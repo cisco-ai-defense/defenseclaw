@@ -481,25 +481,45 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 	return err
 }
 
-// emitIDEPluginMetricsV8 records the defenseclaw.inventory.ide_plugins
-// gauge: the plugin count per IDE product, AI flag and enabled state.
-func emitIDEPluginMetricsV8(recorder *aiDiscoveryV8MetricRecorder, inv *inventory.IDEInventory) {
+// ideGaugeEnabledStates are the registered defenseclaw.ide.plugin.enabled
+// values.
+var ideGaugeEnabledStates = [...]string{"client_side_unknown", "disabled", "enabled", "unknown"}
+
+type ideGaugeKey struct {
+	product, enabled string
+	ai               bool
+}
+
+// ideGaugePoints is the defenseclaw.inventory.ide_plugins gauge of one
+// inventory: the plugin count of every (product, enabled, ai) series of each
+// IDE that has plugins now or lost one since the last scan, zeros included.
+// A gauge series keeps exporting its last value until it is recorded again,
+// so a combination that drops to zero (an IDE's last disabled plugin
+// removed, a plugin enabled again) is recorded as 0 rather than skipped.
+func ideGaugePoints(inv *inventory.IDEInventory) ([]ideGaugeKey, map[ideGaugeKey]int64) {
 	if inv == nil {
-		return
+		return nil, nil
 	}
-	type key struct {
-		product, enabled string
-		ai               bool
-	}
-	counts := map[key]int64{}
-	for _, p := range inv.Plugins {
-		product := p.Product
-		if !ideV8ProductPattern.MatchString(product) {
-			product = "other"
+	product := func(p inventory.IDEPlugin) string {
+		if !ideV8ProductPattern.MatchString(p.Product) {
+			return "other"
 		}
-		counts[key{product: product, enabled: p.Enabled, ai: p.IsAI}]++
+		return p.Product
 	}
-	keys := make([]key, 0, len(counts))
+	counts := map[ideGaugeKey]int64{}
+	for _, list := range [][]inventory.IDEPlugin{inv.Plugins, inv.Removed} {
+		for _, p := range list {
+			for _, enabled := range ideGaugeEnabledStates {
+				for _, ai := range [...]bool{false, true} {
+					counts[ideGaugeKey{product: product(p), enabled: enabled, ai: ai}] = 0
+				}
+			}
+		}
+	}
+	for _, p := range inv.Plugins {
+		counts[ideGaugeKey{product: product(p), enabled: p.Enabled, ai: p.IsAI}]++
+	}
+	keys := make([]ideGaugeKey, 0, len(counts))
 	for k := range counts {
 		keys = append(keys, k)
 	}
@@ -513,6 +533,13 @@ func emitIDEPluginMetricsV8(recorder *aiDiscoveryV8MetricRecorder, inv *inventor
 		}
 		return !a.ai && b.ai
 	})
+	return keys, counts
+}
+
+// emitIDEPluginMetricsV8 records the defenseclaw.inventory.ide_plugins
+// gauge: the plugin count per IDE product, AI flag and enabled state.
+func emitIDEPluginMetricsV8(recorder *aiDiscoveryV8MetricRecorder, inv *inventory.IDEInventory) {
+	keys, counts := ideGaugePoints(inv)
 	for _, k := range keys {
 		k, value := k, counts[k]
 		recorder.record(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
