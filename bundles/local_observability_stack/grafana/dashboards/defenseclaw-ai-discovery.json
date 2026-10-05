@@ -1301,7 +1301,7 @@
     {
       "type": "bargauge",
       "title": "Plugins by IDE",
-      "description": "Current plugin count per IDE product (`ide` label: vscode, cursor, windsurf, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
+      "description": "Current plugin count per IDE product (`ide` label: vscode, cursor, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"

@@ -790,7 +790,7 @@
     {
       "type": "timeseries",
       "title": "Profile digest timeline",
-      "description": "Hook decisions per profile and policy digest over time. A new digest series marks the reload where that profile's effective policy changed; `defenseclaw guardrail profile show <name>` prints the current digest.",
+      "description": "Hook decisions per profile and policy digest over time. A new digest series marks the reload where that profile's effective policy changed; `defenseclaw guardrail profile explain` reports the current digest.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
