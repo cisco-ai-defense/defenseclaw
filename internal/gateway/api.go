@@ -50,7 +50,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -146,14 +145,14 @@ type APIServer struct {
 	// prevents one request from selecting a different runtime generation later.
 	observabilityV8Lifecycle lifecycleV8Runtime
 
-	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
-	// ScannerMode) which can be changed at runtime via the PATCH
-	// /v1/guardrail/config endpoint while other goroutines read them.
+	// cfgMu protects scannerCfg, which a config reload replaces while
+	// request goroutines read it.
 	cfgMu sync.RWMutex
 
 	// configReloader and configSnapshot bind API writes to the same central
-	// transaction and immutable snapshot used by live enforcement. The PATCH
-	// endpoint refuses to write when this coordination is unavailable.
+	// transaction and immutable snapshot used by live enforcement. The
+	// sandbox decision write refuses to run when this coordination is
+	// unavailable.
 	configReloader func(context.Context, string) error
 	configSnapshot func() *config.Config
 	configWriteMu  sync.Mutex
@@ -3005,221 +3004,9 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		}
 		a.writeJSON(w, http.StatusOK, cfg)
 
-	case http.MethodPatch:
-		current := a.runtimeConfigSnapshot()
-		// PR #141 audit C1: defense-in-depth gate. tokenAuth already
-		// fail-closes when no gateway token is configured, but mode
-		// changes are too security-sensitive to depend on a single
-		// middleware layer. A future refactor that exposes this
-		// handler outside the tokenAuth chain (or a misconfigured
-		// custom mux) must not silently downgrade `action` → `observe`
-		// without an authenticated caller. Re-validate here with the
-		// same constant-time compare tokenAuth uses.
-		if status, authErr := guardrailConfigPatchAuthorization(r, current); authErr != "" {
-			a.writeJSON(w, status, map[string]string{"error": authErr})
-			return
-		}
-
-		var req map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-			return
-		}
-
-		if current == nil {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
-			return
-		}
-		if a.configReloader == nil {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-				"error": "central config reload is unavailable; refusing an uncoordinated config write",
-			})
-			return
-		}
-
-		changed := []string{}
-		updates := map[string]any{}
-		if raw, ok := req["mode"]; ok {
-			mode, ok := raw.(string)
-			if !ok || (mode != "observe" && mode != "action") {
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "mode must be observe or action"})
-				return
-			}
-			updates["guardrail.mode"] = mode
-			changed = append(changed, "mode="+mode)
-		}
-		if raw, ok := req["scanner_mode"]; ok {
-			sm, ok := raw.(string)
-			if !ok || (sm != "local" && sm != "remote" && sm != "both") {
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "scanner_mode must be local, remote, or both"})
-				return
-			}
-			updates["guardrail.scanner_mode"] = sm
-			changed = append(changed, "scanner_mode="+sm)
-		}
-		if raw, ok := req["block_message"]; ok {
-			bm, ok := raw.(string)
-			if !ok {
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "block_message must be a string"})
-				return
-			}
-			updates["guardrail.block_message"] = bm
-			changed = append(changed, "block_message")
-		}
-		if raw, ok := req["connector"]; ok {
-			conn, ok := raw.(string)
-			if !ok || strings.TrimSpace(conn) == "" {
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "connector must be a non-empty string"})
-				return
-			}
-			conn = strings.ToLower(strings.TrimSpace(conn))
-			updates["guardrail.connector"] = conn
-			changed = append(changed, "connector="+conn)
-		}
-		if raw, ok := req["hilt_enabled"]; ok {
-			enabled, ok := raw.(bool)
-			if !ok {
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_enabled must be a boolean"})
-				return
-			}
-			updates["guardrail.hilt.enabled"] = enabled
-			changed = append(changed, fmt.Sprintf("hilt_enabled=%v", enabled))
-		}
-		if raw, ok := req["hilt_min_severity"]; ok {
-			minSev, ok := raw.(string)
-			if !ok || strings.TrimSpace(minSev) == "" {
-				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hilt_min_severity must be a non-empty string"})
-				return
-			}
-			minSev = strings.ToUpper(strings.TrimSpace(minSev))
-			updates["guardrail.hilt.min_severity"] = minSev
-			changed = append(changed, "hilt_min_severity="+minSev)
-		}
-
-		if len(updates) == 0 {
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no valid fields to update"})
-			return
-		}
-		a.configWriteMu.Lock()
-		defer a.configWriteMu.Unlock()
-
-		// Re-snapshot after entering the write transaction. An administrator
-		// may have switched the gateway into managed mode, rotated the token,
-		// or changed the authoritative config path while this request body was
-		// being decoded or waiting behind another PATCH.
-		current = a.runtimeConfigSnapshot()
-		if current == nil {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not available"})
-			return
-		}
-		if status, authErr := guardrailConfigPatchAuthorization(r, current); authErr != "" {
-			a.writeJSON(w, status, map[string]string{"error": authErr})
-			return
-		}
-
-		configPath := configFilePathForSnapshot(current)
-		original, err := captureConfigFileState(configPath)
-		if err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := a.patchGuardrailConfigFile(configPath, updates); err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		candidate, err := config.LoadRuntimeV8File(configPath)
-		if err != nil {
-			_ = restoreConfigFileState(configPath, original)
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		diff := diffConfigs(current, candidate)
-		if configReloadMode(candidate) == "hot" && len(diff.RestartRequired) > 0 {
-			if err := restoreConfigFileState(configPath, original); err != nil {
-				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-				return
-			}
-			a.writeJSON(w, http.StatusConflict, map[string]interface{}{
-				"error":            "guardrail config change requires gateway restart",
-				"restart_required": diff.RestartRequired,
-				"changed":          changed,
-			})
-			return
-		}
-
-		if err := a.configReloader(r.Context(), "guardrail_api"); err != nil {
-			rollbackErr := restoreConfigFileState(configPath, original)
-			if rollbackErr == nil {
-				rollbackErr = a.configReloader(r.Context(), "guardrail_api_rollback")
-			}
-			if rollbackErr != nil {
-				err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
-			}
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-
-		statusCode := http.StatusOK
-		status := "updated"
-		live := true
-		responseCfg := a.runtimeConfigSnapshot()
-		if configReloadMode(candidate) == "restart" && !onlyConfigReloadModeChanged(current, candidate) {
-			statusCode = http.StatusAccepted
-			status = "restart_requested"
-			live = false
-			responseCfg = candidate
-		} else if !guardrailConfigContainsUpdates(responseCfg, updates) {
-			rollbackErr := restoreConfigFileState(configPath, original)
-			if rollbackErr == nil {
-				rollbackErr = a.configReloader(r.Context(), "guardrail_api_rollback")
-			}
-			err := fmt.Errorf("central config reload returned without applying the guardrail update")
-			if rollbackErr != nil {
-				err = fmt.Errorf("%w; rollback failed: %v", err, rollbackErr)
-			}
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-
-		resp := guardrailConfigResponse(responseCfg)
-		resp["status"] = status
-		resp["live"] = live
-		resp["changed"] = changed
-
-		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailConfigReload), "", strings.Join(changed, " "))
-		}
-
-		a.writeJSON(w, statusCode, resp)
-
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-}
-
-func guardrailConfigPatchAuthorization(r *http.Request, current *config.Config) (int, string) {
-	if current == nil {
-		return 0, ""
-	}
-	if managed.IsManagedEnterprise(current.DeploymentMode) {
-		return http.StatusForbidden, "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian"
-	}
-	token := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token = strings.TrimPrefix(auth, "Bearer ")
-	}
-	if token == "" {
-		token = r.Header.Get("X-DefenseClaw-Token")
-	}
-	expected := current.Gateway.Token
-	if expected == "" || token == "" || !constantTimeStringMatch(token, expected) {
-		return http.StatusForbidden, "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN"
-	}
-	return 0, ""
-}
-
-func (a *APIServer) configFilePath() string {
-	return configFilePathForSnapshot(a.runtimeConfigSnapshot())
 }
 
 func configFilePathForSnapshot(cfg *config.Config) string {
@@ -3268,78 +3055,6 @@ func restoreConfigFileState(path string, state configFileState) error {
 		return fmt.Errorf("api: remove config after failed live apply: %w", err)
 	}
 	return nil
-}
-
-func (a *APIServer) patchGuardrailConfigFile(path string, updates map[string]any) error {
-	original, err := captureConfigFileState(path)
-	if err != nil {
-		return err
-	}
-	if err := config.PatchYAMLFile(path, updates); err != nil {
-		return err
-	}
-	if _, err := config.LoadRuntimeV8File(path); err != nil {
-		if restoreErr := restoreConfigFileState(path, original); restoreErr != nil {
-			return fmt.Errorf("api: patched config invalid: %w; restore failed: %v", err, restoreErr)
-		}
-		return fmt.Errorf("api: patched config invalid: %w", err)
-	}
-	return nil
-}
-
-func guardrailConfigContainsUpdates(cfg *config.Config, updates map[string]any) bool {
-	if cfg == nil {
-		return false
-	}
-	for key, value := range updates {
-		switch key {
-		case "guardrail.mode":
-			want, ok := value.(string)
-			if !ok || cfg.Guardrail.Mode != want {
-				return false
-			}
-		case "guardrail.scanner_mode":
-			want, ok := value.(string)
-			if !ok || cfg.Guardrail.ScannerMode != want {
-				return false
-			}
-		case "guardrail.block_message":
-			want, ok := value.(string)
-			if !ok || cfg.Guardrail.BlockMessage != want {
-				return false
-			}
-		case "guardrail.connector":
-			want, ok := value.(string)
-			if !ok || cfg.Guardrail.Connector != want {
-				return false
-			}
-		case "guardrail.hilt.enabled":
-			want, ok := value.(bool)
-			if !ok || cfg.Guardrail.HILT.Enabled != want {
-				return false
-			}
-		case "guardrail.hilt.min_severity":
-			want, ok := value.(string)
-			if !ok || cfg.Guardrail.HILT.MinSeverity != want {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func guardrailConfigResponse(cfg *config.Config) map[string]interface{} {
-	resp := map[string]interface{}{}
-	if cfg == nil {
-		return resp
-	}
-	resp["mode"] = cfg.Guardrail.Mode
-	resp["scanner_mode"] = cfg.Guardrail.ScannerMode
-	resp["block_message"] = cfg.Guardrail.BlockMessage
-	resp["connector"] = cfg.Guardrail.Connector
-	resp["hilt_enabled"] = cfg.Guardrail.HILT.Enabled
-	resp["hilt_min_severity"] = cfg.Guardrail.HILT.MinSeverity
-	return resp
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {

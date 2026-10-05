@@ -88,11 +88,6 @@ X-DefenseClaw-Token:   <token>
 X-DC-Auth:             Bearer <token>
 ```
 
-`PATCH /v1/guardrail/config` performs a second, endpoint-local check and accepts
-only `Authorization: Bearer` or `X-DefenseClaw-Token`; `X-DC-Auth` alone is
-rejected there. The endpoint also rejects every patch in
-`managed_enterprise` deployment mode.
-
 Loopback connector hook routes can instead use the matching connector's narrow
 hook token. The Codex token also authorizes `/api/v1/codex/notify`. A
 connector-scoped token on a generic `/api/v1/inspect/*` route is accepted only
@@ -415,7 +410,6 @@ deployment; elsewhere they return `404`.
 | `POST` | `/v1/guardrail/event` | Emit canonical telemetry for an already-decided guardrail event. Requires `evaluation_id`, `direction` (`prompt` or `completion`), `action` (`allow`, `alert`, or `block`), and severity (`NONE` through `CRITICAL`); latency/token values must be finite and nonnegative. Returns `{"status":"ok"}`. No production caller is wired in this repository. |
 | `POST` | `/v1/guardrail/evaluate` | Combine caller-supplied, precomputed `local_result` / `cisco_result` values with required `evaluation_id`, `direction`, and `mode`, plus optional model/scanner/content/timing metadata. It does not scan arbitrary content and returns a `GuardrailOutput` with `action`, `severity`, `reason`, and `scanner_sources`. |
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
-| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into the active DefenseClaw config file, validate the full YAML file, and apply it through the central reloader. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. Managed-enterprise deployments reject this API mutation. |
 
 Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
 

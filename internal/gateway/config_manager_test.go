@@ -21,11 +21,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -879,80 +876,6 @@ func TestDiffConfigsRequiresRestartForJudgeBodyRetentionTransitions(t *testing.T
 				t.Fatalf("restart_required = %v, broad guardrail reason obscures exact boundary", diff.RestartRequired)
 			}
 		})
-	}
-}
-
-func TestGuardrailAPIPatchCommitsDiskManagerSidecarAndProxyTogether(t *testing.T) {
-	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
-	path := fixture.configPath
-	raw := "config_version: 8\n" +
-		"data_dir: " + fixture.dataDir + "\n" +
-		"gateway:\n  token: transactional-token\n" +
-		"guardrail:\n  enabled: true\n  mode: observe\n  scanner_mode: local\n" +
-		"observability: {}\n"
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatalf("write initial config: %v", err)
-	}
-	oldCfg, err := config.LoadRuntimeV8File(path)
-	if err != nil {
-		t.Fatalf("load initial config: %v", err)
-	}
-
-	proxy := &GuardrailProxy{
-		cfg:          &oldCfg.Guardrail,
-		mode:         oldCfg.Guardrail.Mode,
-		blockMessage: oldCfg.Guardrail.BlockMessage,
-		inspector:    NewGuardrailInspector("local", nil, nil, ""),
-	}
-	sidecar := fixture.sidecar
-	sidecar.publishConfig(oldCfg)
-	sidecar.setGuardrailProxy(proxy)
-	bound, err := sidecar.BootstrapObservabilityRuntime(t.Context(), path, []byte(raw))
-	if err != nil || !bound {
-		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
-	}
-	mgr := newConfigManagerWithSnapshot(
-		path, oldCfg, nil, nil, sidecar.observabilityV8ActivePlanDigest(), sidecar.applyConfigReloadSnapshot,
-	)
-	api := &APIServer{scannerCfg: cloneConfig(oldCfg)}
-	api.SetConfigRuntime(mgr.Reload, sidecar.currentConfig)
-
-	body, _ := json.Marshal(map[string]any{"mode": "action"})
-	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer transactional-token")
-	w := httptest.NewRecorder()
-	api.handleGuardrailConfig(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH status = %d, want 200; body: %s", w.Code, w.Body.String())
-	}
-	for label, got := range map[string]string{
-		"manager": mgr.Current().Guardrail.Mode,
-		"sidecar": sidecar.currentConfig().Guardrail.Mode,
-	} {
-		if got != "action" {
-			t.Fatalf("%s mode = %q, want action", label, got)
-		}
-	}
-	proxy.rtMu.RLock()
-	proxyMode := proxy.mode
-	proxy.rtMu.RUnlock()
-	if proxyMode != "action" {
-		t.Fatalf("proxy mode = %q, want action", proxyMode)
-	}
-	persisted, err := config.LoadRuntimeV8File(path)
-	if err != nil {
-		t.Fatalf("reload persisted config: %v", err)
-	}
-	if persisted.Guardrail.Mode != "action" {
-		t.Fatalf("persisted mode = %q, want action", persisted.Guardrail.Mode)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response["live"] != true || response["mode"] != "action" {
-		t.Fatalf("response = %#v, want live action", response)
 	}
 }
 
