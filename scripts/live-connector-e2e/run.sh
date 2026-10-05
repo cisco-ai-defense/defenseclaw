@@ -16,6 +16,9 @@
 #   run.sh --layer contract --connector <name|all>   # Layer A entrypoint smoke
 #   run.sh --layer live     --connector <name|all>   # Layer B live agent
 #
+# --connector also takes a space-separated list ("codex amp"); the macOS
+# contract cell uses this to run every connector after a single install.
+#
 # Layer A targets connectors with an executable shell-hook contract (golden
 # payload -> installed hook entrypoint). Plugin/policy transports are covered
 # by focused tests instead. Layer B only targets connectors that ship a driver
@@ -52,7 +55,8 @@ resolve_connectors() {
   if [ "${CONNECTOR}" = "all" ]; then
     printf '%s\n' "${ALL_CONNECTORS[@]}"
   else
-    printf '%s\n' "${CONNECTOR}"
+    # shellcheck disable=SC2086 # intentional word split of a connector list
+    printf '%s\n' ${CONNECTOR}
   fi
 }
 
