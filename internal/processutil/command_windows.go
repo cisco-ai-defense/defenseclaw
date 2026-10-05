@@ -40,6 +40,11 @@ func configureCapturedCommand(cmd *exec.Cmd) {
 
 const capturedTreeWaitDelay = 2 * time.Second
 
+// capturedTreeExitWait bounds the wait for terminated job members to finish
+// kernel teardown. Teardown normally takes milliseconds; the bound only keeps
+// a member that never becomes signalled from hanging the caller.
+const capturedTreeExitWait = 10 * time.Second
+
 func capturedJobLimitFlags(allowManagedBreakaway bool) uint32 {
 	flags := uint32(windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
 	if allowManagedBreakaway {
@@ -152,10 +157,14 @@ func capturedJobProcessIDs(job windows.Handle) ([]uintptr, error) {
 // returns no terminated descendant still holds the captured output pipes and
 // cmd.Wait reaches EOF without racing WaitDelay.
 //
-// The wait has no deadline, like the direct-process wait before it: every
-// listed process is already being force-terminated and runs no more user
-// code, so only kernel teardown remains.
-func waitCapturedJobExited(job windows.Handle) error {
+// Every listed process is already being force-terminated and runs no more
+// user code, so only kernel teardown remains. That normally takes
+// milliseconds, but a member with pending redirector I/O or an IRP held by a
+// filter driver can stay unsignalled indefinitely, so the whole drain shares
+// one deadline. On timeout it returns nil and cmd.Wait's WaitDelay bounds
+// the rest.
+func waitCapturedJobExited(job windows.Handle, limit time.Duration) error {
+	deadline := time.Now().Add(limit)
 	ids, err := capturedJobProcessIDs(job)
 	if err != nil {
 		return fmt.Errorf("list captured process tree: %w", err)
@@ -174,12 +183,19 @@ func waitCapturedJobExited(job windows.Handle) error {
 		var member int32
 		ok, _, _ := procIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&member)))
 		var waitErr error
+		timedOut := false
 		if ok != 0 && member != 0 {
-			_, waitErr = windows.WaitForSingleObject(process, windows.INFINITE)
+			remaining := max(time.Until(deadline), 0)
+			var result uint32
+			result, waitErr = windows.WaitForSingleObject(process, uint32(remaining.Milliseconds()))
+			timedOut = waitErr == nil && result == uint32(windows.WAIT_TIMEOUT)
 		}
 		windows.CloseHandle(process)
 		if waitErr != nil {
 			return fmt.Errorf("wait for captured process tree exit: %w", waitErr)
+		}
+		if timedOut {
+			return nil // cmd.Wait's WaitDelay bounds the remaining pipe drain
 		}
 	}
 	return nil
@@ -270,7 +286,7 @@ func combinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	// daemon can survive only by explicitly breaking away from the permitted job.
 	jobErr := windows.TerminateJobObject(job, 1)
 	if jobErr == nil {
-		jobErr = waitCapturedJobExited(job)
+		jobErr = waitCapturedJobExited(job, capturedTreeExitWait)
 	}
 	waitErr := cmd.Wait()
 	if directWaitErr != nil {

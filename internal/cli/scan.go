@@ -77,8 +77,8 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 		if _, err := stdout.Write(scanResultSchemaJSON); err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintln(stdout)
-		return nil
+		_, err := fmt.Fprintln(stdout)
+		return err
 	}
 
 	target, err := filepath.Abs(args[0])

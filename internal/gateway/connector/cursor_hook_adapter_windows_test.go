@@ -305,15 +305,22 @@ func assertCursorAllowJSON(t *testing.T, stdout string) {
 	}
 }
 
+// windowsProcessRunning reports whether pid is still running after a short
+// grace period. Kill only starts termination and the adapter waits for it
+// with a bound, so the grace absorbs kernel teardown. Liveness comes from the
+// process handle's signalled state, not GetExitCodeProcess, because a process
+// may exit with STILL_ACTIVE (259). A PID that no longer exists counts as
+// exited; any other open or wait failure counts as running so the caller's
+// assertion fails safe.
 func windowsProcessRunning(pid uint32) bool {
-	const stillActive = 259
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	const grace = 5 * time.Second
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
 	if err != nil {
-		return false
+		return !errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 	}
 	defer windows.CloseHandle(handle)
-	var code uint32
-	return windows.GetExitCodeProcess(handle, &code) == nil && code == stillActive
+	result, err := windows.WaitForSingleObject(handle, uint32(grace.Milliseconds()))
+	return err != nil || result != windows.WAIT_OBJECT_0
 }
 
 func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {

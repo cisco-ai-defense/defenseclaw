@@ -683,7 +683,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Codex policy timeout/process-tree test fixture; never read by production runtime paths"
         }
       ],
@@ -702,7 +702,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Test-only Codex policy grandchild helper"
         }
       ],
@@ -759,7 +759,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Codex policy descendant-cleanup fixture"
         }
       ],
@@ -797,7 +797,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Codex policy process-tree readiness fixture"
         }
       ],
@@ -816,7 +816,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Test-only Codex policy process-tree helper"
         }
       ],

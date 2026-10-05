@@ -11,6 +11,11 @@ concurrency:
   group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: false
 
+# Neither job pushes commits, tags or releases, so the token on the
+# persistent runner only needs to read the repository.
+permissions:
+  contents: read
+
 jobs:
   core:
     name: Core E2E
