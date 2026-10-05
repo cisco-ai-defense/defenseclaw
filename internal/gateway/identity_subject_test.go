@@ -48,6 +48,8 @@ func identityTestRequest(t *testing.T) (got map[string]any) {
 		got["subject_ok"], got["subject"] = ok, subject
 		got["verified"] = requestIdentityFor(ctx, "1201")
 		got["forged"] = requestIdentityFor(ctx, "0")
+		got["hook_user"] = resolveHookUser(ctx, map[string]interface{}{"user_id": "1202"}).ID
+		got["http_user"] = resolveHTTPUserIdentity(r.WithContext(ctx), nil).ID
 	}))
 	handler.ServeHTTP(httptest.NewRecorder(), request)
 	return got
@@ -84,6 +86,10 @@ func TestSessionFactsHeaderCannotChangeVerifiedFacts(t *testing.T) {
 	forged := got["forged"].(*llmEventIdentity)
 	if forged.Directory.Assurance != useridentity.AssuranceClaimed || forged.Directory.Principal != "mallory@evil.test" {
 		t.Fatalf("forged record facts = %+v", forged.Directory)
+	}
+	// The forged user header and payload user never re-attribute the record.
+	if got["hook_user"] != "1201" || got["http_user"] != "1201" {
+		t.Fatalf("hook user = %v, http user = %v, want the verified uid 1201", got["hook_user"], got["http_user"])
 	}
 }
 

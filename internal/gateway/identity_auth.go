@@ -40,6 +40,13 @@ func (a *APIServer) attachVerifiedSubject(ctx context.Context, userID, userName,
 		Source:    source,
 	}
 	ctx = withVerifiedSubject(ctx, subject)
+	// The correlation middleware ran before authentication and took the
+	// user from the loopback X-DefenseClaw-User-* headers, which any local
+	// caller holding the token can set. The verified subject replaces that
+	// claim, so audit and telemetry name the account that was proved.
+	id := AgentIdentityFromContext(ctx)
+	id.UserID, id.UserIDKind, id.UserName = subject.UserID, subject.IDKind, subject.UserName
+	ctx = ContextWithAgentIdentity(ctx, id)
 	var session useridentity.SessionFacts
 	if subject.IDKind == useridentity.KindPOSIXUID {
 		if claimed, ok := claimedSessionFromContext(ctx); ok {

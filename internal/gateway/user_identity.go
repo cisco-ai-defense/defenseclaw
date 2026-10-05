@@ -74,12 +74,14 @@ func gatewayRunsAsServiceAccount() bool {
 
 // resolveHookUserIdentity determines which end user a hook event belongs to.
 //
-// Precedence is deliberate. The identity headers come from the hook process,
-// which is the only participant that runs inside the user's session, so they
-// are preferred. The hook payload is agent-controlled and is consulted only as
-// a fallback for connectors that report a user natively. Both are attribution
-// evidence, not authentication: the gateway's loopback listener is reachable by
-// any local process.
+// Precedence is deliberate. An authenticated request's verified subject is
+// bound onto its agent identity (attachVerifiedSubject) and always wins.
+// Otherwise the identity headers come from the hook process, which is the
+// only participant that runs inside the user's session, so they are
+// preferred. The hook payload is agent-controlled and is consulted only as a
+// fallback for connectors that report a user natively. Both are attribution
+// evidence, not authentication: the gateway's loopback listener is reachable
+// by any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
 	if isSandboxHookRequest(ctx) {
@@ -123,7 +125,14 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 		userID, _, userName := sandboxBindingUser(binding)
 		return newLLMEventUser(userID, userName, userID != "")
 	}
-	user := resolveHTTPUser(r, rawBody)
+	var user llmEventUser
+	if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
+		// An authenticated caller's headers and body are claims; the
+		// verified subject is who it is.
+		user = newTrustedLLMEventUser(subject.UserID, subject.UserName)
+	} else {
+		user = resolveHTTPUser(r, rawBody)
+	}
 	user.Identity = requestIdentityFor(r.Context(), user.ID)
 	return user
 }
