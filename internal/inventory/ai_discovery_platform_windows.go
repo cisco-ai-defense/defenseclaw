@@ -453,6 +453,15 @@ func mergeWindowsApplicationNames(groups ...[]string) []string {
 	return collectWindowsApplicationNames(roots, seed)
 }
 
+// platformIDEAppData returns the current user's %APPDATA% and
+// %LOCALAPPDATA% (Known Folders, which folder redirection may move out of
+// the profile).
+func platformIDEAppData() (string, string) {
+	resolve := windowsDiscoveryKnownFolderResolver(winpath.CurrentUserKnownFolderPathWithFlags)
+	return windowsKnownFolderValue(resolve, windows.FOLDERID_RoamingAppData),
+		windowsKnownFolderValue(resolve, windows.FOLDERID_LocalAppData)
+}
+
 func platformEditorExtensionRoots(_ string) []string {
 	return windowsEditorExtensionRoots(winpath.CurrentUserKnownFolderPathWithFlags)
 }

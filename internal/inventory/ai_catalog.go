@@ -85,6 +85,12 @@ type AISignature struct {
 	ApplicationNames   []string `json:"application_names,omitempty"`
 	ConfigPaths        []string `json:"config_paths,omitempty"`
 	ExtensionIDs       []string `json:"extension_ids,omitempty"`
+	// JetBrainsPluginIDs, ZedExtensionIDs and VimPlugins flag the AI
+	// plugins of the IDE inventory: JetBrains plugin.xml ids, Zed
+	// extension ids and Vim/Neovim plugin folder (repository) names.
+	JetBrainsPluginIDs []string `json:"jetbrains_plugin_ids,omitempty"`
+	ZedExtensionIDs    []string `json:"zed_extension_ids,omitempty"`
+	VimPlugins         []string `json:"vim_plugins,omitempty"`
 	MCPPaths           []string `json:"mcp_paths,omitempty"`
 	// SkillPaths / RulePaths / PluginPaths are directory globs whose
 	// per-user existence + non-emptiness produce SignalSkill / SignalRule /
@@ -492,20 +498,23 @@ func validateAISignature(sig AISignature) error {
 		return fmt.Errorf("ai signature catalog: %s: unsupported category %q", sig.ID, sig.Category)
 	}
 	for field, values := range map[string][]string{
-		"binary_names":      sig.BinaryNames,
-		"process_names":     sig.ProcessNames,
-		"application_names": sig.ApplicationNames,
-		"config_paths":      sig.ConfigPaths,
-		"extension_ids":     sig.ExtensionIDs,
-		"mcp_paths":         sig.MCPPaths,
-		"skill_paths":       sig.SkillPaths,
-		"rule_paths":        sig.RulePaths,
-		"plugin_paths":      sig.PluginPaths,
-		"package_names":     sig.PackageNames,
-		"env_var_names":     sig.EnvVarNames,
-		"domain_patterns":   sig.DomainPatterns,
-		"history_patterns":  sig.HistoryPatterns,
-		"local_endpoints":   sig.LocalEndpoints,
+		"binary_names":         sig.BinaryNames,
+		"process_names":        sig.ProcessNames,
+		"application_names":    sig.ApplicationNames,
+		"config_paths":         sig.ConfigPaths,
+		"extension_ids":        sig.ExtensionIDs,
+		"jetbrains_plugin_ids": sig.JetBrainsPluginIDs,
+		"zed_extension_ids":    sig.ZedExtensionIDs,
+		"vim_plugins":          sig.VimPlugins,
+		"mcp_paths":            sig.MCPPaths,
+		"skill_paths":          sig.SkillPaths,
+		"rule_paths":           sig.RulePaths,
+		"plugin_paths":         sig.PluginPaths,
+		"package_names":        sig.PackageNames,
+		"env_var_names":        sig.EnvVarNames,
+		"domain_patterns":      sig.DomainPatterns,
+		"history_patterns":     sig.HistoryPatterns,
+		"local_endpoints":      sig.LocalEndpoints,
 	} {
 		if err := validateSignatureValues(sig.ID, field, values); err != nil {
 			return err

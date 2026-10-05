@@ -30,7 +30,9 @@
         ".codex/rules",
         "AGENTS.md"
       ],
-      "extension_ids": [],
+      "extension_ids": [
+        "openai.chatgpt"
+      ],
       "mcp_paths": [
         "~/.codex/config.toml",
         ".codex/config.toml"
@@ -99,7 +101,15 @@
         ".claude/commands",
         ".claude/agents"
       ],
-      "extension_ids": [],
+      "extension_ids": [
+        "anthropic.claude-code"
+      ],
+      "jetbrains_plugin_ids": [
+        "com.anthropic.code.plugin"
+      ],
+      "vim_plugins": [
+        "claude-code.nvim"
+      ],
       "mcp_paths": [
         "~/.claude.json",
         ".mcp.json"
@@ -352,7 +362,18 @@
         "AGENT.md",
         "AGENTS.local.md"
       ],
-      "extension_ids": [],
+      "extension_ids": [
+        "codeium.codeium"
+      ],
+      "jetbrains_plugin_ids": [
+        "com.codeium.intellij"
+      ],
+      "vim_plugins": [
+        "codeium.vim",
+        "codeium.nvim",
+        "windsurf.vim",
+        "windsurf.nvim"
+      ],
       "mcp_paths": [
         "$APPDATA/devin/mcp_config.json",
         "~/.config/devin/mcp_config.json",
@@ -423,6 +444,14 @@
       "extension_ids": [
         "github.copilot",
         "github.copilot-chat"
+      ],
+      "jetbrains_plugin_ids": [
+        "com.github.copilot"
+      ],
+      "vim_plugins": [
+        "copilot.vim",
+        "copilot.lua",
+        "CopilotChat.nvim"
       ],
       "mcp_paths": [
         "~/.copilot/mcp-config.json",
@@ -874,6 +903,9 @@
       "extension_ids": [
         "continue.continue"
       ],
+      "jetbrains_plugin_ids": [
+        "com.github.continuedev.continueintellijextension"
+      ],
       "mcp_paths": [],
       "package_names": [
         "@continuedev/continue",
@@ -950,6 +982,9 @@
       "extension_ids": [
         "amazonwebservices.amazon-q-vscode"
       ],
+      "jetbrains_plugin_ids": [
+        "amazon.q"
+      ],
       "mcp_paths": [],
       "package_names": [],
       "env_var_names": [],
@@ -985,6 +1020,12 @@
       "extension_ids": [
         "tabnine.tabnine-vscode"
       ],
+      "jetbrains_plugin_ids": [
+        "com.tabnine.TabNine"
+      ],
+      "vim_plugins": [
+        "tabnine-nvim"
+      ],
       "mcp_paths": [],
       "package_names": [],
       "env_var_names": [],
@@ -1013,6 +1054,12 @@
       "config_paths": [],
       "extension_ids": [
         "sourcegraph.cody-ai"
+      ],
+      "jetbrains_plugin_ids": [
+        "com.sourcegraph.jetbrains"
+      ],
+      "vim_plugins": [
+        "sg.nvim"
       ],
       "mcp_paths": [],
       "package_names": [
@@ -1589,6 +1636,9 @@
       "extension_ids": [
         "google.geminicodeassist"
       ],
+      "jetbrains_plugin_ids": [
+        "com.google.tools.ij.aiplugin"
+      ],
       "mcp_paths": [],
       "package_names": [],
       "env_var_names": [],
@@ -1926,6 +1976,9 @@
       "config_paths": [],
       "extension_ids": [
         "supermaven.supermaven"
+      ],
+      "vim_plugins": [
+        "supermaven-nvim"
       ],
       "mcp_paths": [],
       "package_names": [],

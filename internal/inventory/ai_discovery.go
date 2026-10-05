@@ -177,6 +177,12 @@ type AIDiscoveryOptions struct {
 	// When set, full scans ingest it and this service's own process
 	// detector, which its sandbox blinds, is left to those scans.
 	UserScanDir string
+	// IDEInventory is ai_discovery.ide_inventory (all, ai_only or off).
+	IDEInventory string
+	// SecureClient marks the Secure Client profile, whose discovery output
+	// stays as it was: the historical editor-extension detector and no
+	// IDE inventory.
+	SecureClient bool
 	// homeOwners names the account of each profile in HomeDirs when the
 	// platform enumerated them for a service-context scan (managed Windows).
 	// Signals found under a profile carry its account.
@@ -470,6 +476,10 @@ type AIDiscoverySummary struct {
 type AIDiscoveryReport struct {
 	Summary AIDiscoverySummary `json:"summary"`
 	Signals []AISignal         `json:"signals"`
+	// IDEInventory is the full IDE extension and plugin list of a full
+	// scan (nil when ai_discovery.ide_inventory is off, on the Secure
+	// Client profile, and in snapshots: read it with IDEInventory()).
+	IDEInventory *IDEInventory `json:"ide_inventory,omitempty"`
 }
 
 // AIDiscoveryReportObserver receives a clone of each completed discovery
@@ -603,6 +613,13 @@ type ContinuousDiscoveryService struct {
 	// processOwners, when set, limits the process detector to processes of
 	// these owners (the account name or uid of a per-user scan).
 	processOwners map[string]bool
+
+	// lastIDE is the last full scan's IDE inventory (guarded by mu);
+	// ideBaseline is its plugin set for lifecycle classification (guarded
+	// by scanMu, like the rest of a scan).
+	lastIDE       *IDEInventory
+	ideBaseline   map[string]IDEPlugin
+	ideRecordedAt time.Time
 }
 
 type scanResponse struct {
@@ -734,6 +751,8 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		ManagedEnterprise:    managed.IsManagedEnterprise(cfg.DeploymentMode),
 		StandaloneEnterprise: cfg.StandaloneEnterprise(),
 		UserScanDir:          UserScanDirForConfig(cfg),
+		IDEInventory:         ad.EffectiveIDEInventory(),
+		SecureClient:         cfg.SecureClientIntegration(),
 	})
 }
 
@@ -1145,9 +1164,16 @@ func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool,
 	}
 	report := s.classifyAndPersist(scanID, source, start, signals, stats, prev, full)
 
+	// The IDE inventory is published on its own (IDEInventory) so the
+	// snapshot every API call clones stays the size it was.
+	last := report
+	last.IDEInventory = nil
 	s.mu.Lock()
-	s.last = cloneAIDiscoveryReport(report)
+	s.last = cloneAIDiscoveryReport(last)
 	s.lastErr = nil
+	if full {
+		s.lastIDE = report.IDEInventory
+	}
 	s.mu.Unlock()
 
 	s.fanoutReport(ctx, report, full)
@@ -1167,6 +1193,8 @@ func (s *ContinuousDiscoveryService) notifyReportObservers(ctx context.Context, 
 		return
 	}
 	baseCtx := context.WithoutCancel(ctx)
+	// Observers see the signal report they always saw.
+	report.IDEInventory = nil
 	for _, observer := range observers {
 		observer := observer
 		cloned := cloneAIDiscoveryReport(report)
@@ -1302,6 +1330,8 @@ func modelLifecycleSignalID(signal AISignal) string {
 }
 
 type scanStats struct {
+	// ideInventory is the full scan's IDE inventory (nil when off).
+	ideInventory      *IDEInventory
 	FilesScanned      int
 	Errors            int
 	DetectorErrors    map[string]string
@@ -1385,7 +1415,11 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	measure("config", func() ([]AISignal, int, error) { return s.detectConfigPaths(), 0, nil })
 	measure("binary", func() ([]AISignal, int, error) { return s.detectBinaries(), 0, nil })
 	measure("application", func() ([]AISignal, int, error) { return s.detectApplications(), 0, nil })
-	measure("editor_extension", func() ([]AISignal, int, error) { return s.detectEditorExtensions(), 0, nil })
+	measure("editor_extension", func() ([]AISignal, int, error) {
+		out, ide := s.detectEditorExtensions()
+		stats.ideInventory = mergeIDEInventory(stats.ideInventory, ide)
+		return out, 0, nil
+	})
 	measure("mcp", func() ([]AISignal, int, error) { return s.detectMCPPaths(), 0, nil })
 	measure("skill", func() ([]AISignal, int, error) { return s.detectSkills(), 0, nil })
 	measure("rule", func() ([]AISignal, int, error) { return s.detectRules(), 0, nil })
@@ -1422,7 +1456,8 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	}
 	if s.opts.UserScanDir != "" {
 		measure("user_scan", func() ([]AISignal, int, error) {
-			out, files, errs := s.detectUserScans(time.Now().UTC())
+			out, files, ide, errs := s.detectUserScans(time.Now().UTC())
+			stats.ideInventory = mergeIDEInventory(stats.ideInventory, ide)
 			for key, detail := range errs {
 				stats.DetectorErrors[key] = detail
 			}
@@ -1730,6 +1765,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 	}
 	sortAISignals(out)
 	report := AIDiscoveryReport{Summary: summary, Signals: out}
+	report.IDEInventory = s.finishIDEInventory(stats.ideInventory, full, now)
 	// Best-effort SQL persistence of the scan + computed
 	// confidence snapshots. Failures are logged via stderr but
 	// never fail the scan: the JSON state file remains the
@@ -2728,7 +2764,19 @@ func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
 	return out
 }
 
-func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
+// legacyExcludedExtensionIDs are the extension ids the catalog gained with
+// the IDE inventory. The Secure Client profile's historical detector skips
+// them so its output stays as it was.
+var legacyExcludedExtensionIDs = map[string]bool{
+	"anthropic.claude-code": true,
+	"openai.chatgpt":        true,
+	"codeium.codeium":       true,
+}
+
+// detectEditorExtensionsLegacy is the historical detector the Secure Client
+// profile keeps: directory names under the editors' extension and
+// globalStorage folders, matched against the catalog's extension ids.
+func (s *ContinuousDiscoveryService) detectEditorExtensionsLegacy() []AISignal {
 	// Every path below is per-user; iterate every eligible home so a
 	// root-launched daemon picks up all local users' installed
 	// extensions, not just root's (which is empty on a real endpoint).
@@ -2768,6 +2816,9 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() []AISignal {
 	for _, sig := range s.catalog {
 		for _, ext := range sig.ExtensionIDs {
 			ext = strings.ToLower(ext)
+			if legacyExcludedExtensionIDs[ext] {
+				continue
+			}
 			for _, entry := range entries {
 				if editorExtensionNameMatches(entry, ext) {
 					out = append(out, s.signalFromValue(sig, SignalEditorExtension, "editor_extension", ext))
@@ -4182,6 +4233,8 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 		return err
 	}
 	report.Summary.Source = AISourceExternal
+	// The IDE inventory comes only from this service's own scans.
+	report.IDEInventory = nil
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
 		// Account attribution comes only from the guardian's per-user scans.

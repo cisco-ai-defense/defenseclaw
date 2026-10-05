@@ -1087,14 +1087,19 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 // processes. It ingests the guardian's per-user scans instead: each signal
 // belongs to the account the guardian's record names (not to anything the
 // scan reported), identical files of two users stay distinct, and the
-// gateway's own process detector is reported as covered, not failed.
+// gateway's own process detector is reported as covered, not failed. A v2
+// record's IDE inventory is attributed the same way; a v1 record (a
+// guardian from before the IDE inventory) is still read.
 func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "alice")
 	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
+	mustWrite(t, filepath.Join(home, ".vscode-server", "extensions", "extensions.json"),
+		`[{"identifier":{"id":"example.shadowai"},"version":"1.0.0","relativeLocation":"example.shadowai-1.0.0"}]`)
 	mustWrite(t, filepath.Join(home, ".lmstudio", "models", "example", "tiny", "tiny.gguf"), "GGUF\x03\x00\x00\x00"+strings.Repeat("\x00", 4096))
 	signature := testAISignature()
 	signature.ProcessNames = []string{"shadowai"}
+	signature.ExtensionIDs = []string{"example.shadowai"}
 	catalog := []AISignature{signature}
 	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
 		return []processInfo{{PID: 10, User: "alice", Comm: "shadowai"}, {PID: 11, User: "bob", Comm: "shadowai"}}, nil
@@ -1106,9 +1111,16 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
 		t.Fatalf("SanitizeUserScanReport: %v", err)
 	}
+	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 || report.IDEInventory.Plugins[0].UserName != "" {
+		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
+	}
 	spool := filepath.Join(tmp, "spool")
 	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
-		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: report})
+		version, userReport := UserScanRecordVersion, report
+		if uid == 1002 {
+			version, userReport.IDEInventory = 1, nil
+		}
+		data, err := json.Marshal(UserScanRecord{Version: version, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1150,8 +1162,13 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 		}
 		fingerprints[sig.Fingerprint] = sig.UserName
 	}
-	if processes != 2 || len(got.Signals) != 6 {
-		t.Fatalf("signals = %+v, want a config, a process and a model file signal per user", got.Signals)
+	if processes != 2 || len(got.Signals) != 8 {
+		t.Fatalf("signals = %+v, want a config, a process, an editor extension and a model file signal per user", got.Signals)
+	}
+	ide := svc.IDEInventory()
+	if ide == nil || len(ide.Plugins) != 1 || ide.Plugins[0].UserID != "1001" || ide.Plugins[0].UserName != "alice" ||
+		ide.Plugins[0].Enabled != "client_side_unknown" || !ide.Plugins[0].IsAI {
+		t.Fatalf("IDE inventory = %+v, want alice's remote-server plugin", ide)
 	}
 	if raw, _ := json.Marshal(got); strings.Contains(string(raw), tmp) {
 		t.Fatalf("report leaked a raw path: %s", raw)
@@ -1180,7 +1197,7 @@ func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
 	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{UserScanDir: spool, ScanInterval: 5 * time.Minute}}
 	current := func() bool {
 		t.Helper()
-		_, files, errs := svc.detectUserScans(now)
+		_, files, _, errs := svc.detectUserScans(now)
 		if len(errs) > 0 {
 			t.Fatalf("errors = %v", errs)
 		}
