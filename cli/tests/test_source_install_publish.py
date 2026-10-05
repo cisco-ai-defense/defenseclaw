@@ -1327,30 +1327,85 @@ def test_exact_retirement_refuses_precreated_unbound_custody(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
-def test_exact_retirement_custody_entry_count_is_bounded(tmp_path: Path) -> None:
-    destination = tmp_path / "entry"
-    destination.write_bytes(b"preserve\n")
-    identity = install_publish.path_identity(destination)
+def test_exact_retirement_custody_reclaims_only_completed_retirements_at_its_bound(tmp_path: Path) -> None:
     custody = tmp_path / "custody"
-    custody_fd = install_publish._open_custody_root(custody, create=True)
-    os.close(custody_fd)
-    for index in range(install_publish.MAX_CUSTODY_ENTRIES - 3):
+    os.close(install_publish._open_custody_root(custody, create=True))
+    # An interrupted retirement (its intent without the object) and foreign
+    # names are never reclaimed.
+    pending = tmp_path / "pending"
+    pending.write_bytes(b"pending\n")
+    pending_claim = install_publish.path_identity(pending)
+    pending_intent, _ = install_publish._retirement_names(str(pending), pending_claim, "entry")
+    (custody / pending_intent).write_bytes(install_publish._retirement_document(str(pending), pending_claim, "entry"))
+    for index in range(install_publish.MAX_CUSTODY_ENTRIES - 4):
         (custody / f"retained-{index:03d}").write_bytes(b"retained\n")
+    preserved = {path.name for path in custody.iterdir()}
 
-    assert install_publish.unlink_exact(destination, identity, custody_root=custody)
-    assert not destination.exists()
-    assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
+    for name in ("first", "second"):
+        entry = tmp_path / name
+        entry.write_bytes(name.encode())
+        assert install_publish.unlink_exact(entry, install_publish.path_identity(entry), custody_root=custody)
+        assert not entry.exists()
+        assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
+    assert preserved <= {path.name for path in custody.iterdir()}
+    (retired,) = custody.glob("retired-*")
+    assert retired.read_bytes() == b"second"
 
-    second = tmp_path / "second-entry"
-    second.write_bytes(b"preserve\n")
-    second_identity = install_publish.path_identity(second)
+    # With nothing completed left to reclaim, the bound still refuses.
+    retired.unlink()
+    retired.write_bytes(b"substitute\n")
+    third = tmp_path / "third"
+    third.write_bytes(b"preserve\n")
     with pytest.raises(install_publish.PublishError, match="bounded entry limit"):
-        install_publish.unlink_exact(second, second_identity, custody_root=custody)
+        install_publish.unlink_exact(third, install_publish.path_identity(third), custody_root=custody)
 
-    assert second.read_bytes() == b"preserve\n"
+    assert third.read_bytes() == b"preserve\n"
+    assert retired.read_bytes() == b"substitute\n"
     assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
-    assert len(list(custody.glob("intent-*.json"))) == 1
-    assert len(list(custody.glob("retired-*"))) == 1
+    assert preserved <= {path.name for path in custody.iterdir()}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
+def test_regular_replace_reclaims_retirements_recorded_under_an_earlier_device_number(tmp_path: Path) -> None:
+    # macOS renumbers volumes on every boot, so a long-lived checkout's custody
+    # fills with completed retirements whose recorded device no longer exists.
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    os.close(install_publish._open_custody_root(custody, create=True))
+    for index in range((install_publish.MAX_CUSTODY_ENTRIES - 1) // 2):
+        stage = install_dir / f"..defenseclaw-source-root.source-install-{index:032x}"
+        stage.write_bytes(b"marker\n")
+        device, *rest = install_publish.path_identity(stage)
+        recorded = (device + 1, *rest)
+        intent, retired = install_publish._retirement_names(str(stage), recorded, "entry")
+        (custody / intent).write_bytes(install_publish._retirement_document(str(stage), recorded, "entry"))
+        stage.rename(custody / retired)
+    assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES - 1
+    stale = install_dir / f".defenseclaw-gateway.source-install-{1:032x}"
+    stale.write_bytes(b"partial\n")
+    os.utime(stale, (1_000_000_000, 1_000_000_000))
+
+    destination = install_dir / "defenseclaw-gateway"
+    current, replacement = b"gateway-v1\n", b"gateway-v2\n"
+    destination.write_bytes(current)
+    destination.chmod(0o755)
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(replacement)
+    source.chmod(0o755)
+    install_publish.publish_regular(
+        source,
+        destination,
+        hashlib.sha256(current).hexdigest(),
+        expected_source=hashlib.sha256(replacement).hexdigest(),
+        custody_root=custody,
+    )
+
+    assert destination.read_bytes() == replacement
+    assert sorted(path.name for path in install_dir.iterdir()) == [custody.name, destination.name]
+    # One retired copy is kept per published name: the marker and the gateway.
+    assert len(list(custody.glob("intent-*.json"))) == 2
+    assert len(list(custody.glob("retired-*"))) == 2
 
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
