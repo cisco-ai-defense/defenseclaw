@@ -919,3 +919,49 @@ class DiscoveryOffAndWordingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IDEPluginsTests(unittest.TestCase):
+    def test_lists_every_page_with_filters_and_scope_messages(self):
+        from defenseclaw.gateway import OrchestratorClient
+
+        pages = {
+            "": {"enabled": True, "scope": "all", "next_cursor": "c2",
+                 "counts": {"total": 2, "ai": 1, "disabled": 1, "users": 2},
+                 "plugins": [{"user": "bob", "ide_product": "pycharm", "plugin_id": "org.rust.lang",
+                              "display_name": "Rust", "version": "0.4", "enabled": "disabled"}]},
+            "c2": {"enabled": True, "scope": "all", "next_cursor": "",
+                   "plugins": [{"user": "alice", "ide_product": "vscode-server", "plugin_id": "github.copilot",
+                                "version": "1.250.0", "enabled": "client_side_unknown", "is_ai": True}]},
+        }
+        calls = []
+
+        class PagedClient:
+            ai_usage_ide_plugins_all = OrchestratorClient.ai_usage_ide_plugins_all
+
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage_ide_plugins(self, **kwargs):
+                calls.append(kwargs)
+                return pages[kwargs.get("cursor", "")]
+
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", PagedClient):
+            result = runner.invoke(cmd_agent.agent, ["ide-plugins", "--ide", "VSCode", "--ai-only"], obj=_make_ctx())
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(calls[0], {"user": "", "ide": "vscode", "ai_only": True})
+            self.assertEqual(calls[1]["cursor"], "c2")
+            lines = result.output.splitlines()
+            alice = next(line for line in lines if "github.copilot" in line)
+            self.assertIn("client side", alice)
+            self.assertIn("org.rust.lang (Rust)", result.output)
+            self.assertLess(result.output.index("alice"), result.output.index("bob"))
+            self.assertIn("2 plugin(s) shown; 2 in total, 1 AI, 1 disabled, 2 user(s)", result.output)
+
+            pages[""] = {"enabled": True, "scope": "off", "plugins": []}
+            result = runner.invoke(cmd_agent.agent, ["ide-plugins"], obj=_make_ctx())
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("ide_inventory: off", result.output)

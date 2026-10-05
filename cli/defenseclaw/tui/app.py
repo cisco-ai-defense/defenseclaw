@@ -1663,6 +1663,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     yield Button("Tools", id="inventory-tab-tools", compact=True)
                     yield Button("Models", id="inventory-tab-models", compact=True)
                     yield Button("Memory", id="inventory-tab-memory", compact=True)
+                    yield Button("IDE plugins", id="inventory-tab-ide_plugins", compact=True)
                     yield Button("All scope", id="inventory-scope-all", compact=True)
                     yield Button("Fast", id="inventory-scope-fast", compact=True)
                     yield Button("Refresh", id="inventory-refresh", compact=True)
@@ -13850,6 +13851,23 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.inventory_model.message = hint
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
+        # After the inventory is on screen: this call may wait on the gateway.
+        await self._load_agent_identities()
+        self._render_chrome()
+
+    async def _load_agent_identities(self) -> None:
+        """Add stable agent ids to the Agents sub-tab, quietly.
+
+        ``defenseclaw agent identities`` is newer than this panel; when it is
+        missing or fails the Agents sub-tab simply shows the inventory rows.
+        """
+        intent = self.inventory_model.identities_intent()
+        try:
+            returncode, stdout, _stderr = await _communicate_captured(intent.binary, intent.args)
+        except OSError:
+            self.inventory_model.apply_agent_identities(None)
+            return
+        self.inventory_model.apply_agent_identities(stdout.decode(errors="replace") if returncode == 0 else None)
 
     async def _load_inventory_merged(self, names: list[str], *, announce: bool = True) -> None:
         """Inventory every active connector and merge the snapshots.
@@ -13882,6 +13900,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
+        self._render_chrome()
+        # After the inventory is on screen: this call may wait on the gateway.
+        await self._load_agent_identities()
         self._render_chrome()
 
     async def _load_runtime_model(self) -> None:

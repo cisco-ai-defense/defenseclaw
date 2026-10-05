@@ -599,6 +599,52 @@ class TestAIBOMCommand(unittest.TestCase):
     @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
     @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
     @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_adds_gateway_ide_plugins_once_and_stamps_users(self, mock_build, mock_to_scan, mock_enrich):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.inventory.claw_inventory import _stamp_local_user, local_user_identity
+        from defenseclaw.models import ScanResult
+
+        mock_build.side_effect = lambda *a, **k: self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x", timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        payload = {"enabled": True, "scope": "all", "plugins": [
+            {"user": "alice", "user_id": "1001", "ide_product": "vscode", "plugin_id": "github.copilot",
+             "enabled": "enabled", "is_ai": True},
+            {"user": "bob", "user_id": "1002", "ide_product": "pycharm", "plugin_id": "org.rust.lang",
+             "enabled": "disabled", "is_ai": False},
+        ]}
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage_ide_plugins_all(self):
+                return payload
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   return_value=("127.0.0.1", 18970, "token")), \
+                patch("defenseclaw.gateway.OrchestratorClient", FakeClient):
+            result = self.runner.invoke(aibom, ["scan", "--json"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        first, second = json.loads(result.output[result.output.index("["):])
+        self.assertEqual([p["plugin_id"] for p in first["ide_plugins"]], ["github.copilot", "org.rust.lang"])
+        self.assertEqual(first["summary"]["ide_plugins"],
+                         {"count": 2, "ai": 1, "disabled": 1, "users": 2, "scope": "all"})
+        self.assertNotIn("ide_plugins", second)
+
+        # Locally scanned connector plugins and MCP servers name their account.
+        name, user_id = local_user_identity()
+        inv = {"plugins": [{"id": "p"}], "mcp": [{"id": "m", "user": "kept"}]}
+        _stamp_local_user(inv)
+        self.assertEqual(inv["plugins"][0].get("user"), name)
+        self.assertEqual(inv["plugins"][0].get("user_id"), user_id)
+        self.assertEqual(inv["mcp"][0]["user"], "kept")
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
     def test_scan_connector_flag_targets_one(self, mock_build, mock_to_scan, mock_enrich):
         from defenseclaw.commands.cmd_aibom import aibom
         from defenseclaw.models import ScanResult
