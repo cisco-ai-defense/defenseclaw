@@ -17115,22 +17115,22 @@ def setup_it_governed(app: AppContext, disable: bool, status: bool, yes: bool) -
         app.cfg.guardrail.connectors = {}
     app.cfg.guardrail.connectors["hermes"] = {"mode": "action"}
 
-    # 3. Write MCP servers to config.yaml if credentials were provided
-    if mcp_servers_yaml:
-        config_path = os.path.join(data_dir, "config.yaml")
-        if os.path.isfile(config_path):
-            with open(config_path) as f:
-                cfg_content = f.read()
-            if "mcp_servers:" not in cfg_content:
-                cfg_content += f"\nmcp_servers:\n{mcp_servers_yaml}\n"
-                with open(config_path, "w") as f:
-                    f.write(cfg_content)
-        click.echo("  ✓ MCP servers configured")
-
-    # 4. Save config
+    # 3. Save config first (creates the base)
     app.cfg.save()
-    click.echo()
-    click.echo("  ✓ Config saved with deployment_mode=it_governed")
+
+    # 4. Write full config.yaml with routing, LLM, MCP servers, deployment_mode
+    click.echo("  Writing full config...")
+    _write_full_it_governed_config(data_dir, env_lines, mcp_servers_yaml)
+    click.echo("  ✓ Config written (routing + LLM + MCP + deployment_mode)")
+
+    # 5. Write LiteLLM callback files
+    click.echo("  Creating LiteLLM callback files...")
+    _write_litellm_callbacks(data_dir)
+    click.echo("  ✓ LiteLLM callbacks created")
+
+    # 6. Write .env tuning vars
+    _write_env_tuning_vars(env_path, env_lines)
+    click.echo("  ✓ Environment configured")
 
     # 4. Run the provisioner inline — configure Hermes sandbox now
     click.echo()
@@ -17308,6 +17308,271 @@ def _lock_it_governed_configs(app: AppContext) -> bool:
 _MYAGENT_DMG_URL = "https://github.com/cisco-aispg/defenseclaw/releases/latest/download/MyAgent.dmg"
 _HERMES_SESSION_TOKEN = "myagent-defenseclaw-session-2026"
 _HERMES_SERVE_PORT = 9119
+
+
+def _write_full_it_governed_config(data_dir: str, env_lines: dict, mcp_servers_yaml: str) -> None:
+    """Write the complete config.yaml with routing, LLM, MCP, and deployment_mode."""
+    config_path = os.path.join(data_dir, "config.yaml")
+    with open(config_path) as f:
+        content = f.read()
+
+    # Add deployment_mode if missing
+    if "deployment_mode" not in content:
+        content += "\ndeployment_mode: it_governed\n"
+
+    # Fix LLM to use Circuit API
+    if "api_key_env: CISCO_AI_JWT" not in content:
+        content = content.replace(
+            "llm:\n  api_key_env: DEFENSECLAW_LLM_KEY",
+            "llm:\n  base_url: https://chat-ai.cisco.com/openai/deployments/claude-sonnet-4-6\n"
+            "  api_key_env: CISCO_AI_JWT\n  model: claude-sonnet-4-6\n  provider: anthropic"
+        )
+
+    # Add routing config if missing
+    if "routing:" not in content:
+        content += """
+routing:
+  enabled: true
+  models:
+    - name: coding-model
+      provider: azure
+      model: gpt-5-5
+      base_url: https://chat-ai.cisco.com/openai/deployments/gpt-5-5
+      api_key_env: CISCO_AI_JWT
+    - name: reasoning-model
+      provider: azure
+      model: o3
+      base_url: https://chat-ai.cisco.com/openai/deployments/o3
+      api_key_env: CISCO_AI_JWT
+    - name: quality-model
+      provider: azure
+      model: claude-sonnet-4-6
+      base_url: https://chat-ai.cisco.com/openai/deployments/claude-sonnet-4-6
+      api_key_env: CISCO_AI_JWT
+    - name: fast-model
+      provider: azure
+      model: gpt-4o-mini
+      base_url: https://chat-ai.cisco.com/openai/deployments/gpt-4o-mini
+      api_key_env: CISCO_AI_JWT
+    - name: search-model
+      provider: azure
+      model: gemini-2.5-pro
+      base_url: https://chat-ai.cisco.com/openai/deployments/gemini-2.5-pro
+      api_key_env: CISCO_AI_JWT
+  signals:
+    keywords:
+      - name: coding_intent
+        keywords: [write a function, implement, code, debug, refactor, python, javascript, function, class, unit test, build, fix the bug, deploy]
+        operator: OR
+      - name: reasoning_intent
+        keywords: [analyze, compare, explain in detail, tradeoffs, architecture, design, evaluate, pros and cons, review, strategy]
+        operator: OR
+      - name: search_intent
+        keywords: [search, find, look up, what happened, latest, news, current, when did, who is, where is, research]
+        operator: OR
+      - name: simple_intent
+        keywords: [what is, hello, hi, thanks, how are you, define, 'yes', 'no', ok, help, list]
+        operator: OR
+  decisions:
+    - name: route_coding
+      priority: 100
+      conditions:
+        - type: keyword
+          name: coding_intent
+      model_refs: [coding-model]
+    - name: route_reasoning
+      priority: 100
+      conditions:
+        - type: keyword
+          name: reasoning_intent
+      model_refs: [reasoning-model]
+    - name: route_search
+      priority: 90
+      conditions:
+        - type: keyword
+          name: search_intent
+      model_refs: [search-model]
+    - name: route_simple
+      priority: 50
+      conditions:
+        - type: keyword
+          name: simple_intent
+      model_refs: [fast-model]
+"""
+
+    # Add MCP servers if provided and missing
+    if mcp_servers_yaml and "mcp_servers:" not in content:
+        content += f"\nmcp_servers:\n{mcp_servers_yaml}\n"
+
+    with open(config_path, "w") as f:
+        f.write(content)
+
+
+def _write_litellm_callbacks(data_dir: str) -> None:
+    """Create the LiteLLM callback Python files needed by the proxy."""
+    litellm_dir = os.path.join(data_dir, "litellm")
+    os.makedirs(litellm_dir, exist_ok=True)
+
+    # filter_empty.py
+    with open(os.path.join(litellm_dir, "filter_empty.py"), "w") as f:
+        f.write('''"""Strip empty content blocks (Circuit API fix)."""
+import litellm
+from litellm.integrations.custom_logger import CustomLogger
+
+_orig = litellm.acompletion
+
+async def _patched(*args, **kwargs):
+    msgs = kwargs.get("messages", [])
+    for m in msgs:
+        if isinstance(m.get("content"), list):
+            m["content"] = [c for c in m["content"] if c.get("text", "").strip() or c.get("type") != "text"]
+            if not m["content"]:
+                m["content"] = " "
+    return await _orig(*args, **kwargs)
+
+litellm.acompletion = _patched
+
+class FilterEmpty(CustomLogger):
+    pass
+
+proxy_handler_instance = FilterEmpty()
+''')
+
+    # sr_router.py
+    with open(os.path.join(litellm_dir, "sr_router.py"), "w") as f:
+        f.write('''"""SR routing callback."""
+import httpx, sys
+from litellm.integrations.custom_logger import CustomLogger
+
+SR_URL = "http://127.0.0.1:8080/api/v1/classify/intent"
+MODEL_MAP = {"coding-model": "gpt-5-5", "reasoning-model": "o3", "quality-model": "claude-sonnet-4-6", "fast-model": "gpt-4o-mini", "search-model": "gemini-2.5-pro", "default": "claude-sonnet-4-6"}
+
+def _extract_last_user(data):
+    for msg in reversed(data.get("messages", [])):
+        if msg.get("role") == "user":
+            c = msg.get("content", "")
+            if isinstance(c, str) and c.strip(): return c.strip()
+    inp = data.get("input", "")
+    if isinstance(inp, str) and inp.strip(): return inp.strip()
+    if isinstance(inp, list):
+        for item in reversed(inp):
+            if isinstance(item, dict):
+                c = item.get("content", "")
+                if isinstance(c, str) and c.strip(): return c.strip()
+    return ""
+
+def _route(data, source="hook"):
+    text = _extract_last_user(data)
+    if not text: return
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            resp = client.post(SR_URL, json={"text": text})
+            if resp.status_code == 200:
+                r = resp.json()
+                model = r.get("recommended_model", "")
+                decision = r.get("routing_decision", "")
+                if model and decision != "low_confidence_general":
+                    upstream = MODEL_MAP.get(model, model)
+                    print(f"[SR] \\'{text[:60]}\\' -> {decision} -> {model} ({upstream})", file=sys.stderr, flush=True)
+                    data["model"] = model
+    except Exception as e:
+        print(f"[SR] error: {e}", file=sys.stderr, flush=True)
+
+class SemanticRouter(CustomLogger):
+    async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
+        _route(data)
+        return data
+    async def async_moderation_hook(self, data, user_api_key_dict, call_type):
+        if "messages" not in data: _route(data)
+
+proxy_handler_instance = SemanticRouter()
+''')
+
+    # outlook_mcp.py
+    with open(os.path.join(litellm_dir, "outlook_mcp.py"), "w") as f:
+        f.write('''"""Graph API MCP server for Outlook."""
+import json, os, sys, urllib.request, urllib.error, ssl
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+TOKEN = os.environ.get("MS_GRAPH_ACCESS_TOKEN", "")
+try:
+    import certifi
+    SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    SSL_CTX = ssl.create_default_context()
+    SSL_CTX.check_hostname = False
+    SSL_CTX.verify_mode = ssl.CERT_NONE
+
+def graph_get(path, params=None):
+    url = f"{GRAPH_BASE}{path}"
+    if params:
+        from urllib.parse import urlencode, quote
+        url += "?" + urlencode(params, quote_via=quote)
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, context=SSL_CTX) as resp: return json.loads(resp.read())
+    except urllib.error.HTTPError as e: return {"error": f"HTTP {e.code}"}
+
+TOOLS = [
+    {"name": "outlook_list_emails", "description": "List emails", "inputSchema": {"type": "object", "properties": {"top": {"type": "integer"}, "folder": {"type": "string"}}}},
+    {"name": "outlook_search_emails", "description": "Search emails", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "outlook_list_calendar", "description": "List events", "inputSchema": {"type": "object", "properties": {"top": {"type": "integer"}}}},
+]
+
+def handle_tool(name, args):
+    if name == "outlook_list_emails":
+        data = graph_get(f"/me/mailFolders/{args.get('folder','inbox')}/messages", {"$top": str(args.get("top",10)), "$select": "subject,from,receivedDateTime,isRead", "$orderby": "receivedDateTime%20desc"})
+        if "error" in data: return json.dumps(data)
+        return "\\n".join(f"{m.get('receivedDateTime','')[:16]} | {m.get('from',{}).get('emailAddress',{}).get('name','')} | {m.get('subject','')}" for m in data.get("value",[])) or "No emails"
+    elif name == "outlook_search_emails":
+        data = graph_get("/me/messages", {"$search": f'""{args["query"]}""', "$top": "10", "$select": "subject,from,receivedDateTime"})
+        if "error" in data: return json.dumps(data)
+        return "\\n".join(f"{m.get('receivedDateTime','')[:16]} | {m.get('subject','')}" for m in data.get("value",[])) or "No results"
+    elif name == "outlook_list_calendar":
+        data = graph_get("/me/events", {"$top": str(args.get("top",10))})
+        if "error" in data: return json.dumps(data)
+        return "\\n".join(f"{e.get('start',{}).get('dateTime','')[:16]} | {e.get('subject','')}" for e in data.get("value",[])) or "No events"
+    return f"Unknown: {name}"
+
+def main():
+    for line in sys.stdin:
+        if not line.strip(): continue
+        try: msg = json.loads(line)
+        except: continue
+        method, mid = msg.get("method",""), msg.get("id")
+        if method == "initialize":
+            print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"outlook-graph-mcp","version":"1.0.0"}}}), flush=True)
+        elif method == "tools/list":
+            print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"tools":TOOLS}}), flush=True)
+        elif method == "tools/call":
+            try:
+                result = handle_tool(msg["params"]["name"], msg["params"].get("arguments",{}))
+                print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":result}]}}), flush=True)
+            except Exception as e:
+                print(json.dumps({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":f"Error: {e}"}],"isError":True}}), flush=True)
+
+if __name__ == "__main__": main()
+''')
+
+
+def _write_env_tuning_vars(env_path: str, env_lines: dict) -> None:
+    """Add LiteLLM tuning + hook contract drift vars to .env."""
+    tuning = {
+        "LITELLM_DISABLE_DB_CHECKS": "true",
+        "LITELLM_LOG": "ERROR",
+        "LITELLM_MCP_TOOL_LISTING_TIMEOUT": "120",
+        "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1",
+    }
+    added = False
+    for k, v in tuning.items():
+        if k not in env_lines:
+            env_lines[k] = v
+            added = True
+    if added:
+        with open(env_path, "w") as f:
+            f.write("# DefenseClaw IT Governed — auto-generated\n")
+            for k, v in env_lines.items():
+                f.write(f"{k}={v}\n")
+        os.chmod(env_path, 0o600)
 
 
 def _install_pulseclaw_skills() -> None:
