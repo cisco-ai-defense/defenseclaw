@@ -5169,6 +5169,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel == "inventory":
             self._sync_catalog_connector_filters()
+            # The IDE plugins table fits its cells to the terminal width.
+            self.inventory_model.set_size(
+                int(getattr(self.size, "width", 0) or 0), int(getattr(self.size, "height", 0) or 0)
+            )
             self._table_columns = self.inventory_model.data_table_columns()
             self._table_rows = self.inventory_model.data_table_rows()
             empty = self.inventory_model.empty_state()

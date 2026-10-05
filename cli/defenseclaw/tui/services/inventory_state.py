@@ -52,6 +52,13 @@ INVENTORY_SUBTAB_LABELS: Mapping[InventorySubTab, str] = {
     "ide_plugins": "IDE plugins",
 }
 
+# IDE cell suffix for a plugin of a remote install; mirrors
+# ``defenseclaw agent ide-plugins``.
+IDE_REMOTE_LABELS: Mapping[str, str] = {
+    "ssh_server": "ssh",
+    "jetbrains_remote_dev": "remote dev",
+}
+
 # Enabled cell for an IDE plugin row; mirrors ``defenseclaw agent ide-plugins``.
 IDE_PLUGIN_ENABLED_LABELS: Mapping[str, str] = {
     "enabled": "yes",
@@ -260,6 +267,7 @@ class InventoryIDEPlugin:
     enabled: str = "unknown"
     enabled_source: str = ""
     scope: str = ""
+    remote_kind: str = ""
     is_ai: bool = False
     ai_signature_id: str = ""
     installed_at: str = ""
@@ -279,6 +287,7 @@ class InventoryIDEPlugin:
             enabled=str(raw.get("enabled") or "unknown"),
             enabled_source=str(raw.get("enabled_source") or ""),
             scope=str(raw.get("scope") or ""),
+            remote_kind=str(raw.get("remote_kind") or ""),
             is_ai=bool(raw.get("is_ai")),
             ai_signature_id=str(raw.get("ai_signature_id") or ""),
             installed_at=str(raw.get("installed_at") or ""),
@@ -292,6 +301,17 @@ class InventoryIDEPlugin:
     @property
     def enabled_label(self) -> str:
         return IDE_PLUGIN_ENABLED_LABELS.get(self.enabled, self.enabled)
+
+    @property
+    def location(self) -> str:
+        if self.remote_kind:
+            return IDE_REMOTE_LABELS.get(self.remote_kind, "remote")
+        return "remote" if self.scope == "remote" else ""
+
+    @property
+    def ide_label(self) -> str:
+        product = self.ide_product or self.ide_family
+        return f"{product} ({self.location})" if self.location else product
 
     @property
     def key(self) -> str:
@@ -1330,22 +1350,23 @@ class InventoryPanelModel:
                 if not 0 <= self.cursor < len(ide_rows):
                     return None
                 ide = ide_rows[self.cursor]
+                fields = (
+                    ("Enabled", ide.enabled_label),
+                    ("AI", "yes" if ide.is_ai else "no"),
+                    ("IDE", ide.ide_label),
+                    ("Version", ide.version),
+                    ("User", ide.user),
+                    ("Name", ide.display_name),
+                    ("Publisher", ide.publisher),
+                    ("Enabled from", ide.enabled_source),
+                    ("Scope", ide.scope),
+                    ("AI signature", ide.ai_signature_id),
+                    ("Installed", ide.installed_at),
+                    ("Last seen", ide.last_seen),
+                )
                 return InventoryDetailInfo(
                     f"IDE PLUGIN: {ide.label}",
-                    (
-                        ("Name", ide.display_name),
-                        ("Publisher", ide.publisher),
-                        ("Version", ide.version),
-                        ("User", ide.user),
-                        ("IDE", ide.ide_product or ide.ide_family),
-                        ("Enabled", ide.enabled),
-                        ("Enabled from", ide.enabled_source),
-                        ("Scope", ide.scope),
-                        ("AI", "yes" if ide.is_ai else "no"),
-                        ("AI signature", ide.ai_signature_id),
-                        ("Installed", ide.installed_at),
-                        ("Last seen", ide.last_seen),
-                    ),
+                    tuple((name, value) for name, value in fields if value),
                 )
             case _:
                 return None
@@ -1368,7 +1389,7 @@ class InventoryPanelModel:
                 base = ("ID", "Backend", "Provider", "Files", "Chunks", "Workspace")
             case "ide_plugins":
                 # Per user, never per connector: no Connector column.
-                return ("User", "IDE", "Plugin", "Version", "Enabled", "AI")
+                return self._ide_plugin_columns()
             case _:
                 # The Summary sub-tab is a key/value list, not a per-connector
                 # entity table, so it never carries a CONNECTOR column.
@@ -1471,19 +1492,31 @@ class InventoryPanelModel:
                     for memory in self.filtered_memory()
                 )
             case "ide_plugins":
-                return tuple(
-                    (
-                        ide.user or "—",
-                        ide.ide_product or ide.ide_family,
-                        ide.label,
-                        ide.version,
-                        ide.enabled_label,
-                        "yes" if ide.is_ai else "",
-                    )
-                    for ide in self.filtered_ide_plugins()
-                )
+                return self._ide_plugin_rows()
             case _:
                 return self.summary_table_rows()
+
+    def _ide_plugin_columns(self) -> tuple[str, ...]:
+        columns = ("IDE", "Plugin", "Version", "Enabled", "AI")
+        return ("User", *columns) if self._multi_user(self.filtered_ide_plugins()) else columns
+
+    def _ide_plugin_rows(self) -> tuple[tuple[str, ...], ...]:
+        plugins = self.filtered_ide_plugins()
+        multi_user = self._multi_user(plugins)
+        rows = tuple(
+            (
+                *((ide.user or "—",) if multi_user else ()),
+                ide.ide_label,
+                ide.label,
+                ide.version,
+                ide.enabled_label,
+                "yes" if ide.is_ai else "",
+            )
+            for ide in plugins
+        )
+        # Enabled and AI stay whole; the wider text columns give way so the
+        # table fits an 80-column terminal (GAP-0020, GAP-0050, GAP-0055).
+        return _fit_cells(self._ide_plugin_columns(), rows, self.width or 80, keep=("Enabled", "AI"))
 
     def handle_key(self, key: str) -> InventoryPanelAction:
         # Digits 1-4 are filters only on the Skills and Plugins sub-tabs.
@@ -1593,6 +1626,32 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _user_of(raw: Mapping[str, Any]) -> str:
     return str(raw.get("user") or raw.get("user_name") or raw.get("user_id") or "")
+
+
+def _fit_cells(
+    columns: Sequence[str],
+    rows: tuple[tuple[str, ...], ...],
+    width: int,
+    keep: Sequence[str] = (),
+) -> tuple[tuple[str, ...], ...]:
+    """Clip cells so the table fits *width*; ``keep`` columns stay whole.
+
+    The widest other column loses a character at a time (never below its
+    header or 6), and a clipped cell ends in "…".
+    """
+    widths = [max([len(name), *(len(row[i]) for row in rows)]) for i, name in enumerate(columns)]
+    # Panel margins, the scrollbar and one space of padding each side of a cell.
+    budget = width - 8 - 2 * len(columns)
+    shrinkable = [i for i, name in enumerate(columns) if name not in keep]
+    while shrinkable and sum(widths) > budget:
+        i = max(shrinkable, key=lambda j: widths[j])
+        if widths[i] <= max(6, len(columns[i])):
+            break
+        widths[i] -= 1
+    return tuple(
+        tuple(cell if len(cell) <= widths[i] else cell[: widths[i] - 1] + "…" for i, cell in enumerate(row))
+        for row in rows
+    )
 
 
 def _safe_int(value: Any) -> int:

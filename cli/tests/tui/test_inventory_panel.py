@@ -564,6 +564,23 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     )
     assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
 
+    # At 80 columns long cells give way while Enabled and AI stay whole, a
+    # remote install is marked, and the detail leads with the state (GAP-0055).
+    remote = InventoryPanelModel()
+    remote.set_size(80, 24)
+    long_id = "ms-vscode-remote.remote-ssh-edit-nightly"
+    remote.apply_merged([("codex", json.dumps({"ide_plugins": [
+        ide("dcad-alice@dclab.test", long_id, version="2026.10.100500", enabled="client_side_unknown",
+            is_ai=True, remote_kind="ssh_server", scope="remote"),
+    ]}))])
+    remote.set_active_subtab("ide_plugins")
+    assert remote.data_table_columns() == ("IDE", "Plugin", "Version", "Enabled", "AI")
+    (row,) = remote.data_table_rows()
+    assert row[0] == "vscode (ssh)" and row[1].endswith("…") and row[3:] == ("client side", "yes")
+    assert sum(len(cell) + 2 for cell in row) <= 72
+    remote.set_cursor(0)
+    assert remote.detail_info().fields[:3] == (("Enabled", "client side"), ("AI", "yes"), ("IDE", "vscode (ssh)"))
+
     # One user on Plugins: no User column.
     panel.set_active_subtab("plugins")
     assert "User" not in panel.data_table_columns()

@@ -849,6 +849,18 @@ class OrchestratorClient:
             plugins.extend(page.get("plugins") or [])
             cursor = str(page.get("next_cursor") or "")
             pages += 1
+        # A plugin names its install; copy the install's remote kind onto it
+        # so a ~/.vscode-server row reads differently from the ~/.vscode one.
+        remote = {
+            str(inst.get("install_id") or ""): str(inst.get("remote_kind") or "")
+            for inst in payload.get("installations") or []
+            if isinstance(inst, dict)
+        }
+        for plugin in plugins:
+            if isinstance(plugin, dict) and not plugin.get("remote_kind"):
+                kind = remote.get(str(plugin.get("install_id") or ""), "")
+                if kind:
+                    plugin["remote_kind"] = kind
         out = dict(payload)
         out["plugins"] = plugins
         out["next_cursor"] = cursor if pages >= max_pages else ""
