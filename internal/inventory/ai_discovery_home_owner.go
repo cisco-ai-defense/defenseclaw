@@ -59,11 +59,12 @@ func brokeredProcessAccounts() map[int]ProcessAccount {
 
 // homeOwnerForAccount returns the one profile owner whose account is user.
 func (s *ContinuousDiscoveryService) homeOwnerForAccount(user string) (discoveryHomeOwner, bool) {
-	user = strings.TrimSpace(user[strings.LastIndex(user, `\`)+1:])
+	bare := func(name string) string { return strings.TrimSpace(name[strings.LastIndex(name, `\`)+1:]) }
+	user = bare(user)
 	var found discoveryHomeOwner
 	matches := 0
 	for _, owner := range s.opts.homeOwners {
-		if user != "" && owner.Home != "" && strings.EqualFold(strings.TrimSpace(owner.UserName), user) {
+		if user != "" && owner.Home != "" && strings.EqualFold(bare(owner.UserName), user) {
 			found = owner
 			matches++
 		}

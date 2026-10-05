@@ -275,11 +275,9 @@ var currentIDEOwner = func() ideOwner {
 	if err != nil {
 		return ideOwner{}
 	}
-	name := u.Username
-	if i := strings.LastIndex(name, `\`); i >= 0 {
-		name = name[i+1:]
-	}
-	return ideOwner{id: u.Uid, name: name}
+	// The full account name (DOMAIN\name on Windows), as agent identities and
+	// hook records spell it.
+	return ideOwner{id: u.Uid, name: u.Username}
 }
 
 func programFilesDirs() []string {
