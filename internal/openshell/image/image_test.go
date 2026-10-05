@@ -247,6 +247,35 @@ func TestDockerfileShape(t *testing.T) {
 	}
 }
 
+// GAP-0030: the image names the run-as uid, so whoami works in the sandbox:
+// the base image's sandbox user takes the uid and gid unless an entry has
+// them already, and a second run changes nothing.
+func TestRunAsUserStepNamesTheUID(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the step runs in the Linux image; it uses GNU sed")
+	}
+	dir := t.TempDir()
+	passwd, group := filepath.Join(dir, "passwd"), filepath.Join(dir, "group")
+	for p, data := range map[string]string{
+		passwd: "root:x:0:0:root:/root:/bin/bash\nsandbox:x:998:998:Sandbox:/home/sandbox:/bin/bash\n",
+		group:  "root:x:0:\nsandbox:x:998:\n",
+	} {
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if out, err := exec.Command("sh", "-c", runAsUserStep(1005, 1005, passwd, group)).CombinedOutput(); err != nil {
+			t.Fatalf("step: %v %s", err, out)
+		}
+	}
+	gotP, _ := os.ReadFile(passwd)
+	gotG, _ := os.ReadFile(group)
+	if !strings.Contains(string(gotP), "\nsandbox:x:1005:1005:Sandbox:/sandbox:/bin/bash\n") || !strings.Contains(string(gotG), "\nsandbox:x:1005:\n") {
+		t.Fatalf("passwd = %q, group = %q", gotP, gotG)
+	}
+}
+
 // TestDockerfileAnswersLocalhost pins AG-MAC-F1: an image for the MicroVM
 // driver resolves localhost without /etc/hosts, which a MicroVM boots
 // empty. The pinned nss-myhostname .deb of the build architecture is
