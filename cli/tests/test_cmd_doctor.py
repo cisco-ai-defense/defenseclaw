@@ -1041,6 +1041,53 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("hermes mode is observe", result.checks[0]["detail"])
         self.assertNotIn("guardrail.mode", result.checks[0]["detail"])
 
+    def test_hilt_observe_warnings_collapse_into_one_row(self):
+        from defenseclaw.commands.cmd_doctor import _emit_hilt_observe_summary
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+        result = _DoctorResult()
+        observe_only: list[tuple[str, str]] = []
+        for connector in ("amp", "codex", "cursor"):
+            _check_hilt_support(cfg, connector, result, observe_only=observe_only)
+        _emit_hilt_observe_summary(observe_only, result, tagged=True)
+
+        [row] = result.checks
+        self.assertEqual((row["status"], row["label"]), ("warn", "Human approval"))
+        self.assertIn("amp, codex, cursor", row["detail"])
+        self.assertIn("defenseclaw guardrail hilt off", row["remediation"])
+
+    def test_llm_reachable_is_skipped_when_nothing_uses_the_llm(self):
+        from defenseclaw.commands.cmd_doctor import _check_llm_reachable
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "omnigent"
+        cfg.llm.model = "ollama/qwen2.5:0.5b"
+        result = _DoctorResult()
+        with patch("defenseclaw.llm.ping", side_effect=AssertionError("probed an unused LLM")):
+            _check_llm_reachable(cfg, result)
+
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertIn("not used", result.checks[0]["detail"])
+
     def test_hilt_new_connector_support_matrix(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
@@ -2338,7 +2385,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
     """
 
     def _make_cfg(self):
-        return Config(
+        cfg = Config(
             data_dir="/tmp/defenseclaw-dryrun",
             audit_db="/tmp/defenseclaw-dryrun/audit.db",
             quarantine_dir="/tmp/defenseclaw-dryrun/quarantine",
@@ -2349,6 +2396,8 @@ class DoctorFixDryRunTests(unittest.TestCase):
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
         )
+        cfg.acp = None  # no ACP binding, so the ACP guard repair stays a noop
+        return cfg
 
     def test_dry_run_calls_only_read_only_planners(self):
         from defenseclaw.commands import cmd_doctor
@@ -2448,14 +2497,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 16)
+        self.assertEqual(len(result.repairs), 17)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 7)
+        self.assertEqual(result.repair_summary.noop, 8)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -2545,10 +2594,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 16)
+        self.assertEqual(len(result.repairs), 17)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 7)
+        self.assertEqual(result.repair_summary.noop, 8)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()
@@ -3285,3 +3334,17 @@ class DoctorScannerRepairHintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_stopped_local_observability_stack_is_not_a_failure():
+    from defenseclaw.commands import cmd_doctor
+
+    local = SimpleNamespace(name="local-observability", preset="")
+    remote = SimpleNamespace(name="splunk", preset="")
+    live = SimpleNamespace(circuit_state="open", last_failure_class="network")
+    with patch.object(cmd_doctor.socket, "create_connection", side_effect=ConnectionRefusedError):
+        assert cmd_doctor._local_observability_stack_stopped(local, live, "fail")
+        assert not cmd_doctor._local_observability_stack_stopped(remote, live, "fail")
+    with patch.object(cmd_doctor.socket, "create_connection", return_value=contextlib.nullcontext()):
+        # The stack is up, so its collector failing is a real failure.
+        assert not cmd_doctor._local_observability_stack_stopped(local, live, "fail")
