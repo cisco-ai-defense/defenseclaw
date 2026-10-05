@@ -96,8 +96,8 @@ type DirectoryFacts struct {
 	// UPN is the userPrincipalName when the directory exposes one (SSSD
 	// InfoPipe, the Windows identity store, TranslateNameW).
 	UPN string `json:"upn,omitempty"`
-	// Domain is the DNS or NetBIOS domain of the account, as the OS
-	// reports it (defenseclaw.user.domain).
+	// Domain is the account's domain in lower case, by its DNS name where
+	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).
 	Domain string `json:"domain,omitempty"`
 	// Realm is the Kerberos realm, usually the upper-case DNS domain.
 	Realm string `json:"realm,omitempty"`

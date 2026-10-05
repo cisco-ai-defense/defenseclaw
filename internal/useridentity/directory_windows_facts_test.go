@@ -56,7 +56,7 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		t.Fatalf("entra facts = %+v", entra)
 	}
 	hybrid := resolveWindowsDirectoryFacts(reader, adSID, func(string) string { return "ignored@corp.example.com" }, now)
-	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "CORP" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
+	if hybrid.Directory != DirectoryActiveDirectory || hybrid.Domain != "corp.example.com" || hybrid.Realm != "CORP.EXAMPLE.COM" ||
 		hybrid.Principal != "bob@corp.example.com" || hybrid.TenantID != tenant {
 		t.Fatalf("hybrid AD facts = %+v", hybrid)
 	}

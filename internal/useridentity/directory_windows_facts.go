@@ -143,8 +143,11 @@ func resolveWindowsDirectoryFacts(
 	case ok && strings.EqualFold(domain, r.ComputerName()):
 		facts.Directory = DirectoryLocal
 	case ok && domain != "":
+		// The domain is reported in lower case, by its DNS name when it is
+		// the machine's own domain, as SSSD and winbind report it on
+		// Linux; LookupAccountSid gives only the NetBIOS name.
 		facts.Directory = DirectoryActiveDirectory
-		facts.Domain = domain
+		facts.Domain = strings.ToLower(domain)
 		if upn != "" && strings.EqualFold(provider, entraProviderName) {
 			// A hybrid user signed in to Entra: the identity store has the
 			// cloud UPN, which is the synced AD UPN.
@@ -158,6 +161,7 @@ func resolveWindowsDirectoryFacts(
 			// The account is in the machine's own domain, whose DNS name
 			// is the Kerberos realm.
 			facts.Realm = strings.ToUpper(join.DNSDomain)
+			facts.Domain = strings.ToLower(join.DNSDomain)
 		}
 	default:
 		return DirectoryFacts{}
