@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -1504,14 +1505,30 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 		UserID:    user.ID,
 		UserName:  user.Name,
 	}
+	// The agent identity is derived from verified facts only (see
+	// resolveHookAgentIdentity); it keys the session instance, so two users
+	// who send the same session id get different instances.
+	facts := resolveHookAgentIdentity(ctx, req)
+	identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+	newSession := false
 	if reg := SharedAgentRegistry(); reg != nil {
-		resolved := reg.Resolve(ctx, req.SessionID, identity.AgentID)
+		resolved, minted := reg.ResolveForAgentIdentity(ctx, facts.ID, req.SessionID, identity.AgentID)
 		if identity.AgentID == "" {
 			identity.AgentID = resolved.AgentID
 		}
 		identity.AgentInstanceID = resolved.AgentInstanceID
 		identity.SidecarInstanceID = resolved.SidecarInstanceID
+		newSession = minted
+		// A sub-agent that shares its parent's session gets an instance of
+		// its own, derived from the parent's. Parent, root and depth
+		// lineage stay on llmEventMeta.
+		if facts.ID != "" && identity.AgentInstanceID != "" {
+			if subagent := hookSubagentID(req); subagent != "" {
+				identity.AgentInstanceID = agentidentity.SubagentInstanceID(identity.AgentInstanceID, subagent)
+			}
+		}
 	}
+	sharedAgentIdentities.observe(facts, req.SessionID, newSession)
 	return identity
 }
 

@@ -701,6 +701,21 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def agent_identities(
+        self, *, user: str | None = None, connector: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch agent identities (``GET /api/v1/agents/identities``),
+        optionally narrowed to one user or one connector."""
+        params = {key: value for key, value in (("user", user), ("connector", connector)) if value}
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/agents/identities",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def ai_usage(self) -> dict[str, Any]:
         resp = self._session.get(
             f"{self.base_url}/api/v1/ai-usage",

@@ -5601,3 +5601,92 @@ def _error_class(error: str) -> str:
     if "failed" in err:
         return "probe_failed"
     return "other"
+
+
+# ---------------------------------------------------------------------------
+# agent identities — the stable agt- identity of each harness install
+# (one connector for one user on one machine), from inventory.db.
+# ---------------------------------------------------------------------------
+
+
+@agent.command("identities")
+@click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
+@click.option("--connector", "connector_name", default=None, help="Only this connector.")
+@click.option("--json", "as_json", is_flag=True, help="Output the identities as JSON.")
+@click.option("--gateway-host", default=None, help="Sidecar API host override.")
+@click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
+@click.option(
+    "--gateway-token-env",
+    default=None,
+    help="Environment variable containing the sidecar API token override.",
+)
+@pass_ctx
+def identities(
+    app: AppContext,
+    user: str | None,
+    connector_name: str | None,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List agent identities: one per connector install, per user, per machine.
+
+    The ID (agt-...) is derived from the machine id, the verified user,
+    the connector and its config root, so it is stable across sessions
+    and gateway restarts. Each session of an agent has its own ais- id.
+    """
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        payload = client.agent_identities(user=user, connector=connector_name)
+    except requests.ConnectionError as exc:
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    rows = [row for row in payload.get("identities", []) or [] if isinstance(row, Mapping)]
+    if as_json:
+        click.echo(json.dumps(
+            {"enabled": bool(payload.get("enabled", False)), "identities": rows},
+            indent=2, sort_keys=True))
+        return
+    if payload.get("enabled") is False:
+        click.echo("Agent identities are not recorded on this deployment.")
+        return
+    if not rows:
+        click.echo("No agent identities seen yet. They appear after an agent's first hook.")
+        return
+    click.echo(_render_agent_identities(rows))
+
+
+def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
+    headers = ("User", "Connector", "Agent identity", "Sessions", "Last seen", "Config root")
+    table = [headers]
+    for row in rows:
+        user = str(row.get("user_name") or row.get("user_id") or "")
+        root = str(row.get("install_fp") or "")
+        hint = str(row.get("install_hint") or "")
+        if hint:
+            root = f"{root} (agent claims {hint})"
+        table.append((
+            _bounded(user, 32),
+            str(row.get("connector", "")),
+            str(row.get("agent_id", "")),
+            str(row.get("sessions_seen", 0)),
+            _format_relative_time(str(row.get("last_seen", "") or "")),
+            root,
+        ))
+    widths = [max(len(line[i]) for line in table) for i in range(len(headers) - 1)]
+    lines = [
+        "  ".join(cell.ljust(width) for cell, width in zip(line[:-1], widths)) + "  " + line[-1]
+        for line in table
+    ]
+    return "\n".join(line.rstrip() for line in lines)

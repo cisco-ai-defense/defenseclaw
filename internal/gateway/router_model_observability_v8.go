@@ -199,6 +199,7 @@ func eventRouterAgentInputV8(observation hookModelV8Observation) observability.S
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
 	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
 	input.DefenseClawRunID = hookModelV8OptionalID(meta.RunID)
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)

@@ -135,6 +135,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawUserIDKind:               v8UserIDKind(meta.UserIDKind),
 			DefenseClawUserName:                 hookV8OptionalIdentifier(meta.UserName),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
+			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 			DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),
 			GenAIConversationID:                 hookV8OptionalIdentifier(meta.SessionID),

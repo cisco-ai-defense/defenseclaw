@@ -376,6 +376,7 @@ func applyGeneratedToolV8Identity(input *observability.SpanToolExecuteInput, obs
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
 	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)
