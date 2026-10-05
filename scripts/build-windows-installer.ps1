@@ -1135,6 +1135,8 @@ if problems:
     raise SystemExit('\n'.join(problems))
 for module in ('defenseclaw', 'skill_scanner', 'mcpscanner', 'yara'):
     __import__(module)
+from skill_scanner.core.scan_policy import ScanPolicy
+ScanPolicy.from_preset('quiet')  # the recommended policy DefenseClaw defaults to
 import asyncio
 import yara
 from magika import Magika

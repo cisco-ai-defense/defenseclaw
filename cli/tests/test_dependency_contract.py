@@ -61,8 +61,16 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
 
 TOMLI_COMPATIBILITY_CONTRACT = (">=2.0.1", 'python_version < "3.11"')
 
-SKILL_SCANNER_VERSION = "2.0.4"
-SKILL_SCANNER_SHA256 = "8ac399d4542870fad7b09027b9d45f0668788dfff3a5a95603c6f195430a5d74"
+SKILL_SCANNER_VERSION = "2.2.1"
+# 2.2.1 ships only platform wheels (each bundles a CEL helper): no
+# py3-none-any, Windows arm64 or musl wheel, and Python >=3.11.
+SKILL_SCANNER_WHEELS = {
+    "macosx_13_0_arm64": "233189ed423e343448d0e324979c521d65cfba69cf8a07f8f0207170161ed6fa",
+    "macosx_13_0_x86_64": "e09940589bb93b7b49f131352b1581a030d180fa3775cee676442cf0aebffa59",
+    "manylinux_2_17_aarch64": "e5e6a3d7f956afccae73c7326e3a1a2d43203a431b7cbd598333f6098b3190e6",
+    "manylinux_2_17_x86_64": "cd6ab22b72c4c8124c7a20f8d0b10582408336f17d340ace1fe7d9e3ba256680",
+    "win_amd64": "d1bf7bb295f314627c7f6a58d9debba05dce72e9251d65aaad48ca77736e8655",
+}
 MCP_SCANNER_VERSION = "4.3.0"
 MCP_SCANNER_SHA256 = "ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812"
 TEXTUAL_LOCKED_VERSION = "8.2.8"
@@ -72,6 +80,19 @@ WINDOWS_PYTHON_313_ONNXRUNTIME_MINIMUM = Version("1.21.0")
 
 def _requirements(values: list[str]) -> dict[str, Requirement]:
     return {Requirement(value).name.lower(): Requirement(value) for value in values}
+
+
+def _assert_skill_scanner_wheels(values: list[str]) -> None:
+    """One hashed platform wheel per supported platform, each Python >=3.11."""
+    pinned = [Requirement(value) for value in values if Requirement(value).name == "cisco-ai-skill-scanner"]
+    found = {}
+    for requirement in pinned:
+        wheel, _, sha = str(requirement.url).rpartition("/")[2].partition("#sha256=")
+        prefix = f"cisco_ai_skill_scanner-{SKILL_SCANNER_VERSION}-cp311.cp312.cp313.cp314-none-"
+        assert wheel.startswith(prefix) and wheel.endswith(".whl"), wheel
+        found[wheel[len(prefix):-len(".whl")]] = sha
+        assert not requirement.marker.evaluate({"python_version": "3.10", "python_full_version": "3.10.14"})
+    assert found == SKILL_SCANNER_WHEELS
 
 
 def _assert_requirement_contract(
@@ -99,10 +120,7 @@ def test_runtime_and_security_contracts_are_direct_and_synchronized_with_uv_over
         f"cisco_ai_mcp_scanner-{MCP_SCANNER_VERSION}-py3-none-any.whl#sha256={MCP_SCANNER_SHA256}"
     )
     assert str(direct["cisco-ai-mcp-scanner"].marker) == 'python_version >= "3.11"'
-    skill_scanner = direct["cisco-ai-skill-scanner"]
-    assert str(skill_scanner.url).endswith(
-        f"cisco_ai_skill_scanner-{SKILL_SCANNER_VERSION}-py3-none-any.whl#sha256={SKILL_SCANNER_SHA256}"
-    )
+    _assert_skill_scanner_wheels(document["project"]["dependencies"])
 
 
 def test_dependency_repair_cannot_lower_security_floors() -> None:
@@ -251,16 +269,15 @@ def test_windows_python_313_dependency_lock_has_supported_onnxruntime_wheel() ->
 
 def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Authoritative Requires-Dist fields from the shipped scanner wheels:
-    # skill scanner 2.0.4: rich>=13, textual>=1, and litellm>=1.77;
+    # skill scanner 2.2.1: rich>=14.0,<15, textual>=7.0,<9, litellm>=1.89.7,<2;
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
     # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.91.5,<1.92.
-    # Scanner 2.0.5-2.0.9 instead pin old LiteLLM/Textual releases, and
-    # 2.0.10-2.0.13 cap Textual<8, so 2.0.4 is the newest viable wheel.
+    # MCP scanner 4.8.x pins litellm==1.93.0 (CVE-2026-84377), so 4.3.0 stays.
     intersections = {
-        "rich": [Requirement("rich>=13"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
-        "textual": [Requirement("textual>=1"), Requirement("textual>=8.2.8,<9")],
+        "rich": [Requirement("rich<15,>=14.0"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
+        "textual": [Requirement("textual<9,>=7.0"), Requirement("textual>=8.2.8,<9")],
         "litellm": [
-            Requirement("litellm>=1.77.0"),
+            Requirement("litellm<2,>=1.89.7"),
             Requirement("litellm>=1.77.0"),
             Requirement("litellm>=1.91.5,<1.92.0"),
         ],
@@ -302,6 +319,7 @@ def test_production_textual_behavior_has_a_packaging_floor() -> None:
     assert hasattr(App, "ansi_color")
 
 
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="skill-scanner 2.2.1 requires Python 3.11+")
 def test_pinned_skill_scanner_api_and_local_scan(tmp_path: Path) -> None:
     """Exercise every upstream API entry point used by the production wrapper."""
     assert importlib_metadata.version("cisco-ai-skill-scanner") == SKILL_SCANNER_VERSION
@@ -321,6 +339,9 @@ def test_pinned_skill_scanner_api_and_local_scan(tmp_path: Path) -> None:
         "use_virustotal",
         "use_aidefense",
         "use_trigger",
+        "use_osv",
+        "llm_provider",
+        "vt_upload_files",
         "llm_consensus_runs",
     }.issubset(factory_parameters)
     assert "lenient" in inspect.signature(SkillScanner.scan_skill).parameters
@@ -336,7 +357,7 @@ def test_pinned_skill_scanner_api_and_local_scan(tmp_path: Path) -> None:
         "# Clean test skill\n\nReturn the provided text unchanged.\n",
         encoding="utf-8",
     )
-    policy = ScanPolicy.default()
+    policy = ScanPolicy.from_preset("quiet")
     analyzers = build_analyzers(policy=policy)
     result = SkillScanner(analyzers=analyzers, policy=policy).scan_skill(skill)
     assert result is not None
@@ -432,7 +453,5 @@ def test_fresh_wheel_metadata_contains_complete_runtime_contract(tmp_path: Path)
     )
     assert MAGIKA_MINIMUM_VERSION in wheel_requirements["magika"].specifier
     assert Version("1.0.1") not in wheel_requirements["magika"].specifier
-    assert str(wheel_requirements["cisco-ai-skill-scanner"].url).endswith(
-        f"cisco_ai_skill_scanner-{SKILL_SCANNER_VERSION}-py3-none-any.whl#sha256={SKILL_SCANNER_SHA256}"
-    )
+    _assert_skill_scanner_wheels(metadata.get_all("Requires-Dist", []))
     assert "cisco-ai-mcp-scanner" in wheel_requirements
