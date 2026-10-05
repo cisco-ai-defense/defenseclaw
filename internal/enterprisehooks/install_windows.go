@@ -834,6 +834,27 @@ func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.
 			label, path, windowsSIDString(owner), windowsSIDString(target))
 	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
+	// If a prior repair left an admin-owned slot in the quarantine
+	// location, the target-token purge below will refuse it (its
+	// handle-owner check compares against the exact target SID).
+	// Remove any admin-owned slot via os.RemoveAll under the current
+	// elevated install process's privileges BEFORE the target-token
+	// purge runs, so the subsequent purge has a clean canvas.
+	// Target-owned slots stay on the target-token path.
+	if slotOwner, slotOwnerErr := windowsPathOwnerNoFollow(quarantine); slotOwnerErr == nil &&
+		slotOwner != nil && !slotOwner.Equals(target) &&
+		windowsEnterpriseAdminIdentity(slotOwner) {
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] clearing admin-owned quarantine slot before "+
+				"target-token purge: %s (slot owner=%s, target=%s)\n",
+			quarantine, windowsSIDString(slotOwner), windowsSIDString(target))
+		if removeErr := os.RemoveAll(quarantine); removeErr != nil {
+			return fmt.Errorf(
+				"enterprise hooks: clear admin-owned quarantine slot %s: %w",
+				quarantine, removeErr,
+			)
+		}
+	}
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
 		return fmt.Errorf(
 			"enterprise hooks: bounded obstruction quarantine for %s is unavailable: %w",

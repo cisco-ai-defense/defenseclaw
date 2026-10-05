@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -306,6 +307,18 @@ func reconcileWindowsCodexRequirements(
 			return nil, false, fmt.Errorf("hooks.windows_managed_dir has unsupported type %T", existing)
 		}
 		if !sameWindowsCodexMachinePath(value, opts.ManagedDir) {
+			// Strict mode preserves refuse-on-drift: a hardened
+			// deployment MUST refuse a stale hooks.windows_managed_dir
+			// value instead of silently overwriting it. The managed-
+			// hooks adoptable fix in codex_machine_requirements_
+			// windows.go also honors strict mode for the ownership
+			// record; this is its on-wire mirror.
+			if managed.TrustStrictAncestors() {
+				return nil, false, fmt.Errorf(
+					"hooks.windows_managed_dir = %q does not match the current install's canonical ManagedDir %q",
+					value, opts.ManagedDir,
+				)
+			}
 			// Bulldoze: a prior unsigned certification install at a scoped
 			// path left windows_managed_dir pointing at its (now stale) bin
 			// directory. Refusing stranded the current install. Overwrite

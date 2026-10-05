@@ -198,14 +198,14 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 					statePath, removeErr,
 				)
 			}
-			if len(expected) != 0 {
-				// With the stale pair removed, the current install is now
-				// in the "no prior policy" branch above - return the empty
-				// snapshot result and let install proceed to write a fresh
-				// pair. Rollback has no snapshot to restore (symmetric with
-				// the policy-absent branch above).
-				return nil
-			}
+			// With the stale pair removed, the current install is now
+			// in the "no prior policy" branch above - return the empty
+			// snapshot result and let install proceed to write a fresh
+			// pair. Rollback has no snapshot to restore (symmetric with
+			// the policy-absent branch above). The behaviour is the
+			// same whether or not opts.Targets specified an expected
+			// identity: the drift reclaim already removed the stale
+			// files, so there is nothing to restore.
 			return nil
 		}
 		result = WindowsClaudeManagedPolicyTeardownSnapshot{

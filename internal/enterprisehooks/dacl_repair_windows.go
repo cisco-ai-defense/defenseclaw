@@ -304,14 +304,18 @@ func openWindowsGuardianACLChild(
 			windows.FILE_OPEN_FOR_BACKUP_INTENT,
 	)
 	if final {
-		// WRITE_OWNER is included so the bulldoze path in the caller can
-		// transfer ownership from a trusted admin principal (SYSTEM /
-		// BUILTIN\Administrators / TrustedInstaller) to the target user SID
-		// when a prior install's elevated token left per-user runtime files
-		// Administrators-owned. SeRestorePrivilege (which the caller holds)
-		// permits the WRITE_OWNER acquisition even when the current DACL
-		// does not grant it.
-		access |= windows.WRITE_DAC | windows.WRITE_OWNER | windows.FILE_READ_ATTRIBUTES
+		// Target-token-only DACL repair. The caller
+		// (repairWindowsTargetOwnedPathDACLNoFollow) runs under the
+		// target's token, which lacks SeTakeOwnershipPrivilege and
+		// SeRestorePrivilege, so we cannot (and must not) request
+		// WRITE_OWNER on this handle - an ownership transfer attempt
+		// would fail at SetSecurityInfo and the handle access would
+		// still have requested a privilege the token doesn't hold.
+		// Privileged ownership transfer runs through a different code
+		// path (repairWindowsTargetOwnedPathDACL) that explicitly
+		// holds the restore/takeOwnership privileges and opens its
+		// handles with WRITE_OWNER there.
+		access |= windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES
 	} else {
 		access |= windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE
 		options |= windows.FILE_DIRECTORY_FILE | windows.FILE_SYNCHRONOUS_IO_NONALERT
