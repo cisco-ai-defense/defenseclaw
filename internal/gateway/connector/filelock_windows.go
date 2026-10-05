@@ -398,9 +398,16 @@ func validateWindowsManagedFileLockHandleForTarget(
 		// BUILTIN\Administrators / TrustedInstaller instead of the target
 		// user. The DACL check below still enforces SE_DACL_PROTECTED and
 		// the exact 4-ACE canonical layout, so a trusted admin owner on
-		// an otherwise canonical lock is safe to adopt. A foreign user
-		// SID or non-admin group stays fatal.
-		if !managed.IsWindowsTrustedAdminOwner(owner) {
+		// an otherwise canonical lock is safe to adopt in non-strict
+		// mode. A foreign user SID or non-admin group stays fatal.
+		//
+		// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+		// refuses even trusted-admin ownership: a hardened deployment
+		// must observe the exact target-user owner on the lock, and
+		// silently adopting an admin-owned lock masks the exact tamper
+		// signal the strict-mode operator opts in to catch.
+		if managed.TrustStrictAncestors() ||
+			!managed.IsWindowsTrustedAdminOwner(owner) {
 			return fmt.Errorf("managed lock owner does not match effective target user")
 		}
 		fmt.Fprintf(os.Stderr,

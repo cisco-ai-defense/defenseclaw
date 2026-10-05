@@ -142,6 +142,15 @@ func ReconcileWindowsCodexMachineRequirements(
 		if ownership.existed {
 			state, err = parseWindowsCodexMachineOwnership(ownership.data)
 			if err != nil {
+				// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+				// refuses to silently seed fresh ownership on top of an
+				// unparseable record. The parse failure is the same
+				// forensic tamper signal operators configure strict mode
+				// to catch (prior install wrote a corrupted record or an
+				// external process tampered with the JSON).
+				if managed.TrustStrictAncestors() {
+					return fmt.Errorf("enterprise hooks: parse Codex machine ownership: %w", err)
+				}
 				// Bulldoze: ownership JSON is on disk but unparseable (prior
 				// install wrote a partial file, or disk corruption). Treat
 				// as adoptable and seed fresh ownership from the current

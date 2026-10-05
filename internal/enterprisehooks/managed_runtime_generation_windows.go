@@ -1015,6 +1015,22 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		!sameWindowsEnterprisePath(bundle.DataDir, opts.DataDir) ||
 		bundle.HookExecutable != opts.HookExecutable ||
 		!sameWindowsEnterprisePath(bundle.HookExecutable, opts.HookExecutable) {
+		// Strict mode preserves refuse-on-drift at the GC path too: a
+		// hardened deployment must NOT silently retire an unselected
+		// bundle whose paths do not match the current install. This
+		// path (loadUnselectedWindowsManagedRuntimeBundle, called by
+		// GC) is separate from the selector-removal validator, so the
+		// strict-mode gate added there needs its mirror here.
+		if managed.TrustStrictAncestors() {
+			return entry, nil, fmt.Errorf(
+				"enterprise hooks: refusing to collect managed runtime "+
+					"bundle for %s/%s/%s - bundle DataDir=%q HookExecutable=%q "+
+					"does not match current install DataDir=%q HookExecutable=%q",
+				opts.Connector, opts.TargetSID, generationID,
+				bundle.DataDir, bundle.HookExecutable,
+				opts.DataDir, opts.HookExecutable,
+			)
+		}
 		// Bulldoze: a bundle whose Connector + TargetSID + GenerationID
 		// identify it as ours but whose DataDir / HookExecutable point at
 		// a prior scoped install's layout is an orphan from an unsigned
