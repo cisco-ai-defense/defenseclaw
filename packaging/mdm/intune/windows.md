@@ -59,7 +59,7 @@ For Authenticode trust, add:
 | --- | --- |
 | Program: installer type | **Command line** |
 | Program: install command | `%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` |
-| Program: uninstall command | `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` (Intune does not expand environment variables in uninstall commands). Add `PURGE=1` to also remove the config, credentials and state. |
+| Program: uninstall command | `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` (Intune does not expand environment variables in uninstall commands). It always removes the config, credentials and machine state; add `PURGE=1` to also remove each enrolled account's DefenseClaw data and per-user binaries. |
 | Install behavior | **System** |
 | Device restart behavior | **Determine behavior based on return codes** |
 | Return codes | Keep the defaults: `0` Success, `1707` Success, `3010` Soft reboot, `1641` Hard reboot, `1618` Retry. The lifecycle's `1603` and `1639` then report as Failed. |

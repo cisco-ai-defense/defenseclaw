@@ -293,7 +293,9 @@ Setup:
 - **Remove.** `/uninstall` revokes the targets, removes the services and
   binaries, and removes DefenseClaw's Codex and Claude Code machine-policy
   entries. It keeps runtime state, logs and guardian evidence. `PURGE=1` also
-  removes managed state; use it only for an approved decommission.
+  removes managed state; use it only for an approved decommission. This is
+  the Secure Client profile: the standalone Setup's `/uninstall` always
+  removes its machine state (see [Remove](/docs/enterprise/windows#remove)).
 
 After an upgrade, run `/status`, `/verify`, the guardian `status` and
 `verify` above, and one allowed and one blocked tool call.

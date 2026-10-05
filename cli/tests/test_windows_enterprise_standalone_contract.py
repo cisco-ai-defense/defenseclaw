@@ -238,6 +238,29 @@ def test_standalone_default_uninstall_removes_the_machine_state() -> None:
     assert entry.count("$Purge = ") == 1
 
 
+def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> None:
+    # GAP-2647: the standalone Setup pages describe the GAP-1277 behavior
+    # above (machine state always removed; PURGE=1 adds the per-user data).
+    # The Secure Client page keeps its own wording (state kept unless
+    # PURGE=1) and says how the standalone profile differs.
+    standalone = {
+        "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "windows.mdx",
+        "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx",
+        "setup-design": ROOT / "docs" / "WINDOWS-ENTERPRISE-SETUP.md",
+        "intune": ROOT / "packaging" / "mdm" / "intune" / "windows.md",
+    }
+    for name, page in standalone.items():
+        text = " ".join(_text(page).split())
+        assert "PURGE=1` to also remove the config" not in text, name
+        assert "`/uninstall`, also remove managed state." not in text, name
+        assert "remove state on uninstall" not in text, name
+    secure_client = " ".join(
+        _text(ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx").split()
+    )
+    assert "It keeps runtime state, logs and guardian evidence." in secure_client
+    assert "the standalone Setup's `/uninstall` always removes its machine state" in secure_client
+
+
 def test_standalone_uninstall_retry_binds_the_receipt_to_the_retrying_cli() -> None:
     # GAP-1684/GAP-1679: when the first self-uninstall could not rename
     # InstallRoot aside, its retry by the installed CLI runs from InstallRoot.

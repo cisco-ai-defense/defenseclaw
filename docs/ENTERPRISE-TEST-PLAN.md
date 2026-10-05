@@ -744,7 +744,7 @@ stops parsing at the first unknown argument, so put `JSON=1` early:
 | `ALLOWEDSIGNERS=<sha256>,...` | Signed Setup only |
 | `JSON=1` | Print the result document |
 | `NOSTART=1` | Services stopped and disabled; `/repair` starts them |
-| `PURGE=1` | With `/uninstall`: also remove `C:\ProgramData\Cisco\DefenseClaw` |
+| `PURGE=1` | With `/uninstall`: also remove each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries (`/uninstall` always removes `C:\ProgramData\Cisco\DefenseClaw`) |
 | `TIMEOUTSECONDS=<60..7200>` | Default 1800 |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([CLI-12](#admin-cli)) |
 | `/quiet`, `/norestart`, `/?`, `/help` | Accepted; the first two do nothing |
