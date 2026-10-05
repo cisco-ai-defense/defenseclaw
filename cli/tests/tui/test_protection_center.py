@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import string
 from types import SimpleNamespace
@@ -21,7 +20,6 @@ import pytest
 from defenseclaw.policy_catalog import ConnectorPack, ProtectionPack, RuleFamily, ScopePosture, ToolChain
 from defenseclaw.tui import policy_panel
 from defenseclaw.tui.policy_panel import (
-    composed_pack_path,
     hilt_change_modal,
     mode_change_modal,
     policy_threshold_modal,
@@ -301,22 +299,14 @@ def test_consequence_modals_turn_red_only_when_protection_weakens() -> None:
     database = model.protection_pack("database-destruction-protection")
     assert protection_change_modal(model, codex, database, False).actions[0].danger is True
     kubernetes = model.protection_pack("kubernetes-production-protection")
-    # claudecode's default pack keeps its levels in the composed folder.
-    assert protection_change_modal(model, model.scope_row("claudecode"), kubernetes, True).actions[0].danger is False
-    # codex's strict pack is composed into protected-codex/strict, so it keeps strict levels.
+    # Turning a pack on adds rules on top of the scope's pack; it never weakens it.
     assert protection_change_modal(model, codex, kubernetes, True).actions[0].danger is False
-    assert composed_pack_path(model, codex).endswith(os.path.join("protected-codex", "strict"))
-    # With no policy_dir the CLI composes under <data_dir>/policies; the preview says the same.
-    model.set_config(SimpleNamespace(policy_dir="", data_dir="/dc"))
-    assert composed_pack_path(model, codex) == os.path.join("/dc", "policies", "guardrail", "protected-codex", "strict")
 
 
 def test_global_changes_name_the_connectors_that_keep_their_own_setting() -> None:
     model = protection_model()
     global_row = model.scope_row("")
     assert any("codex" in line for line in mode_change_modal(model, global_row, "action").details)
-    kubernetes = model.protection_pack("kubernetes-production-protection")
-    assert any("codex" in line for line in protection_change_modal(model, global_row, kubernetes, True).details)
     assert any("claudecode" in line for line in hilt_change_modal(model, global_row, "HIGH+").details)
 
 

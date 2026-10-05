@@ -478,10 +478,30 @@ def _guardrail(cfg: Any) -> Any:
     return getattr(cfg, "guardrail", None)
 
 
+def configured_pack_dir(cfg: Any, block: Any) -> str:
+    """The directory a guardrail scope block selects, "" when it selects none.
+
+    ``rule_pack`` (a preset name or a ``guardrail.custom_packs`` key) wins
+    over the v8 ``rule_pack_dir`` at the same scope, as in the gateway
+    (``config.ResolveRulePackDir``).
+    """
+    if block is None:
+        return ""
+    name = str(getattr(block, "rule_pack", "") or "").strip()
+    if name:
+        custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
+        if custom is not None:
+            return normalize_pack_path(str(getattr(custom, "path", "") or ""))
+        if name in RULE_PACK_PRESETS:
+            return preset_pack_dir(cfg, name)
+        return ""
+    return normalize_pack_path(str(getattr(block, "rule_pack_dir", "") or ""))
+
+
 def global_pack(cfg: Any) -> ConnectorPack:
     """The pack connectors without an override enforce (connector="global")."""
     gc = _guardrail(cfg)
-    configured = normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))
+    configured = configured_pack_dir(cfg, gc)
     if configured:
         name, _ = pack_name_for_path(cfg, configured)
         return ConnectorPack(connector="global", pack=name, path=configured, source="global")
@@ -493,7 +513,7 @@ def global_pack(cfg: Any) -> ConnectorPack:
     )
 
 
-def _override_dir(gc: Any, connector: str) -> str:
+def _override_dir(gc: Any, connector: str, cfg: Any = None) -> str:
     getter = getattr(gc, "_connector_override", None)
     block = None
     if callable(getter):
@@ -505,7 +525,7 @@ def _override_dir(gc: Any, connector: str) -> str:
         connectors = getattr(gc, "connectors", None)
         block = connectors.get(connector) if isinstance(connectors, Mapping) else None
     if block is not None:
-        return normalize_pack_path(str(getattr(block, "rule_pack_dir", "") or ""))
+        return configured_pack_dir(cfg, block)
     if callable(getter) or not callable(getattr(gc, "effective_rule_pack_dir", None)):
         return ""
     # Duck-typed configs that only expose the effective resolver: anything
@@ -534,7 +554,7 @@ def effective_packs(cfg: Any) -> list[ConnectorPack]:
     fallback = global_pack(cfg)
     out: list[ConnectorPack] = []
     for connector in _active_connectors(cfg):
-        override = _override_dir(gc, connector)
+        override = _override_dir(gc, connector, cfg)
         if override:
             name, _ = pack_name_for_path(cfg, override)
             out.append(ConnectorPack(connector=connector, pack=name, path=override, source="override"))
@@ -576,9 +596,9 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
                 continue
             _add(child, full, "custom")
 
-    configured = [normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))]
+    configured = [configured_pack_dir(cfg, gc)]
     for connector in sorted((getattr(gc, "connectors", None) or {}).keys()):
-        configured.append(_override_dir(gc, connector))
+        configured.append(_override_dir(gc, connector, cfg))
     for path in configured:
         if not path:
             continue
@@ -835,32 +855,26 @@ PACK_PROFILES = ("default", "strict", "permissive")
 
 
 def pack_profile(path: str) -> str:
-    """The posture profile the gateway reads from a rule-pack folder name.
+    """The posture profile the gateway gives a rule-pack directory.
 
-    Mirrors ``guardrailProfileForDir`` in internal/gateway/decision.go: the
-    folder's base name decides tool-call block and alert levels; ``strict``
-    and ``permissive`` keep theirs, every other name reads as ``default``.
+    Mirrors ``packPosture`` in internal/gateway/thresholds.go: the
+    ``posture`` of the pack's ``defenseclaw-pack.json`` manifest when it
+    names one, else the folder's base name (``strict`` and ``permissive``
+    keep theirs, every other name reads as ``default``).
     """
     raw = (path or "").strip().rstrip("/\\")
     if not raw:
         return "default"
+    try:
+        with open(os.path.join(raw, PROTECTION_MANIFEST), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError, UnicodeDecodeError):
+        manifest = None
+    posture = manifest.get("posture") if isinstance(manifest, dict) else None
+    if isinstance(posture, str) and posture.strip().lower() in PACK_PROFILES:
+        return posture.strip().lower()
     base = os.path.basename(os.path.normpath(raw)).lower()
     return base if base in {"strict", "permissive"} else "default"
-
-
-def protected_pack_dir(cfg: Any, scope: str, profile: str = "default") -> str:
-    """Where ``guardrail protection`` composes *scope*'s pack.
-
-    ``<policy_dir>/guardrail/protected-<scope>/<profile>`` ("" without a
-    policy dir). The last folder is the base pack's profile because the
-    gateway takes tool-call block and alert levels from the folder name, so a
-    strict pack with opt-in packs layered on must still end in ``strict``.
-    """
-    root = policy_root(cfg)
-    if not root:
-        return ""
-    safe = profile if profile in PACK_PROFILES else "default"
-    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}", safe)
 
 
 def is_protected_pack_path(path: str) -> bool:
@@ -1232,7 +1246,9 @@ def resolve_levels(
 ) -> ScopeLevels:
     """Tool-call levels exactly as the gateway resolves them.
 
-    Mirrors ``guardrailLevelThresholds`` in internal/gateway/decision.go:
+    Mirrors ``resolveThresholds`` in internal/gateway/thresholds.go, which
+    every guardrail surface (prompts, completions, tool calls, the proxy)
+    uses:
     block and alert each take the connector's own value
     (``connector_levels``, None for the global scope), else the global
     ``guardrail.block_at`` / ``alert_at`` (``global_levels``), else the level
@@ -1283,7 +1299,7 @@ def scope_levels(cfg: Any, connector: str = "") -> ScopeLevels:
     fallback = global_pack(cfg)
     if not connector:
         return resolve_levels(fallback.path, _level_pair(gc))
-    path = _override_dir(gc, connector) or fallback.path
+    path = _override_dir(gc, connector, cfg) or fallback.path
     return resolve_levels(path, _level_pair(gc), _level_pair(_connector_block(gc, connector)))
 
 
@@ -1342,16 +1358,33 @@ def _connector_block(gc: Any, connector: str) -> Any:
     return connectors.get(connector) if isinstance(connectors, Mapping) else None
 
 
-def scope_postures(cfg: Any) -> list[ScopePosture]:
-    """Posture of the global scope, then of every active connector."""
-    gc = _guardrail(cfg)
-    memo: dict[str, tuple[str, ...]] = {}
+def configured_protection(block: Any) -> tuple[str, ...]:
+    """``rules.protections`` of a guardrail scope block (global, connector or
+    profile), in the order config.yaml lists them."""
+    rules = getattr(block, "rules", None) if block is not None else None
+    names = getattr(rules, "protections", None) if rules is not None else None
+    return tuple(str(name) for name in (names or []) if str(name or "").strip())
 
-    def _protection(path: str) -> tuple[str, ...]:
+
+def scope_postures(cfg: Any) -> list[ScopePosture]:
+    """Posture of the global scope, then of every active connector.
+
+    A scope's protection packs are its ``guardrail.rules.protections``
+    (a connector also gets the global ones: the gateway layers them), plus
+    any a v8 composed pack directory still records until the config is
+    migrated to version 9.
+    """
+    gc = _guardrail(cfg)
+    order = {pack.name: index for index, pack in enumerate(protection_packs())}
+    memo: dict[str, tuple[str, ...]] = {}
+    global_on = configured_protection(gc)
+
+    def _protection(path: str, block: Any = None) -> tuple[str, ...]:
         key = os.path.realpath(path) if path else ""
         if key not in memo:
             memo[key] = enabled_protection(path)
-        return memo[key]
+        names = dict.fromkeys((*global_on, *configured_protection(block), *memo[key]))
+        return tuple(sorted(names, key=lambda name: order.get(name, len(order))))
 
     fallback = global_pack(cfg)
     global_levels = _level_pair(gc)
@@ -1391,7 +1424,7 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
                 pack=row.pack,
                 pack_path=row.path,
                 pack_source=row.source,
-                protection=_protection(row.path),
+                protection=_protection(row.path, block),
                 block_at=levels.block_at,
                 alert_at=levels.alert_at,
                 levels_source=levels.source,
@@ -1425,6 +1458,8 @@ __all__ = [
     "active_policy_name",
     "discover_rule_packs",
     "effective_packs",
+    "configured_pack_dir",
+    "configured_protection",
     "enabled_protection",
     "get_policy",
     "global_pack",
@@ -1446,7 +1481,6 @@ __all__ = [
     "is_protected_pack_path",
     "pack_profile",
     "policy_root",
-    "protected_pack_dir",
     "protection_pack_dir",
     "protection_packs",
     "protection_packs_dir",

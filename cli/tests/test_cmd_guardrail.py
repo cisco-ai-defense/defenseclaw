@@ -1479,7 +1479,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # tool-call block and alert levels, globally or per connector.
         # allow-private-upstream records private upstream hosts the
         # gateway may reach (guardrail.allow_private_upstreams). profile
-        # lists and explains the identity-based guardrail profiles.
+        # lists and explains the identity-based guardrail profiles. rule and
+        # suppress edit guardrail.rules (enable/disable/severity, suppressions).
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1499,6 +1500,8 @@ class CommandRegistrationTests(unittest.TestCase):
                 "mode",
                 "profile",
                 "protection",
+                "rule",
+                "suppress",
                 "use-pack",
                 "validate-pack",
             },

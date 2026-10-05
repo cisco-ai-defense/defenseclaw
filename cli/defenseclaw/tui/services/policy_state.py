@@ -129,9 +129,6 @@ CHAIN_DOMAINS: tuple[tuple[str, str], ...] = (
     ("security-controls", "Security controls"),
 )
 
-# The composed pack folder ``guardrail protection enable`` writes per scope.
-PROTECTED_PACK_PREFIX = "protected-"
-
 
 def threshold_rank(label: str) -> int | None:
     """How little a threshold label catches (1 = LOW+ … 5 = none); None if unknown."""
@@ -906,8 +903,7 @@ class PoliciesPanelModel:
         # ``guardrail hilt --connector`` needs the per-connector map; a
         # single-connector install changes the global block instead.
         self.multi_connector = isinstance(connectors, Mapping) and bool(connectors)
-        # policy_dir, else <data_dir>/policies: the folder the CLI composes
-        # protection packs under (policy_catalog.protected_pack_dir).
+        # policy_dir, else <data_dir>/policies.
         self.policy_dir = policy_root(config)
 
     def apply_policies(self, policies: list[Any] | tuple[Any, ...]) -> None:
@@ -1967,7 +1963,6 @@ __all__ = [
     "POLICY_VIEWS",
     "PROFILE_LEVELS",
     "PROTECTED_CONTEXT",
-    "PROTECTED_PACK_PREFIX",
     "TOOL_ALERT_LEVELS",
     "TOOL_BLOCK_LEVELS",
     "VIEW_KEYS",

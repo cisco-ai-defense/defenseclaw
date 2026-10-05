@@ -63,7 +63,6 @@ from defenseclaw.tui.screens.rule_pack_picker import (
 )
 from defenseclaw.tui.services.policy_state import (
     INHERIT,
-    PROTECTED_PACK_PREFIX,
     TOOL_ALERT_LEVELS,
     TOOL_BLOCK_LEVELS,
     VIEW_SHORT_TITLES,
@@ -81,13 +80,11 @@ from defenseclaw.tui.services.policy_state import (
     loosened_text,
     mode_intent,
     mode_weakens,
-    pack_profile,
     pack_weakens,
     parse_validation,
     policy_side_effects,
     policy_weakenings,
     posture_summary,
-    profile_levels,
     protection_claim,
     protection_intent,
     severity_actions,
@@ -1028,18 +1025,6 @@ def hilt_change_modal(model: PoliciesPanelModel, row: Any, level: str) -> Conseq
     )
 
 
-def composed_pack_path(model: PoliciesPanelModel, row: Any) -> str:
-    """Where ``guardrail protection enable`` composes the scope's pack.
-
-    ``protected-<scope>/<profile>``: the last folder keeps the base pack's
-    profile, which is where the gateway reads tool-call levels from.
-    """
-    scope = str(getattr(row, "scope", "") or "global")
-    root = model.policy_dir or "<policy dir>"
-    profile = pack_profile(str(getattr(row, "pack_path", "") or ""))
-    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}", profile)
-
-
 def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enable: bool) -> ConsequenceModalModel:
     """Turning an opt-in protection pack on or off for one scope."""
     name = str(getattr(pack, "name", ""))
@@ -1059,34 +1044,16 @@ def protection_change_modal(model: PoliciesPanelModel, row: Any, pack: Any, enab
         count = int(getattr(pack, "rule_count", 0) or 0)
         rules = f" ({count} rule{'s' if count != 1 else ''}; the details list them)" if count else ""
         details.append(f"It blocks: {covers}{rules}." if covers else "It adds the pack's blocking rules.")
-        current_path = str(getattr(row, "pack_path", "") or "")
-        base = str(getattr(row, "pack", "") or "-")
-        target = composed_pack_path(model, row)
-        folder = os.path.join("guardrail", os.path.basename(os.path.dirname(target)), os.path.basename(target))
         details.append(
-            f"Builds {folder} in your policy folder from {base} and the opt-in packs, checks it, "
-            f"and switches {where} to it; a running gateway restarts."
+            f"Adds it to {where}'s guardrail.rules.protections in config.yaml; the gateway layers it on "
+            f"{str(getattr(row, 'pack', '') or 'the rule pack')} and applies it on its next reload."
         )
-        if not connector:
-            own = model.own_setting("pack")
-            if own:
-                details.append("Not covered, they have their own pack; turn it on there too: " + ", ".join(own) + ".")
-        before, after = pack_profile(current_path), pack_profile(target)
-        if before != after:
-            weaker = True
-            old_block, old_alert = profile_levels(current_path)
-            new_block, new_alert = profile_levels(target)
-            consequence = (
-                f"This weakens protection: the gateway takes tool-call levels from the pack folder's name, so "
-                f"{os.path.basename(target)} is treated as {after}: blocks {new_block} and alerts on {new_alert} "
-                f"instead of {old_block} and {old_alert} ({before})."
-            )
     else:
         summary = f"{scope} stops blocking what the pack covers."
         remaining = [p for p in model.scope_protection(row) if p != name]
         if not remaining:
             details.append(f"That is the last opt-in pack, so {where} goes back to its base pack.")
-        details.append("A running gateway restarts to load the change.")
+        details.append("The gateway applies the change on its next reload.")
         details.append(f"No longer blocked: {covers}." if covers else "Its rules stop applying.")
         consequence = f"This weakens protection: {title} is turned off for {scope}."
     details.append(_run_line(intent))
@@ -1104,7 +1071,6 @@ __all__ = [
     "POLICY_BUTTON_KEYS",
     "PolicyCatalogRead",
     "PolicyPanelMixin",
-    "composed_pack_path",
     "hilt_change_modal",
     "level_change_modal",
     "level_preview",
