@@ -55,7 +55,7 @@ func (p darwinPlatform) Capabilities() map[Plane]Capability {
 			Plane: PlaneA, Available: true, Mechanism: "ps(1)",
 		},
 		PlaneB: {
-			Plane: PlaneB, Available: true, Mechanism: "lsof(8) and BPF DNS capture",
+			Plane: PlaneB, Available: true, Mechanism: "lsof(8)",
 			// Root is what makes this plane machine-wide, not what makes it
 			// work at all, so RequiresRoot stays false: an unprivileged run
 			// still attributes its own user's sockets and says so.

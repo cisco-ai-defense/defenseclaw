@@ -46,14 +46,14 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		// hermes case.
 		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
 		{"cursor", func() Connector { return NewCursorConnector() }, true, true, true},
-		{"windsurf", func() Connector { return NewWindsurfConnector() }, true, true, true},
-		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, true, true, true},
-		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
+		// OpenHands uses Decode only to map the CLI's PascalCase SDK
+		// event_type onto the contract's snake_case event names.
+		{"openhands", func() Connector { return NewOpenHandsConnector() }, true, true, true},
 		// Antigravity uses Decode because agy v1 ships a nested
 		// `toolCall` wire shape that the generic normalizer cannot read.
-		// Cursor and Windsurf use Decode only for their connector-native
-		// generation/execution-to-turn semantics.
+		// Cursor uses Decode only for its connector-native
+		// generation-to-turn semantics.
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, true, true, true},
 		// opencode controls its own flat wire shape (the bridge plugin we
 		// ship), so it needs no Decode; Respond comes from the shared
@@ -124,8 +124,6 @@ func TestHookOnlyProfiles_MapDocumentedNativeTurnIDs(t *testing.T) {
 	}{
 		{"cursor generation", cursorProfileDecode, map[string]interface{}{"generation_id": "gen-7"}, "gen-7"},
 		{"cursor explicit turn fallback", cursorProfileDecode, map[string]interface{}{"turn_id": "turn-7"}, "turn-7"},
-		{"windsurf execution", windsurfProfileDecode, map[string]interface{}{"execution_id": "exec-9"}, "exec-9"},
-		{"windsurf explicit turn fallback", windsurfProfileDecode, map[string]interface{}{"turn_id": "turn-9"}, "turn-9"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,8 +142,6 @@ func TestHookOnlyProfiles_DoNotCrossMapUnrelatedIDsToTurns(t *testing.T) {
 	}{
 		{"cursor execution", cursorProfileDecode, map[string]interface{}{"execution_id": "exec-7"}},
 		{"cursor tool call", cursorProfileDecode, map[string]interface{}{"tool_call_id": "tool-7"}},
-		{"windsurf generation", windsurfProfileDecode, map[string]interface{}{"generation_id": "gen-9"}},
-		{"windsurf step", windsurfProfileDecode, map[string]interface{}{"step_id": "step-9"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -638,74 +634,6 @@ func TestClaudeCodeProfileRespond_WatchPathsForEveryDynamicSource(t *testing.T) 
 				}
 			}
 		})
-	}
-}
-
-func TestGeminiProfileUsesOfficialBlockAndResponseBoundaries(t *testing.T) {
-	profile := NewGeminiCLIConnector().HookProfile(SetupOpts{})
-	if !eventInProfile("AfterModel", profile.Capabilities.BlockEvents) {
-		t.Fatalf("Gemini profile omitted officially blockable AfterModel: %v", profile.Capabilities.BlockEvents)
-	}
-	for _, event := range geminiCLIBlockEvents {
-		mapped := hookOnlyProfileMapVerdict(HookVerdictInput{
-			Mode:      "action",
-			Event:     event,
-			RawAction: "block",
-			Caps:      profile.Capabilities,
-		})
-		if mapped.Action != "block" || mapped.WouldBlock {
-			t.Errorf("Gemini %s verdict = %#v, want authoritative block", event, mapped)
-			continue
-		}
-		out := hookOnlyProfileRespond(HookRespondInput{
-			Req:       HookProfileRequest{ConnectorName: "geminicli", HookEventName: event},
-			Action:    mapped.Action,
-			RawAction: "block",
-			Reason:    "policy denied",
-			Caps:      profile.Capabilities,
-		})
-		want := map[string]interface{}{"decision": "deny", "reason": "policy denied"}
-		if !reflect.DeepEqual(out.Output, want) {
-			t.Errorf("Gemini %s block output = %#v, want %#v", event, out.Output, want)
-		}
-	}
-
-	blockedSelection := hookOnlyProfileMapVerdict(HookVerdictInput{
-		Mode:      "action",
-		Event:     "BeforeToolSelection",
-		RawAction: "block",
-		Caps:      profile.Capabilities,
-	})
-	if blockedSelection.Action != "allow" || !blockedSelection.WouldBlock {
-		t.Fatalf("BeforeToolSelection block mapping = %#v, want audit-only allow", blockedSelection)
-	}
-	selectionOutput := hookOnlyProfileRespond(HookRespondInput{
-		Req:               HookProfileRequest{ConnectorName: "geminicli", HookEventName: "BeforeToolSelection"},
-		Action:            "alert",
-		RawAction:         "confirm",
-		AdditionalContext: "approval required",
-		Caps:              profile.Capabilities,
-	})
-	if selectionOutput.Output != nil {
-		t.Fatalf("BeforeToolSelection emitted unsupported flow/system fields: %#v", selectionOutput.Output)
-	}
-
-	advisory := hookOnlyProfileRespond(HookRespondInput{
-		Req:               HookProfileRequest{ConnectorName: "geminicli", HookEventName: "Notification"},
-		Action:            "alert",
-		RawAction:         "alert",
-		AdditionalContext: "policy notice",
-		Caps:              profile.Capabilities,
-	})
-	wantAdvisory := map[string]interface{}{"systemMessage": "policy notice"}
-	if !reflect.DeepEqual(advisory.Output, wantAdvisory) {
-		t.Fatalf("Gemini Notification output = %#v, want %#v", advisory.Output, wantAdvisory)
-	}
-	for _, event := range []string{"SessionStart", "SessionEnd", "PreCompress", "Notification"} {
-		out := geminiCLIHookOutputForProfile(event, "block", "must remain advisory", "")
-		if out != nil {
-			t.Errorf("Gemini advisory event %s emitted a block response: %#v", event, out)
-		}
 	}
 }
 

@@ -1,0 +1,67 @@
+# DefenseClaw hook enumerator — enrolls eligible local users who run a
+# supported AI agent into the protected guardian manifest.
+#
+# Root, but it only writes the manifest directory. Agent versions are read
+# from package metadata or probed as the user, never by running a user's
+# binary as root.
+
+[Unit]
+Description=DefenseClaw hook enumerator (managed enterprise)
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+After=defenseclaw-gateway.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+Group=root
+Environment=DEFENSECLAW_HOME=/var/lib/defenseclaw
+Environment=DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml
+Environment=DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise
+Environment=DEFENSECLAW_ENTERPRISE_PROFILE=standalone
+Environment=DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR=/var/lib/defenseclaw-hook-guardian
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks enumerate --manifest /etc/defenseclaw/hook-guardian/targets.yaml --interval 5m
+Restart=always
+RestartSec=10s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
+# The guardian data dir holds refused-surfaces.json, which the enumerator
+# publishes for the gateway (enterprise.enrollment.unverified_versions).
+# It is root:defenseclaw 0640 so the gateway can read it; CAP_CHOWN lets
+# the enumerator set that group (GAP-1760).
+ReadWritePaths=/etc/defenseclaw/hook-guardian /var/lib/defenseclaw-hook-guardian
+# CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
+# drops CAP_SETUID from a User= service that filters system calls unless it
+# is in the ambient set, and the per-user workers need both. The kernel
+# clears the ambient set when a worker switches to the user's uid.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_SETGID CAP_SETUID
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+# No MemoryDenyWriteExecute: the per-user workers this unit starts run agent
+# CLIs for version discovery and hook setup, and JIT runtimes such as Node
+# (V8) die under it (SIGTRAP). DefenseClaw's own binary also needs
+# executable memory on x86_64 (see defenseclaw-gateway.service).
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

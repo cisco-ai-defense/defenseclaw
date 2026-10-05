@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -113,7 +114,7 @@ func (c *OpenClawConnector) Name() string                           { return "op
 func (c *OpenClawConnector) Description() string                    { return "fetch interceptor plugin" }
 func (c *OpenClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
-	return ResolveSubprocessPolicy(SubprocessSandbox)
+	return ResolveSubprocessPolicy(SubprocessShims)
 }
 
 // AllowedHosts returns the OpenClaw upstream baseline. The OpenClaw
@@ -154,18 +155,26 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// in openclaw.json. Enabling the connector is the *only* step an
 	// operator needs — no separate `defenseclaw setup guardrail` phase.
 	configPath := filepath.Join(openClawHome(), "openclaw.json")
-	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+	keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
+	if err != nil {
 		return fmt.Errorf("openclaw config backup: %w", err)
+	}
+	if keepSnapshot {
+		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+			return fmt.Errorf("openclaw config backup: %w", err)
+		}
 	}
 	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
-	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
-		return fmt.Errorf("openclaw config backup hash: %w", err)
+	if keepSnapshot {
+		if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+			return fmt.Errorf("openclaw config backup hash: %w", err)
+		}
 	}
 
 	// Surface 2: Plugin subprocess enforcement
-	policy := ResolveSubprocessPolicy(SubprocessSandbox)
+	policy := ResolveSubprocessPolicy(SubprocessShims)
 	if err := SetupSubprocessEnforcement(policy, opts); err != nil {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}
@@ -177,6 +186,113 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	return nil
+}
+
+// IsBundledPlugin reports whether dir is DefenseClaw's own OpenClaw plugin
+// (~/.openclaw/extensions/defenseclaw) and every file in it is an unmodified
+// copy of the bundle this gateway embeds. Files still being written may be
+// missing; an added, changed or non-regular file makes it false (GAP-1525).
+func (c *OpenClawConnector) IsBundledPlugin(dir string) bool {
+	extDir := c.BundledPluginDir()
+	got, err1 := filepath.Abs(dir)
+	want, err2 := filepath.Abs(extDir)
+	if err1 != nil || err2 != nil || filepath.Clean(got) != filepath.Clean(want) {
+		return false
+	}
+	return openClawExtensionMatchesBundle(want)
+}
+
+// BundledPluginDir is where Setup installs DefenseClaw's own OpenClaw plugin.
+func (c *OpenClawConnector) BundledPluginDir() string {
+	return filepath.Join(openClawHome(), "extensions", "defenseclaw")
+}
+
+var errNotBundledFile = errors.New("not a bundled file")
+
+func openClawExtensionMatchesBundle(extDir string) bool {
+	if !openClawExtensionAvailable() {
+		return false
+	}
+	if info, err := os.Lstat(extDir); err != nil || !info.IsDir() {
+		return false
+	}
+	files := 0
+	err := filepath.WalkDir(extDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return errNotBundledFile
+		}
+		rel, err := filepath.Rel(extDir, p)
+		if err != nil {
+			return err
+		}
+		want, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, filepath.ToSlash(rel)))
+		if err != nil {
+			return errNotBundledFile
+		}
+		have, err := os.ReadFile(p)
+		if err != nil || !bytes.Equal(have, want) {
+			return errNotBundledFile
+		}
+		files++
+		return nil
+	})
+	return err == nil && files > 0
+}
+
+// openClawSnapshotUsable reports whether teardown may restore openclaw.json
+// from the pre-setup snapshot. Setup runs again on every gateway start, so a
+// snapshot is kept only while openclaw.json still holds exactly what DefenseClaw
+// last wrote. Once the user (or OpenClaw) changed it, or when there is no
+// snapshot but the file already registers DefenseClaw, teardown removes only
+// DefenseClaw's own entries and keeps everything else (GAP-1463).
+func openClawSnapshotUsable(dataDir, connectorName, configPath string) (bool, error) {
+	drifted, err := managedFileBackupDrifted(dataDir, connectorName, "openclaw.json", configPath)
+	if err != nil {
+		return false, err
+	}
+	if drifted {
+		discardManagedFileBackup(dataDir, connectorName, "openclaw.json")
+		return false, nil
+	}
+	if _, err := os.Stat(managedFileBackupPath(dataDir, connectorName, "openclaw.json")); err == nil {
+		return true, nil
+	}
+	return !openClawConfigRegistersDefenseClaw(configPath), nil
+}
+
+// openClawConfigRegistersDefenseClaw reports whether openclaw.json already
+// lists the DefenseClaw plugin, so a snapshot of it would not be pre-setup.
+func openClawConfigRegistersDefenseClaw(configPath string) bool {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	cfg := map[string]interface{}{}
+	if json.Unmarshal(data, &cfg) != nil {
+		return false
+	}
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	if plugins == nil {
+		return false
+	}
+	if entries, ok := plugins["entries"].(map[string]interface{}); ok {
+		if _, found := entries["defenseclaw"]; found {
+			return true
+		}
+	}
+	allow, _ := plugins["allow"].([]interface{})
+	for _, v := range allow {
+		if s, _ := v.(string); s == "defenseclaw" {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {
@@ -283,6 +399,10 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 		rel, err := filepath.Rel(srcRoot, path)
 		if err != nil {
 			return err
+		}
+		if rel == openClawPlaceholderName {
+			// The tracked build marker stays in the embed next to a synced bundle; it is not a plugin file.
+			return nil
 		}
 		target := filepath.Join(absDstRoot, rel)
 		if !strings.HasPrefix(target, absDstRoot+string(filepath.Separator)) && target != absDstRoot {

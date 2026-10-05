@@ -149,7 +149,7 @@ func (a *APIServer) mapInboundTraceV8(
 		}
 	}
 	fields, _, err = a.enrichInboundWithHookLifecycleV8(
-		leaf, target, authenticatedSource, &correlation, fields, selected,
+		ctx, leaf, target, authenticatedSource, &correlation, fields, selected,
 	)
 	if err != nil {
 		return observability.InboundImportedTraceInput{}, 0, err

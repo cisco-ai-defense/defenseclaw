@@ -7,6 +7,7 @@ import codecs
 import contextlib
 import ntpath
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -18,11 +19,15 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from defenseclaw import credential_provenance
 from defenseclaw.gateway import resolve_gateway_binary
 
 _CREATE_SUSPENDED = 0x00000004
 _PIPE_FRAGMENT_FLUSH_SECONDS = 0.05
 _PIPE_FRAGMENT_MAX_CHARS = 64 * 1024
+# A colour code cut by a read boundary ("\x1b[9" | "0m..."): held back so the
+# next read completes it instead of showing "[90m" text (GAP-1543).
+_INCOMPLETE_ESCAPE_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*)?\Z")
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,9 @@ class CommandEvent:
     exit_code: int | None = None
     duration: float = 0.0
     cancelled: bool = False
+    # An "output" piece that goes on the line shown last: that line was shown
+    # before its newline arrived, as "restarting..." is (GAP-2284).
+    continues: bool = False
 
 
 class ProcessTree(Protocol):
@@ -94,8 +102,14 @@ class CommandExecutor:
             process.send_signal(signal.SIGINT)
             try:
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_grace)
-            except TimeoutError:
-                process.kill()
+            except asyncio.TimeoutError:
+                # The grace wait is torn down across loop iterations, so the
+                # child can exit naturally and its transport can finish right
+                # at the deadline. asyncio then raises ProcessLookupError from
+                # kill(); the process is already gone, so the cancel still
+                # completes with a single cancelled result.
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
                 await asyncio.wait_for(asyncio.shield(process.wait()), timeout=self._cancel_force)
             return True
 
@@ -110,7 +124,7 @@ class CommandExecutor:
                 os.write(master_fd, text.encode())
             return
         process = self._process
-        if process is not None and process.stdin is not None:
+        if process is not None and process.stdin is not None and not process.stdin.is_closing():
             process.stdin.write(text.encode())
 
     async def run(
@@ -140,7 +154,8 @@ class CommandExecutor:
         resolved_argv = resolve_subprocess_argv(binary, args)
         started = time.monotonic()
         self._cancelled = False
-        child_env = os.environ.copy()
+        # Children reload ~/.defenseclaw/.env themselves (GAP-1176).
+        child_env = credential_provenance.child_environ()
         if env_overrides:
             child_env.update(env_overrides)
         yield CommandEvent("start", " ".join((binary, *args)))
@@ -177,26 +192,33 @@ class CommandExecutor:
             yield CommandEvent("done", exit_code=1, duration=time.monotonic() - started)
             return
         if stdin_input is not None and process.stdin is not None:
-            with contextlib.suppress(OSError):
+            # Write the payload, then close stdin: the child sees EOF after
+            # the secret instead of waiting for more input, and nothing typed
+            # later in Activity can reach a secret-reading prompt.
+            with contextlib.suppress(OSError, ConnectionError):
                 process.stdin.write(stdin_input.encode())
                 await process.stdin.drain()
+            with contextlib.suppress(OSError, ConnectionError):
+                process.stdin.close()
         try:
             assert process.stdout is not None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             pending = ""
+            open_line = False
             while True:
                 try:
                     chunk = await asyncio.wait_for(
                         process.stdout.read(4096),
                         timeout=_PIPE_FRAGMENT_FLUSH_SECONDS,
                     )
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     # A newline-less interactive prompt must become visible
                     # while the child is waiting for stdin. Delay only long
                     # enough to coalesce ordinary cross-chunk line fragments.
-                    for text in _split_terminal_chunk(pending):
-                        yield CommandEvent("output", text)
-                    pending = ""
+                    ready, pending = _hold_incomplete_escape(pending)
+                    for event in _output_events(ready, open_line):
+                        yield event
+                    open_line = _line_left_open(ready, open_line)
                     continue
                 if not chunk:
                     break
@@ -208,15 +230,17 @@ class CommandExecutor:
                             pending[:_PIPE_FRAGMENT_MAX_CHARS],
                             pending[_PIPE_FRAGMENT_MAX_CHARS:],
                         )
-                        for text in _split_terminal_chunk(bounded):
-                            yield CommandEvent("output", text)
+                        for event in _output_events(bounded, open_line):
+                            yield event
+                        open_line = _line_left_open(bounded, open_line)
                     continue
-                for text in _split_terminal_chunk(complete):
-                    yield CommandEvent("output", text)
+                for event in _output_events(complete, open_line):
+                    yield event
+                open_line = False
                 pending = trailing
             pending += decoder.decode(b"", final=True)
-            for text in _split_terminal_chunk(pending):
-                yield CommandEvent("output", text)
+            for event in _output_events(pending, open_line):
+                yield event
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:
@@ -262,18 +286,53 @@ class CommandExecutor:
         os.close(slave_fd)
         self._process = process
         self._master_fd = master_fd
+        # A read can end inside a UTF-8 character or a colour code; carry
+        # the cut part into the next read (GAP-1543).
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        carry = ""
+        # A read can also end inside a line; showing each piece as its own
+        # line broke words ("amp, cl" / "audecode"). Hold the unfinished line
+        # until its newline, or show it after a short pause so a prompt
+        # without a newline still appears (GAP-1772), as the pipe path does.
+        partial = ""
+        open_line = False
+        read: asyncio.Future[bytes] | None = None
         try:
             while True:
-                if process.returncode is not None:
-                    break
+                if read is None:
+                    if process.returncode is not None:
+                        break
+                    read = asyncio.ensure_future(asyncio.to_thread(os.read, master_fd, 4096))
+                if partial:
+                    done, _ = await asyncio.wait({read}, timeout=_PIPE_FRAGMENT_FLUSH_SECONDS)
+                    if not done:
+                        for event in _output_events(partial, open_line):
+                            yield event
+                        open_line = _line_left_open(partial, open_line)
+                        partial = ""
+                        continue
                 try:
-                    chunk = await asyncio.to_thread(os.read, master_fd, 4096)
+                    chunk = await read
                 except OSError:
                     break
+                finally:
+                    read = None
                 if not chunk:
                     break
-                for text in _split_terminal_chunk(chunk.decode(errors="replace")):
-                    yield CommandEvent("output", text)
+                ready, carry = _hold_incomplete_escape(carry + decoder.decode(chunk))
+                text_so_far = partial + ready
+                cut = max(text_so_far.rfind("\n"), text_so_far.rfind("\r")) + 1
+                complete, partial = text_so_far[:cut], text_so_far[cut:]
+                for event in _output_events(complete, open_line):
+                    yield event
+                open_line = _line_left_open(complete, open_line)
+                while len(partial) >= _PIPE_FRAGMENT_MAX_CHARS:
+                    bounded, partial = partial[:_PIPE_FRAGMENT_MAX_CHARS], partial[_PIPE_FRAGMENT_MAX_CHARS:]
+                    for event in _output_events(bounded, open_line):
+                        yield event
+                    open_line = _line_left_open(bounded, open_line)
+            for event in _output_events(partial + carry + decoder.decode(b"", final=True), open_line):
+                yield event
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:
@@ -346,6 +405,32 @@ def managed_subprocess_kwargs() -> dict[str, int]:
     if os.name == "nt":
         kwargs["creationflags"] |= _CREATE_SUSPENDED
     return kwargs
+
+
+def _hold_incomplete_escape(text: str) -> tuple[str, str]:
+    """Split ``text`` into what can be shown now and a cut trailing escape."""
+
+    match = _INCOMPLETE_ESCAPE_RE.search(text)
+    if match is None:
+        return text, ""
+    return text[: match.start()], text[match.start() :]
+
+
+def _output_events(text: str, open_line: bool) -> tuple[CommandEvent, ...]:
+    """Output events for ``text``. While a line shown before its newline is
+    still open, the first piece of ``text`` goes on that line (GAP-2284)."""
+
+    continues = open_line and not text.startswith(("\n", "\r"))
+    return tuple(
+        CommandEvent("output", part, continues=continues and index == 0)
+        for index, part in enumerate(_split_terminal_chunk(text))
+    )
+
+
+def _line_left_open(text: str, open_line: bool) -> bool:
+    """Whether the last line is still open after showing ``text``."""
+
+    return open_line if not text else not text.endswith(("\n", "\r"))
 
 
 def _split_terminal_chunk(text: str) -> tuple[str, ...]:

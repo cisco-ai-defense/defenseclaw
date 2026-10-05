@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
 
@@ -117,6 +118,13 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	case errors.As(err, &secretError):
 		result.Path = "$." + secretError.Path
 		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"
+		if secretError.Credential {
+			result.Reason = fmt.Sprintf(
+				"[secret_reference_unresolved] protected credential %q is not stored or not trusted; "+
+					"credential references resolve only in a standalone enterprise deployment, after `enterprise secret set --name %s`",
+				secretError.Reference, secretError.Reference,
+			)
+		}
 	case errors.As(err, &yamlError):
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
@@ -311,6 +319,13 @@ type loadedConfigV8File struct {
 }
 
 func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8FileWithCredentials(path, defaultDataDir, "")
+}
+
+// loadConfigV8FileWithCredentials is loadConfigV8File resolving protected
+// credential references from credentialsDir; empty derives it from a
+// standalone source's own path.
+func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -340,16 +355,22 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 		resolvedDataDir = config.DefaultDataPath()
 	}
 	loadDotEnvIntoOS(filepath.Join(resolvedDataDir, ".env"))
-	managedOptions, err := config.ResolveObservabilityV8ManagedAIDOptionsForInspection(absPath, raw)
-	if err != nil {
-		return nil, err
-	}
 
+	// The schema pass comes first: its errors name the field and what it
+	// takes. The managed-destination decode below runs the runtime loader,
+	// whose errors reach the wire only as "configuration could not be
+	// compiled safely" at "$" (an openshell.llm or
+	// openshell.workdir.undo_ignored.max_mb the schema refuses was reported
+	// that way).
 	compiled, err := config.ParseCompileObservabilityV8(
 		absPath,
 		raw,
-		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir},
+		config.ObservabilityV8CompileOptions{DefaultDataDir: resolvedDataDir, CredentialsDir: credentialsDir},
 	)
+	if err != nil {
+		return nil, err
+	}
+	managedOptions, err := config.ResolveObservabilityV8ManagedAIDOptionsForInspection(absPath, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -406,8 +427,25 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// The runtime loader moves a retired connector key to its replacement
+	// (legacyconnector), so compare against the roster it is expected to
+	// produce rather than the raw source keys.
+	_, rename, dropped := legacyconnector.MigrateConnectorKeys("", names)
+	droppedKeys := make(map[string]struct{}, len(dropped))
+	for _, name := range dropped {
+		droppedKeys[name] = struct{}{}
+	}
+	expected := 0
 	for _, name := range names {
-		if _, retained := candidate.Guardrail.Connectors[name]; retained {
+		if _, gone := droppedKeys[name]; gone {
+			continue
+		}
+		expected++
+		runtimeName := name
+		if replacement, renamed := rename[name]; renamed {
+			runtimeName = replacement
+		}
+		if _, retained := candidate.Guardrail.Connectors[runtimeName]; retained {
 			continue
 		}
 		return &config.V8SemanticError{
@@ -418,7 +456,7 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 			Action:   "refuse activation and keep the live configuration unchanged",
 		}
 	}
-	if len(candidate.Guardrail.Connectors) != len(configured) {
+	if len(candidate.Guardrail.Connectors) != expected {
 		return &config.V8SemanticError{
 			Source:   document.Source,
 			Path:     "$.guardrail.connectors",

@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,4 +411,106 @@ func assertHookV8MetricPoint(
 		}
 	}
 	t.Errorf("metric point attributes=%v value=%v not found in %+v", wantAttributes, wantValue, points)
+}
+
+func TestHookDecisionV8CarriesSandboxBindingCorrelation(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		SessionID: "session-sandbox-1", SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33",
+		SandboxName: "dc-claudecode-myapp-7f3a",
+	})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-sandbox-1", ToolName: "Bash"}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action"}
+	api.emitHookDecisionObservabilityV8(ctx, req, resp, HookAuditEnvelope{Enforced: true, ElapsedMs: 3}, false)
+	eventuallyTrue(t, func() bool {
+		_, requests := capture.snapshot()
+		return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 &&
+			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) >= 1
+	})
+	logs := hookModelV8CapturedLogs(capture.logSnapshot())
+	var logWire struct {
+		Body map[string]interface{} `json:"body"`
+	}
+	if len(logs) != 1 || json.Unmarshal([]byte(logs[0].Body.GetStringValue()), &logWire) != nil {
+		t.Fatalf("generated hook decision logs=%d, want one with a JSON body", len(logs))
+	}
+	if logWire.Body["defenseclaw.sandbox.id"] != "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33" ||
+		logWire.Body["defenseclaw.sandbox.name"] != "dc-claudecode-myapp-7f3a" {
+		t.Errorf("generated hook decision body = %v, want the sandbox id and name", logWire.Body)
+	}
+	// Sandbox identities are high-cardinality log attributes only; no hook
+	// decision metric may carry them as a label.
+	_, requests := capture.snapshot()
+	for _, instrument := range []string{
+		observability.TelemetryInstrumentDefenseClawConnectorHookInvocations,
+		observability.TelemetryInstrumentDefenseClawConnectorHookOutcome,
+		observability.TelemetryInstrumentDefenseClawInspectEvaluations,
+	} {
+		for _, point := range hookModelV8MetricPoints(requests, instrument) {
+			for key := range point.attributes {
+				if strings.HasPrefix(key, "defenseclaw.sandbox.") {
+					t.Errorf("metric %s carries sandbox label %s", instrument, key)
+				}
+			}
+		}
+	}
+}
+
+func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		envelope         audit.CorrelationEnvelope
+		wantID, wantName string // "" when the attribute is left out
+	}{
+		{name: "unbound"},
+		{"bound", audit.CorrelationEnvelope{SandboxID: " sbx-1 ", SandboxName: "dc-codex-app-0a1b"}, "sbx-1", "dc-codex-app-0a1b"},
+		{"name without id before the gateway accepted the sandbox", audit.CorrelationEnvelope{SandboxName: "dc-codex-app-0a1b"}, "", "dc-codex-app-0a1b"},
+		{"free text is dropped", audit.CorrelationEnvelope{SandboxID: "has space", SandboxName: "-leading-dash"}, "", ""},
+		{"name over the registered bound is dropped", audit.CorrelationEnvelope{SandboxID: "sbx-2", SandboxName: "dc-" + strings.Repeat("a", 126)}, "sbx-2", ""},
+	} {
+		id, name := hookDecisionV8Sandbox(tc.envelope)
+		if got, ok := id.Get(); ok != (tc.wantID != "") || got != tc.wantID {
+			t.Errorf("%s: sandbox id=(%q,%v) want %q", tc.name, got, ok, tc.wantID)
+		}
+		if got, ok := name.Get(); ok != (tc.wantName != "") || got != tc.wantName {
+			t.Errorf("%s: sandbox name=(%q,%v) want %q", tc.name, got, ok, tc.wantName)
+		}
+	}
+}
+
+// GAP-1536: when the correlation ledger cannot be written (disk full), the
+// verdict is still exported (log and metrics), so blocks stay visible
+// remotely while the local audit store is down.
+func TestHookDecisionV8IsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-full-disk", ToolName: "Bash",
+		SuppressCorrelationEmit: true, CorrelationUnavailable: true,
+	}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action"}
+	api.finalizeAgentHook(t.Context(), "claudecode", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+	eventuallyTrue(t, func() bool {
+		_, requests := capture.snapshot()
+		return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 &&
+			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) >= 1
+	})
+}
+
+// GAP-1536: the prompt/tool/response event (Galileo's invoke_agent and
+// execute_tool spans) of a hook whose correlation ledger write failed is
+// still exported; only an exact replay stays unexported.
+func TestHookLLMEventIsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  agentHookRequest
+		want bool
+	}{
+		{"correlated", agentHookRequest{}, true},
+		{"correlation unavailable", agentHookRequest{SuppressCorrelationEmit: true, CorrelationUnavailable: true}, true},
+		{"exact replay", agentHookRequest{SuppressCorrelationEmit: true}, false},
+	} {
+		if got := hookLLMEventExportable(tc.req); got != tc.want {
+			t.Errorf("%s: hookLLMEventExportable = %t, want %t", tc.name, got, tc.want)
+		}
+	}
 }

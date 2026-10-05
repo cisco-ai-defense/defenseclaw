@@ -31,7 +31,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
+from defenseclaw.gateway import resolve_trusted_gateway_binary
 
 RULEPACK_WIRE_VERSION: Final = 1
 RULEPACK_HELPER_TIMEOUT_SECONDS: Final = 15
@@ -106,7 +107,13 @@ def validate_rule_pack(
     protocol drift raise :class:`RulePackValidationBridgeError`; callers must
     not reinterpret those states as successful validation.
     """
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise RulePackValidationBridgeError(
+            unsafe_gateway_remedy(exc),
+            code="gateway_untrusted",
+        ) from exc
     if not binary:
         raise RulePackValidationBridgeError(
             "defenseclaw-gateway is required for authoritative rule-pack validation; "
@@ -176,8 +183,15 @@ def validate_rule_pack(
 
 
 def safe_display_path(path: str) -> str:
-    """Quote an operator/config path without emitting terminal control bytes."""
-    return json.dumps(str(path), ensure_ascii=True)
+    """Quote an operator/config path without emitting terminal control bytes.
+
+    Only quotes and non-printable characters are escaped, so a Windows path
+    keeps its single backslashes.
+    """
+    text = "".join(
+        '\\"' if ch == '"' else ch if ch.isprintable() else f"\\u{ord(ch):04x}" for ch in str(path)
+    )
+    return f'"{text}"'
 
 
 def bridge_error_wire(error: RulePackValidationBridgeError) -> dict[str, Any]:

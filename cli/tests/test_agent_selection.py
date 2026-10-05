@@ -103,6 +103,73 @@ def test_darwin_openhands_selection_binds_stable_executable_and_full_chain(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
+def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    tool_bin = tmp_path / "uv" / "tools" / "openhands" / "bin"
+    tool_bin.mkdir(parents=True, mode=0o700)
+    (tool_bin / "openhands").write_text("#!/bin/sh\n", encoding="utf-8")
+    link = tmp_path / "bin" / "openhands"
+    link.parent.mkdir()
+    link.symlink_to(tool_bin / "openhands")
+    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(link),))
+
+    with pytest.raises(OSError, match=r"trusted-paths add .*uv/tools/openhands/bin"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
+
+
+def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1620: the selection probe reused discovery's 8 s budget and failed
+    # right after discovery had verified the same agent.
+    executable = tmp_path / "amp"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def slow_probe(*_args, **kwargs):
+        seen.update(kwargs)
+        return "", agent_selection.agent_discovery.VERSION_PROBE_TIMED_OUT
+
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(agent_selection.agent_discovery, "_version_for_agent_binary", slow_probe)
+
+    with pytest.raises(OSError, match=r"did not answer its version probe within 90 s .*re-run setup"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "amp")
+    assert seen["timeout_override"] == agent_selection.SELECTION_VERSION_TIMEOUT_SECONDS
+
+    budgets: list[float] = []
+
+    def fake_run(*_args, timeout, **_kwargs):
+        budgets.append(timeout)
+        return subprocess.CompletedProcess([], 0, b"amp 1.0\n", b"")
+
+    monkeypatch.setattr(agent_selection.agent_discovery.subprocess, "run", fake_run)
+    agent_selection.agent_discovery._version_for_binary(str(executable), (), require_trusted_binary_paths=False)
+    agent_selection.agent_discovery._version_for_binary(
+        str(executable), (), require_trusted_binary_paths=False, timeout_override=90.0
+    )
+    assert budgets == [agent_selection.agent_discovery.VERSION_TIMEOUT_SECONDS, 90.0]
+
+
+def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1612: npm's claude.cmd sits in a default-trusted prefix but is a
+    # script wrapper; trusted-paths add answered "already trusted".
+    shim = tmp_path / "npm" / "claude.cmd"
+    shim.parent.mkdir()
+    shim.write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(shim),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(agent_selection.os, "name", "nt")
+
+    with pytest.raises(OSError, match="claude.cmd is a script wrapper") as raised:
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "claudecode")
+    assert "claude install" in str(raised.value)
+    assert "trusted-paths add" not in str(raised.value)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
 def test_darwin_openhands_selection_rejects_identity_change_during_hash(
     tmp_path: Path,
     monkeypatch,
@@ -252,6 +319,14 @@ def test_amp_setup_candidates_enumerate_only_native_amp_exe(tmp_path: Path, monk
     rejected = tuple(trusted / name for name in ("amp.cmd", "amp.bat", "amp.com", "amp-helper.exe"))
     for path in rejected:
         path.write_bytes(b"not native Amp authority")
+    # npm's amp.cmd launches this package image (WIN2-U2-06).
+    packaged = trusted.joinpath("node_modules", "@ampcode", "cli", "bin", "amp.exe")
+    packaged.parent.mkdir(parents=True)
+    packaged.write_bytes(b"native Amp from npm")
+    # `npm i -g @sourcegraph/amp` nests the same image (GAP-1437).
+    nested = trusted.joinpath("node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe")
+    nested.parent.mkdir(parents=True)
+    nested.write_bytes(b"native Amp from the sourcegraph package")
     monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
     monkeypatch.setattr(
         agent_selection.agent_discovery,
@@ -271,7 +346,7 @@ def test_amp_setup_candidates_enumerate_only_native_amp_exe(tmp_path: Path, monk
         str(tmp_path / "state"),
     )
 
-    assert candidates == (str(native),)
+    assert candidates == (str(native), str(packaged), str(nested))
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows native Amp selection authority")
@@ -487,10 +562,10 @@ def test_windows_opencode_exact_image_rejects_lookalike_reparse_and_unsafe_acl(
         ("opencode 1.18.9", False),
         ("opencode 1.18.20", True),
         ("opencode 1.18.31", True),
-        ("opencode 1.19.0", False),
+        ("opencode 1.19.0", True),
     ],
 )
-def test_windows_opencode_selection_enforces_exact_validated_version_range(
+def test_windows_opencode_selection_enforces_validated_version_floor(
     reported: str,
     accepted: bool,
     tmp_path: Path,
@@ -1228,3 +1303,34 @@ def test_setup_candidates_do_not_recursively_accept_lookalike_npm_codex(
     )
 
     assert str(lookalike) not in candidates
+
+
+def test_windows_hermes_managed_executable_matches_the_gateway_order(tmp_path: Path) -> None:
+    # Hermes 0.21.5+ bootstrap installs have bin\hermes.exe and no venv; the
+    # venv image still wins when both exist (internal/hermespath).
+    local = tmp_path / "local"
+    launcher = local / "hermes" / "bin" / "hermes.exe"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(b"launcher")
+    pick = agent_selection.agent_discovery._windows_hermes_managed_executable
+    assert pick(str(local)) == str(launcher)
+    venv = local / "hermes" / "hermes-agent" / "venv" / "Scripts" / "hermes.exe"
+    venv.parent.mkdir(parents=True)
+    venv.write_bytes(b"venv")
+    assert pick(str(local)) == str(venv)
+
+
+def test_windows_opencode_npm_image_needs_the_opencode_ai_package(tmp_path: Path, monkeypatch) -> None:
+    # npm OpenCode is admitted like the gateway admits it: the exact native
+    # image under the user's npm root, whose package.json names opencode-ai.
+    roaming = tmp_path / "Roaming"
+    monkeypatch.setattr(agent_selection, "_windows_known_folder", lambda _identifier: str(roaming))
+    image = Path(agent_selection._windows_opencode_npm_executable())
+    assert image == roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"native")
+    manifest = image.parent.parent / "package.json"
+    manifest.write_text('{"name": "opencode-lookalike"}', encoding="utf-8")
+    assert not agent_selection._opencode_npm_package_identity_verified(str(image))
+    manifest.write_text('{"name": "opencode-ai"}', encoding="utf-8")
+    assert agent_selection._opencode_npm_package_identity_verified(str(image))

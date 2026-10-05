@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,6 +15,7 @@ from defenseclaw import config as config_module
 from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_version
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
 from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.pinned_exec import pinned_executable, run_pinned_executable
 
 
 def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
@@ -35,6 +39,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
         "DEFENSECLAW_DAEMON",
         "DEFENSECLAW_DISABLE_REDACTION",
+        "DEFENSECLAW_ENTERPRISE_PROFILE",
         "CLAUDE_CONFIG_DIR",
         "SSL_CERT_FILE",
         "SSL_CERT_DIR",
@@ -60,6 +65,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         b"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n"
         b"DEFENSECLAW_DAEMON=1\n"
         b"DEFENSECLAW_DISABLE_REDACTION=1\n"
+        b"DEFENSECLAW_ENTERPRISE_PROFILE=standalone\n"
         b"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n"
         b"SSL_CERT_FILE=/tmp/attacker-ca.pem\n"
         b"SSL_CERT_DIR=/tmp/attacker-ca-directory\n"
@@ -536,13 +542,18 @@ def test_component_diagnosis_gate_and_lifecycle_use_one_controller(
         )
 
     monkeypatch.setattr(cmd_version.subprocess, "check_output", check_output)
+    monkeypatch.setattr(
+        cmd_version,
+        "run_pinned_executable",
+        lambda argv, **_kwargs: SimpleNamespace(stdout=check_output(argv)),
+    )
     executed: list[tuple[str, str]] = []
 
     def run(argv, **_kwargs):
         executed.append((argv[0], argv[1]))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(cmd_setup.subprocess, "run", run)
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", run)
     monkeypatch.setattr(
         "defenseclaw.doctor_health.read_cached_discovery",
         lambda _data_dir: None,
@@ -642,6 +653,11 @@ def test_action_rechecks_current_controller_after_running_record_exits(
         return f"defenseclaw-gateway version {version}\n"
 
     monkeypatch.setattr(cmd_version.subprocess, "check_output", check_output)
+    monkeypatch.setattr(
+        cmd_version,
+        "run_pinned_executable",
+        lambda argv, **_kwargs: SimpleNamespace(stdout=check_output(argv)),
+    )
     restart = Mock(return_value=True)
     monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", restart)
 
@@ -691,7 +707,7 @@ def test_selected_current_controller_is_revalidated_before_start(
         lambda _path: None,
     )
     run = Mock()
-    monkeypatch.setattr(cmd_setup.subprocess, "run", run)
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", run)
 
     repaired, detail = cmd_doctor._repair_gateway_lifecycle(
         cfg,
@@ -701,3 +717,71 @@ def test_selected_current_controller_is_revalidated_before_start(
     assert repaired is False
     assert detail == "binary not found"
     run.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="refuses the binary through its POSIX mode")
+def test_restart_names_a_refused_gateway_instead_of_a_build_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An installed gateway the custody check refuses is named, not reported missing."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_bytes(b"synthetic executable")
+    os.chmod(gateway, 0o777)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    run = Mock()
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", run)
+
+    started = cmd_setup._restart_defense_gateway(os.fspath(data_dir), child_env={"PATH": os.fspath(bin_dir)})
+
+    output = capsys.readouterr().out
+    assert started is False
+    assert f"refusing to run {gateway.resolve()}" in output
+    assert "make gateway" not in output
+    run.assert_not_called()
+
+
+def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(tmp_path) -> None:
+    """A controller swapped in at the verified path after the check is never launched."""
+    controller = tmp_path / ("defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway")
+    replacement = tmp_path / "replacement"
+    if os.name == "nt":
+        shutil.copyfile(os.path.join(os.environ["SystemRoot"], "System32", "cmd.exe"), controller)
+        replacement.write_bytes(b"replacement controller")
+    else:
+        shutil.copyfile("/bin/echo", controller)
+        replacement.write_text("#!/bin/sh\necho replacement\n", encoding="utf-8")
+        for path in (controller, replacement):
+            path.chmod(0o755)
+
+    if os.name == "nt":
+        with pinned_executable(os.fspath(controller)):
+            # NTFS refuses to replace a file held without delete sharing.
+            with pytest.raises(PermissionError):
+                os.replace(replacement, controller)
+        # The hold lasts until the command exits, so the controller cannot be
+        # renamed away before it starts its own long-running process either.
+        renamed = run_pinned_executable(
+            [os.fspath(controller), "/d", "/c", "ren", os.fspath(controller), "moved.exe"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+        assert renamed.returncode != 0
+        assert controller.exists()
+        return
+
+    with pinned_executable(os.fspath(controller)) as pinned:
+        os.replace(replacement, controller)
+        argv = [os.fspath(controller), "verified"]
+        if sys.platform.startswith("linux"):
+            process = pinned.popen(argv, stdout=subprocess.PIPE, text=True)
+            stdout, _ = process.communicate(timeout=10)
+            assert stdout.strip() == "verified"
+        else:
+            with pytest.raises(UnsafePathError):
+                pinned.popen(argv, stdout=subprocess.PIPE)

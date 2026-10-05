@@ -291,6 +291,67 @@ def test_runtime_no_restart_says_the_change_is_not_live(
     assert "--no-restart" in result.output
 
 
+def test_runtime_hints_name_a_command_that_exists(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    restart_spy: _RestartSpy,
+) -> None:
+    """GAP-2548: 'defenseclaw setup restart' does not exist."""
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes", "--no-restart")
+
+    assert "setup restart" not in result.output
+    assert "defenseclaw-gateway restart" in result.output
+
+
+def test_runtime_enable_with_only_openclaw_gateway_down_is_not_a_failure(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-2548: defenseclaw-gateway restarted, so the planes are live."""
+    from defenseclaw.commands import cmd_setup
+
+    def openclaw_down(*_a: Any, **_k: Any) -> None:
+        raise cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
+
+    monkeypatch.setattr(cmd_setup, "_restart_services", openclaw_down)
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes", "--no-enable-host-plane")
+
+    assert result.exit_code == 0, result.output
+    assert "Gateway restart failed" not in result.output
+    assert "openclaw gateway run" in result.output
+    assert "runtime planes are live" in result.output
+
+
+def test_runtime_enable_real_restart_failure_names_an_existing_command(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from defenseclaw.commands import cmd_setup
+
+    def gateway_down(*_a: Any, **_k: Any) -> None:
+        raise cmd_setup._GatewayRestartFailed("gateway restart/readiness failed")
+
+    monkeypatch.setattr(cmd_setup, "_restart_services", gateway_down)
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes")
+
+    assert result.exit_code == 1, result.output
+    assert "Gateway restart failed" in result.output
+    assert "setup restart" not in result.output
+    assert "defenseclaw-gateway restart" in result.output
+
+
 def test_severity_filter_narrows_the_table_and_tolerates_unknown_bands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -416,6 +477,23 @@ def test_runtime_permissions_reports_state_not_just_requirements():
     # Something must have been decided either way; an all-unknown report is
     # indistinguishable from not having checked.
     assert by_state.get(True, 0) + by_state.get(False, 0) > 0, payload
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no DNS naming grant")
+def test_runtime_permissions_marks_dns_naming_off_when_capture_is_off(monkeypatch):
+    """With dns_capture off, the DNS naming grant is unused, not missing."""
+    from types import SimpleNamespace
+
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    cfg = SimpleNamespace(ai_discovery=SimpleNamespace(runtime=SimpleNamespace(dns_capture=False)))
+    monkeypatch.setattr(cmd_agent, "_load_config_best_effort", lambda app: cfg)
+    result = CliRunner().invoke(runtime_permissions, [])
+    assert result.exit_code == 0, result.output
+    assert "[off] shadow egress (B), DNS naming" in result.output
+    assert "[MISSING] shadow egress (B), DNS naming" not in result.output
+    assert "--dns-capture" in result.output
 
 
 def test_runtime_permissions_does_not_probe_another_host_os():
@@ -572,3 +650,21 @@ def test_runtime_acquisition_is_pruned_when_unset():
     kept = {"runtime": {"enabled": True, "acquisition": "helper"}}
     _prune_ai_runtime_fields(kept)
     assert kept["runtime"]["acquisition"] == "helper"
+
+
+def test_status_marks_a_limited_running_plane_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-1377: a non-elevated Windows gateway runs Plane B on its own sockets
+    # only; status and findings must not print a plain "running".
+    payload = dict(_DEGRADED_SNAPSHOT)
+    payload["planes"] = [
+        {"plane": "b", "name": "shadow egress", "available": True, "running": True,
+         "mechanism": "GetExtendedTcpTable and GetExtendedUdpTable",
+         "reason": "egress attribution is limited to this process's own sockets; "
+                   "run the gateway elevated for machine-wide coverage"},
+    ]
+    client = _StubClient(payload)
+    monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
+    result = _invoke("findings")
+    assert result.exit_code == 0, result.output
+    assert "shadow egress: partial, running via GetExtendedTcpTable" in result.output
+    assert "limited to this process's own sockets" in result.output

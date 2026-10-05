@@ -8,6 +8,23 @@ import type {
 } from './types';
 import { scenarioConnectorMappings } from './types';
 
+// GitHub Light's green (#22863a) sits just above 4.5:1 on white and
+// drops below it on the tinted code surface and highlighted lines, and
+// GitHub's comment grey (#6a737d) misses 4.5:1 on the demo's code
+// surfaces in both themes. Swap them for same-hue colours that clear AA;
+// the rest of Shiki's palette clears AA on every scenario surface. This
+// is done here rather than in CSS because React rewrites the inline style
+// as rgb() when a demo step re-renders, which no attribute selector matches.
+const TOKEN_COLORS: Record<'light' | 'dark', Record<string, string>> = {
+  light: { '#22863a': '#176b31', '#6a737d': '#57606a' },
+  dark: { '#6a737d': '#8b949e' },
+};
+
+function tokenColor(color: string | undefined, theme: 'light' | 'dark') {
+  if (!color) return color;
+  return TOKEN_COLORS[theme][color.toLowerCase()] ?? color;
+}
+
 function TokenLines({
   lines,
   theme,
@@ -57,7 +74,7 @@ function TokenLines({
               {line.length === 0 ? '\u00a0' : line.map((token, tokenIndex) => (
                 <span
                   key={`${lineNumber}-${tokenIndex}`}
-                  style={{ color: token.color, fontStyle: token.fontStyle === 1 ? 'italic' : undefined }}
+                  style={{ color: tokenColor(token.color, theme), fontStyle: token.fontStyle === 1 ? 'italic' : undefined }}
                 >
                   {token.content}
                 </span>

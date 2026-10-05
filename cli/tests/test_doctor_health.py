@@ -224,10 +224,47 @@ def test_discovery_absence_is_unavailable_and_unregistered_names_are_bounded() -
     assert "password" not in repr(findings)
 
 
+def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() -> None:
+    discovery = SimpleNamespace(
+        agents={
+            "kiro": _signal(installed=True, version="kiro-cli 2.22.0"),
+            "omnigent": _signal(installed=True, version="omnigent 0.15.0"),
+        }
+    )
+
+    kiro, omnigent, custom = assess_connector_health(("kiro", "omnigent", "customagent"), discovery)
+
+    assert (kiro.connector, kiro.status, kiro.reason_code) == (
+        "kiro",
+        HealthStatus.SUPPORTED,
+        "connector-not-version-gated",
+    )
+    assert "proxy" not in kiro.summary
+    assert omnigent.status is HealthStatus.SUPPORTED
+    assert omnigent.reason_code == "connector-version-untested-newer"
+    assert omnigent.contract_id == "omnigent-custom-policy-v1"
+    assert "untested newer version" in omnigent.summary
+    assert (custom.connector, custom.reason_code) == ("customagent", "connector-contract-unregistered")
+
+
 def test_valid_json_non_object_discovery_cache_is_rejected(tmp_path) -> None:
     (tmp_path / "agent_discovery.json").write_text("[]", encoding="utf-8")
 
     assert read_cached_discovery(str(tmp_path)) is None
+
+
+def test_upgrade_without_discovery_cache_uses_the_gateway_hook_lock(tmp_path) -> None:
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"claudecode": {"raw_agent_version": "2.1.286 (Claude Code)"}}}),
+        encoding="utf-8",
+    )
+
+    claude, codex = assess_connector_health(("claudecode", "codex"), read_cached_discovery(str(tmp_path)))
+
+    assert claude.status is HealthStatus.SUPPORTED
+    assert codex.reason_code == "agent-discovery-unavailable"
+    assert "defenseclaw agent discover --refresh" in codex.summary
+    assert doctor_health.supported_range_text(doctor_health._supported_ranges("claudecode")) == ">=2.1.154"
 
 
 def test_generic_unattended_experimental_repair_is_refused() -> None:

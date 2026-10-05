@@ -1,0 +1,14 @@
+{
+  "description": "Gateway REST API bind host precedence. Read by internal/config (APIBindHost) and cli/defenseclaw/config.py (api_bind_host) so the listener and every CLI client agree: an explicit gateway.api_bind wins, then the legacy standalone guardrail.host, then loopback.",
+  "schema_version": 1,
+  "cases": [
+    {"name": "default loopback", "mode": "", "guardrail_host": "localhost", "api_bind": "", "want": "127.0.0.1"},
+    {"name": "host mode ignores guardrail host", "mode": "", "guardrail_host": "10.200.0.1", "api_bind": "", "want": "127.0.0.1"},
+    {"name": "legacy shim", "mode": "standalone", "guardrail_host": "10.200.0.1", "api_bind": "", "want": "10.200.0.1"},
+    {"name": "legacy localhost stays loopback", "mode": "standalone", "guardrail_host": "localhost", "api_bind": "", "want": "127.0.0.1"},
+    {"name": "explicit loopback wins over shim", "mode": "standalone", "guardrail_host": "10.200.0.1", "api_bind": "127.0.0.1", "want": "127.0.0.1"},
+    {"name": "explicit wildcard wins over shim", "mode": "standalone", "guardrail_host": "10.200.0.1", "api_bind": "0.0.0.0", "want": "0.0.0.0"},
+    {"name": "explicit non-loopback bind", "mode": "", "guardrail_host": "localhost", "api_bind": "192.168.65.2", "want": "192.168.65.2"},
+    {"name": "explicit IPv6 loopback", "mode": "", "guardrail_host": "localhost", "api_bind": "::1", "want": "::1"}
+  ]
+}

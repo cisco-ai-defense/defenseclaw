@@ -19,9 +19,7 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 	profile := filepath.Join(root, "profile")
 	copilotHome := filepath.Join(root, "copilot")
 	cursorHome := filepath.Join(root, "cursor")
-	windsurfHome := filepath.Join(root, "windsurf-profile")
 	antigravityHome := filepath.Join(root, ".gemini", "config")
-	geminiHome := filepath.Join(root, ".gemini")
 	openCodeHome := filepath.Join(root, "opencode")
 	hermesHome := filepath.Join(root, "hermes")
 	env := []string{
@@ -31,11 +29,8 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 		"USERPROFILE=" + profile,
 		"COPILOT_HOME=" + copilotHome,
 		"DEFENSECLAW_CURSOR_CONFIG_HOME=" + cursorHome,
-		"WINDSURF_USER_HOME=" + windsurfHome,
 		"ANTIGRAVITY_CONFIG_DIR=" + filepath.Join(root, "ignored-antigravity"),
-		"GEMINI_CONFIG_DIR=" + filepath.Join(root, "ignored-gemini"),
 		"DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME=" + antigravityHome,
-		"DEFENSECLAW_GEMINI_CONFIG_HOME=" + geminiHome,
 		"OPENCODE_CONFIG_DIR=" + openCodeHome,
 		"HERMES_HOME=" + hermesHome,
 	}
@@ -48,9 +43,7 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 		{connector: "amp", want: filepath.Join(profile, ".config", "amp")},
 		{connector: "copilot", want: copilotHome},
 		{connector: "cursor", want: cursorHome},
-		{connector: "windsurf", want: windsurfHome},
 		{connector: "antigravity", want: antigravityHome},
-		{connector: "geminicli", want: geminiHome},
 		{connector: "opencode", want: openCodeHome},
 		{connector: "hermes", want: hermesHome},
 	} {
@@ -175,31 +168,6 @@ func TestCopilotLifecycleCommandArgsBindExactHome(t *testing.T) {
 	}
 }
 
-func TestWindsurfLifecycleCommandArgsBindsProfileRootExplicitly(t *testing.T) {
-	root := t.TempDir()
-	dataRoot := filepath.Join(root, "data")
-	profileRoot := filepath.Join(root, "windsurf-profile")
-	args, err := connectorLifecycleCommandArgs(
-		dataRoot,
-		"windsurf",
-		"teardown",
-		[]string{"WINDSURF_USER_HOME=" + profileRoot, "USERPROFILE=" + filepath.Join(root, "ambient")},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"connector", "teardown",
-		"--connector", "windsurf",
-		"--data-dir", dataRoot,
-		"--config-home", profileRoot,
-		"--json",
-	}
-	if !reflect.DeepEqual(args, want) {
-		t.Fatalf("connector lifecycle args = %q, want %q", args, want)
-	}
-}
-
 func TestCursorConnectorLifecycleCommandArgsBindsConfigHomeExplicitly(t *testing.T) {
 	root := t.TempDir()
 	dataRoot := filepath.Join(root, "data")
@@ -271,9 +239,6 @@ func TestConnectorLifecycleConfigHomeRejectsAmbiguousOrUnsafeBinding(t *testing.
 		{name: "duplicate Copilot", connector: "copilot", env: []string{"COPILOT_HOME=" + valid, "copilot_home=" + valid}, want: "COPILOT_HOME is duplicated"},
 		{name: "cursor missing", connector: "cursor", env: []string{"UNRELATED=1"}, want: "DEFENSECLAW_CURSOR_CONFIG_HOME is empty"},
 		{name: "cursor duplicate", connector: "cursor", env: []string{"DEFENSECLAW_CURSOR_CONFIG_HOME=" + valid, "defenseclaw_cursor_config_home=" + valid}, want: "DEFENSECLAW_CURSOR_CONFIG_HOME is duplicated"},
-		{name: "windsurf missing", connector: "windsurf", env: []string{"USERPROFILE=" + valid}, want: "WINDSURF_USER_HOME is empty"},
-		{name: "Gemini missing", connector: "geminicli", env: []string{"GEMINI_CONFIG_DIR=" + valid}, want: "DEFENSECLAW_GEMINI_CONFIG_HOME is empty"},
-		{name: "Gemini duplicate", connector: "geminicli", env: []string{"DEFENSECLAW_GEMINI_CONFIG_HOME=" + valid, "defenseclaw_gemini_config_home=" + valid}, want: "DEFENSECLAW_GEMINI_CONFIG_HOME is duplicated"},
 		{name: "hermes missing", connector: "hermes", env: []string{"USERPROFILE=" + valid}, want: "HERMES_HOME is empty"},
 		{name: "OpenCode missing", connector: "opencode", env: []string{"USERPROFILE=" + valid}, want: "OPENCODE_CONFIG_DIR is empty"},
 		{name: "OpenCode duplicate", connector: "opencode", env: []string{"OPENCODE_CONFIG_DIR=" + valid, "opencode_config_dir=" + valid}, want: "OPENCODE_CONFIG_DIR is duplicated"},

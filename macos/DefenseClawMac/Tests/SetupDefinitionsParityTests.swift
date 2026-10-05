@@ -119,6 +119,8 @@ struct SetupDefinitionsParityTests {
         secureSetupSecretsUseChildEnvironment()
         webhookBuilderCoversCurrentNotifierOptions()
         webhookValidationRequiresProviderCredentials()
+        removedStandaloneSandboxWizardStaysHidden()
+        sandboxWizardMatchesTheTUIWizard()
         print("Setup definition parity tests passed")
     }
 
@@ -236,7 +238,6 @@ struct SetupDefinitionsParityTests {
     private static func includesOnlyCanonicalDevinAcrossSetupAndCatalogSurfaces() {
         expect(TUIWizards.connectors.contains("devin"), "Devin appears in the native connector picker")
         expect(TUIWizards.hookConnectors.contains("devin"), "Devin is treated as a hook connector")
-        expect(!TUIWizards.connectors.contains("windsurf"), "legacy Windsurf is not selectable")
 
         let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let sourceRoot = testsDirectory.deletingLastPathComponent().appendingPathComponent("DefenseClawMac")
@@ -256,8 +257,6 @@ struct SetupDefinitionsParityTests {
             scanner.contains("p(\".config\", \"devin\", \"config.json\")"),
             "native catalog retains legacy Devin MCP read compatibility"
         )
-        expect(!scanner.localizedCaseInsensitiveContains("windsurf"),
-               "native catalog has no public Windsurf surface")
     }
 
     private static func bundledSkillsRemainDiscoveryOnlyAcrossNativeCatalogSurfaces() {
@@ -669,6 +668,75 @@ struct SetupDefinitionsParityTests {
             "events": "block,health",
         ]
         expect(TUIWizards.webhookValidation(pagerDuty) == nil, "valid PagerDuty notifier")
+    }
+
+    private static func removedStandaloneSandboxWizardStaysHidden() {
+        // `defenseclaw sandbox setup --sandbox-ip/--host-ip/...` was deleted
+        // with the legacy standalone OpenShell integration.
+        let legacyKeys: Set<String> = ["sandbox-ip", "host-ip", "no-auto-pair", "no-host-networking"]
+        expect(
+            TUIWizards.all.allSatisfy { wizard in wizard.fields.allSatisfy { !legacyKeys.contains($0.key) } },
+            "no setup wizard offers the removed standalone sandbox options"
+        )
+    }
+
+    private static func sandboxWizardMatchesTheTUIWizard() {
+        let wizard = TUIWizards.all.first { $0.id == "sandbox" }
+        expect(wizard != nil, "the Sandbox wizard is listed")
+        expect(wizard?.fields.contains { $0.key == "install-openshell" } == false,
+               "the app never runs the sudo installer (it needs a terminal)")
+        expect(wizard?.fields.contains { $0.key.contains("telemetry") || $0.label.contains("telemetry") } == false,
+               "no telemetry question: the Homebrew gateway does not read gateway.env")
+        expect(wizard?.fields.contains { $0.key.contains("mount") || $0.label.lowercased().contains("mount") } == false,
+               "no mounts question: setup runs macOS sandboxes in MicroVMs, which mount no host folders")
+        let blurb = wizard?.blurb ?? ""
+        for fact in ["MicroVM", "Apple silicon", "compute_driver = \"vm\"", "every run works on a copy",
+                     "defenseclaw sandbox pull", "e2fsprogs"] {
+            expect(blurb.contains(fact), "the Sandbox wizard's blurb names \(fact)")
+        }
+        expect(!blurb.contains("cannot run on a Mac"), "the blurb no longer says sandboxes cannot run on a Mac")
+        // The same literal the TUI test pins for macOS (test_sandbox_setup_wizard.py).
+        let defaults = Dictionary(uniqueKeysWithValues: (wizard?.fields ?? []).map { ($0.key, $0.defaultValue) })
+        expect(TUIWizards.sandboxCommands(defaults, false) == [[
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--harness", "codex", "--no-wrappers",
+        ]], "defaults match the TUI wizard")
+        expect(TUIWizards.sandboxCommands([
+            "harness-codex": "no", "mounts": "no", "wrappers": "yes", "build-images": "no",
+        ], false) == [[
+            "sandbox", "setup", "--non-interactive", "--harness", "claudecode", "--wrappers", "--skip-images",
+        ]], "every consent flag, and never --no-mounts")
+        expect(TUIWizards.sandboxCommands(["action": "doctor"], false) == [["sandbox", "doctor"]], "doctor action")
+        expect(TUIWizards.sandboxValidation(["harness-claudecode": "no", "harness-codex": "no"]) != nil,
+               "a harness is required")
+        let config: YAMLNode = .mapping(["openshell": .mapping(["harnesses": .sequence([.scalar("codex")])])])
+        expect(TUIWizards.sandboxLiveDefaults(config) == ["harness-claudecode": "no", "harness-codex": "yes"],
+               "configured harnesses seed the toggles")
+
+        // Every flag the TUI builder can emit is one the app emits too, except
+        // the sudo installer, and the telemetry opt-in and the mounts question
+        // the TUI offers only off macOS.
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let python = (try? String(
+            contentsOf: testsDirectory.appendingPathComponent("../../../cli/defenseclaw/tui/panels/setup.py"),
+            encoding: .utf8
+        )) ?? ""
+        guard let start = python.range(of: "def _build_sandbox_args("),
+              let end = python.range(of: "\ndef ", range: start.upperBound..<python.endIndex)
+        else {
+            expect(false, "the TUI sandbox argv builder was not found in setup.py")
+            return
+        }
+        let body = String(python[start.upperBound..<end.lowerBound])
+        let pattern = try! NSRegularExpression(pattern: #""(--[a-z-]+)""#)
+        let matches = pattern.matches(in: body, range: NSRange(body.startIndex..., in: body))
+        let tuiFlags = Set(matches.compactMap { match in
+            Range(match.range(at: 1), in: body).map { String(body[$0]) }
+        })
+        let swiftFlags: Set<String> = [
+            "--non-interactive", "--harness", "--wrappers", "--no-wrappers", "--skip-images",
+        ]
+        expect(tuiFlags == swiftFlags.union(["--install-openshell", "--upstream-telemetry", "--no-mounts"]),
+               "TUI sandbox flags \(tuiFlags.sorted()) differ from the app's")
     }
 
     private static func value(after flag: String, in arguments: [String]) -> String? {

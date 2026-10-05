@@ -46,6 +46,7 @@ from defenseclaw.commands.cmd_doctor import (
     _check_openclaw_transport_advisory,
     _check_openhands_hooks,
     _check_proxy_interception,
+    _check_scanners,
     _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
@@ -60,6 +61,46 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorGuardrailConfig,
 )
+
+
+class DoctorVirusTotalTests(unittest.TestCase):
+    """GAP-1936: the VirusTotal row agrees with the credential row."""
+
+    def _cfg(self, use_virustotal: bool, key_env: str = ""):
+        from defenseclaw.config import SkillScannerConfig
+
+        sc = SkillScannerConfig(use_virustotal=use_virustotal, virustotal_api_key_env=key_env)
+        return SimpleNamespace(scanners=SimpleNamespace(skill_scanner=sc))
+
+    def test_disabled_is_skipped(self):
+        from defenseclaw.commands.cmd_doctor import _check_virustotal
+
+        result = _DoctorResult()
+        with patch.dict(os.environ, {}, clear=True):
+            _check_virustotal(self._cfg(False), result)
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertEqual(result.checks[0]["detail"], "not enabled")
+
+    def test_enabled_without_key_warns_with_next_step(self):
+        from defenseclaw.commands.cmd_doctor import _check_virustotal
+
+        result = _DoctorResult()
+        with patch.dict(os.environ, {}, clear=True):
+            _check_virustotal(self._cfg(True), result)
+        check = result.checks[0]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("enabled, but VIRUSTOTAL_API_KEY is not set", check["detail"])
+        self.assertIn("defenseclaw keys set VIRUSTOTAL_API_KEY", check["remediation"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
+    def test_default_env_name_key_is_probed(self, probe):
+        from defenseclaw.commands.cmd_doctor import _check_virustotal
+
+        result = _DoctorResult()
+        with patch.dict(os.environ, {"VIRUSTOTAL_API_KEY": "dummy"}, clear=True):
+            _check_virustotal(self._cfg(True), result)
+        self.assertEqual(result.checks[0]["status"], "pass")
+        self.assertEqual(probe.call_args.kwargs["headers"], {"x-apikey": "dummy"})
 
 
 class DoctorSecurityOverrideTests(unittest.TestCase):
@@ -134,7 +175,7 @@ class DoctorHermesPathTests(unittest.TestCase):
             with patch(
                 "defenseclaw.commands.cmd_doctor.hermes_config_path",
                 return_value=config_path,
-            ):
+            ), patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=True):
                 _check_hook_health(cfg, "hermes", result)
 
             self.assertEqual(result.passed, 0, result.checks)
@@ -144,7 +185,7 @@ class DoctorHermesPathTests(unittest.TestCase):
 
 class DoctorGuardrailTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):
+    def test_empty_guardrail_model_is_not_a_warning(self, _mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -159,11 +200,12 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_guardrail_proxy(cfg, result)
 
+        # Fetch-interceptor routing is how OpenClaw works (GAP-2233):
+        # an empty guardrail.model is not something to warn about.
         self.assertEqual(result.failed, 0)
-        self.assertEqual(result.warned, 1)
+        self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
-        warn_checks = [c for c in result.checks if c["status"] == "warn"]
-        self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+        self.assertNotIn("guardrail.model", " ".join(c["detail"] for c in result.checks))
 
     def test_proxy_interception_fails_when_self_test_misses(self):
         cfg = Config(
@@ -180,6 +222,52 @@ class DoctorGuardrailTests(unittest.TestCase):
         _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
         self.assertEqual(result.failed, 1, result.checks)
         self.assertIn("not being intercepted", result.checks[0]["detail"])
+
+    def test_proxy_interception_waits_for_first_report_after_restart(self):
+        # GAP-2487: right after a sidecar restart the plugin has not reported
+        # yet; it does within a minute, so this is not a FAIL.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 2000})
+        self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("waiting for the OpenClaw plugin", result.checks[0]["detail"])
+
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 600000})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("has not reported", result.checks[0]["detail"])
+
+    def test_proxy_interception_points_at_an_unreachable_openclaw_gateway(self):
+        # GAP-2506: the plugin cannot report while the OpenClaw gateway is
+        # down, so "rerun doctor in a minute" never helped.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        result.record("fail", "OpenClaw gateway", "not reachable at 127.0.0.1:20497")
+        _check_proxy_interception(cfg, result, live_health={"uptime_ms": 2000})
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertEqual(result.failed, 2, result.checks)
+        row = result.checks[-1]
+        self.assertIn("OpenClaw gateway is not reachable", row["detail"])
+        self.assertIn("start or fix the OpenClaw gateway first", row["remediation"])
 
     def test_proxy_interception_passes_when_self_test_verified(self):
         cfg = Config(
@@ -392,11 +480,52 @@ class DoctorGuardrailTests(unittest.TestCase):
         # _subsystem_expected_enabled returns None and we fall to
         # the "skip" branch; the post-fix change appends the summary.
         self.assertEqual(row["status"], "skip")
-        self.assertIn(
-            "no OpenClaw fleet configured (standalone mode)",
-            row["detail"],
-            f"summary should be surfaced in detail; got: {row['detail']!r}",
+        # GAP-1363: a hook-only roster never uses the OpenClaw fleet uplink,
+        # so the row says so instead of repeating the fleet summary.
+        self.assertEqual(row["detail"], "disabled — not used: the configured connectors run through hooks")
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_sidecar_guardrail_row_shows_the_hook_policy_mode(self, mock_probe):
+        """A hook connector in action mode reported the data path as
+        mode=observability; the row must show the policy mode instead."""
+        import json as _json
+
+        details = {
+            "connector": "claudecode",
+            "mode": "observability",
+            "policy_mode": "action",
+            "enforcement_enabled": True,
+            "enforcement_surface": "agent_lifecycle_hooks",
+            "proxy_port": "closed",
+        }
+        mock_probe.return_value = (
+            200,
+            _json.dumps(
+                {
+                    "gateway": {"state": "running"},
+                    "watcher": {"state": "running"},
+                    "guardrail": {"state": "running", "details": details},
+                    "api": {"state": "running"},
+                }
+            ),
         )
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, connector="claudecode"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "claudecode"
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        rows = [c for c in result.checks if c.get("label", "").strip().endswith("guardrail")]
+        self.assertEqual([row["detail"] for row in rows], ["running (mode=action, hook-enforced)"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_falls_back_to_generic_message_without_summary(self, mock_probe):
@@ -435,7 +564,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(gateway_rows[0]["status"], "skip")
         self.assertEqual(
             gateway_rows[0]["detail"],
-            "disabled (reported by sidecar)",
+            "disabled — not used: the configured connectors run through hooks",
         )
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
@@ -533,6 +662,87 @@ class DoctorGuardrailTests(unittest.TestCase):
         api = self._sidecar_row(result, "api")
         self.assertEqual(api["status"], "fail")
         self.assertIn("absent from health response", api["detail"])
+
+    def test_sidecar_check_says_gateway_is_stopped_once(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_http_probe", return_value=(0, "<urlopen error [Errno 111] Connection refused>")):
+            self.assertIsNone(_check_sidecar(cfg, result))
+        with patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("t", "", "")):
+            self.assertTrue(cmd_doctor._check_gateway_auth(cfg, result))
+        self.assertEqual(len(result.checks), 1, result.checks)
+        self.assertIn("the gateway is not running", result.checks[0]["detail"])
+        self.assertIn("defenseclaw-gateway start", result.checks[0]["detail"])
+
+    def test_sidecar_check_names_foreign_holder_without_its_health_rows(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with (
+            patch.object(
+                cmd_doctor,
+                "_trusted_gateway_listener",
+                return_value=cmd_doctor._GatewayTrust("missing", "managed gateway PID file is missing"),
+            ),
+            patch.object(cmd_doctor, "_gateway_port_holder", return_value="PID 4242 (defenseclaw-gateway)"),
+        ):
+            result = self._run_sidecar_health(self._sidecar_alignment_cfg(), self._complete_sidecar_health())
+        self.assertEqual(len(result.checks), 1, result.checks)
+        self.assertEqual(result.checks[0]["status"], "fail")
+        self.assertIn("held by PID 4242 (defenseclaw-gateway), not by this account's gateway", result.checks[0]["detail"])
+        self.assertEqual(result.gateway_down, "foreign")
+
+        # A holder that is not a gateway at all answers /health with an error.
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=(404, "not found")),
+            patch.object(cmd_doctor, "_foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            _check_sidecar(self._sidecar_alignment_cfg(), result)
+        self.assertIn("held by PID 4343 (python3), not by this account's gateway", result.checks[0]["detail"])
+        self.assertEqual(result.gateway_down, "foreign")
+
+    def test_foreign_port_fix_does_not_ask_to_stop_another_accounts_process(self):
+        # GAP-1706: the same command form as defenseclaw-gateway status/start,
+        # and another account's process is not this account's to stop.
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        with patch.object(cmd_doctor, "_free_api_port_hint", return_value="18980"):
+            other = cmd_doctor._foreign_gateway_port_detail(
+                cfg, "PID 12964 (defenseclaw-gateway.exe, probably another account's DefenseClaw gateway)"
+            )
+            own = cmd_doctor._foreign_gateway_port_detail(cfg, "PID 4343 (python3)")
+        self.assertIn("That process belongs to another account, so move", other)
+        self.assertNotIn("Stop that process", other)
+        self.assertIn("Stop that process, or move", own)
+        for text in (other, own):
+            # Word for word the text defenseclaw-gateway status and start print.
+            self.assertIn(
+                "move this account's gateway to a free port with: defenseclaw setup gateway --api-port 18980 "
+                "--non-interactive, then run: defenseclaw-gateway start",
+                text,
+            )
+
+        # GAP-1706: on Windows a standard user cannot read an elevated
+        # holder's account; Windows refusing to open it means another account.
+        from defenseclaw import process_liveness
+
+        for denied in (True, False):
+            with (
+                patch.object(cmd_doctor.sys, "platform", "win32"),
+                patch.object(process_liveness, "process_access_denied", return_value=denied),
+                patch.object(cmd_doctor, "_free_api_port_hint", return_value="18980"),
+            ):
+                text = cmd_doctor._foreign_gateway_port_remediation(cfg, holder="PID 3792 (pwsh.exe)")
+            self.assertEqual(text.startswith("That process belongs to another account"), denied, text)
+
+    def test_refused_token_send_is_not_a_transport_failure(self):
+        from defenseclaw.commands import cmd_doctor
+
+        detail = cmd_doctor._token_probe_failure(0, "listener is not verified" + cmd_doctor._GATEWAY_TOKEN_REFUSED)
+        self.assertEqual(detail, "the token was not sent: listener is not verified")
 
     def test_sidecar_check_accepts_intentionally_disabled_fleet_gateway(self):
         for scenario, fleet_mode in (
@@ -642,12 +852,12 @@ class DoctorGuardrailTests(unittest.TestCase):
                 enabled=True,
                 model="",
                 port=4000,
-                connector="geminicli",
+                connector="cursor",
             ),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
         )
-        cfg.claw.mode = "geminicli"
+        cfg.claw.mode = "cursor"
         result = _DoctorResult()
 
         _check_guardrail_proxy(cfg, result)
@@ -664,7 +874,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         # GuardrailConfig in this fixture leaves ``gc.mode`` at the
         # canonical ``"observe"`` default, so we expect the observe
         # variant of the message here.
-        self.assertIn("hook-driven for geminicli", result.checks[0]["detail"])
+        self.assertIn("hook-driven for cursor", result.checks[0]["detail"])
         self.assertIn("mode=observe", result.checks[0]["detail"])
         self.assertIn("proxy port intentionally closed", result.checks[0]["detail"])
 
@@ -1571,14 +1781,22 @@ class VerifyBedrockTests(unittest.TestCase):
         _verify_bedrock("ASIAEXAMPLETEMPKEY", r)
         self.assertEqual(r.warned, 1, r.checks)
 
-    def test_unrecognized_shape_passes_with_note(self):
-        # If the operator is running a custom gateway that accepts
-        # some other token format, we shouldn't block — just note
-        # the shape isn't one we can probe.
+    def test_unrecognized_shape_warns_with_next_step(self):
+        # GAP-2195: Bedrock rejects keys without a known prefix, so an
+        # unknown shape is a WARN with a next step, never a green check.
         r = _DoctorResult()
-        _verify_bedrock("custom-gateway-token-xyz", r)
+        _verify_bedrock("dccert-fake-invalid-key", r)
+        self.assertEqual((r.passed, r.warned, r.failed), (0, 1, 0), r.checks)
+        self.assertIn("does not look like a Bedrock API key", r.checks[0]["detail"])
+        self.assertIn("keys set DEFENSECLAW_LLM_KEY", r.checks[0].get("remediation", ""))
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
+    def test_short_term_bedrock_api_key_is_probed(self, mock_probe):
+        # GAP-1365: short-term keys from the AWS token generator.
+        r = _DoctorResult()
+        _verify_bedrock("bedrock-api-key-" + "A" * 40, r)
+        mock_probe.assert_called_once()
         self.assertEqual(r.passed, 1, r.checks)
-        self.assertIn("shape not recognized", r.checks[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "{}"))
     def test_absk_200_is_pass(self, mock_probe):
@@ -1843,6 +2061,92 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         # repair it (the fixer was intentionally removed; the real remedy is
         # rerunning setup so hooks are regenerated and re-registered).
         self.assertNotIn("doctor --fix", freshness[0]["detail"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hook_check_warns_about_another_installs_hooks(self):
+        # GAP-1529: a config.toml copied from another account kept that
+        # install's DefenseClaw hook entries next to ours; doctor said PASS.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            own_home = os.path.join(tmp, "home", ".defenseclaw")
+            cfg = self._make_cfg(own_home)
+            self._write_hook(own_home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            other_live = os.path.join(tmp, "other", ".dc", "hooks", "codex-hook.sh")
+            os.makedirs(os.path.dirname(other_live))
+            with open(other_live, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            other_gone = os.path.join(tmp, "gone", ".defenseclaw", "hooks", "codex-hook.sh")
+            third_party = os.path.join(tmp, "vendor", "hooks", "codex-hook.sh")
+            os.makedirs(os.path.dirname(third_party))
+            with open(third_party, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\necho vendor\n")
+            own = os.path.join(own_home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            lines = []
+            for script in (own, other_live, other_gone, third_party):
+                lines += [
+                    "[[hooks.PreToolUse]]",
+                    "[[hooks.PreToolUse.hooks]]",
+                    'type = "command"',
+                    f'command = "{script} --event PreToolUse --hook-contract codex-hooks-v4"',
+                    "timeout = 30",
+                ]
+            with open(config_toml, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            result = _DoctorResult()
+
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+            clean = _DoctorResult()
+            with open(config_toml, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines[:5]) + "\n")
+            cmd_doctor._check_codex_hooks(cfg, clean, platform_name="posix", config_path=config_toml)
+
+        rows = [c for c in result.checks if c["label"] == "Codex hooks of another install"]
+        self.assertEqual([c["status"] for c in rows], ["warn"], result.checks)
+        runs, fails = rows[0]["detail"].split("; ")
+        self.assertIn(other_live, runs)
+        self.assertIn("runs two hook chains", runs)
+        # GAP-1854: a deleted script fails on every event; it is no second chain.
+        self.assertIn(other_gone, fails)
+        self.assertIn("fail on every Codex event", fails)
+        self.assertNotIn(third_party, rows[0]["detail"])
+        self.assertNotIn(own + ",", rows[0]["detail"])
+        self.assertEqual([c for c in clean.checks if c["label"] == "Codex hooks of another install"], [])
+
+    def test_unreadable_foreign_codex_hook_script_counts_as_broken(self):
+        # GAP-1854: another account's unreadable home raised PermissionError
+        # and the foreign entry was ignored.
+        from unittest import mock
+
+        from defenseclaw.commands import cmd_doctor
+
+        path = "/Users/other/.defenseclaw/hooks/codex-hook.sh"
+        with mock.patch("builtins.open", side_effect=PermissionError(13, "denied")):
+            self.assertEqual(cmd_doctor._defenseclaw_hook_script_kind(path), "broken")
+            self.assertEqual(cmd_doctor._defenseclaw_hook_script_kind("/opt/vendor/hooks/codex-hook.sh"), "")
+
+    def test_codex_hook_check_fails_on_the_teardown_placeholder(self):
+        # GAP-1312: after uninstall the script is the disabled placeholder
+        # (disabledHookTombstone in Go) and config.toml no longer runs it.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            self._write_hook(
+                tmp,
+                "codex-hook.sh",
+                "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\n"
+                "# Codex connector was torn down. Existing host processes may\nexit 0\n",
+            )
+            result = _DoctorResult()
+
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix")
+
+        rows = [c for c in result.checks if c["label"].startswith("Codex hooks")]
+        self.assertEqual([c["status"] for c in rows], ["fail"], rows)
+        self.assertIn("torn down", rows[0]["detail"])
 
     def test_claude_freshness_checks_registered_hook_path(self):
         from defenseclaw.commands import cmd_doctor
@@ -2404,6 +2708,12 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         import http.server
         import threading
 
+        # The in-process server stands in for this account's gateway, so it
+        # is not reported as a foreign process holding the port.
+        holder = patch("defenseclaw.commands.cmd_doctor._gateway_port_holder", return_value="")
+        holder.start()
+        self.addCleanup(holder.stop)
+
         # Records every path + header set the server received, so a test can
         # prove the auth header was NOT replayed to the redirect target.
         self.requests: list[dict] = []
@@ -2629,6 +2939,23 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         cfg.guardrail = SimpleNamespace(mode=mode)
         return cfg
 
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_no_active_connector_skips_proxy_probe(self, mock_probe):
+        # GAP-2291: after the last connector is removed nothing needs the
+        # proxy, so doctor must not FAIL (and exit 1) on a closed port.
+        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
+
+        cfg = self._cfg([])
+        cfg.guardrail = SimpleNamespace(enabled=True, mode="observe", port=4000)
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.checks[0]["status"], "skip")
+        self.assertIn("no active connector", result.checks[0]["detail"])
+
     def test_all_hook_enforced_reports_closed(self):
         from defenseclaw.commands.cmd_doctor import (
             _guardrail_proxy_intentionally_closed,
@@ -2734,8 +3061,8 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        detail = _guardrail_proxy_intentionally_closed(self._cfg(["geminicli"]))
-        self.assertIn("hook-driven for geminicli", detail)
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["cursor"]))
+        self.assertIn("hook-driven for cursor", detail)
         self.assertIn("mode=observe", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
@@ -2785,6 +3112,175 @@ class DoctorFixHelpTextTests(unittest.TestCase):
             warn["detail"],
         )
         self.assertNotIn("doctor --fix", warn["detail"])
+
+
+class TestLegacySandboxDoctor(unittest.TestCase):
+    """The removed openshell-sandbox mode is reported with its cleanup command."""
+
+    def _cfg(self, data_dir: str, *, legacy: bool) -> Config:
+        cfg = Config(
+            data_dir=data_dir,
+            audit_db=os.path.join(data_dir, "audit.db"),
+            gateway=GatewayConfig(host="127.0.0.1"),
+            openshell=OpenShellConfig(mode="standalone" if legacy else ""),
+        )
+        cfg._source_config_version = 8
+        return cfg
+
+    def test_legacy_install_warns_with_cleanup_remediation(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=True), result)
+        self.assertEqual(result.warned, 1, result.checks)
+        row = result.checks[0]
+        self.assertEqual(row["check_id"], "doctor.sandbox.legacy-install")
+        self.assertIn("openshell.mode=standalone", row["detail"])
+        self.assertIn("defenseclaw sandbox legacy-cleanup", row["remediation"])
+
+    def test_leftover_data_dir_artifacts_are_evidence_too(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            with open(os.path.join(data_dir, "openclaw-ownership-backup.json"), "w") as fh:
+                fh.write("{}")
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("openclaw-ownership-backup.json", result.checks[0]["detail"])
+
+    def test_host_mode_install_emits_nothing(self):
+        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
+        self.assertEqual(result.checks, [])
+
+    def test_degraded_legacy_sandbox_health_warns_instead_of_failing(self):
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {
+                "state": "degraded",
+                "last_error": "legacy standalone install detected — run `defenseclaw sandbox legacy-cleanup`",
+            },
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=True)
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(cfg, result)
+        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
+        self.assertEqual(sandbox["status"], "warn")
+        self.assertIn("legacy-cleanup", sandbox["detail"])
+
+    def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
+        # openshell.enabled makes the gateway run the sandbox subsystem; its
+        # "running" must not read as a stale sidecar or drive restarts.
+        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
+
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {"state": "running", "details": {"ingress": "127.0.0.1:18971", "egress": "127.0.0.1:18972"}},
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.openshell.enabled = True
+            result = _DoctorResult()
+            with (
+                patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._http_probe",
+                    return_value=(200, json.dumps(health)),
+                ),
+            ):
+                _check_sidecar(cfg, result)
+                _status, detail = _gateway_service_health_assessment(cfg, health)
+        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
+        self.assertEqual(sandbox["status"], "pass", sandbox)
+        # Other subsystems of this fixture may drift; the sandbox does not.
+        self.assertNotIn("sandbox", detail)
+
+        # Sandboxes enabled but reported disabled is a stale sidecar, except
+        # where the gateway turns them off on purpose.
+        stale = dict(health, sandbox={"state": "disabled"})
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.openshell.enabled = True
+            with patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"):
+                status, detail = _gateway_service_health_assessment(cfg, stale)
+            self.assertEqual(status, "repairable", detail)
+            self.assertIn("sandbox is enabled in config but reports disabled", detail)
+            with patch("defenseclaw.commands.cmd_doctor.sys.platform", "win32"):
+                status, detail = _gateway_service_health_assessment(cfg, stale)
+            self.assertNotIn("sandbox", detail)
+
+    def test_degraded_legacy_sandbox_does_not_block_gateway_repairs(self):
+        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=True)
+            health = {
+                "api": {"state": "running"},
+                "gateway": {"state": "disabled"},
+                "watcher": {"state": "disabled"},
+                "telemetry": {"state": "running"},
+                "guardrail": {"state": "disabled"},
+                "sandbox": {"state": "degraded"},
+            }
+            status, detail = _gateway_service_health_assessment(cfg, health)
+        self.assertNotEqual(status, "operational", detail)
+        self.assertNotIn("sandbox", detail)
+
+
+@unittest.skipIf(os.name == "nt", "the POSIX repair command")
+class DoctorScannerRepairHintTests(unittest.TestCase):
+    """A failed skill-scanner check names the command that repairs it (manual test R2-44)."""
+
+    _CFG = SimpleNamespace(
+        scanners=SimpleNamespace(
+            skill_scanner=SimpleNamespace(binary="/opt/dc/.venv/bin/skill-scanner"),
+            mcp_scanner=SimpleNamespace(binary="mcp-scanner"),
+        )
+    )
+
+    def _run(self, side_effect):
+        result = _DoctorResult()
+        with (
+            patch("defenseclaw.commands.cmd_doctor.resolve_scanner_binary", side_effect=lambda b: b),
+            patch("defenseclaw.commands.cmd_doctor.subprocess.run", side_effect=side_effect),
+        ):
+            _check_scanners(self._CFG, result)
+        return result.checks[0]
+
+    def test_timeout_warns_to_retry_then_names_the_resolver(self):
+        import subprocess as sp
+
+        check = self._run(sp.TimeoutExpired(cmd="skill-scanner", timeout=30))
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("did not answer --version within 30 s", check["detail"])
+        self.assertIn("run `defenseclaw doctor` again", check["detail"])
+        self.assertIn("`bash defenseclaw-upgrade.sh --yes`", check["detail"])
+        self.assertIn("/docs/get-started/upgrade/", check["detail"])
+        self.assertNotIn("repair path", check["detail"])
+
+    def test_unstartable_launcher_names_the_resolver(self):
+        check = self._run(OSError("exec format error"))
+        self.assertEqual(check["status"], "fail")
+        self.assertIn("could not start: exec format error; repair the launcher with the release upgrade resolver",
+                      check["detail"])
 
 
 if __name__ == "__main__":

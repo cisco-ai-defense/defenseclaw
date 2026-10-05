@@ -667,7 +667,10 @@ func TestAllowUnsignedIsRestrictedBeforeImportAndArtifactValidation(t *testing.T
 			"-AllowUnsigned is restricted to exact disposable DefenseClaw certification scope",
 			"^DefenseClawCertGateway_([a-f0-9]{10})$",
 			"DefenseClawCertGuardian_$runID",
-			"'Cisco',\n        'Cisco Secure Client',\n        'DefenseClaw-Cert',\n        $runID",
+			// The certification roots are the profile vendor's DefenseClaw-Cert
+			// folders plus the run ID.
+			"\"$vendor\\DefenseClaw-Cert\")",
+			".CertificationInstallBase,\n        $runID",
 			".codex-defenseclaw-cert-$runID",
 		} {
 			if !strings.Contains(script, contract) {
@@ -1025,7 +1028,7 @@ func TestWindowsCertificationHarnessFixesAreFailClosedAndBounded(t *testing.T) {
 	}
 	fingerprint := windowsPowerShellFunction(t, harness, "Get-CodexManagedHookFingerprint")
 	for _, contract := range []string{
-		"Microsoft\\.PowerShell\\.Management\\\\Start-Process",
+		"Get-AwaitedHookBridge $decoded",
 		"$actualHook",
 		"$expectedCanonicalHook",
 		"[StringComparison]::OrdinalIgnoreCase",

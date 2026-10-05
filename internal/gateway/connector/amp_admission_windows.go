@@ -36,7 +36,10 @@ func validateAmpWindowsSetupAdmission(opts SetupOpts) error {
 	if err != nil {
 		return fmt.Errorf("Amp executable admission: %w", err)
 	}
-	if opts.AgentVersion != authority.rawVersion {
+	// Amp's version line ends with a relative release age ("3d ago") that
+	// changes without a binary change; the executable digest below still
+	// binds the exact build.
+	if stableAmpVersion(opts.AgentVersion) != stableAmpVersion(authority.rawVersion) {
 		return errors.New("Amp executable admission: selected raw version does not match protected evidence")
 	}
 	if opts.HookContractID != "" && opts.HookContractID != authority.contractID {
@@ -62,7 +65,7 @@ func validateAmpWindowsLockPublication(dataDir string, entry HookContractLockEnt
 	if err != nil {
 		return fmt.Errorf("Amp contract publication: %w", err)
 	}
-	if entry.RawAgentVersion != authority.rawVersion ||
+	if stableAmpVersion(entry.RawAgentVersion) != stableAmpVersion(authority.rawVersion) ||
 		entry.NormalizedAgentVersion != authority.normalizedVersion ||
 		entry.ContractID != authority.contractID ||
 		entry.CompatibilityStatus != HookCompatibilityKnown ||
@@ -139,4 +142,8 @@ func validateAmpExecutableEvidence(selected string, authority ampExecutableAutho
 		return errors.New("selected executable digest does not match protected evidence")
 	}
 	return nil
+}
+
+func stableAmpVersion(raw string) string {
+	return stableRawAgentVersionForContract(HookContractLockEntry{Connector: "amp", RawAgentVersion: raw})
 }

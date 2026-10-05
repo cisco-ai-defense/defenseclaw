@@ -83,7 +83,7 @@ type linuxSource struct {
 	// credentialRoots are the directories fanotify marks. Marking a whole
 	// mount would deliver every open on the system, which on a build host is
 	// millions of events a minute for no gain.
-	credentialRoots []string
+	credentialRoots []credentialRoot
 }
 
 // NewSource returns the Linux Plane C source.
@@ -91,25 +91,85 @@ func NewSource(homeDirs []string) Source {
 	return &linuxSource{buffer: NewBuffer(), credentialRoots: credentialRoots(homeDirs)}
 }
 
+// credentialRoot is one location fanotify marks. A root below a user's home
+// sits in a path that user controls, so it is opened with
+// openHomeCredentialRoot; a system root is root-owned and marked by path.
+type credentialRoot struct {
+	// home is the enrolled home the root belongs to; empty for system roots.
+	home string
+	path string
+}
+
+// homeCredentialSuffixes are the home-relative directories worth watching.
+var homeCredentialSuffixes = []string{
+	".aws", ".ssh", ".config/gcloud", ".kube", ".docker",
+	".claude", ".codex", ".cursor", ".openclaw",
+}
+
 // credentialRoots are the directories worth watching for credential access and
 // agent-config persistence. Chosen narrowly on purpose: fanotify has no path
 // filter, so every additional root is delivered events the classifier then has
 // to discard.
-func credentialRoots(homeDirs []string) []string {
-	roots := make([]string, 0, len(homeDirs)*6+2)
+func credentialRoots(homeDirs []string) []credentialRoot {
+	roots := make([]credentialRoot, 0, len(homeDirs)*len(homeCredentialSuffixes)+2)
 	for _, home := range homeDirs {
 		home = strings.TrimSpace(home)
 		if home == "" {
 			continue
 		}
-		for _, suffix := range []string{
-			".aws", ".ssh", ".config/gcloud", ".kube", ".docker",
-			".claude", ".codex", ".cursor", ".openclaw",
-		} {
-			roots = append(roots, filepath.Join(home, suffix))
+		home = filepath.Clean(home)
+		for _, suffix := range homeCredentialSuffixes {
+			roots = append(roots, credentialRoot{home: home, path: filepath.Join(home, suffix)})
 		}
 	}
-	return append(roots, "/etc/shadow", "/etc/sudoers.d")
+	return append(roots, credentialRoot{path: "/etc/shadow"}, credentialRoot{path: "/etc/sudoers.d"})
+}
+
+// openHomeCredentialRoot opens a credential directory below a user's home so
+// it can be marked through the descriptor.
+//
+// The home's owner controls every path component below the home. Marking by
+// path follows symbolic links, so ~/.kube -> /etc would have the privileged
+// helper watch a system directory for every process on the host and flood
+// the shared event buffer, evicting other users' events. A link that stays
+// inside the same home (a dotfile manager's layout) is still honored: the
+// root is resolved once, must land strictly inside the resolved home, and is
+// then opened one component at a time with O_NOFOLLOW, so a link swapped in
+// after the check fails the open instead of being followed. The caller owns
+// the returned descriptor.
+func openHomeCredentialRoot(home, root string) (int, error) {
+	resolvedHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return -1, fmt.Errorf("resolve home %s: %w", home, err)
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return -1, fmt.Errorf("resolve credential root %s: %w", root, err)
+	}
+	rel, err := filepath.Rel(resolvedHome, resolved)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) {
+		return -1, fmt.Errorf("credential root %s resolves to %s, outside its home %s", root, resolved, resolvedHome)
+	}
+	fd, err := unix.Open(resolvedHome, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open home %s: %w", resolvedHome, err)
+	}
+	components := strings.Split(rel, "/")
+	for i, component := range components {
+		flags := unix.O_PATH | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+		if i == len(components)-1 {
+			// fanotify_mark resolves a descriptor with fdget, which refuses
+			// O_PATH descriptors, so the last component is really opened.
+			flags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+		}
+		next, openErr := unix.Openat(fd, component, flags, 0)
+		_ = unix.Close(fd)
+		if openErr != nil {
+			return -1, fmt.Errorf("open credential root %s at %q: %w", root, component, openErr)
+		}
+		fd = next
+	}
+	return fd, nil
 }
 
 func (s *linuxSource) Events() <-chan Event { return s.buffer.Events() }
@@ -371,17 +431,30 @@ func (s *linuxSource) startFanotify() error {
 	if err != nil {
 		return fmt.Errorf("fanotify_init: %w", err)
 	}
+	// FAN_OPEN and the modify/close-write pair cover the read and write
+	// halves. FAN_EVENT_ON_CHILD extends a directory mark to its entries,
+	// which is what makes marking ~/.aws catch ~/.aws/credentials.
+	const mask = unix.FAN_OPEN | unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_EVENT_ON_CHILD
 	marked := 0
 	for _, root := range s.credentialRoots {
-		if _, statErr := os.Stat(root); statErr != nil {
+		if root.home != "" {
+			// A root in a user's home is marked through a descriptor that
+			// was opened without following links.
+			rootFD, openErr := openHomeCredentialRoot(root.home, root.path)
+			if openErr != nil {
+				continue
+			}
+			markErr := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_ONLYDIR, mask, rootFD, "")
+			_ = unix.Close(rootFD)
+			if markErr == nil {
+				marked++
+			}
 			continue
 		}
-		// FAN_OPEN and the modify/close-write pair cover the read and write
-		// halves. FAN_EVENT_ON_CHILD extends a directory mark to its entries,
-		// which is what makes marking ~/.aws catch ~/.aws/credentials.
-		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD,
-			unix.FAN_OPEN|unix.FAN_MODIFY|unix.FAN_CLOSE_WRITE|unix.FAN_EVENT_ON_CHILD,
-			unix.AT_FDCWD, root); err != nil {
+		if _, statErr := os.Stat(root.path); statErr != nil {
+			continue
+		}
+		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, mask, unix.AT_FDCWD, root.path); err != nil {
 			continue
 		}
 		marked++

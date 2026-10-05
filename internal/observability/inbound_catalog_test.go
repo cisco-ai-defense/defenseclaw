@@ -604,7 +604,7 @@ func TestInboundCatalogGeneratedMetricNormalizerParity(t *testing.T) {
 			normalizer: "genai-provider-label-v1",
 			cases: map[string]string{
 				"": "unknown", "Anthropic": "anthropic", "claudecode": "anthropic", "codex": "openai",
-				"gemini-cli": "google", "openai-with-random-suffix": "openai", "attacker-provider": "other",
+				"gemini-2.5-pro": "google", "openai-with-random-suffix": "openai", "attacker-provider": "other",
 			},
 		},
 		{

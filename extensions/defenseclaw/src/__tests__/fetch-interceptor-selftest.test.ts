@@ -17,6 +17,7 @@ import {
   createFetchInterceptor,
   INTERCEPTION_PROBE_HEADER,
 } from "../fetch-interceptor.js";
+import { isOpenClawClientProcess, logInfo } from "../log.js";
 
 const guardrailPort = 14173;
 
@@ -65,6 +66,50 @@ describe("OpenClaw interception self-test", () => {
     expect(layers.undiciDispatcher).toBe(true);
     const banner = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
     expect(banner.some((line) => line.includes("interceptor layers") && line.includes("undici=true"))).toBe(true);
+  });
+
+  it("prints a repeated self-test result once (GAP-1454)", async () => {
+    vi.mocked(console.log).mockClear();
+    await interceptor.runSelfTest();
+    await interceptor.runSelfTest();
+    const lines = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
+    expect(lines.filter((line) => line.includes("interception self-test ok=true"))).toHaveLength(1);
+  });
+
+  it("keeps routine lines out of an interactive terminal unless verbose (GAP-1454)", () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    try {
+      vi.stubEnv("DEFENSECLAW_DEBUG", "");
+      vi.mocked(console.log).mockClear();
+      logInfo("[defenseclaw] routine");
+      expect(console.log).not.toHaveBeenCalled();
+      vi.stubEnv("DEFENSECLAW_DEBUG", "1");
+      logInfo("[defenseclaw] routine");
+      expect(console.log).toHaveBeenCalledWith("[defenseclaw] routine");
+    } finally {
+      vi.unstubAllEnvs();
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else delete (process.stdout as { isTTY?: boolean }).isTTY;
+    }
+  });
+
+  it("keeps routine lines out of OpenClaw CLI commands even when piped (GAP-1737)", () => {
+    expect(isOpenClawClientProcess("openclaw")).toBe(true);
+    expect(isOpenClawClientProcess("openclaw-tui")).toBe(true);
+    expect(isOpenClawClientProcess("openclaw-gateway")).toBe(false);
+    expect(isOpenClawClientProcess("node")).toBe(false);
+    const title = process.title;
+    try {
+      vi.stubEnv("DEFENSECLAW_DEBUG", "");
+      process.title = "openclaw";
+      vi.mocked(console.log).mockClear();
+      logInfo("[defenseclaw] routine");
+      expect(console.log).not.toHaveBeenCalled();
+    } finally {
+      process.title = title;
+      vi.unstubAllEnvs();
+    }
   });
 
   it("does not emit the probe header toward a real provider host", async () => {

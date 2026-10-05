@@ -34,6 +34,9 @@ type mcpRuntimeProbe struct {
 	Transport  string
 	Surface    string
 	Matched    bool
+	// WorkspaceDir is the agent's working directory from the hook, used to
+	// resolve a name-only probe to the connector's configured server.
+	WorkspaceDir string
 }
 
 type skillRuntimeProbe struct {
@@ -76,11 +79,13 @@ const (
 
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
+	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, req.ToolInput)
+	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -228,6 +233,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
+	probe = a.resolveMCPProbeEndpoint(connector, probe)
 	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
@@ -269,6 +275,30 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	}
 	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
 	return decision, true
+}
+
+// resolveMCPProbeEndpoint fills a name-only hook probe (mcp__<server>__<tool>)
+// with the URL, command and transport the connector has configured for that
+// server. Registry-promoted rules are pinned to URL and transport, so without
+// this an approved server never matched at runtime and registry-required
+// blocked every MCP tool call (GAP-2488). A server the connector does not
+// list keeps the bare name and matches only name-only rules.
+func (a *APIServer) resolveMCPProbeEndpoint(connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+	if a == nil || a.scannerCfg == nil || !a.scannerCfg.AssetPolicy.Enabled {
+		return probe
+	}
+	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
+		return probe
+	}
+	entry, ok := a.scannerCfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	if !ok {
+		return probe
+	}
+	probe.URL = strings.TrimSpace(entry.URL)
+	probe.Command = strings.TrimSpace(entry.Command)
+	probe.Args = entry.Args
+	probe.Transport = strings.TrimSpace(entry.Transport)
+	return probe
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
@@ -515,6 +545,28 @@ func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDec
 	default:
 		return true
 	}
+}
+
+// hookResponseRuleIDs are the rule IDs a hook response carries: the hook
+// rules' own IDs plus the asset_policy.<type>.<source> ID of every blocking
+// asset decision, as the asset-policy audit row records them. The tool span
+// takes its defenseclaw.guardrail.rule_id from the first ID, so the asset
+// rule leads when asset policy, not a hook rule, raised the block
+// (GAP-2489).
+func hookResponseRuleIDs(hookRuleIDs []string, rawActionBeforeAssets string, assetDecisions []runtimeAssetDecision) []string {
+	var assetRuleIDs []string
+	for _, asset := range assetDecisions {
+		if asset.decision.RawAction == "block" {
+			assetRuleIDs = append(assetRuleIDs, assetPolicyDecisionRuleID(asset.decision, asset.targetType))
+		}
+	}
+	if len(assetRuleIDs) == 0 {
+		return hookRuleIDs
+	}
+	if normalizeCodexAction(rawActionBeforeAssets) == "block" {
+		return mergeBoundedRuleIDs(8, hookRuleIDs, assetRuleIDs)
+	}
+	return mergeBoundedRuleIDs(8, assetRuleIDs, hookRuleIDs)
 }
 
 // dispatchAssetPolicyNotification fires an OS toast for an asset
@@ -1277,7 +1329,10 @@ func assetPolicyResponseReason(decision config.AssetPolicyDecision) string {
 		parts = append(parts, "connector="+decision.Connector)
 	}
 	if decision.RegistryStatus != "" {
-		parts = append(parts, "registry_status="+assetPolicyRegistryStatusForReason(decision.RegistryStatus))
+		// The decision vocabulary as is ("unregistered"), as the asset-policy
+		// audit row and finding.observed record it, so one SIEM filter on
+		// registry_status finds every event of the evaluation (GAP-2516).
+		parts = append(parts, "registry_status="+decision.RegistryStatus)
 	}
 	parts = append(parts, fmt.Sprintf("registry_configured=%t", decision.RegistryConfigured))
 	if decision.RuntimeSurface != "" {
@@ -1305,15 +1360,6 @@ func assetPolicyReasonCode(source string) string {
 	}
 }
 
-func assetPolicyRegistryStatusForReason(status string) string {
-	switch strings.TrimSpace(status) {
-	case "unregistered":
-		return "not-registered"
-	default:
-		return status
-	}
-}
-
 func runtimeAssetCanEnforce(event string) bool {
 	// Claude Code / Codex use canonical PascalCase event names. Prompt
 	// submission/expansion are native pre-load selection surfaces, while
@@ -1322,7 +1368,7 @@ func runtimeAssetCanEnforce(event string) bool {
 	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest":
 		return true
 	}
-	// Generic hook-only connectors (hermes, cursor, devin, geminicli,
+	// Generic hook-only connectors (hermes, cursor, devin,
 	// copilot, openhands) use varied case/spacing for the same semantic events
 	// (preToolUse, pre_tool_call, beforeMCPExecution, beforeShellExecution,
 	// pre_run_command, premcptooluse, ...). Reusing the canonical

@@ -352,6 +352,26 @@ func TestDeliveryFailureAndRecoveryPersistLocallyWithoutFanout(t *testing.T) {
 	if got := fixture.optionalAdapter.deliveries.Load(); got != 0 {
 		t.Fatalf("local-only transition recursively exported %d records", got)
 	}
+	var details []string
+	detailRows, err := database.Query(`SELECT COALESCE(details,'') FROM audit_events
+		WHERE action = ? ORDER BY rowid`, sidecarDeliveryHealthAction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detailRows.Close()
+	for detailRows.Next() {
+		var detail string
+		if err := detailRows.Scan(&detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if !reflect.DeepEqual(details, []string{
+		"must-not-export/logs failed: projection_invalid",
+		"must-not-export/logs restored",
+	}) {
+		t.Fatalf("details=%q", details)
+	}
 }
 
 func newDestinationTestRuntimeFixture(

@@ -496,6 +496,58 @@ func TestAuditDBWindowsSecuresTrustedSidecarThroughPinnedHandle(t *testing.T) {
 	}
 }
 
+func TestAuditDBWindowsDiscardsAReadersIdleSidecarsItCannotHarden(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "protected", "audit.db")
+	db, err := openHardenedAuditSQLite(path, auditDBPathHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS probe(a)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// A read-only reader of the stopped gateway's database leaves both sidecars.
+	reader, err := openAuditReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err := reader.QueryRow(`SELECT count(*) FROM probe`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); err != nil {
+			t.Fatalf("reader left no %s sidecar: %v", suffix, err)
+		}
+	}
+	denied := auditDBPathHooks{reopenSidecarForHardening: func(string, *os.File) (*os.File, error) {
+		return nil, windows.ERROR_ACCESS_DENIED
+	}}
+	if err := secureAuditDBSQLiteSidecars(path, denied); err != nil {
+		t.Fatalf("idle sidecars the gateway cannot harden: %v", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
+			t.Fatalf("idle %s sidecar was kept: %v", suffix, err)
+		}
+	}
+
+	if err := os.WriteFile(path+"-wal", []byte("retained pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureAuditDBSQLiteSidecars(path, denied); err == nil {
+		t.Fatal("a -wal with pages the gateway cannot harden was accepted")
+	}
+	if _, err := os.Stat(path + "-wal"); err != nil {
+		t.Fatalf("a -wal with pages was removed: %v", err)
+	}
+}
+
 func TestAuditDBWindowsRejectsLeafReparsePoint(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target.db")

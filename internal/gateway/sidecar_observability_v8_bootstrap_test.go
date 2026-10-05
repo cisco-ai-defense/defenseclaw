@@ -304,6 +304,9 @@ func TestManagedReloadCandidateUsesEffectiveConfigBeforeEquivalence(t *testing.T
 }
 
 func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	// This component fixture runs as the test user, not as a pinned Windows
 	// virtual service account. Keep the process identity honest while the
@@ -659,7 +662,7 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 			child = span
 		}
 	}
-	if root == nil || child == nil || root.Name != "invoke_agent diagnostic" || child.Name != "chat gpt-4o-mini" ||
+	if root == nil || child == nil || root.Name != "invoke_agent diagnostic" || child.Name != "chat defenseclaw-diagnostic" ||
 		fmt.Sprintf("%x", root.TraceId) != result.TraceID ||
 		!bytes.Equal(root.TraceId, child.TraceId) || !bytes.Equal(root.SpanId, child.ParentSpanId) {
 		t.Fatalf("canonical root/child pair root=%+v child=%+v result=%+v", root, child, result)
@@ -989,7 +992,7 @@ func TestSidecarBootstrapObservabilityV8RejectsV7WithoutMutation(t *testing.T) {
 }
 
 func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
-	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil, nil); err == nil || sidecar != nil {
+	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil); err == nil || sidecar != nil {
 		t.Fatalf("v7 constructor = sidecar:%v error:%v", sidecar, err)
 	}
 }
@@ -1019,7 +1022,7 @@ func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 			candidate.DeploymentMode = test.failedNewMode
 			candidate.Gateway.DeviceKeyFile = badKey
 
-			sidecar, err := NewSidecar(candidate, nil, nil, nil)
+			sidecar, err := NewSidecar(candidate, nil, nil)
 			if err == nil || sidecar != nil {
 				t.Fatalf("failed constructor = sidecar:%v error:%v", sidecar, err)
 			}
@@ -1097,6 +1100,9 @@ func TestSidecarOwnedObservabilityV8ReloadsGenerationAndShutsDownBeforeStore(t *
 }
 
 func TestSidecarRawReloadResolvesManagedModeAndDefaultEndpoint(t *testing.T) {
+	if managed.IsStandaloneProfile(managed.DefaultEnterpriseProfile(runtime.GOOS)) {
+		t.Skip("managed hosts on this OS are standalone; the Secure Client AI Defense destination does not exist here")
+	}
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
 		t.Context(), fixture.configPath, fixture.raw,
@@ -1966,4 +1972,44 @@ func sidecarV8BootstrapCode(err error) sidecarObservabilityV8BootstrapErrorCode 
 		return target.Code()
 	}
 	return ""
+}
+
+func TestObservabilityClawModeOmittedForSeveralConnectors(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Claw.Mode = "claudecode"
+	cfg.Guardrail.Connector = "claudecode"
+	if got := observabilityClawMode(cfg); got != "claudecode" {
+		t.Fatalf("single connector claw mode = %q, want claudecode", got)
+	}
+	cfg.Claw.Mode = "antigravity"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"antigravity": {}, "claudecode": {}}
+	if got := observabilityClawMode(cfg); got != "" {
+		t.Fatalf("multi-connector claw mode = %q, want it omitted", got)
+	}
+}
+
+// GAP-2100: `defenseclaw-gateway stop` waits 10s for a graceful exit before it
+// signals; the normal close in Run and its deferred retry must both fit in
+// that window when a telemetry collector is down or refuses exports.
+func TestObservabilityV8ShutdownFlushFitsTheGracefulStopWindow(t *testing.T) {
+	const gracefulStopWindow = 10 * time.Second
+	if 2*sidecarObservabilityV8ShutdownTimeout >= gracefulStopWindow {
+		t.Fatalf("two shutdown flushes of %s do not fit in the %s stop window", sidecarObservabilityV8ShutdownTimeout, gracefulStopWindow)
+	}
+}
+
+// GAP-2166: a shutdown flush timeout is a warning that names the bound and the
+// next step, not a "bootstrap failed" error.
+func TestObservabilityV8ShutdownFlushWarningWording(t *testing.T) {
+	got := observabilityV8ShutdownFlushWarning()
+	for _, want := range []string{"WARNING", "did not finish within 4s", "setup observability test", "stopped normally"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning %q is missing %q", got, want)
+		}
+	}
+	for _, bad := range []string{"Error:", "bootstrap", "shutdown_degraded"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("warning %q must not contain %q", got, bad)
+		}
+	}
 }

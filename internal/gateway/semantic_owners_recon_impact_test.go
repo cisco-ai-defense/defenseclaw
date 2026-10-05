@@ -183,6 +183,19 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
+			// GAP-1197: a critical top-level directory itself.
+			name:   "recursive delete kernel pseudo-filesystem",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /proc"),
+			want:   true,
+		},
+		{
+			// GAP-1197: the old docs trigger, a disposable child of /var.
+			name:   "recursive delete var child is bounded",
+			ruleID: "CMD-RM-RF",
+			input:  reconImpactCommand("rm -rf /var/tmp/defenseclaw-demo-empty"),
+		},
+		{
 			name:   "recursive delete system child is bounded",
 			ruleID: "CMD-RM-RF",
 			input:  reconImpactCommand("rm -rf /etc/example-app"),

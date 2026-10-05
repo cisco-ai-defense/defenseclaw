@@ -33,6 +33,7 @@ defines the supported path for each connector.
 | Configuration loading and effective defaults | [`../internal/config/`](../internal/config/) |
 | Admission and enforcement | [`../internal/policy/`](../internal/policy/), [`../internal/enforce/`](../internal/enforce/), [`../policies/`](../policies/) |
 | Scanners and runtime guardrail | [`../internal/scanner/`](../internal/scanner/), [`../internal/guardrail/`](../internal/guardrail/) |
+| OpenShell sandbox integration (see [`SANDBOX.md`](SANDBOX.md)) | [`../internal/openshell/`](../internal/openshell/), [`../internal/sandboxauth/`](../internal/sandboxauth/), [`../policies/sandbox/`](../policies/sandbox/) |
 | Audit store and action contract | [`../internal/audit/`](../internal/audit/) |
 | Inventory and discovery persistence | [`../internal/inventory/`](../internal/inventory/) |
 | Canonical telemetry and destinations | [`../internal/observability/`](../internal/observability/), [`../internal/telemetry/`](../internal/telemetry/) |

@@ -41,7 +41,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache, lru_cache
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -63,6 +63,7 @@ from yaml.nodes import MappingNode
 from defenseclaw.observability.detector_catalog_v1 import (
     DETECTOR_GROUPS as CATALOG_DETECTOR_GROUPS,
 )
+from defenseclaw.openshell_validation import openshell_error
 
 MAX_SOURCE_BYTES = 4 * 1024 * 1024
 MAX_YAML_NODES = 65_536
@@ -280,6 +281,23 @@ _SECRET_FIELD_NAMES = frozenset(
 _HEADER_MAP_FIELD_NAMES = frozenset(("headers", "extra_headers"))
 
 
+def yaml_error_mark(exc: BaseException) -> Any:
+    """The source position a YAML error belongs to.
+
+    When the parser only notices the problem at the end of the stream (an
+    unclosed ``[`` or quote on the last line), the problem mark is the line
+    after the file; the context mark is the line that opened the construct,
+    which is the line to fix (GAP-1430).
+    """
+
+    problem_mark = getattr(exc, "problem_mark", None)
+    context_mark = getattr(exc, "context_mark", None)
+    problem = str(getattr(exc, "problem", "") or "")
+    if context_mark is not None and ("stream end" in problem or "end of stream" in problem):
+        return context_mark
+    return problem_mark or context_mark
+
+
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
@@ -380,6 +398,28 @@ def _construct_text_scalar(loader: _StrictLoader, node: Any) -> str:
 _StrictLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_text_scalar)
 _StrictLoader.add_constructor("tag:yaml.org,2002:binary", _construct_text_scalar)
 
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+
+
+class _V8SourceLoader(_StrictLoader):
+    """_StrictLoader that reads booleans as the gateway does.
+
+    PyYAML resolves YAML 1.1, where ``yes``/``no``/``on``/``off`` are
+    booleans too. Go's yaml.v3 uses the YAML 1.2 core schema and reads them
+    as strings, so the v8 schema refuses ``yolo: no`` in the gateway; resolve
+    only the core-schema spellings here so validation agrees. (The v7
+    upgrade converter keeps _StrictLoader.)
+    """
+
+
+_V8SourceLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+    for first, resolvers in _StrictLoader.yaml_implicit_resolvers.items()
+}
+_V8SourceLoader.add_implicit_resolver(
+    _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
 
 def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> ValidatedV8Config:
     """Parse and validate one exact-v8 source without reading secrets or network."""
@@ -463,7 +503,7 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
             raise V8ConfigError(source_name, "$", "utf-8", "save the configuration as UTF-8") from exc
         _preflight_yaml_structure(text, source_name)
         try:
-            document = yaml.load(text, Loader=_StrictLoader)
+            document = yaml.load(text, Loader=_V8SourceLoader)
         except (RecursionError, OverflowError):
             raise V8ConfigError(
                 source_name,
@@ -591,7 +631,7 @@ def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bo
     except V8ConfigError:
         raise
     except (yaml.YAMLError, RecursionError, OverflowError) as exc:
-        mark = getattr(exc, "problem_mark", None)
+        mark = yaml_error_mark(exc)
         path = f"$ (line {mark.line + 1}, column {mark.column + 1})" if mark is not None else "$"
         raise V8ConfigError(
             source_name,
@@ -672,10 +712,60 @@ def _validate_utf8_text(value: str, source_name: str, path: str) -> None:
         ) from None
 
 
+@cache
+def _go_schema_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile a schema ``pattern`` with Go RE2's meaning of ``$``.
+
+    Outside a character class, RE2's ``$`` matches only at the end of the
+    text; Python's also matches before a final newline, so ``"codex\\n"``
+    would satisfy ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` here and fail the
+    gateway's schema. Such a ``$`` becomes ``\\Z``.
+    """
+
+    out: list[str] = []
+    i, n, in_class = 0, len(pattern), False
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            out.append(pattern[i : i + 2])
+            i += 2
+            continue
+        if in_class:
+            in_class = c != "]"
+        elif c == "[":
+            in_class = True
+            out.append(c)
+            i += 1
+            # A "]" right after "[" or "[^" is a member, not the end.
+            if pattern.startswith("^", i):
+                out.append("^")
+                i += 1
+            if pattern.startswith("]", i):
+                out.append("]")
+                i += 1
+            continue
+        elif c == "$":
+            out.append(r"\Z")
+            i += 1
+            continue
+        out.append(c)
+        i += 1
+    return re.compile("".join(out))
+
+
+def _go_pattern_keyword(validator: Any, pattern: str, instance: Any, schema: Any) -> Any:
+    """The ``pattern`` keyword with RE2 anchors (see _go_schema_pattern)."""
+
+    from jsonschema.exceptions import ValidationError
+
+    if validator.is_type(instance, "string") and _go_schema_pattern(pattern).search(instance) is None:
+        yield ValidationError(f"{instance!r} does not match {pattern!r}")
+
+
 @lru_cache(maxsize=1)
 def _schema_validator() -> Any:
     try:
-        from jsonschema import Draft202012Validator
+        from jsonschema import Draft202012Validator, validators
     except ImportError as exc:  # pragma: no cover - integration guard for minimal wheels
         raise RuntimeError("v8 config validation requires the existing jsonschema dependency") from exc
     packaged = resources.files("defenseclaw").joinpath("_data", "config", "v8", "defenseclaw-config.schema.json")
@@ -689,7 +779,8 @@ def _schema_validator() -> Any:
             schema = json.load(stream)
     Draft202012Validator.check_schema(schema)
     _assert_schema_parity(schema)
-    return Draft202012Validator(schema)
+    go_anchored = validators.extend(Draft202012Validator, {"pattern": _go_pattern_keyword})
+    return go_anchored(schema)
 
 
 def _assert_schema_parity(schema: dict[str, Any]) -> None:
@@ -791,7 +882,46 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
         "oneOf": "use exactly one supported v8 source shape",
         "type": "use the value type documented by the canonical v8 schema",
     }.get(keyword, "correct the field using the canonical v8 schema and reference")
-    raise V8ConfigError(source_name, path, keyword, action)
+    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+
+
+# An enum longer than this is left to the reference rather than listed.
+_MAX_LISTED_ENUM_VALUES = 16
+
+
+def _declared_action(keyword: str, error: Any) -> str:
+    """What the schema declares at a failed enum or bound, as Go's validator says it.
+
+    Only the schema's own values are named (the allowed values, the minimum
+    and maximum), never the rejected source value.
+    """
+
+    if keyword == "enum":
+        values = error.validator_value
+        if (
+            isinstance(values, list)
+            and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
+            and all(isinstance(value, str) for value in values)
+        ):
+            return "use one of " + ", ".join(values)
+        return ""
+    if keyword not in ("minimum", "maximum") or not isinstance(error.schema, Mapping):
+        return ""
+
+    def bound(key: str) -> str:
+        value = error.schema.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return ""
+        return str(value)
+
+    low, high = bound("minimum"), bound("maximum")
+    if low and high:
+        return f"use a number between {low} and {high}"
+    if low:
+        return f"use a number at or above {low}"
+    if high:
+        return f"use a number at or below {high}"
+    return ""
 
 
 def _json_path(parts: tuple[Any, ...]) -> str:
@@ -807,6 +937,7 @@ def _semantic_error(source_name: str, path: str, action: str) -> None:
 
 def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
     _validate_private_upstream_allowlist(document.get("guardrail") or {}, source_name)
+    _validate_openshell(document, source_name)
     observability = document.get("observability") or {}
     profiles = observability.get("redaction_profiles", {})
     _validate_profiles(profiles, source_name)
@@ -840,6 +971,14 @@ def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
                 )
             route_names.add(route["name"])
         _validate_destination(destination, path, source_name)
+
+
+def _validate_openshell(document: dict[str, Any], source_name: str) -> None:
+    """Mirror the Go openshell section validation (see openshell_validation)."""
+
+    error = openshell_error(document)
+    if error is not None:
+        _semantic_error(source_name, error[0], error[1])
 
 
 def _validate_private_upstream_allowlist(guardrail: dict[str, Any], source_name: str) -> None:
@@ -1398,7 +1537,7 @@ def _built_in_field_modes() -> dict[str, dict[str, str]]:
     }
 
 
-def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False) -> Any:
+def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False, in_asset_policy: bool = False) -> Any:
     if isinstance(value, dict):
         if in_headers and set(value) == {"env"} and isinstance(value["env"], str):
             return {"env": value["env"]}
@@ -1406,19 +1545,22 @@ def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False) -> 
         for key, child in value.items():
             key_text = str(key).lower()
             headers = in_headers or key_text in _HEADER_MAP_FIELD_NAMES
+            asset_policy = in_asset_policy or (parent_key == "" and key_text == "asset_policy")
             if headers and key_text not in _HEADER_MAP_FIELD_NAMES and isinstance(child, str):
                 result[key] = "[REDACTED]"
             elif parent_key == "webhooks" and key_text == "url" and isinstance(child, str):
                 result[key] = "[REDACTED]"
+            elif asset_policy and key_text == "url" and isinstance(child, str):
+                result[key] = _masked_rule_url(child)
             elif key_text in {"endpoint", "base_url", "url"} and isinstance(child, str):
                 result[key] = _masked_url(child)
             elif key_text in _SECRET_FIELD_NAMES and not key_text.endswith("_env"):
                 result[key] = "[REDACTED]" if child else child
             else:
-                result[key] = _masked_copy(child, key_text, headers)
+                result[key] = _masked_copy(child, key_text, headers, asset_policy)
         return result
     if isinstance(value, list):
-        return [_masked_copy(child, parent_key, in_headers) for child in value]
+        return [_masked_copy(child, parent_key, in_headers, in_asset_policy) for child in value]
     return copy.deepcopy(value)
 
 
@@ -1435,6 +1577,32 @@ def _resource_value_has_inline_credentials(value: str) -> bool:
             return False
         authority = re.split(r"[/?#]", remainder, maxsplit=1)[0]
         return "@" in authority
+
+
+# A path segment this long made of token characters, with both letters and
+# digits, is treated as an embedded key (for example a per-user MCP server URL).
+_TOKEN_LIKE_PATH_SEGMENT = re.compile(r"(?=[^/]*[0-9])(?=[^/]*[A-Za-z])[A-Za-z0-9._~+=-]{24,}")
+
+
+def _masked_rule_url(value: str) -> str:
+    """Mask an asset_policy rule URL while keeping it readable.
+
+    The URL is the matching key of an allow/deny rule, so the scheme, host
+    and ordinary path stay visible. Userinfo, the query, the fragment and any
+    token-like path segment are still masked.
+    """
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "[REDACTED_URL]"
+    if parsed.username is not None or parsed.password is not None:
+        return "[REDACTED_URL]"
+    path = "/".join(
+        "[REDACTED]" if _TOKEN_LIKE_PATH_SEGMENT.fullmatch(segment) else segment for segment in parsed.path.split("/")
+    )
+    query = "[REDACTED]" if parsed.query else ""
+    fragment = "[REDACTED]" if parsed.fragment else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
 
 
 def _masked_url(value: str) -> str:

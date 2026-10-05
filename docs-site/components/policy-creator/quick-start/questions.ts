@@ -224,7 +224,7 @@ export const BLOCK_CARDS: BlockCard[] = [
     category: 'multi_step',
     title: 'Lethal trifecta (Willison)',
     description:
-      'Session combines untrusted ingress + sensitive data access + external egress. The three ingredients of indirect-prompt-injection exfil. Catches sessions where each step looked HIGH/MEDIUM individually but the combination is CRITICAL.',
+      'Session combines untrusted ingress + sensitive data access + external egress, the three ingredients of indirect-prompt-injection exfil. The two bundled correlator patterns are compiled into the gateway and always run, so this choice adds nothing to the export: they record a CRITICAL CORR-* finding when a session completes the sequence.',
     ruleIds: [],
     correlatorPatternIds: ['LETHAL-TRIFECTA', 'TRIFECTA-WITH-FINGERPRINT-MATCH'],
     cookbookHref: '/docs/policies#layer-5--session-correlator',
@@ -250,15 +250,6 @@ export interface AllowCard {
 
 export const ALLOW_CARDS: AllowCard[] = [
   {
-    id: 'cosmetic_shell',
-    title: 'Cosmetic shell commands (git status, ls, pwd)',
-    description:
-      'These are read-only, always safe, and the noisiest source of false-positive injection findings. Suppress them and your alert volume drops by ~60%.',
-    toolPattern: '^(?:shell|bash|sh)\\.execute$',
-    suppressFindings: ['JUDGE-INJ-COSMETIC', 'CMD-LS', 'CMD-PWD'],
-    cookbookHref: '/docs/policies/suppression-cookbook',
-  },
-  {
     id: 'first_party_plugins',
     title: 'First-party plugins (your org\u2019s code)',
     description:
@@ -271,15 +262,6 @@ export const ALLOW_CARDS: AllowCard[] = [
     description:
       'Sandboxed agents that legitimately fetch from internal APIs need their domains whitelisted in the firewall.',
     domains: ['*.corp.internal', '*.internal.example.com'],
-  },
-  {
-    id: 'dev_tools',
-    title: 'Known dev tools (Cursor / Claude Code / Codex)',
-    description:
-      'IDE assistants generate noisy traffic that\u2019s usually fine. Suppress the standard noise without disabling the rule packs.',
-    toolPattern: '^(?:cursor|claude-code|codex|aider)\\.[a-z_]+$',
-    suppressFindings: ['JUDGE-INJ-COSMETIC'],
-    cookbookHref: '/docs/policies/suppression-cookbook',
   },
 ];
 
@@ -308,7 +290,7 @@ export const RESPONSES = [
   },
   {
     id: 'ask',
-    title: 'Ask first (HILT) on medium+',
+    title: 'Ask first (HITL) on medium+',
     description:
       'Pause the agent at MEDIUM and HIGH and wait for a human to approve / deny. CRITICAL still hard-blocks.',
     block_threshold: 4 as const,

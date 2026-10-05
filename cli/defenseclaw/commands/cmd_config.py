@@ -16,13 +16,15 @@
 
 """defenseclaw config — inspect and validate configuration.
 
-Four subcommands:
+Five subcommands:
 
 * ``config validate`` — parse ``~/.defenseclaw/config.yaml`` and
   return a non-zero exit code on any error. Used both by the operator
   and by the auto-validate hook in ``main.py``.
-* ``config show`` — render the resolved config as JSON or YAML with
-  secrets masked.
+* ``config show`` — render the config as JSON or YAML with secrets
+  masked (observability resolved; every other section as written, with
+  defaults for the keys config.yaml leaves out).
+* ``config get`` — print one dotted key of that view.
 * ``config reference`` — render schema-generated v8 reference material.
 * ``config path`` — print the filesystem layout DefenseClaw uses.
 """
@@ -42,12 +44,13 @@ from defenseclaw import config as config_module
 from defenseclaw import ux
 from defenseclaw.config_inspect import (
     ConfigInspectError,
+    ConfigInspectTimeoutError,
     config_v8_reference,
     config_v8_schema,
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_validate_v8
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -70,7 +73,7 @@ _V8_VERSION_LINE = re.compile(
     rb"(?:8|['\"]8['\"])\s*(?:#.*)?$"
 )
 _MAX_VERSION_PROBE_BYTES = 4 * 1024 * 1024 + 1
-_V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "reference", "path"})
+_V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "path"})
 
 
 @click.group("config")
@@ -93,7 +96,7 @@ def config_cmd(ctx: click.Context) -> None:
     ):
         raise click.ClickException(
             "configuration schema v8 is required for config changes; "
-            "run 'defenseclaw upgrade' first"
+            "run 'defenseclaw migrate' first"
         )
 
 
@@ -147,23 +150,30 @@ def config_validate(quiet: bool) -> None:
     show_default=True,
     help="Output format.",
 )
-@click.option("--source", is_flag=True, help="Display the masked source configuration.")
-@click.option("--effective", is_flag=True, help="Display canonical resolved defaults and expansions.")
+@click.option("--source", is_flag=True, help="Show config.yaml as written (secrets masked), unresolved.")
+@click.option(
+    "--effective",
+    is_flag=True,
+    help="Show only the observability section, resolved with its defaults and expansions.",
+)
 @click.option(
     "--provenance",
     is_flag=True,
-    help="Include canonical Go provenance annotations for the effective configuration.",
+    help="With --effective, also show where each observability setting comes from.",
 )
 @click.option(
     "--section",
-    type=click.Choice(["observability"], case_sensitive=False),
+    metavar="NAME",
     default=None,
-    help="Limit output to one configuration section.",
+    help="Show one top-level section, for example asset_policy, guardrail or observability.",
 )
 @click.option(
     "--reveal",
     is_flag=True,
-    help="Include resolved secret VALUES (masked). Off by default; env-var names are always shown.",
+    # Hidden: it works only for pre-v8 configurations, and every 1.0
+    # config is v8 (secrets there are always masked).
+    hidden=True,
+    help="Pre-v8 configurations only: show partly masked secret values instead of '***'.",
 )
 @pass_ctx
 def config_show(
@@ -175,41 +185,18 @@ def config_show(
     section: str | None,
     reveal: bool,
 ) -> None:
-    """Render the resolved configuration (secrets masked)."""
-    if source and effective:
-        raise click.UsageError("--source and --effective are mutually exclusive")
-    if source and provenance:
-        raise click.UsageError("--provenance annotates the effective view and cannot be combined with --source")
+    """Show the configuration with secrets masked.
 
-    cfg_path = str(config_module.config_path())
-    v8 = _looks_like_v8_config(cfg_path)
-    if v8:
-        if reveal:
-            raise click.UsageError("--reveal is not supported for configuration v8 output")
-        if source:
-            try:
-                raw = Path(cfg_path).read_bytes()
-                data = load_validate_v8(raw, source_name=cfg_path).masked
-            except OSError as exc:
-                raise click.ClickException(f"cannot read configuration source: {exc}") from exc
-            except (V8ConfigError, RuntimeError) as exc:
-                raise click.ClickException(str(exc)) from exc
-        else:
-            try:
-                result = inspect_v8_config("effective", config_path=cfg_path)
-            except ConfigInspectError as exc:
-                raise click.ClickException(str(exc)) from exc
-            data = {"observability": result.effective or {}}
-    else:
-        if provenance:
-            raise click.UsageError("--provenance requires a configuration v8 effective plan")
-        # Preserve the pre-v8 view for installations that have not upgraded.
-        cfg = app.cfg if app.cfg is not None else config_module.load()
-        data = _config_to_masked_dict(cfg, reveal=reveal)
-
+    Every section is shown: the values config.yaml sets plus the defaults
+    that apply to the keys it leaves out, with the observability section
+    resolved the way the gateway runs it. --source shows only what
+    config.yaml sets. Read one value with 'defenseclaw config get KEY', for
+    example asset_policy.enabled.
+    """
+    data = _show_data(app, source=source, effective=effective, provenance=provenance, reveal=reveal)
     if section:
-        section_name = section.lower()
-        data = {section_name: data.get(section_name, {})}
+        view = "effective" if (effective or provenance) else ("source" if source else "full")
+        data = _select_section(data, section, view=view)
     if provenance:
         effective_observability = data.get("observability")
         if isinstance(effective_observability, dict):
@@ -222,6 +209,188 @@ def config_show(
             "basis": "canonical_go_effective_plan",
             "annotations": annotations,
         }
+    _emit(data, fmt)
+
+
+@config_cmd.command("get")
+@click.argument("key")
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["yaml", "json"], case_sensitive=False),
+    default="yaml",
+    show_default=True,
+    help="Format of a section or list value.",
+)
+@pass_ctx
+def config_get(app: AppContext, key: str, fmt: str) -> None:
+    """Print one configuration value (secrets masked).
+
+    KEY is a dotted path such as asset_policy.enabled or
+    asset_policy.mcp.registry_required. A key config.yaml leaves out prints
+    its default, with a note on stderr. Exits 1 when the key has no value
+    and no default, and 2 for an unknown section.
+    """
+    parts = [part for part in key.strip().split(".") if part]
+    if not parts:
+        raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
+    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    found, value = _lookup(view, parts)
+    if not found:
+        sections = _v8_sections() or set(view)
+        if parts[0] not in view and parts[0] not in sections:
+            available = ", ".join(sorted(sections)) or "none"
+            raise click.UsageError(f"no configuration section '{parts[0]}'. Sections: {available}")
+        if parts[0] not in view:
+            raise click.ClickException(
+                f"{key} is not set: config.yaml has no '{parts[0]}' section and it has no defaults."
+            )
+        raise click.ClickException(
+            f"{key} is not set and has no default. "
+            f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
+        )
+    if parts[0] != "observability" and _looks_like_v8_config(str(config_module.config_path())):
+        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+        if not _lookup(written, parts)[0]:
+            click.echo(f"(default: config.yaml does not set {key})", err=True)
+    if isinstance(value, (dict, list)) or fmt.lower() == "json":
+        _emit(value, fmt)
+    elif isinstance(value, bool):
+        click.echo("true" if value else "false")
+    elif value is None:
+        click.echo("null")
+    else:
+        click.echo(str(value))
+
+
+def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
+    """Follow a dotted path through dicts and list indexes."""
+    value = data
+    for part in parts:
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+            value = value[int(part)]
+        else:
+            return False, None
+    return True, value
+
+
+def _v8_schema() -> dict:
+    try:
+        from defenseclaw.observability.v8_config import _schema_validator
+
+        return _schema_validator().schema
+    except Exception:  # noqa: BLE001 - without the schema, show only what is written.
+        return {}
+
+
+def _v8_sections() -> set[str]:
+    return set((_v8_schema().get("properties") or {}).keys())
+
+
+def _v8_defaults(app: AppContext) -> dict:
+    """The masked values the CLI runs with, pruned to v8 schema keys.
+
+    They fill the keys config.yaml leaves out, so a fresh install shows
+    asset_policy.enabled and the rest (GAP-2171).
+    """
+    schema = _v8_schema()
+    if not schema:
+        return {}
+    try:
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+    except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
+        cfg = config_module.default_config()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    def _prune(value: object, node: object) -> object:
+        node = _resolve(node)
+        if not isinstance(value, dict) or not isinstance(node, dict) or "properties" not in node:
+            return value
+        props = node["properties"]
+        return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
+
+    return _prune(_config_to_masked_dict(cfg, reveal=False), schema)  # type: ignore[return-value]
+
+
+def _merge_defaults(written: dict, defaults: dict) -> dict:
+    merged = dict(defaults)
+    for key, value in written.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_defaults(value, merged[key])
+        else:
+            merged[key] = value
+    return merged
+
+
+def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bool, reveal: bool) -> dict:
+    """Return the masked view 'config show' and 'config get' print."""
+    if source and effective:
+        raise click.UsageError("--source and --effective are mutually exclusive")
+    if source and provenance:
+        raise click.UsageError("--provenance annotates the effective view and cannot be combined with --source")
+
+    cfg_path = str(config_module.config_path())
+    if not _looks_like_v8_config(cfg_path):
+        if provenance:
+            raise click.UsageError("--provenance requires a configuration v8 effective plan")
+        # Preserve the pre-v8 view for installations that have not upgraded.
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+        legacy = _config_to_masked_dict(cfg, reveal=reveal)
+        if effective:
+            return {"observability": legacy.get("observability")}
+        return legacy
+
+    if reveal:
+        raise click.UsageError(
+            "--reveal works only for pre-v8 configurations; this config is v8, which always masks secret values"
+        )
+    resolved_only = effective or provenance
+    masked: dict = {}
+    if not resolved_only:
+        try:
+            raw = Path(cfg_path).read_bytes()
+            masked = dict(load_validate_v8(raw, source_name=cfg_path).masked)
+        except OSError as exc:
+            raise click.ClickException(f"cannot read configuration source: {exc}") from exc
+        except (V8ConfigError, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        if source:
+            return masked
+        masked = _merge_defaults(masked, _v8_defaults(app))
+    try:
+        result = inspect_v8_config("effective", config_path=cfg_path)
+    except ConfigInspectError as exc:
+        raise click.ClickException(str(exc)) from exc
+    # Only observability has a canonical resolved plan; every other section is
+    # shown as written plus its defaults (GAP-2171).
+    masked["observability"] = result.effective or {}
+    return masked
+
+
+def _select_section(data: dict, section: str, *, view: str = "full") -> dict:
+    name = section.strip().lower()
+    if name in data:
+        return {name: data[name]}
+    if view == "effective":
+        raise click.UsageError("--effective shows only the observability section; drop --effective for other sections")
+    if name in _v8_sections():
+        if view == "source":
+            raise click.ClickException(
+                f"config.yaml does not set '{name}'. Drop --source to see the defaults that apply"
+            )
+        raise click.ClickException(f"section '{name}' is not set in config.yaml and has no defaults")
+    available = ", ".join(sorted(key for key in data if not key.startswith("_"))) or "none"
+    raise click.UsageError(f"no section '{name}' in this view. Sections: {available}")
+
+
+def _emit(data: object, fmt: str) -> None:
     if fmt.lower() == "json":
         click.echo(json.dumps(data, indent=2, sort_keys=True))
     else:
@@ -233,18 +402,54 @@ def config_show(
 # ---------------------------------------------------------------------------
 
 
+_ALL_FIELDS_COMMAND = "defenseclaw config reference --format json-schema"
+
+# Build provenance lines of the generated YAML reference; they name repository
+# files a user does not have and tell them not to edit what they may copy.
+_GENERATOR_HEADER_LINES = ("# GENERATED FILE. DO NOT EDIT.", "# Canonical schema:", "# Generator:")
+
+
+def _strip_generator_header(rendered: str) -> str:
+    lines = rendered.splitlines(keepends=True)
+    kept: list[str] = []
+    for line in lines[:12]:
+        if line.startswith(_GENERATOR_HEADER_LINES):
+            continue
+        if line.strip() == "#" and kept and kept[-1].strip() == "#":
+            continue
+        kept.append(line)
+    return "".join(kept + lines[12:])
+
+
 @config_cmd.command("reference")
-@click.argument("section", type=click.Choice(["observability"], case_sensitive=False))
+@click.argument(
+    "section",
+    type=click.Choice(["observability"], case_sensitive=False),
+    required=False,
+    default="observability",
+)
 @click.option(
     "--format",
     "fmt",
     type=click.Choice(["yaml", "json-schema", "markdown"], case_sensitive=False),
     default="yaml",
     show_default=True,
+    help="Output format.",
 )
-@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the reference to this file instead of stdout.",
+)
 def config_reference(section: str, fmt: str, output: Path | None) -> None:
-    """Render a version-matched generated configuration reference."""
+    """Print the configuration reference for this version.
+
+    The yaml and markdown formats cover SECTION, and observability is the
+    only section they have. --format json-schema prints the schema of every
+    section (guardrail, gateway, scanners and the rest) with each field's
+    allowed values.
+    """
 
     try:
         rendered = (
@@ -252,6 +457,8 @@ def config_reference(section: str, fmt: str, output: Path | None) -> None:
         )
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
+    if fmt.lower() == "yaml":
+        rendered = _strip_generator_header(rendered)
 
     if output is None:
         click.echo(rendered, nl=not rendered.endswith("\n"))
@@ -289,12 +496,17 @@ def config_path(app: AppContext) -> None:
         ("quarantine dir", cfg.quarantine_dir),
         ("dotenv", os.path.join(cfg.data_dir, ".env")),
         ("device key", cfg.gateway.device_key_file),
+    ]
+    # OpenClaw paths matter only when OpenClaw is set up on this host.
+    claw_rows = [
         ("OpenClaw config", cfg.claw.config_file),
         ("OpenClaw home", cfg.claw.home_dir),
     ]
-    label_width = max(len(lbl) for lbl, _ in rows)
+    if any(value and os.path.exists(os.path.expanduser(str(value))) for _, value in claw_rows):
+        rows.extend(claw_rows)
+    label_width = max(len(lbl) for lbl, _ in rows) + 2  # colon plus one space
     for label, value in rows:
-        exists = value and os.path.exists(str(value))
+        exists = value and os.path.exists(os.path.expanduser(str(value)))
         marker = ux._style("✓", fg="green", bold=True) if exists else ux.dim("·")
         padded = (label + ":").ljust(label_width)
         click.echo(f"  {marker}  {ux._style(padded, fg='bright_black', bold=True)}{value}")
@@ -315,6 +527,9 @@ class ValidationResult:
         self.parse_error: str = ""
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        # The canonical validator did not finish (a busy host); the file was
+        # not judged invalid (GAP-1621).
+        self.timed_out: bool = False
 
     @property
     def ok(self) -> bool:
@@ -338,14 +553,225 @@ def validate_config() -> ValidationResult:
         try:
             inspected = inspect_v8_config("validate", config_path=cfg_path)
         except ConfigInspectError as exc:
-            res.errors.append(str(exc))
+            res.timed_out = isinstance(exc, ConfigInspectTimeoutError)
+            res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res
         if inspected.valid is not True:
             res.errors.append("canonical v8 validator returned no validity decision")
         return res
 
-    res.errors.append("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
+    if config_module.config_is_empty(cfg_path):
+        res.errors.append(config_module.empty_config_message(cfg_path))
+        return res
+    res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
     return res
+
+
+def _v8_failure_detail(cfg_path: str, exc: ConfigInspectError) -> str:
+    """The canonical validator's refusal in plain words, with its line.
+
+    The Go decision stands; this only says it plainly (GAP-1430, GAP-1499):
+    the line, the field, the bad enum value and the allowed values, and the
+    command to run next, instead of the "candidate field=...; reason=[code]"
+    wire record.
+
+    The Go helper reports a failure outside its schema pass (the runtime
+    loader's checks, such as openshell.binary or an openshell.egress
+    pattern) only as "configuration could not be compiled safely" at "$".
+    For those, the Python mirror (``load_validate_v8``, value-free) says
+    which field it is and what it takes.
+    """
+
+    raw = _bounded_source(cfg_path)
+    if exc.field_path == "$":
+        if raw is None:
+            return str(exc)
+        syntax = _yaml_syntax_detail(raw)
+        if syntax:
+            return syntax
+        try:
+            load_validate_v8(raw, source_name=cfg_path)
+        except V8ConfigError as mirror:
+            return _plain_v8_issue(raw, mirror.path, f"[{mirror.keyword}] {mirror.corrective_action}")
+        except (OSError, RuntimeError, ValueError):
+            pass
+        return str(exc)
+    if exc.field_path and exc.reason:
+        return _plain_v8_issue(raw, exc.field_path, exc.reason)
+    return str(exc)
+
+
+def _bounded_source(cfg_path: str) -> bytes | None:
+    # Read no more than the canonical validator does: an over-limit source
+    # keeps its refusal, and is never read whole.
+    try:
+        with open(cfg_path, "rb") as stream:
+            raw = stream.read(MAX_SOURCE_BYTES + 1)
+    except OSError:
+        return None
+    return None if len(raw) > MAX_SOURCE_BYTES else raw
+
+
+def _yaml_syntax_detail(raw: bytes) -> str | None:
+    """Name the line and the parser's reason for a YAML syntax error."""
+
+    from defenseclaw.observability.v8_config import yaml_error_mark
+
+    try:
+        yaml.compose(raw)
+    except yaml.YAMLError as exc:
+        mark = yaml_error_mark(exc)
+        where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        return (
+            f"{where}invalid YAML ({problem}). "
+            "Fix that line in config.yaml, then run 'defenseclaw config validate' again"
+        )
+    except Exception:  # noqa: BLE001 - anything else is the mirror's to explain.
+        return None
+    return None
+
+
+_V8_PATH_TOKEN = re.compile(r'\.([^.\[\s]+)|\[(\d+)\]|\["((?:[^"\\]|\\.)*)"\]')
+_UNDECLARED_KEY_SUMMARY = "configuration violates the additionalProperties constraint"
+_V8_REASON = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENV_REFERENCE = re.compile(r"\$\{(?:env:)?([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _yaml_node_at(raw: bytes | None, field_path: str):
+    """The composed YAML node at a ``$.a.b[0]["k"]`` path, or None."""
+
+    if raw is None or not field_path.startswith("$"):
+        return None
+    try:
+        node = yaml.compose(raw)
+    except Exception:  # noqa: BLE001 - no position is better than a crash.
+        return None
+    rest = field_path[1:]
+    while rest and node is not None:
+        match = _V8_PATH_TOKEN.match(rest)
+        if match is None:
+            return None
+        rest = rest[match.end() :]
+        key, index, quoted = match.groups()
+        if index is not None:
+            if not isinstance(node, yaml.SequenceNode) or int(index) >= len(node.value):
+                return None
+            node = node.value[int(index)]
+            continue
+        name = key if key is not None else quoted.replace('\\"', '"')
+        if not isinstance(node, yaml.MappingNode):
+            return None
+        node = next(
+            (value for k, value in node.value if isinstance(k, yaml.ScalarNode) and k.value == name),
+            None,
+        )
+    return None if rest else node
+
+
+def _key_lines(raw: bytes | None, field_path: str) -> list[int]:
+    """The 1-based lines of every definition of the last key in ``field_path``."""
+
+    tokens = list(_V8_PATH_TOKEN.finditer(field_path, 1))
+    if not field_path.startswith("$") or not tokens or tokens[-1].end() != len(field_path):
+        return []
+    key, _index, quoted = tokens[-1].groups()
+    if key is None and quoted is None:
+        return []
+    name = key if key is not None else quoted.replace('\\"', '"')
+    parent = _yaml_node_at(raw, field_path[: tokens[-1].start()])
+    if not isinstance(parent, yaml.MappingNode):
+        return []
+    return [k.start_mark.line + 1 for k, _ in parent.value if isinstance(k, yaml.ScalarNode) and k.value == name]
+
+
+def _duplicate_key_line(raw: bytes | None, field_path: str) -> int:
+    """The 1-based line of the second definition of the key at ``field_path``, or 0."""
+
+    lines = _key_lines(raw, field_path)
+    return lines[1] if len(lines) > 1 else 0
+
+
+def _key_line(raw: bytes | None, field_path: str) -> int:
+    """The 1-based line of the key at ``field_path``, or 0.
+
+    An unknown section's value starts on its first child's line; the key is
+    the line to fix (GAP-2235).
+    """
+
+    lines = _key_lines(raw, field_path)
+    return lines[0] if lines else 0
+
+
+def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
+    path = field_path.split(" (line", 1)[0].strip()
+    field = path[2:] if path.startswith("$.") else ("config.yaml" if path == "$" else path)
+    node = _yaml_node_at(raw, path)
+    line = _key_line(raw, path) or (node.start_mark.line + 1 if node is not None else 0)
+    where = f"line {line}: " if line else ""
+    match = _V8_REASON.match(reason.strip())
+    code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+
+    if code == "secret_reference_unresolved" and "protected credential" not in text:
+        env = ""
+        if isinstance(node, yaml.MappingNode):
+            # setup writes the reference as a mapping, {env: NAME} (GAP-1442).
+            node = next(
+                (
+                    value
+                    for key, value in node.value
+                    if isinstance(key, yaml.ScalarNode) and key.value == "env" and isinstance(value, yaml.ScalarNode)
+                ),
+                None,
+            )
+        if isinstance(node, yaml.ScalarNode):
+            value = node.value.strip()
+            reference = _ENV_REFERENCE.fullmatch(value)
+            env = reference.group(1) if reference else (value if _ENV_NAME.fullmatch(value) else "")
+        needs = env or "an environment variable"
+        save = env or "<NAME>"
+        return (
+            f"{where}{field} needs {needs}, which has no value in the environment or the DefenseClaw "
+            f".env file. Save it with: defenseclaw keys set {save}. Until it is set, setup commands "
+            "refuse to run, including the one that removes this destination"
+        )
+
+    if code == "yaml_duplicate_key":
+        # Name the second definition's line, not the first one's value
+        # (GAP-2188).
+        first = re.search(r"first definition is at line (\d+)", text)
+        line = _duplicate_key_line(raw, path)
+        if first and line:
+            return (
+                f"line {line}: {field} appears twice; the first one is at line {first.group(1)}. Merge them into one."
+            )
+
+    if code == "config_schema_invalid" and text.startswith(_UNDECLARED_KEY_SUMMARY):
+        # The gateway's words for an undeclared key, not the schema keyword
+        # (GAP-2235): 'guardrail.mdoe: unknown field (did you mean "mode"?).'
+        suggestion = re.search(r"suggested field ([^;]+)", text)
+        hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
+        return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
+
+    parts = [
+        part.strip()
+        for part in text.split("; ")
+        if part.strip() and not part.strip().startswith("inspect the canonical v8 schema")
+    ]
+    allowed = re.search(r"expected one of (\[.*?\])(?:;|$)", text)
+    if allowed and isinstance(node, yaml.ScalarNode):
+        try:
+            choices = ", ".join(str(choice) for choice in json.loads(allowed.group(1)))
+        except (TypeError, ValueError):
+            choices = allowed.group(1)
+        value = node.value if len(node.value) <= 60 else node.value[:57] + "..."
+        return f'{where}{field} is "{value}"; allowed values: {choices}.'
+    detail = "; ".join(parts).rstrip(".") or "is not valid"
+    # ``config reference`` (YAML) covers only observability; the JSON schema
+    # lists every section and field (GAP-1661).
+    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code == "config_schema_invalid" else ""
+    return f"{where}{field}: {detail}.{suffix}"
 
 
 def _looks_like_v8_config(path: str) -> bool:

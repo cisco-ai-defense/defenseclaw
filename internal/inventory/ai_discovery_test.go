@@ -20,10 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -32,6 +34,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -164,8 +167,8 @@ func TestLoadAISignatures_DevinUsesNativeCLIContractOnly(t *testing.T) {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
 	for _, sig := range sigs {
-		if sig.ID == "windsurf" {
-			t.Fatal("retired Windsurf signature remains public")
+		if legacyconnector.IsRetired(sig.ID) {
+			t.Fatal("the retired Desktop connector signature remains public")
 		}
 		if sig.ID != "devin" {
 			continue
@@ -732,6 +735,43 @@ func TestContinuousDiscoveryShellHistoryFingerprintIsStable(t *testing.T) {
 	}
 }
 
+// TestContinuousDiscoveryShellHistoryHasNoLastActive: a shell-history
+// substring match says nothing about when the tool last ran, so the scan
+// must not stamp LastActiveAt with the scan time (GAP-2268).
+func TestContinuousDiscoveryShellHistoryHasNoLastActive(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	mustWrite(t, filepath.Join(home, ".zsh_history"), "openai chat --model gpt-4\n")
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled:             true,
+		Mode:                "enhanced",
+		IncludeShellHistory: true,
+		DataDir:             filepath.Join(tmp, "data"),
+		HomeDir:             home,
+		MaxFilesPerScan:     20,
+		MaxFileBytes:        64 * 1024,
+	}, []AISignature{testAISignature()})
+	cleanupPreparedDiscoveryService(t, svc)
+
+	report, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Detector != "shell_history" {
+			continue
+		}
+		found = true
+		if sig.LastActiveAt != nil {
+			t.Fatalf("shell_history signal %q LastActiveAt = %v, want nil", sig.Product, *sig.LastActiveAt)
+		}
+	}
+	if !found {
+		t.Fatalf("scan produced no shell_history signal: %+v", report.Signals)
+	}
+}
+
 func TestContinuousDiscoveryFullScanEmitsGone(t *testing.T) {
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "home")
@@ -1040,6 +1080,206 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 	}
 	if got := report.Signals[0].Source; got != AISourceExternal {
 		t.Errorf("signal.source = %q, want %q", got, AISourceExternal)
+	}
+}
+
+// The standalone gateway cannot see user homes or other accounts'
+// processes. It ingests the guardian's per-user scans instead: each signal
+// belongs to the account the guardian's record names (not to anything the
+// scan reported), identical files of two users stay distinct, and the
+// gateway's own process detector is reported as covered, not failed.
+func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "alice")
+	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
+	mustWrite(t, filepath.Join(home, ".lmstudio", "models", "example", "tiny", "tiny.gguf"), "GGUF\x03\x00\x00\x00"+strings.Repeat("\x00", 4096))
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	catalog := []AISignature{signature}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: 10, User: "alice", Comm: "shadowai"}, {PID: 11, User: "bob", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), home, "alice", 1001, UserScanOptions{Mode: "enhanced"}, catalog)
+	for i := range report.Signals {
+		report.Signals[i].UserName = "mallory"
+	}
+	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
+		t.Fatalf("SanitizeUserScanReport: %v", err)
+	}
+	spool := filepath.Join(tmp, "spool")
+	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: report})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(spool, fmt.Sprintf("%d.json", uid)), string(data))
+	}
+	previousTrust := userScanFileTrustCheck
+	userScanFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { userScanFileTrustCheck = previousTrust })
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, DataDir: filepath.Join(tmp, "data"), HomeDir: filepath.Join(tmp, "gateway"), UserScanDir: spool,
+	}, catalog)
+	cleanupPreparedDiscoveryService(t, svc)
+	got, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if got.Summary.Result != "ok" || got.Summary.DetectorNotes["process"] != userScanProcessNote {
+		t.Fatalf("summary = %+v, want ok with the process detector covered by per-user scans", got.Summary)
+	}
+	fingerprints := map[string]string{}
+	processes := 0
+	for _, sig := range got.Signals {
+		if sig.Source != AISourceUserScan {
+			t.Fatalf("the gateway's own scan reported %+v", sig)
+		}
+		want := map[string]string{"1001": "alice", "1002": "bob"}[sig.UserID]
+		if want == "" || sig.UserName != want {
+			t.Fatalf("signal attributed to %q/%q, want the record's account: %+v", sig.UserID, sig.UserName, sig)
+		}
+		if sig.Runtime != nil {
+			processes++
+			if sig.Runtime.PID != 10 || sig.Runtime.User != want {
+				t.Fatalf("process signal %+v, want alice's own process attributed to %s", sig.Runtime, want)
+			}
+		}
+		if other, dup := fingerprints[sig.Fingerprint]; dup {
+			t.Fatalf("users %s and %s share fingerprint %s", other, sig.UserName, sig.Fingerprint)
+		}
+		fingerprints[sig.Fingerprint] = sig.UserName
+	}
+	if processes != 2 || len(got.Signals) != 6 {
+		t.Fatalf("signals = %+v, want a config, a process and a model file signal per user", got.Signals)
+	}
+	if raw, _ := json.Marshal(got); strings.Contains(string(raw), tmp) {
+		t.Fatalf("report leaked a raw path: %s", raw)
+	}
+}
+
+// A pass over many homes can outlast a record's lifetime. While the
+// guardian's pass is running (or as long as its last pass took), a record it
+// has not reached again stays current (#1036).
+func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
+	spool := t.TempDir()
+	now := time.Now().UTC()
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
+	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	report.Summary.FilesScanned = 7
+	data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: 1001, User: "alice", UpdatedAt: now.Add(-40 * time.Minute), Report: report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(spool, "1001.json"), string(data))
+	previousTrust := userScanFileTrustCheck
+	userScanFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { userScanFileTrustCheck = previousTrust })
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{UserScanDir: spool, ScanInterval: 5 * time.Minute}}
+	current := func() bool {
+		t.Helper()
+		_, files, errs := svc.detectUserScans(now)
+		if len(errs) > 0 {
+			t.Fatalf("errors = %v", errs)
+		}
+		return files == 7
+	}
+	if current() {
+		t.Fatal("a 40-minute-old record is current with no pass record")
+	}
+	pass, _ := json.Marshal(UserScanPass{Version: UserScanRecordVersion, StartedAt: now.Add(-45 * time.Minute), Running: true})
+	mustWrite(t, filepath.Join(spool, UserScanPassName), string(pass))
+	if !current() {
+		t.Fatal("a record expired while the pass that will refresh it is still running")
+	}
+}
+
+// Linux ps prints a user name longer than eight characters truncated
+// ("longname+"). A per-user scan still keeps its account's own processes.
+func TestScanUserHomeKeepsOwnProcessesUnderATruncatedUserName(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("only Linux ps truncates user names")
+	}
+	signature := testAISignature()
+	signature.ProcessNames = []string{"shadowai"}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "firstna+", Comm: "shadowai"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "firstname.lastname", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want the account's own process", report.Signals)
+}
+
+// cursor-agent runs node under its own argv[0], and Node renames the main
+// thread, so comm is "mainthread". The per-user scan still reports it, with
+// a real last_seen time (GAP-1207).
+func TestScanUserHomeFindsARenamedMainThreadByArgv0(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "cursor-agent"}}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	for _, sig := range report.Signals {
+		if sig.Runtime != nil && sig.Runtime.PID == os.Getpid() {
+			if sig.LastSeen.IsZero() || sig.FirstSeen.IsZero() || sig.Runtime.Comm != "cursor-agent" {
+				t.Fatalf("signal = %+v, want cursor-agent with first/last seen set", sig)
+			}
+			return
+		}
+	}
+	t.Fatalf("signals = %+v, want an active_process signal for cursor-agent", report.Signals)
+}
+
+// Cursor's `agent` alias is a symlink to .../cursor-agent; argv[0]'s basename
+// is "agent", which the catalog leaves out (ssh-agent, gpg-agent), so the
+// resolved name is what matches (GAP-1865).
+func TestScanUserHomeFindsCursorStartedThroughItsAgentAlias(t *testing.T) {
+	signature := AISignature{ID: "cursor", Name: "Cursor", Category: "supported_connector", Confidence: 0.95, ProcessNames: []string{"cursor", "Cursor"}}
+	stubProcessSnapshotSource(t, func() ([]processInfo, error) {
+		return []processInfo{
+			{PID: os.Getpid(), User: "alice", Comm: "mainthread", Argv0: "agent", Argv0Target: "cursor-agent"},
+			{PID: os.Getpid() + 1, User: "alice", Comm: "ssh-agent"},
+		}, nil
+	})
+	report := ScanUserHome(context.Background(), t.TempDir(), "alice", os.Getuid(), UserScanOptions{}, []AISignature{signature})
+	found := false
+	for _, sig := range report.Signals {
+		if sig.Runtime == nil {
+			continue
+		}
+		if sig.Runtime.PID != os.Getpid() || sig.Runtime.Comm != "cursor-agent" {
+			t.Fatalf("signal = %+v, want only the cursor-agent alias process", sig)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatalf("signals = %+v, want an active_process signal for the agent alias", report.Signals)
+	}
+}
+
+// A partial per-user scan names the detector that failed. Only the process
+// and model file scans used to, so a package manifest walk error on macOS
+// reached the gateway as "partial scan: " with no cause.
+func TestScanUserHomeNamesAFailingPackageManifestWalk(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder this account cannot read")
+	}
+	home := t.TempDir()
+	locked := filepath.Join(home, "project")
+	if err := os.Mkdir(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	opts := UserScanOptions{Mode: "enhanced", IncludePackageManifests: true}
+	report := ScanUserHome(context.Background(), home, "alice", os.Getuid(), opts, []AISignature{testAISignature()})
+	if report.Summary.Result != "partial" || report.Summary.DetectorErrors["package_manifest"] == "" {
+		t.Fatalf("summary = %+v, want partial naming package_manifest", report.Summary)
 	}
 }
 

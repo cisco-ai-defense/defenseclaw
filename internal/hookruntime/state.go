@@ -361,7 +361,7 @@ func publishAt(paths Paths, source, hookPath, gatewayPath, dataRoot, transaction
 	// before recording its identity, then require that protection on every cold
 	// start. This prevents a project or another local principal from replacing
 	// the image selected by the hook launcher.
-	if err := safefile.ProtectFile(gatewayPath); err != nil {
+	if err := protectInstalledGateway(gatewayPath); err != nil {
 		return fmt.Errorf("protect installed gateway for hook recovery: %w", err)
 	}
 	if err := safefile.ValidatePrivateFile(gatewayPath); err != nil {

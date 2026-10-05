@@ -29,7 +29,10 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
   "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \
   "$ROOT/DefenseClawMac/DataLayer/CLIRunner.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/GatewayAdminProtocol.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/GatewayAdministratorClient.swift" \
   "$ROOT/DefenseClawMac/DataLayer/AIRuntimeModels.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/SandboxModels.swift" \
   "$ROOT/DefenseClawMac/DataLayer/GatewayClient.swift" \
   "$ROOT/Tests/InstallationContextTests.swift" \
   -o "$BUILD_DIR/InstallationContextTests"

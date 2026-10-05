@@ -139,6 +139,10 @@ done
 				t.Fatalf("curl argv missing descriptor transport %q:\n%s", fdArg, argv)
 			}
 		}
+		// GAP-1418: the loopback POST must bypass an inherited HTTP(S)_PROXY.
+		if !strings.Contains(argv, "--noproxy\n*\n") {
+			t.Fatalf("curl argv missing --noproxy '*':\n%s", argv)
+		}
 
 		headers := readCodexNotifyCapture(t, headerPath)
 		if gotToken, ok := capturedCurlAuthorizationToken(headers); !ok || gotToken != wantToken {

@@ -18,6 +18,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -47,91 +49,16 @@ func (fn readinessRoundTripFunc) RoundTrip(request *http.Request) (*http.Respons
 }
 
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
-	if defaultStartReadinessTimeout != 60*time.Second {
-		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	// A loaded Windows host took 142 s before the API listened (GAP-1206).
+	want := 60 * time.Second
+	if runtime.GOOS == "windows" {
+		want = 600 * time.Second
 	}
-}
-
-func TestUpgradeControllerReadinessDelegationIsExactAndNeverWeakensRotation(t *testing.T) {
-	for _, tc := range []struct {
-		name                string
-		value               string
-		rotationTransaction bool
-		want                bool
-	}{
-		{name: "ordinary direct start"},
-		{name: "false-like value", value: "0"},
-		{name: "word-like value", value: "true"},
-		{name: "fresh upgrade controller", value: "1", want: true},
-		{name: "rotation remains synchronous", value: "1", rotationTransaction: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(upgradeFreshProcessEnv, tc.value)
-			if got := upgradeControllerOwnsGatewayStartReadiness(tc.rotationTransaction); got != tc.want {
-				t.Fatalf(
-					"upgradeControllerOwnsGatewayStartReadiness(rotation=%v, value=%q) = %v, want %v",
-					tc.rotationTransaction,
-					tc.value,
-					got,
-					tc.want,
-				)
-			}
-		})
+	if defaultStartReadinessTimeout != want {
+		t.Fatalf("default start readiness timeout = %s, want %s", defaultStartReadinessTimeout, want)
 	}
-}
-
-func TestFreshProcessMarkerIsHiddenFromGatewayAndWatchdogChildren(t *testing.T) {
-	for _, value := range []string{"1", "unexpected"} {
-		t.Run(value, func(t *testing.T) {
-			t.Setenv(upgradeFreshProcessEnv, value)
-			restore, err := isolateUpgradeFreshProcessMarkerFromChildren()
-			if err != nil {
-				t.Fatalf("isolate marker: %v", err)
-			}
-			if observed, present := os.LookupEnv(upgradeFreshProcessEnv); present {
-				t.Fatalf("gateway/watchdog child environment retained marker %q", observed)
-			}
-			restore()
-			if observed := os.Getenv(upgradeFreshProcessEnv); observed != value {
-				t.Fatalf("restored management marker = %q, want %q", observed, value)
-			}
-		})
-	}
-}
-
-func TestUpgradeWaitReadyCommandIsHiddenAndFailsClosedBeforeConfigLoading(t *testing.T) {
-	if !upgradeWaitReadyCmd.Hidden {
-		t.Fatal("upgrade readiness bridge must remain hidden")
-	}
-	if upgradeWaitReadyCmd.PersistentPreRunE == nil {
-		t.Fatal("upgrade readiness bridge would inherit the sidecar root pre-run")
-	}
-	if err := upgradeWaitReadyCmd.PersistentPreRunE(upgradeWaitReadyCmd, nil); err != nil {
-		t.Fatalf("upgrade readiness no-op pre-run: %v", err)
-	}
-
-	oldVersion := appVersion
-	oldTimeout, _ := upgradeWaitReadyCmd.Flags().GetDuration(upgradeWaitReadyTimeoutFlag)
-	oldExpected, _ := upgradeWaitReadyCmd.Flags().GetString(upgradeWaitReadyVersionFlag)
-	t.Cleanup(func() {
-		appVersion = oldVersion
-		_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyTimeoutFlag, oldTimeout.String())
-		_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyVersionFlag, oldExpected)
-	})
-	_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyTimeoutFlag, "60s")
-	_ = upgradeWaitReadyCmd.Flags().Set(upgradeWaitReadyVersionFlag, "0.9.0")
-
-	for _, marker := range []string{"", "0"} {
-		t.Setenv(upgradeFreshProcessEnv, marker)
-		if err := runUpgradeWaitReady(upgradeWaitReadyCmd, nil); err == nil || !strings.Contains(err.Error(), "fresh-process controller marker") {
-			t.Fatalf("marker %q error = %v, want exact handoff refusal", marker, err)
-		}
-	}
-
-	t.Setenv(upgradeFreshProcessEnv, "1")
-	appVersion = "0.8.5"
-	if err := runUpgradeWaitReady(upgradeWaitReadyCmd, nil); err == nil || !strings.Contains(err.Error(), "control binary version") {
-		t.Fatalf("control binary mismatch error = %v, want candidate-version refusal", err)
+	if gatewayStartLockWait <= defaultStartReadinessTimeout {
+		t.Fatalf("start lock wait %s must exceed the readiness timeout %s", gatewayStartLockWait, defaultStartReadinessTimeout)
 	}
 }
 
@@ -188,13 +115,20 @@ observability:
 }
 
 func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
-	cfg := config.DefaultConfig()
-	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
-	cfg.OTel.Enabled = false
+	for _, version := range []int{config.ObservabilityV8ConfigVersion, config.ObservabilityV8ConfigVersion + 1} {
+		cfg := config.DefaultConfig()
+		cfg.ConfigVersion = version
+		cfg.OTel.Enabled = false
 
-	requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
-	if !requirements.telemetryEnabled {
-		t.Fatal("schema-v8 observability runtime was treated as disabled telemetry")
+		requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
+		if !requirements.telemetryEnabled {
+			t.Fatalf("config_version %d observability runtime was treated as disabled telemetry", version)
+		}
+	}
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion - 1
+	if daemonReadinessRequirementsFromConfig(cfg, time.Time{}).telemetryEnabled {
+		t.Fatal("pre-v8 config expected the canonical observability runtime")
 	}
 }
 
@@ -455,6 +389,9 @@ func TestGatewaySnapshotReadyRetriesUnavailableTelemetryHealth(t *testing.T) {
 }
 
 func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *testing.T) {
+	previous := startupRetriesSQLiteIO
+	t.Cleanup(func() { startupRetriesSQLiteIO = previous })
+	startupRetriesSQLiteIO = false
 	for _, primary := range []float64{5, 6} {
 		t.Run(fmt.Sprintf("sqlite-primary-%v", primary), func(t *testing.T) {
 			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
@@ -540,6 +477,64 @@ func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *tes
 	}
 }
 
+// GAP-1519: on Windows an event-history SQLite I/O error during startup (an
+// antivirus scan holding a large audit.db) is waited out, not fatal.
+func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing.T) {
+	previous := startupRetriesSQLiteIO
+	t.Cleanup(func() { startupRetriesSQLiteIO = previous })
+	startupRetriesSQLiteIO = true
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Telemetry = gateway.SubsystemHealth{
+		State: gateway.StateError,
+		Details: map[string]interface{}{
+			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+		},
+	}
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if ready || err != nil {
+		t.Fatalf("io readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+	// GAP-1796: health omits a zero primary code (-1 = absent here).
+	for _, primary := range []float64{0, 9, -1} {
+		snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+		snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = primary
+		if primary < 0 {
+			delete(snap.Telemetry.Details, "event_history_last_sqlite_primary_code")
+		}
+		ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+		if ready || err != nil {
+			t.Fatalf("deadline/%v readiness = %v, error = %v; want retryable not-ready", primary, ready, err)
+		}
+	}
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "full"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(13)
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil {
+		t.Fatal("a full disk must still fail at once")
+	}
+	// GAP-1603: the failure names the cause in plain words.
+	if !strings.Contains(err.Error(), "event_history=sqlite_write_failed/full): audit events cannot be written because the disk holding the audit database is full") {
+		t.Fatalf("error = %v, want the plain cause and SQLite class", err)
+	}
+	// GAP-1790: a write that timed out on a large audit.db is waited out on
+	// every OS (a macOS start failed this way, the next start worked); an
+	// I/O error stays fatal outside Windows.
+	startupRetriesSQLiteIO = false
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(9)
+	ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if ready || err != nil {
+		t.Fatalf("deadline elsewhere readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "io"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(10)
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil || !strings.Contains(err.Error(), "event_history=sqlite_write_failed/io") {
+		t.Fatalf("io elsewhere = %v; want an immediate failure naming the class", err)
+	}
+}
+
 func telemetryReadinessFatalError(t *testing.T, details map[string]interface{}) string {
 	t.Helper()
 	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
@@ -602,9 +597,11 @@ func TestGatewaySnapshotReadyReportsBoundedTelemetryFailureBranches(t *testing.T
 	t.Run("event history", func(t *testing.T) {
 		got := telemetryReadinessFatalError(t, map[string]interface{}{
 			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
-			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+			"event_history_last_sqlite_class": "full", "event_history_last_sqlite_primary_code": float64(13),
 		})
-		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed)"
+		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed/full): " +
+			"audit events cannot be written because the disk holding the audit database is full; " +
+			"free space on that disk (the gateway resumes writing once there is room)"
 		if got != want {
 			t.Fatalf("telemetry event-history diagnostic = %q, want %q", got, want)
 		}
@@ -858,9 +855,8 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
 	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
 	tokens := map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeCodex:     strings.Repeat("c", 64),
-		connector.OTLPScopeClaude:    strings.Repeat("d", 64),
-		connector.OTLPScopeGeminiCLI: strings.Repeat("e", 64),
+		connector.OTLPScopeCodex:  strings.Repeat("c", 64),
+		connector.OTLPScopeClaude: strings.Repeat("d", 64),
 	}
 	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
 		return tokens[scope], nil
@@ -883,11 +879,6 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 				t.Errorf("%s authorization did not use its scoped credential", source)
 			}
 			seen[source]++
-		case r.URL.Path == "/otlp/geminicli/"+tokens[connector.OTLPScopeGeminiCLI]+"/v1/logs":
-			if got := r.Header.Get("Authorization"); got != "" {
-				t.Errorf("geminicli path-token probe sent an Authorization header")
-			}
-			seen["geminicli"]++
 		default:
 			t.Errorf("unexpected convergence probe path %q source %q", r.URL.Path, source)
 		}
@@ -896,15 +887,45 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 	defer srv.Close()
 
 	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex", "geminicli"},
+		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex"},
 	)
 	if err != nil {
 		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v", err)
 	}
-	for name, want := range map[string]int{"claudecode": 2, "codex": 1, "geminicli": 1} {
+	for name, want := range map[string]int{"claudecode": 2, "codex": 1} {
 		if seen[name] != want {
 			t.Fatalf("%s auth probes = %d, want %d", name, seen[name], want)
 		}
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationSkipsOpenHandsWithoutExporter(t *testing.T) {
+	// GAP-1513: OpenHands has no native OTLP exporter off macOS, so setup
+	// mints no scoped credential and rotation must not require one.
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	codexToken := strings.Repeat("c", 64)
+	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
+		if scope == connector.OTLPScopeCodex {
+			return codexToken, nil
+		}
+		return "", nil
+	}
+	seen := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.Header.Get("X-DefenseClaw-Source")]++
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", t.TempDir(), []string{"codex", "openhands"},
+	)
+	if err != nil {
+		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v, want OpenHands skipped", err)
+	}
+	if seen["codex"] != 1 || seen["openhands"] != 0 {
+		t.Fatalf("probes = %v, want one codex probe and none for openhands", seen)
 	}
 }
 
@@ -1352,49 +1373,6 @@ func (p *fakeReadinessProcess) StopStarted(pid int, _ time.Duration) error {
 	return p.stopErr
 }
 
-func TestVerifyDelegatedGatewayStartReturnsBeforeFrozenControllerTimeout(t *testing.T) {
-	base := &fakeReadinessProcess{running: true, pid: 42}
-	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
-
-	started := time.Now()
-	err := verifyDelegatedGatewayStart(process, 42)
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("delegated launch verification took %s, want well below frozen controller's 30s timeout", elapsed)
-	}
-	if err != nil {
-		t.Fatalf("strong live delegated launch rejected: %v", err)
-	}
-	if base.stopCalls != 0 {
-		t.Fatalf("slow-but-live delegated gateway was stopped %d times", base.stopCalls)
-	}
-}
-
-func TestVerifyDelegatedGatewayStartFailsClosedBeforeReadinessDelegation(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		running    bool
-		pid        int
-		identityOK bool
-	}{
-		{name: "process exited", pid: 42, identityOK: true},
-		{name: "PID changed", running: true, pid: 43, identityOK: true},
-		{name: "strong identity missing", running: true, pid: 42},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			base := &fakeReadinessProcess{running: tc.running, pid: tc.pid}
-			process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: tc.identityOK}
-
-			err := verifyDelegatedGatewayStart(process, 42)
-			if err == nil || !strings.Contains(err.Error(), "process start identity") {
-				t.Fatalf("delegated launch error = %v, want strong live identity failure", err)
-			}
-			if base.stopCalls != 1 || base.stoppedPID != 42 {
-				t.Fatalf("scoped cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
-			}
-		})
-	}
-}
-
 func TestWaitForStartedDaemonStopsSlowLiveProcessAfterDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(readinessSnapshot(gateway.StateDisabled, gateway.StateDisabled))
@@ -1797,8 +1775,9 @@ func TestPrintDaemonStartResultOnlyRendersReadySuccess(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDaemonStartResult(42, readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
 	})
-	if !strings.Contains(out, "OK (PID 42)") || !strings.Contains(out, "routing:off") || strings.Contains(out, "STARTING") {
-		t.Fatalf("output = %q, want READY-only success rendering", out)
+	// A disabled subsystem is not in use, so it is not listed as "off".
+	if !strings.Contains(out, "OK (PID 42)") || strings.Contains(out, "routing") || strings.Contains(out, "STARTING") {
+		t.Fatalf("output = %q, want READY-only success rendering without unused subsystems", out)
 	}
 }
 
@@ -1916,6 +1895,100 @@ func TestWaitForGatewayReadinessFailsFastOnGuardrailError(t *testing.T) {
 	}
 	if ready {
 		t.Fatal("waitForGatewayReadiness() ready = true, want false")
+	}
+}
+
+func admissionRefusedSnapshot() gateway.HealthSnapshot {
+	snap := readinessSnapshot(gateway.StateError, gateway.StateDisabled)
+	snap.Guardrail.LastError = "hook contract admission failed: connector codex hook contract drift detected"
+	snap.Guardrail.Details = map[string]interface{}{
+		gateway.GuardrailHookContractAdmissionRefused: []interface{}{"codex"},
+	}
+	return snap
+}
+
+func TestGatewaySnapshotReadyAcceptsOnlyAnAdmissionRefusedGuardrail(t *testing.T) {
+	allowed := daemonReadinessRequirements{guardrailEnabled: true, allowHookContractAdmissionRefusal: true}
+	if ready, err := gatewaySnapshotReady(admissionRefusedSnapshot(), allowed); err != nil || !ready {
+		t.Fatalf("admission-refused readiness = %v, %v; want ready", ready, err)
+	}
+
+	strict := allowed
+	strict.allowHookContractAdmissionRefusal = false
+	if _, err := gatewaySnapshotReady(admissionRefusedSnapshot(), strict); err == nil ||
+		!strings.Contains(err.Error(), "gateway guardrail failed during startup") {
+		t.Fatalf("strict admission-refused error = %v, want the guardrail startup failure", err)
+	}
+
+	unstructured := admissionRefusedSnapshot()
+	unstructured.Guardrail.Details = nil
+	if _, err := gatewaySnapshotReady(unstructured, allowed); err == nil {
+		t.Fatal("a guardrail error without the structured admission detail was accepted")
+	}
+
+	telemetryStarting := admissionRefusedSnapshot()
+	telemetryStarting.Telemetry.State = gateway.StateStarting
+	waiting := allowed
+	waiting.telemetryEnabled = true
+	if ready, err := gatewaySnapshotReady(telemetryStarting, waiting); err != nil || ready {
+		t.Fatalf("admission-refused readiness with starting telemetry = %v, %v; want still waiting", ready, err)
+	}
+
+	apiFailed := admissionRefusedSnapshot()
+	apiFailed.API = gateway.SubsystemHealth{State: gateway.StateError, LastError: "bind failed"}
+	if _, err := gatewaySnapshotReady(apiFailed, allowed); err == nil || !strings.Contains(err.Error(), "bind failed") {
+		t.Fatalf("admission-refused readiness with a failed API = %v, want the API failure", err)
+	}
+}
+
+func TestWaitForStartedDaemonLeavesAdmissionRefusedGatewayRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(admissionRefusedSnapshot())
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	snap, ready, err := waitForStartedDaemon(
+		process, 42, srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true, allowHookContractAdmissionRefusal: true},
+	)
+	if err != nil || !ready || base.stopCalls != 0 {
+		t.Fatalf("admission-refused start ready=%v err=%v stopCalls=%d, want a running gateway", ready, err, base.stopCalls)
+	}
+	refused, ok := guardrailHookContractAdmissionRefusal(snap.Guardrail)
+	if !ok || !slices.Equal(refused, []string{"codex"}) {
+		t.Fatalf("refused connectors = %v, %v; want codex from the status document", refused, ok)
+	}
+
+	_, ready, err = waitForStartedDaemon(
+		process, 42, srv.Client(), srv.URL, time.Second, 5*time.Millisecond,
+		daemonReadinessRequirements{guardrailEnabled: true},
+	)
+	if err == nil || ready || base.stopCalls != 1 {
+		t.Fatalf("strict start ready=%v err=%v stopCalls=%d, want the launched gateway stopped", ready, err, base.stopCalls)
+	}
+}
+
+func TestHookContractAdmissionStartErrorUsesTheInstallerExitCode(t *testing.T) {
+	if gatewayStartAdmissionRefusedExitCode != 3 {
+		t.Fatalf("admission-refused exit code = %d; installers depend on 3", gatewayStartAdmissionRefusedExitCode)
+	}
+	err := hookContractAdmissionStartError(
+		[]string{"codex", "claudecode"},
+		"hook contract admission failed: connector codex hook contract drift detected",
+	)
+	if code := commandExitCode(err); code != 3 {
+		t.Fatalf("exit code = %d, want 3", code)
+	}
+	for _, want := range []string{
+		"gateway is running",
+		"hook contract drift detected",
+		"`defenseclaw setup guardrail --connector codex` and `defenseclaw setup guardrail --connector claudecode`",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("admission error %q is missing %q", err.Error(), want)
+		}
 	}
 }
 

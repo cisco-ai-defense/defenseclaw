@@ -167,6 +167,20 @@ type AIDiscoveryOptions struct {
 	// scan-trace telemetry (StartScan / detector traces / End) remains owned
 	// by the bound observability runtime and fires on every tick.
 	ManagedEnterprise bool
+	// StandaloneEnterprise marks the standalone managed profile. Its
+	// service-context profile walk uses the shared
+	// winpath.IsInteractiveUserSID predicate, which also admits Microsoft
+	// Entra ID users; the Secure Client profile keeps its historical filter.
+	StandaloneEnterprise bool
+	// UserScanDir is the spool of per-user scans the hook guardian writes
+	// in the standalone profile on Linux and macOS (UserScanDirForConfig).
+	// When set, full scans ingest it and this service's own process
+	// detector, which its sandbox blinds, is left to those scans.
+	UserScanDir string
+	// homeOwners names the account of each profile in HomeDirs when the
+	// platform enumerated them for a service-context scan (managed Windows).
+	// Signals found under a profile carry its account.
+	homeOwners []discoveryHomeOwner
 }
 
 // AIEvidence is an internal normalized evidence record. RawPath is never
@@ -249,7 +263,15 @@ type ProcessRuntime struct {
 	UptimeSec int64      `json:"uptime_sec,omitempty"`
 	User      string     `json:"user,omitempty"`
 	Comm      string     `json:"comm,omitempty"`
+	// OtherInstances lists the other live processes of the same product
+	// (two Claude Code sessions, say), newest first. The signal itself
+	// stays one row per product so its fingerprint and lifecycle don't
+	// change; the newest process fills the fields above (GAP-2633).
+	OtherInstances []ProcessRuntime `json:"other_instances,omitempty"`
 }
+
+// maxProcessOtherInstances bounds Runtime.OtherInstances per signal.
+const maxProcessOtherInstances = 64
 
 // LocalModelInfo describes one model observed through a vetted local-server
 // metadata endpoint or as an on-disk model artifact. Model IDs deliberately
@@ -340,7 +362,12 @@ type AISignal struct {
 	FirstSeen          time.Time       `json:"first_seen"`
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
-	EvidenceHash       string          `json:"-"`
+	// UserID (a uid) and UserName name the account a per-user scan ran as.
+	// The gateway takes both from the guardian's spool record, never from
+	// the scan's own output.
+	UserID       string `json:"user_id,omitempty"`
+	UserName     string `json:"user,omitempty"`
+	EvidenceHash string `json:"-"`
 	// ModelProvenanceHubResolvedAt is an internal freshness marker for optional
 	// Hub enrichment. It is mirrored by aiStoredSignal but never returned by the
 	// API or sent to telemetry sinks.
@@ -409,12 +436,14 @@ const (
 )
 
 // maxEvidencePerSignal caps the number of evidence rows the engine
-// will accept on a single signal. The bound is generous (manifests
-// + lockfiles + version pins for one component rarely produce more
-// than a dozen rows in practice) but it is finite so a malicious
-// pack cannot DOS the gateway or the SQLite store via a single
-// pathological signal.
-const maxEvidencePerSignal = 32
+// will accept on a single signal. A skills folder is one signal with
+// one row per skill, and a stock Hermes install alone bundles 58, so
+// at 32 every Hermes account stayed partial (cap_exceeded) and half
+// its skills were never named (GAP-2379). The bound matches the
+// per-user report's list limit (maxUserScanField) and stays finite
+// so a malicious pack cannot DOS the gateway or the SQLite store via
+// a single pathological signal.
+const maxEvidencePerSignal = 256
 
 type AIDiscoverySummary struct {
 	ScanID            string            `json:"scan_id"`
@@ -433,6 +462,9 @@ type AIDiscoverySummary struct {
 	Errors            int               `json:"errors"`
 	DetectorErrors    map[string]string `json:"detector_errors,omitempty"`
 	DetectorDurations map[string]int    `json:"detector_durations_ms,omitempty"`
+	// DetectorNotes names detectors another source covers, for example the
+	// process detector when per-user scans provide it.
+	DetectorNotes map[string]string `json:"detector_notes,omitempty"`
 }
 
 type AIDiscoveryReport struct {
@@ -504,6 +536,10 @@ type ContinuousDiscoveryService struct {
 	// queries are disabled.
 	invStore         *InventoryStore
 	confidenceParams ConfidenceParams
+	// historyRetentionDays bounds invStore scan history (0 = unbounded);
+	// historySweep schedules the pruning. See ai_discovery_history.go.
+	historyRetentionDays atomic.Int64
+	historySweep         inventoryHistorySweeper
 
 	mu              sync.RWMutex
 	last            AIDiscoveryReport
@@ -563,6 +599,10 @@ type ContinuousDiscoveryService struct {
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   AIDiscoveryObservabilityV8
+
+	// processOwners, when set, limits the process detector to processes of
+	// these owners (the account name or uid of a per-user scan).
+	processOwners map[string]bool
 }
 
 type scanResponse struct {
@@ -581,7 +621,9 @@ func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryServ
 		return nil, err
 	}
 	opts := AIDiscoveryOptionsFromConfig(cfg)
-	return NewContinuousDiscoveryServiceWithOptions(opts, catalog), nil
+	svc := NewContinuousDiscoveryServiceWithOptions(opts, catalog)
+	svc.processOwners = perUserProcessOwners(opts)
+	return svc, nil
 }
 
 func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, legacy ...any) *ContinuousDiscoveryService {
@@ -596,6 +638,9 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 		store:    NewAIStateStore(filepath.Join(opts.DataDir, "ai_discovery_state.json")),
 		triggers: make(chan chan scanResponse, 1),
 	}
+	// Scan history follows the observability.local.retention_days default
+	// until the gateway applies the effective window.
+	svc.historyRetentionDays.Store(config.ObservabilityV8DefaultRetentionDays)
 	if opts.LookupModelProvenanceOnline {
 		svc.modelProvenanceHub = newHuggingFaceProvenanceResolver()
 	}
@@ -683,10 +728,12 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		// branch which added cfg.Privacy.DisableRedaction). When the
 		// redaction subtree lands on main, wire it as
 		// `DisableRedaction: cfg.Privacy.DisableRedaction`.
-		DataDir:           cfg.DataDir,
-		HomeDir:           home,
-		HomeDirs:          append([]string{}, ad.HomeDirs...),
-		ManagedEnterprise: managed.IsManagedEnterprise(cfg.DeploymentMode),
+		DataDir:              cfg.DataDir,
+		HomeDir:              home,
+		HomeDirs:             append([]string{}, ad.HomeDirs...),
+		ManagedEnterprise:    managed.IsManagedEnterprise(cfg.DeploymentMode),
+		StandaloneEnterprise: cfg.StandaloneEnterprise(),
+		UserScanDir:          UserScanDirForConfig(cfg),
 	})
 }
 
@@ -747,9 +794,14 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	// developer running a local build does not silently start reading
 	// their coworkers' dotdirs on a shared workstation.
 	if opts.ManagedEnterprise && len(opts.HomeDirs) == 0 {
-		if platformHomes := platformDiscoveryHomeDirs(); len(platformHomes) > 0 {
+		if owners := platformDiscoveryHomeOwners(opts.StandaloneEnterprise); len(owners) > 0 {
+			platformHomes := make([]string, 0, len(owners))
+			for _, owner := range owners {
+				platformHomes = append(platformHomes, owner.Home)
+			}
 			opts.HomeDirs = platformHomes
 			opts.HomeDir = platformHomes[0]
+			opts.homeOwners = owners
 		}
 	}
 	// Dedupe HomeDirs and ensure HomeDir participates so single-user
@@ -898,6 +950,10 @@ func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr err
 			}
 		}
 	}()
+	// Registered after the close defer so the sweeper has stopped before
+	// the history store closes.
+	stopHistory := s.startHistoryRetention(ctx)
+	defer stopHistory()
 	_, _ = s.runScan(ctx, true, "startup")
 
 	fullTicker := time.NewTicker(s.opts.ScanInterval)
@@ -1193,6 +1249,14 @@ func (s *ContinuousDiscoveryService) fanoutReport(ctx context.Context, report AI
 	}
 }
 
+// managedInventoryEmitActive reports the live managed mode that gates the
+// process-only tick in fanoutReport.
+func (s *ContinuousDiscoveryService) managedInventoryEmitActive() bool {
+	s.managedInventoryEmitMu.RLock()
+	defer s.managedInventoryEmitMu.RUnlock()
+	return s.managedInventoryEmit != nil
+}
+
 // SetManagedInventoryEmitHook installs the sidecar callback that publishes the
 // connector and MCP endpoint snapshot after each managed discovery scan. A nil
 // callback clears it. The callback does not emit discovery signals; those flow
@@ -1241,6 +1305,7 @@ type scanStats struct {
 	FilesScanned      int
 	Errors            int
 	DetectorErrors    map[string]string
+	DetectorNotes     map[string]string
 	DedupeSuppressed  int
 	DetectorDurations map[string]int
 	// ModelAPIConclusive keys are provider + detector pairs for which a
@@ -1287,10 +1352,10 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		})
 		out, files, err := fn()
 		if err != nil {
+			// Name every failing detector: a partial result that names
+			// none ("partial scan: ") gives the operator nothing to act on.
 			stats.Errors++
-			if name == "process" || name == "model_file" {
-				stats.DetectorErrors[name] = err.Error()
-			}
+			stats.DetectorErrors[name] = err.Error()
 		}
 		endedAt := time.Now()
 		child.end(AIDiscoveryV8DetectorResult{
@@ -1302,10 +1367,16 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		add(out)
 	}
 
-	measure("process", func() ([]AISignal, int, error) {
-		out, err := s.detectProcesses()
-		return out, 0, err
-	})
+	if s.opts.UserScanDir != "" {
+		// This service's sandbox hides other accounts' processes; each
+		// user's own scan reports them.
+		stats.DetectorNotes = map[string]string{"process": userScanProcessNote}
+	} else {
+		measure("process", func() ([]AISignal, int, error) {
+			out, err := s.detectProcesses()
+			return out, 0, err
+		})
+	}
 	if !full {
 		sortAISignals(signals)
 		return signals, stats
@@ -1349,9 +1420,96 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	if s.opts.IncludeShellHistory {
 		measure("shell_history", func() ([]AISignal, int, error) { return s.detectShellHistory() })
 	}
+	if s.opts.UserScanDir != "" {
+		measure("user_scan", func() ([]AISignal, int, error) {
+			out, files, errs := s.detectUserScans(time.Now().UTC())
+			for key, detail := range errs {
+				stats.DetectorErrors[key] = detail
+			}
+			if len(errs) > 0 {
+				return out, files, errors.New("per-user scan records are incomplete")
+			}
+			return out, files, nil
+		})
+	}
 
+	signals = s.dropUnbackedSharedSurfaceSignals(signals)
 	sortAISignals(signals)
 	return signals, stats
+}
+
+// sharedSurfaceDetectors are the path detectors whose catalog paths several
+// products list.
+var sharedSurfaceDetectors = map[string]bool{"config": true, "skill": true, "rule": true, "plugin": true}
+
+// dropUnbackedSharedSurfaceSignals drops the signals of a product that rest
+// only on a path several catalog products list (the cross-agent
+// ~/.agents/skills, where DefenseClaw's own CodeGuard skill goes, or
+// ~/.claude/skills) when that product has no evidence of its own. A shell
+// history mention is not such evidence. Without this, one CodeGuard install
+// made Cursor, Devin, Amp, Antigravity, Copilot and OpenHands "seen" for a
+// user who has none of them (GAP-1378).
+func (s *ContinuousDiscoveryService) dropUnbackedSharedSurfaceSignals(signals []AISignal) []AISignal {
+	owners := map[string]map[string]bool{}
+	for _, sig := range s.catalog {
+		id := normalizeAIID(sig.ID)
+		for _, list := range [][]string{sig.ConfigPaths, sig.SkillPaths, sig.RulePaths, sig.PluginPaths} {
+			for _, candidate := range list {
+				candidate = strings.TrimSpace(candidate)
+				if candidate == "" || id == "" {
+					continue
+				}
+				if owners[candidate] == nil {
+					owners[candidate] = map[string]bool{}
+				}
+				owners[candidate][id] = true
+			}
+		}
+	}
+	shared := map[string]bool{}
+	for candidate, ids := range owners {
+		if len(ids) < 2 {
+			continue
+		}
+		for _, path := range s.expandCandidatePath(candidate) {
+			shared[hashPath(path)] = true
+		}
+	}
+	if len(shared) == 0 {
+		return signals
+	}
+	onSharedSurface := func(sig AISignal) bool {
+		if !sharedSurfaceDetectors[sig.Detector] {
+			return false
+		}
+		for _, ev := range sig.Evidence {
+			if ev.Type == sig.Detector && shared[ev.PathHash] {
+				return true
+			}
+		}
+		return false
+	}
+	backedAll, backedUser := map[string]bool{}, map[string]bool{}
+	for _, sig := range signals {
+		if sig.Detector == "shell_history" || onSharedSurface(sig) {
+			continue
+		}
+		id := normalizeAIID(sig.SignatureID)
+		if sig.UserID == "" {
+			backedAll[id] = true
+		} else {
+			backedUser[id+"\x00"+sig.UserID] = true
+		}
+	}
+	out := signals[:0]
+	for _, sig := range signals {
+		id := normalizeAIID(sig.SignatureID)
+		if onSharedSurface(sig) && !backedAll[id] && !backedUser[id+"\x00"+sig.UserID] {
+			continue
+		}
+		out = append(out, sig)
+	}
+	return out
 }
 
 func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, start time.Time, signals []AISignal, stats scanStats, prev aiStateFile, full bool) AIDiscoveryReport {
@@ -1396,11 +1554,16 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		// `mtime`-style hint via signal.LastActiveAt, keep that
 		// value; otherwise default LastActiveAt to `now` so consumers
 		// always have *some* "freshness" timestamp to render.
-		if sig.LastActiveAt == nil && !(sig.Model != nil && sig.Model.Status == "installed") {
+		// Shell-history matches are the exception: a substring hit in a
+		// flat command log carries no time of use, so stamping the scan
+		// time would report a tool that never ran as "last active: just
+		// now". Leave it nil; freshness falls back to LastSeen.
+		if sig.LastActiveAt == nil && sig.Detector != "shell_history" &&
+			!(sig.Model != nil && sig.Model.Status == "installed") {
 			t := now
 			sig.LastActiveAt = &t
 		}
-		if old, ok := prevMap[sig.Fingerprint]; ok {
+		if old, ok := prevMap[sig.Fingerprint]; ok && (old.UserID != "" || sig.UserID == "") {
 			if full && sig.Detector == "model_file" && sig.WorkspaceHash != "" &&
 				stats.ModelFileDeferred[sig.WorkspaceHash] {
 				// A cursor page can contain only part of a sharded model. Preserve
@@ -1433,6 +1596,13 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 				sig.State = AIStateSeen
 			}
 		} else {
+			// Also new when a signal stored without an account (a build
+			// from before per-user attribution) now has one: the one
+			// discovered record with its user is what an administrator
+			// filters by (GAP-1739).
+			if old, ok := prevMap[sig.Fingerprint]; ok {
+				sig.FirstSeen = old.FirstSeen
+			}
 			sig.State = AIStateNew
 		}
 		// Include every active signal in the report (not just deltas)
@@ -1524,9 +1694,16 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		}
 	}
 
-	if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
-		stats.Errors++
-		stats.DetectorErrors["state_store"] = err.Error()
+	// Managed mode publishes lifecycle records on full scans only
+	// (fanoutReport), so a process-only tick there must not persist what it
+	// classified: the next full scan would take a process the tick found as
+	// already seen and never send its discovered record, only its removal
+	// (GAP-1738). Lifecycle deltas are then computed between full scans.
+	if full || !s.managedInventoryEmitActive() {
+		if err := s.store.Save(aiStateFile{Version: aiDiscoveryStateVersion, UpdatedAt: now, Signals: current}); err != nil {
+			stats.Errors++
+			stats.DetectorErrors["state_store"] = err.Error()
+		}
 	}
 
 	summary := AIDiscoverySummary{
@@ -1546,6 +1723,7 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 		Errors:            stats.Errors,
 		DetectorErrors:    stats.DetectorErrors,
 		DetectorDurations: stats.DetectorDurations,
+		DetectorNotes:     stats.DetectorNotes,
 	}
 	if stats.Errors > 0 {
 		summary.Result = "partial"
@@ -1692,12 +1870,41 @@ func (s *ContinuousDiscoveryService) recordScanIfPossible(report AIDiscoveryRepo
 	}
 }
 
+// serviceListOnlyInstallFolders are the per-user install folders that the
+// managed Windows enumerator grants the gateway service list-only rights on
+// (inventoryDACLListOnlyDirs in internal/enterprisehooks). An agent that
+// updates itself replaces its folder (Amp recreates @ampcode\cli at start),
+// and the new folder lacks the grant until the next enumerator pass. A
+// folder the service is denied still exists, so it is not reported removed
+// and then discovered again with a new first_seen (GAP-2034).
+var serviceListOnlyInstallFolders = map[string]bool{
+	"$LOCALAPPDATA/Kiro-Cli":                 true,
+	"$LOCALAPPDATA/copilot/pkg":              true,
+	"$LOCALAPPDATA/devin/cli":                true,
+	"$APPDATA/npm/node_modules/@ampcode/cli": true,
+	"$LOCALAPPDATA/cursor-agent":             true,
+}
+
+// discoveryConfigStat is os.Stat; tests replace it.
+var discoveryConfigStat = os.Stat
+
+// configPathPresent reports whether a config candidate is on disk. On a
+// service-context scan a list-only install folder the service is denied
+// counts as present (serviceListOnlyInstallFolders).
+func (s *ContinuousDiscoveryService) configPathPresent(candidate, path string) bool {
+	_, err := discoveryConfigStat(path)
+	if err == nil {
+		return true
+	}
+	return len(s.opts.homeOwners) > 0 && serviceListOnlyInstallFolders[candidate] && errors.Is(err, os.ErrPermission)
+}
+
 func (s *ContinuousDiscoveryService) detectConfigPaths() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.ConfigPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) {
+				if s.configPathPresent(candidate, path) {
 					category := SignalWorkspaceArtifact
 					if sig.SupportedConnector != "" {
 						category = SignalSupportedConnector
@@ -1783,6 +1990,7 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 		added++
 	}
 	out := s.signalFromEvidence(sig, SignalMCPServer, "mcp", evidence)
+	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
 	if st, err := os.Stat(path); err == nil {
@@ -1797,6 +2005,12 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 // "unparseable" from "no servers declared". The plain readMCPServerNames
 // remains for callers that don't need the reason.
 func readMCPServerNamesWithErr(path string) ([]string, error) {
+	// An empty MCP config declares no server; it is not malformed.
+	// Antigravity leaves a 0-byte mcp_config.json, which read as a
+	// parse error and so as an MCP server row (GAP-2337).
+	if isBlankFile(path) {
+		return nil, nil
+	}
 	entries, err := parseMCPConfigForNames(path)
 	if err != nil {
 		return nil, err
@@ -1809,6 +2023,19 @@ func readMCPServerNamesWithErr(path string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// isBlankFile reports a small regular file holding only whitespace.
+func isBlankFile(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > 4096 {
+		return false
+	}
+	if st.Size() == 0 {
+		return true
+	}
+	raw, err := os.ReadFile(path) // #nosec G304 -- catalog MCP config path
+	return err == nil && strings.TrimSpace(string(raw)) == ""
 }
 
 // readMCPServerNames parses `path` with the appropriate format-specific
@@ -1840,7 +2067,8 @@ func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
 	case strings.HasSuffix(lower, ".toml"):
 		return config.ReadMCPFromCodexConfigTOML(path)
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
-		return config.ReadMCPFromYAMLPath(path, []string{"mcp", "servers"}, []string{"mcpServers"})
+		// Hermes keeps its servers under top-level mcp_servers (GAP-1845).
+		return config.ReadMCPFromYAMLPath(path, []string{"mcp_servers"}, []string{"mcp", "servers"}, []string{"mcpServers"})
 	case base == ".claude.json":
 		// ~/.claude.json holds user-scope (top-level `mcpServers`) *and*
 		// per-project local-scope (`projects.<path>.mcpServers`) entries.
@@ -1983,7 +2211,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 			coverageReason = CoverageReasonReadError
 		default:
 			if detector == "skill" && strings.EqualFold(strings.TrimSpace(sig.ID), "hermes") &&
-				hermesskills.IsRoot(path) {
+				s.isHermesSkillsRoot(path) {
 				if childPartial, childReason := s.appendHermesSkillChildren(&evidence, path); childPartial {
 					partial = true
 					coverageReason = childReason
@@ -2001,6 +2229,12 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				}
 				name := sanitizeBasenameValue(entry.Name())
 				if name == "" {
+					continue
+				}
+				// A skill is a folder. A hidden file beside the skills is
+				// the agent's own state (Cursor .sync-manifest.json, the
+				// Codex .codex-system-skills.marker), not a skill (GAP-2263).
+				if detector == "skill" && isHiddenSkillStateFile(entry) {
 					continue
 				}
 				// Codex uses `.system` as a one-level skill container. Expand
@@ -2041,6 +2275,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		}
 	}
 	out := s.signalFromEvidence(sig, category, detector, evidence)
+	s.stampHomeOwner(&out, path)
 	out.Partial = partial
 	out.CoverageReason = coverageReason
 	if statErr == nil {
@@ -2059,7 +2294,11 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 	if remaining <= 0 {
 		return true, CoverageReasonCapExceeded
 	}
-	entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+	discover := hermesskills.Discover
+	if !hermesskills.IsRoot(root) {
+		discover = hermesskills.DiscoverProfileRoot
+	}
+	entries, err := discover(root, hermesskills.DefaultDirectoryLimit)
 	if err != nil {
 		if errors.Is(err, os.ErrPermission) {
 			return true, CoverageReasonPermissionDenied
@@ -2096,6 +2335,41 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 	return false, ""
 }
 
+// hermesProfileSkillsRoots are where a Hermes skills root sits in a
+// profile: %LOCALAPPDATA%\hermes\skills on Windows, ~/.hermes/skills
+// elsewhere (the catalog's two Hermes skill paths).
+var hermesProfileSkillsRoots = []string{
+	filepath.Join("AppData", "Local", "hermes", "skills"),
+	filepath.Join(".hermes", "skills"),
+}
+
+// isHermesSkillsRoot reports whether path is a Hermes skills root: this
+// process's own, or on a service-context scan (managed Windows) the one in
+// a scanned profile. hermesskills.IsRoot resolves only the service
+// account's own Hermes home, so every user's Hermes category folders and
+// .bundled_manifest were listed as skills (GAP-2263).
+func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
+	if hermesskills.IsRoot(path) {
+		return true
+	}
+	owner, ok := s.homeOwnerForPath(path)
+	if !ok {
+		return false
+	}
+	for _, tail := range hermesProfileSkillsRoots {
+		if strings.EqualFold(filepath.Clean(path), filepath.Join(filepath.Clean(owner.Home), tail)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHiddenSkillStateFile reports a hidden regular file in a skills folder:
+// the agent's own state, not a skill (a skill is a folder).
+func isHiddenSkillStateFile(entry os.DirEntry) bool {
+	return strings.HasPrefix(entry.Name(), ".") && entry.Type().IsRegular()
+}
+
 // appendSystemSkillChildren enumerates one level below a Codex `.system`
 // container. Exact vendor-cache children are stamped bundled; children below
 // any other root are stamped user-owned. Nested subtrees are not recursed into.
@@ -2122,6 +2396,11 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 		}
 		name := sanitizeBasenameValue(entry.Name())
 		if name == "" {
+			continue
+		}
+		// Codex keeps .codex-system-skills.marker inside .system; like
+		// any hidden file beside the skills it is not a skill (GAP-2263).
+		if isHiddenSkillStateFile(entry) {
 			continue
 		}
 		child := filepath.Join(systemDir, entry.Name())
@@ -2218,15 +2497,45 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	if err != nil {
 		return nil, fmt.Errorf("process snapshot: %w", err)
 	}
+	if len(s.processOwners) > 0 {
+		owned := procs[:0]
+		for _, proc := range procs {
+			// Linux ps shows a user name longer than eight characters
+			// truncated ("longname+"); there the owner of /proc/<pid>
+			// decides.
+			owner := s.processOwners[proc.User]
+			if !owner {
+				uid := processOwnerUID(proc.PID)
+				owner = uid != "" && s.processOwners[uid]
+			}
+			if owner {
+				owned = append(owned, proc)
+			}
+		}
+		procs = owned
+	}
 	if len(procs) == 0 {
 		return nil, nil
 	}
 	windowsSnapshot := procs[0].Windows
 	if windowsSnapshot {
 		classifyWindowsProcesses(procs, s.catalog)
+		s.attributeProcessOwners(procs)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
+	// POSIX matches are name based, so one process can match several
+	// signatures (the "claude" CLI matches both Claude Code's "claude" and
+	// Claude Desktop's "Claude"). Each process keeps only its closest
+	// matches; see processMatchScore.
+	type posixClaim struct {
+		sig   AISignature
+		want  string
+		procs []processInfo // closest name matches, newest first
+		score int
+	}
+	var claims []posixClaim
+	bestScore := map[int]int{}
 	for _, sig := range s.catalog {
 		if windowsSnapshot {
 			for i := range procs {
@@ -2237,46 +2546,117 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 			}
 			continue
 		}
-		for _, want := range sig.ProcessNames {
-			want = strings.ToLower(strings.TrimSpace(want))
+		for _, rawWant := range sig.ProcessNames {
+			want := strings.ToLower(strings.TrimSpace(rawWant))
 			if want == "" {
 				continue
 			}
-			// Pick the *most recently started* matching process so
-			// the rendered Runtime block is the freshest invocation,
-			// not whichever ps row sorted first. This makes "Last
-			// active" intuitive when a long-lived helper process and
-			// a fresh agent run share the same comm.
-			var best *processInfo
+			// Keep every process with the closest name match, so Claude
+			// Desktop's "Claude" picks the app rather than a "claude"
+			// CLI, and sort them newest first: the most recently started
+			// one fills the Runtime block (the freshest invocation, not
+			// whichever ps row sorted first) and the rest become
+			// Runtime.OtherInstances.
+			var matched []processInfo
+			bestMatch := 0
 			for i := range procs {
-				if !processNameMatches(procs[i].Comm, want) {
+				name := processMatchName(procs[i], want)
+				if name == "" {
 					continue
 				}
-				if best == nil || procs[i].StartedAt.After(best.StartedAt) {
-					p := procs[i]
-					best = &p
+				match := processMatchScore(name, rawWant)
+				if match < bestMatch {
+					continue
 				}
+				if match > bestMatch {
+					matched = nil
+					bestMatch = match
+				}
+				p := procs[i]
+				p.Comm = name
+				matched = append(matched, p)
 			}
-			if best == nil {
+			if len(matched) == 0 {
 				continue
 			}
-			// Quality reflects how confident this row is *as evidence
-			// of the named SDK*. Exact comm match (the kernel-reported
-			// process name equals a catalog `process_names` entry) is
-			// the strongest signal a `ps` snapshot can give us;
-			// substring matches (e.g. "claude-code" containing "claude")
-			// are still useful but less specific, so the engine
-			// down-weights them via Quality.
-			quality := 1.0
-			matchKind := MatchKindExact
-			if !processCommExactlyEquals(best.Comm, want) {
-				quality = 0.5
-				matchKind = MatchKindSubstring
+			sort.SliceStable(matched, func(i, j int) bool {
+				return matched[i].StartedAt.After(matched[j].StartedAt)
+			})
+			for _, p := range matched {
+				if bestMatch > bestScore[p.PID] {
+					bestScore[p.PID] = bestMatch
+				}
 			}
-			out = append(out, s.signalFromProcess(sig, *best, now, matchKind, quality))
+			claims = append(claims, posixClaim{sig: sig, want: want, procs: matched, score: bestMatch})
 		}
 	}
+	for _, claim := range claims {
+		var kept []processInfo
+		for _, p := range claim.procs {
+			if claim.score == bestScore[p.PID] {
+				kept = append(kept, p)
+			}
+		}
+		if len(kept) == 0 {
+			continue
+		}
+		// Quality reflects how confident this row is *as evidence
+		// of the named SDK*. Exact comm match (the kernel-reported
+		// process name equals a catalog `process_names` entry) is
+		// the strongest signal a `ps` snapshot can give us;
+		// substring matches (e.g. "claude-code" containing "claude")
+		// are still useful but less specific, so the engine
+		// down-weights them via Quality.
+		quality := 1.0
+		matchKind := MatchKindExact
+		if !processCommExactlyEquals(kept[0].Comm, claim.want) {
+			quality = 0.5
+			matchKind = MatchKindSubstring
+		}
+		signal := s.signalFromProcess(claim.sig, kept[0], now, matchKind, quality)
+		for _, other := range kept[1:] {
+			if len(signal.Runtime.OtherInstances) >= maxProcessOtherInstances {
+				break
+			}
+			signal.Runtime.OtherInstances = append(signal.Runtime.OtherInstances, *newProcessRuntime(other, now))
+		}
+		out = append(out, signal)
+	}
 	return out, nil
+}
+
+// processMatchName is the process name that matches want: comm, or else
+// argv[0]'s basename when the process renamed its main thread (Linux), or
+// else the basename argv[0]'s symlink resolves to (Cursor's `agent` alias).
+func processMatchName(proc processInfo, want string) string {
+	if processNameMatches(proc.Comm, want) {
+		return proc.Comm
+	}
+	if proc.Argv0 != "" && processNameMatches(proc.Argv0, want) {
+		return proc.Argv0
+	}
+	if proc.Argv0Target != "" && processNameMatches(proc.Argv0Target, want) {
+		return proc.Argv0Target
+	}
+	return ""
+}
+
+// processMatchScore ranks how closely a process name matches a catalog
+// process name: exact with the same case (4), exact ignoring case (3),
+// substring with the same case (2), substring ignoring case (1).
+func processMatchScore(have, want string) int {
+	have = strings.TrimSpace(filepath.Base(have))
+	want = strings.TrimSpace(filepath.Base(want))
+	switch {
+	case have == want:
+		return 4
+	case strings.EqualFold(have, want):
+		return 3
+	case strings.Contains(have, want):
+		return 2
+	default:
+		return 1
+	}
 }
 
 func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc processInfo, now time.Time, matchKind string, quality float64) AISignal {
@@ -2288,6 +2668,19 @@ func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc pro
 	}
 	ev := AIEvidence{Type: "process", ValueHash: hashValue(evidenceValue), Quality: quality, MatchKind: matchKind}
 	signal := s.signalFromEvidence(sig, SignalActiveProcess, "process", []AIEvidence{ev})
+	runtimeInfo := newProcessRuntime(proc, now)
+	if runtimeInfo.StartedAt != nil {
+		started := *runtimeInfo.StartedAt
+		signal.LastActiveAt = &started
+	}
+	if proc.OwnerID != "" {
+		signal.UserID, signal.UserName = proc.OwnerID, proc.OwnerName
+	}
+	signal.Runtime = runtimeInfo
+	return signal
+}
+
+func newProcessRuntime(proc processInfo, now time.Time) *ProcessRuntime {
 	runtimeInfo := &ProcessRuntime{PID: proc.PID, PPID: proc.PPID, User: proc.User, Comm: proc.Comm}
 	if !proc.StartedAt.IsZero() {
 		started := proc.StartedAt
@@ -2295,10 +2688,11 @@ func (s *ContinuousDiscoveryService) signalFromProcess(sig AISignature, proc pro
 		if uptime := now.Sub(proc.StartedAt); uptime >= 0 {
 			runtimeInfo.UptimeSec = int64(uptime.Seconds())
 		}
-		signal.LastActiveAt = &started
 	}
-	signal.Runtime = runtimeInfo
-	return signal
+	if proc.OwnerID != "" && runtimeInfo.User == "" {
+		runtimeInfo.User = proc.OwnerName
+	}
+	return runtimeInfo
 }
 
 func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
@@ -2606,6 +3000,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 	var out []AISignal
 	files := 0
 	walkErrs := 0
+	ownDataDirs := s.ownDataDirs()
 	// Walk each scan root; collect entries grouped by dir so we can
 	// compute lockfile-based version indexes once per dir.
 	for _, root := range s.scanRoots() {
@@ -2625,6 +3020,16 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
+			if err != nil && s.discoveryAccessSkipped(err) {
+				// Skipped as the model scan does: macOS privacy
+				// protection keeps ~/.Trash and other apps' folders
+				// from a process without Full Disk Access, which is
+				// not an error of this scan.
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if err != nil {
 				// Permission errors / vanished entries are
 				// expected in long-running scans; record one bump
@@ -2640,7 +3045,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				if shouldSkipDiscoveryDir(d.Name()) && path != root {
+				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -3080,7 +3485,9 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 					Quality:   0.5,
 					MatchKind: MatchKindHeuristic,
 				}
-				out = append(out, s.signalFromEvidence(sig, SignalShellHistoryMatch, "shell_history", []AIEvidence{ev}))
+				historySignal := s.signalFromEvidence(sig, SignalShellHistoryMatch, "shell_history", []AIEvidence{ev})
+				s.stampHomeOwner(&historySignal, path)
+				out = append(out, historySignal)
 				break
 			}
 			if !s.opts.IncludeNetworkDomains {
@@ -3098,6 +3505,7 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 					ValueHash: hashValue(sig.ID + ":" + domain),
 				}
 				domainSignal := s.signalFromEvidence(sig, SignalProviderDomain, "shell_history", []AIEvidence{ev})
+				s.stampHomeOwner(&domainSignal, path)
 				// Carry the matched domain, not just the history file it was
 				// found in. Basenames is what a consumer joins on, and
 				// without this it holds ".zsh_history" while Name and
@@ -3121,6 +3529,7 @@ func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, d
 		ev.RawPath = path
 	}
 	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
+	s.stampHomeOwner(&out, path)
 	// "Last active" for path-evidence detectors (config / binary /
 	// MCP / extension) defaults to the file's modification time when
 	// available. That's a meaningful liveness proxy: an `~/.codex/`
@@ -3246,6 +3655,9 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return nil
+	}
+	if rewritten, ok := s.profileRelativeCandidate(candidate); ok {
+		candidate = rewritten
 	}
 	missingEnv := false
 	candidate = os.Expand(candidate, func(name string) string {
@@ -3772,6 +4184,8 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 	report.Summary.Source = AISourceExternal
 	for i := range report.Signals {
 		report.Signals[i].Source = AISourceExternal
+		// Account attribution comes only from the guardian's per-user scans.
+		report.Signals[i].UserID, report.Signals[i].UserName = "", ""
 		// Provenance country/publisher claims are catalog-controlled. An
 		// external discovery client may supply the model ID, but it cannot
 		// impersonate a higher-confidence publisher rule on outbound events.

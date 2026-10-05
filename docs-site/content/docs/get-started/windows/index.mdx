@@ -10,18 +10,37 @@ keywords:
 ---
 
 DefenseClaw has a native, per-user Windows x64 (`amd64`) distribution. It
-installs a local gateway, native hook launcher, CLI, TUI, scanners, and managed
-Python runtime. Connector availability, setup, paths, and platform-specific
-quirks live on the [connector pages](/docs/connectors#platform-support), next
-to the equivalent macOS/Linux guidance. A supported availability label does
-not populate validation evidence or certify an official-client run.
+installs a local gateway, native hook runner, CLI, TUI, scanners, and a managed
+Python runtime for the signed-in user. Connector availability, setup, paths,
+and platform-specific quirks live on the
+[connector pages](/docs/connectors#platform-support), next to the
+macOS and Linux guidance.
 
-For centrally managed endpoints, the separate
-[managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout)
-installs four administrator-owned Windows services: `DefenseClawGateway`,
-`DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and
-`DefenseClawHookEnumerator`. It is explicitly opt-in and does not change this
-per-user package or its existing auto-heal behavior.
+## Install
+
+In PowerShell, as the user who runs your agents:
+
+```powershell
+irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
+```
+
+Open a new terminal afterwards so the `PATH` change applies, then run
+`defenseclaw init` to pick the agents to guard.
+[Install and maintain](/docs/get-started/windows/install-lifecycle) covers
+installer options, upgrade, rollback, and uninstall.
+
+For centrally managed computers, use
+[enterprise deployment](/docs/enterprise) instead. It installs
+administrator-owned Windows services. The
+[standalone profile](/docs/enterprise/windows), for Intune or any other MDM,
+installs `DefenseClawGateway`, `DefenseClawSensorHelper`,
+`DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. The
+[Secure Client profile](/docs/enterprise/secure-client#windows-system-service-layout)
+installs the same services plus the `DefenseClawCMIDBroker` credential broker.
+Both are opt-in. On a computer with a standalone enterprise deployment, this
+per-user package does not run: `install.ps1`, `defenseclaw upgrade`,
+`defenseclaw rollback`, and the per-user gateway refuse, because the
+organization installs and updates DefenseClaw there.
 
 <Callout type="warning" title="WSL is not supported">
 This guide is for DefenseClaw, the agent, and its configuration running in the
@@ -33,83 +52,106 @@ native agent at a WSL installation, or mix native and WSL connector homes.
 
 | Status | Meaning in this guide |
 | --- | --- |
-| **Supported** | Implemented and available through ordinary native Windows x64 Setup. This availability label does not populate validation metadata or claim authentic client evidence. |
-| **Limited** | Supported only on the stated surface, with optional configuration, an extra dependency, or a narrower guarantee. |
-| **Unsupported** | Rejected, unavailable, or outside the native Windows product contract. |
-| **Not applicable** | A platform-specific concept is intentionally absent from the Windows design. |
+| **Supported** | Ships in the standard native Windows x64 install. |
+| **Limited** | Works only on the stated surface, or needs optional configuration or an extra dependency. |
+| **Unsupported** | Refused or unavailable on native Windows. |
+| **Not tested** | Not part of this release's Windows testing; it may work, but it is not supported. |
+| **Not applicable** | A macOS or Linux concept that Windows does not use. |
 
 ## Choose a connector
 
-The [connector platform table](/docs/connectors#platform-support) is the
-canonical Windows support matrix. Each linked connector page contains both
-platform setup paths and calls out native Windows dependencies, unsupported
-topologies, reload behavior, and event-specific enforcement limits.
+The [connector platform table](/docs/connectors#platform-support) shows which
+agents DefenseClaw guards on Windows. Each connector page has a Windows tab
+with its setup command, the files it changes, what it needs installed, and
+when to restart the agent.
 
-Supported native Windows connectors remain connected directly to their normal
-upstream service. DefenseClaw does **not** insert a model proxy on Windows. It
-can protect and observe only events the installed agent emits through a
-documented hook, awaited policy, or native telemetry surface.
+On Windows, DefenseClaw adds a hook or plugin to your agent. The agent keeps
+talking directly to its own model service: DefenseClaw does **not** proxy model
+traffic on Windows. It sees, and in action mode can block, only the events the
+agent reports through that hook or plugin.
 
 <Cards>
-  <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, authenticated release Setup, repair, upgrade qualification, recovery, and uninstall." />
+  <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, install, upgrade, rollback, repair, and uninstall." />
   <Card title="Choose a connector" href="/docs/connectors#platform-support" description="Compare macOS/Linux and native Windows support, then open one connector's setup and quirks." />
-  <Card title="Managed enterprise" href="/docs/setup/enterprise-deployment#windows-system-service-layout" description="Gateway, credential broker, hook guardian, profile enumerator, non-admin guarantees, and the enterprise CLI lifecycle." />
-  <Card title="Capabilities" href="/docs/capability-matrix" description="Connector enforcement, native ask, fail-closed, and subprocess capabilities." />
-  <Card title="CLI commands" href="/docs/reference/cli" description="Canonical command reference with platform-specific availability notes." />
-  <Card title="Windows security model" href="/docs/get-started/windows/telemetry-security" description="Loopback authentication, local audit, scoped credentials, release provenance, and recovery guarantees." />
-  <Card title="Paths and troubleshooting" href="/docs/get-started/windows/paths-troubleshooting" description="Filesystem reference, safe diagnostics, terminal guidance, and verification checklists." />
+  <Card title="Enterprise deployment" href="/docs/enterprise" description="Administrator-owned services for Intune or any MDM, with the standalone and Secure Client profiles." />
+  <Card title="Capabilities" href="/docs/connectors/capability-matrix" description="What each connector can block, ask about, and fail closed on." />
+  <Card title="CLI commands" href="/docs/reference/cli" description="Command reference with platform availability notes." />
+  <Card title="Windows security model" href="/docs/get-started/windows/telemetry-security" description="Loopback authentication, local audit, scoped credentials, release checks, and recovery." />
+  <Card title="Paths and troubleshooting" href="/docs/get-started/windows/paths-troubleshooting" description="Where files live, first diagnostics, fixes, and post-install checks." />
 </Cards>
 
-## Native architecture
+## How it fits together
 
 The normal installation is one current-user application:
 
-1. `DefenseClawSetup-x64.exe` installs product-owned files and an embedded
-   runtime below the current user's Programs directory.
-2. Connector setup installs the exact native hook, adapter, or in-process
-   policy bridge documented on that connector's Windows tab. Use the
-   [connector platform table](/docs/connectors#platform-support) as the
-   canonical source for process, path, dependency, and enforcement details.
-3. The native hook, adapter, or in-process bridge sends declared events to an
-   authenticated gateway API on loopback. Action mode can return a decision
-   only where that agent event or awaited policy phase supports one.
-4. Native OTLP from the agent enters a connector-scoped loopback receiver. It
-   adds telemetry; it is never an enforcement path.
-5. The gateway evaluates policy and persists mandatory local audit data. Any
-   outbound observability destination is an additional, explicit choice.
+1. `install.ps1` installs the gateway, hook runner, and CLI for the current
+   user in `%USERPROFILE%\.local\bin` and `%USERPROFILE%\.defenseclaw`.
+2. Connector setup adds DefenseClaw's hook, adapter, or plugin to the agent,
+   as described on that connector's Windows tab.
+3. When the agent runs a hook, the hook sends the event to the gateway on
+   loopback (`127.0.0.1`), with a credential scoped to that connector. In
+   action mode the gateway's answer can block the step, where that event
+   supports a block.
+4. Agents that export OpenTelemetry send it to the same local gateway. That
+   adds detail to the audit log; it never blocks anything.
+5. The gateway applies policy and writes every decision to the local audit
+   database. Sending data to Splunk, an OTLP collector, or another destination
+   is a separate, explicit choice.
 
-See [Telemetry and security](/docs/get-started/windows/telemetry-security) for
-the authentication, redaction, and local-storage boundaries.
+See the [Windows security model](/docs/get-started/windows/telemetry-security)
+for authentication, redaction, and local storage.
 
 ## What is outside the support boundary
 
-| Item | Status | Boundary |
-| --- | --- | --- |
-| WSL installation or a mixed native/WSL connector | **Unsupported** | Native and WSL executables, profiles, and hook paths are different trust domains. |
-| Windows x86 | **Unsupported** | Setup requires an `amd64` process and payload. |
-| Windows ARM64, including x64 emulation | **Not certified** | Setup rejects it rather than relying on emulation. |
-| Machine-wide Setup or MSI | **Unsupported** | The public package accepts `INSTALLSCOPE=user` only. |
-| Elevated, service, session-zero, or background Setup | **Unsupported** | State-changing Setup actions require the signed-in, non-elevated interactive user. |
-| Windows model-proxy connectors | **Unsupported** | The native Windows gateway supports connector hook, plugin, and awaited-policy lanes, not the guardrail-proxy lifecycle. |
-| A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
-| OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
-| `systemd`, `launchd`, Unix sockets, and DefenseClaw-provided POSIX hook shells | **Not applicable** | Windows uses native processes and Windows process identity. DefenseClaw uses the packaged hook executable, a managed adapter, or an in-process bridge and does not add WSL or a POSIX shell. A connector page calls out any separate upstream runtime dependency, such as Devin's own Windows hook runner. |
-| Machine services from the public per-user Setup | **Unsupported** | The current-user Setup never elevates or installs services. The separate [managed-enterprise lifecycle](/docs/setup/enterprise-deployment#windows-system-service-layout) installs `DefenseClawGateway`, `DefenseClawCMIDBroker`, `DefenseClawHookGuardian`, and `DefenseClawHookEnumerator`. |
-| Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
+**Unsupported**
 
-No roadmap is implied by these classifications.
+- **WSL, or a mix of native and WSL connectors.** Native Windows and WSL keep
+  separate executables, profiles, and hook paths. Install DefenseClaw and the
+  agent natively.
+- **Windows ARM64, including x64 emulation.** Releases publish no ARM64 build,
+  and `install.ps1` stops on ARM64 without changing anything.
+- **Windows x86.** Release binaries are `amd64` only.
+- **A machine-wide install, MSI, or Windows services from the per-user
+  package.** `install.ps1` installs for the current user only and never
+  installs a service. For machine-wide services, use the
+  [standalone profile](/docs/enterprise/windows) or the
+  [Secure Client profile](/docs/enterprise/secure-client#windows-system-service-layout).
+- **Model-proxy connectors (OpenClaw, ZeptoClaw).** Native Windows has no
+  guardrail proxy; connectors use hooks and plugins.
+- **OpenShell sandboxes.** `defenseclaw sandbox` commands stop with "OpenShell
+  sandboxes run on Linux and macOS only", and the TUI Sandboxes panel says the
+  same. Run [sandboxes](/docs/sandboxes) on Linux or an Apple-silicon Mac.
+
+**Not tested**
+
+- **An agent on another computer sending hooks to this gateway.** The tested
+  path is the agent and the gateway on the same computer, for the same user,
+  over loopback. Sending telemetry to a remote destination is separate and
+  supported.
+- **Docker Desktop's WSL2 engine for the bundled local stacks.** The optional
+  local observability and Local Splunk stacks are tested with Linux containers
+  on the Hyper-V backend.
+
+**Not applicable**
+
+- **`systemd`, `launchd`, Unix sockets, and POSIX hook shells.** Windows uses
+  native processes. DefenseClaw runs its packaged hook executable, a managed
+  adapter, or an in-process plugin, and adds no WSL or POSIX shell. A
+  connector page notes any runtime the agent itself needs, such as Devin's own
+  Windows hook runner.
+
+These lists describe the current release; they are not a roadmap.
 
 ## If you are migrating
 
-For a normal-mode migration from macOS or Linux, expect a per-user Setup EXE instead of a shell installer,
-HKCU `PATH` and Run registration instead of a service manager, native process
-identity instead of PID-only signaling, and the selected connector's native
-hook, adapter, plugin, or awaited-policy lane instead of a DefenseClaw POSIX
-hook script. Sandbox and proxy connector features do not move with you.
+From macOS or Linux, expect `install.ps1` instead of `install.sh`, a user
+`PATH` entry in the registry, and the connector's Windows hook or plugin
+instead of a POSIX hook script. OpenClaw and ZeptoClaw do not move with you,
+because they need the guardrail proxy.
 
-From WSL, perform a fresh native install. Install the selected
-[supported connector](/docs/connectors#platform-support) natively for the same
-Windows user, follow its Windows setup tab, and do not copy a WSL data
+From WSL, do a fresh native install. Install the
+[supported agent](/docs/connectors#platform-support) natively for the same
+Windows user and follow its Windows setup tab. Do not copy a WSL data
 directory, hook scripts, tokens, virtual environment, gateway binary, or
 connector configuration into the Windows profile.
 

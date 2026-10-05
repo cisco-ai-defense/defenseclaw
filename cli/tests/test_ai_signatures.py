@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 
 import pytest
+from defenseclaw import legacy_connector
 from defenseclaw.inventory.ai_signatures import (
     ALLOWED_CATEGORIES,
     SignaturePackError,
@@ -64,7 +65,7 @@ def test_devin_signature_tracks_canonical_connector_contract():
     signatures = {sig.id: sig for sig in load_ai_signatures()}
     devin = signatures["devin"]
 
-    assert "windsurf" not in signatures
+    assert legacy_connector.RETIRED_DESKTOP_ID not in signatures
     assert set(devin.binary_names) == {"devin", "devin.exe"}
     assert set(devin.process_names) == {"devin", "devin.exe"}
     assert {
@@ -83,7 +84,7 @@ def test_devin_signature_tracks_canonical_connector_contract():
         "AGENTS.local.md",
         ".agents/skills",
     } <= set(devin.config_paths)
-    assert not any("windsurf" in path.casefold() for path in devin.config_paths)
+    assert not any(legacy_connector.RETIRED_DESKTOP_ID in path.casefold() for path in devin.config_paths)
     assert {
         "$APPDATA/devin/mcp_config.json",
         "~/.config/devin/mcp_config.json",

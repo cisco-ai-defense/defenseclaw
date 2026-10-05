@@ -22,7 +22,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,9 +33,14 @@ import (
 	"unicode/utf8"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -50,22 +58,261 @@ The sidecar must be running for this command to work.`,
 	// Status only needs the strict runtime config to locate the health API.
 	// Do not inherit root's audit-store lifecycle: a second short-lived Store
 	// can unlink the running daemon's WAL/SHM and strand later audit writes.
-	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-		return loadGatewayCommandConfigOnly()
+	// On a standalone managed host an administrator's status reads the
+	// managed deployment without extra environment variables.
+	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
+		gatewayStatusConfigProblem = nil
+		err := loadGatewayCommandConfigFor(cmd)
+		if relaxed := gatewayStatusRelaxedConfig(err); relaxed != nil {
+			// GAP-1788, GAP-2062: a missing destination secret or an
+			// invalid value does not hide the running gateway; show its
+			// status, then the config problem.
+			cfg = relaxed
+			gatewayStatusConfigProblem = gatewayStatusConfigLoadError(err)
+			return nil
+		}
+		return gatewayStatusConfigLoadError(err)
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
-	RunE:              runSidecarStatus,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		err := runSidecarStatus(cmd, args)
+		if gatewayStatusConfigProblem != nil {
+			return gatewayStatusConfigProblem
+		}
+		return err
+	},
 }
 
+// gatewayStatusConfigProblem is the config.yaml error that status reports
+// after the gateway's health when only a destination secret is missing.
+var gatewayStatusConfigProblem error
+
+// gatewayStatusRelaxedConfig loads config.yaml without compiling the
+// observability destinations when err is only a missing destination secret,
+// so status can still find and query the gateway. An invalid enum or type
+// value is dropped for the same purpose, so status shows the running
+// gateway before the problem in both cases (GAP-2062); so is an undeclared
+// key (GAP-2173). It returns nil
+// otherwise.
+func gatewayStatusRelaxedConfig(err error) *config.Config {
+	var secretErr *config.V8SecretReferenceError
+	secretOnly := err != nil && errors.As(err, &secretErr) && !secretErr.Credential
+	if err == nil || (!secretOnly && !gatewayStatusDroppableValue(err)) {
+		return nil
+	}
+	path := config.ConfigPath()
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil
+	}
+	for range 8 {
+		// Check the schema before the typed decode: a wrong-type value
+		// (a list for a string, text for a boolean or integer) fails the
+		// decode with no schema path to drop (GAP-2118).
+		schemaCheck := config.ValidateV8SchemaBytes(path, raw)
+		if schemaCheck == nil {
+			relaxed, loadErr := config.LoadRuntimeV8FromBytes(path, raw)
+			if loadErr != nil {
+				return nil
+			}
+			return relaxed
+		}
+		if !gatewayStatusDroppableValue(schemaCheck) {
+			return nil
+		}
+		var next []byte
+		ok := false
+		var schemaErr *config.V8SchemaError
+		var yamlErr *config.V8YAMLError
+		switch {
+		case errors.As(schemaCheck, &schemaErr):
+			next, ok = yamlWithoutPath(raw, schemaErr.Path, 0)
+		case errors.As(schemaCheck, &yamlErr):
+			// Keep the first definition of a duplicate section (GAP-2188).
+			next, ok = yamlWithoutPath(raw, yamlErr.Path, yamlErr.Line)
+		}
+		if !ok {
+			return nil
+		}
+		raw = next
+	}
+	return nil
+}
+
+// gatewayStatusDroppableValue reports a schema error about one value (an
+// unknown enum choice, a wrong type or an undeclared key), whose removal leaves the rest of
+// config.yaml, including the gateway address, as written.
+func gatewayStatusDroppableValue(err error) bool {
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		// A second definition of a key (GAP-2188) is dropped too.
+		return yamlErr.Code == config.V8YAMLErrorDuplicateKey && yamlErr.Line > 0 &&
+			yamlErr.Path != "" && yamlErr.Path != "$"
+	}
+	var schemaErr *config.V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Path == "" || schemaErr.Path == "$" {
+		return false
+	}
+	// An unknown (typo'd) key is dropped too (GAP-2173).
+	return schemaErr.Keyword == "enum" || schemaErr.Keyword == "type" || schemaErr.Keyword == "additionalProperties"
+}
+
+var yamlPathSegment = regexp.MustCompile(`^(?:\.([A-Za-z0-9_-]+)|\[([0-9]+)\])`)
+
+// yamlWithoutPath removes the value at a schema display path such as
+// $.guardrail.mode or $.connectors[0].name from a YAML document. With a
+// line above zero it removes only the key written on that line, the second
+// definition of a duplicate key.
+func yamlWithoutPath(raw []byte, path string, line int) ([]byte, bool) {
+	rest := strings.TrimPrefix(path, "$")
+	var segments []string
+	for rest != "" {
+		match := yamlPathSegment.FindStringSubmatch(rest)
+		if match == nil {
+			return nil, false
+		}
+		segments = append(segments, match[1]+match[2])
+		rest = rest[len(match[0]):]
+	}
+	var doc yaml.Node
+	if len(segments) == 0 || yaml.Unmarshal(raw, &doc) != nil || len(doc.Content) == 0 {
+		return nil, false
+	}
+	node := doc.Content[0]
+	for i, segment := range segments {
+		last := i == len(segments)-1
+		found := false
+		switch node.Kind {
+		case yaml.MappingNode:
+			for j := 0; j+1 < len(node.Content); j += 2 {
+				if node.Content[j].Value != segment || last && line > 0 && node.Content[j].Line != line {
+					continue
+				}
+				if last {
+					node.Content = append(node.Content[:j], node.Content[j+2:]...)
+				} else {
+					node = node.Content[j+1]
+				}
+				found = true
+				break
+			}
+		case yaml.SequenceNode:
+			index, err := strconv.Atoi(segment)
+			if err == nil && index >= 0 && index < len(node.Content) {
+				if last {
+					node.Content = append(node.Content[:index], node.Content[index+1:]...)
+				} else {
+					node = node.Content[index]
+				}
+				found = true
+			}
+		}
+		if !found {
+			return nil, false
+		}
+	}
+	out, err := yaml.Marshal(&doc)
+	return out, err == nil
+}
+
+// gatewayStatusJSON selects the machine-readable status (GAP-1609).
+var gatewayStatusJSON bool
+
 func init() {
+	statusCmd.Flags().BoolVar(&gatewayStatusJSON, "json", false, "Print the gateway health as JSON")
 	rootCmd.AddCommand(statusCmd)
+}
+
+// gatewayStatusDocument is the --json form of gateway status: the /health
+// snapshot when the gateway answers, otherwise why not and the next step.
+type gatewayStatusDocument struct {
+	Running  bool                    `json:"running"`
+	Endpoint string                  `json:"endpoint"`
+	Health   *gateway.HealthSnapshot `json:"health,omitempty"`
+	Error    string                  `json:"error,omitempty"`
+	Hint     string                  `json:"hint,omitempty"`
+}
+
+func runSidecarStatusJSON(w io.Writer) error {
+	addr := sidecarHealthURL(cfg)
+	doc := gatewayStatusDocument{Endpoint: addr}
+	var failure error
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		doc.Error = problem
+		doc.Hint = foreignGatewayListenerFix(cfg)
+		failure = errors.New("the gateway port is held by another process")
+	} else if snap, err := fetchSidecarHealth(&http.Client{Timeout: 5 * time.Second}, addr); err != nil {
+		doc.Error = err.Error()
+		doc.Hint = sidecarNotRunningHint(cfg)
+		failure = errors.New("sidecar unreachable")
+		if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
+			doc.Hint = fmt.Sprintf("The gateway process (PID %d) is running but does not answer /health. "+
+				"Restart it with: defenseclaw-gateway restart", pid)
+			failure = errors.New("sidecar not answering")
+		}
+	} else {
+		doc.Running = true
+		doc.Health = &snap
+	}
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(doc); err != nil {
+		return err
+	}
+	return failure
+}
+
+// gatewayStatusConfigLoadError adds the daemon state and the next step when
+// config.yaml does not load: a running gateway keeps enforcing the config it
+// started with, and start/restart already name the same repair (GAP-1431).
+func gatewayStatusConfigLoadError(err error) error {
+	if err == nil || !strings.HasPrefix(err.Error(), "failed to load config:") {
+		return err
+	}
+	state := "The gateway is not running."
+	running, pid := daemon.New(config.DefaultDataPath()).IsRunning()
+	if running {
+		state = fmt.Sprintf("The gateway (PID %d) is still running with the config it started with.", pid)
+	}
+	if message, empty := emptyConfigFileMessage(config.ConfigPath()); empty {
+		return fmt.Errorf("%s %s", message, state)
+	}
+	var secretErr *config.V8SecretReferenceError
+	if errors.As(err, &secretErr) && !secretErr.Credential {
+		// Same next step start and restart print (GAP-1353).
+		// `setup <destination> disable` validates the whole file too, so
+		// name the edit that works (GAP-1788).
+		dest := "that destination"
+		subject := "an observability destination"
+		if secretErr.Destination != "" {
+			dest = fmt.Sprintf("destination %q", secretErr.Destination)
+			subject = "observability " + dest
+		}
+		// One remedy, as start and restart give it: the loader's own
+		// "set it with ..." advice repeated it (GAP-1900).
+		where := ""
+		var semanticErr *config.V8SemanticError
+		if errors.As(err, &semanticErr) && semanticErr.Line > 0 {
+			where = fmt.Sprintf("%s line %d: ", config.ConfigPath(), semanticErr.Line)
+		}
+		return fmt.Errorf("failed to load config: %s%s needs %s, which is not set. %s Set it with: "+
+			"defenseclaw keys set %s (or remove %s from %s), then run: defenseclaw-gateway %s",
+			where, subject, secretErr.Reference, state, secretErr.Reference, dest, config.ConfigPath(),
+			gatewayStatusNextVerb(running))
+	}
+	if problem, ok := configSchemaProblem(err); ok {
+		return fmt.Errorf("failed to load config: %s. %s Fix the file (check it with: defenseclaw config validate)",
+			problem, state)
+	}
+	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
 }
 
 func printGatewayStatusBanner() {
 	fmt.Println()
 	title := "DefenseClaw Gateway Status"
 	fmt.Println("  " + Style(title, "fg=cyan", "bold"))
-	under := strings.Repeat("═", utf8.RuneCountInString(title))
+	under := strings.Repeat(glyph("═", "="), utf8.RuneCountInString(title))
 	fmt.Println("  " + Style(under, "fg=cyan"))
 }
 
@@ -73,7 +320,7 @@ func printGatewayKV(key, value string) {
 	label := fmt.Sprintf("%-*s", gatewayStatusLabelWidth, key+":")
 	rendered := value
 	if rendered == "" {
-		rendered = Dim("—")
+		rendered = Dim(glyph("—", "-"))
 	}
 	fmt.Printf("  %s%s\n", Style(label, "fg=bright_black", "bold"), rendered)
 }
@@ -97,9 +344,9 @@ func styledConnectorStateVerb(state string) string {
 	}
 	switch u {
 	case "RUNNING", "ACTIVE", "READY", "UP":
-		return " — " + Style(u, "fg=green")
+		return " " + glyph("—", "-") + " " + Style(u, "fg=green")
 	default:
-		return " — " + Style(u, "fg=yellow")
+		return " " + glyph("—", "-") + " " + Style(u, "fg=yellow")
 	}
 }
 
@@ -107,13 +354,7 @@ func gatewayBindHost(c *config.Config) string {
 	if c == nil {
 		c = config.DefaultConfig()
 	}
-	bind := "127.0.0.1"
-	if c.Gateway.APIBind != "" {
-		bind = c.Gateway.APIBind
-	} else if c.OpenShell.IsStandalone() && c.Guardrail.Host != "" && c.Guardrail.Host != "localhost" {
-		bind = c.Guardrail.Host
-	}
-	return bind
+	return config.APIBindHost(c)
 }
 
 func sidecarHealthURL(c *config.Config) string {
@@ -179,17 +420,44 @@ func fetchSidecarHealth(client *http.Client, addr string) (gateway.HealthSnapsho
 }
 
 func runSidecarStatus(_ *cobra.Command, _ []string) error {
+	if gatewayStatusJSON {
+		return runSidecarStatusJSON(os.Stdout)
+	}
 	addr := sidecarHealthURL(cfg)
+	// /health is public: any process on the port answers it. Never present
+	// another home's or account's gateway as this one.
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		fmt.Println()
+		Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+		printGatewayKV("Endpoint", addr)
+		Subhead(problem + ". Its status is not shown.")
+		Subhead(foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("the gateway port is held by another process")
+	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	snap, err := fetchSidecarHealth(client, addr)
 	if err != nil {
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {
+			if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
+				// A live but hung gateway (GAP-1342): "start" only says it
+				// is already running, so name restart here.
+				fmt.Println()
+				Warn("Sidecar Status: NOT ANSWERING")
+				printGatewayKV("Endpoint", addr)
+				printGatewayKV("PID", strconv.Itoa(pid))
+				Subhead(fmt.Sprintf("The gateway process (PID %d) is running but does not answer /health.", pid))
+				Subhead("Restart it with: defenseclaw-gateway restart")
+				return fmt.Errorf("sidecar not answering")
+			}
 			fmt.Println()
 			Warn("Sidecar Status: NOT RUNNING")
 			printGatewayKV("Endpoint", addr)
-			Subhead("Start the sidecar with: defenseclaw-gateway start")
+			if reason := lastGatewayExitError(cfg); reason != "" {
+				printGatewayKV("Last exit", reason)
+			}
+			Subhead(sidecarNotRunningHint(cfg))
 			return fmt.Errorf("sidecar unreachable")
 		}
 		return fmt.Errorf("sidecar status: %w", err)
@@ -200,6 +468,11 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayStatusBanner()
 	printGatewayKV("Started", snap.StartedAt.Format(time.RFC3339))
 	printGatewayKV("Uptime", formatDuration(uptime))
+	if !cfg.StandaloneEnterprise() && !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) &&
+		gatewayRunsReplacedBinary() {
+		Warn("This account's gateway is running a binary that was replaced after it started")
+		Subhead("Load the installed one with: defenseclaw-gateway restart")
+	}
 	fmt.Println()
 
 	bind := gatewayBindHost(cfg)
@@ -207,23 +480,93 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printConnectorModes(modes)
 	}
 
-	Section("Subsystems")
-	printSubsystem("Gateway", snap.Gateway)
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Routing", snap.Routing)
-	printSubsystem("Telemetry", snap.Telemetry)
-	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
-	}
+	printSubsystems(&snap)
 
 	printConnectors(&snap)
 	if isLocalStatusTarget(bind) {
 		printHookGuardianStatus()
+		printMovedCorruptAuditStores(cfg, time.Time{})
 	}
 
 	return nil
+}
+
+// printMovedCorruptAuditStores tells the operator when the gateway replaced a
+// corrupt audit store (moved at or after since); otherwise only the gateway
+// log said so and status looked like a healthy, empty history.
+func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
+	if cfg == nil {
+		return
+	}
+	var moved []audit.MovedCorruptStore
+	for _, store := range audit.MovedCorruptStores(cfg.AuditDB) {
+		if !store.MovedAt.Before(since) {
+			moved = append(moved, store)
+		}
+	}
+	if len(moved) == 0 {
+		return
+	}
+	newest := moved[len(moved)-1]
+	fmt.Println()
+	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
+		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		recoverHint += " (sqlite3 is not installed; get the command-line tool from https://sqlite.org/download.html)"
+	}
+	Subhead(recoverHint)
+	Subhead("Delete the moved file and its -wal/-shm files when they are no longer needed.")
+}
+
+// lastGatewayExitError returns the error a per-user gateway printed as the
+// last line of gateway.log before it exited (for example a refused plugin
+// folder or audit store), so a stopped gateway says why it stopped.
+func lastGatewayExitError(c *config.Config) string {
+	if c == nil || c.StandaloneEnterprise() {
+		return ""
+	}
+	path := filepath.Join(config.DefaultDataPath(), daemon.LogFileName)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	const tailBytes = 16 << 10
+	if info.Size() > tailBytes {
+		if _, err := f.Seek(info.Size()-tailBytes, io.SeekStart); err != nil {
+			return ""
+		}
+	}
+	tail, err := io.ReadAll(io.LimitReader(f, tailBytes))
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(tail), "\r\n"), "\n")
+	last := strings.TrimSpace(lines[len(lines)-1])
+	reason, ok := strings.CutPrefix(last, "Error: ")
+	if !ok || !utf8.ValidString(reason) {
+		return ""
+	}
+	if len(reason) > 400 {
+		reason = reason[:400] + "..."
+	}
+	return reason
+}
+
+// sidecarNotRunningHint names how to bring the gateway back. The per-user
+// gateway is started with `start`; a unix standalone deployment's gateway
+// is a system service that `start` refuses to touch.
+func sidecarNotRunningHint(c *config.Config) string {
+	if c != nil && c.StandaloneEnterprise() && runtime.GOOS != "windows" {
+		return "The managed gateway runs as a system service; an administrator can restart it with: " +
+			managedHostServiceRestartCommand()
+	}
+	return "Start the sidecar with: defenseclaw-gateway start"
 }
 
 func isLocalStatusTarget(host string) bool {
@@ -279,22 +622,78 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		conns = []gateway.ConnectorHealth{*snap.Connector}
 	}
 
-	if len(conns) == 0 {
+	notStarted := guardrailConnectorsNotStarted(snap.Guardrail.Details)
+	if len(conns) == 0 && len(notStarted) == 0 {
 		printGatewayKV("Agents", Dim("(no active connector)"))
 		fmt.Println()
 		return
 	}
 
-	printGatewayKV("Agents", fmt.Sprintf("%d active", len(conns)))
+	// GAP-1937: name the connectors that failed setup in the count, the way
+	// `defenseclaw status` does ("4 active, 1 not running").
+	agents := fmt.Sprintf("%d active", len(conns))
+	if len(notStarted) > 0 {
+		agents += fmt.Sprintf(", %d not running", len(notStarted))
+	}
+	printGatewayKV("Agents", agents)
 	for i := range conns {
 		c := conns[i]
-		stateStr := strings.ToUpper(string(c.State))
+		stateStr, detail := connectorDisplayState(&c, time.Now())
 		header := fmt.Sprintf("%s (%s)%s",
 			friendlyConnectorName(c.Name), c.Name, styledConnectorStateVerb(stateStr))
 		fmt.Printf("             %s\n", header)
+		if detail != "" {
+			fmt.Printf("               %s\n", Dim(detail))
+		}
 		printConnectorBody(&c)
 	}
+	// A connector whose setup failed at start is not enforced (GAP-1714).
+	for _, name := range notStarted {
+		fmt.Printf("             %s (%s)%s\n", friendlyConnectorName(name), name, styledConnectorStateVerb("NOT RUNNING"))
+		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
+			"see gateway.log, then run: defenseclaw setup "+name))
+	}
 	fmt.Println()
+}
+
+// opencodeHeartbeatFreshness matches the CLI's OpenCode freshness window.
+const opencodeHeartbeatFreshness = 15 * time.Minute
+
+// connectorDisplayState returns the state word for a connector row. OpenCode
+// is shown the way `defenseclaw status` shows it (GAP-1871): a running adapter
+// without a load heartbeat is IDLE (OpenCode is closed) and a stale heartbeat
+// is DEGRADED, so the two status views agree.
+func connectorDisplayState(c *gateway.ConnectorHealth, now time.Time) (string, string) {
+	state := strings.ToUpper(string(c.State))
+	if c.Name != "opencode" || c.State != gateway.StateRunning {
+		return state, ""
+	}
+	if c.LastLoadHeartbeatAt == nil {
+		return "IDLE", "no load heartbeat yet: OpenCode has not loaded the plugin since the gateway started, " +
+			"which is normal while OpenCode is closed"
+	}
+	if now.Sub(*c.LastLoadHeartbeatAt) > opencodeHeartbeatFreshness {
+		return "DEGRADED", "load heartbeat is stale (last received at " +
+			c.LastLoadHeartbeatAt.UTC().Format(time.RFC3339) + "); OpenCode may be stopped or idle"
+	}
+	return state, ""
+}
+
+// guardrailConnectorsNotStarted reads the guardrail's connectors_not_started
+// detail, a []string in process and a []interface{} after a JSON round trip.
+func guardrailConnectorsNotStarted(details map[string]interface{}) []string {
+	var names []string
+	switch raw := details["connectors_not_started"].(type) {
+	case []string:
+		names = append(names, raw...)
+	case []interface{}:
+		for _, value := range raw {
+			if name, ok := value.(string); ok && strings.TrimSpace(name) != "" {
+				names = append(names, name)
+			}
+		}
+	}
+	return names
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines
@@ -431,13 +830,13 @@ func printHookGuardianStatus() {
 			label += " for " + home
 		}
 		if row.OK {
-			fmt.Printf("                  %s — ok\n", label)
+			fmt.Printf("                  %s %s ok\n", label, glyph("—", "-"))
 		} else {
 			errText := row.Error
 			if errText == "" {
 				errText = "failed"
 			}
-			fmt.Printf("                  %s — %s\n", label, Style(errText, "fg=yellow"))
+			fmt.Printf("                  %s %s %s\n", label, glyph("—", "-"), Style(errText, "fg=yellow"))
 		}
 	}
 	fmt.Println()
@@ -448,7 +847,7 @@ func printHookGuardianStatus() {
 // _FRIENDLY_CONNECTOR_NAMES (cli/defenseclaw/commands/cmd_status.py) so the
 // Go gateway status and the Python `defenseclaw status` agree on every
 // connector's display name instead of title-casing the raw id (e.g.
-// "geminicli" -> "Retired Gemini CLI (cleanup only)", not "Geminicli"). Duplicated rather than
+// "claudecode" -> "Claude Code", not "Claudecode"). Duplicated rather than
 // shared to avoid pulling the TUI/Bubble Tea graph into the CLI binary.
 func friendlyConnectorName(name string) string {
 	switch strings.TrimSpace(name) {
@@ -466,20 +865,20 @@ func friendlyConnectorName(name string) string {
 		return "Cursor"
 	case "devin":
 		return "Devin"
-	case "windsurf":
-		return "Retired Cascade (cleanup only)"
-	case "geminicli":
-		return "Retired Gemini CLI (cleanup only)"
 	case "copilot":
 		return "GitHub Copilot CLI"
 	case "openhands":
 		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
+	case "opencode":
+		return "OpenCode"
 	case "amp":
 		return "Amp"
 	case "omnigent":
 		return "OmniGent"
+	case "kiro":
+		return "Kiro"
 	default:
 		s := strings.TrimSpace(name)
 		if s == "" {
@@ -505,6 +904,15 @@ type connectorModeSummary struct {
 	ProxyIntercept     bool     `json:"proxy_intercept"`
 	GuardrailMode      string   `json:"guardrail_mode"`
 	HookEnforcement    bool     `json:"hook_enforcement"`
+	// Enabled is the connector's guardrail.connectors.<name>.enabled
+	// switch; nil from sidecars that predate the field means enabled.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// disabled reports a connector the config turned off: it is listed but
+// nothing enforces it.
+func (m *connectorModeSummary) disabled() bool {
+	return m != nil && m.Enabled != nil && !*m.Enabled
 }
 
 // fetchConnectorModes returns one mode summary per active connector. It
@@ -576,11 +984,21 @@ func printConnectorModes(modes []connectorModeSummary) {
 
 func printConnectorModeEntry(m *connectorModeSummary) {
 	modeLabel := Style(fmt.Sprintf("%-18s", "Connector:"), "fg=bright_black", "bold")
-	connectorName := m.Connector
-	if connectorName != "" {
-		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
+	if m.Connector == "" {
+		// GAP-1386: no connector configured (init --connector none) used
+		// to print a blank "Connector:" value and "Data path: unconfigured".
+		fmt.Printf("    %s%s\n", modeLabel, Dim("none (no active connector)"))
+		return
 	}
+	connectorName := fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
 	fmt.Printf("    %s%s\n", modeLabel, connectorName)
+	if m.disabled() {
+		// A configured but disabled connector has no hooks or proxy in
+		// its data path; its policy fields would read as enforced.
+		statusLine := Style(fmt.Sprintf("%-18s", "Status:"), "fg=bright_black", "bold")
+		fmt.Printf("    %s%s\n", statusLine, Dim("disabled, not enforced"))
+		return
+	}
 	dataPath := m.Mode
 	if m.Mode == "observability" {
 		dataPath = "direct-to-upstream"
@@ -622,8 +1040,48 @@ func printConnectorModeEntry(m *connectorModeSummary) {
 	fmt.Printf("    %s%s\n", pxLabel, intercept)
 }
 
+// printSubsystems renders the Subsystems section. "Gateway" is the OpenClaw
+// fleet uplink: when it is disabled and no rostered connector is a proxy
+// connector (OpenClaw, ZeptoClaw), nothing uses it, so its DISABLED state and
+// OpenClaw upstream advice are left out (the TUI does the same).
+func printSubsystems(snap *gateway.HealthSnapshot) {
+	Section("Subsystems")
+	if !fleetUplinkUnused(snap) {
+		printSubsystem("Gateway", snap.Gateway)
+	}
+	printSubsystem("Watcher", snap.Watcher)
+	printSubsystem("API", snap.API)
+	printSubsystem("Guardrail", snap.Guardrail)
+	printSubsystem("Routing", snap.Routing)
+	printSubsystem("Telemetry", snap.Telemetry)
+	if snap.Sandbox != nil {
+		printSubsystem("Sandbox", *snap.Sandbox)
+	}
+}
+
+func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {
+	if snap.Gateway.State != gateway.StateDisabled {
+		return false
+	}
+	conns := snap.Connectors
+	if len(conns) == 0 && snap.Connector != nil {
+		conns = []gateway.ConnectorHealth{*snap.Connector}
+	}
+	if len(conns) == 0 {
+		return false
+	}
+	for _, c := range conns {
+		if connector.IsProxyConnector(c.Name) {
+			return false
+		}
+	}
+	return true
+}
+
 func printSubsystem(name string, h gateway.SubsystemHealth) {
-	label := fmt.Sprintf("%-*s", 10, name+":")
+	// One column wider than the longest label ("Telemetry:"), so the state
+	// never runs into it and lines up with the detail rows below.
+	label := fmt.Sprintf("%-*s", 11, name+":")
 	fmt.Printf("  %s%s", Style(label, "fg=bright_black", "bold"), styledSubsystemState(h.State))
 	if !h.Since.IsZero() {
 		fmt.Printf("%s%s%s", Dim(" (since "), h.Since.Format(time.RFC3339), Dim(")"))
@@ -631,7 +1089,15 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 	fmt.Println()
 
 	if h.LastError != "" {
-		fmt.Printf("             %s %s\n", Dim("last error:"), h.LastError)
+		fmt.Printf("             %s %s\n", Dim("last error:"), asciiText(h.LastError))
+	}
+	problem := eventHistoryProblem(h.Details)
+	if problem != "" {
+		fmt.Printf("             %s %s\n", Dim("problem:"), problem)
+	}
+	judge := judgeProblem(h.Details)
+	if judge != "" {
+		fmt.Printf("             %s %s\n", Dim("problem:"), asciiText(judge))
 	}
 	if len(h.Details) > 0 {
 		keys := make([]string, 0, len(h.Details))
@@ -643,14 +1109,97 @@ func printSubsystem(name string, h gateway.SubsystemHealth) {
 			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
 				continue
 			}
+			if problem != "" && strings.HasPrefix(k, "event_history_") {
+				continue // already said in plain words above
+			}
+			if judge != "" && strings.HasPrefix(k, "judge_") {
+				continue
+			}
 			line, ok := formatDetailValue(h.Details[k])
 			if !ok {
 				continue
 			}
-			fmt.Printf("             %s %s\n", Dim(k+":"), line)
+			fmt.Printf("             %s %s\n", Dim(k+":"), asciiText(line))
 		}
 	}
 	fmt.Println()
+}
+
+// eventHistoryProblem says in plain words why audit events cannot be
+// written, instead of the raw event_history_* tokens (GAP-1308).
+func eventHistoryProblem(details map[string]interface{}) string {
+	if failure, _ := details["event_history_failure"].(string); failure != "sqlite_write_failed" {
+		return ""
+	}
+	class, _ := details["event_history_last_sqlite_class"].(string)
+	switch class {
+	case "full":
+		return "audit events cannot be written because the disk holding the audit database is full; " +
+			"free space on that disk (the gateway resumes writing once there is room)"
+	case "busy_locked":
+		return "audit events cannot be written because another process keeps the audit database locked"
+	case "readonly_cantopen":
+		return "audit events cannot be written because the audit database is read-only or cannot be opened"
+	case "constraint_corrupt":
+		return "audit events cannot be written because the audit database is damaged; run 'defenseclaw doctor'"
+	case "io", "deadline":
+		return "audit events cannot be written because reading or writing the audit database failed or timed out " +
+			"(another program, such as an antivirus scan, may hold the file); try again in a minute"
+	default:
+		return "audit events cannot be written to the audit database; run 'defenseclaw doctor'"
+	}
+}
+
+// judgeProblem says in plain words that recent LLM judge calls failed
+// (gateway judge_* details), or returns "". The hook lane then keeps the
+// rule verdicts, which used to show nowhere but the gateway log (GAP-1288).
+func judgeProblem(details map[string]interface{}) string {
+	state, _ := details["judge_state"].(string)
+	if state != "failing" && state != "degraded" {
+		return ""
+	}
+	failed, _ := formatDetailValue(details["judge_failed_calls"])
+	total, _ := formatDetailValue(details["judge_recent_calls"])
+	lastError, _ := details["judge_last_error"].(string)
+	lead := "the LLM judge failed " + failed + " of its last " + total + " calls"
+	if state == "failing" {
+		lead = "the LLM judge failed all of its last " + total + " calls, so only the rules decide"
+	}
+	if lastError != "" {
+		lead += "; last error: " + lastError
+	}
+	if judgeErrorIsNetwork(lastError) {
+		return lead + "; " + judgeNetworkNextStep
+	}
+	return lead + "; run 'defenseclaw doctor' and 'defenseclaw setup llm --role judge'"
+}
+
+// judgeNetworkNextStep is the next step for a judge that cannot reach its
+// provider or credential source. Re-running 'setup llm' cannot fix a dead
+// proxy or a blocked network (GAP-1669).
+const judgeNetworkNextStep = "the judge cannot reach its provider or credential source: check the network and " +
+	"the gateway's proxy settings (HTTPS_PROXY, NO_PROXY; an instance role also needs 169.254.169.254 in NO_PROXY), " +
+	"then restart the gateway (defenseclaw-gateway restart) and run 'defenseclaw doctor'"
+
+// judgeNetworkErrorMarkers are lower-case fragments of transport and
+// credential-fetch failures (Go net errors, proxies, AWS credential chain).
+var judgeNetworkErrorMarkers = []string{
+	"proxyconnect", "proxy", "connection refused", "connection reset", "no such host",
+	"network is unreachable", "i/o timeout", "dial tcp", "tls handshake",
+	"failed to retrieve aws credentials", "failed to refresh cached credentials",
+	"ec2 imds", "no route to host",
+}
+
+// judgeErrorIsNetwork reports whether a judge error is a transport or
+// credential-fetch failure rather than a configuration or auth error.
+func judgeErrorIsNetwork(lastError string) bool {
+	text := strings.ToLower(lastError)
+	for _, marker := range judgeNetworkErrorMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func formatDetailValue(v interface{}) (string, bool) {

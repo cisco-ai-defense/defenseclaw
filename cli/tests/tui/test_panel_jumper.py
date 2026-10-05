@@ -18,6 +18,7 @@ the high-value layer.
 
 from __future__ import annotations
 
+import pytest
 from defenseclaw.tui.screens.panel_jumper import (
     PanelChoice,
     PanelJumperScreen,
@@ -224,3 +225,49 @@ def test_action_cancel_returns_none() -> None:
     screen, captured = _new_screen()
     screen.action_cancel()
     assert captured == [None]
+
+
+# ---------------------------------------------------------------------------
+# The app: Ctrl+P and the digit hotkeys (manual round 2, R2-52)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ctrl_p_opens_the_panel_jumper_not_textuals_palette() -> None:
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        assert isinstance(app.screen, PanelJumperScreen), type(app.screen)
+        for key in "sandbox":
+            await pilot.press(key)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.active_panel == "sandboxes"
+
+
+@pytest.mark.asyncio
+async def test_digits_switch_panels_from_the_setup_wizard_list_and_goal_menu() -> None:
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("0")
+        await pilot.pause()
+        assert app.active_panel == "setup"
+        wizard = app.setup_model.active_wizard
+        app.query_one("#command-input").blur()
+        await pilot.press("7")
+        await pilot.pause()
+        assert app.active_panel == "sandboxes"
+        assert app.setup_model.active_wizard == wizard, "the digit did not pick a wizard"
+        await pilot.press("0")
+        await pilot.press("enter")  # the goal menu
+        await pilot.pause()
+        assert app.setup_model.goal_active
+        await pilot.press("2")
+        await pilot.pause()
+        assert app.active_panel == "alerts" and not app.setup_model.form_active

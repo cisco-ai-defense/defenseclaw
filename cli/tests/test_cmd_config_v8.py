@@ -101,7 +101,7 @@ def test_top_level_validate_reaches_canonical_diagnostics_for_malformed_v8(tmp_p
 
     assert result.exit_code == 1
     assert "$.observability: malformed YAML source" in result.output
-    assert "run 'defenseclaw upgrade' first" not in result.output
+    assert "run 'defenseclaw migrate' first" not in result.output
     root_preflight.assert_not_called()
     inspect.assert_called_once_with("validate", config_path=str(config_path))
 
@@ -148,7 +148,7 @@ def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) ->
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"observability": effective}
     assert reveal.exit_code == 2
-    assert "--reveal is not supported" in reveal.output
+    assert "--reveal works only for pre-v8 configurations" in reveal.output
 
 
 def test_v8_provenance_view_exposes_only_canonical_go_annotations(tmp_path: Path) -> None:
@@ -286,5 +286,17 @@ def test_future_config_mutation_refuses_v7_source(tmp_path: Path) -> None:
         cmd_config.config_cmd.commands.pop("mutation-probe", None)
 
     assert result.exit_code == 1
-    assert "run 'defenseclaw upgrade' first" in result.output
+    assert "run 'defenseclaw migrate' first" in result.output
     root_preflight.assert_not_called()
+
+
+def test_duplicate_section_names_the_second_definition_line() -> None:
+    # GAP-2188: the second "gateway:" (line 4) is named, not the first one's value.
+    raw = b"config_version: 8\ngateway:\n  api_port: 19010\ngateway:\n  api_port: 19011\n"
+    reason = (
+        "[yaml_duplicate_key] duplicate mapping key; the first definition is at line 2, column 1; "
+        "remove one definition so precedence is unambiguous"
+    )
+    assert cmd_config._plain_v8_issue(raw, "$.gateway", reason) == (
+        "line 4: gateway appears twice; the first one is at line 2. Merge them into one."
+    )

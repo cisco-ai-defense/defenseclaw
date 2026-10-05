@@ -121,7 +121,7 @@ func validateWindowsNamespacePurgeRequest(
 	if err := validateWindowsNamespacePurgeRootPath(request.Root); err != nil {
 		return nil, err
 	}
-	if err := windowsNamespacePurgeRootScope(request.Root); err != nil {
+	if err := windowsNamespacePurgeRootScope(request.Profile, request.Root); err != nil {
 		return nil, err
 	}
 	if request.ExpectedIdentity != "" && !validWindowsManagedRuntimeIdentity(request.ExpectedIdentity) {
@@ -156,12 +156,23 @@ func validateWindowsNamespacePurgeRootPath(path string) error {
 	return nil
 }
 
-func validateWindowsNamespacePurgeProductionRoot(path string) error {
+func validateWindowsNamespacePurgeProductionRoot(profile, path string) error {
+	switch profile {
+	case "":
+		profile = winpath.EnterpriseProfileSecureClient
+	case winpath.EnterpriseProfileSecureClient, winpath.EnterpriseProfileStandalone:
+	default:
+		return fmt.Errorf("enterprise hooks: namespace cleanup profile %q is not supported", profile)
+	}
 	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: resolve trusted Program Files for namespace cleanup: %w", err)
 	}
-	base := filepath.Join(programFiles, "Cisco", "Cisco Secure Client")
+	vendor := filepath.Join("Cisco", "Cisco Secure Client")
+	if profile == winpath.EnterpriseProfileStandalone {
+		vendor = "Cisco"
+	}
+	base := filepath.Join(programFiles, vendor)
 	production := filepath.Join(base, "DefenseClaw")
 	if strings.EqualFold(path, production) {
 		return nil

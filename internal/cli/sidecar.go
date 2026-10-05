@@ -31,7 +31,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -64,6 +63,15 @@ func init() {
 }
 
 func runSidecar(cmd *cobra.Command, _ []string) error {
+	// A detached gateway's gateway.log lines carry a time (GAP-1319). The
+	// root pre-run usually started the stamper already (GAP-2109).
+	startDaemonLogStamp()
+	defer stopDaemonLogStamp()
+	// Before any outbound client exists: a standalone gateway routes its
+	// outbound clients through enterprise.network.
+	if err := applyStandaloneEgress(cfg); err != nil {
+		return fmt.Errorf("sidecar: apply enterprise.network: %w", err)
+	}
 	if sidecarToken != "" {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
@@ -77,8 +85,6 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	if sidecarPort > 0 {
 		cfg.Gateway.Port = sidecarPort
 	}
-
-	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
 
 	fmt.Println("╔══════════════════════════════════════════════╗")
 	fmt.Println("║       DefenseClaw Gateway Sidecar            ║")
@@ -98,16 +104,12 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 			fmt.Printf("    Skill dirs: autodiscover (from claw mode)\n")
 		}
 	}
-	if cfg.Guardrail.Enabled {
-		fmt.Printf("  Guardrail:    port=%d mode=%s\n", cfg.Guardrail.Port, cfg.Guardrail.Mode)
-		fmt.Printf("    Model:      %s → %s\n", cfg.Guardrail.Model, cfg.Guardrail.ModelName)
-		fmt.Printf("    API key:    %s\n", cfg.Guardrail.APIKeyEnv)
-	} else {
-		fmt.Printf("  Guardrail:    disabled\n")
+	for _, line := range guardrailBannerLines(cfg) {
+		fmt.Println(line)
 	}
 	fmt.Println()
 
-	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell)
+	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
 	}
@@ -127,7 +129,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	// backward compatible with today.
 	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		sc.Health().SetDaemonConfigLoaded(true)
-		statePath := guardianstate.PathForDataDir(cfg.DataDir)
+		statePath := guardianstate.PathForPlatform(enterpriseHooksStandaloneUnixActive(), cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
 		sc.Health().SetGuardianStateReader(func() string {
 			return guardianstate.ReadState(statePath)
 		})
@@ -341,4 +343,27 @@ func tokenStatus(token string) string {
 		return token[:4] + "..." + token[len(token)-4:]
 	}
 	return "***"
+}
+
+// guardrailBannerLines is the guardrail part of the sidecar start banner.
+// Hook-only installs set no guardrail proxy model, so the Model and API key
+// rows are shown only when one is set; the judge LLM in use is shown instead
+// of blank rows (GAP-2107).
+func guardrailBannerLines(cfg *config.Config) []string {
+	if !cfg.Guardrail.Enabled {
+		return []string{"  Guardrail:    disabled"}
+	}
+	lines := []string{fmt.Sprintf("  Guardrail:    port=%d mode=%s", cfg.Guardrail.Port, cfg.Guardrail.Mode)}
+	if cfg.Guardrail.Model != "" || cfg.Guardrail.ModelName != "" {
+		lines = append(lines,
+			fmt.Sprintf("    Model:      %s → %s", cfg.Guardrail.Model, cfg.Guardrail.ModelName),
+			fmt.Sprintf("    API key:    %s", cfg.Guardrail.APIKeyEnv),
+		)
+	}
+	if cfg.Guardrail.Judge.Enabled {
+		if model := cfg.ResolveLLM("guardrail.judge").Model; model != "" {
+			lines = append(lines, fmt.Sprintf("    Judge:      %s", model))
+		}
+	}
+	return lines
 }

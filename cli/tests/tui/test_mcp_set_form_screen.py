@@ -16,32 +16,12 @@ import pytest
 from defenseclaw.tui.screens.mcp_set_form import (
     MCP_FIELD_LABELS,
     MCP_FIELD_ORDER,
-    MCPSetFormScreen,
     MCPSetFormValues,
-    MCPSetResult,
     MCPSetValidationError,
     apply_text_key,
     parse_env_pairs,
     skip_scan_truthy,
 )
-from textual.app import App, ComposeResult
-from textual.widgets import Checkbox, Input, Static
-
-
-class MCPSetHarness(App[MCPSetResult | None]):
-    def __init__(self, initial_name: str = "") -> None:
-        super().__init__()
-        self.initial_name = initial_name
-        self.result: MCPSetResult | None = None
-
-    def compose(self) -> ComposeResult:
-        yield Static("mcp set harness")
-
-    def on_mount(self) -> None:
-        self.push_screen(MCPSetFormScreen(self.initial_name), self._set_result)
-
-    def _set_result(self, result: MCPSetResult | None) -> None:
-        self.result = result
 
 
 def test_mcp_set_form_field_order_matches_go_oracle() -> None:
@@ -88,6 +68,7 @@ def test_mcp_set_form_builds_cli_argv_shape() -> None:
     assert all("API_KEY=xxx" not in arg for arg in result.argv)
     assert result.env == (("API_KEY", "xxx"), ("REGION", "us-east-1"))
 
+
 def test_mcp_set_form_rejects_mixed_command_and_url() -> None:
     # F-1821: A mixed command+url entry is scanned remotely (URL) but the local
     # command is what gets installed/run, so reject it instead of silently
@@ -127,31 +108,6 @@ def test_mcp_set_form_omits_connector_when_unfocused() -> None:
     assert "--connector" not in result.argv
 
 
-@pytest.mark.asyncio
-async def test_mcp_set_form_screen_carries_connector() -> None:
-    app = MCPSetHarness(initial_name="context7")
-    app._connector = "codex"
-
-    async with app.run_test(size=(120, 44)) as pilot:
-        screen = app.screen
-        assert isinstance(screen, MCPSetFormScreen)
-        screen.connector = "codex"
-        screen.query_one("#mcp-command", Input).value = "uvx"
-        await pilot.press("ctrl+s")
-        await pilot.pause()
-
-        assert app.result is not None
-        assert app.result.argv == (
-            "mcp",
-            "set",
-            "context7",
-            "--command",
-            "uvx",
-            "--connector",
-            "codex",
-        )
-
-
 def test_mcp_set_form_validates_required_fields_and_env_pairs() -> None:
     with pytest.raises(MCPSetValidationError, match="name is required"):
         MCPSetFormValues(command="uvx").build_result()
@@ -172,87 +128,3 @@ def test_mcp_set_form_skip_scan_truthy_and_text_editing() -> None:
     assert apply_text_key("caf", "e") == "cafe"
     assert apply_text_key("cafe", "home") == "cafe"
     assert apply_text_key("cafe\N{LATIN SMALL LETTER E WITH ACUTE}", "backspace") == "cafe"
-
-
-def _fill_screen(screen: MCPSetFormScreen) -> None:
-    # F-1821: Command and URL are mutually exclusive; fill a local-command
-    # entry (no URL) so build_result succeeds.
-    screen.query_one("#mcp-name", Input).value = "context7"
-    screen.query_one("#mcp-command", Input).value = "uvx"
-    screen.query_one("#mcp-args", Input).value = "context7-mcp"
-    screen.query_one("#mcp-transport", Input).value = "stdio"
-    screen.query_one("#mcp-env", Input).value = "API_KEY=xxx, REGION=us-east-1"
-    screen.query_one("#mcp-skip-scan", Checkbox).value = True
-
-
-@pytest.mark.asyncio
-async def test_mcp_set_form_submit_button_returns_cli_result() -> None:
-    app = MCPSetHarness()
-
-    async with app.run_test(size=(120, 44)) as pilot:
-        screen = app.screen
-        assert isinstance(screen, MCPSetFormScreen)
-        _fill_screen(screen)
-        await pilot.click("#mcp-set-submit")
-        await pilot.pause()
-
-        assert app.result is not None
-        assert app.result.argv[-1] == "--skip-scan"
-        assert app.result.argv[:3] == ("mcp", "set", "context7")
-
-
-@pytest.mark.asyncio
-async def test_mcp_set_form_ctrl_s_returns_cli_result() -> None:
-    app = MCPSetHarness(initial_name="context7")
-
-    async with app.run_test(size=(120, 44)) as pilot:
-        screen = app.screen
-        assert isinstance(screen, MCPSetFormScreen)
-        screen.query_one("#mcp-command", Input).value = "uvx"
-        await pilot.press("ctrl+s")
-        await pilot.pause()
-
-        assert app.result is not None
-        assert app.result.argv == ("mcp", "set", "context7", "--command", "uvx")
-
-
-@pytest.mark.asyncio
-async def test_mcp_set_form_enter_in_field_submits() -> None:
-    app = MCPSetHarness(initial_name="context7")
-
-    async with app.run_test(size=(120, 44)) as pilot:
-        screen = app.screen
-        assert isinstance(screen, MCPSetFormScreen)
-        screen.query_one("#mcp-command", Input).value = "uvx"
-        # on_mount focuses #mcp-name; Enter in a field submits via Input.Submitted.
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.result is not None
-        assert app.result.argv == ("mcp", "set", "context7", "--command", "uvx")
-
-
-@pytest.mark.asyncio
-async def test_mcp_set_form_enter_with_invalid_input_keeps_modal_open() -> None:
-    app = MCPSetHarness()  # empty name -> invalid
-
-    async with app.run_test(size=(120, 44)) as pilot:
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.result is None
-        assert isinstance(app.screen, MCPSetFormScreen)
-        assert "name is required" in app.screen.query_one("#mcp-set-status", Static).content
-
-
-@pytest.mark.asyncio
-async def test_mcp_set_form_invalid_submit_keeps_modal_open_with_status() -> None:
-    app = MCPSetHarness()
-
-    async with app.run_test(size=(120, 44)) as pilot:
-        await pilot.click("#mcp-set-submit")
-        await pilot.pause()
-
-        assert app.result is None
-        assert isinstance(app.screen, MCPSetFormScreen)
-        assert "name is required" in app.screen.query_one("#mcp-set-status", Static).content

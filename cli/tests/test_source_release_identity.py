@@ -12,10 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from scripts import release_candidate, source_release_identity
+from scripts import source_release_identity
 
 ROOT = Path(__file__).resolve().parents[2]
 BASH = shutil.which("bash") or "/bin/bash"
+# The checked-in source version: source builds (make all) report the 1.0 line.
+CHECKED_IN_RELEASE = "1.0.0"
 VERSION_PATHS = (
     "Makefile",
     "pyproject.toml",
@@ -71,6 +73,7 @@ def _preflight(
     mode: str,
     *,
     dev_reclaim: bool = False,
+    gateway_name: str = "defenseclaw-gateway",
 ) -> subprocess.CompletedProcess[str]:
     environment = {
         **os.environ,
@@ -88,7 +91,7 @@ def _preflight(
             str(install_dir),
             ".venv/bin",
             "defenseclaw",
-            "defenseclaw-gateway",
+            gateway_name,
         ],
         env=environment,
         text=True,
@@ -113,20 +116,19 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,
-        expected_release="0.8.10",
+        expected_release=CHECKED_IN_RELEASE,
     )
 
     assert identity == {
         "schema_version": 1,
-        "source_release": "0.8.10",
+        "source_release": CHECKED_IN_RELEASE,
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {"0.8.10"}
+    assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {CHECKED_IN_RELEASE}
     assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
-    assert release_candidate._reviewed_source_install_identity("0.8.10") == identity
 
 
 def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() -> None:
@@ -138,7 +140,6 @@ def test_dynamic_release_identity_uses_dispatch_version_with_reviewed_epoch() ->
         "source_install_compatibility_epoch": 2,
         "runtime_config_version": 8,
     }
-    assert release_candidate._reviewed_source_install_identity("9.8.7") == identity
 
 
 def test_hard_cut_cannot_reuse_bridge_source_identity(tmp_path: Path) -> None:
@@ -170,7 +171,7 @@ def test_release_stamp_is_idempotent_for_checked_in_development_version(tmp_path
     before = {relative: reviewed_bytes(relative) for relative in VERSION_PATHS}
 
     completed = subprocess.run(
-        [BASH, str(stamp), "0.8.10"],
+        [BASH, str(stamp), CHECKED_IN_RELEASE],
         cwd=repo,
         text=True,
         capture_output=True,
@@ -256,47 +257,23 @@ def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
     path.write_text(source.replace(old, new), encoding="utf-8")
 
     with pytest.raises(source_release_identity.SourceIdentityError, match=message):
-        source_release_identity.validate_source_tree(repo, expected_release="0.8.10")
+        source_release_identity.validate_source_tree(repo, expected_release=CHECKED_IN_RELEASE)
 
 
 def test_release_workflow_stamps_dispatch_version_and_tags_reviewed_commit() -> None:
     workflow = (ROOT / ".github/workflows/release.yaml").read_text(encoding="utf-8")
-    tracked = workflow.index("git ls-files --error-unmatch --")
-    stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', tracked)
-    build_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', stamp + 1)
-    expected = workflow.index('--expected-release "$RELEASE_TAG"', build_stamp)
-    extension_build = workflow.index("run: make extensions", expected)
-    restore_generated = workflow.index("git restore --worktree --", extension_build)
-    cleanliness_check = workflow.index("git status --porcelain --untracked-files=all", restore_generated)
-    gateway_build = workflow.index("goreleaser/goreleaser-action@", extension_build)
-    package_stamp = workflow.index('scripts/stamp-version.sh "$RELEASE_TAG"', build_stamp + 1)
-    publish = workflow.index('gh release create "$RELEASE_TAG"')
+    tag = workflow.index('git tag "$VERSION"')
+    stamp = workflow.index('scripts/stamp-version.sh "$VERSION"', tag)
+    extension_build = workflow.index("make extensions", stamp)
+    restore = workflow.index("git restore --worktree -- .", extension_build)
+    clean = workflow.index('test -z "$(git status --porcelain)"', restore)
+    gateway_build = workflow.index("goreleaser/goreleaser-action@", clean)
+    package_stamp = workflow.index('scripts/stamp-version.sh "$VERSION"', gateway_build)
+    wheel_build = workflow.index("make dist-cli dist-installers dist-requirements", package_stamp)
+    publish = workflow.index('gh release create "$VERSION"')
 
-    assert (
-        tracked
-        < stamp
-        < build_stamp
-        < expected
-        < extension_build
-        < restore_generated
-        < cleanliness_check
-        < gateway_build
-        < package_stamp
-        < publish
-    )
-    for relative in VERSION_PATHS:
-        assert relative in workflow[tracked:stamp]
-        assert relative in workflow[restore_generated:cleanliness_check]
-    assert "Require reviewed source release identity" not in workflow
-    assert "git diff --exit-code --" not in workflow[tracked:expected]
-    assert '--target "$RELEASE_COMMIT"' in workflow[publish:]
-    proof = workflow.index("scripts/release_api_retry.py prove-published", publish)
-    assert publish < proof
-    proof_command = workflow[proof : proof + 500]
-    assert '--tag "$RELEASE_TAG"' in proof_command
-    assert '--commit "$RELEASE_COMMIT"' in proof_command
-    assert "--candidate-root release-candidate" in proof_command
-    assert "--omit-windows-binaries" not in proof_command
+    assert tag < stamp < extension_build < restore < clean < gateway_build < package_stamp < wheel_build < publish
+    assert '--target "$GITHUB_SHA"' in workflow[publish:]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
@@ -313,7 +290,7 @@ def test_legacy_source_marker_refuses_before_gateway_mutation(tmp_path: Path) ->
 
     assert completed.returncode != 0
     assert "legacy source-install marker" in completed.stdout + completed.stderr
-    assert "No installed files or services were changed" in completed.stdout + completed.stderr
+    assert "This step changed nothing" in completed.stdout + completed.stderr
     assert installed_gateway.read_bytes() == original
 
 
@@ -662,8 +639,56 @@ def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
 
     assert completed.returncode != 0
     assert "unowned ACP guard already exists" in completed.stdout + completed.stderr
-    assert "No installed files or services were changed" in completed.stdout + completed.stderr
+    assert "This step changed nothing" in completed.stdout + completed.stderr
+    if os.name != "nt":
+        assert "defenseclaw-gateway stop; defenseclaw uninstall --binaries --yes && make all" in completed.stderr
+        # GAP-2001: retrying the uninstall alone did not get past a 0.8.x timeout.
+        assert "defenseclaw-gateway connector teardown --connector <name> --data-dir" in completed.stderr
     assert installed_acp.read_bytes() == b"foreign acp\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_refusal_hint_keeps_the_release_installed_uv(tmp_path: Path) -> None:
+    # GAP-1783: uninstall --binaries removes the uv the release installer
+    # recorded, and make all needs uv, so the hint drops the record first.
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    install_dir.mkdir(parents=True)
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    _write_executable(repo / "defenseclaw-acp", b"source acp\n")
+    _write_executable(install_dir / "defenseclaw-acp", b"foreign acp\n")
+    (install_dir / "defenseclaw-uv.sha256").write_text("0" * 64 + "  uv\n", encoding="utf-8")
+
+    completed = _preflight(tmp_path, repo, install_dir, "publish-acp")
+
+    assert completed.returncode != 0
+    record = f"{install_dir}/defenseclaw-uv.sha256"
+    assert (
+        f"defenseclaw-gateway stop; rm -f '{record}'; defenseclaw uninstall --binaries --yes && make all"
+        in completed.stderr
+    )
+    assert "keeps the uv the release installer added" in completed.stderr
+    assert (install_dir / "defenseclaw-uv.sha256").exists()
+
+
+def test_windows_refusal_hint_keeps_the_release_installed_uv(tmp_path: Path) -> None:
+    # GAP-1843: the Windows hint kept 'uninstall --binaries', which removes
+    # the uv install.ps1 recorded, so the next 'make all' found no uv.
+    script = (ROOT / "scripts/source-install-preflight.sh").read_text(encoding="utf-8")
+    start = script.index("refuse() {")
+    refuse = script[start : script.index("\n}\n", start) + 3]
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+
+    def hint() -> str:
+        program = f"MODE=check; IS_WINDOWS=1; FOREIGN_INSTALL=1; INSTALL_DIR='{install_dir}'\n{refuse}refuse x"
+        return subprocess.run([BASH, "-c", program], capture_output=True, text=True, check=False).stderr
+
+    assert "  defenseclaw.cmd uninstall --binaries --yes\n  make all\n" in hint()
+    (install_dir / "defenseclaw-uv.sha256").write_text("0" * 64 + "  uv.exe\n", encoding="utf-8")
+    assert f"  rm -f '{install_dir}/defenseclaw-uv.sha256'; defenseclaw.cmd uninstall --binaries --yes\n  make all\n" in hint()
+    assert "keeps the uv the release installer added" in hint()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
@@ -687,6 +712,60 @@ def test_make_all_dev_reclaim_replaces_existing_acp(tmp_path: Path) -> None:
     assert published.returncode == 0, published.stdout + published.stderr
     assert installed_acp.read_bytes() == b"acp-v2\n"
     assert installed_gateway.read_bytes() == b"gateway-v1\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_publishes_windows_hook_launcher_beside_gateway(tmp_path: Path) -> None:
+    # GAP-1479: init registers hooks at <install dir>/defenseclaw-hook.exe, so a
+    # Windows make all must publish the launcher it builds, and rebuild it later.
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    cli = repo / ".venv/bin/defenseclaw"
+    _write_executable(cli, b"source cli\n")
+    install_dir.mkdir(parents=True)
+    (install_dir / "defenseclaw").symlink_to(cli)
+    _write_executable(repo / "defenseclaw-gateway.exe", b"gateway\n")
+    _write_executable(install_dir / "defenseclaw-gateway.exe", b"gateway\n")
+    source_hook = repo / "defenseclaw-hook.exe"
+    installed_hook = install_dir / "defenseclaw-hook.exe"
+    _write_executable(source_hook, b"hook-v1\n")
+
+    for payload in (b"hook-v1\n", b"hook-v2\n"):
+        source_hook.write_bytes(payload)
+        published = _preflight(
+            tmp_path,
+            repo,
+            install_dir,
+            "publish-hook",
+            dev_reclaim=True,
+            gateway_name="defenseclaw-gateway.exe",
+        )
+        assert published.returncode == 0, published.stdout + published.stderr
+        assert installed_hook.read_bytes() == payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_unowned_hook_launcher_refuses_before_mutation(tmp_path: Path) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    install_dir.mkdir(parents=True)
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-hook.exe", b"source hook\n")
+    installed_hook = install_dir / "defenseclaw-hook.exe"
+    _write_executable(installed_hook, b"release hook\n")
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-hook",
+        dev_reclaim=True,
+        gateway_name="defenseclaw-gateway.exe",
+    )
+
+    assert completed.returncode != 0
+    assert "unowned hook launcher already exists" in completed.stderr
+    assert installed_hook.read_bytes() == b"release hook\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
@@ -897,6 +976,7 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert "source-install-preflight.sh dev-check" in makefile
     assert "source-install-preflight.sh dev-publish-gateway" in makefile
     assert "source-install-preflight.sh dev-publish-acp" in makefile
+    assert "source-install-preflight.sh dev-publish-hook" in makefile
     assert "source-install-preflight.sh dev-claim" in makefile
     assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1

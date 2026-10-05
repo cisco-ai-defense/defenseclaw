@@ -1,0 +1,657 @@
+---
+title: Enterprise threat model
+description: Who DefenseClaw trusts, where each trust boundary sits on Windows, Linux and macOS, what a standard user can and cannot do, and which risks remain in the standalone enterprise profile.
+keywords:
+  - DefenseClaw threat model
+  - trust zones
+  - trust boundaries
+  - standard user
+  - managed_enterprise security
+  - residual risk
+---
+
+An enterprise deployment exists to stop two things: a standard user turning
+DefenseClaw off, and an AI agent working around it. This page explains how
+that holds on Windows, Linux and macOS, and where it stops. It covers the
+standalone profile, which an MDM, a package or an administrator installs.
+The Secure Client profile is described in
+[Secure Client managed deployment](/docs/enterprise/secure-client).
+
+The full threat models, with one row per threat and the code and tests
+behind each control, are in the repository. They are listed at the
+[end of this page](#full-threat-models).
+
+## Terms used on this page
+
+| Term | Meaning |
+| --- | --- |
+| Gateway | The service that inspects each agent event and answers allow or deny. |
+| Hook | `defenseclaw-hook`, the small program the agent runs for each event, such as a tool call. It forwards the event to the gateway. |
+| Guardian | The service that installs and repairs DefenseClaw's hook registration in each enrolled user's agent config. |
+| Enumerator | The service that finds the users and agents to protect and writes the target manifest. |
+| Authorization ledger | The administrator-owned record of which user is protected for which agent. The gateway reads it to decide who may use a hook. |
+| Machine policy | The agent vendor's machine-wide settings, such as Codex `requirements.toml`. A standard user cannot edit them. |
+| Per-user connector | An agent with no machine policy, so DefenseClaw registers its hook in the user's own config and the guardian keeps it there. |
+
+Each term is defined in more detail in [Concepts](/docs/enterprise/concepts).
+
+## Who is trusted
+
+**Trusted:**
+
+- administrators, root, SYSTEM and LocalSystem;
+- your MDM and the agent it runs on each computer;
+- the publisher that signs the release, or the SHA-256 manifest you pin.
+
+**Not trusted:**
+
+- a standard user;
+- any AI agent that user runs, and anything a prompt can steer it to do;
+- other local users;
+- the gateway process, if it is compromised.
+
+DefenseClaw does not defend a computer from its own administrator. An agent
+that runs with unrestricted `sudo` or an elevated administrator session is an
+administrator. A developer who can become an administrator (a member of the
+local Administrators group on Windows, even with a filtered UAC token; the
+`admin` group on macOS; `sudo` or `wheel` rights on Linux) can remove
+DefenseClaw by elevating, so the controls on this page hold for standard
+accounts. Keep agents, and the developers who run them, on standard
+accounts.
+
+## Trust zones
+
+DefenseClaw places every component in one of six zones. The zone decides
+what the component may touch.
+
+| Zone | Holds | Trust |
+| --- | --- | --- |
+| Z0 · Admin and OS | The OS service manager, the MDM agent, the package installer and the lifecycle commands | Trusted |
+| Z1 · Services | The guardian, the enumerator and the sensor helper | Privileged; trusted |
+| Z2 · Gateway | The gateway, under its own low-privilege account | Restricted; it cannot change policy |
+| Z3 · Admin-owned files | Binaries, config, policies, secrets, the target manifest, the authorization ledger and vendor machine policy | Written only by administrators and DefenseClaw's privileged services |
+| Z4 · User session | The AI agent, the hook as it runs for the user, and the user's own files | Untrusted |
+| Z5 · Cloud | Cisco AI Defense, used only when an administrator stores an API key | External |
+
+The two diagrams below hold on every OS: the first shows who puts
+DefenseClaw in place, the second how a tool call is checked. An arrow that
+crosses a zone border is a trust boundary. The channel each boundary uses on
+each OS is in [Channels on each OS](#channels-on-each-os), and the controls on
+each boundary are in
+[How each boundary is protected](#how-each-boundary-is-protected).
+
+<Flow
+  direction="TB"
+  caption="Who puts DefenseClaw in place. Only administrators and DefenseClaw's privileged services write the files in Z3. The guardian writes a user's files as that user, never with its own rights."
+>
+  <Zone id="s0" label="Z0 · Admin and OS" tone="trusted">
+    <Node id="s-lc" kind="operator">{`MDM or admin\nruns the lifecycle`}</Node>
+  </Zone>
+  <Zone id="s1" label="Z1 · Services" tone="privileged">
+    <Node id="s-grd" kind="generic">{`Guardian\nkeeps hooks in place`}</Node>
+  </Zone>
+  <Zone id="s3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="s-cfg" kind="policy">{`Config and policy\nsecrets`}</Node>
+    <Node id="s-vp" kind="policy">{`Agent machine policy\nCodex · Claude Code`}</Node>
+  </Zone>
+  <Zone id="s4" label="Z4 · User session" tone="untrusted">
+    <Node id="s-agent" kind="agent">{`AI agent\nand its user config`}</Node>
+  </Zone>
+  <Edge from="s-lc" to="s-grd" label="installs" />
+  <Edge from="s-lc" to="s-cfg" label="writes" />
+  <Edge from="s-lc" to="s-vp" label="writes" />
+  <Edge from="s-grd" to="s-agent" label="repairs hooks, as the user" />
+  <Edge from="s-vp" to="s-agent" label="registers hooks" />
+</Flow>
+
+On Windows the guardian also writes machine policy: Claude Code's, Cursor's,
+Copilot's and OpenCode's. The lifecycle writes Codex's. On Linux and macOS the
+lifecycle writes all of it.
+
+<Flow
+  direction="TB"
+  caption="How a tool call is checked. The hook verifies the gateway before it sends anything, and the gateway verifies the caller. The gateway can read its config and policy but not change them."
+>
+  <Zone id="r4" label="Z4 · User session" tone="untrusted">
+    <Node id="r-agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="r-hook" kind="connector">{`defenseclaw-hook\nverifies the gateway`}</Node>
+  </Zone>
+  <Zone id="r2" label="Z2 · Gateway" tone="restricted">
+    <Node id="r-gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
+  </Zone>
+  <Zone id="r3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="r-cfg" kind="policy">{`Config and policy\nauthorization ledger`}</Node>
+  </Zone>
+  <Zone id="r1" label="Z1 · Services" tone="privileged">
+    <Node id="r-snsr" kind="generic">{`Sensor helper\nfixed requests only`}</Node>
+  </Zone>
+  <Zone id="r5" label="Z5 · Cloud" tone="external">
+    <Node id="r-aid" kind="generic">{`Cisco AI Defense\noptional, needs a key`}</Node>
+  </Zone>
+  <Edge from="r-agent" to="r-hook" label="runs per tool call" />
+  <Edge from="r-hook" to="r-gw" label="asks · caller checked" />
+  <Edge from="r-gw" to="r-cfg" label="reads" />
+  <Edge from="r-gw" to="r-snsr" label="asks" />
+  <Edge from="r-gw" to="r-aid" label="HTTPS" />
+</Flow>
+
+### Channels on each OS
+
+| Boundary | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Services started by | Service Control Manager | systemd | launchd |
+| Gateway account | `NT SERVICE\DefenseClawGateway` | `defenseclaw` | `_defenseclaw` |
+| Hook to gateway | Loopback TCP, `127.0.0.1:18970` | Unix socket `/run/defenseclaw-hook/hook.sock`, held open by systemd | Unix socket `/opt/cisco/defenseclaw/run/hook.sock`, opened by the gateway |
+| The hook verifies the gateway | The connected process must be the one the Service Control Manager reports for `DefenseClawGateway` | The socket's owner must be root or `defenseclaw` | The socket's owner must be root or `_defenseclaw` |
+| The gateway verifies the caller | The hook's credential is bound to the user's SID | The caller's uid, from the kernel | The caller's uid, from the kernel |
+| The guardian writes user files | Under the user's own token, while the user has an active session | Through a short-lived worker that runs as the user | Through a short-lived worker that runs as the user |
+| Gateway to sensor helper | Local socket in `C:\Program Files\Cisco\DefenseClaw\ipc` | `/run/defenseclaw-sensor/sensor-helper.sock`; the helper answers only the `defenseclaw` uid | `/var/run/defenseclaw-sensor/sensor-helper.sock`; the helper answers only the `_defenseclaw` uid |
+
+The sections below list, for each OS, what runs or lives in each zone and the
+identity it runs as.
+
+### Windows
+
+| Zone | What runs or lives there | Identity |
+| --- | --- | --- |
+| Z0 | The Service Control Manager, and the MDM agent or an administrator running Setup (`DefenseClawSetup-Enterprise-Standalone-x64.exe`) or `defenseclaw.exe enterprise windows` | SYSTEM or an elevated administrator |
+| Z1 | The `DefenseClawHookGuardian`, `DefenseClawHookEnumerator` and `DefenseClawSensorHelper` services | LocalSystem. The sensor helper keeps only `SeChangeNotifyPrivilege`. |
+| Z2 | The `DefenseClawGateway` service, listening on `127.0.0.1:18970`. It writes only `runtime` and `logs\gateway` under `C:\ProgramData\Cisco\DefenseClaw`, and its IPC directory `C:\Program Files\Cisco\DefenseClaw\ipc`. | `NT SERVICE\DefenseClawGateway` |
+| Z3 | Binaries in `C:\Program Files\Cisco\DefenseClaw\bin`. Under `C:\ProgramData\Cisco\DefenseClaw`: `etc\config.yaml`, `secrets`, `hook-guardian\targets.yaml` (target manifest), `hook-guardian-state` (authorization ledger) and `install` (lifecycle state). Hook runtime state in `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Vendor machine policy in `%ProgramData%\OpenAI\Codex\requirements.toml`, `C:\Program Files\ClaudeCode\managed-settings.d`, `%ProgramData%\Cursor\hooks.json`, `%ProgramData%\GitHub\Copilot\policy.d` and `%ProgramData%\opencode`. | Written only by Administrators and SYSTEM |
+| Z4 | The AI agent; `defenseclaw-hook.exe`, an administrator-owned binary that runs as the user; the user's agent config and DefenseClaw hook registrations | The signed-in user |
+| Z5 | Cisco AI Defense | External |
+
+On Windows the guardian writes a user's files under that user's own token,
+and only while the user has an active (connected) session. On Windows the
+lifecycle writes Codex `requirements.toml` at install, upgrade and repair; the
+guardian writes the Claude Code, Cursor, Copilot and OpenCode machine policy
+and repairs all five. Windows hooks reach the gateway over loopback TCP with
+credentials bound to the user's SID.
+
+A few Windows files are readable by standard users by design: the lifecycle
+results in `%WINDIR%\Logs\DefenseClaw`, and the per-connector enrollment
+lists, runtime selectors and public machine-policy summary in
+`C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. They hold no credential.
+
+### Linux
+
+| Zone | What runs or lives there | Identity |
+| --- | --- | --- |
+| Z0 | systemd (PID 1), the package manager, and `defenseclaw-gateway enterprise linux` run by an MDM script, an administrator, the config-apply path unit or the daily verify timer | root |
+| Z1 | The `defenseclaw-hook-guardian`, `defenseclaw-hook-enumerator` and `defenseclaw-sensor-helper` services. For each user, the guardian starts a short-lived worker that runs as that user. | root, each service with a fixed, reduced capability set. The worker runs as the target user. |
+| Z2 | The `defenseclaw-gateway` service. systemd owns its two sockets, `127.0.0.1:18970` and `/run/defenseclaw-hook/hook.sock`, and keeps them open across gateway restarts. The gateway can write only `/var/lib/defenseclaw`, `/run/defenseclaw`, `/var/log/defenseclaw` and its hook socket directory `/run/defenseclaw-hook`. | The `defenseclaw` system user, with no capabilities |
+| Z3 | `/opt/defenseclaw/bin`; `/etc/defenseclaw` with `config.yaml`, `policies`, `secrets`, `hook-guardian/targets.yaml` and `managed-runtime.json`; `/var/lib/defenseclaw-hook-guardian` (authorization ledger); `/var/lib/defenseclaw-enterprise` (lifecycle state). Vendor machine policy in `/etc/codex/requirements.toml`, `/etc/claude-code/managed-settings.d`, `/etc/cursor/hooks.json`, `/etc/github-copilot/policy.d` and `/etc/opencode`. | Written only by root |
+| Z4 | The AI agent; `/opt/defenseclaw/bin/defenseclaw-hook` running as the user; the user's agent config | The user |
+| Z5 | Cisco AI Defense | External |
+
+On Linux and macOS the lifecycle, not the guardian, writes vendor machine
+policy. Hooks, DefenseClaw's in-agent plugins and bridges reach the gateway
+only through the hook socket, which gives the gateway each caller's kernel
+uid; there is no TCP fallback.
+
+### macOS
+
+| Zone | What runs or lives there | Identity |
+| --- | --- | --- |
+| Z0 | launchd, the `.pkg` installer, and `defenseclaw-gateway enterprise macos` run by the MDM agent, an administrator, or the `com.cisco.defenseclaw.apply` and `com.cisco.defenseclaw.verify` LaunchDaemons | root |
+| Z1 | The `com.cisco.defenseclaw.hook-guardian`, `com.cisco.defenseclaw.hook-enumerator` and `com.cisco.defenseclaw.sensor-helper` LaunchDaemons. For each user, the guardian starts a short-lived worker that runs as that user. | root. The worker runs as the target user. |
+| Z2 | The `com.cisco.defenseclaw.gateway` LaunchDaemon, listening on `127.0.0.1:18970` and `/opt/cisco/defenseclaw/run/hook.sock`. It writes only `/opt/cisco/defenseclaw/runtime`, its socket directory `/opt/cisco/defenseclaw/run`, and `/Library/Logs/Cisco/DefenseClaw/gateway`. | `_defenseclaw`, a hidden system user |
+| Z3 | Under `/opt/cisco/defenseclaw`: `bin`, `etc/config.yaml`, `etc/policies`, `etc/secrets`, `etc/hook-guardian/targets.yaml`, `etc/managed-runtime.json`, `hook-guardian-state` (authorization ledger) and `lifecycle`. Vendor machine policy in `/etc/codex/requirements.toml`, `/Library/Application Support/ClaudeCode/managed-settings.d`, `/Library/Application Support/Cursor/hooks.json`, `/etc/github-copilot/policy.d` and `/Library/Application Support/opencode`. | Written only by root |
+| Z4 | The AI agent; `/opt/cisco/defenseclaw/bin/defenseclaw-hook` running as the user; the user's agent config | The user |
+| Z5 | Cisco AI Defense | External |
+
+## What a standard user can and cannot do
+
+The tables list what happens when a standard user, or an AI agent running as
+that user, tries to get around DefenseClaw. The results mean:
+
+- **Denied**: the operating system or DefenseClaw refuses the action.
+- **Still inspected**: the change is accepted, but DefenseClaw's hooks keep
+  running.
+- **Repaired**: the guardian puts DefenseClaw's registration back.
+- **Fails closed**: the agent's tool call is blocked with a DefenseClaw
+  message.
+
+A result applies to every OS unless the cell names one.
+
+### Disable DefenseClaw
+
+| Attempt | Result | Enforced by |
+| --- | --- | --- |
+| Stop, disable, delete or reconfigure a DefenseClaw service (`sc.exe`, `Stop-Service`, `systemctl stop`, `disable` or `mask`, `launchctl bootout`) | Denied | Windows: service permissions give users query rights only. Linux: the units are root-owned and changing them needs root. macOS: system LaunchDaemons need root. |
+| End a DefenseClaw process | Denied | The services run as LocalSystem, root or the gateway account, which a standard user cannot signal. Each service also restarts whenever it exits: Windows service recovery repeats indefinitely, systemd uses `Restart=always`, and launchd uses `KeepAlive`. |
+| Replace, rename, truncate or change the permissions of a DefenseClaw binary, or plant a link in its directories | Denied | Binaries and every parent directory are writable only by administrators or root. |
+| Edit the config, policies, secrets, target manifest, authorization ledger, runtime descriptor, service definitions or vendor machine policy | Denied | Administrator-only write on each file and its parent directory. The gateway itself has read-only access, and the loader rejects config and policy files a non-administrator could have written. |
+| Read the Cisco AI Defense API key | Denied | Linux: the key file is readable only by root (systemd 247 or later passes it to the gateway as a credential), or by root and the `defenseclaw` group on older systemd. macOS: readable by root and the `_defenseclaw` group. Windows: readable by SYSTEM, Administrators and the gateway service only. |
+| Start a per-user gateway, or run `defenseclaw upgrade`, `defenseclaw rollback` or the per-user installer | Refused | They detect the managed deployment and refuse. Windows: `install.ps1`, `upgrade` and `rollback` check the `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` marker, and the per-user gateway checks the recorded managed deployment. Linux and macOS: the runtime descriptor. This check prevents accidental conflicts; `defenseclaw-hook` still verifies the listener. |
+| Put files in, change the owner or permissions of, or replace your own `%USERPROFILE%\.defenseclaw` or a file in it, so a failed Windows install cannot roll back | Denied | The rollback deletes only files it proves DefenseClaw wrote; a DefenseClaw hook file whose permissions changed is still removed. When it finds anything else (another file, a changed owner or permissions on the folder or on a file other than a hook file, a hard link, or a folder that replaced the one the install created), it deletes nothing in that folder: it renames it to `%USERPROFILE%\.defenseclaw.rollback-<random>` and finishes, so the install is not left pending. A file or folder a program holds open delays the rollback until the program closes it. |
+
+### Impersonate the gateway
+
+| Attempt | Result | Enforced by |
+| --- | --- | --- |
+| Listen on `127.0.0.1:18970`, or on the hook socket, while an administrator restarts the gateway, and answer "allow" | Fails closed: the listener receives no hook request, credential or tool payload. Two exceptions, in [Residual risks](#residual-risks): the agents' own telemetry exporters, and on Windows a listener that takes the port between the Amp or OpenCode plugin's listener check and its hook call. | [Peer verification](#how-each-boundary-is-protected). Windows: `defenseclaw-hook` sends only when the listening process is the running `DefenseClawGateway` service, and the Amp and per-user OpenCode plugins first require the listener to prove it can derive the user's credential. Linux: systemd keeps both sockets open across restarts, and hooks and plugins use only the hook socket and check that the listener is root or `defenseclaw`. macOS: hooks and plugins use only the socket, in a directory only `_defenseclaw` can write, and check the listener's uid. |
+| Create the hook socket, or its directory, before the service starts | Denied | Linux: `/run/defenseclaw-hook` is created at boot for `defenseclaw` with mode `0755`. macOS: `/opt/cisco/defenseclaw/run` belongs to `_defenseclaw` inside the root-owned install tree. Windows has no hook socket. |
+
+### Disable hooks
+
+| Attempt | Result | Enforced by |
+| --- | --- | --- |
+| Delete or edit DefenseClaw's hook registration or plugin in your own agent config (per-user connectors) | Repaired within about a minute; a file change usually triggers repair within seconds | The guardian watches the files and reconciles every minute, writing as the user. Windows: repair runs while the user has an active (connected) session. |
+| Turn hooks off in user or project settings: Claude Code `disableAllHooks` (also through `--settings`), Codex `[features] hooks = false`, `-c features.hooks=false` or `--disable hooks` | Still inspected | Machine policy. Claude Code runs managed hooks whatever lower settings say. Codex machine requirements pin `features.hooks = true` and managed hooks only. |
+| Point the agent at another config directory with `CLAUDE_CONFIG_DIR`, `HOME`, `CODEX_HOME` or `COPILOT_HOME` | Still inspected | Codex, Claude Code and Copilot load DefenseClaw's hooks from fixed machine paths, not from the user's config directory. |
+| Start a per-user agent (Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent) with another config home, such as `XDG_CONFIG_HOME`, `HOME` or `HERMES_HOME`, with `devin --config <file>`, or with Hermes `--safe-mode` | Not inspected, not logged, not repaired; status and verify still report the user's agent ready | DefenseClaw's registration is only in the default location, and the guardian cannot see how a session was started. See [Residual risks](#residual-risks). |
+| Run a copy of a supported agent, at a supported version, from another path | Still inspected | Machine policy applies to every copy of Codex, Claude Code, Cursor, Copilot and OpenCode on the computer. An old or self-built client can ignore it; see [Residual risks](#residual-risks). |
+| Change DefenseClaw's own environment, such as `DEFENSECLAW_FAIL_MODE=open` or another gateway address or token | Still inspected, or fails closed | `defenseclaw-hook` in a managed deployment always fails closed, never open, and talks only to a gateway it has verified. Linux and macOS: it reads the gateway address and listener identity only from the administrator-owned runtime descriptor. Windows: it checks that the listener is the `DefenseClawGateway` service process. |
+
+A client that DefenseClaw does not support, or one that is too old or
+modified, is not covered. See [Residual risks](#residual-risks).
+
+### Weaken security
+
+| Attempt | Result | Enforced by |
+| --- | --- | --- |
+| Add a user or project hook for Codex or Claude Code that rewrites a tool call after DefenseClaw checked it | Denied for both on every OS; the hook never runs. | The vendor's managed-hooks-only lock (`allow_managed_hooks_only` for Codex, `allowManagedHooksOnly` for Claude Code), set in machine policy. |
+| Change DefenseClaw's configuration or policy through the gateway API, or use one agent's hook token for another agent | Denied | The management API needs the gateway's own token, which users cannot read. A hook token works only on its own agent's hook routes, and the hook socket serves only the hook, inspect and Codex notify routes, never the management API. |
+| Delete or edit DefenseClaw's audit database, lifecycle state or logs | Denied | These live in administrator- or service-owned directories. |
+
+### Affect another user
+
+| Attempt | Result | Enforced by |
+| --- | --- | --- |
+| Change or replace another user's agent config, DefenseClaw registration or project files | Denied | Home directory permissions. DefenseClaw writes each user's files as that user, so it never writes with more rights than the user has. |
+| Read another user's DefenseClaw hook token or authorization ledger rows | Denied | Each user's copy of a hook token is in that user's own files with owner-only access, and in the gateway's private state. The ledger is administrator-owned and readable only by administrators and the gateway. |
+| Send hook or telemetry requests that claim to be another user | Denied | Linux and macOS hooks: the gateway takes the caller's identity from the kernel (the peer uid on the hook socket), not from the request. On TCP (Windows hooks, and telemetry on every OS): each user's credential is bound to their uid or SID, and the gateway refuses identity headers that name anyone else. |
+| Plant a rewriting Codex or Claude Code hook in a shared project directory that another user works in | Denied for both on every OS; the hook never runs. | The vendor's managed-hooks-only lock. |
+| Enroll, exempt or remove another user | Denied | The target manifest and authorization ledger are administrator-owned. Only administrators (through the lifecycle), the enumerator and the guardian write them, from the administrator's config. |
+| Gain administrator rights through DefenseClaw, for example through a writable service path or a hijacked `PATH` | Denied | Binaries and directories are administrator-owned. The lifecycle uses fixed paths and ignores the caller's `PATH` and environment, and each service takes its environment only from its service definition. |
+
+## How each boundary is protected
+
+Each row is one boundary from the diagrams, with the control that defends
+it.
+
+| Boundary | What could go wrong | Control |
+| --- | --- | --- |
+| Z0 to Z1 and Z3: the lifecycle installs services and files | A tampered or user-writable payload runs with administrator rights | **Trusted payloads.** Windows: Setup and `defenseclaw.exe enterprise windows` accept only an Authenticode-signed payload or one that matches a pinned SHA-256 manifest, and run PowerShell 7 only from its protected registration; `enterprise.trust.mode: authenticode` also refuses the hash-pinned route. Linux and macOS: the MDM script checks a pinned SHA-256, or the package signature, before it installs. Every lifecycle action is a locked transaction that rolls back on failure, and an older release is refused unless the administrator asks for a rollback. |
+| Z4 to Z1, Z2 and Z3: a user acts on services or files | A user stops a service, replaces a binary, or edits config, policy, secrets, the manifest or the ledger | **Service hardening and administrator-only ACLs.** Windows services give users query rights only; Linux units and macOS LaunchDaemons are root-owned; every service restarts when it exits. Every DefenseClaw file and its parent directory is writable only by administrators or root, except the gateway's own state and log directories, which its service account writes. A deployment record or folder a standard user plants under `%ProgramData%` is ignored or moved aside. |
+| Z4 to Z2: the hook calls the gateway | A user process takes the gateway's address during a restart and answers "allow" | **Peer verification.** `defenseclaw-hook` sends no bytes until the listener is proven. Windows: the connected process must be the running `DefenseClawGateway` service process. The Windows Amp plugin and the per-user OpenCode plugin, which call the gateway from inside the agent, first make the listener prove it can derive the user's credential (an HMAC over a fresh nonce), so an impostor that answers the proof receives only a digest and the call fails closed. The proof is a separate request from the hook call that follows: a listener that takes the gateway's place between the two, which needs an administrator or upgrade restart at that moment and a new connection for the hook call, receives that call's credential and payload, and its answer is accepted. See [Residual risks](#residual-risks). Linux and macOS: hooks, DefenseClaw's in-agent plugins and bridges use only the hook socket, and the listener must be root (systemd) or the gateway account. There is no TCP fallback. Otherwise the call fails closed. The agents' own telemetry exporters do not verify the listener; see [Residual risks](#residual-risks). |
+| Z2 to Z1: the gateway asks the sensor helper | A compromised gateway uses the privileged helper for more than discovery | **A closed protocol.** The gateway can ask the helper for exactly three things, the process table, the connection table and the event stream, and cannot name a path, a process or a command. Linux and macOS: the helper accepts a connection only from the gateway account's uid, read from the kernel. Windows: its socket sits in the administrator-owned `ipc` directory, whose access list the operating system enforces. |
+| Z2 authorizing Z4: the gateway accepts a hook call | An unenrolled user, or another user's identity, reaches inspection | Linux and macOS: the gateway reads the caller's kernel uid on the hook socket. A per-user agent requires that uid to be enrolled for that agent in the authorization ledger. Agents attached through machine policy are inspected for every user unless `enterprise.enrollment.unenrolled_users` is `deny`. Root follows `enterprise.enrollment.root`. On the TCP address (Windows hooks, and every OS's telemetry exporters), each user's credentials are bound to their uid or SID and accepted only while the ledger protects that user; the gateway attributes the request to that identity and refuses identity headers that name anyone else. Each credential works only on its own agent's routes. Windows: a user who is not in the protected enrollment state fails closed. |
+| Z1 to Z4: the guardian repairs a user's files | A privileged service is tricked into writing outside the user's home, or a registration stays deleted | **Guardian and enumerator.** The guardian writes as the user: under the user's own token on Windows, and through a worker process running as the user on Linux and macOS. It repairs changes within about a minute and records each protected user in the ledger. The enumerator refreshes enrollment every 5 minutes. On Linux and macOS it removes a user only after three consecutive definite "no such user" answers, so a directory outage removes no one. On Windows a revoked user's DefenseClaw registrations are removed as that user, at their next sign-in if they are signed out. |
+| Z3 to Z4: vendor machine policy loads DefenseClaw's hooks | A user turns hooks off or points the agent at another config | **Machine policy.** For Codex, Claude Code, Cursor, Copilot and OpenCode (through DefenseClaw's managed OpenCode plugin), DefenseClaw's hooks sit in the vendor's machine-wide policy, which a standard user cannot edit. DefenseClaw adds only its own entries and removes only those on uninstall. On Windows it rewrites Codex `requirements.toml` as normalized TOML, so comments and key order in that file are not kept. See [Machine policy](/docs/enterprise/machine-policy). |
+| Inside Z4: a user or project hook runs next to DefenseClaw's | A second hook rewrites or approves the tool call after inspection | **Vendor lock and foreign-hook guard.** Codex and Claude Code run with the vendor's managed-hooks-only lock under the default `managed_hooks_only: enforce` (Codex always on Windows). For Cursor, Copilot, Devin, OpenCode and Amp on every OS, Hermes on Linux and macOS, and Codex or Claude Code with `managed_hooks_only: preserve`, the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) removes unapproved entries from the user's config, and `defenseclaw-hook` denies tool calls while an unapproved hook is present in the user's files or the project. A session that started while an unapproved hook was present stays denied until the agent restarts, for at most 7 days, because agents keep the hooks they loaded at session start; the gateway keeps that record per verified uid or SID, and stop and session-end events are still allowed so the agent can end its turn. |
+| Z2 to Z5: the gateway calls Cisco AI Defense | The API key leaks | The key is read only from the protected secrets directory, never logged or printed, and an API key written in the config is rejected. The call uses HTTPS, through `enterprise.network` when a proxy is set. Without a key, the local policy engine decides alone. See [AI Defense key](/docs/enterprise/ai-defense-key). |
+
+These rules hold on every OS:
+
+- The gateway never runs as root or LocalSystem.
+- No privileged service writes a user's files with its own rights.
+- `defenseclaw-hook` sends nothing to a listener it has not verified.
+- The authorization ledger, not a status file, decides who is protected.
+- A directory lookup error never removes a user.
+- Paths come from the fixed layout, never from the caller's environment.
+- Secrets are never logged or printed.
+- A running service is not proof of protection. Status reports partial
+  coverage as incomplete.
+
+## Scope
+
+### Inspected
+
+DefenseClaw inspects the hook events that supported agents send: tool calls,
+and for some agents prompts and session events. It protects only the agents
+listed in the config. On Linux and macOS, listing a machine-policy agent
+publishes its policy even with `enabled: false`, and the config the lifecycle
+writes when you supply none lists no agents. On Windows you supply the config. See
+[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+
+| Agent | How DefenseClaw is attached | Windows | Linux | macOS |
+| --- | --- | --- | --- | --- |
+| Codex, Claude Code, Cursor, GitHub Copilot | Vendor machine policy | Yes | Yes | Yes |
+| OpenCode | Vendor machine policy, through DefenseClaw's managed OpenCode plugin; per user while that plugin is not in force | Yes | Yes | Yes |
+| Devin, Antigravity, Hermes | Hook registration in each user's config | Yes | Yes | Yes |
+| Amp | Plugin in each user's config | Yes | Yes | Yes |
+| OpenHands, OmniGent | Registration in each user's config | Not supported | Yes | Yes |
+| Kiro | Hook registration in each user's global `~/.kiro/hooks` and the CLI 2.x `defenseclaw` agent, on every OS; the [ACP guard](/docs/acp-guard) for editors that start Kiro over ACP | Yes | Yes | Yes |
+| OpenClaw, ZeptoClaw | Not supported: they need DefenseClaw's model-traffic proxy, which the enterprise profile does not run | No | No | No |
+
+Which users are protected is set by enrollment. See
+[Enrollment](/docs/enterprise/enrollment).
+
+### Not covered
+
+- Agents that are not in the table above.
+- Self-built, modified or copied agent clients, and clients below
+  DefenseClaw's supported minimum version.
+- A per-user agent started with a config home other than the user's default
+  or in a mode that skips user configuration (Hermes `--safe-mode`), a
+  per-user agent below its supported minimum version (for example OpenHands
+  before 1.12.0 started with `uvx`), and agents installed where discovery
+  does not look. See [Residual risks](#residual-risks).
+- Agents that run in a container, a virtual machine, WSL, a dev container or
+  on a remote host. Hooks run where the agent runs, so DefenseClaw must be
+  installed there.
+- Anything an agent does outside the events it sends to its hooks. The
+  enterprise profile does not proxy or inspect the agent's network or model
+  traffic.
+- Administrators and root, who are trusted.
+
+## Residual risks
+
+These risks remain by design or because of how an agent vendor works. Each
+one names where it applies and what reduces it.
+
+### Per-user agents and discovery
+
+#### Per-user agents are advisory against a deliberate user
+
+DefenseClaw's registration or plugin lives in the user's own default config. A user can remove it until the guardian repairs it (usually within seconds, at most about a minute), and can start the agent with another config home (for example `XDG_CONFIG_HOME`, `HOME`, `OPENCODE_CONFIG_DIR`, `HERMES_HOME` or a non-default Hermes profile), with `devin --config <file>`, or with Hermes `--safe-mode`, so the registration is never loaded: no DefenseClaw hook runs, nothing fails closed, no audit record is written, and the guardian never repairs that session. Status and verify keep reporting the user's agent ready, because the registration in the default location is intact.
+
+On Linux and macOS a user can also leave a path the guardian refuses in their own home, such as a link or a file where the agent's config folder belongs; the registration is then not repaired until the path is fixed, and status and verify report it only as the warning `guardian_target_user_path`, which does not fail verify or `detect.sh --require-healthy`.
+
+This applies to Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `--config`), Antigravity and OpenHands (`HOME`), and Hermes (`--safe-mode`, `HERMES_HOME`). Machine-policy agents are not affected.
+
+**Where:** Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent, and OpenCode while it is on the per-user route.
+
+**What reduces it:** Prefer agents that use machine policy where you need enforcement. Use application control to control how users launch these agents, for example by allowing the agent to run only from an administrator-owned launcher that resets these variables and refuses these flags, or a vendor machine policy where the agent has one.
+
+#### Agents installed in unusual places
+
+Discovery covers the usual install locations, the common Node version managers and package managers, and `agent_prefixes`. An agent installed or copied anywhere else in a home is neither enrolled nor reported.
+
+**Where:** Every OS.
+
+**What reduces it:** Install shared agents under an `agent_prefixes` path (Linux and macOS); use application control.
+
+#### App-only and extension-only users are not enrolled
+
+Agents used only as a desktop app or editor extension are not enrolled. Enrollment finds an agent only through its CLI install, so a user of Claude Desktop, the Claude Code or Codex VS Code extension, the Codex app or the Antigravity IDE who has no CLI install gets no enrollment: on Windows their machine-policy hook calls are refused, on Linux and macOS they are inspected under the default contract or refused (`unenrolled_users`), and per-user agents get no hooks. Tracked in [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912).
+
+**Where:** Every OS.
+
+**What reduces it:** Install the agent's CLI for app users, or set `unenrolled_users: deny`.
+
+#### Agents without a lock or the guard
+
+Antigravity, OpenHands and OmniGent have neither, and neither has Hermes on Windows, so hooks a user or project adds for them run next to DefenseClaw's.
+
+**Where:** Those agents, every OS; Hermes on Windows.
+
+**What reduces it:** Treat their coverage as advisory; use application control where you need more.
+
+### Old, unsupported and vendor-limited clients
+
+#### Unsupported, old, copied or self-built clients
+
+A client below DefenseClaw's hook-contract floors, or one built without the vendor's machine-policy handling, can ignore machine policy and hooks. For Claude Code the standalone profile sets `requiredMinimumVersion` (the [version floor](/docs/enterprise/machine-policy#claude-code-version-floor)), but Claude Code reads it only from 2.1.163, so builds older than that, including every build below the 2.1.154 floor, ignore it: the floor stops no build (2.1.153 starts with it in place).
+
+No other connector has a vendor setting that stops an older client. For builds from 2.1.163, running sessions continue until the next session start, an administrator value wins even below the floor, and a value that is not a version merging after DefenseClaw's drop-in leaves no floor. While HKLM `Settings`, macOS managed preferences or server-managed settings are in force without the key, the builds it targets never read it. `enterprise policy verify` fails when a value, file or source it can see leaves no floor, and reports a value below the floor.
+
+On Linux and macOS, Claude Code releases that do not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77) ignore both DefenseClaw drop-ins, the hooks and the floor: a user who installs one under their home runs it with no DefenseClaw hook and no audit record, and `status` and `verify` do not report it. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
+
+Per-user agents below their supported minimum are the same: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, does not load DefenseClaw's hooks, so its tool calls run with no audit record. Nothing refuses it, and because `uvx` runs it from its cache, it is not reported either.
+
+**Where:** Every OS.
+
+**What reduces it:** Use application control (WDAC or AppLocker on Windows, fapolicyd on Linux, Santa or similar on macOS) to allow only approved agent clients at or above the supported versions, including copies that a package runner such as `uvx` starts from its cache. Put `requiredMinimumVersion` in any higher-precedence Claude Code source you deploy.
+
+#### Claude Code bare mode skips session-start hooks
+
+Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` hook. Claude Code 2.1.287 still runs the managed `UserPromptSubmit` and `PreToolUse` hooks in both modes, so prompts and tool calls are still inspected; other releases may skip `UserPromptSubmit` too. `disableAllHooks`, including through `--settings`, does not turn off managed hooks.
+
+**Where:** Claude Code, every OS.
+
+**What reduces it:** Treat session-start and prompt inspection as best effort. Tool-call inspection is the enforcement point.
+
+#### OpenCode can start without plugins
+
+Pure mode (`--pure`, `OPENCODE_PURE=1`) and `OPENCODE_TEST_MANAGED_CONFIG_DIR` start a session without any DefenseClaw plugin, the managed one included, and OpenCode does not document the order in which plugins run.
+
+**Where:** OpenCode, every OS.
+
+**What reduces it:** The foreign-hook guard stays on for OpenCode. Recheck after each OpenCode release.
+
+#### Cursor enterprise hooks depend on the plan
+
+Cursor applies the enterprise `hooks.json` only on plans that support enterprise hooks.
+
+**Where:** Cursor, every OS.
+
+**What reduces it:** Confirm on a real client with your Cursor plan.
+
+#### Higher-precedence vendor policy
+
+A higher-precedence vendor policy, such as Codex cloud or MDM requirements or Claude Code server-managed settings, can override the local machine policy.
+
+**Where:** Codex, Claude Code.
+
+**What reduces it:** Coordinate with whoever manages those settings, and check the effective policy with `defenseclaw-gateway enterprise policy verify --live --user <user> --connector <codex or claudecode> --agent-binary <absolute path>`, run as root on Linux or macOS (a managed Windows host refuses `--live`; see [Machine policy](/docs/enterprise/machine-policy#inspect-export-and-verify)).
+
+### Hook process control and timeouts
+
+#### Users can end or stall their own hook
+
+`defenseclaw-hook` and the per-user hook scripts run as the user, so that user can end, suspend or slow them until the agent's hook timeout. Agents that block only on an explicit deny or exit code then run the call, and no DefenseClaw decision or audit record is written before it runs.
+
+Claude Code and Codex run the call when the user kills their own hook (a failed hook) or stops it (a 30-second timeout), and OpenHands, Devin and Hermes run it when the hook is killed. OpenHands can also run it when the hook stalls until its 60-second timeout, leaving only OpenHands' own confirmation prompt, which the user answers. GitHub Copilot stays closed unless every one of its hooks is stopped (Copilot CLI 1.0.91 stays closed even then), and OpenCode, Amp and Antigravity stay closed.
+
+"Fail-closed" in the [capability matrix](/docs/connectors/capability-matrix) means blocking when the hook cannot reach the gateway, not when the user ends the hook.
+
+**Where:** Every OS.
+
+**What reduces it:** Use EDR process protection or application control so users cannot signal the hook; keep hook latency low and monitor hook failures, and tool calls that appear in the audit without a pre-tool decision (for example a Hermes `post_tool_call` record with no `pre_tool_call` record).
+
+#### Hermes and Copilot hook failures and timeouts
+
+Hermes blocks a tool call only when the hook returns a block answer (and, from Hermes 0.21, exit code 2), so a hook that crashes or is killed cannot fail closed, and in the Hermes releases DefenseClaw supports a hook timeout lets the call run too. Some Hermes builds block the call when a stalled hook times out, but Hermes does not document that. GitHub Copilot does not document what a hook that times out means: earlier Copilot CLI releases ran the call when every hook timed out, and Copilot CLI 1.0.91 denies it ("hook errored").
+
+**Where:** Hermes, Copilot.
+
+**What reduces it:** Treat Hermes coverage as advisory. Use EDR process protection or application control so users cannot signal the hook. Keep hook latency low and monitor timeouts.
+
+### Foreign hooks and hook order
+
+#### Hermes has no hook lock or ordering
+
+On Linux and macOS the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) blocks tool calls while `config.yaml`, or the managed-scope `config.yaml` a user points `HERMES_MANAGED_DIR` at, has a hook DefenseClaw did not write, but a Hermes process keeps the hooks it loaded at start or re-read on a plugin reload: an entry the user removes after Hermes loaded it and before the next session start or tool call keeps running in that process unseen (one the guardian removes keeps that process's tool calls blocked until Hermes restarts). Hermes Python plugins run inside Hermes and are not inspected.
+
+**Where:** Hermes, Linux and macOS.
+
+**What reduces it:** Treat Hermes coverage as advisory; use application control over Hermes plugins and how users launch Hermes.
+
+#### OpenHands project hooks replace DefenseClaw's
+
+OpenHands loads a project's `.openhands/hooks.json` instead of the user's `~/.openhands/hooks.json`: it uses the first of the two it finds, so in a project that has its own file, even one with a single unrelated hook, none of DefenseClaw's OpenHands hooks run. Tool calls there are not inspected or logged, OpenHands shows no DefenseClaw message, and status and verify do not report it. A repository a developer clones can carry the file.
+
+**Where:** OpenHands, Linux and macOS.
+
+**What reduces it:** Treat OpenHands coverage as advisory. Keep `.openhands/hooks.json` out of the repositories developers use (for example with a repository rule or a server-side push check), search existing checkouts for it, and use application control where you need more.
+
+#### Limits of the foreign-hook guard's session block
+
+The foreign-hook guard's session block holds only a hook present when the session started, or one the guardian removed after the agent process started (only for a process DefenseClaw can name). A foreign hook that removes itself before DefenseClaw's session-start check, a hook added later in the session, or a session still running 7 days after its block was recorded is held only by the per-call check, which denies while the hook is present. The guardian cleans a redirected user config location only after a DefenseClaw hook has run with that environment; on Windows it also cleans the locations the user's persistent environment names, while the user's registry hive is loaded.
+
+**Where:** Agents the foreign-hook guard covers, every OS.
+
+**What reduces it:** For Claude Code and Codex on Linux and macOS, keep the vendor lock (`managed_hooks_only: enforce`). Deliver hooks your developers need through machine policy.
+
+#### Amp has no machine-wide plugin location
+
+The DefenseClaw plugin sits in the user's default Amp config directory, so an Amp session that uses a different config directory (for example with `XDG_CONFIG_HOME` or `HOME` set to another folder) does not load it: tool calls there run with no audit record, and status and verify still report the user's Amp ready.
+
+**Where:** Amp, every OS.
+
+**What reduces it:** Treat Amp coverage as best effort. Use application control over how users launch Amp, as for other per-user agents.
+
+### Partly covered apps and surfaces
+
+#### GitHub Copilot in VS Code is partly covered
+
+With `ownership: merge` the Copilot machine policy enables VS Code's `ChatHooks` and `ChatEditorPreferCopilotHarness` policies (written on Windows and Linux, deployed through MDM on macOS), so new editor chats use the SDK harness, which reads Copilot's machine policy. DefenseClaw places a per-user Local hook file for chats on the Local harness, and under `managed_hooks_only: enforce` a per-user plugin. On Linux it also sets the Local harness lock (`allowManagedHooksOnly`), but only once every enrolled user has the plugin and every VS Code found is 1.139.x. Windows and macOS get no lock, and none of this is live-verified. Tracked in [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913).
+
+**Where:** Copilot in VS Code, every OS.
+
+**What reduces it:** Keep both VS Code policies enabled, and use the Copilot CLI for governed work.
+
+#### Devin Desktop is partly covered
+
+A user without the `devin` CLI is enrolled when the Devin CLI the Desktop bundles is at 3000.4.25 or later and not known broken, and is otherwise reported as unprotected, Devin Local under `devin acp` is not certified, one Devin Local process serves every Desktop tab, and builds before 3.9.19 still run Cascade, which DefenseClaw turns off through the machine-level Cascade hooks file rather than inspecting. Tracked in [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915).
+
+**Where:** Devin Desktop, every OS.
+
+**What reduces it:** Keep Devin Desktop at 3.9.19 or later; use application control over which apps users run.
+
+#### Kiro IDE global hooks are not live-verified
+
+The Kiro IDE is discovered on every OS but its use of the global hook file is not live-verified. The guardian reads the IDE's version from its `product.json` (never runs it), enrolls a user who has only the IDE, and reports an IDE before 1.0.182, which reads only workspace hooks, as `kiro_ide_below_global_hooks_floor`. Whether the IDE enforces the global file, which shell it runs hook commands in on Windows, and where the Agent Hooks panel stores its toggle are open live checks; the Windows IDE locations are not verified against an install. Tracked in [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916).
+
+**Where:** Kiro IDE, every OS.
+
+**What reduces it:** Keep Kiro IDE at 1.0.182 or later; use the ACP guard for editors that start Kiro over ACP.
+
+#### Kiro per-user hooks are advisory
+
+Only Kiro IDE 1.0.182 and later and `kiro-cli --v3` read the global `~/.kiro/hooks` file. Neither kiro-cli engine vetoes prompts: kiro-cli 2.24.1 with `--v3` sends a prompt DefenseClaw blocked to the model with the block reason attached (the audit log still records the block), and bare `kiro-cli` (the 2.x engine) vetoes tool calls only, and only through the `defenseclaw` agent. Another agent (`--agent`, `/agent swap`), a relocated `KIRO_HOME`, or hooks from Kiro's cloud configuration sync run without DefenseClaw's hook. Kiro proceeds past any hook exit other than 0 and 2, and its hook timeout is not documented.
+
+**Where:** Kiro, Linux, macOS and Windows.
+
+**What reduces it:** Keep kiro-cli at 2.24.1 or later. Treat a kiro-cli prompt block as a record, not a veto. Turn off configuration sync in the Kiro console. Use the ACP guard for editors that start Kiro over ACP.
+
+#### Kiro on Windows before its first run
+
+Kiro on Windows is enrolled per user, and a kiro-cli that has never run has no version the guardian can read, so it is enrolled at 2.24.1 (the lowest reviewed contract) until its first run names the version. The Kiro hook returns a block as exit 2 whether Kiro starts it through `pwsh -Command`, `powershell -Command`, `cmd.exe` or directly.
+
+**Where:** Kiro, Windows.
+
+**What reduces it:** See [Kiro on Windows](/docs/connectors/kiro#native-windows).
+
+#### Agent sessions inside WSL 2
+
+Agent sessions inside WSL 2 are outside Windows machine policy: Claude Desktop WSL sessions, the Codex app's WSL agent and the Codex VS Code extension's WSL mode. The user can be root in their own distribution, and Windows endpoint sensors do not see the WSL VM. Tracked in [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914).
+
+**Where:** Windows.
+
+**What reduces it:** The standalone profile keeps Claude Desktop WSL sessions off where the hive rule allows, resets the Codex extension's WSL setting and reports the rest; `platform: disable` (`AllowWSL=0`) closes WSL. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl).
+
+### Windows
+
+#### Windows repairs need a session
+
+Windows repairs need a session. The guardian writes a user's files only while that user has an active (connected) session, so a user who is signed out or disconnected is repaired when their session is active again. Revoked users are cleaned at their next sign-in.
+
+**Where:** Windows, per-user agents.
+
+**What reduces it:** Monitor guardian status for users that stay pending.
+
+#### Windows uninstall can leave per-user registrations
+
+Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and none of these agents blocks on a hook command that cannot start.
+
+**Where:** Windows, per-user agents.
+
+**What reduces it:** Uninstall from your MDM as LocalSystem while users are signed in.
+
+#### The Windows Claude Code attestation is the administrator's statement
+
+The Windows Claude Code attestation is the administrator's statement. `repair --attest-claude-effective-policy` records it; it does not run Claude Code.
+
+**Where:** Windows, Claude Code.
+
+**What reduces it:** Before you attest, have Claude Code make a tool call in an enrolled user's own session and find its record with `audit export` from an elevated prompt (`enterprise policy verify --live` is refused on a managed Windows host); repeat after each upgrade.
+
+#### Windows plugin listener check
+
+The Windows Amp plugin and the per-user OpenCode plugin check the listener with a separate request before each hook call. A user who takes `127.0.0.1:18970` between that check and the hook call receives that call's per-user credential and tool payload, and the plugin accepts the answer. It needs the gateway to release the port at that moment (an administrator or upgrade restart) and the hook call to open a new connection. `defenseclaw-hook` checks the service process on every connection and is not affected.
+
+**Where:** Windows, Amp and per-user OpenCode.
+
+**What reduces it:** Restart or upgrade the gateway outside working hours; alert on any process other than the gateway listening on `127.0.0.1:18970`.
+
+#### Windows group filters use cached membership
+
+Group filters on Windows use cached membership. A signed-out user is decided from the groups seen at their last sign-in, and a directory user who has not signed in since installation is pending: kept, not added, not revoked.
+
+**Where:** Windows, `include_groups` and `exclude_groups`.
+
+**What reduces it:** Name groups by SID; allow for the next sign-in when you change membership.
+
+### Availability and the gateway port
+
+#### A held gateway address blocks that user
+
+A user can hold the gateway's address while the gateway is stopped. `defenseclaw-hook` then fails closed, which blocks that user's tool calls, and does not accept an "allow" from that listener. On Linux, systemd keeps the sockets open across normal restarts.
+
+**Where:** Every OS.
+
+**What reduces it:** Monitor gateway health.
+
+#### A hook flood slows other accounts
+
+Each account has its own hook budget (see `enterprise_managed_rate_limited` in [Troubleshooting](/docs/enterprise/troubleshooting)) and runs at most half as many requests at once as the gateway has processors, so one account's flood is refused or queued without stopping other accounts' hooks. It still makes their hooks slower: the gateway accepts and refuses the flood's connections, and the flooding account's own processes compete for the host's CPU, which DefenseClaw does not control.
+
+**Where:** Standalone profile, every OS.
+
+**What reduces it:** Limit standard users' CPU (on Linux, for example, `CPUQuota=` on `user.slice`), and find what floods the gateway from the account named in the rate-limit log line.
+
+#### Telemetry sent to a held port
+
+The agents' own telemetry exporters send to `127.0.0.1:18970` without verifying the listener. A user who holds the port while the gateway is down receives that telemetry, which can include prompt text, and the sending user's per-user telemetry credential, and can then post telemetry attributed to that user for that agent until the user leaves enrollment. The credential never authenticates hook, inspect or management routes, or another agent.
+
+**Where:** Codex, Claude Code, OpenHands and OmniGent telemetry. Every gateway restart on macOS and Windows; on Linux only while an administrator has the socket unit stopped.
+
+**What reduces it:** Alert on any process other than the gateway listening on `127.0.0.1:18970`, and treat per-user telemetry attribution as advisory after a gateway restart. Per-user (non-managed) installs on Linux, macOS and Windows have the same residual on the account's gateway API port: DefenseClaw's hooks and CLI send nothing to another account's listener there, but Claude Code's exporter sends its Claude-scoped OTLP bearer to whoever holds the port while that account's gateway is stopped. Give each account its own port and keep its gateway running; see [Claude Code](/docs/connectors/claudecode#how-claude-code-reaches-the-gateway).
+
+#### Secure Client credentials are shared per agent
+
+In the Secure Client profile hook and telemetry credentials are shared per agent, so one user can post events attributed to another user of the same agent.
+
+**Where:** Secure Client profile, Windows and macOS.
+
+**What reduces it:** Treat per-user attribution in Secure Client telemetry as advisory.
+
+### Platform and administration
+
+#### User namespaces on Linux
+
+Where standard users can create a private user and mount namespace, an agent started inside one can be given its own view of the machine policy, the runtime descriptor and the hook socket directory. `enterprise linux verify` warns (`unprivileged_user_namespaces`), as it does on stock Ubuntu 24.04 and RHEL 9.
+
+**Where:** Linux.
+
+**What reduces it:** Set `user.max_user_namespaces=0`, or on AppArmor hosts `kernel.apparmor_restrict_unprivileged_unconfined=1`, for example in `/etc/sysctl.d`. Both also restrict the Codex and Claude Code command sandboxes; see [User namespaces](/docs/enterprise/linux#user-namespaces).
+
+#### Short windows during administrator actions
+
+A running gateway can reload an edited config just before the lifecycle rejects and reverts it, and on Linux an upgrade that changes a socket unit releases the gateway's port while the socket restarts.
+
+**Where:** Linux and macOS.
+
+**What reduces it:** Change the config and upgrade through the lifecycle, and monitor `config_rejected`.
+
+#### Unsigned builds and application control
+
+Unsigned, hash-pinned builds do not satisfy application-control rules that require a publisher signature.
+
+**Where:** Windows (WDAC, AppLocker), macOS (Gatekeeper).
+
+**What reduces it:** Use signed builds, or re-sign them and pin your certificate with the trust options at install time.
+
+#### A compromised privileged service
+
+A compromised privileged DefenseClaw service holds administrator-level power.
+
+**Where:** Every OS.
+
+**What reduces it:** Keep binaries administrator-owned; the services are part of the trusted base.
+
+## Full threat models
+
+The repository models carry one row per threat, with the code and tests
+behind each control:
+
+- [Enterprise threat model](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/ENTERPRISE-THREAT-MODEL.md):
+  profiles, zones, the cross-platform boundary table and residual risks.
+- [Windows](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md),
+  [Linux](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/LINUX-ENTERPRISE-THREAT-MODEL.md)
+  and [macOS](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/MACOS-ENTERPRISE-THREAT-MODEL.md):
+  the per-platform threat rows.

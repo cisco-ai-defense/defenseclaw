@@ -29,11 +29,13 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,7 @@ class PanelJumperScreen(ModalScreen[str | None]):
         super().__init__()
         self._choices = choices
         self._filtered: list[PanelChoice] = list(choices)
+        self._query = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="panel-jumper-dialog"):
@@ -190,7 +193,13 @@ class PanelJumperScreen(ModalScreen[str | None]):
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id != "panel-jumper-input":
             return
-        self._filtered = filter_choices(event.value, self._choices)
+        self._apply_query(event.value)
+
+    def _apply_query(self, value: str) -> None:
+        if value == self._query:
+            return
+        self._query = value
+        self._filtered = filter_choices(value, self._choices)
         self.selected_index = 0
         self._refresh_list()
 
@@ -207,6 +216,14 @@ class PanelJumperScreen(ModalScreen[str | None]):
         self._refresh_list()
 
     def action_choose(self) -> None:
+        # "plugins" + Enter in one burst (a paste or a fast typist) reaches
+        # Enter before the Input.Changed messages: filter by what the box
+        # holds now, or Enter opened the first unfiltered row, Overview
+        # (GAP-1540).
+        try:
+            self._apply_query(self.query_one("#panel-jumper-input", Input).value)
+        except NoMatches:
+            pass
         if not self._filtered:
             self.dismiss(None)
             return
@@ -247,7 +264,8 @@ class PanelJumperScreen(ModalScreen[str | None]):
                 f"  [#475569]({choice.name})[/]"
             )
             lines.append(row)
-        target.update("\n".join(lines))
+        size = rows_that_fit(self.app.size.height, 14, cap=14)
+        target.update("\n".join(window_lines(lines, self.selected_index, size)))
 
 
 __all__ = [

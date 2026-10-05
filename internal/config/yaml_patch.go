@@ -167,6 +167,12 @@ func yamlScalarNode(value any) *yaml.Node {
 	case string:
 		n.Tag = "!!str"
 		n.Value = v
+	case []string:
+		n.Kind = yaml.SequenceNode
+		n.Tag = "!!seq"
+		for _, item := range v {
+			n.Content = append(n.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: item})
+		}
 	default:
 		n.Tag = "!!str"
 		n.Value = fmt.Sprint(v)

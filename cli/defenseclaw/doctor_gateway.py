@@ -32,6 +32,7 @@ import os
 import posixpath
 import socket
 import stat
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Literal
@@ -49,6 +50,7 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     read_regular_file_no_follow,
     trusted_runtime_owner,
+    trusted_system_subprocess_env,
 )
 from defenseclaw.safety import is_symlink
 
@@ -177,15 +179,18 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> tuple[Eviden
             ancestor = os.path.dirname(os.path.abspath(path)) or os.curdir
             while ancestor:
                 parent = os.path.dirname(ancestor)
-                # A drive/share root cannot itself be renamed. The generic ACL
-                # validator also treats harmless root-level create-child grants
-                # as writes, so stop after validating every replaceable
-                # ancestor below that immutable boundary.
+                # A drive/share root cannot itself be renamed, so stop after
+                # validating every replaceable ancestor below that boundary.
                 if not parent or parent == ancestor:
                     break
+                # Only rights that can rename, delete or re-ACL an existing
+                # child matter on an ancestor. Create-child grants such as the
+                # BUILTIN\\Users (CI)(AD)/(WD) entries a folder inherits from
+                # an NTFS volume root cannot replace the record (GAP-2615).
                 if ancestor_problem := windows_acl_custody_write_error(
                     ancestor,
                     allow_current_user=True,
+                    ancestor_replace_only=True,
                 ):
                     return (
                         "denied",
@@ -722,6 +727,32 @@ class GatewayEvidence:
             return ListenerEvidence("unavailable", reason="native Windows listener inspection is unavailable")
         return _windows_listener_evidence(port, host=host)
 
+    def connection_owner(
+        self,
+        pid: int,
+        client: tuple[object, ...],
+        server: tuple[object, ...],
+    ) -> ListenerEvidence:
+        """Report whether ``pid`` holds the server end of one connected socket.
+
+        ``client`` and ``server`` are ``getsockname()`` and ``getpeername()``
+        of a socket this process connected. ``ok`` carries the PID the kernel
+        attributes the accepted server socket to. ``missing`` means ``pid``
+        does not hold it yet, which is also the state before the server has
+        accepted the connection, so callers poll within a short bound.
+        """
+        local = _socket_endpoint(server)
+        remote = _socket_endpoint(client)
+        if local is None or remote is None or not 0 < pid <= MAX_PLATFORM_PID:
+            return ListenerEvidence("unavailable", reason="connected endpoint is not a TCP/IP endpoint")
+        if self.platform_name == "win32":
+            return _windows_connection_owner(local, remote)
+        if self.platform_name.startswith("linux"):
+            return _linux_connection_owner(pid, local, remote)
+        if self.platform_name == "darwin":
+            return _lsof_connection_owner(pid, local, remote)
+        return ListenerEvidence("unavailable", reason="native connection ownership inspection is unavailable")
+
     def watchdog_state(self, path: str) -> WatchdogStateEvidence:
         return read_watchdog_state(path)
 
@@ -957,16 +988,23 @@ def _listener_address_matches(local_address: str, target_host: str) -> bool:
     return local.version == target.version and (local.is_unspecified or local == target)
 
 
-def _windows_listener_evidence(
-    port: int,
-    *,
-    host: str = "",
-) -> ListenerEvidence:  # pragma: no cover - native Windows only
-    """Resolve a TCP listener owner with GetExtendedTcpTable (IPv4/IPv6)."""
+_WINDOWS_TCP_TABLE_OWNER_PID_LISTENER = 3
+_WINDOWS_TCP_TABLE_OWNER_PID_CONNECTIONS = 4
+_WINDOWS_MIB_TCP_STATE_ESTAB = 5
+_WindowsTCPRow = tuple[int, str, int, str, int, int]
+
+
+def _windows_tcp_owner_rows(
+    family: int,
+    table_class: int,
+) -> tuple[EvidenceStatus, list[_WindowsTCPRow]]:  # pragma: no cover - native Windows only
+    """Read one GetExtendedTcpTable owner-PID table for ``family``.
+
+    Rows are ``(state, local address, local port, remote address, remote
+    port, owner PID)`` with ports in host order.
+    """
     from ctypes import wintypes
 
-    if not 1 <= port <= 65_535:
-        return ListenerEvidence("unavailable", reason="configured API port is invalid")
     iphlpapi = ctypes.WinDLL("iphlpapi", use_last_error=True)
     get_table = iphlpapi.GetExtendedTcpTable
     get_table.argtypes = (
@@ -978,7 +1016,6 @@ def _windows_listener_evidence(
         wintypes.ULONG,
     )
     get_table.restype = wintypes.DWORD
-    tcp_table_owner_pid_listener = 3
     error_insufficient_buffer = 122
     error_access_denied = 5
 
@@ -1004,64 +1041,80 @@ def _windows_listener_evidence(
             ("pid", wintypes.DWORD),
         ]
 
+    row_type: type[ctypes.Structure] = TCP4Row if family == socket.AF_INET else TCP6Row
+    size = wintypes.ULONG(0)
+    result = get_table(None, ctypes.byref(size), False, family, table_class, 0)
+    if result not in (0, error_insufficient_buffer):
+        return ("denied" if result == error_access_denied else "unavailable"), []
+    if not size.value:
+        return "ok", []
+    buffer = ctypes.create_string_buffer(size.value)
+    result = get_table(buffer, ctypes.byref(size), False, family, table_class, 0)
+    if result == error_insufficient_buffer and size.value > len(buffer):
+        # The table can grow between the sizing and fill calls.
+        buffer = ctypes.create_string_buffer(size.value)
+        result = get_table(buffer, ctypes.byref(size), False, family, table_class, 0)
+    if result != 0:
+        return ("denied" if result == error_access_denied else "unavailable"), []
+    count = ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD)).contents.value
+    offset = ctypes.sizeof(wintypes.DWORD)
+    # The table aligns its row array to the row's native alignment.
+    alignment = ctypes.alignment(row_type)
+    offset = (offset + alignment - 1) & ~(alignment - 1)
+    rows: list[_WindowsTCPRow] = []
+    for index in range(count):
+        row = row_type.from_buffer_copy(buffer, offset + index * ctypes.sizeof(row_type))
+        try:
+            if family == socket.AF_INET:
+                local_packed = int(row.local_addr).to_bytes(4, byteorder=sys.byteorder)
+                remote_packed = int(row.remote_addr).to_bytes(4, byteorder=sys.byteorder)
+            else:
+                local_packed = bytes(row.local_addr)
+                remote_packed = bytes(row.remote_addr)
+            local_address = socket.inet_ntop(family, local_packed)
+            remote_address = socket.inet_ntop(family, remote_packed)
+        except (OSError, OverflowError, ValueError):
+            continue
+        rows.append(
+            (
+                int(row.state),
+                local_address,
+                socket.ntohs(row.local_port & 0xFFFF),
+                remote_address,
+                socket.ntohs(row.remote_port & 0xFFFF),
+                int(row.pid),
+            )
+        )
+    return "ok", rows
+
+
+def _windows_listener_evidence(
+    port: int,
+    *,
+    host: str = "",
+) -> ListenerEvidence:  # pragma: no cover - native Windows only
+    """Resolve a TCP listener owner with GetExtendedTcpTable (IPv4/IPv6)."""
+    if not 1 <= port <= 65_535:
+        return ListenerEvidence("unavailable", reason="configured API port is invalid")
     target_host = host.strip("[]")
-    families: tuple[tuple[int, type[ctypes.Structure]], ...] = (
-        (socket.AF_INET, TCP4Row),
-        (socket.AF_INET6, TCP6Row),
-    )
+    families: tuple[int, ...] = (socket.AF_INET, socket.AF_INET6)
     if target_host and target_host.casefold() != "localhost":
         try:
             target_version = ipaddress.ip_address(target_host).version
         except ValueError:
             return ListenerEvidence("unavailable", reason="configured API host is not an IP literal")
-        family = socket.AF_INET if target_version == 4 else socket.AF_INET6
-        row_type = TCP4Row if target_version == 4 else TCP6Row
-        families = ((family, row_type),)
+        families = (socket.AF_INET if target_version == 4 else socket.AF_INET6,)
 
     matching_pids: set[int] = set()
     query_errors: list[EvidenceStatus] = []
-    for family, row_type in families:
-        size = wintypes.ULONG(0)
-        result = get_table(None, ctypes.byref(size), False, family, tcp_table_owner_pid_listener, 0)
-        if result not in (0, error_insufficient_buffer):
-            if result == error_access_denied:
-                query_errors.append("denied")
-            else:
-                query_errors.append("unavailable")
+    for family in families:
+        status, rows = _windows_tcp_owner_rows(family, _WINDOWS_TCP_TABLE_OWNER_PID_LISTENER)
+        if status != "ok":
+            query_errors.append(status)
             continue
-        if not size.value:
-            continue
-        buffer = ctypes.create_string_buffer(size.value)
-        result = get_table(buffer, ctypes.byref(size), False, family, tcp_table_owner_pid_listener, 0)
-        if result == error_insufficient_buffer and size.value > len(buffer):
-            # The table can grow between the sizing and fill calls.
-            buffer = ctypes.create_string_buffer(size.value)
-            result = get_table(buffer, ctypes.byref(size), False, family, tcp_table_owner_pid_listener, 0)
-        if result != 0:
-            if result == error_access_denied:
-                query_errors.append("denied")
-            else:
-                query_errors.append("unavailable")
-            continue
-        count = ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD)).contents.value
-        offset = ctypes.sizeof(wintypes.DWORD)
-        # The table aligns its row array to the row's native alignment.
-        alignment = ctypes.alignment(row_type)
-        offset = (offset + alignment - 1) & ~(alignment - 1)
-        for index in range(count):
-            row = row_type.from_buffer_copy(buffer, offset + index * ctypes.sizeof(row_type))
-            if socket.ntohs(row.local_port & 0xFFFF) != port:
-                continue
-            try:
-                if family == socket.AF_INET:
-                    packed = int(row.local_addr).to_bytes(4, byteorder=sys.byteorder)
-                else:
-                    packed = bytes(row.local_addr)
-                local_address = socket.inet_ntop(family, packed)
-            except (OSError, OverflowError, ValueError):
-                continue
-            if _listener_address_matches(local_address, host):
-                matching_pids.add(int(row.pid))
+        for _state, local_address, local_port, _remote_address, _remote_port, pid in rows:
+            if local_port == port and _listener_address_matches(local_address, host):
+                matching_pids.add(pid)
     if len(matching_pids) == 1:
         return ListenerEvidence("ok", pid=next(iter(matching_pids)))
     if len(matching_pids) > 1:
@@ -1074,6 +1127,179 @@ def _windows_listener_evidence(
             return ListenerEvidence("denied", reason="listener ownership access denied")
         return ListenerEvidence("unavailable", reason="listener ownership could not be queried")
     return ListenerEvidence("missing", reason="no TCP listener on the configured API port")
+
+
+_Endpoint = tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int]
+
+
+def _socket_endpoint(address: object) -> _Endpoint | None:
+    """Normalize ``(host, port, ...)``; IPv4-mapped IPv6 compares as IPv4.
+
+    A dual-stack listener accepts an IPv4 client on an IPv6 socket, so the
+    two ends of one loopback connection can name the same address in either
+    family.
+    """
+    if not isinstance(address, tuple) or len(address) < 2:
+        return None
+    host, port = address[0], address[1]
+    if not isinstance(host, str) or type(port) is not int or not 1 <= port <= 65_535:
+        return None
+    try:
+        ip = ipaddress.ip_address(host.strip("[]").split("%", 1)[0])
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip, port
+
+
+def _linux_proc_net_endpoint(field: str) -> _Endpoint | None:
+    """Decode one ``/proc/net/tcp*`` ``ADDRESS:PORT`` field."""
+    raw_address, separator, raw_port = field.rpartition(":")
+    try:
+        packed = bytes.fromhex(raw_address)
+        port = int(raw_port, 16)
+    except ValueError:
+        return None
+    if not separator or len(packed) not in (4, 16):
+        return None
+    if sys.byteorder == "little":
+        # The kernel prints each 32-bit address word in host byte order.
+        packed = b"".join(packed[index : index + 4][::-1] for index in range(0, len(packed), 4))
+    return _socket_endpoint((str(ipaddress.ip_address(packed)), port))
+
+
+def _linux_connection_owner(
+    pid: int,
+    local: _Endpoint,
+    remote: _Endpoint,
+    *,
+    proc_root: str = "/proc",
+) -> ListenerEvidence:
+    """Find the accepted socket for ``local``<-``remote`` among ``pid``'s descriptors."""
+    inode = ""
+    table_found = False
+    for table_name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+                rows = table.readlines()[1:]
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError):
+            return ListenerEvidence("unavailable", reason="Linux connection table could not be read")
+        table_found = True
+        for row in rows:
+            fields = row.split()
+            # State 01 is ESTABLISHED.
+            if len(fields) < 10 or fields[3] != "01":
+                continue
+            if _linux_proc_net_endpoint(fields[1]) == local and _linux_proc_net_endpoint(fields[2]) == remote:
+                inode = fields[9]
+                break
+        if inode:
+            break
+    if not table_found:
+        return ListenerEvidence("unavailable", reason="Linux connection tables are unavailable")
+    if not inode.isdigit() or inode == "0":
+        # The kernel gives a queued connection a socket inode only on accept.
+        return ListenerEvidence("missing", reason="the connected server socket is not held by a process yet")
+    target = f"socket:[{inode}]"
+    try:
+        descriptors = os.scandir(os.path.join(proc_root, str(pid), "fd"))
+    except PermissionError:
+        return ListenerEvidence("denied", reason="gateway process descriptors are not readable")
+    except OSError:
+        return ListenerEvidence("unavailable", reason="gateway process descriptors are unavailable")
+    with descriptors:
+        for descriptor in descriptors:
+            try:
+                if os.readlink(descriptor.path) == target:
+                    return ListenerEvidence("ok", pid=pid)
+            except OSError:
+                continue
+    return ListenerEvidence("missing", reason="the gateway process does not hold the connected server socket")
+
+
+def trusted_lsof_path() -> str:
+    """Return a fixed system lsof path, never a PATH-resolved executable."""
+    for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
+
+
+def _lsof_endpoint(text: str) -> _Endpoint | None:
+    address, separator, port = text.strip().rpartition(":")
+    if not separator or not port.isdigit():
+        return None
+    return _socket_endpoint((address, int(port)))
+
+
+def _lsof_connection_owner(pid: int, local: _Endpoint, remote: _Endpoint) -> ListenerEvidence:
+    """Ask a fixed-path ``lsof`` whether ``pid`` holds ``local``<-``remote``."""
+    lsof_path = trusted_lsof_path()
+    if not lsof_path:
+        return ListenerEvidence("unavailable", reason="trusted lsof binary is unavailable")
+    try:
+        proc = subprocess.run(
+            [
+                lsof_path,
+                "-nP",
+                "-a",
+                "-p",
+                str(pid),
+                f"-iTCP:{remote[1]}",
+                "-sTCP:ESTABLISHED",
+                "-Fn",
+            ],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
+            timeout=2.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return ListenerEvidence("unavailable", reason="lsof connection inspection failed")
+    if proc.returncode != 0:
+        if proc.returncode == 1 and not proc.stdout.strip():
+            return ListenerEvidence("missing", reason="the gateway process does not hold the connected server socket")
+        return ListenerEvidence("unavailable", reason="lsof connection inspection failed")
+    for line in proc.stdout.splitlines():
+        if not line.startswith("n"):
+            continue
+        source, arrow, destination = line[1:].partition("->")
+        if arrow and _lsof_endpoint(source) == local and _lsof_endpoint(destination) == remote:
+            return ListenerEvidence("ok", pid=pid)
+    return ListenerEvidence("missing", reason="the gateway process does not hold the connected server socket")
+
+
+def _windows_connection_owner(
+    local: _Endpoint,
+    remote: _Endpoint,
+) -> ListenerEvidence:  # pragma: no cover - native Windows only
+    """Return the owner PID of the ESTABLISHED ``local``<-``remote`` row."""
+    query_errors: list[EvidenceStatus] = []
+    for family in (socket.AF_INET, socket.AF_INET6):
+        status, rows = _windows_tcp_owner_rows(family, _WINDOWS_TCP_TABLE_OWNER_PID_CONNECTIONS)
+        if status != "ok":
+            query_errors.append(status)
+            continue
+        for state, local_address, local_port, remote_address, remote_port, pid in rows:
+            if (
+                state == _WINDOWS_MIB_TCP_STATE_ESTAB
+                and _socket_endpoint((local_address, local_port)) == local
+                and _socket_endpoint((remote_address, remote_port)) == remote
+            ):
+                if pid <= 0:
+                    return ListenerEvidence("unavailable", reason="connected server socket has no owner PID")
+                return ListenerEvidence("ok", pid=pid)
+    if "denied" in query_errors:
+        return ListenerEvidence("denied", reason="connection ownership access denied")
+    if query_errors:
+        return ListenerEvidence("unavailable", reason="connection ownership could not be queried")
+    return ListenerEvidence("missing", reason="the connected server socket is not visible")
 
 
 def gateway_executable_name(path: str, *, platform_name: str | None = None) -> str:

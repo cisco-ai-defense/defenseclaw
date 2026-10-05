@@ -1,0 +1,583 @@
+/* Landing page. Uses the editorial tokens in app/global.css (ink, paper,
+ * soft, rule, muted, blue) and the shared .editorial-shell / .editorial-button
+ * classes; everything else is scoped here.
+ *
+ * Type scale (major third, 1rem base): 0.8 · 0.875 · 1 · 1.25 · 1.563 ·
+ * 1.953 · 2.441 · 3.052 · 3.815. One loud element per page: the hero
+ * runbook (components/install). Everything else stays on paper, ruled. */
+
+/* ── Hero ──────────────────────────────────────────────────────────────── */
+
+.hero {
+  border-bottom: 1px solid var(--editorial-rule);
+  background: var(--editorial-paper);
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+  column-gap: clamp(2rem, 4vw, 4.5rem);
+  align-items: start;
+  padding-block: clamp(2.5rem, 4.5vw, 4rem) clamp(3rem, 5vw, 4.5rem);
+}
+
+.heroCopy,
+.heroDemo {
+  min-width: 0;
+}
+
+.heroDemo :global(.feature-demo) {
+  margin: 0;
+}
+
+.heroDemo :global(.scenario-header h2) {
+  font-size: clamp(1.05rem, 1.25vw, 1.25rem);
+}
+
+/* On the landing the demo's labels read as plain text, not a mono eyebrow;
+ * the synthetic-data notice stays, it's information. */
+.heroDemo :global(.scenario-eyebrow),
+.heroDemo :global(.scenario-status) {
+  font-family: var(--font-sans), sans-serif;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.heroDemo :global(.scenario-status) {
+  font-weight: 500;
+}
+
+.heroTitle {
+  max-width: 14ch;
+  margin: 1.5rem 0 0;
+  font-size: clamp(2.441rem, 4.1vw, 3.815rem);
+  font-weight: 600;
+  letter-spacing: -0.045em;
+  line-height: 1.02;
+  text-wrap: balance;
+}
+
+.heroLede {
+  max-width: 36rem;
+  margin: 1.25rem 0 0;
+  color: var(--editorial-muted);
+  font-size: clamp(1rem, 1.15vw, 1.125rem);
+  line-height: 1.6;
+}
+
+.heroRunbook {
+  max-width: 42rem;
+  margin-top: 1.75rem;
+}
+
+.heroAfter {
+  max-width: 42rem;
+  margin: 0.9rem 0 0;
+  color: var(--editorial-muted);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.heroAfter a,
+.textLink {
+  color: var(--editorial-blue);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--editorial-blue) 45%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+}
+
+.heroAfter a:hover,
+.textLink:hover {
+  text-decoration-color: currentColor;
+}
+
+.heroAfter a:focus-visible,
+.textLink:focus-visible,
+.enterpriseHook:focus-visible,
+.agent:focus-visible,
+.feature:focus-visible,
+.stories a:focus-visible {
+  outline: 2px solid var(--editorial-blue);
+  outline-offset: 3px;
+}
+
+/* Enterprise hook: the first thing in the hero, quiet but unmissable. A
+ * plain ruled link with a brand-blue edge; no pill, no arrow. */
+.enterpriseHook {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  max-width: 100%;
+  min-height: 2.75rem;
+  padding: 0.55rem 1rem 0.55rem 0.85rem;
+  border: 1px solid var(--editorial-rule);
+  border-left: 3px solid var(--editorial-blue);
+  background: var(--editorial-soft);
+  color: var(--editorial-ink);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  transition: border-color 150ms ease;
+}
+
+.enterpriseHook > svg {
+  flex: none;
+  width: 1.1rem;
+  height: 1.1rem;
+  color: var(--editorial-blue);
+}
+
+.enterpriseHook strong {
+  font-weight: 650;
+}
+
+.enterpriseHookText {
+  color: var(--editorial-muted);
+}
+
+.enterpriseHook:hover {
+  border-color: var(--editorial-blue);
+}
+
+.enterpriseHook:hover .enterpriseHookText {
+  color: var(--editorial-ink);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+/* ── Sections ──────────────────────────────────────────────────────────── */
+
+.section {
+  padding-block: clamp(3.5rem, 6vw, 5.5rem);
+  border-bottom: 1px solid var(--editorial-rule);
+}
+
+.intro {
+  margin-bottom: clamp(2rem, 3.5vw, 2.75rem);
+}
+
+.intro h2,
+.closing h2,
+.enterprise h2 {
+  max-width: 22ch;
+  margin: 0;
+  font-size: clamp(1.953rem, 3.1vw, 3.052rem);
+  font-weight: 580;
+  letter-spacing: -0.04em;
+  line-height: 1.06;
+  text-wrap: balance;
+}
+
+.intro p {
+  max-width: 36rem;
+  margin: 1rem 0 0;
+  color: var(--editorial-muted);
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.introStacked {
+  margin: 0;
+}
+
+/* ── Agents ────────────────────────────────────────────────────────────── */
+
+.agents {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--editorial-rule);
+  border-left: 1px solid var(--editorial-rule);
+  list-style: none;
+}
+
+.agents > li {
+  min-width: 0;
+  border-right: 1px solid var(--editorial-rule);
+  border-bottom: 1px solid var(--editorial-rule);
+}
+
+.agent {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 0.85rem;
+  row-gap: 0.8rem;
+  align-items: center;
+  height: 100%;
+  padding: 1.25rem 1.35rem;
+  color: var(--editorial-ink);
+  transition: background-color 160ms ease;
+}
+
+.agent:hover {
+  background: var(--editorial-soft);
+}
+
+.agent:hover .agentName {
+  color: var(--editorial-blue);
+}
+
+.agentName {
+  min-width: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+}
+
+.agentOs {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 0.35rem 0.9rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agentOs li,
+.legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--editorial-muted);
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+
+.agentOs svg,
+.legend svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  flex: 0 0 auto;
+}
+
+.agentOs [data-status='supported'] svg,
+.legend [data-status='supported'] svg {
+  color: var(--editorial-green);
+}
+
+.agentOs [data-status='preview'] svg,
+.legend [data-status='preview'] svg {
+  color: var(--editorial-amber);
+}
+
+.agentOs [data-status='unsupported'] > span:first-of-type {
+  text-decoration: line-through;
+}
+
+.agentsFoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem 2rem;
+  margin-top: 1.25rem;
+}
+
+.agentsFoot .textLink {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  font-size: 0.875rem;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin: 0;
+}
+
+/* ── Features ──────────────────────────────────────────────────────────── */
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--editorial-rule);
+  list-style: none;
+}
+
+.features > li {
+  min-width: 0;
+  border-right: 1px solid var(--editorial-rule);
+  border-bottom: 1px solid var(--editorial-rule);
+}
+
+.features > li:nth-child(4n) {
+  border-right: 0;
+}
+
+.feature {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  height: 100%;
+  padding: 1.5rem 1.5rem 1.75rem;
+  color: var(--editorial-ink);
+}
+
+.features > li:nth-child(4n + 1) .feature {
+  padding-left: 0;
+}
+
+.featureTitle {
+  font-size: 1.125rem;
+  font-weight: 620;
+  letter-spacing: -0.015em;
+  line-height: 1.3;
+}
+
+.feature:hover .featureTitle {
+  color: var(--editorial-blue);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+.featureBody {
+  color: var(--editorial-muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.preview {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0 0.4rem;
+  border: 1px solid color-mix(in oklab, var(--editorial-amber) 55%, transparent);
+  color: var(--editorial-amber);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.5;
+  vertical-align: 0.12em;
+}
+
+/* ── Enterprise ────────────────────────────────────────────────────────── */
+
+.enterprise {
+  padding-block: clamp(3.5rem, 6vw, 5.5rem);
+  border-bottom: 1px solid var(--editorial-rule);
+  background: var(--editorial-soft);
+  scroll-margin-top: 4rem;
+}
+
+.enterpriseGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: clamp(2.5rem, 6vw, 7rem);
+  align-items: start;
+}
+
+.enterprise h2 {
+  max-width: 14ch;
+}
+
+.enterprise :global(.editorial-actions) {
+  margin-top: 2rem;
+}
+
+.enterpriseFacts {
+  margin: 0;
+  border-top: 1px solid var(--editorial-rule);
+}
+
+.enterpriseFacts div {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  gap: 1.5rem;
+  padding: 1.25rem 0;
+  border-bottom: 1px solid var(--editorial-rule);
+}
+
+.enterpriseFacts dt {
+  color: var(--editorial-ink);
+  font-size: 1rem;
+  font-weight: 620;
+  line-height: 1.55;
+}
+
+.enterpriseFacts dd {
+  margin: 0;
+  color: var(--editorial-muted);
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+/* ── Stories ───────────────────────────────────────────────────────────── */
+
+.storiesGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: clamp(2.5rem, 7vw, 8rem);
+}
+
+.stories {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--editorial-rule);
+  list-style: none;
+}
+
+.stories a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 1.25rem 0;
+  border-bottom: 1px solid var(--editorial-rule);
+  color: var(--editorial-ink);
+}
+
+.stories strong {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.stories a:hover strong {
+  color: var(--editorial-blue);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+.stories span {
+  color: var(--editorial-muted);
+  font-size: 0.9rem;
+}
+
+/* ── Closing ───────────────────────────────────────────────────────────── */
+
+.closing {
+  padding-block: clamp(3.5rem, 6vw, 5.5rem);
+  background: var(--editorial-paper);
+}
+
+.closingGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2rem 3rem;
+  align-items: end;
+}
+
+.closing p {
+  margin: 1rem 0 0;
+  color: var(--editorial-muted);
+}
+
+.closing :global(.editorial-actions) {
+  margin-top: 0;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ── Responsive ────────────────────────────────────────────────────────── */
+
+@media (max-width: 1279px) {
+  .agents {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1023px) {
+  .heroGrid {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 3rem;
+  }
+
+  .storiesGrid,
+  .enterpriseGrid,
+  .closingGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .features {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .features > li:nth-child(4n) {
+    border-right: 1px solid var(--editorial-rule);
+  }
+
+  .features > li:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .features > li:nth-child(4n + 1) .feature {
+    padding-left: 1.5rem;
+  }
+
+  .features > li:nth-child(2n + 1) .feature {
+    padding-left: 0;
+  }
+}
+
+@media (max-width: 767px) {
+  .heroGrid {
+    padding-top: 1.75rem;
+  }
+
+  .heroTitle {
+    margin-top: 1.25rem;
+    font-size: clamp(2.25rem, 10.5vw, 3.052rem);
+  }
+
+  .agents {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .agent {
+    padding: 1rem 0.85rem;
+    column-gap: 0.6rem;
+  }
+
+  .agentName {
+    font-size: 0.92rem;
+  }
+
+  .agentOs {
+    gap: 0.3rem 0.6rem;
+  }
+
+  .features {
+    grid-template-columns: 1fr;
+  }
+
+  .features > li,
+  .features > li:nth-child(4n) {
+    border-right: 0;
+  }
+
+  .feature,
+  .features > li:nth-child(4n + 1) .feature,
+  .features > li:nth-child(2n + 1) .feature {
+    padding: 1.25rem 0;
+  }
+
+  .enterpriseFacts div {
+    grid-template-columns: 1fr;
+    gap: 0.3rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent,
+  .enterpriseHook {
+    transition: none;
+  }
+}

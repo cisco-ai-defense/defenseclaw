@@ -3747,22 +3747,6 @@ attributes:
       max_utf8_bytes: 256
     notes: NFC bounded metric dimension; producer cardinality gate applies
   introduced_in: telemetry-registry-v1
-- id: defenseclaw.metric.command
-  type: string
-  brief: Canonical bounded metric dimension projected as command for local observability
-  examples:
-  - unknown
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: internal
-  cardinality: bounded
-  normalization:
-    id: bounded-v1
-    overrides:
-      max_utf8_bytes: 256
-    notes: NFC bounded metric dimension; producer cardinality gate applies
-  introduced_in: telemetry-registry-v1
 - id: defenseclaw.metric.subsystem
   type: string
   brief: Canonical bounded metric dimension projected as subsystem for local observability
@@ -4019,6 +4003,439 @@ attributes:
       max_utf8_bytes: 256
     notes: NFC bounded metric dimension; producer cardinality gate applies
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.sandbox.id
+  type: string
+  brief: OpenShell-assigned sandbox identifier
+  examples: [0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: Opaque gateway identifier; absent until OpenShell has accepted the create request. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.name
+  type: string
+  brief: DefenseClaw sandbox name
+  examples: [dc-claudecode-myapp-7f3a]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: DefenseClaw-assigned name, stable across stop and start; it can embed the project folder name, so it is internal. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.runtime
+  type: string
+  brief: Isolation runtime hosting the sandbox
+  examples: [openshell]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [openshell]}
+    notes: NVIDIA OpenShell 0.1.x is the only supported runtime
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.driver
+  type: string
+  brief: OpenShell compute driver running the sandbox
+  examples: [docker]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [docker, podman, vm, k8s]}
+    notes: The OpenShell gateway compute driver; DefenseClaw supports only docker today
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.image.digest
+  type: string
+  brief: Content digest of the sandbox workload image
+  examples: ['sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: Digest of the DefenseClaw overlay (or bring-your-own) image the workload runs; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.version
+  type: int64
+  brief: OpenShell sandbox policy revision in force
+  examples: [3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 4294967295}
+    notes: The monotonically increasing per-sandbox policy version OpenShell reports as loaded; zero is never fabricated for an unknown revision
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.profile
+  type: string
+  brief: DefenseClaw sandbox network profile
+  examples: [open]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [open, balanced, strict]}
+    notes: open is allow-by-default with a blocklist; balanced is a default-deny allowlist; strict permits provider hosts only
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.pack
+  type: string
+  brief: Sandbox policy pack name
+  examples: [open]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: A built-in pack (open, balanced, strict) or an operator-supplied pack name
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.phase
+  type: string
+  brief: Sandbox lifecycle phase
+  examples: [ready]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    notes: OpenShell SandboxPhase values plus the DefenseClaw-only creating (before the gateway accepts the sandbox) and deleted (after it is gone) bookends
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workdir.mode
+  type: string
+  brief: How the project folder reaches the sandbox
+  examples: [mount]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [mount, copy]}
+    notes: mount is the live bind mount of the launch folder; copy is the staged copy-in and patch-back flow
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.phase.previous
+  type: string
+  brief: Sandbox lifecycle phase before this transition
+  examples: [starting]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    notes: Absent when the producer did not observe the prior phase; never inferred
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.phase.from
+  type: string
+  brief: Source phase of an aggregated sandbox lifecycle transition
+  examples: [starting]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    notes: Metric dimension only; the per-sandbox record carries defenseclaw.sandbox.phase.previous
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.phase.to
+  type: string
+  brief: Destination phase of an aggregated sandbox lifecycle transition
+  examples: [ready]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [creating, provisioning, starting, ready, stopping, stopped, completed, error, deleting, deleted, unknown]}
+    notes: Metric dimension only; the per-sandbox record carries defenseclaw.sandbox.phase
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.lifecycle.trigger
+  type: string
+  brief: What caused the sandbox lifecycle transition
+  examples: [watch]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [create, start, stop, delete, reconcile, watch]}
+    notes: create, start, stop, and delete are DefenseClaw-initiated operations; watch is a gateway status update; reconcile is drift found by the controller (for example a sandbox deleted outside DefenseClaw)
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.exit_code
+  type: int64
+  brief: Exit code of the sandbox's main process
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: -2147483648, max: 2147483647}
+    notes: OpenShell-normalized main process result (signal exits are 128 plus the signal number); present only once the main process has exited
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.condition.type
+  type: string
+  brief: OpenShell sandbox condition type behind the transition
+  examples: [Ready]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Gateway-reported condition class, for example Ready or ConfigurationReady
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.condition.status
+  type: string
+  brief: Status of the reported OpenShell sandbox condition
+  examples: ['True']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: ['True', 'False', Unknown]}
+    notes: Exact gateway condition status
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.condition.reason
+  type: string
+  brief: Machine-readable reason of the reported OpenShell sandbox condition
+  examples: [ConfigurationInvalid]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Gateway-owned reason token; never derived from the message
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.condition.message
+  type: string
+  brief: Human-readable message of the reported OpenShell sandbox condition
+  examples: [policy failed validation]
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: sensitive
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 1024}
+    notes: Gateway-supplied text; route-projected by the selected redaction profile
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.approval.kind
+  type: string
+  brief: What a sandbox approval would open
+  examples: [network_rule]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [network_rule, host_port]}
+    notes: network_rule is an OpenShell draft policy proposal; host_port is a consented host loopback port
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.approval.scope
+  type: string
+  brief: How far a resolved sandbox approval applies
+  examples: [sandbox]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [sandbox, always]}
+    notes: sandbox applies to the one sandbox; always persists the decision for future sandboxes
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.operation
+  type: string
+  brief: Sandbox workspace protection operation
+  examples: [snapshot]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [snapshot, undo, mask, review, upload, pull, quarantine]}
+    notes: snapshot and undo protect the mounted folder; mask hides secret files; review scans the session's changes; upload and pull are the copy-mode transfer; quarantine renames the .git entry of a nested repository that appeared in the mounted folder during a session
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.snapshot.kind
+  type: string
+  brief: Storage used for a pre-session workspace snapshot
+  examples: [git]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [git, filesystem]}
+    notes: git is a snapshot commit under refs/defenseclaw/pre; filesystem is a hardlink or copy-on-write tree for non-git folders
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.snapshot.ref
+  type: string
+  brief: Reference to the workspace snapshot the operation created or restored
+  examples: [refs/defenseclaw/pre/dc-claudecode-myapp-7f3a]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 512}
+    notes: A git ref or commit, or the snapshot directory name; never an absolute host path
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.pull.mode
+  type: string
+  brief: How copy-mode results were brought back to the host
+  examples: [branch]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [apply, branch, patch]}
+    notes: apply is a three-way apply, branch creates dc/<name>, patch writes a patch file
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.file_count
+  type: int64
+  brief: Files the workspace operation covered
+  examples: [8]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Changed files for review, undo, and pull; masked files for mask; snapshotted files for snapshot; quarantined .git entries for quarantine
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.lines_added
+  type: int64
+  brief: Lines added across the covered files
+  examples: [212]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Diffstat count; absent when no diff was computed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.lines_removed
+  type: int64
+  brief: Lines removed across the covered files
+  examples: [37]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Diffstat count; absent when no diff was computed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.flagged_count
+  type: int64
+  brief: Changed files that can run code on the host
+  examples: [2]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Review findings such as package.json scripts, .envrc, CI workflows, git filters, new executables, and symlinks
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.byte_count
+  type: int64
+  brief: Bytes the workspace operation stored or transferred
+  examples: [1048576]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 9223372036854775807}
+    notes: Snapshot size, or the upload or pull transfer size
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.workspace.paths
+  type: string[]
+  brief: Workspace-relative paths the operation masked or flagged
+  examples: [[.env, package.json]]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 1024, max_items: 64}
+    notes: Relative to the project root and bounded to 64 entries; file names can disclose project content, so each destination's redaction profile governs them
+  introduced_in: telemetry-registry-v2
 groups:
 - id: resource.core
   type: resource
@@ -5690,6 +6107,12 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
     requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   log:
     event_name: ai_component.changed
   x-defenseclaw:
@@ -5755,6 +6178,12 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
     requirement_level: recommended
   log:
     event_name: ai_component.discovered
@@ -5841,6 +6270,12 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
     requirement_level: recommended
   log:
     event_name: ai_component.removed
@@ -6256,7 +6691,13 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - body.compliance.activity
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields: []
   log:
     event_name: authentication.failed
@@ -6628,7 +7069,7 @@ groups:
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
-  - body.compliance.activity
+  - body.policy.updated
   attributes: []
   body_fields: []
   log:
@@ -6782,7 +7223,7 @@ groups:
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
-  - body.platform.health
+  - body.subsystem.health
   attributes: []
   body_fields: []
   log:
@@ -6809,7 +7250,7 @@ groups:
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
-  - body.platform.health
+  - body.subsystem.health
   attributes: []
   body_fields: []
   log:
@@ -6834,7 +7275,7 @@ groups:
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
-  - body.platform.health
+  - body.subsystem.health
   attributes: []
   body_fields: []
   log:
@@ -6860,7 +7301,7 @@ groups:
   stability: stable
   introduced_in: telemetry-registry-v1
   extends:
-  - body.platform.health
+  - body.subsystem.health
   attributes: []
   body_fields: []
   log:
@@ -9537,6 +9978,224 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: correlation.sandbox
+  type: attribute_group
+  brief: OpenShell sandbox identity, image, policy revision, profile, pack, phase, and workspace mode carried by every sandbox-originated log; never a metric label set.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.runtime
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.image.digest
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.version
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.profile
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.pack
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.phase
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workdir.mode
+    requirement_level: recommended
+  body_fields: []
+- id: body.policy.updated
+  type: body_group
+  brief: Policy update compliance body; a sandbox policy change carries the sandbox correlation.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.compliance.activity
+  - correlation.sandbox
+  attributes: []
+  body_fields: []
+- id: body.subsystem.health
+  type: body_group
+  brief: Subsystem health transition body; an openshell transition about one sandbox carries the sandbox correlation.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.platform.health
+  - correlation.sandbox
+  attributes: []
+  body_fields: []
+- id: body.sandbox.lifecycle
+  type: body_group
+  brief: Sandbox lifecycle transition body with the resulting phase, exit result, and the gateway condition behind it.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.phase
+    requirement_level: required
+  - ref: defenseclaw.sandbox.phase.previous
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.lifecycle.trigger
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.exit_code
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.condition.type
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.condition.status
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.condition.reason
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.condition.message
+    requirement_level: recommended
+- id: body.sandbox.workspace
+  type: body_group
+  brief: Sandbox workspace protection body for snapshots, undo, secret masks, change review, copy-mode transfer, and nested-repository quarantine.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  - security.enforcement
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.workspace.operation
+    requirement_level: required
+  - ref: defenseclaw.sandbox.workspace.snapshot.kind
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.snapshot.ref
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.pull.mode
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.file_count
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.lines_added
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.lines_removed
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.flagged_count
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.byte_count
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.workspace.paths
+    requirement_level: recommended
+- id: log.sandbox.lifecycle
+  type: log
+  brief: Canonical sandbox.lifecycle log identity; one record per observed or initiated sandbox phase change.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.lifecycle
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - attempted
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.sandbox.workspace
+  type: log
+  brief: Canonical sandbox.workspace log identity for snapshot, undo, mask, review, upload, pull, and quarantine operations.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.workspace
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.workspace
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - completed
+    - failed
+    - no_change
+    - partial
+    - skipped
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    - enforcement_state_change
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.transitions
+  type: metric
+  brief: Sandbox lifecycle phase transitions aggregated by harness connector and phase pair; sandbox identities are never labels.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.phase.from
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.phase.to
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.transitions
+    instrument_type: counter
+    value_type: int64
+    unit: '{transition}'
+    description: Sandbox lifecycle phase transitions by harness connector and phase pair.
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+- id: metric.defenseclaw.sandbox.active
+  type: metric
+  brief: Sandboxes currently provisioning, starting, ready, or stopping, per harness connector.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.connector.source
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.sandbox.active
+    instrument_type: gauge
+    value_type: int64
+    unit: '{sandbox}'
+    description: Sandboxes currently provisioning, starting, ready, or stopping, per harness connector.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.connector.source
+        label: connector
+  x-defenseclaw:
+    bucket: agent.lifecycle
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 producer_identity_sets:
 - id: identity_set.agent_lifecycle
   identities:
@@ -9860,10 +10519,22 @@ producer_identity_sets:
   - event_name: legacy.audit.registry.add
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.approve
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.edit
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.reject
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.remove
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.require
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.sync
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.setup.connector.mode
@@ -10027,6 +10698,9 @@ producer_identity_sets:
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.plugin.restore
+    bucket: enforcement.action
+    compatibility_only: true
+  - event_name: legacy.audit.plugin.unblock
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.quarantine
@@ -10207,6 +10881,30 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.warn
     bucket: guardrail.evaluation
     compatibility_only: true
+  - event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
   - event_name: legacy.audit.inspect.tool.alert
     bucket: guardrail.evaluation
     compatibility_only: true
@@ -10217,6 +10915,18 @@ producer_identity_sets:
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.install.allowed
@@ -10262,6 +10972,9 @@ producer_identity_sets:
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.plugin.restore
+    bucket: enforcement.action
+    compatibility_only: true
+  - event_name: legacy.audit.plugin.unblock
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.quarantine
@@ -10371,6 +11084,30 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.warn
     bucket: guardrail.evaluation
     compatibility_only: true
+  - event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
   - event_name: legacy.audit.inspect.tool.alert
     bucket: guardrail.evaluation
     compatibility_only: true
@@ -10381,6 +11118,18 @@ producer_identity_sets:
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.install.allowed
@@ -10616,10 +11365,22 @@ producer_identity_sets:
   - event_name: legacy.audit.registry.add
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.approve
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.edit
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.reject
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.remove
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.require
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.sync
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.setup.connector.mode
@@ -11321,6 +12082,30 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.warn
     bucket: guardrail.evaluation
     compatibility_only: true
+  - event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
   - event_name: legacy.audit.inspect.tool.alert
     bucket: guardrail.evaluation
     compatibility_only: true
@@ -11331,6 +12116,18 @@ producer_identity_sets:
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.install.allowed
@@ -11484,6 +12281,56 @@ producer_identity_sets:
   - event_name: tool_start
     bucket: tool.activity
     family: log.compat.tool_start
+- id: identity_set.sandbox_lifecycle
+  identities:
+  - event_name: sandbox.lifecycle
+    bucket: agent.lifecycle
+    family: log.sandbox.lifecycle
+- id: identity_set.sandbox_workspace
+  identities:
+  - event_name: sandbox.workspace
+    bucket: enforcement.action
+    family: log.sandbox.workspace
+- id: identity_set.sandbox_egress
+  identities:
+  - event_name: egress.allowed
+    bucket: network.egress
+    family: log.egress.allowed
+  - event_name: egress.blocked
+    bucket: network.egress
+    family: log.egress.blocked
+- id: identity_set.sandbox_approval
+  identities:
+  - event_name: approval.requested
+    bucket: compliance.activity
+    family: log.approval.requested
+  - event_name: approval.resolved
+    bucket: compliance.activity
+    family: log.approval.resolved
+- id: identity_set.sandbox_policy
+  identities:
+  - event_name: policy.updated
+    bucket: compliance.activity
+    family: log.policy.updated
+- id: identity_set.sandbox_health
+  identities:
+  - event_name: subsystem.lifecycle
+    bucket: platform.health
+    family: log.subsystem.lifecycle
+  - event_name: subsystem.ready
+    bucket: platform.health
+    family: log.subsystem.ready
+  - event_name: subsystem.degraded
+    bucket: platform.health
+    family: log.subsystem.degraded
+  - event_name: subsystem.restored
+    bucket: platform.health
+    family: log.subsystem.restored
+- id: identity_set.sandbox_finding
+  identities:
+  - event_name: finding.observed
+    bucket: security.finding
+    family: log.finding.observed
 producer_mappings:
 - producer: gateway_event
   key: verdict
@@ -13337,26 +14184,6 @@ producer_mappings:
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
-  key: init-sandbox
-  source: internal/audit/actions.go
-  event_name_policy: context_optional
-  allowed_context_identity_set: identity_set.compliance_activity
-  severity_policy: canonical_or_info
-  mandatory_rules:
-  - control_plane_mutation
-  - approval_resolution
-  - alert_mutation
-  - protected_boundary_auth_failure
-  companion_rules: []
-  compatibility:
-    introduced_in: telemetry-registry-v1
-    legacy_event_prefix: legacy.audit.
-    disposition: translate_to_v8
-  default_identity:
-    event_name: legacy.audit.init.sandbox
-    bucket: compliance.activity
-    compatibility_only: true
-- producer: audit_action
   key: init-sidecar
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -13375,6 +14202,142 @@ producer_mappings:
   default_identity:
     event_name: legacy.audit.init.sidecar
     bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-allow
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-block
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-confirm
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-allow
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-block
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-confirm
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
     compatibility_only: true
 - producer: audit_action
   key: inspect-reveal
@@ -13462,6 +14425,74 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-allow
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-block
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-confirm
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
 - producer: audit_action
@@ -13982,6 +15013,25 @@ producer_mappings:
     bucket: enforcement.action
     compatibility_only: true
 - producer: audit_action
+  key: plugin-unblock
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.enforcement_action
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  - enforcement_state_change
+  companion_rules:
+  - asset_lifecycle_on_state_change
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.plugin.unblock
+    bucket: enforcement.action
+    compatibility_only: true
+- producer: audit_action
   key: policy-activate
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -14175,6 +15225,86 @@ producer_mappings:
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
+  key: registry-sync
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.sync
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-require
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.require
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-approve
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.approve
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-reject
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.reject
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
   key: rescan
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -14227,6 +15357,89 @@ producer_mappings:
     event_name: legacy.audit.restore
     bucket: enforcement.action
     compatibility_only: true
+- producer: audit_action
+  key: sandbox-approval
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_approval
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - approval_resolution
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-egress
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_egress
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-finding
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_finding
+  severity_policy: finding_required
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-health
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_health
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-lifecycle
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_lifecycle
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-policy
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_policy
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox-workspace
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_workspace
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  - enforcement_state_change
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
 - producer: audit_action
   key: scan
   source: internal/audit/actions.go

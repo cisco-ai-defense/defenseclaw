@@ -74,6 +74,13 @@ classes:
       ActionCodexNotify: "codex.notify"
       ActionCodexNotifyAgentTurnComplete: "codex.notify.agent-turn-complete"
       ActionCodexNotifyMalformed: "codex.notify.malformed"
+      ActionSandboxLifecycle: "sandbox-lifecycle"
+      ActionSandboxWorkspace: "sandbox-workspace"
+      ActionSandboxEgress: "sandbox-egress"
+      ActionSandboxApproval: "sandbox-approval"
+      ActionSandboxPolicy: "sandbox-policy"
+      ActionSandboxHealth: "sandbox-health"
+      ActionSandboxFinding: "sandbox-finding"
       ActionSidecarStart: "sidecar-start"
       ActionSidecarStop: "sidecar-stop"
       ActionSidecarConnected: "sidecar-connected"
@@ -145,6 +152,18 @@ classes:
       ActionInspectToolBlock: "inspect-tool-block"
       ActionInspectToolAlert: "inspect-tool-alert"
       ActionInspectToolAllow: "inspect-tool-allow"
+      ActionInspectRequestConfirm: "inspect-request-confirm"
+      ActionInspectRequestBlock: "inspect-request-block"
+      ActionInspectRequestAlert: "inspect-request-alert"
+      ActionInspectRequestAllow: "inspect-request-allow"
+      ActionInspectResponseConfirm: "inspect-response-confirm"
+      ActionInspectResponseBlock: "inspect-response-block"
+      ActionInspectResponseAlert: "inspect-response-alert"
+      ActionInspectResponseAllow: "inspect-response-allow"
+      ActionInspectToolResponseConfirm: "inspect-tool-response-confirm"
+      ActionInspectToolResponseBlock: "inspect-tool-response-block"
+      ActionInspectToolResponseAlert: "inspect-tool-response-alert"
+      ActionInspectToolResponseAllow: "inspect-tool-response-allow"
       ActionInspectReveal: "inspect-reveal"
       ActionAPIAuthFailure: "api-auth-failure"
       ActionAPIConfigPatch: "api-config-patch"
@@ -180,7 +199,6 @@ classes:
       ActionInitGateway: "init-gateway"
       ActionInitGuardrail: "init-guardrail"
       ActionInitNotificationsToggle: "init-notifications-toggle"
-      ActionInitSandbox: "init-sandbox"
       ActionInitSidecar: "init-sidecar"
       ActionPolicyCreate: "policy-create"
       ActionPolicyActivate: "policy-activate"
@@ -188,6 +206,10 @@ classes:
       ActionRegistryAdd: "registry-add"
       ActionRegistryEdit: "registry-edit"
       ActionRegistryRemove: "registry-remove"
+      ActionRegistrySync: "registry-sync"
+      ActionRegistryRequire: "registry-require"
+      ActionRegistryApprove: "registry-approve"
+      ActionRegistryReject: "registry-reject"
       ActionScanEnforced: "scan-enforced"
       ActionScanFinding: "scan-finding"
       ActionDismissAlert: "dismiss-alert"
@@ -206,6 +228,7 @@ classes:
       ActionPluginEnable: "plugin-enable"
       ActionPluginQuarantine: "plugin-quarantine"
       ActionPluginRestore: "plugin-restore"
+      ActionPluginUnblock: "plugin-unblock"
       ActionBlockMCP: "block-mcp"
       ActionAllowMCP: "allow-mcp"
       ActionMCPUnblock: "mcp-unblock"
@@ -291,7 +314,6 @@ classes:
       "defenseclaw.judge.semaphore.depth": {type: "updowncounter", unit: "{slot}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
       "defenseclaw.judge.semaphore.drops": {type: "counter", unit: "{drop}", labels: [], empty_labels_reason: "All current production Add/Record callsites pass no instrument-specific attributes; OTel resource attributes may still be attached by the provider."}
       "defenseclaw.llm_bridge.latency": {type: "histogram", unit: "ms", labels: ["gen_ai.request.model", "status"]}
-      "defenseclaw.openshell.exit": {type: "counter", unit: "{exit}", labels: ["command", "exit_code"]}
       "defenseclaw.otel.ingest.bytes": {type: "counter", unit: "By", labels: ["connector", "signal", "source"]}
       "defenseclaw.otel.ingest.last_seen_ts": {type: "gauge", unit: "s", labels: ["connector", "signal", "source"]}
       "defenseclaw.otel.ingest.malformed": {type: "counter", unit: "{request}", labels: ["connector", "signal", "source"]}

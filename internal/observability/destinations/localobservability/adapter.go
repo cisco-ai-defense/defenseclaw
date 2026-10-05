@@ -145,7 +145,7 @@ func completeCanary(spans []localCanarySpan) bool {
 		}
 	}
 	return root != nil && child != nil && root.span != nil && child.span != nil &&
-		root.span.Name == "invoke_agent diagnostic" && child.span.Name == "chat gpt-4o-mini" &&
+		root.span.Name == observability.RuntimeCanaryAgentSpanName && child.span.Name == observability.RuntimeCanaryModelSpanName &&
 		root.span.Kind == tracepb.Span_SPAN_KIND_INTERNAL && child.span.Kind == tracepb.Span_SPAN_KIND_CLIENT &&
 		root.span.Status != nil && child.span.Status != nil &&
 		root.span.Status.Code == tracepb.Status_STATUS_CODE_OK && child.span.Status.Code == tracepb.Status_STATUS_CODE_OK &&

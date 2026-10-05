@@ -260,7 +260,7 @@ class TestManualVerdictStatusFlip(SyncTestBase):
     to wait for the next scan run to see the row turn red.
     """
 
-    def test_reject_flips_status_to_blocked(self):
+    def test_reject_flips_status_to_rejected(self):
         manifest = _fresh_skill_manifest()
         self.stub_fetch(manifest)
 
@@ -275,12 +275,14 @@ class TestManualVerdictStatusFlip(SyncTestBase):
         )
         self.assertIsNotNone(verdict)
         self.assertTrue(verdict.rejected)
-        self.assertEqual(verdict.status, "blocked")
+        # GAP-2371: "rejected", not "blocked" — reject only stops promotion.
+        self.assertEqual(verdict.status, "rejected")
 
-        # And it survives a reload from disk.
+        # And it survives a reload from disk, counted apart from blocked.
         idx = load_index(self.cfg.data_dir, self.source.id)
         v = idx.find("skill", "demo-skill")
-        self.assertEqual(v.status, "blocked")
+        self.assertEqual(v.status, "rejected")
+        self.assertEqual((idx.blocked_count, idx.rejected_count), (0, 1))
 
     def test_unreject_clears_synthetic_blocked_status(self):
         # Reject then un-reject. The synthetic ``status="blocked"``
@@ -335,6 +337,24 @@ class TestManualVerdictStatusFlip(SyncTestBase):
         self.assertTrue(verdict.approved)
         self.assertFalse(verdict.rejected)
         self.assertEqual(verdict.status, "pending")
+
+
+class TestDecisionKeepsScanVerdict(SyncTestBase):
+    def test_reject_then_approve_restores_clean_scan(self):
+        """GAP-1764: a reject + approve does not turn a scanned-clean entry into pending."""
+        manifest = _fresh_skill_manifest()
+        self.stub_fetch(manifest)
+        sync_source(
+            self.cfg, self.cfg.data_dir, self.source,
+            scan_callback=lambda _src, entry: _scan_result(entry.name),
+            auto_promote=False, save=False,
+        )
+        args = (self.cfg.data_dir, self.source.id, "skill", "demo-skill")
+        self.assertEqual(manual_set_verdict(*args, rejected=True).status, "rejected")
+        self.assertEqual(manual_set_verdict(*args, approved=True).status, "clean")
+        manual_set_verdict(*args, rejected=True)
+        self.assertEqual(manual_set_verdict(*args, rejected=False).status, "clean")
+        self.assertEqual(load_index(self.cfg.data_dir, self.source.id).find("skill", "demo-skill").status, "clean")
 
 
 class TestPromotionWipeBeforeReplace(SyncTestBase):
@@ -495,3 +515,21 @@ class TestCacheIO(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_sync_table_spells_out_promoted_skills_and_mcps(capsys):
+    from types import SimpleNamespace
+
+    from defenseclaw.commands import cmd_registry
+
+    assert cmd_registry._promoted_label(0, 0) == "0"
+    assert cmd_registry._promoted_label(0, 1) == "1 MCP"
+    assert cmd_registry._promoted_label(2, 3) == "2 skills, 3 MCPs"
+    report = SimpleNamespace(
+        source_id="sf1-local", fetched=1, scanned=1, promoted_skills=0, promoted_mcps=1,
+        errors=[], ok=lambda: True,
+    )
+    cmd_registry._print_sync_reports([report])
+    out = capsys.readouterr().out
+    assert "1 MCP" in out
+    assert "0/1" not in out

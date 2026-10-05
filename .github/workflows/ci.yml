@@ -24,6 +24,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    # Pick the suites a pull request needs from the files it changes
+    # (scripts/ci_changes.py, contract: cli/tests/test_ci_changes.py). Every
+    # other event runs everything. Required checks still report: a gated job
+    # is skipped, which passes; Go Build gates its steps so each matrix name
+    # reports; and the Go Test, Python Lint & Test and Enterprise Required
+    # aggregates accept a skipped partition only when this job selected it
+    # away. Gated jobs use `!= 'false'`, so a failed classifier runs everything.
+    name: Select CI suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      go: ${{ steps.classify.outputs.go }}
+      go_pinned: ${{ steps.classify.outputs.go_pinned }}
+      go_tests: ${{ steps.classify.outputs.go_tests }}
+      python: ${{ steps.classify.outputs.python }}
+      python_tests: ${{ steps.classify.outputs.python_tests }}
+      py_select: ${{ steps.classify.outputs.py_select }}
+      python_lint: ${{ steps.classify.outputs.python_lint }}
+      wheel: ${{ steps.classify.outputs.wheel }}
+      ts: ${{ steps.classify.outputs.ts }}
+      rego: ${{ steps.classify.outputs.rego }}
+      checks: ${{ steps.classify.outputs.checks }}
+      core: ${{ steps.classify.outputs.core }}
+      install: ${{ steps.classify.outputs.install }}
+      enterprise: ${{ steps.classify.outputs.enterprise }}
+      workflows: ${{ steps.classify.outputs.workflows }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          # The pull_request merge commit and its base parent.
+          fetch-depth: 2
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_changes.py --event "$EVENT_NAME" --github-output "$GITHUB_OUTPUT"
+
+  workflow-lint:
+    name: Workflow Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.workflows != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      # Syntax, expressions, job graph and runner labels (.github/actionlint.yaml).
+      # Embedded scripts are not linted here.
+      - run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -shellcheck= -pyflakes=
+
   version-sync:
     name: Version Sync Check
     runs-on: ubuntu-latest
@@ -40,116 +95,10 @@ jobs:
       # check does not pin or preselect the next release number.
       - run: make check-version-sync
 
-  upgrade-manifest:
-    name: Upgrade Manifest Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      # Ensures future releases carry a release-owned migration contract
-      # before the release workflow publishes upgrade-manifest.json.
-      - run: make check-upgrade-manifest
-
-  release-validation-plan:
-    name: Release Validation Plan
-    runs-on: ubuntu-latest
-    outputs:
-      sensitive: ${{ steps.paths.outputs.sensitive }}
-      pr_matrix: ${{ steps.pr.outputs.matrix }}
-      medium_matrix: ${{ steps.medium.outputs.matrix }}
-      candidate_version: ${{ steps.version.outputs.candidate_version }}
-      latest_stable: ${{ steps.version.outputs.latest_stable }}
-      baseline_artifact: ${{ steps.baseline-name.outputs.name }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - id: paths
-        name: Detect release-sensitive paths without network access
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            python3 scripts/release_certification.py paths \
-              --base "$BASE_SHA" --head "$HEAD_SHA" \
-              --github-output "$GITHUB_OUTPUT"
-          else
-            echo 'sensitive=false' >> "$GITHUB_OUTPUT"
-          fi
-      # Resolve authenticated live state on every PR so a newly published
-      # immutable release cannot first break the unconditional main-push path
-      # after merge. Path sensitivity still controls the expensive candidate
-      # build and upgrade matrices below.
-      - id: version
-        name: Resolve candidate against live stable state
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh api --paginate --slurp \
-            -H "Accept: application/vnd.github+json" \
-            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            > published-releases.json
-          source_version="$(python3 scripts/source_release_identity.py check --machine | cut -f1)"
-          python3 scripts/release_certification.py resolve-version \
-            --source-version "$source_version" \
-            --published-releases published-releases.json \
-            --github-output "$GITHUB_OUTPUT" >/dev/null
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-      - id: baseline-name
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
-        run: echo "name=ci-effective-upgrade-baselines-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-      - id: baselines
-        name: Resolve one authenticated effective baseline snapshot
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
-        run: |
-          set -euo pipefail
-          python3 scripts/resolve_upgrade_baselines.py \
-            --target-version "$CANDIDATE_VERSION" \
-            --output effective-upgrade-baselines.json
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        if: ${{ github.event_name == 'push' || steps.paths.outputs.sensitive == 'true' }}
-        with:
-          name: ${{ steps.baseline-name.outputs.name }}
-          path: effective-upgrade-baselines.json
-          if-no-files-found: error
-          retention-days: 2
-      - id: pr
-        if: ${{ github.event_name == 'pull_request' && steps.paths.outputs.sensitive == 'true' }}
-        name: Select risky-PR baselines by behavior class
-        env:
-          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
-          LATEST_STABLE: ${{ steps.version.outputs.latest_stable }}
-        run: |
-          python3 scripts/release_certification.py select-baselines \
-            --baselines effective-upgrade-baselines.json \
-            --scope pr \
-            --candidate-version "$CANDIDATE_VERSION" \
-            --latest-stable "$LATEST_STABLE" \
-            --github-output "$GITHUB_OUTPUT" >/dev/null
-      - id: medium
-        if: ${{ github.event_name == 'push' }}
-        name: Select main-merge smoke by behavior class
-        env:
-          CANDIDATE_VERSION: ${{ steps.version.outputs.candidate_version }}
-          LATEST_STABLE: ${{ steps.version.outputs.latest_stable }}
-        run: |
-          python3 scripts/release_certification.py select-baselines \
-            --baselines effective-upgrade-baselines.json \
-            --scope medium \
-            --candidate-version "$CANDIDATE_VERSION" \
-            --latest-stable "$LATEST_STABLE" \
-            --github-output "$GITHUB_OUTPUT" >/dev/null
-
   go-lint:
     name: Go Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -172,6 +121,8 @@ jobs:
 
   go-test-gateway:
     name: Go Gateway Test (shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -213,6 +164,8 @@ jobs:
 
   go-test-audit:
     name: Go Audit Test (shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -254,6 +207,8 @@ jobs:
 
   go-test-other:
     name: Go Test (remaining packages / shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     strategy:
@@ -301,63 +256,14 @@ jobs:
           path: coverage-go-other-${{ matrix.shard }}.out
           retention-days: 1
 
-  go-test:
-    # Preserve the existing required-check name while combining the complete
-    # race/coverage suite from the gateway and audit shards plus all remaining
-    # packages.
-    name: Go Test
-    needs: [go-test-gateway, go-test-audit, go-test-other]
-    if: ${{ always() }}
+  go-pinned:
+    # A pull request with no Go change still runs the Go tests that name a
+    # file it changes, such as a docs page a test reads.
+    name: Go Pinned Tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go_pinned == 'true' }}
     runs-on: ubuntu-latest
-    steps:
-      - name: Require every Go test partition
-        env:
-          GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
-          AUDIT_RESULT: ${{ needs.go-test-audit.result }}
-          OTHER_RESULT: ${{ needs.go-test-other.result }}
-        run: |
-          test "$GATEWAY_RESULT" = success
-          test "$AUDIT_RESULT" = success
-          test "$OTHER_RESULT" = success
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          pattern: go-coverage-*
-          path: coverage-parts
-          merge-multiple: true
-      - name: Combine Go coverage
-        run: |
-          set -euo pipefail
-          mapfile -t coverage_parts < <(
-            find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
-          )
-          test "${#coverage_parts[@]}" -eq 24
-          python3 scripts/merge_go_coverage.py \
-            --output coverage.out \
-            "${coverage_parts[@]}"
-          go tool cover -func=coverage.out >/dev/null
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        with:
-          name: go-coverage
-          path: coverage.out
-
-  go-build:
-    name: Go Build (${{ matrix.goos }}/${{ matrix.goarch }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: arm64
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -371,14 +277,126 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
+      - name: Run the Go tests that name a changed file
+        env:
+          GO_TESTS: ${{ needs.changes.outputs.go_tests }}
+        run: |
+          set -euo pipefail
+          status=0
+          while IFS=$'\t' read -r package pattern; do
+            echo "::group::go test -run '$pattern' $package"
+            go test -count=1 -timeout 25m -run "$pattern" "$package" || status=1
+            echo "::endgroup::"
+          done < <(python3 -c 'import json, os; [print(t["package"] + "\t" + t["run"]) for t in json.loads(os.environ["GO_TESTS"])]')
+          exit "$status"
+
+  go-test:
+    # Preserve the existing required-check name while combining the complete
+    # race/coverage suite from the gateway and audit shards plus all remaining
+    # packages. A pull request without Go changes skips the shards and runs
+    # only Go Pinned Tests, if any.
+    name: Go Test
+    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Go test partition
+        env:
+          GO_SUITE: ${{ needs.changes.outputs.go }}
+          GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
+          AUDIT_RESULT: ${{ needs.go-test-audit.result }}
+          OTHER_RESULT: ${{ needs.go-test-other.result }}
+          PINNED_RESULT: ${{ needs.go-pinned.result }}
+        run: |
+          set -euo pipefail
+          if [ "$GO_SUITE" = false ]; then
+            echo "No Go change in this pull request: the Go suite was skipped."
+            case "$PINNED_RESULT" in success|skipped) ;; *) echo "Go Pinned Tests: $PINNED_RESULT"; exit 1 ;; esac
+            exit 0
+          fi
+          test "$GATEWAY_RESULT" = success
+          test "$AUDIT_RESULT" = success
+          test "$OTHER_RESULT" = success
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          pattern: go-coverage-*
+          path: coverage-parts
+          merge-multiple: true
+      - name: Combine Go coverage
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        run: |
+          set -euo pipefail
+          mapfile -t coverage_parts < <(
+            find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
+          )
+          test "${#coverage_parts[@]}" -eq 24
+          python3 scripts/merge_go_coverage.py \
+            --output coverage.out \
+            "${coverage_parts[@]}"
+          go tool cover -func=coverage.out >/dev/null
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          name: go-coverage
+          path: coverage.out
+
+  go-build:
+    # The three matrix names are required checks, so the job always starts
+    # and gates its steps instead: a skipped matrix job would never report
+    # the expanded names.
+    name: Go Build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: changes
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - if: ${{ needs.changes.outputs.go == 'false' }}
+        run: echo "No Go change in this pull request; the cross build is skipped."
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: ${{ needs.changes.outputs.go != 'false' }}
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - if: ${{ needs.changes.outputs.go != 'false' }}
+        run: make plugin
+      - if: ${{ needs.changes.outputs.go != 'false' }}
+        run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ needs.changes.outputs.go != 'false' }}
         with:
           name: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
           path: defenseclaw-${{ matrix.goos }}-${{ matrix.goarch }}
 
   python-test:
     name: Python Test (shard ${{ matrix.shard }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.python_tests != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -396,6 +414,9 @@ jobs:
         env:
           PYTHON_TEST_SHARD: ${{ matrix.shard }}
           PYTHON_TEST_SHARDS: 4
+          # Empty for the full suite. Otherwise the only modules to run: the
+          # TUI tests and the tests that name a changed file.
+          PY_SELECT: ${{ needs.changes.outputs.py_select }}
         run: |
           set -euo pipefail
           mapfile -t test_files < <(
@@ -406,6 +427,13 @@ jobs:
               --exclude cli/tests/test_telemetry_registry_candidate_renderer.py
           )
           test "${#test_files[@]}" -gt 0
+          if [ -n "$PY_SELECT" ]; then
+            mapfile -t test_files < <(
+              printf '%s\n' "${test_files[@]}" | grep -Fx -f <(tr ' ' '\n' <<<"$PY_SELECT") || true
+            )
+            echo "Selected ${#test_files[@]} test modules in this shard."
+            [ "${#test_files[@]}" -gt 0 ] || exit 0
+          fi
           COVERAGE_FILE="coverage-py-shard-$PYTHON_TEST_SHARD" \
             .venv/bin/python -m pytest "${test_files[@]}" \
               -q --tb=short \
@@ -420,6 +448,8 @@ jobs:
 
   python-lint:
     name: Python Lint
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.python_lint != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -431,34 +461,49 @@ jobs:
 
   python-lint-test:
     # Preserve the existing required-check name while making it the single
-    # authority over live release validation, lint, every isolated test
-    # partition, and combined coverage.
+    # authority over lint, every isolated test partition, and combined
+    # coverage.
+    # A pull request without Python changes runs only the selected modules
+    # (or nothing), and skips lint, the judge corpus and the coverage merge.
     name: Python Lint & Test
-    needs: [release-validation-plan, python-test, python-lint]
+    needs: [changes, python-test, python-lint]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require release validation, lint, and every Python test partition
+      - name: Require lint and every Python test partition
         env:
-          RELEASE_VALIDATION_RESULT: ${{ needs.release-validation-plan.result }}
+          PYTHON_SUITE: ${{ needs.changes.outputs.python }}
           PYTHON_REGULAR_RESULT: ${{ needs.python-test.result }}
           PYTHON_LINT_RESULT: ${{ needs.python-lint.result }}
         run: |
-          test "$RELEASE_VALIDATION_RESULT" = success
+          set -euo pipefail
+          if [ "$PYTHON_SUITE" = false ]; then
+            echo "No Python change in this pull request: only selected modules ran."
+            for result in "$PYTHON_REGULAR_RESULT" "$PYTHON_LINT_RESULT"; do
+              case "$result" in success|skipped) ;; *) echo "partition result: $result"; exit 1 ;; esac
+            done
+            exit 0
+          fi
           test "$PYTHON_REGULAR_RESULT" = success
           test "$PYTHON_LINT_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ needs.changes.outputs.python != 'false' }}
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - run: uv sync
-      - run: make contextual-judge-test
+        if: ${{ needs.changes.outputs.python != 'false' }}
+      - if: ${{ needs.changes.outputs.python != 'false' }}
+        run: uv sync
+      - if: ${{ needs.changes.outputs.python != 'false' }}
+        run: make contextual-judge-test
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: ${{ needs.changes.outputs.python != 'false' }}
         with:
           pattern: python-coverage-part-*
           path: coverage-parts
           merge-multiple: true
       - name: Combine Python coverage
+        if: ${{ needs.changes.outputs.python != 'false' }}
         run: |
           set -euo pipefail
           mapfile -t coverage_parts < <(
@@ -468,6 +513,7 @@ jobs:
           .venv/bin/coverage combine "${coverage_parts[@]}"
           .venv/bin/coverage xml -o coverage-py.xml
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ needs.changes.outputs.python != 'false' }}
         with:
           name: python-coverage
           path: coverage-py.xml
@@ -491,6 +537,8 @@ jobs:
 
   python-wheel-install:
     name: Python Wheel Security Contract (${{ matrix.python-version }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.wheel != 'false' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -544,16 +592,16 @@ jobs:
               "cryptography": ">=50.0.0,<51",
               "python-dotenv": ">=1.2.2",
               "python-multipart": ">=0.0.31",
-              "urllib3": ">=2.7.0",
+              "urllib3": ">=2.8.0",
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
               "aiohttp": ">=3.14.3,<4",
-              "pyjwt": ">=2.13.0",
+              "pyjwt": ">=2.15.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
               # Keep the portable LiteLLM line in wheel metadata. A tool.uv
               # override is not shipped and cannot protect installers.
-              "litellm": ">=1.84.0,<1.92.0",
+              "litellm": ">=1.91.5,<1.92.0",
           }
           with zipfile.ZipFile(wheel) as archive:
               metadata_name = next(
@@ -673,82 +721,15 @@ jobs:
             --vulnerability-service osv \
             --path "$tmp/venv/lib/python${{ matrix.python-version }}/site-packages"
 
-  upgrade-smoke:
-    name: Release Regression (deterministic)
+  install-smoke:
+    # Builds release-shaped assets from this commit and runs the real
+    # installer through a fresh install, a 0.8.10 upgrade with rollback, the
+    # 0.8.x handoff, and the failure drills, each in a throwaway HOME.
+    name: Install and Upgrade Smoke
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.install != 'false' }}
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      # A PR cannot mint release.yaml@refs/heads/main's Fulcio identity. Keep
-      # ordinary CI deterministic and exercise the signed positive/live paths
-      # only in nightly/manual certification.
-      - name: Run fast release regression contracts
-        run: |
-          uv run python -m pytest -q \
-            cli/tests/test_verify_sigstore_blob.py \
-            cli/tests/test_observability_v8_upgrade_continuity_checker.py \
-            cli/tests/test_resolve_upgrade_baselines.py \
-            cli/tests/test_release_api_retry.py \
-            cli/tests/test_release_workflow_staged.py \
-            cli/tests/test_upgrade_smoke_static.py \
-            cli/tests/test_upgrade_release_smoke_contract.py \
-            cli/tests/test_release_certification.py \
-            cli/tests/test_release_validation_strategy.py
-
-  historical-resolver-dependencies:
-    name: Historical Resolver Dependency Handoff (${{ matrix.platform }})
-    needs: release-validation-plan
-    if: >-
-      ${{
-        (github.event_name == 'pull_request' && needs.release-validation-plan.outputs.sensitive == 'true') ||
-        (github.event_name == 'push' && github.ref == 'refs/heads/main')
-      }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            platform: linux-amd64
-            runner_arch: X64
-          - runner: macos-15
-            platform: darwin-arm64
-            runner_arch: ARM64
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          python-version: "3.12"
-      # PR jobs cannot mint release.yaml@refs/heads/main's Fulcio identity.
-      # Instead, execute the production resolver's content-pinned historical
-      # dependency phases in isolated environments and require each installed
-      # graph to pass `uv pip check`. Full provenance and resolver success stay
-      # mandatory after the candidate is signed by the release workflow.
-      - name: Execute phase-separated production resolver dependency graph
-        run: |
-          test "$RUNNER_ARCH" = "${{ matrix.runner_arch }}"
-          scripts/test-historical-bootstrap-dependencies.sh
-
-  unsigned-upgrade-candidate:
-    name: Build selective exact-SHA upgrade candidate once
-    needs: release-validation-plan
-    if: >-
-      ${{
-        (github.event_name == 'pull_request' && needs.release-validation-plan.outputs.sensitive == 'true') ||
-        (github.event_name == 'push' && github.ref == 'refs/heads/main')
-      }}
-    runs-on: ubuntu-latest
-    env:
-      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
-    timeout-minutes: 25
-    outputs:
-      artifact_name: ${{ steps.name.outputs.artifact_name }}
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -756,173 +737,43 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - id: name
-        run: echo "artifact_name=unsigned-upgrade-candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - run: scripts/build-release-assets.sh 9.9.9 "$RUNNER_TEMP/assets" linux/amd64 windows/amd64
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
-          path: .
-      - id: prepare
-        name: Build exact PR SHA developer candidate
-        run: |
-          set -euo pipefail
-          scripts/test-upgrade-release.sh \
-            --prepare-only \
-            --platform linux/amd64 \
-            --target-version "${{ needs.release-validation-plan.outputs.candidate_version }}" \
-            --keep-workdir | tee prepare-candidate.log
-          root="$(sed -n 's/^OK: Prepared candidate release root: //p' prepare-candidate.log | tail -1)"
-          test -d "$root"
-          echo "root=$root" >> "$GITHUB_OUTPUT"
-      - name: Preserve candidate modes for Actions transport
-        env:
-          CANDIDATE_ROOT: ${{ steps.prepare.outputs.root }}
-        run: |
-          set -euo pipefail
-          python3 scripts/release_candidate.py pack-transport \
-            --source "$CANDIDATE_ROOT" \
-            --output unsigned-candidate.tar
-      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
-        with:
-          name: ${{ steps.name.outputs.artifact_name }}
-          path: unsigned-candidate.tar
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+          name: install-smoke-assets
+          path: ${{ runner.temp }}/assets/
+          retention-days: 3
+      - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh upgrade-0.8.10 handoff drills"
 
-  selective-upgrade-smoke:
-    name: Selective upgrade (${{ matrix.class }} / ${{ matrix.baseline }})
-    needs: [release-validation-plan, unsigned-upgrade-candidate, historical-resolver-dependencies]
-    if: >-
-      ${{
-        github.event_name == 'pull_request' &&
-        needs.release-validation-plan.outputs.sensitive == 'true'
-      }}
-    runs-on: ubuntu-latest
-    env:
-      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.release-validation-plan.outputs.pr_matrix) }}
+  install-smoke-windows:
+    name: Install and Upgrade Smoke (Windows)
+    needs: install-smoke
+    runs-on: windows-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
-          path: unsigned-candidate-transport
-      - name: Restore exact candidate modes
+          name: install-smoke-assets
+          path: assets
+      - shell: pwsh
         run: |
-          set -euo pipefail
-          python3 scripts/release_candidate.py unpack-transport \
-            --archive unsigned-candidate-transport/unsigned-candidate.tar \
-            --destination unsigned-candidate
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
-          path: .
-      - name: Run selected deterministic success/refusal contract
-        env:
-          BASELINE: ${{ matrix.baseline }}
-          CANDIDATE_VERSION: ${{ needs.release-validation-plan.outputs.candidate_version }}
-          RISK_CLASS: ${{ matrix.class }}
-          VALIDATION_MODE: ${{ matrix.mode }}
-          EXPECTED_RESULT: ${{ matrix.expected }}
-        run: |
-          set -euo pipefail
-          echo "Selected release risk class: $RISK_CLASS ($VALIDATION_MODE → $EXPECTED_RESULT)"
-          # An unsigned PR cannot prove production resolver success. Exercise
-          # the target-owned migration and fresh-process health in a throwaway
-          # HOME, while the production protocol harness proves pre-mutation
-          # refusal. Signed resolver/handoff success belongs to certification.
-          run_success() {
-            scripts/test-developer-target-activation.sh \
-              --from-version "$BASELINE" \
-              --target-version "$CANDIDATE_VERSION" \
-              --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
-              --baseline-mode seed \
-              --health-timeout 60
-          }
-          run_refusal() {
-            scripts/test-upgrade-protocol-release.sh \
-              --from-version "$BASELINE" \
-              --target-version "$CANDIDATE_VERSION" \
-              --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
-              --baseline-mode seed \
-              --refusal-contract-only
-          }
-          case "$EXPECTED_RESULT" in
-            success) run_success ;;
-            refusal-before-mutation) run_refusal ;;
-            success-and-refusal) run_success; run_refusal ;;
-            *)
-              echo "::error title=Unknown selective validation result::$EXPECTED_RESULT"
-              exit 1
-              ;;
-          esac
-
-  main-release-smoke:
-    name: Main Release Candidate Smoke (${{ matrix.class }})
-    needs: [release-validation-plan, unsigned-upgrade-candidate, historical-resolver-dependencies]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
-    env:
-      UPGRADE_BASELINE_POLICY: ${{ github.workspace }}/effective-upgrade-baselines.json
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.release-validation-plan.outputs.medium_matrix) }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ needs.unsigned-upgrade-candidate.outputs.artifact_name }}
-          path: unsigned-candidate-transport
-      - name: Restore exact candidate modes
-        run: |
-          set -euo pipefail
-          python3 scripts/release_candidate.py unpack-transport \
-            --archive unsigned-candidate-transport/unsigned-candidate.tar \
-            --destination unsigned-candidate
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ needs.release-validation-plan.outputs.baseline_artifact }}
-          path: .
-      - name: Run exact-SHA candidate representative upgrade canary
-        env:
-          BASELINE: ${{ matrix.baseline }}
-          RISK_CLASS: ${{ matrix.class }}
-          CANDIDATE_VERSION: ${{ needs.release-validation-plan.outputs.candidate_version }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          make check-upgrade-manifest
-          scripts/test-developer-target-activation.sh \
-            --from-version "$BASELINE" \
-            --target-version "$CANDIDATE_VERSION" \
-            --release-root "$GITHUB_WORKSPACE/unsigned-candidate" \
-            --baseline-mode seed \
-            --baseline-dependencies published \
-            --health-timeout 60
+          & scripts/test-install-lifecycle.ps1 -Assets assets -Lanes 'fresh setup-import files-in-use failure-drill policy'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   connector-matrix:
     name: Connector Matrix
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -941,33 +792,19 @@ jobs:
       - run: make dev-pycli
       - run: make connector-matrix-test
 
-  enterprise-hook-hardening:
-    name: Enterprise Hook Hardening (${{ matrix.os }}, ${{ matrix.connector }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        connector: [codex, claudecode, amp]
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
-        with:
-          go-version-file: go.mod
-      - name: Build enterprise gateway CLI
-        shell: bash
-        run: go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
-      - name: Test root boundary and connector repair
-        shell: bash
-        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" "${{ matrix.connector }}"
-
+  # The Secure Client profile hook hardening flow (a synthetic target home and
+  # a TCP fake gateway) runs only on macOS. Linux has only the standalone
+  # profile (real account homes and the peer-authorized hook socket), which the
+  # Unix Standalone Lifecycle job and the deb and rpm install lanes cover.
+  # macOS runners bill at ~10x Linux, so the macOS hook hardening cells and the
+  # enterprise packaging smoke share one runner and one gateway build instead
+  # of four separate jobs.
   macos-enterprise-packaging:
-    name: macOS Enterprise Packaging
+    name: macOS Enterprise Hook Hardening + Packaging
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -980,7 +817,20 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
           go build -o "$RUNNER_TEMP/defenseclaw-acp" ./cmd/defenseclaw-acp
+      - name: Test root boundary and connector repair (codex)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" codex
+      - name: Test root boundary and connector repair (claudecode)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" claudecode
+      - name: Test root boundary and connector repair (amp)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: ./scripts/test-enterprise-hook-hardening.sh "$RUNNER_TEMP/defenseclaw-gateway" amp
       - name: Test managed package ownership enforcement
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           MACOS_ENTERPRISE_PACKAGING_SMOKE: "1"
@@ -989,8 +839,360 @@ jobs:
             "$RUNNER_TEMP/defenseclaw-gateway" \
             "$RUNNER_TEMP/defenseclaw-acp"
 
+  unix-standalone-lifecycle:
+    # The standalone Linux and macOS lifecycle engine, its units and the
+    # Unix peer-identity code. The go-test jobs run on Linux and go-build
+    # only cross-compiles darwin, so the macOS-only code (LOCAL_PEERCRED,
+    # dscl identity, launchd layout, the kern.proc agent-process lookup and
+    # the linux||darwin hook-socket, peer-home and trusted-state code) runs
+    # here on its own OS, and the systemd units get a static systemd-analyze
+    # check on Linux.
+    name: Unix Standalone Lifecycle (${{ matrix.os }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Go tests of the standalone lifecycle packages
+        shell: bash
+        run: >-
+          go test -count=1 -timeout 20m
+          ./internal/enterpriseunix/...
+          ./internal/unixidentity/...
+          ./internal/peercred/...
+          ./internal/managed/...
+          ./internal/enterprisehooks/...
+          ./internal/enterprisepolicy/...
+          ./internal/ipc/...
+      - name: Go tests of the darwin paths in the agent-process, connector, gateway and CLI packages
+        # The go-test jobs run these packages on Linux only. On macOS this runs
+        # the kern.proc agent-process lookup, every connector package
+        # (hookexec and the /etc/codex requirements path included) and, in
+        # internal/gateway and internal/cli, the tests of their darwin, unix,
+        # linux||darwin and !windows test files plus the foreign-hook guard,
+        # which keys sessions by the agent process.
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner's default TMPDIR is under /var, a symbolic link to
+          # /private/var, and the Claude Code settings reader refuses a file
+          # under a linked parent. Test fixtures go in a link-free folder.
+          mkdir -p "$RUNNER_TEMP/go-tmp"
+          TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
+          export TMPDIR
+          go test -count=1 -timeout 20m ./internal/agentprocess/... ./internal/gateway/connector/...
+          unix_tests() { # unix_tests <test files...>: a -run pattern for their Test functions
+            local file names=()
+            for file in "$@"; do
+              case "$file" in
+                *_windows_test.go | *_linux_test.go) continue ;;
+                *_darwin_test.go | *_unix_test.go | */hook_foreign_guard*_test.go) ;;
+                *) grep -Eq '^//go:build .*(darwin|unix|!windows|!linux)' "$file" || continue ;;
+              esac
+              names+=($(sed -n 's/^func \(Test[A-Za-z0-9_]*\)(t \*testing\.T).*/\1/p' "$file"))
+            done
+            [ "${#names[@]}" -gt 0 ] || { echo "no unix or darwin tests in $*" >&2; return 1; }
+            local IFS='|'
+            echo "^(${names[*]})\$"
+          }
+          for pkg in internal/gateway internal/cli; do
+            pattern=$(unix_tests "$pkg"/*_test.go)
+            echo "$pkg: $(tr '|' '\n' <<<"$pattern" | wc -l | tr -d ' ') unix and darwin tests"
+            go test -count=1 -timeout 20m -run "$pattern" "./$pkg"
+          done
+      - name: The shipped binaries start without stderr output
+        # A dependency's start-up warning (for example sonic's Go-version
+        # notice) would reach admin and MDM output and agent hook errors.
+        shell: bash
+        run: make check-quiet-startup
+      - name: systemd-analyze verify the packaged units
+        # systemd-analyze exits 0 on unknown keys and bad values, so the
+        # script fails on any diagnostic it prints.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./scripts/test-systemd-units.sh
+
+  # Standalone managed-enterprise install lanes: each one installs the real
+  # package on a disposable host with the real service manager, converges,
+  # verifies, runs the MDM detection script, uninstalls and checks what is
+  # left (scripts/test-enterprise-unix-install.sh and
+  # scripts/test-enterprise-windows-install.ps1).
+  enterprise-install-assets:
+    # The deb and rpm come from the release's own GoReleaser config (a
+    # snapshot of `make packaging-linux-enterprise`, unsigned) and the Windows
+    # Setup from the release's builder without a signing certificate, which
+    # is the hash-pinned standalone-unsigned flavor.
+    name: Enterprise Install Lane Assets
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      linux-version: ${{ steps.linux.outputs.version }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build the Linux packages with the release GoReleaser config
+        uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
+        with:
+          version: "v2.15.4"
+          args: release --snapshot --clean --skip=sbom,sign,publish,validate
+        env:
+          # A snapshot needs no tag history; the version is 9.9.9-SNAPSHOT-<commit>.
+          GORELEASER_CURRENT_TAG: v9.9.9
+      - name: Collect the linux/amd64 packages
+        id: linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import json; print(json.load(open("dist/metadata.json"))["version"])')
+          mkdir -p "$RUNNER_TEMP/enterprise-install-linux"
+          cp "dist/defenseclaw-enterprise-${version}-linux-amd64.deb" \
+            "dist/defenseclaw-enterprise-${version}-linux-amd64.rpm" "$RUNNER_TEMP/enterprise-install-linux/"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Build the hash-pinned unsigned Windows standalone Setup
+        shell: bash
+        run: packaging/windows/standalone/build-setup.sh --version 9.9.9 --out-dir "$RUNNER_TEMP/enterprise-install-windows"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enterprise-install-linux
+          path: ${{ runner.temp }}/enterprise-install-linux/
+          if-no-files-found: error
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install-windows/
+          if-no-files-found: error
+          retention-days: 3
+
+  enterprise-linux-install:
+    # The deb installs on the Ubuntu 24.04 runner itself (systemd 255 is PID
+    # 1); the rpm installs in Red Hat UBI containers that boot systemd: RHEL 9
+    # (systemd 252) and RHEL 8 (systemd 239, the package's minimum). Each lane
+    # also runs systemd-analyze verify on the installed units with that
+    # systemd and fails on any diagnostic outside the lane script's
+    # per-release allow list (directive_minimum), so a directive RHEL 8
+    # silently ignores is either listed there or fails the rpm-el8 lane.
+    name: Enterprise Install Lane (${{ matrix.lane }})
+    needs: enterprise-install-assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: deb
+            package: deb
+          - lane: rpm-el9
+            package: rpm
+            image: registry.access.redhat.com/ubi9/ubi-init@sha256:762319bbd0b15a4eff9078eb373b1f426de3e8b5560cf314715c62844b7b0fc8
+          - lane: rpm-el8
+            package: rpm
+            image: registry.access.redhat.com/ubi8/ubi-init@sha256:96fe60da3105dbd9a74cc6fbf3a17741e98fd96a572b22256644e93f0f6ba6a6
+    env:
+      LANE_VERSION: ${{ needs.enterprise-install-assets.outputs.linux-version }}
+      LANE_IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: enterprise-install-linux
+          path: ${{ runner.temp }}/enterprise-install
+      - name: Remove group and other write access from the runner /opt
+        # Hosted Ubuntu runners ship /opt world-writable, and the standalone
+        # profile refuses policy under a folder other accounts can write.
+        if: matrix.package == 'deb'
+        shell: bash
+        run: sudo chmod go-w /opt
+      - name: Install, converge, verify and remove the deb on the runner
+        if: matrix.package == 'deb'
+        shell: bash
+        run: >-
+          sudo bash scripts/test-enterprise-unix-install.sh
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.deb"
+          --version "$LANE_VERSION" --results "$RUNNER_TEMP/lane-results"
+      - name: Install, converge, verify and remove the rpm in a UBI systemd container
+        if: matrix.package == 'rpm'
+        shell: bash
+        run: >-
+          bash scripts/test-enterprise-linux-container.sh --image "$LANE_IMAGE"
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${LANE_VERSION}-linux-amd64.rpm"
+          --version "$LANE_VERSION" --results "$RUNNER_TEMP/lane-results"
+      - name: Make the lifecycle results readable
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-install-results-${{ matrix.lane }}
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  enterprise-macos-install:
+    name: Enterprise Install Lane (pkg)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build the unsigned standalone pkg
+        shell: bash
+        run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
+      - name: Install, converge, verify and remove the pkg
+        shell: bash
+        run: >-
+          sudo bash scripts/test-enterprise-unix-install.sh
+          --package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-9.9.9-darwin-arm64.pkg"
+          --version 9.9.9 --results "$RUNNER_TEMP/lane-results"
+      - name: Make the lifecycle results readable
+        if: always()
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-install-results-pkg
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  enterprise-windows-install:
+    # Setup /ensure, /ensure (no-op), verify, status, detect.ps1, the
+    # installed CLI's ensure and /uninstall with the four Windows services.
+    name: Enterprise Install Lane (Windows services)
+    needs: enterprise-install-assets
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install
+      - name: Give the runner Windows log folder its usual owner and access
+        # Hosted Windows runner images leave C:\Windows\Logs owned by, and
+        # writable for, the built-in Administrator account. The lifecycle log
+        # refuses a parent folder another account owns or can write.
+        shell: pwsh
+        run: |
+          $logs = Join-Path $env:windir 'Logs'
+          $account = (Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }).SID.Value
+          icacls $logs /setowner '*S-1-5-32-544' | Out-Null
+          if ($account) {
+            icacls $logs /inheritance:d | Out-Null
+            icacls $logs /remove:g "*$account" | Out-Null
+          }
+          icacls $logs
+      - name: Install, converge, verify and remove the standalone services
+        shell: pwsh
+        run: >-
+          ./scripts/test-enterprise-windows-install.ps1
+          -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
+          -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-install-results-windows
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
+  enterprise-required:
+    # One required check for the standalone managed-enterprise gates, in the
+    # same pattern as Go Test and Python Lint & Test: it runs even when a gate
+    # fails or is skipped, and passes only when every gate succeeded. The main
+    # branch ruleset requires this name, so a red install lane or lifecycle
+    # job blocks the merge.
+    name: Enterprise Required
+    needs:
+      - changes
+      - enterprise-install-assets
+      - enterprise-linux-install
+      - enterprise-macos-install
+      - enterprise-windows-install
+      - unix-standalone-lifecycle
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every enterprise gate
+        env:
+          INSTALL_ASSETS: ${{ needs.enterprise-install-assets.result }}
+          LINUX_INSTALL: ${{ needs.enterprise-linux-install.result }}
+          MACOS_INSTALL: ${{ needs.enterprise-macos-install.result }}
+          WINDOWS_INSTALL: ${{ needs.enterprise-windows-install.result }}
+          UNIX_LIFECYCLE: ${{ needs.unix-standalone-lifecycle.result }}
+          # false when the pull request changes nothing these gates consume.
+          ENTERPRISE: ${{ needs.changes.outputs.enterprise }}
+        shell: bash
+        run: |
+          status=0
+          for gate in INSTALL_ASSETS LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UNIX_LIFECYCLE; do
+            result=${!gate}
+            echo "$gate: $result"
+            if [ "$ENTERPRISE" = false ] && [ "$result" = skipped ]; then
+              continue
+            fi
+            [ "$result" = success ] || status=1
+          done
+          exit "$status"
+
+  quiet-startup-latest-go:
+    # Advisory: the gates above build with go.mod's Go, which a dependency's
+    # start-up warning about a newer toolchain never reaches. This job builds
+    # with the newest stable Go, the way a release host that upgraded its Go
+    # would, and reports such a warning without gating merges.
+    name: Quiet Start-up (latest Go, advisory)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: stable
+      - name: The shipped binaries start without stderr output on the latest Go
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+        run: make check-quiet-startup
+
   python-audit:
     name: Python Dependency Audit
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.python != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1026,8 +1228,10 @@ jobs:
       # pyproject.toml:
       #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
-      # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265) and pyjwt>=2.13.0
-      # (PYSEC-2026-175/177/178/179) are likewise pinned in pyproject.toml.
+      # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265), pyjwt>=2.15.0
+      # (PYSEC-2026-175/177/178/179, CVE-2026-101917, CVE-2026-102265..102274,
+      # CVE-2026-101918) and urllib3>=2.8.0 (CVE-2026-97687/97688/97689) are
+      # likewise pinned in pyproject.toml.
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
       # pip-audit can evaluate the installed environment.
@@ -1071,6 +1275,8 @@ jobs:
 
   ts-build-test:
     name: TypeScript Build & Test
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1086,6 +1292,8 @@ jobs:
 
   ts-audit:
     name: npm Dependency Audit
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.ts != 'false' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -1107,6 +1315,8 @@ jobs:
 
   rego-test:
     name: Rego Policy Tests
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.rego != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1123,6 +1333,8 @@ jobs:
 
   schema-parity:
     name: Schema & Parity Checks
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.checks != 'false' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -1152,6 +1364,8 @@ jobs:
 
   local-observability-golden:
     name: Local Observability Golden
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

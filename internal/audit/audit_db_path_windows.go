@@ -78,6 +78,39 @@ func openAuditDBFileNoFollow(path string, create, harden bool) (*os.File, error)
 	return file, nil
 }
 
+// auditDBWindowsFileStandardInfo mirrors FILE_STANDARD_INFO.
+type auditDBWindowsFileStandardInfo struct {
+	AllocationSize int64
+	EndOfFile      int64
+	NumberOfLinks  uint32
+	DeletePending  byte
+	Directory      byte
+}
+
+func auditDBWindowsStandardInfo(file *os.File) (auditDBWindowsFileStandardInfo, error) {
+	var info auditDBWindowsFileStandardInfo
+	err := windows.GetFileInformationByHandleEx(
+		windows.Handle(file.Fd()), windows.FileStandardInfo,
+		(*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)),
+	)
+	return info, err
+}
+
+// auditDBPinnedFileDeleted reports that a pinned file was deleted (delete
+// pending or no remaining links), as after SQLite deletes a WAL or SHM file
+// on its last close.
+func auditDBPinnedFileDeleted(file *os.File) (bool, error) {
+	info, err := auditDBWindowsStandardInfo(file)
+	if err != nil {
+		return false, err
+	}
+	return info.DeletePending != 0 || info.NumberOfLinks == 0, nil
+}
+
+// validateAuditDBSidecarLinkCount is enforced by openAuditDBFileNoFollow on
+// Windows for every database file.
+func validateAuditDBSidecarLinkCount(*os.File) error { return nil }
+
 func auditDBWindowsFileAccess(harden bool) uint32 {
 	access := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE)
 	if harden {
@@ -643,3 +676,7 @@ func auditDBModeMatches(os.FileInfo, os.FileMode) bool { return true }
 // who can mutate the directory. validateAuditDBPlatformTrust already proves
 // owner, protected DACL, inheritance, and every write-capable ACE.
 func auditDBImmediateDirectoryModeTrusted(os.FileInfo) bool { return true }
+
+// auditDBOpenElsewhere needs no probe on Windows: SQLite opens the database
+// without delete sharing, so renaming a file another process has open fails.
+func auditDBOpenElsewhere(string) error { return nil }

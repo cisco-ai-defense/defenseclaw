@@ -118,7 +118,7 @@ export function PolicySummaryCard({
           label="Block at"
           value={`severity ${policy.guardrail.block_threshold} (${rankLabel(policy.guardrail.block_threshold)})`}
         />
-        <Row label="HILT" value={policy.guardrail.hilt.enabled ? `on @ ${policy.guardrail.hilt.min_severity}` : 'off'} />
+        <Row label="HITL" value={policy.guardrail.hilt.enabled ? `on @ ${policy.guardrail.hilt.min_severity}` : 'off'} />
       </ul>
     </div>
   );
@@ -132,7 +132,7 @@ function Row({ label, value, hint }: { label: string; value: string; hint?: stri
         <span className="text-right font-medium tabular-nums">{value}</span>
       </div>
       {hint && (
-        <span className="text-[10px] leading-tight text-fd-muted-foreground/80">{hint}</span>
+        <span className="text-[10px] leading-tight text-fd-muted-foreground">{hint}</span>
       )}
     </li>
   );

@@ -7,6 +7,14 @@
 > security boundaries, and troubleshooting. The guide is authoritative for
 > user-facing support classifications.
 
+> **DefenseClaw 1.0 and later:** `scripts/install.ps1` installs, upgrades and
+> rolls back DefenseClaw on Windows directly, and `defenseclaw upgrade` runs
+> it. Releases no longer publish `DefenseClawSetup-x64.exe`,
+> `upgrade-manifest.json`, release provenance or `defenseclaw_<version>_*`
+> archives. The Setup package described below is still built by
+> `windows-native.yml` for managed deployments; the release-pipeline and
+> upgrade details that follow describe 0.8.x.
+
 ## Existing release inputs
 
 The installer composes the established release outputs instead of creating a
@@ -230,8 +238,7 @@ a random operation identity; every destructive application/cache path is
 derived from Windows Known Folders. It also records the explicitly selected
 connector configuration homes needed for Codex, Claude Code, GitHub Copilot
 CLI, Cursor, Devin, Hermes, Antigravity, OpenCode, and OmniGent, plus the
-observed user PATH. Legacy Windsurf and Gemini CLI fields are consumed only for
-authenticated upgrade or uninstall cleanup. Recovery
+observed user PATH. Recovery
 rejects an altered destructive path, an unrelated install-state identity, an
 untrusted journal ACL, or a reparse point in a transaction-owned root. Agent
 configuration symlinks remain supported by the connector's target-aware writer.

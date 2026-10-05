@@ -121,6 +121,23 @@ def _escape_table_cell(text: str) -> str:
     return s
 
 
+_CODE_SPAN = re.compile(r"(`[^`]*`)")
+
+
+def _mdx_escape_text(text: str) -> str:
+    """Escape what MDX would parse as JSX or an expression in prose cells.
+
+    Outside code spans, ``<token>`` opens a JSX tag and ``{...}`` a JS
+    expression, so a purpose such as ``http://<user>@host:<port>`` fails the
+    whole page's MDX parse. ``<`` becomes ``&lt;`` and braces are
+    backslash-escaped; code spans are left alone.
+    """
+    parts = _CODE_SPAN.split(text)
+    for i in range(0, len(parts), 2):
+        parts[i] = parts[i].replace("<", "&lt;").replace("{", "\\{").replace("}", "\\}")
+    return "".join(parts)
+
+
 def _impact_badge(impact: str) -> str:
     return {
         "high": "**HIGH**",
@@ -165,23 +182,21 @@ def _default_cell(entry: EnvVar, *, mdx: bool) -> str:
     rendered = _escape_table_cell(d)
     if mdx and _mdx_default_needs_backticks(rendered):
         return f"`{rendered}`"
+    if "://" in rendered:
+        # A bare URL would render as a clickable link to a local service.
+        return " ".join(f"`{w}`" if "://" in w else w for w in rendered.split(" "))
     return rendered
 
 
-def _consumer_cell(entry: EnvVar) -> str:
-    parts = []
-    for c in entry.consumers:
-        parts.append(f"`{_escape_table_cell(c.location)}` — {_escape_table_cell(c.description)}")
-    return "<br/>".join(parts)
-
-
-def _security_note_cell(entry: EnvVar) -> str:
+def _security_note_cell(entry: EnvVar, *, mdx: bool) -> str:
     if not entry.security_note:
         return "—"
-    return _escape_table_cell(entry.security_note)
+    note = _escape_table_cell(entry.security_note)
+    return _mdx_escape_text(note) if mdx else note
 
 
-_SENTENCE_SPLIT = re.compile(r"\.\s+(?=[A-Z])")
+# Never split after "e.g." or "i.e.", which are followed by a capitalized name.
+_SENTENCE_SPLIT = re.compile(r"(?<!\be\.g)(?<!\bi\.e)\.\s+(?=[A-Z])")
 
 
 def _first_sentence(text: str) -> str:
@@ -197,8 +212,27 @@ def _first_sentence(text: str) -> str:
     return head
 
 
+def _consumer_files(entry: EnvVar) -> str:
+    """Comma-separated unique consumer file paths, in registry order.
+
+    The per-callsite descriptions stay in ``registry.json``; the rendered
+    table names only the files so the row stays readable at docs width.
+    """
+    seen: list[str] = []
+    for c in entry.consumers:
+        loc = _escape_table_cell(c.location)
+        if loc and loc not in seen:
+            seen.append(loc)
+    return ", ".join(f"`{loc}`" for loc in seen)
+
+
 def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
-    """Render one category's MDX-safe table."""
+    """Render one category's MDX-safe table.
+
+    Two columns keep every row inside the docs content width: the variable
+    (name, security impact, default and accepted values) and what it does
+    (purpose, security concern, and the files that read it).
+    """
     entries = sorted(registry.by_category(category), key=lambda e: e.name)
     if not entries:
         return "\n*(no entries in this category)*\n"
@@ -206,33 +240,29 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
     br = "<br/>" if mdx else "<br>"
 
     lines: list[str] = []
-    lines.append(
-        "| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |"
-    )
-    lines.append(
-        "| --- | --- | --- | --- | --- | --- | --- |"
-    )
+    lines.append("| Variable | What it does |")
+    lines.append("| --- | --- |")
     for e in entries:
         name = f"`{e.name}`"
         if e.deprecated:
             name = f"~~`{e.name}`~~"
-        purpose = _escape_table_cell(_first_sentence(e.purpose))
+        impact = _impact_badge(e.security_impact)
+        if impact != "—":
+            name += f"{br}Impact: {impact}"
+        prose = _mdx_escape_text if mdx else (lambda text: text)
+        what = prose(_escape_table_cell(_first_sentence(e.purpose)))
         if e.replacement_hint:
-            purpose += (
-                f" {br}**Fix:** "
-                + _escape_table_cell(e.replacement_hint)
-            )
-        # Consumer cell built with <br/> placeholder; rewrite per-target.
-        consumer_cell = _consumer_cell(e).replace("<br/>", br)
-        row = (
-            f"| {name} | {_impact_badge(e.security_impact)} | "
-            f"{_default_cell(e, mdx=mdx)} | "
-            f"{_accepted_values_cell(e)} | "
-            f"{purpose} | "
-            f"{_security_note_cell(e)} | "
-            f"{consumer_cell} |"
-        )
-        lines.append(row)
+            what += f"{br}**Fix:** " + prose(_escape_table_cell(e.replacement_hint))
+        if e.security_note:
+            what += f"{br}**Security:** " + _security_note_cell(e, mdx=mdx)
+        files = _consumer_files(e)
+        if files:
+            what += f"{br}**Read by:** {files}"
+        name += f"{br}Default: {_default_cell(e, mdx=mdx)}"
+        values = _accepted_values_cell(e)
+        if values != "—":
+            name += f"{br}Values: {values}"
+        lines.append(f"| {name} | {what} |")
     return "\n".join(lines)
 
 
@@ -246,7 +276,25 @@ def _render_block(*, mdx: bool) -> str:
         title = _CATEGORY_TITLES[category]
         chunks.append(f"## {title}")
         chunks.append("")
-        chunks.append(_render_table(category, mdx=mdx, registry=registry))
+        table = _render_table(category, mdx=mdx, registry=registry)
+        if mdx and category == CATEGORY_TEST_FIXTURE:
+            # Test-only switches are listed for completeness but collapsed so
+            # they don't read as operator settings.
+            count = len(registry.by_category(category))
+            chunks.append(
+                "These variables exist for DefenseClaw's own test suites. Do not "
+                "set them on a real install."
+            )
+            chunks.append("")
+            chunks.append('<Accordions type="single">')
+            chunks.append(f'<Accordion title="Show the {count} test-only variables">')
+            chunks.append("")
+            chunks.append(table)
+            chunks.append("")
+            chunks.append("</Accordion>")
+            chunks.append("</Accordions>")
+        else:
+            chunks.append(table)
         chunks.append("")
     return "\n".join(chunks).rstrip() + "\n"
 
@@ -285,7 +333,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     """\
     ---
     title: Environment variables
-    description: Every environment variable DefenseClaw reads, grouped by category, with defaults, accepted values, and the file:line that consumes each one.
+    description: Every environment variable DefenseClaw reads, grouped by category, with defaults, accepted values, and the files that read each one.
     keywords:
       - DefenseClaw env vars
       - DEFENSECLAW_LLM_KEY
@@ -318,7 +366,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     - [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
     - [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
     - [Reference → Keys](/docs/reference/keys) — credential resolution order.
-    - [Reference → Redaction](/docs/reference/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
+    - [Observability → Redaction](/docs/observability/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
     - [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
     """
 )

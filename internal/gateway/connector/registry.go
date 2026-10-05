@@ -40,6 +40,11 @@ type Registry struct {
 	mu       sync.RWMutex
 	builtins map[string]Connector
 	plugins  map[string]Connector
+	// pluginDir and pluginDiscoveryErr record the last DiscoverPlugins call
+	// so NotShipped can tell a connector this build no longer ships from a
+	// plugin that failed to load.
+	pluginDir          string
+	pluginDiscoveryErr error
 }
 
 // NewRegistry creates an empty registry.
@@ -188,7 +193,6 @@ func newBuiltinConnectors() []Connector {
 		NewHermesConnector(),
 		NewCursorConnector(),
 		NewDevinConnector(),
-		NewGeminiCLIConnector(),
 		NewCopilotConnector(),
 		NewOpenHandsConnector(),
 		NewAntigravityConnector(),
@@ -227,6 +231,10 @@ func IsKnownBuiltinConnector(name string) bool {
 // DiscoverPlugins scans a directory for Go plugin .so files and loads them.
 func (r *Registry) DiscoverPlugins(dir string) error {
 	connectors, err := LoadPlugins(dir)
+	r.mu.Lock()
+	r.pluginDir = dir
+	r.pluginDiscoveryErr = err
+	r.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("discover plugins in %s: %w", dir, err)
 	}

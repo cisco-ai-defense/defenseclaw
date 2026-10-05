@@ -199,7 +199,7 @@ func TestHookDecisionMetaReusesLifecycleExecutionAcrossStartTurnResumeAndChild(t
 
 func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
 	root := llmEventMeta{
-		Source: "geminicli", SessionID: "parent-session", AgentID: "retained-root",
+		Source: "openhands", SessionID: "parent-session", AgentID: "retained-root",
 		RootAgentID: "retained-root", RootSessionID: "parent-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
 	}
@@ -209,7 +209,7 @@ func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
 		hookSessionStateOrder: []string{rootKey},
 	}
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "child-session",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "child-session",
 		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
 		ToolName: "Bash",
 		Payload: map[string]any{
@@ -233,7 +233,7 @@ func TestHookDecisionMetaKeepsExplicitUnknownParentAgent(t *testing.T) {
 
 func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *testing.T) {
 	root := llmEventMeta{
-		Source: "geminicli", SessionID: "parent-session", AgentID: "retained-root",
+		Source: "openhands", SessionID: "parent-session", AgentID: "retained-root",
 		RootAgentID: "retained-root", RootSessionID: "parent-session",
 		LifecycleID: "root-lifecycle", ExecutionID: "root-execution", AgentDepth: 0,
 	}
@@ -243,7 +243,7 @@ func TestHookDecisionMetaResolvesParentSessionWhenParentAgentIsNotReported(t *te
 		hookSessionStateOrder: []string{rootKey},
 	}
 	req := agentHookRequest{
-		ConnectorName: "geminicli", HookEventName: "BeforeTool", SessionID: "child-session",
+		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "child-session",
 		TurnID: "child-turn", AgentID: "child-agent", AgentName: "child", AgentType: "subagent",
 		ToolName: "Bash",
 		Payload: map[string]any{
@@ -620,8 +620,6 @@ func TestAllHookConnectorsNormalizeStableLifecycle(t *testing.T) {
 		{"claudecode", "SessionStart", "SessionEnd", "session_start", "session_end"},
 		{"hermes", "on_session_start", "on_session_end", "session_start", "session_end"},
 		{"cursor", "sessionStart", "sessionEnd", "session_start", "session_end"},
-		{"windsurf", "pre_user_prompt", "post_cascade_response", "turn_start", "turn_end"},
-		{"geminicli", "SessionStart", "SessionEnd", "session_start", "session_end"},
 		{"copilot", "sessionStart", "sessionEnd", "session_start", "session_end"},
 		{"antigravity", "PreInvocation", "Stop", "turn_start", "turn_end"},
 		{"openhands", "session_start", "session_end", "session_start", "session_end"},
@@ -1020,18 +1018,20 @@ func TestBoundedHookLLMSpanContent(t *testing.T) {
 func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 	}
 	api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
-	api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
+	secondID := api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
 
-	first, ok := api.takeHookToolInvocation(meta, "Bash", "first-result")
-	if !ok || first.arguments != `{"command":"first"}` {
-		t.Fatalf("first queued invocation=%+v ok=%v", first, ok)
-	}
-	second, ok := api.takeHookToolInvocation(meta, "Bash", "second-result")
+	// A decision on the second call (a block) ends that call's span, not the
+	// older pending one's, though no tool-call ID tells them apart (#1036).
+	second, ok := api.takeHookToolInvocation(meta, "Bash", secondID)
 	if !ok || second.arguments != `{"command":"second"}` {
-		t.Fatalf("second queued invocation=%+v ok=%v", second, ok)
+		t.Fatalf("named invocation=%+v ok=%v", second, ok)
+	}
+	first, ok := api.takeHookToolInvocation(meta, "Bash", "")
+	if !ok || first.arguments != `{"command":"first"}` {
+		t.Fatalf("oldest queued invocation=%+v ok=%v", first, ok)
 	}
 	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
 		t.Fatalf("tool queue not drained: %#v %#v", api.hookToolInvocations, api.hookToolInvocationOrder)
@@ -1040,7 +1040,7 @@ func TestHookToolInvocationQueuePreservesRepeatedSameToolCalls(t *testing.T) {
 
 func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDeduped(t *testing.T) {
 	executionA := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution-a",
 	}
 	executionB := executionA
@@ -1051,11 +1051,11 @@ func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDedupe
 		api.rememberHookToolInvocation(executionA, "Bash", `{"command":"execution-a"}`)
 		api.rememberHookToolInvocation(executionB, "Bash", `{"command":"execution-b"}`)
 
-		second, ok := api.takeHookToolInvocation(executionB, "Bash", "same result")
+		second, ok := api.takeHookToolInvocation(executionB, "Bash", "")
 		if !ok || second.arguments != `{"command":"execution-b"}` {
 			t.Fatalf("execution B invocation=%+v emit=%v", second, ok)
 		}
-		first, ok := api.takeHookToolInvocation(executionA, "Bash", "same result")
+		first, ok := api.takeHookToolInvocation(executionA, "Bash", "")
 		if !ok || first.arguments != `{"command":"execution-a"}` {
 			t.Fatalf("execution A invocation=%+v emit=%v", first, ok)
 		}
@@ -1063,13 +1063,13 @@ func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDedupe
 
 	t.Run("completion observations", func(t *testing.T) {
 		api := &APIServer{}
-		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); !ok {
+		if _, ok := api.takeHookToolInvocation(executionA, "Bash", ""); !ok {
 			t.Fatal("first execution completion was suppressed")
 		}
-		if _, ok := api.takeHookToolInvocation(executionA, "Bash", "same result"); !ok {
+		if _, ok := api.takeHookToolInvocation(executionA, "Bash", ""); !ok {
 			t.Fatal("same-content completion without an exact receipt was suppressed")
 		}
-		if _, ok := api.takeHookToolInvocation(executionB, "Bash", "same result"); !ok {
+		if _, ok := api.takeHookToolInvocation(executionB, "Bash", ""); !ok {
 			t.Fatal("second execution completion was suppressed by the first")
 		}
 	})
@@ -1078,17 +1078,17 @@ func TestHookToolInvocationCacheIsExecutionScopedAndCompletionIsNotContentDedupe
 func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution", ToolID: "tool-call",
 	}
 	arguments := `{"command":"printf ok"}`
 	api.rememberHookToolInvocation(meta, "Bash", arguments)
 	api.rememberHookToolInvocation(meta, "Bash", arguments)
 
-	if _, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok {
+	if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
 		t.Fatal("first completion was suppressed")
 	}
-	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok || snapshot.id != "" {
+	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok || snapshot.id != "" {
 		t.Fatalf("second completion should remain an independent observation without queued state: %+v ok=%v", snapshot, ok)
 	}
 	if len(api.hookToolInvocations) != 0 || len(api.hookToolInvocationOrder) != 0 {
@@ -1099,7 +1099,7 @@ func TestHookToolInvocationExactIDDoesNotQueueTwiceButDoesNotSuppressCompletion(
 func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
 	api := &APIServer{}
 	meta := llmEventMeta{
-		Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+		Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 		ExecutionID: "execution", ToolID: "tool-call",
 	}
 	api.rememberHookToolInvocation(meta, "Bash", `{"command":"printf old"}`)
@@ -1111,11 +1111,11 @@ func TestHookToolInvocationNativeIDReplacesPendingArguments(t *testing.T) {
 	if got := len(api.hookToolInvocationOrder); got != 1 {
 		t.Fatalf("native tool ID queue order entries=%d want=1", got)
 	}
-	snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result")
+	snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "")
 	if !ok || snapshot.arguments != `{"command": "printf new"}` {
 		t.Fatalf("native tool ID completion snapshot=%+v emit=%v", snapshot, ok)
 	}
-	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", "same result"); !ok || snapshot.id != "" {
+	if snapshot, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok || snapshot.id != "" {
 		t.Fatalf("native tool completion without an exact receipt was suppressed: %+v ok=%v", snapshot, ok)
 	}
 }
@@ -1124,13 +1124,13 @@ func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T)
 	t.Run("native ID", func(t *testing.T) {
 		api := &APIServer{}
 		meta := llmEventMeta{
-			Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 			ExecutionID: "execution", ToolID: "tool-call",
 		}
-		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output":"first"}`); !ok {
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
 			t.Fatal("first native tool completion was suppressed")
 		}
-		if _, ok := api.takeHookToolInvocation(meta, "Bash", `{"output": "second"}`); !ok {
+		if _, ok := api.takeHookToolInvocation(meta, "Bash", ""); !ok {
 			t.Fatal("native tool completion without an exact receipt was suppressed")
 		}
 		api.rememberHookToolInvocation(meta, "Bash", `{"command":"late replay"}`)
@@ -1142,13 +1142,13 @@ func TestHookToolCompletionIdentityUsesNativeIDOrPendingInvocation(t *testing.T)
 	t.Run("no ID repeated calls", func(t *testing.T) {
 		api := &APIServer{}
 		meta := llmEventMeta{
-			Source: "geminicli", SessionID: "session", AgentID: "agent", TurnID: "turn",
+			Source: "openhands", SessionID: "session", AgentID: "agent", TurnID: "turn",
 			ExecutionID: "execution",
 		}
 		api.rememberHookToolInvocation(meta, "Bash", `{"command":"first"}`)
 		api.rememberHookToolInvocation(meta, "Bash", `{"command":"second"}`)
-		first, firstOK := api.takeHookToolInvocation(meta, "Bash", "same result")
-		second, secondOK := api.takeHookToolInvocation(meta, "Bash", "same result")
+		first, firstOK := api.takeHookToolInvocation(meta, "Bash", "")
+		second, secondOK := api.takeHookToolInvocation(meta, "Bash", "")
 		if !firstOK || !secondOK || first.id == "" || second.id == "" || first.id == second.id {
 			t.Fatalf("no-ID repeated completions first=%+v/%v second=%+v/%v", first, firstOK, second, secondOK)
 		}

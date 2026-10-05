@@ -406,7 +406,7 @@ async def test_pipe_executor_flushes_unterminated_fragment_on_controlled_timeout
         wait_calls += 1
         if wait_calls == 2:
             awaitable.close()
-            raise TimeoutError
+            raise asyncio.TimeoutError
         return await awaitable
 
     monkeypatch.setattr(asyncio, "wait_for", controlled_wait_for)
@@ -439,18 +439,94 @@ async def test_pipe_executor_bounds_newline_free_pending_output(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_cancel_natural_exit_race_has_one_terminal_result() -> None:
+async def test_pipe_executor_marks_the_rest_of_a_line_shown_early(monkeypatch) -> None:
+    # GAP-2284: "restarting..." is shown after a pause; its mark must go on
+    # that line, while text after a newline starts a new one.
+    executor = _mock_pipe_executor(
+        monkeypatch,
+        (b"restarting...", b" \xe2\x9c\x93\n", b"waiting", b"\nstill waiting\n", b""),
+    )
+    wait_calls = 0
+
+    async def controlled_wait_for(awaitable, *, timeout: float) -> bytes:
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls in (2, 5):
+            awaitable.close()
+            raise asyncio.TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr(asyncio, "wait_for", controlled_wait_for)
+
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [(event.text, event.continues) for event in events if event.kind == "output"] == [
+        ("restarting...", False),
+        (" ✓", True),
+        ("waiting", False),
+        ("still waiting", False),
+    ]
+
+
+@pytest.mark.parametrize("reap_first", [False, True], ids=["in-flight-exit", "reaped-exit"])
+@pytest.mark.asyncio
+async def test_cancel_natural_exit_race_has_one_terminal_result(reap_first: bool) -> None:
+    # The child exits on its own right after its readiness line. Cancel is
+    # issued from the consumer while run() is suspended on that line, so it
+    # lands while the natural exit is in flight (either side may win) or,
+    # with reap_first, after the exit has been reaped (cancel must be a no-op).
+    # Synchronizing on the line avoids polling for a short-lived running state.
     executor = CommandExecutor(use_pty=False, cancel_grace=0.05)
-    collect = asyncio.create_task(_collect(executor, ("-c", "import time; time.sleep(0.03)")))
-    await _wait_until_running(executor)
-    await asyncio.sleep(0.02)
+    events = []
+    cancel_results: list[bool] = []
+    async for event in executor.run(sys.executable, ("-u", "-c", "print('ready')")):
+        events.append(event)
+        if event.kind == "output" and event.text == "ready":
+            if reap_first:
+                assert executor._process is not None
+                await executor._process.wait()
+            cancel_results.append(await executor.cancel())
 
-    await executor.cancel()
-    events = await collect
-
+    assert len(cancel_results) == 1
+    if reap_first:
+        assert cancel_results == [False]
     done = [event for event in events if event.kind == "done"]
     assert len(done) == 1
-    assert (done[0].cancelled, done[0].exit_code) in {(True, 130), (False, 0)}
+    assert events[-1] is done[0]
+    expected = (True, 130) if cancel_results[0] else (False, 0)
+    assert (done[0].cancelled, done[0].exit_code) == expected
+    assert executor.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_tolerates_natural_exit_at_grace_deadline() -> None:
+    # asyncio raises ProcessLookupError from kill() once the transport has
+    # finished, which happens when the child exits while the grace wait is
+    # being torn down. Cancel must still complete with one cancelled result.
+    loop = asyncio.get_running_loop()
+    exited = loop.create_future()
+
+    class ExitingProcess:
+        pid = 1
+        stdin = None
+        returncode = None
+
+        def send_signal(self, _sig) -> None:
+            pass
+
+        def kill(self) -> None:
+            self.returncode = 0
+            exited.set_result(0)
+            raise ProcessLookupError
+
+        def wait(self):
+            return exited
+
+    executor = CommandExecutor(use_pty=False, cancel_grace=0.001, cancel_force=5.0)
+    executor._process = ExitingProcess()  # type: ignore[assignment]
+
+    assert await executor.cancel() is True
+    assert exited.done()
 
 
 @pytest.mark.asyncio
@@ -568,12 +644,24 @@ async def test_posix_cancel_preserves_sigint_before_fallback() -> None:
         "print('ready', flush=True); time.sleep(60)"
     )
     executor = CommandExecutor(use_pty=False, cancel_grace=1.0)
-    collect = asyncio.create_task(_collect(executor, ("-u", "-c", code)))
-    await _wait_until_running(executor)
-    await asyncio.sleep(0.05)
+    events: list = []
+
+    async def collect_events() -> None:
+        async for event in executor.run(sys.executable, ("-u", "-c", code)):
+            events.append(event)
+
+    collect = asyncio.create_task(collect_events())
+    # Cancel only once the child has installed its SIGINT handler (it prints
+    # "ready" after that); a fixed short sleep lost the race on a busy machine.
+    for _ in range(500):
+        if any(event.kind == "output" and "ready" in event.text for event in events):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError("child never printed ready")
 
     await executor.cancel()
-    events = await collect
+    await collect
 
     assert "got-sigint" in [event.text for event in events if event.kind == "output"]
     assert events[-1].cancelled is True

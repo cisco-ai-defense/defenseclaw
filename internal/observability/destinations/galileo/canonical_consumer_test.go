@@ -43,11 +43,15 @@ type canonicalCaptureAdapter struct {
 	deliver    delivery.DeliveryResult
 	block      chan struct{}
 	closeGate  chan struct{}
-	closeErr   error
-	closeCalls atomic.Uint64
-	transport  otlp.ExportCounters
-	mu         sync.Mutex
-	closed     bool
+	// closeEntered, when set, receives one nonblocking signal each time
+	// Close begins, so a test can cancel a shutdown exactly while the
+	// adapter close is in flight instead of guessing with a short timeout.
+	closeEntered chan struct{}
+	closeErr     error
+	closeCalls   atomic.Uint64
+	transport    otlp.ExportCounters
+	mu           sync.Mutex
+	closed       bool
 }
 
 func (adapter *canonicalCaptureAdapter) Counters() otlp.ExportCounters {
@@ -98,6 +102,12 @@ func (adapter *canonicalCaptureAdapter) Deliver(
 
 func (adapter *canonicalCaptureAdapter) Close(ctx context.Context) error {
 	adapter.closeCalls.Add(1)
+	if adapter.closeEntered != nil {
+		select {
+		case adapter.closeEntered <- struct{}{}:
+		default:
+		}
+	}
 	if adapter.closeGate != nil {
 		select {
 		case <-ctx.Done():
@@ -472,7 +482,7 @@ func TestCanonicalConsumerExportsAllSixGeneratedFamiliesWithPR403Graph(t *testin
 	}, "none", 12)
 	consumer, err := NewCanonicalTraceConsumer(CanonicalTraceConsumerOptions{
 		Destination: fixture.destination, Generation: 12, Pipeline: fixture.pipeline,
-		Adapter: adapter, Dispatcher: canonicalDispatcherConfigWithDelay("galileo", 8, 12, 100*time.Millisecond),
+		Adapter: adapter, Dispatcher: canonicalDispatcherConfigWithDelay("galileo", 8, 12, time.Second),
 		Limits: compatibility.DefaultLimits(), Observer: fixture.failures,
 	})
 	if err != nil {
@@ -485,7 +495,14 @@ func TestCanonicalConsumerExportsAllSixGeneratedFamiliesWithPR403Graph(t *testin
 			t.Fatalf("enqueue %s = %s failures=%+v", record.EventName(), result, fixture.failures.snapshot())
 		}
 	}
-	flushCanonical(t, consumer)
+	// All seven spans must leave in one request: Galileo re-roots a span whose
+	// parent went in an earlier request (GAP-2045), so a 100 ms batch window
+	// split the graph on a slow runner. Wait out the 1 s window here.
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelFlush()
+	if err := consumer.ForceFlush(flushCtx); err != nil {
+		t.Fatalf("ForceFlush: %v", err)
+	}
 	var spans []*tracepb.Span
 	for {
 		select {
@@ -571,21 +588,40 @@ func TestCanonicalConsumerShutdownIsRetryableIdempotentAndCannotReactivate(t *te
 	t.Parallel()
 	fixture := newCanonicalFixture(t, "galileo-shutdown", observability.BucketModelIO, "none", 2)
 	fixture.adapter.closeGate = make(chan struct{})
+	fixture.adapter.closeEntered = make(chan struct{}, 1)
 	fixture.consumer.Activate()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	// The first attempt must be abandoned while the adapter close is in
+	// flight. A fixed short timeout can instead expire during StopIntake or
+	// Drain on a loaded runner, so the adapter close is never attempted and
+	// the call count below is off by one. Cancel only once Close is entered.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := fixture.consumer.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+	first := make(chan error, 1)
+	go func() { first <- fixture.consumer.Shutdown(ctx) }()
+	select {
+	case <-fixture.adapter.closeEntered:
+	case err := <-first:
+		t.Fatalf("first shutdown returned %v before adapter close was entered", err)
+	}
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
 		t.Fatalf("first shutdown = %v", err)
 	}
 	close(fixture.adapter.closeGate)
-	shutdownCanonical(t, fixture.consumer)
-	shutdownCanonical(t, fixture.consumer)
+	// No wall-clock deadline on the waits above or the retries below: each
+	// one waits on a specific event, and a real hang is caught by the test
+	// binary's -timeout rather than by a guess about runner speed.
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := fixture.consumer.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown retry %d = %v", attempt, err)
+		}
+	}
 	fixture.consumer.Activate()
 	if result := fixture.consumer.tryEnqueueRecord(fixture.modelRecord(t, "late")); result != telemetry.V8CanonicalSpanEnqueueClosed {
 		t.Fatalf("post-shutdown enqueue = %s", result)
 	}
 	if got := fixture.adapter.closeCalls.Load(); got != 2 {
-		t.Fatalf("adapter close calls = %d, want one timed-out and one successful attempt", got)
+		t.Fatalf("adapter close calls = %d, want one cancelled and one successful attempt", got)
 	}
 }
 

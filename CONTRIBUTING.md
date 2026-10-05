@@ -33,8 +33,9 @@ make lint
 ```
 
 `make test` runs the Python CLI suite and race-enabled gateway/E2E Go packages.
-`make ts-test` and `make rego-test` are separate. `make check` runs schema,
-generated-artifact, provider, dashboard, and release-manifest parity gates.
+`make ts-test` and `make rego-test` are separate. `make check` runs the v7 audit,
+error-code and schema gates, plus the observability v8 hard-cut, Grafana
+dashboard, provider coverage, LLM catalog, and guardrail catalog gates.
 Use focused tests while iterating, then run the checks relevant to every area
 you changed. Local source targets use one locked, test-ready `.venv`; the
 `make build`, `make all`, `make test`, `make check`, and `make py-lint` targets

@@ -74,13 +74,9 @@ def _selects_full_connector_matrix(path: str) -> bool:
         "scripts/build-windows-installer.ps1",
         "scripts/initialize-windows-native-ci-paths.ps1",
         "scripts/install.ps1",
-        "scripts/install-pinned-windows-cosign.ps1",
         "scripts/invoke-windows-setup-standard-user-ci.ps1",
-        "scripts/test-fresh-install-release-windows.ps1",
-        "scripts/test-upgrade-release-windows.ps1",
         "scripts/test-windows-disposable-user-safety.ps1",
         "scripts/test-windows-setup-wizard.ps1",
-        "scripts/upgrade.ps1",
         "scripts/validate_packaged_v8_resources.py",
         "scripts/windows-authenticode.ps1",
         "scripts/windows-binary-identity.ps1",
@@ -204,7 +200,6 @@ def test_unix_contract_matrix_covers_executable_shell_hook_connectors() -> None:
     assert "omnigent" not in json.loads(full_match.group(1))["connector"]
     assert "          - openclaw" not in dispatch
     assert "          - zeptoclaw" not in dispatch
-    assert "          - geminicli" not in dispatch
 
 
 def test_copilot_contract_normalizes_fixture_event_to_native_registration() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -39,8 +40,14 @@ def _doc_rows_by_name(path: Path) -> dict[str, list[str]]:
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.startswith("| `DEFENSECLAW_"):
             continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        rows[cells[0].strip("`")] = cells
+        # Row shape: | `NAME`<br/>Impact: X<br/>Default: Y<br/>Values: Z | ... |
+        # Impact is omitted for variables without one. Split on unescaped
+        # pipes only, because values such as `a\|b` contain escaped ones.
+        cells = [cell.strip() for cell in re.split(r"(?<!\\)\|", line.strip().strip("|"))]
+        parts = cells[0].split("<br/>")
+        fields = dict(part.split(": ", 1) for part in parts[1:] if ": " in part)
+        name = parts[0].strip("`")
+        rows[name] = [name, fields.get("Impact", "—"), fields.get("Default", ""), fields.get("Values", "")]
     return rows
 
 
@@ -210,6 +217,12 @@ class RegistryStructureTests(unittest.TestCase):
                 "`unset`",
                 "`absolute file path`, `unset`",
             ),
+            # GAP-1393: defenseclaw-gateway validates Rego, so OPA is optional.
+            "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA": (
+                "**medium**",
+                "`unset` (validation needs opa or defenseclaw-gateway)",
+                "`1`, `unset`",
+            ),
             "DEFENSECLAW_WINDOWS_PROCESS_HELPER": (
                 "—",
                 "`unset`",
@@ -375,6 +388,18 @@ class ActiveSecurityOverridesTests(unittest.TestCase):
         self.assertIn("DEFENSECLAW_DEV", inclusive)
         restricted = [e.name for e in active_security_overrides(env, include_low_impact=False)]
         self.assertNotIn("DEFENSECLAW_DEV", restricted)
+
+    def test_sandbox_binding_id_surfaces_as_a_sandbox_bypass(self) -> None:
+        # Any value turns `sandbox run` and the shell wrappers native, so
+        # the opaque id is active whenever it is set (Go: activeWhenNonEmpty).
+        entry = load_registry().get("DEFENSECLAW_SANDBOX_ID")
+        assert entry is not None
+        self.assertEqual((entry.security_impact, entry.surface_in_doctor), ("medium", True))
+        self.assertFalse(entry.is_active({"DEFENSECLAW_SANDBOX_ID": " "}))
+        env = {"DEFENSECLAW_SANDBOX_ID": "dcmarker-binding"}
+        self.assertTrue(entry.is_active(env))
+        names = [e.name for e in active_security_overrides(env, include_low_impact=False)]
+        self.assertEqual(names, ["DEFENSECLAW_SANDBOX_ID"])
 
     def test_strict_availability_does_not_surface(self) -> None:
         # DEFENSECLAW_STRICT_AVAILABILITY is opt-IN to stricter

@@ -22,14 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-const (
-	codexPolicyHangHelperEnv       = "DEFENSECLAW_CODEX_POLICY_HANG_HELPER"
-	codexPolicyTreeHelperEnv       = "DEFENSECLAW_CODEX_POLICY_TREE_HELPER"
-	codexPolicyGrandchildHelperEnv = "DEFENSECLAW_CODEX_POLICY_GRANDCHILD_HELPER"
-	codexPolicyEntryPathEnv        = "DEFENSECLAW_CODEX_POLICY_ENTRY_PATH"
-	codexPolicyReadyPathEnv        = "DEFENSECLAW_CODEX_POLICY_READY_PATH"
-	codexPolicyMarkerPathEnv       = "DEFENSECLAW_CODEX_POLICY_MARKER_PATH"
-)
+const codexPolicyHangHelperEnv = "DEFENSECLAW_CODEX_POLICY_HANG_HELPER"
 
 func TestBoundedDiagnosticBufferConcurrentAccess(t *testing.T) {
 	const limit = 1024
@@ -65,14 +58,18 @@ func TestEnforceCodexUserHookPolicy(t *testing.T) {
 			Source:                `C:\ProgramData\OpenAI\Codex\requirements.toml`,
 		}, nil
 	}
+	// Per-user installs register in config.toml on every platform (current
+	// Codex ignores CODEX_HOME/managed_config.toml on Windows), so a
+	// managed-only policy must refuse them everywhere.
 	err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{})
-	if runtime.GOOS == "windows" {
-		if err != nil {
-			t.Fatalf("managed-only Windows policy rejected source-trusted registration: %v", err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), "allow_managed_hooks_only") ||
+	if err == nil || !strings.Contains(err.Error(), "allow_managed_hooks_only") ||
 		!strings.Contains(err.Error(), `C:\ProgramData\OpenAI\Codex\requirements.toml`) {
 		t.Fatalf("blocked user-hook policy error = %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		if err := enforceCodexUserHookPolicy(context.Background(), SetupOpts{ManagedEnterprise: true}); err != nil {
+			t.Fatalf("managed-only policy rejected the managed enterprise registration: %v", err)
+		}
 	}
 
 	blocked = false
@@ -396,32 +393,6 @@ func TestInspectCodexPolicyPreservesRPCErrorDuringCleanup(t *testing.T) {
 }
 
 func TestCodexPolicyAppServerHelper(t *testing.T) {
-	if os.Getenv(codexPolicyGrandchildHelperEnv) == "1" {
-		time.Sleep(750 * time.Millisecond)
-		_ = os.WriteFile(os.Getenv(codexPolicyMarkerPathEnv), []byte("survived"), 0o600)
-		os.Exit(0)
-	}
-	if os.Getenv(codexPolicyTreeHelperEnv) == "1" {
-		if entry := os.Getenv(codexPolicyEntryPathEnv); entry != "" {
-			if err := os.WriteFile(entry, []byte("entered"), 0o600); err != nil {
-				os.Exit(30)
-			}
-		}
-		child := exec.Command(os.Args[0], "-test.run=^TestCodexPolicyAppServerHelper$", "--")
-		child.Env = append(
-			os.Environ(),
-			codexPolicyGrandchildHelperEnv+"=1",
-			codexPolicyMarkerPathEnv+"="+os.Getenv(codexPolicyMarkerPathEnv),
-		)
-		if err := child.Start(); err != nil {
-			os.Exit(31)
-		}
-		if err := os.WriteFile(os.Getenv(codexPolicyReadyPathEnv), []byte("ready"), 0o600); err != nil {
-			os.Exit(32)
-		}
-		time.Sleep(10 * time.Second)
-		os.Exit(0)
-	}
 	if os.Getenv(codexPolicyHangHelperEnv) == "1" {
 		time.Sleep(10 * time.Second)
 		os.Exit(0)

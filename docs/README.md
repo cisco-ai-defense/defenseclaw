@@ -18,11 +18,16 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | Guardrail | [`GUARDRAIL.md`](GUARDRAIL.md), [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md) | `internal/gateway/`, `internal/guardrail/`, `policies/` |
 | Observability v8 | [`OBSERVABILITY.md`](OBSERVABILITY.md) | `schemas/telemetry/v8/`, `schemas/config/v8/`, `internal/observability/` |
 | Gateway | [`reference/GATEWAY_SPEC.md`](reference/GATEWAY_SPEC.md) | `internal/gateway/` |
+| OpenShell sandbox | [`SANDBOX.md`](SANDBOX.md) (architecture and legacy cleanup), [`OPENSHELL_SANDBOX_EVENTS.md`](OPENSHELL_SANDBOX_EVENTS.md) (telemetry) | `internal/openshell/`, `internal/sandboxauth/`, `policies/sandbox/` |
 | Private upstream security | [`reference/PRIVATE_UPSTREAMS.md`](reference/PRIVATE_UPSTREAMS.md) | `internal/netguard/`, `internal/gateway/provider.go` |
-| Testing | [`TESTING.md`](TESTING.md), [`E2E.md`](E2E.md) | `Makefile`, `.github/workflows/`, component tests |
-| Release engineering | [`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md), [`RELEASE_VALIDATION.md`](RELEASE_VALIDATION.md), [`RELEASE_CHANNEL.md`](RELEASE_CHANNEL.md) | `.github/workflows/release.yaml`, release scripts |
+| Testing | [`TESTING.md`](TESTING.md), [`E2E.md`](E2E.md), [`SECURITY-TEST-SUITE.md`](SECURITY-TEST-SUITE.md) | `Makefile`, `.github/workflows/`, component tests |
+| Release engineering | [`RELEASE_RUNBOOK.md`](RELEASE_RUNBOOK.md) | `.github/workflows/release.yaml`, `scripts/install.sh`, `scripts/install.ps1` |
 | Schemas | [`../schemas/README.md`](../schemas/README.md) | `schemas/config/v8/`, `schemas/telemetry/v8/`, generators |
-| Native Windows | [`WINDOWS-NATIVE-INSTALLER.md`](WINDOWS-NATIVE-INSTALLER.md), [`WINDOWS-NATIVE-CI.md`](WINDOWS-NATIVE-CI.md), [`WINDOWS_RESCUE.md`](WINDOWS_RESCUE.md) | `packaging/windows/`, Windows scripts and workflows |
+| Native Windows | [`WINDOWS-NATIVE-INSTALLER.md`](WINDOWS-NATIVE-INSTALLER.md), [`WINDOWS-NATIVE-CI.md`](WINDOWS-NATIVE-CI.md) | `packaging/windows/`, Windows scripts and workflows |
+| Managed enterprise | [`ENTERPRISE-THREAT-MODEL.md`](ENTERPRISE-THREAT-MODEL.md), [`LINUX-ENTERPRISE-THREAT-MODEL.md`](LINUX-ENTERPRISE-THREAT-MODEL.md), [`MACOS-ENTERPRISE-THREAT-MODEL.md`](MACOS-ENTERPRISE-THREAT-MODEL.md), [`WINDOWS-ENTERPRISE-THREAT-MODEL.md`](WINDOWS-ENTERPRISE-THREAT-MODEL.md), [`ENTERPRISE-TEST-PLAN.md`](ENTERPRISE-TEST-PLAN.md) | `internal/managed/`, `internal/enterpriseunix/`, `internal/enterprisepolicy/`, `packaging/mdm/` |
+| Connector research | [`research/`](research/), [`development/`](development/), [`reference/CLAUDE-CODE-WINDOWS.md`](reference/CLAUDE-CODE-WINDOWS.md), [`windows-native-connector-reference-checklist.md`](windows-native-connector-reference-checklist.md) | `internal/gateway/connector/` |
+| Specs and design notes | [`specs/`](specs/README.md), [`design/`](design/), [`requirements/`](requirements/) | the code each spec names |
+| Archive | [`archive/`](archive/) | none; historical records only |
 
 Package-local READMEs stay beside the bundle, package, example, or fixture they
 describe.
@@ -34,7 +39,9 @@ These files intentionally contain links rather than a second guide:
 [`CLI.md`](CLI.md), [`API.md`](API.md),
 [`CONFIG_FILES.md`](CONFIG_FILES.md), [`ENV-VARS.md`](ENV-VARS.md),
 [`CONNECTOR-MATRIX.md`](CONNECTOR-MATRIX.md),
-[`REGISTRIES.md`](REGISTRIES.md), and [`SPLUNK_APP.md`](SPLUNK_APP.md).
+[`REGISTRIES.md`](REGISTRIES.md), [`SPLUNK_APP.md`](SPLUNK_APP.md),
+[`GUARDRAIL_QUICKSTART.md`](GUARDRAIL_QUICKSTART.md), and
+[`SANDBOX_QUICKSTART.md`](SANDBOX_QUICKSTART.md).
 
 ## Repository-only scope
 

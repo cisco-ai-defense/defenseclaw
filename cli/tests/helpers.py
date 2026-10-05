@@ -102,7 +102,7 @@ class _CommandReadModelFixture:
     def __init__(self, store: Store) -> None:
         self.store = store
 
-    def log_scan(self, result: ScanResult) -> None:
+    def log_scan(self, result: ScanResult, *, connector: str | None = None) -> None:
         scan_id = str(uuid.uuid4())
         self.store.insert_scan_result(
             scan_id,
@@ -196,6 +196,11 @@ class _CommandReadModelFixture:
             )
         )
 
+    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+        from defenseclaw.logger import Logger
+
+        Logger.log_config_change(self, operation, details, actor=actor)  # type: ignore[arg-type]
+
     def log_alert(self, source: str, severity: str, summary: str, details=None) -> None:
         self.store.log_event(
             Event(
@@ -261,7 +266,7 @@ def make_temp_config(tmp_dir: str | None = None) -> Config:
         skill_scanner=SkillScannerConfig(binary="skill-scanner"),
         mcp_scanner=MCPScannerConfig(binary="mcp-scanner"),
     )
-    cfg.openshell = OpenShellConfig(binary="openshell")
+    cfg.openshell = OpenShellConfig()
     cfg.gateway = GatewayConfig(host="127.0.0.1", api_port=18970)
     cfg.skill_actions = SkillActionsConfig()
     return cfg

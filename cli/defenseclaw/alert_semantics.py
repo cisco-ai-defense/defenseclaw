@@ -43,3 +43,52 @@ ALERT_LEGACY_FINDING_ACTIONS = (
     "scan-finding",
     "tool-result-pii-alert",
 )
+
+# The VS Code Local harness runs Copilot hooks under Claude-style event names
+# (PreToolUse); the Copilot CLI sends the camelCase names Setup registers
+# (preToolUse). Alerts show the CLI name for both, so one hook point is not
+# split in two (GAP-2619). Mirrors copilotCLIHookFileLocalEvents in
+# internal/gateway/connector/hook_only_copilot_vscode.go.
+_COPILOT_LOCAL_TO_CLI_EVENT = {
+    "SessionStart": "sessionStart",
+    "UserPromptSubmit": "userPromptSubmitted",
+    "PreToolUse": "preToolUse",
+    "PostToolUse": "postToolUse",
+    "Stop": "agentStop",
+    "SubagentStop": "subagentStop",
+}
+
+
+def copilot_hook_target(target: str, connector: str = "") -> str:
+    """``copilot:PreToolUse`` -> ``copilot:preToolUse``; a bare ``PreToolUse``
+    becomes ``preToolUse`` when ``connector`` is copilot. Other targets are
+    returned unchanged."""
+    text = target or ""
+    head, sep, event = text.partition(":")
+    if sep and head.strip().lower() == "copilot":
+        cli = _COPILOT_LOCAL_TO_CLI_EVENT.get(event.strip())
+        return f"{head}:{cli}" if cli else text
+    if (connector or "").strip().lower() == "copilot":
+        return _COPILOT_LOCAL_TO_CLI_EVENT.get(text.strip(), text)
+    return text
+
+
+_COPILOT_CLI_TO_LOCAL_EVENT = {cli: local for local, cli in _COPILOT_LOCAL_TO_CLI_EVENT.items()}
+
+
+def copilot_hook_target_spellings(target: str, connector: str = "") -> tuple[str, ...]:
+    """Every stored spelling of one Copilot hook target, canonical first:
+    ``copilot:PreToolUse`` -> (``copilot:preToolUse``, ``copilot:PreToolUse``).
+    A bare event name expands only when ``connector`` is copilot. Lookups by
+    target use it so both harnesses match (GAP-2619); any other target gives
+    a one-item tuple."""
+    text = target or ""
+    canonical = copilot_hook_target(text, connector)
+    head, sep, event = canonical.partition(":")
+    if sep and head.strip().lower() == "copilot":
+        local = _COPILOT_CLI_TO_LOCAL_EVENT.get(event.strip())
+        return (canonical, f"{head}:{local}") if local else (text,)
+    if not sep and (connector or "").strip().lower() == "copilot":
+        local = _COPILOT_CLI_TO_LOCAL_EVENT.get(canonical.strip())
+        return (canonical, local) if local else (text,)
+    return (text,)

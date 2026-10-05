@@ -1,477 +1,197 @@
 # DefenseClaw Release Runbook
 
-This is the canonical operator procedure for a DefenseClaw release and for
-repairing its authenticated stable channel. The repository is the policy
-authority: when this runbook, an external note, or a personal automation
-disagrees, stop and use the checked-in workflow, scripts, policies, and
-documentation.
-
-Read this runbook together with:
-
-- [Release validation strategy](RELEASE_VALIDATION.md), which defines the
-  artifact gates and historical upgrade matrix;
-- [Authenticated release channel](RELEASE_CHANNEL.md), which defines stable
-  discovery and rescue trust; and
-- [Windows rescue](WINDOWS_RESCUE.md), which defines native Windows recovery.
-
-## Release model
-
-A reviewed merge to `main` is source certification. The release workflow does
-not recertify all repository CI. It builds one candidate from that reviewed
-commit and proves only the release outcomes: Linux, macOS, and Windows
-artifacts exist; fresh installers work; supported macOS/Linux upgrades work;
-platform signing status is honest; and the tested bytes are the published
-bytes.
-
-There are two intentionally different kinds of release state:
-
-- **Immutable tagged releases.** A version tag, resolver, installer, app,
-  binary, manifest, checksum, and proof are never replaced after publication.
-- **A mutable, signed stable channel.** The `release-channel` branch may
-  fast-forward to a signed document that selects a newer immutable release.
-  Clients authenticate that document and the target resolver digest before
-  running anything.
-
-The updater is therefore repairable without making an old updater mutable. A
-future patch release can publish a fixed immutable resolver and advance the
-signed channel to it. Nothing rewrites assets attached to an older tag.
-
-## Persistent repository controls
-
-These are repository settings, not fields that an operator must attest to for
-each release.
-
-### Immutable releases and scoped secrets
-
-1. Enable GitHub Immutable Releases for the repository.
-2. Scope `release` environment secrets to the release workflow. A per-release
-   environment approval is optional, not part of the dispatch contract.
-3. Configure Apple and Windows signing secrets only as complete groups. See
-   [Unsigned platform builds](#unsigned-platform-builds) for the supported
-   no-credential mode.
-4. Keep the required PR and `main` checks in branch policy. Merge remains the
-   source-certification boundary.
-
-GitHub verifies the immutable release after publication, so there is no
-per-release confirmation checkbox. You do not need to create a ruleset to cut
-a release. A ruleset on `release-channel` is optional repository hardening,
-not a release prerequisite or part of client trust.
-This relies on protected `main`, required checks, and the reviewed release
-workflow and signing identity remaining protected from administrator-level
-bypass; a channel ruleset alone cannot defend against an administrator who can
-rewrite those publishing authorities.
-
-With those authorities intact, someone limited to editing the channel can
-delete the pointer or replay an older valid signed pointer, affecting
-availability or freshness. They still cannot make clients accept an unsigned
-channel document, altered resolver, or altered release payload: Sigstore
-authenticates the channel and its digests bind the immutable versioned assets.
+A release is one run of the Release workflow. Installed clients upgrade by
+running the latest release's installer, so nothing else has to be updated
+between versions. The one exception is a single run after the first 1.x
+release, which points 0.8.8–0.8.10 upgrades at it (see "One-time: move
+0.8.8–0.8.10 upgrades to 1.x" below).
 
 ## Cut a release
 
-### 1. Dispatch from reviewed `main`
+1. Merge the changes to `main`. CI's **Install and Upgrade Smoke** jobs build
+   release-shaped assets from the commit and run the real installer on Linux
+   and Windows.
+2. Actions → **Release** → Run workflow on `main` with `version: X.Y.Z` (bare,
+   no `v`, newer than the latest release). Or:
 
-Merge every release change and wait for the required `main` checks. Anything
-merged into `main` is source-certified. Do not make a version-bump commit; the
-workflow input stamps an isolated build checkout.
+   ```bash
+   gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref main -f version=X.Y.Z
+   ```
 
-In GitHub, open **Actions → Release → Run workflow**, select **main**, choose
-`operation=release`, and enter a bare canonical version without a `v` prefix.
-The examples below use `0.8.8`; replace it with the intended version.
+3. The workflow builds every asset once, writes and signs `checksums.txt`,
+   runs the install lifecycle on Linux x64/arm64, macOS and Windows, and
+   publishes the release as **latest**. The lifecycle covers a fresh install
+   that verifies the new signature, upgrades from the previous 1.x release,
+   0.8.10 and 0.8.4, rollback, the 0.8.x handoff, and failure drills that must
+   roll back. See [Testing](TESTING.md#install-and-upgrade-tests).
 
-```bash
-RELEASE_VERSION=0.8.8
-```
+Releases build for Linux (`amd64`, `arm64`), macOS on Apple Silicon (`arm64`;
+Intel Macs are unsupported), and Windows (`amd64`).
 
-```bash
-gh workflow run release.yaml \
-  --repo cisco-ai-defense/defenseclaw \
-  --ref main \
-  -f operation=release \
-  -f version="$RELEASE_VERSION"
-```
+The macOS app is signed with Developer ID and notarized when all five Apple
+secrets (`MACOS_DEVELOPER_ID_P12_BASE64`, `MACOS_DEVELOPER_ID_P12_PASSWORD`,
+`MACOS_NOTARY_KEY_BASE64`, `MACOS_NOTARY_KEY_ID`, `MACOS_NOTARY_ISSUER_ID`) are
+set in the `release` environment. Without them the run fails, because
+`install.sh` would put an ad-hoc signed app, which runs without administrator
+mode, on users' Macs. To publish such an app anyway (a fork, a test), run with
+`-f allow_unnotarized_macos_app=true`.
 
-Clicking **Run workflow** (or running the command above) is the release
-authorization. GitHub automatically freezes the dispatch's exact `github.sha`,
-so the run stays on that reviewed `main` commit even if another merge lands
-later. Operators do not copy a commit SHA or attest to repository settings.
+The same run builds the standalone enterprise packages for MDM deployment:
+the Windows Setup, the Linux `.deb`, `.rpm` and payload archives, and the
+macOS `.pkg`. Unlike the app, they do not need signing secrets. Without them
+they ship unsigned, and deployments pin each one by its SHA-256 in the
+cosign-signed `checksums.txt`. The release signs them when their secrets
+are set: `WINDOWS_AUTHENTICODE_PFX_BASE64` and
+`WINDOWS_AUTHENTICODE_PFX_PASSWORD` (Authenticode for the Setup),
+`ENTERPRISE_GPG_PRIVATE_KEY` and `ENTERPRISE_GPG_PASSPHRASE` (GPG signatures
+for the Linux packages), and `MACOS_INSTALLER_SIGNING_IDENTITY` with
+`MACOS_SIGNING_IDENTITY` for the pkg. The pkg reuses the app's Developer ID
+certificate and notary key (add `MACOS_INSTALLER_P12_BASE64` and
+`MACOS_INSTALLER_P12_PASSWORD` when the Developer ID Installer certificate is
+in its own PKCS#12); the app's five secrets alone leave the pkg unsigned. See
+`packaging/mdm/signing/README.md` for the trust channels.
 
-The first job validates the version, selected commit, tag/release namespace,
-version progression, and authenticated POSIX upgrade baselines before the
-expensive build begins. For a target newer than `0.8.7`, it must select seven
-distinct lanes: latest older, exact `0.8.6`, exact `0.8.5`, exact `0.8.4`, and
-the newest authenticated `0.7.x`, `0.6.x`, and `0.5.x` releases. `0.8.7` is
-the one six-lane exception because latest older and `0.8.6` are the same
-release.
+The macOS pkg ships unsigned for now: the `release` environment does not
+carry the Developer ID Installer secrets, and their absence does not fail the
+run. The pkg is protected by its SHA-256 in the cosign-signed
+`checksums.txt`. When a release's pkg is unsigned, the `enterprise-macos` job
+summary says so, and the release notes open with a line telling deployments
+to verify the pkg through `checksums.txt`. Adding the installer secrets later
+turns signing back on with no workflow change.
 
-Do not create or push the tag first. Do not run `gh release create`. The
-workflow owns the version namespace until the tested candidate is published.
-
-### 2. Monitor the exact run
-
-Find the run created by that dispatch, record its ID and URL, then watch that
-ID:
-
-```bash
-gh run list --workflow release.yaml --event workflow_dispatch --limit 10
-gh run watch <run-id> --exit-status
-gh run view <run-id> --log-failed
-```
-
-The expected release path is:
-
-1. validate the request, credentials, namespace, and authenticated baselines;
-2. build the runtime once and build the macOS app and native Windows Setup;
-3. seal one checksummed candidate;
-4. run fresh-install and target-specific upgrade gates against those exact
-   candidate bytes;
-5. create the tag and immutable GitHub release, then prove remote custody; and
-6. sign and fast-forward the stable channel in the separate post-release job.
-
-GitHub Actions directory artifacts normalize POSIX file modes. The workflow
-therefore crosses every candidate job boundary as one deterministic
-`release-candidate.tar`, safely extracts it without following archive links or
-paths, and then reruns sealed-candidate verification, including the reviewed
-`install.sh` executable mode. Do not upload the candidate directory directly,
-extract the tar with a generic command, or weaken the mode check.
-
-The run is complete only when the required release jobs and
-`Advance authenticated stable channel` are green. The immutable release may
-already exist when only the final channel job is red; handle that case with
-the [failure decision tree](#failure-decision-tree), not another release
-dispatch.
-
-## Required evidence before declaring success
-
-### Workflow gates
-
-Confirm that the exact run shows:
-
-- Linux and macOS fresh install through `install.sh`;
-- every baseline selected by workflow request validation upgraded on both
-  Linux and macOS, including the `0.8.4` bridge and `0.8.5` forward handoff
-  for pre-`0.8.4` sources;
-- exact public `0.8.1` upgraded through the full `0.8.4` and `0.8.5` bridge
-  route on both Linux and macOS as a companion case in the selected `0.8.5`
-  lane;
-- exact published `0.8.6` and `0.8.7` install-plus-first-run field states with
-  an absent migration cursor recovered through the candidate resolver on both
-  Linux and macOS under the immutable rescue bootstrap’s clean tool path;
-- every candidate resolver success case ran without a runner-installed `uv`
-  on `PATH`, proving the authenticated private bootstrap and handoffs;
-- the native `macos-15-intel` fresh-install and authenticated-upgrade lanes
-  both verified the exact sealed candidate, then refused before dependency,
-  network, artifact, or state effects;
-- native Windows x64 fresh install through `install.ps1` and
-  `DefenseClawSetup-x64.exe`;
-- exact CLI and gateway version plus healthy gateway checks;
-- sealed-candidate verification before publication; and
-- immutable remote asset custody before stable-channel advancement.
-
-Windows acceptance is explicitly fresh-install-only. Every release still
-builds and exercises the exact native Setup and `install.ps1` candidate, but
-the release matrix does not claim or require a historical native Windows
-upgrade path. Do not invent an unauthenticated historical lane.
-
-### Public release and asset inventory
-
-Inspect the release object and its asset names:
+To try a release on real machines before users see it, run the workflow with
+`draft: true` and download the draft's assets (`gh release download X.Y.Z`).
+Use disposable test machines or VMs, not anyone's working install: an
+unpublished release has not been through users yet. Check the assets against
+the signed checksum list before running anything:
 
 ```bash
-gh release view "$RELEASE_VERSION" \
-  --repo cisco-ai-defense/defenseclaw \
-  --json tagName,isDraft,isPrerelease,isImmutable,targetCommitish,url,assets
-
-gh release view "$RELEASE_VERSION" \
-  --repo cisco-ai-defense/defenseclaw \
-  --json assets \
-  --jq '.assets[].name' | sort
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+sha256sum --check --ignore-missing checksums.txt   # macOS: shasum -a 256 --check --ignore-missing checksums.txt
 ```
 
-Require the exact version, a non-draft/non-prerelease immutable release, and
-the expected complete families:
-
-- Linux amd64/arm64, macOS arm64, and Windows amd64/arm64 gateway artifacts
-  and their SBOMs; Intel macOS is outside the supported release contract;
-- the CLI wheel and plugin release assets;
-- the macOS app DMG and ZIP, either notarized names or explicit
-  `-unverified` names;
-- `DefenseClawSetup-x64.exe` plus its digest, provenance, and SBOM;
-- `install.sh`, `install.ps1`, `defenseclaw-upgrade.sh`,
-  `defenseclaw-upgrade.ps1`, `defenseclaw-rescue.sh`, and
-  `defenseclaw-rescue.ps1`;
-- the upgrade manifest, release provenance, and source map; and
-- `checksums.txt`, `checksums.txt.pem`, `checksums.txt.sig`, and
-  `checksums.txt.bundle`.
-
-Protocol-2 policy still carries the legacy Darwin/amd64 slot for authenticated
-schema compatibility. It is not a supported macOS asset: release install,
-upgrade, rescue, package, build-validation, and certification paths must all
-refuse Intel macOS before using it.
-
-On a clean Linux verification host, download every public asset, authenticate
-the checksum manifest, and check every payload digest:
-
-```bash
-VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-release.XXXXXX")"
-gh release download "$RELEASE_VERSION" \
-  --repo cisco-ai-defense/defenseclaw \
-  --dir "$VERIFY_DIR"
-
-python3 scripts/verify-sigstore-blob.py \
-  --certificate "$VERIFY_DIR/checksums.txt.pem" \
-  --signature "$VERIFY_DIR/checksums.txt.sig" \
-  --certificate-identity \
-    "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  "$VERIFY_DIR/checksums.txt"
-
-(cd "$VERIFY_DIR" && sha256sum --check checksums.txt)
-```
-
-Do not treat the GitHub page, TLS, or a `releases/latest` redirect as artifact
-authentication.
-
-### Public install and upgrade smoke
-
-Use disposable, clean hosts; never make a production machine the release test
-bed. The pre-publication candidate gates remain the authoritative full matrix,
-and the custody proof binds those tested bytes to the public release.
-
-On both Linux and macOS, authenticate the downloaded release directory as
-above, then exercise the published POSIX installer:
-
-```bash
-bash "$VERIFY_DIR/install.sh" \
-  --local "$VERIFY_DIR" \
-  --yes \
-  --connector none
-defenseclaw --version
-defenseclaw status
-```
-
-On a disposable native Windows x64 host, use a trusted checkout of the
-reviewed release commit with the exact Cosign `2.6.3` verifier installed on
-`PATH`. Download the public proof and installer, authenticate `checksums.txt`
-under the release workflow identity, bind the saved `install.ps1` to that
-signed manifest, and only then execute the verified script:
+On Windows (PowerShell, with `cosign.exe` on PATH):
 
 ```powershell
-$ReleaseVersion = "0.8.8" # Replace with the intended release.
-$ExpectUnsignedSetup = $true # Set false when the release job reports signed.
-$VerifyDir = Join-Path ([IO.Path]::GetTempPath()) (
-  "defenseclaw-release-" + [guid]::NewGuid().ToString("N")
-)
-[IO.Directory]::CreateDirectory($VerifyDir) | Out-Null
-foreach ($Asset in @(
-  "checksums.txt",
-  "checksums.txt.pem",
-  "checksums.txt.sig",
-  "install.ps1",
-  "DefenseClawSetup-x64.exe"
-)) {
-  gh release download $ReleaseVersion `
-    --repo cisco-ai-defense/defenseclaw `
-    --dir $VerifyDir `
-    --pattern $Asset
-  if ($LASTEXITCODE -ne 0) { throw "Could not download $Asset" }
+cosign verify-blob --bundle checksums.txt.bundle `
+  --certificate-identity https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main `
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+Get-Content checksums.txt | ForEach-Object {
+  $hash, $name = -split $_
+  if ((Test-Path $name) -and (Get-FileHash -Algorithm SHA256 $name).Hash -ne $hash) { throw "$name does not match checksums.txt" }
 }
-
-python scripts/verify-sigstore-blob.py `
-  --certificate (Join-Path $VerifyDir "checksums.txt.pem") `
-  --signature (Join-Path $VerifyDir "checksums.txt.sig") `
-  --certificate-identity `
-    "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" `
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" `
-  (Join-Path $VerifyDir "checksums.txt")
-if ($LASTEXITCODE -ne 0) { throw "Release checksum proof did not authenticate" }
-
-$Installer = Join-Path $VerifyDir "install.ps1"
-$InstallerLines = @(
-  Get-Content -LiteralPath (Join-Path $VerifyDir "checksums.txt") |
-    Where-Object { $_ -cmatch "^[0-9a-f]{64}  install\.ps1$" }
-)
-if ($InstallerLines.Count -ne 1) {
-  throw "Signed checksums do not contain exactly one install.ps1 entry"
-}
-$ExpectedInstallerSha256 = $InstallerLines[0].Substring(0, 64)
-$ActualInstallerSha256 = (
-  Get-FileHash -LiteralPath $Installer -Algorithm SHA256
-).Hash.ToLowerInvariant()
-if ($ActualInstallerSha256 -cne $ExpectedInstallerSha256) {
-  throw "Downloaded install.ps1 does not match signed checksums"
-}
-
-$Setup = Join-Path $VerifyDir "DefenseClawSetup-x64.exe"
-$SetupLines = @(
-  Get-Content -LiteralPath (Join-Path $VerifyDir "checksums.txt") |
-    Where-Object { $_ -cmatch "^[0-9a-f]{64}  DefenseClawSetup-x64\.exe$" }
-)
-if ($SetupLines.Count -ne 1) {
-  throw "Signed checksums do not contain exactly one DefenseClawSetup-x64.exe entry"
-}
-$ExpectedSetupSha256 = $SetupLines[0].Substring(0, 64)
-$ActualSetupSha256 = (
-  Get-FileHash -LiteralPath $Setup -Algorithm SHA256
-).Hash.ToLowerInvariant()
-if ($ActualSetupSha256 -cne $ExpectedSetupSha256) {
-  throw "Downloaded DefenseClawSetup-x64.exe does not match signed checksums"
-}
-
-$SetupSignature = Get-AuthenticodeSignature $Setup
-$ExpectedSignatureStatus = if ($ExpectUnsignedSetup) { "NotSigned" } else { "Valid" }
-if ($SetupSignature.Status.ToString() -cne $ExpectedSignatureStatus) {
-  throw "Setup signature status was $($SetupSignature.Status), expected $ExpectedSignatureStatus"
-}
-if (-not $ExpectUnsignedSetup) {
-  $SetupPublisher = if ($null -ne $SetupSignature.SignerCertificate) {
-    $SetupSignature.SignerCertificate.GetNameInfo(
-      [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
-      $false
-    )
-  } else {
-    ""
-  }
-  if ($SetupPublisher -cne "Cisco Systems, Inc.") {
-    throw "Setup publisher was '$SetupPublisher', expected 'Cisco Systems, Inc.'"
-  }
-}
-
-& $Installer -Version $ReleaseVersion -Connector none -Yes
-if ($LASTEXITCODE -ne 0) { throw "Authenticated install.ps1 failed" }
-defenseclaw --version
-defenseclaw status
 ```
 
-The installed CLI and gateway must report the target version and the gateway
-must be healthy. For notarized macOS output, also require:
+Then install them with `install.sh --local DIR` or `install.ps1 -Local DIR`,
+and publish:
 
 ```bash
-hdiutil verify "DefenseClawMac-${RELEASE_VERSION}-macos-arm64.dmg"
-xcrun stapler validate "DefenseClawMac-${RELEASE_VERSION}-macos-arm64.dmg"
-spctl --assess --verbose=4 --type open \
-  "DefenseClawMac-${RELEASE_VERSION}-macos-arm64.dmg"
+gh release edit X.Y.Z --draft=false --latest
 ```
 
-Finally, snapshot disposable Linux and macOS installations on the previous
-stable release and exercise signed-channel discovery:
+## Dry run
+
+A dry run exercises the whole workflow, including the enterprise Windows and
+macOS jobs, without publishing anything. Use it after changing the workflow
+or the packaging scripts. It runs from any branch, and the version may already
+be released or be older than the latest release:
 
 ```bash
-defenseclaw upgrade --yes
-defenseclaw --version
-defenseclaw status
+gh workflow run release.yaml --repo cisco-ai-defense/defenseclaw --ref <branch> -f version=X.Y.Z -f dry_run=true
 ```
 
-Require the target version and healthy gateway. If the release changes
-migrations, bridge selection, or recovery, also repeat the relevant public
-smoke from the affected historical fixture. Regardless, the pre-publication
-run must already show every authenticated `0.8.6`, `0.8.5`, `0.8.4`,
-`0.7.x`, `0.6.x`, and `0.5.x` lane selected by the workflow.
+With `dry_run: true`:
 
-### Stable channel
+- `validate` still runs its read-only checks, but notes a non-`main` ref, an
+  existing tag, release or draft, a 0.x version or an older version instead of
+  failing. It refuses `operation: legacy-channel`.
+- `build`, `macos-app`, `enterprise-windows` and `enterprise-macos` run outside
+  the `release` environment with every secret blanked. The app is ad-hoc
+  signed, and the Setup, pkg and Linux packages are unsigned. Nothing is
+  Authenticode-signed, GPG-signed or sent to Apple for notarization.
+- `sign` is skipped, because it writes to the public Sigstore log.
+  `dry-run-assets` writes an unsigned `checksums.txt` instead.
+- `install-gate` runs the full install and upgrade lifecycle on the unsigned
+  assets. With no `checksums.txt.bundle`, the installers verify `--local`
+  assets against `checksums.txt` only. The upgrade-from-previous lanes run
+  only when the latest release is older than the dry-run version.
+- `publish` and `legacy-channel` never run. Their release and push steps also
+  stop on their own in a dry run.
 
-Require the channel job to report successful read-back verification. Record
-the `release-channel` commit:
+The assets and `checksums.txt` are the run's `release` artifact, kept for 3
+days, and the run summary starts with "dry run: nothing published":
 
 ```bash
-gh api \
-  repos/cisco-ai-defense/defenseclaw/git/ref/heads/release-channel \
-  --jq '.object.sha'
+gh run download <run-id> --repo cisco-ai-defense/defenseclaw -n release -D dry-run-assets
 ```
 
-The public `defenseclaw upgrade --yes` smoke above is the end-to-end
-authentication check: discovery must accept the signed channel, fetch the
-immutable target resolver, and finish at the target release.
+## When a release is broken
 
-## Unsigned platform builds
+Releases are immutable and a deleted release burns its tag, so never delete
+one.
 
-Missing platform credentials do not block an otherwise valid release:
+1. Stop new installs from getting it: `gh release edit X.Y.Z --prerelease`, or
+   `gh release edit <good version> --latest`.
+2. Fix on `main` and cut `X.Y.(Z+1)`. Users who already upgraded get the fix
+   with `defenseclaw upgrade`: the fix to any part of the install or upgrade
+   process ships in the new release's installer.
+3. Anyone whose `defenseclaw` no longer starts runs the install command again,
+   or `defenseclaw rollback`, which does not need the broken release to work.
 
-- With none of the five Apple Developer ID/notary values, the workflow
-  ad-hoc-signs the macOS app and publishes only DMG/ZIP names ending in
-  `-unverified`.
-- With neither Windows certificate value, the workflow publishes Setup with
-  explicit unverified provenance and requires Authenticode `NotSigned`.
-- Linux and the release checksum manifest continue through their normal
-  keyless Sigstore custody path.
+## One-time: move 0.8.8–0.8.10 upgrades to 1.x
 
-Those bytes are still immutable and authenticated by the signed release
-manifest, but they are not platform-trusted. Release notes and operator
-evidence must preserve that distinction. A partially configured Apple group
-or Windows pair is an error and stops the run; the workflow never silently
-downgrades a requested signed build.
+`defenseclaw upgrade` on 0.8.8–0.8.10 macOS/Linux follows a signed pointer on
+the `release-channel` branch. After the first 1.x release is published and
+verified, run the Release workflow once with `operation: legacy-channel` and
+`version: <that release>`. It runs the 0.8.10 channel publisher from the
+`0.8.10` tag, pointing 0.8.x clients at the release's `defenseclaw-upgrade.sh`,
+which hands off to the latest `install.sh`. It does not need to run again.
 
-## Repair only the stable channel
+## Never change
 
-Use `repair-channel` only when the immutable release is already correct and
-the separate channel job cannot be rerun successfully. The target must be the
-newest immutable stable release. Repair never builds, edits, uploads, or
-replaces a tagged asset.
+- The asset names `install.sh`, `install.ps1` and `defenseclaw-upgrade.sh`, the
+  `releases/latest/download/` and `releases/download/X.Y.Z/` URLs, and bare
+  `X.Y.Z` tags. Every installed client downloads these.
+- The installer flags `--yes`, `--version`, `--local` and `--rollback`
+  (`-Yes`, `-Version`, `-Local`, `-Rollback`). Unknown flags must stay
+  warnings, not errors.
+- `cli/defenseclaw/upgrade_shim.py` stays standard-library only.
+- The install paths: binaries are real files in `~/.local/bin` (hooks record
+  those paths) and the Python environment is `~/.defenseclaw/.venv`.
+- Releases come only from `release.yaml` on `main`; installers and 0.8.x
+  clients check its Sigstore identity.
+- `checksums.txt` stays in the flat `<sha256>  <name>` format and lists
+  `install.sh`, `install.ps1` and `defenseclaw-upgrade.sh`.
+- Never publish `defenseclaw_<v>_<os>_<arch>.*`, `upgrade-manifest.json`,
+  `release-provenance.json` or `DefenseClawSetup-x64.exe`: 0.8.x clients stop
+  safely only because those names do not exist.
+- `defenseclaw-upgrade.sh` keeps its last line
+  `# DefenseClaw upgrade resolver complete v1`.
 
-In GitHub, open **Actions → Release → Run workflow**, select **main**, choose
-`operation=repair-channel`, and enter the published target:
+## Changing the config schema
 
-```bash
-RELEASE_VERSION=0.8.8
+`config.yaml` is validated against the closed schema
+`schemas/config/v8/defenseclaw-config.schema.json` (every object sets
+`additionalProperties: false`), by both the gateway and the CLI.
 
-gh workflow run release.yaml \
-  --repo cisco-ai-defense/defenseclaw \
-  --ref main \
-  -f operation=repair-channel \
-  -f version="$RELEASE_VERSION"
-```
-
-As with a normal release, GitHub binds the dispatch to its own `github.sha`;
-no human-supplied commit or confirmation is required. Watch the exact run ID.
-The repair job re-authenticates the newest immutable target, published checksum
-proof, provenance, source tree, and GitHub asset digests. It then signs a new
-channel document and publishes a non-forced fast-forward child. An invalid old
-tip remains in history; same-version rebinding and rollback remain forbidden.
-Repeat the stable-channel and disposable signed-discovery checks after repair.
-
-## Failure decision tree
-
-| Observed state | Action |
-| --- | --- |
-| A build, installer, or upgrade gate failed and no release exists | Fix the cause, merge it to `main`, and dispatch the still-unused version from the new reviewed commit. A transient failure may use GitHub's **Re-run failed jobs** while its candidate artifacts remain available. |
-| Only an exact same-commit tag exists and no release exists | Let the workflow's namespace reconciliation decide whether the original run or a same-commit redispatch can resume. Do not delete, move, or recreate the tag manually. |
-| Publication returned an ambiguous API error | Inspect the workflow reconciliation and remote namespace. Never retry `gh release create` manually. Escalate any state that is neither absent nor the exact immutable candidate. |
-| The immutable release is green, but `Advance authenticated stable channel` failed | Prefer **Re-run failed jobs** on the original run. If that is unavailable or the channel tip needs authenticated repair, dispatch `operation=repair-channel` for the newest immutable release. |
-| Asset digest, Sigstore, provenance, or remote-custody proof failed | Stop. Investigate the immutable release and evidence. Do not advance or repair the channel merely to hide a custody failure. |
-| A field defect exists in an immutable installer or resolver | Fix it on `main`, publish a new patch version, and advance the signed channel to that new immutable resolver. Never replace the old tagged asset. |
-| Installed CLI discovery is broken | Obtain a rescue bootstrap from an authenticated `0.8.8+` tagged release, verify the saved bytes, and use the external rescue path in `RELEASE_CHANNEL.md`; never pipe an unauthenticated response into a shell. |
-| The proposed repair target is older than the newest immutable stable release | Stop. Channel rollback is forbidden; ship a newer fixed patch instead. |
-
-## Never do these
-
-- Never dispatch the release workflow from a branch other than `main`.
-- Never manually create, push, move, or delete a release tag.
-- Never manually create a GitHub release or upload, edit, or replace an asset
-  attached to an existing tag.
-- Never rerun `operation=release` for an already published version.
-- Never edit, delete, or force-push `release-channel`; only the reviewed
-  workflow may publish a signed fast-forward update.
-- Never point the stable channel at a mutable, older, draft, prerelease, or
-  unauthenticated target.
-- Never remove an upgrade lane, bridge, installer gate, checksum, or custody
-  check to make a release finish.
-- Never use `--allow-unverified`, an unsigned raw branch script, or an
-  unauthenticated `releases/latest` response to rescue an installation.
-- Never call an explicitly `-unverified` or `NotSigned` platform artifact
-  notarized or Authenticode-signed.
-
-## Release record
-
-Retain these facts with the release:
-
-- target version, workflow run ID/URL, workflow commit, and target commit;
-- the exact authenticated Linux/macOS baseline list selected by the workflow;
-- macOS and Windows verification status;
-- immutable release URL and complete public asset inventory;
-- signed checksum verification and digest-check results;
-- Linux, macOS, and Windows install smoke results;
-- Linux and macOS signed-channel upgrade smoke results; and
-- stable-channel commit plus any rerun or repair evidence.
-
-Do not declare the rollout complete while any required item is missing or
-ambiguous.
+- **A new key:** add it to that schema and give it a default in the Python
+  (`cli/defenseclaw/config.py`) and Go (`internal/config`) loaders. No
+  migration is needed. An older release with the same `config_version`
+  rejects the key, so do not write it by default while downgrading to such a
+  release must still work.
+- **Renaming, removing or re-shaping a key:** prefer adding a new key and
+  reading the old one. A `config_version` bump is a larger change: one step in
+  `CONFIG_MIGRATIONS` (`cli/defenseclaw/migrations.py`, keyed by the old
+  version; the runner writes the new version), `CURRENT_CONFIG_VERSION`
+  (`cli/defenseclaw/config.py`), `MaxSupportedConfigVersion`
+  (`internal/config/observability_v8_types.go`), the schema's
+  `config_version` `const`, and every place that still expects exactly 8
+  (`git grep -nE '!= 8|== 8' -- cli/defenseclaw internal`). Do not touch Go's
+  `CurrentConfigVersion` (7), the legacy decoder. `defenseclaw migrate --check`
+  does not validate these steps, so test that a migrated file loads in both
+  loaders.
+- **Audit database changes** are forward-only migrations the gateway applies
+  at startup (`internal/audit/store.go`, and the judge-body and inventory
+  stores); never edit or reorder an existing one.

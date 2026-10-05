@@ -147,7 +147,8 @@ type ProvidersConfig struct {
 }
 
 // LoadProviders parses the embedded providers.json and merges an
-// optional operator overlay at ~/.defenseclaw/custom-providers.json.
+// optional operator overlay at <data dir>/custom-providers.json (see
+// CustomProvidersPath).
 // The overlay is "additive only": it can introduce new providers or
 // extend the ollama_ports list, but a failing parse is tolerated —
 // the built-in registry is always returned even if the overlay is
@@ -171,32 +172,50 @@ func LoadProviders() (*ProvidersConfig, error) {
 	return &cfg, nil
 }
 
-// CustomProvidersPath returns the location of the operator overlay,
-// honoring DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container
-// installs. Empty return value means no overlay applies.
+// CustomProvidersPath returns the location of the operator overlay:
+// DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container installs, else
+// custom-providers.json in the DefenseClaw data dir: DEFENSECLAW_HOME when
+// set (a managed service's data_dir, or a per-user install relocated with
+// it, which is where the Python CLI writes the overlay), otherwise
+// ~/.defenseclaw. Empty return value means no overlay applies.
 func CustomProvidersPath() string {
+	path, _ := customProvidersPath()
+	return path
+}
+
+// customProvidersPath is CustomProvidersPath, and whether the path is the
+// ~/.defenseclaw fallback rather than a location the process was pointed at.
+func customProvidersPath() (path string, fallback bool) {
 	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" {
-		return p
+		return p, false
+	}
+	if dataDir := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); dataDir != "" {
+		return filepath.Join(dataDir, "custom-providers.json"), false
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return ""
+		return "", true
 	}
-	return filepath.Join(home, ".defenseclaw", "custom-providers.json")
+	return filepath.Join(home, ".defenseclaw", "custom-providers.json"), true
 }
 
 // mergeCustomProviders applies the operator overlay in place.
 // Exported through LoadProviders; split for testability.
 func mergeCustomProviders(cfg *ProvidersConfig) {
-	path := CustomProvidersPath()
+	path, fallback := customProvidersPath()
 	if path == "" {
 		return
 	}
 	f, err := os.Open(path) // #nosec G304 — path is a fixed per-user overlay, documented.
 	if err != nil {
-		// ENOENT is the common case — overlay absent. Any other
-		// error is logged but non-fatal.
-		if !os.IsNotExist(err) {
+		// The overlay is optional: an absent file is the common case and
+		// prints nothing. So does one under the ~/.defenseclaw fallback this
+		// account may not read (a service account's or another account's
+		// home), which is not this process's overlay. An overlay in the data
+		// dir the process was pointed at (DEFENSECLAW_HOME or the explicit
+		// path) that it cannot read is logged, since its providers are then
+		// silently missing. Every error is non-fatal.
+		if !os.IsNotExist(err) && !(fallback && os.IsPermission(err)) {
 			fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay open error: %v\n", err)
 		}
 		return

@@ -231,7 +231,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("openhands"), "action")
         self.assertFalse(g.effective_enabled("openhands"))
         # Genuinely-absent connector still falls through to the global.
-        self.assertEqual(g.effective_mode("windsurf"), "observe")
+        self.assertEqual(g.effective_mode("retired-example"), "observe")
 
     def test_effective_enabled(self):
         # Mirrors Go EffectiveEnabled: default True; False only on an
@@ -248,7 +248,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertTrue(g.effective_enabled("claudecode"))
         self.assertTrue(g.effective_enabled("cursor"))
         # Unknown / empty / single-connector all default True.
-        self.assertTrue(g.effective_enabled("windsurf"))
+        self.assertTrue(g.effective_enabled("retired-example"))
         self.assertTrue(g.effective_enabled(""))
         self.assertTrue(GuardrailConfig(connector="codex").effective_enabled("codex"))
 
@@ -619,42 +619,33 @@ class TestResolveListConnector(unittest.TestCase):
         message = str(cm.exception)
         self.assertIn("Configured connectors: codex", message)
         self.assertNotIn("Active connectors:", message)
+        self.assertIn("To add it: defenseclaw setup <connector>", message)
 
-    def test_cleanup_only_connector_is_rejected_with_antigravity_migration(self):
+    def test_known_connector_not_configured_names_setup_command(self):
         import click
         from defenseclaw.commands import resolve_list_connector
 
-        app = self._app(connector="geminicli")
+        app = self._app(connector="claudecode", connectors=["codex"])
         with self.assertRaises(click.UsageError) as cm:
-            resolve_list_connector(app, "")
-        message = str(cm.exception)
-        self.assertIn("cleanup-only", message)
-        self.assertIn("Antigravity", message)
-        self.assertIn("setup remove geminicli --yes", message)
+            resolve_list_connector(app, "cursor")
+        self.assertIn("To add it: defenseclaw setup cursor", str(cm.exception))
 
-    def test_asset_fanout_skips_cleanup_only_connector(self):
-        from defenseclaw.commands import resolve_list_connectors
-
-        app = self._app(
-            connector="codex",
-            connectors=["codex", "geminicli", "cursor"],
-        )
-        self.assertEqual(
-            resolve_list_connectors(app, ""),
-            ["codex", "cursor"],
-        )
-
-    def test_explicit_cleanup_only_connector_is_rejected_in_mixed_roster(self):
+    def test_no_connector_configured_says_so_without_openclaw(self):
+        # GAP-1690: after "init --connector none" nothing is configured, so
+        # the error must not list the phantom "openclaw" default.
         import click
-        from defenseclaw.commands import resolve_list_connectors
+        from defenseclaw.commands import resolve_list_connector
 
-        app = self._app(
-            connector="codex",
-            connectors=["codex", "geminicli"],
-        )
-        with self.assertRaises(click.UsageError) as cm:
-            resolve_list_connectors(app, "gemini-cli")
-        self.assertIn("Antigravity", str(cm.exception))
+        app = self._app(connector="")
+        app.cfg.claw.mode = ""
+        with self.assertRaises(click.ClickException) as cm:
+            resolve_list_connector(app, "claudecode")
+        self.assertNotIsInstance(cm.exception, click.UsageError)
+        self.assertEqual(cm.exception.exit_code, 1)
+        message = str(cm.exception)
+        self.assertIn("no connector is configured yet", message)
+        self.assertIn("defenseclaw setup claude-code", message)
+        self.assertNotIn("openclaw", message)
 
 
 if __name__ == "__main__":

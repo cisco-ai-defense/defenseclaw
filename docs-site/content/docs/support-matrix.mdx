@@ -1,0 +1,84 @@
+---
+title: Support matrix
+description: Which AI coding agents and DefenseClaw features work on Linux, macOS and Windows, in the open-source and enterprise editions, and what live tests verified for DefenseClaw 1.0.
+keywords:
+  - DefenseClaw support matrix
+  - DefenseClaw supported platforms
+  - DefenseClaw Windows support
+  - DefenseClaw enterprise vs open source
+  - AI coding agent support
+---
+
+import {
+  ConnectorOsMatrix,
+  EditionMatrix,
+  PlatformTable,
+  StatusLegend,
+} from '@/components/support-matrix';
+
+This page answers three questions: does DefenseClaw protect my agent on my
+operating system, which features come with each edition, and how the
+enterprise edition attaches to each agent. Every **Supported** cell was
+verified by a live test in this release. Everything else is labeled.
+
+<StatusLegend />
+
+- **Open source** is the per-user install: one command, and each user runs
+  their own DefenseClaw. Start with the [Download](/docs/get-started/download)
+  page.
+- **Enterprise** is the managed standalone profile an administrator deploys
+  with a package or an MDM. Users can't turn it off. Start with
+  [Deploy to a fleet](/docs/enterprise/get-started). The Secure Client
+  profile is covered in
+  [Secure Client managed deployment](/docs/enterprise/secure-client).
+
+## Agents
+
+**Supported** means a live test on that OS verified the agent's hooks and a
+block before the tool call ran. A cell says so when the agent's telemetry to
+Grafana and Galileo wasn't verified there. Switch to **Enterprise** for the
+managed edition. Select an agent for its setup page.
+
+<ConnectorOsMatrix />
+
+The connector contract behind each row (block events, native ask, fail
+closed, sandbox tier) is on the [capability matrix](/docs/connectors/capability-matrix).
+Exact version ranges are on [Compatibility](/docs/connectors/compatibility).
+
+## Features
+
+<EditionMatrix />
+
+**Not offered** in the enterprise columns means the feature is a per-user
+command. The enterprise packages don't install the per-user `defenseclaw`
+CLI, and a managed computer refuses per-user commands. The administrator
+configures the managed gateway through its
+[config](/docs/enterprise/configuration) instead.
+
+## Enterprise
+
+In the enterprise edition DefenseClaw attaches to each agent in one of two
+ways:
+
+- **Machine policy.** DefenseClaw's hooks sit in the agent vendor's
+  administrator-owned policy files, which apply to every user of the
+  computer. See [Machine policy](/docs/enterprise/machine-policy).
+- **Per-user.** The guardian writes DefenseClaw's hook or plugin into each
+  enrolled user's own agent config and repairs it if it changes. See
+  [Enrollment](/docs/enterprise/enrollment).
+
+<ConnectorOsMatrix edition="enterprise" />
+
+## Platforms
+
+<PlatformTable />
+
+Intel Macs aren't supported, and Windows is x64 only. The
+full requirements are on [Install](/docs/get-started/install) and, for the
+enterprise packages, under **Requirements** on the
+[Windows](/docs/enterprise/windows#requirements),
+[Linux](/docs/enterprise/linux#requirements) and
+[macOS](/docs/enterprise/macos#requirements) pages.
+
+Agents that connect through the guardrail proxy aren't part of this matrix.
+Their pages are listed under [Connectors](/docs/connectors).

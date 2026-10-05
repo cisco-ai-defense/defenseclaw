@@ -127,9 +127,14 @@ class InventoryPlugin:
             id=str(raw.get("id") or ""),
             name=str(raw.get("name") or ""),
             version=str(raw.get("version") or ""),
-            origin=str(raw.get("origin") or ""),
+            # GAP-1593: Hermes rows carry source_kind and enabled, not
+            # origin and status; show them as 'plugin list' does.
+            origin=str(raw.get("origin") or raw.get("source_kind") or ""),
             enabled=bool(raw.get("enabled")),
-            status=str(raw.get("status") or ""),
+            status=str(
+                raw.get("status")
+                or (("enabled" if raw.get("enabled") else "disabled") if "enabled" in raw else "")
+            ),
             verdict=str(raw.get("policy_verdict") or raw.get("verdict") or ""),
             verdict_detail=str(raw.get("policy_detail") or raw.get("verdict_detail") or ""),
             scan_findings=int(raw.get("scan_findings") or 0),
@@ -287,6 +292,9 @@ class InventorySummary:
     plugins: Mapping[str, Any] = field(default_factory=dict)
     mcp: Mapping[str, Any] = field(default_factory=dict)
     agents: Mapping[str, Any] = field(default_factory=dict)
+    # Counted only: rule files ("Rules (Hermes 1)" in aibom) have no sub-tab
+    # yet, but the Summary lists them so every aibom category shows (GAP-1546).
+    rules: Mapping[str, Any] = field(default_factory=dict)
     tools: Mapping[str, Any] = field(default_factory=dict)
     models: Mapping[str, Any] = field(default_factory=dict)
     memory: Mapping[str, Any] = field(default_factory=dict)
@@ -307,6 +315,7 @@ class InventorySummary:
             plugins=_mapping(raw.get("plugins")),
             mcp=_mapping(raw.get("mcp")),
             agents=_mapping(raw.get("agents")),
+            rules=_mapping(raw.get("rules")),
             tools=_mapping(raw.get("tools")),
             models=_mapping(raw.get("model_providers")),
             memory=_mapping(raw.get("memory")),
@@ -435,6 +444,9 @@ class InventorySnapshot:
             raw = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError(f"parse inventory json: {exc}") from exc
+        if raw == []:
+            # aibom scan --json with no connector configured (GAP-2073).
+            raw = {}
         if not isinstance(raw, Mapping):
             raise ValueError("parse inventory json: expected object")
         return cls.from_mapping(raw)
@@ -735,11 +747,13 @@ class InventoryPanelModel:
         memory = tuple(item for snap in snaps for item in snap.memory)
         total_errors = sum(len(snap.errors) for snap in snaps)
         limitations = tuple(item for snap in snaps for item in snap.limitations)
+        rules = sum(_int_count(snap.summary.rules) for snap in snaps)
         total_items = (
             len(skills)
             + len(plugins)
             + len(mcps)
             + len(agents)
+            + rules
             + len(tools)
             + len(models)
             + len(memory)
@@ -750,6 +764,7 @@ class InventoryPanelModel:
             plugins={"count": str(len(plugins))},
             mcp={"count": str(len(mcps))},
             agents={"count": str(len(agents))},
+            rules={"count": str(rules)},
             tools={"count": str(len(tools))},
             models={"count": str(len(models))},
             memory={"count": str(len(memory))},
@@ -906,13 +921,19 @@ class InventoryPanelModel:
             "plugins": _map_val(inv.summary.plugins, "count"),
             "mcp": _map_val(inv.summary.mcp, "count"),
             "agents": _map_val(inv.summary.agents, "count"),
+            "rules": str(_int_count(inv.summary.rules)),
             "tools": _map_val(inv.summary.tools, "count"),
             "models": _map_val(inv.summary.models, "count"),
             "memory": _map_val(inv.summary.memory, "count"),
         }
-        config_path = inv.openclaw_config
-        if inv.connector_config_files and inv.connector_config_files[0]:
-            config_path = inv.connector_config_files[0]
+        from defenseclaw.inventory.claw_inventory import aibom_display_config
+
+        config_path = aibom_display_config({
+            "connector": connector,
+            "openclaw_config": inv.openclaw_config,
+            "connector_config_files": list(inv.connector_config_files),
+            "connector_mcp_files": list(inv.connector_mcp_files),
+        }) or inv.openclaw_config
         return InventorySummaryState(
             connector_name=connector,
             source_label=source_label,
@@ -934,12 +955,30 @@ class InventoryPanelModel:
         if summary is None:
             return ()
         inv = self._summary_inventory()
+        # Under "All" in a multi-connector install the merged snapshot's
+        # Source/Home/Config belong to the primary connector only; name every
+        # connector instead and leave the per-connector paths to the filter
+        # (GAP-1156).
+        merged_names = (
+            [friendly_connector_name(name) for name, _snap in self.connector_snapshots]
+            if not (self.connector_filter or "").strip() and len(self.connector_snapshots) > 1
+            else []
+        )
+        if merged_names:
+            origin: list[tuple[str, str]] = [
+                ("Source", f"All {len(merged_names)} connectors: {', '.join(merged_names)}"),
+                ("Home / Config", "per connector (press m to pick one)"),
+            ]
+        else:
+            origin = [
+                ("Source", summary.source_label),
+                ("Home", summary.home_path),
+                ("Config", summary.config_path),
+            ]
         rows: list[tuple[str, str]] = [
             ("AIBOM version", summary.version),
             ("Generated", summary.generated_at),
-            ("Source", summary.source_label),
-            ("Home", summary.home_path),
-            ("Config", summary.config_path),
+            *origin,
             ("Total items", summary.counts["total_items"]),
             ("Skills", _count_with_suffix(summary.counts["skills"], "eligible", inv.summary.skills if inv else {})),
             (
@@ -951,6 +990,12 @@ class InventoryPanelModel:
             ),
             ("MCPs", summary.counts["mcp"]),
             ("Agents", summary.counts["agents"]),
+            (
+                "Rules",
+                summary.counts["rules"]
+                if summary.counts["rules"] == "0"
+                else f"{summary.counts['rules']} (list them with: defenseclaw aibom scan)",
+            ),
             ("Tools", summary.counts["tools"]),
             ("Models", summary.counts["models"]),
             ("Memory", summary.counts["memory"]),
@@ -1203,14 +1248,17 @@ class InventoryPanelModel:
                 return self.summary_table_rows()
 
     def handle_key(self, key: str) -> InventoryPanelAction:
+        # Digits 1-4 are filters only on the Skills and Plugins sub-tabs.
+        # Everywhere else they fall through to the panel shortcuts, so "3"
+        # opens Skills as the tab bar says (GAP-1156).
+        if key in {"1", "2", "3", "4"} and self.active_sub not in {"skills", "plugins"}:
+            return InventoryPanelAction(False)
         if key == "1":
             self.filter = ""
             self.cursor = 0
             self.detail_open = False
-            return InventoryPanelAction(True, hint="Inventory filter: all.")
+            return InventoryPanelAction(True, hint="Inventory filter: all. (Digits filter on this sub-tab; Ctrl+P switches panel.)")
         if key in {"2", "3", "4"}:
-            if self.active_sub not in {"skills", "plugins"}:
-                return InventoryPanelAction(True)
             if self.active_sub == "skills":
                 filters: Mapping[str, InventoryFilter] = {
                     "2": "eligible",
@@ -1227,12 +1275,17 @@ class InventoryPanelModel:
             self.cursor = 0
             self.detail_open = False
             label = self.filter or "all"
-            return InventoryPanelAction(True, hint=f"Inventory filter: {label}.")
-        if key in {"h", "left", "shift+tab"}:
+            return InventoryPanelAction(
+                True,
+                hint=f"Inventory filter: {label} (1 shows all). Digits filter on this sub-tab; Ctrl+P switches panel.",
+            )
+        # Tab / Shift+Tab stay global (next / previous panel), as the help
+        # says; h/l walk the sub-tabs (GAP-1641).
+        if key in {"h", "left"}:
             before = self.active_sub
             self.move_subtab(-1)
             return InventoryPanelAction(True, hint="" if self.active_sub != before else "(first inventory sub-tab)")
-        if key in {"l", "right", "tab"}:
+        if key in {"l", "right"}:
             before = self.active_sub
             self.move_subtab(1)
             return InventoryPanelAction(True, hint="" if self.active_sub != before else "(last inventory sub-tab)")
@@ -1252,7 +1305,8 @@ class InventoryPanelModel:
             return InventoryPanelAction(True, detail_opened=True)
         if key == "o":
             self.toggle_fast_scan()
-            return InventoryPanelAction(True, hint=f"scope={','.join(self.category_scope) or 'all'}")
+            scope = ", ".join(self.category_scope) or "all categories"
+            return InventoryPanelAction(True, hint=f"The next inventory scan (r) covers {scope}.")
         if key == "r":
             return InventoryPanelAction(True, self.load_intent())
         return InventoryPanelAction(False)
@@ -1291,6 +1345,13 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _int_count(raw: Mapping[str, Any]) -> int:
+    try:
+        return int(raw.get("count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _map_val(mapping: Mapping[str, Any], key: str) -> str:
     if key not in mapping:
         return "0"
@@ -1318,7 +1379,7 @@ def _plugin_count_summary(count: str, mapping: Mapping[str, Any]) -> str:
 
 def _verdict_summary(mapping: Mapping[str, str]) -> str:
     parts: list[str] = []
-    for key in ("blocked", "rejected", "allowed", "warning", "clean", "unscanned"):
+    for key in ("blocked", "rejected", "allowed", "warning", "clean", "unscanned", "discovery-only"):
         value = mapping.get(key, "0")
         if value not in {"", "0"}:
             parts.append(f"{value} {key}")

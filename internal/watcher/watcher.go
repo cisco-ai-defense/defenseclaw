@@ -18,6 +18,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,9 +35,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -88,6 +89,9 @@ type AdmissionResult struct {
 	InstallAction string
 	FileAction    string
 	RuntimeAction string
+	// ScanID is the scan_results row admission recorded, or "" when no
+	// scan was logged. It becomes the rescan baseline's scan (GAP-2507).
+	ScanID string
 }
 
 // OnAdmission is called after each install event is processed.
@@ -111,9 +115,23 @@ type InstallWatcher struct {
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
 	managedArtifacts []string
+	// bundledPlugin reports whether a plugin path is DefenseClaw's own plugin,
+	// byte-identical to the copy this gateway ships (OpenClaw, GAP-1525).
+	bundledPlugin func(path string) bool
+	// bundledPluginDir is where the connector writes that plugin at gateway
+	// start. The startup rescan defers it until Setup has refreshed it.
+	bundledPluginDir string
+	// startupRescanDone is set after the first rescan cycle (rescan goroutine
+	// only).
+	startupRescanDone bool
+	// startupAdmitRoots are the skill and plugin roots that already held
+	// baselines when the startup rescan began (rescan goroutine only).
+	startupAdmitRoots map[InstallType][]string
+	// markedWatchRoots caches the root markers written by this process
+	// (rescan goroutine only).
+	markedWatchRoots map[string]bool
 	store            *audit.Store
 	logger           *audit.Logger
-	shell            *sandbox.OpenShell
 	opa              *policy.Engine
 	webhooks         WebhookDispatcher
 	debounce         time.Duration
@@ -121,6 +139,13 @@ type InstallWatcher struct {
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
+
+	// pluginWaiting holds plugin-root folders that had nothing to admit yet
+	// (empty or category folders) and are watched for what lands in them;
+	// addWatch adds such a watch. Both are used on the Run goroutine only
+	// (GAP-2449).
+	pluginWaiting map[string]struct{}
+	addWatch      func(dir string)
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   ObservabilityV8Runtime
@@ -147,7 +172,7 @@ func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
 // to the built-in Go admission logic. Watcher observability is exclusively
 // emitted through the audit logger's generated v8 runtime.
-func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
+func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -158,7 +183,6 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		pluginDirs:       pluginDirs,
 		store:            store,
 		logger:           logger,
-		shell:            shell,
 		opa:              opa,
 		debounce:         debounce,
 		onAdmit:          onAdmit,
@@ -195,6 +219,35 @@ func (w *InstallWatcher) SetManagedArtifacts(paths []string) {
 	}
 }
 
+// SetBundledPluginCheck binds the connector's check for its own shipped plugin.
+// A plugin that passes is DefenseClaw's own and is not scanned; one with an
+// added or changed file fails the check and is scanned like any other.
+func (w *InstallWatcher) SetBundledPluginCheck(check func(path string) bool) {
+	w.bundledPlugin = check
+}
+
+// SetBundledPluginDir records where the connector installs its own plugin.
+func (w *InstallWatcher) SetBundledPluginDir(dir string) {
+	w.bundledPluginDir = dir
+}
+
+// isBundledPluginDir reports whether path is the connector's own plugin dir.
+func (w *InstallWatcher) isBundledPluginDir(path string) bool {
+	if w.bundledPluginDir == "" {
+		return false
+	}
+	got, err1 := filepath.Abs(path)
+	want, err2 := filepath.Abs(w.bundledPluginDir)
+	return err1 == nil && err2 == nil && filepath.Clean(got) == filepath.Clean(want)
+}
+
+// isOwnPlugin reports whether a plugin path is connector-managed or
+// DefenseClaw's own unmodified plugin. Admission and the periodic rescan both
+// skip such plugins, so neither raises findings on DefenseClaw's own code.
+func (w *InstallWatcher) isOwnPlugin(path string) bool {
+	return w.isManagedArtifact(path) || (w.bundledPlugin != nil && w.bundledPlugin(path))
+}
+
 func (w *InstallWatcher) isManagedArtifact(path string) bool {
 	for _, managedPath := range w.managedArtifacts {
 		if sameWatcherPath(path, managedPath) {
@@ -219,6 +272,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	watched := 0
 	watchedDirs := make(map[string]struct{})
+	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
+	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
 	watchOnce := func(dir, kind string) bool {
 		absolute, absErr := filepath.Abs(dir)
 		if absErr != nil {
@@ -228,7 +283,21 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if _, exists := watchedDirs[key]; exists {
 			return true
 		}
-		if err := ensureAndWatch(fsw, dir); err != nil {
+		if createsAgentOwnedDir(dir) {
+			// Watched once the agent's own installer creates it (GAP-2354).
+			deferredDirs = append(deferredDirs, [2]string{dir, kind})
+			fmt.Printf("[watch] %s dir %s does not exist yet; watching it once the agent creates it\n", kind, dir)
+			return false
+		}
+		created, err := ensureAndWatch(fsw, dir)
+		if len(created) > 0 {
+			// Uninstall removes these again while they are empty (and the
+			// OpenCode teardown removes its own).
+			if recordErr := gatewayconnector.RecordWatcherCreatedDirs(w.cfg.DataDir, created); recordErr != nil {
+				fmt.Fprintf(os.Stderr, "[watch] record created dirs: %v\n", recordErr)
+			}
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
@@ -238,12 +307,21 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		return true
 	}
 	for _, dir := range w.skillDirs {
-		watchOnce(dir, "skill")
+		if watchOnce(dir, "skill") {
+			// Claude Code syncs account skills two levels down
+			// (skills/synced/<account>/<skill>); watch those folders too so
+			// a newly synced skill is scanned on arrival (GAP-1409).
+			synced := filepath.Join(dir, "synced")
+			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
+				addDirWatches(fsw, synced, 1, watchedDirs)
+			}
+		}
 	}
 	for _, dir := range w.pluginDirs {
 		if !watchOnce(dir, "plugin") {
 			continue
 		}
+		w.watchExistingPluginFolders(dir)
 		if watcherConnectorName(w.cfg) == "claudecode" &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
 			addClaudeCacheWatches(fsw, dir, watchedDirs)
@@ -275,6 +353,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
+			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+				forgetDirWatches(fsw, event.Name, watchedDirs)
+			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
@@ -289,17 +370,46 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
+			if depth, inside := w.claudeSyncedDepth(event.Name); inside {
+				if info, statErr := os.Stat(event.Name); statErr != nil || !info.IsDir() {
+					continue
+				}
+				switch depth {
+				case 0:
+					// The synced folder itself: watch it and its account
+					// folders; the event below expands it into its skills.
+					addDirWatches(fsw, event.Name, 1, watchedDirs)
+				case 1:
+					// A new account folder: watch it and queue the skills
+					// already inside (they can land before the watch).
+					addDirWatches(fsw, event.Name, 0, watchedDirs)
+					children, _ := os.ReadDir(event.Name)
+					for _, child := range children {
+						if child.IsDir() && !strings.HasPrefix(child.Name(), ".") {
+							w.queueSyncedSkill(ctx, filepath.Join(event.Name, child.Name()))
+						}
+					}
+					continue
+				default:
+					w.queueSyncedSkill(ctx, event.Name)
+					continue
+				}
+			}
+			queued := event.Name
 			if !w.isDirectChildDir(event.Name) {
-				continue
+				var ok bool
+				if queued, ok = w.waitingPluginEvent(event.Name); !ok {
+					continue
+				}
 			}
 			evtType := "create"
 			if event.Op&fsnotify.Rename != 0 {
 				evtType = "rename"
 			}
-			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
+			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(queued).Type.String(), "")
 			w.mu.Lock()
-			if _, exists := w.pending[event.Name]; !exists {
-				w.pending[event.Name] = time.Now()
+			if _, exists := w.pending[queued]; !exists {
+				w.pending[queued] = time.Now()
 			}
 			w.mu.Unlock()
 
@@ -311,6 +421,19 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[watch] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
+			if len(deferredDirs) > 0 {
+				waiting := deferredDirs
+				deferredDirs = nil
+				for _, entry := range waiting {
+					if _, statErr := os.Lstat(entry[0]); statErr != nil {
+						deferredDirs = append(deferredDirs, entry)
+						continue
+					}
+					if watchOnce(entry[0], entry[1]) && entry[1] == "plugin" {
+						w.watchExistingPluginFolders(entry[0])
+					}
+				}
+			}
 			w.processPending(ctx)
 		}
 	}
@@ -335,7 +458,9 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 			continue
 		}
 		for _, evt := range w.pendingInstallEvents(path) {
+			snap := w.admissionSnapshot(evt)
 			result := w.runAdmission(ctx, evt)
+			w.recordAdmissionBaseline(evt, snap, result.ScanID)
 			if w.onAdmit != nil {
 				w.onAdmit(result)
 			}
@@ -348,6 +473,24 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 // the original category event so it fails open to scanning.
 func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 	fallback := w.classifyEvent(path)
+	if depth, ok := w.claudeSyncedDepth(path); ok && depth == 2 {
+		fallback.Type = InstallSkill
+		return []InstallEvent{fallback}
+	}
+	if synced, ok := claudeSyncedSkillDirs(path); ok {
+		out := make([]InstallEvent, 0, len(synced))
+		for _, skill := range synced {
+			evt := w.classifyEvent(skill)
+			evt.Type = InstallSkill
+			out = append(out, evt)
+		}
+		return out
+	}
+	if fallback.Type == InstallPlugin {
+		if events, ok := w.pluginFolderEvents(path); ok {
+			return events
+		}
+	}
 	for _, root := range w.skillDirs {
 		if !hermesskills.IsRoot(root) || !watcherPathAtOrBelow(path, root) {
 			continue
@@ -463,6 +606,13 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			Reason:  "connector-managed plugin is lifecycle-owned and discovery-only",
 		}
 	}
+	if evt.Type == InstallPlugin && w.bundledPlugin != nil && w.bundledPlugin(evt.Path) {
+		return AdmissionResult{
+			Event:   evt,
+			Verdict: VerdictAllowed,
+			Reason:  "DefenseClaw's own plugin, identical to the bundled copy",
+		}
+	}
 	// Vendor-managed skills remain visible to inventory, but
 	// must never enter scanner or enforcement paths. Check both the lexical
 	// and resolved path so an alias outside a bundle cannot bypass the boundary.
@@ -500,8 +650,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// evt.Path we drop the allow and force a fresh scan/decision.
 	if existing, _ := pe.GetAction(targetType, evt.Name); existing != nil {
 		if existing.Actions.Install == "allow" && existing.SourcePath != "" && existing.SourcePath != evt.Path {
-			_ = w.logger.LogAction("install-allow-path-mismatch", evt.Path,
-				fmt.Sprintf("type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
+			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+				fmt.Sprintf("reason=allow-path-mismatch type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
 					targetType, evt.Name, existing.SourcePath, evt.Path))
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)
@@ -658,11 +808,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
-		_ = w.logScan(ctx, evt, result, "blocked")
+		scanID := w.logScanID(ctx, evt, result, "blocked")
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "blocked", targetType)
 		res = AdmissionResult{
-			Event: evt, Verdict: VerdictBlocked, Reason: reason,
+			ScanID: scanID,
+			Event:  evt, Verdict: VerdictBlocked, Reason: reason,
 			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 			InstallAction: "block",
 		}
@@ -672,10 +823,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
-		_ = w.logScan(ctx, evt, result, "allowed")
+		scanID := w.logScanID(ctx, evt, result, "allowed")
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{
-			Event: evt, Verdict: VerdictAllowed, Reason: reason,
+			ScanID: scanID,
+			Event:  evt, Verdict: VerdictAllowed, Reason: reason,
 			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 			InstallAction: "allow",
 		}
@@ -701,10 +853,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		out, evalErr := w.opa.Evaluate(ctx, input)
 		if evalErr == nil {
 			w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-			_ = w.logScan(ctx, evt, result, out.Verdict)
+			scanID := w.logScanID(ctx, evt, result, out.Verdict)
 			w.recordAdmission(ctx, out.Verdict, targetType)
 			res = AdmissionResult{
-				Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
+				ScanID: scanID,
+				Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
 				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 				InstallAction: out.InstallAction,
 				FileAction:    out.FileAction,
@@ -730,10 +883,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		ScanResult: scanInput,
 	}, fallbackProfile)
 	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-	_ = w.logScan(ctx, evt, result, out.Verdict)
+	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
 	res = AdmissionResult{
-		Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
+		ScanID: scanID,
+		Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
 		MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
 		InstallAction: out.InstallAction,
 		FileAction:    out.FileAction,
@@ -768,6 +922,12 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 
 		if w.takeActionFor(evt) {
 			blockReason := fmt.Sprintf("auto-block: watch detected %s findings (scanner=%s)", result.MaxSeverity(), scannerName)
+			// An operator restore keeps the files only while the install
+			// block it left in place remains. Decide that before this scan
+			// adds its own block: after an unblock + restore, the block below
+			// is a fresh decision and the files must be quarantined again,
+			// not retained under a "quarantined" record (GAP-1971).
+			retainRestored := w.preserveRestoredBlockedAsset(evt)
 
 			installAction := coalesce(out.InstallAction, "block")
 			runtimeAction := coalesce(out.RuntimeAction, "allow")
@@ -785,7 +945,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 				"file":        fileAction,
 			}
 
-			if fileAction == "quarantine" {
+			if fileAction == "quarantine" && !retainRestored {
 				_ = pe.Quarantine(targetType, evt.Name, blockReason)
 			}
 			if runtimeAction == "block" {
@@ -796,7 +956,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 				fmt.Sprintf("type=%s reason=%s", targetType, blockReason), enforcement)
 
 			if fileAction == "quarantine" || runtimeAction == "block" {
-				w.enforceBlock(ctx, evt)
+				w.enforceBlockWith(ctx, evt, retainRestored)
 			}
 		}
 	case "warning":
@@ -910,21 +1070,36 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 }
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
+	w.enforceBlockWith(ctx, evt, true)
+}
+
+// enforceBlockWith applies the block; honorRestore keeps the files of an
+// operator-restored asset whose earlier install block still stands.
+func (w *InstallWatcher) enforceBlockWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
 	switch evt.Type {
 	case InstallMCP:
-		me := enforce.NewMCPEnforcer(w.shell)
-		_ = me.BlockEndpoint(evt.Name)
+		// MCP servers have no filesystem artifact to quarantine. The sidecar's
+		// handleMCPAdmission applies the block verdict to the connector's MCP
+		// configuration from the admission result this watcher publishes.
 	case InstallSkill, InstallPlugin:
-		w.quarantineAsset(ctx, evt)
+		w.quarantineAssetWith(ctx, evt, honorRestore)
 	}
 }
 
+// pluginCategoryQuarantineDir is the quarantine tree of plugins in a Hermes
+// category folder (cli/defenseclaw/enforce/plugin_enforcer.py mirrors it).
+const pluginCategoryQuarantineDir = "plugin-categories"
+
 func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
+	w.quarantineAssetWith(ctx, evt, true)
+}
+
+func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
 	if w == nil || w.cfg == nil || w.store == nil {
 		w.emitQuarantineFailure(ctx, evt.Path, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
 		return
 	}
-	if w.preserveRestoredBlockedAsset(evt) {
+	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
 		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
 		return
@@ -943,6 +1118,17 @@ func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) 
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt.Path, err)
 		return
+	}
+	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
+		// A plugin in a category folder keeps its category in quarantine, so
+		// "plugin restore <category>/<name>" finds it and web/x and memx/x
+		// don't share one slot (GAP-2464). It lives in its own tree
+		// (plugin-categories/<connector>/<category>/<name>), not inside the
+		// slot of a flat plugin named like the category, which "plugin
+		// restore <category>" would otherwise restore with it (GAP-2470).
+		plan.QuarantinePath = filepath.Join(
+			plan.QuarantineRoot, pluginCategoryQuarantineDir, connector, filepath.Base(category), physicalName,
+		)
 	}
 	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
 		TargetType: evt.Type.String(), TargetName: evt.Name,
@@ -1097,17 +1283,25 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 	if connector != "" {
 		connectors = append(connectors, "")
 	}
+	// A restore clears the file action in every scope it owned. A file
+	// action set in any scope since then is a later quarantine decision (for
+	// example a re-scan block after unblock + restore), so the restored-files
+	// exception no longer applies and a re-added copy is quarantined
+	// (GAP-1971).
+	restored := false
 	for _, scope := range connectors {
 		entry, err := w.store.GetActionForConnector(evt.Type.String(), evt.Name, scope)
 		if err != nil || entry == nil {
 			continue
 		}
-		if entry.Actions.File == "" && entry.SourcePath != "" &&
-			sameWatcherPath(entry.SourcePath, evt.Path) {
-			return true
+		if entry.Actions.File != "" {
+			return false
+		}
+		if entry.SourcePath != "" && sameWatcherPath(entry.SourcePath, evt.Path) {
+			restored = true
 		}
 	}
-	return false
+	return restored
 }
 
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
@@ -1217,7 +1411,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.pluginDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
-			return true
+			return !skipPluginChildDir(filepath.Base(path))
 		}
 	}
 	if watcherConnectorName(w.cfg) == "claudecode" {
@@ -1270,6 +1464,15 @@ func (w *InstallWatcher) recordScanError(
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordWatcherScanErrorMetric(ctx, scannerName, targetType, errorType)
 	}
+}
+
+// logScanID logs an admission scan and returns its scan id, or "" when the
+// scan row was not written.
+func (w *InstallWatcher) logScanID(ctx context.Context, evt InstallEvent, result *scanner.ScanResult, verdict string) string {
+	if err := w.logScan(ctx, evt, result, verdict); err != nil {
+		return ""
+	}
+	return result.ScanID
 }
 
 func (w *InstallWatcher) logScan(
@@ -1353,21 +1556,102 @@ func toFindingInputs(findings []scanner.Finding) []policy.FindingInput {
 	return out
 }
 
-func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
+// agentOwnedDirNames are folders an agent's own installer creates and expects
+// to be absent: the Hermes installer refuses an existing ~/.hermes/hermes-agent
+// that is not its git checkout (GAP-2354).
+var agentOwnedDirNames = map[string]struct{}{"hermes-agent": {}}
+
+// createsAgentOwnedDir reports whether creating dir would also create one of
+// agentOwnedDirNames (dir itself or a missing parent).
+func createsAgentOwnedDir(dir string) bool {
+	current, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	for {
+		if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		if _, owned := agentOwnedDirNames[strings.ToLower(filepath.Base(current))]; owned {
+			return true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+}
+
+// ensureAndWatch creates dir when it is missing and watches it. It returns
+// the absolute paths of the folders it created: dir and any missing parents.
+func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
+	var created []string
+	if current, err := filepath.Abs(dir); err == nil {
+		for {
+			if _, err := os.Lstat(current); !errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+			created = append(created, current)
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+			current = parent
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create dir: %w", err)
+		return nil, fmt.Errorf("create dir: %w", err)
 	}
 
 	if err := fsw.Add(dir); err != nil {
-		return fmt.Errorf("watch: %w", err)
+		return created, fmt.Errorf("watch: %w", err)
 	}
 
-	return nil
+	return created, nil
 }
 
 func addClaudeCacheWatches(
 	fsw *fsnotify.Watcher,
 	root string,
+	watched map[string]struct{},
+) {
+	addDirWatches(fsw, root, 2, watched)
+}
+
+// forgetDirWatches drops the watches of path and the folders below it once
+// path was moved (to quarantine) or removed. fsnotify drops the watch of the
+// moved folder itself, but watchedDirs kept its key, so addDirWatches skipped
+// a folder re-created at the same path and nothing added to it reached
+// admission (GAP-2469). Watches of sub-folders that moved along are removed
+// too, so events inside quarantine aren't reported under the old path.
+func forgetDirWatches(fsw *fsnotify.Watcher, path string, watched map[string]struct{}) {
+	key := strings.ToLower(filepath.Clean(path))
+	if _, ok := watched[key]; !ok {
+		return
+	}
+	below := func(p string) bool {
+		p = strings.ToLower(filepath.Clean(p))
+		return p == key || strings.HasPrefix(p, key+string(filepath.Separator))
+	}
+	for k := range watched {
+		if below(k) {
+			delete(watched, k)
+		}
+	}
+	for _, p := range fsw.WatchList() {
+		if below(p) {
+			_ = fsw.Remove(p)
+		}
+	}
+}
+
+// addDirWatches watches root and its real (non-symlink) subfolders down to
+// maxDepth levels below it.
+func addDirWatches(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
 	watched map[string]struct{},
 ) {
 	root = filepath.Clean(root)
@@ -1395,7 +1679,7 @@ func addClaudeCacheWatches(
 				return r == '/' || r == '\\'
 			}))
 		}
-		if depth > 2 {
+		if depth > maxDepth {
 			return fs.SkipDir
 		}
 		key := strings.ToLower(filepath.Clean(path))

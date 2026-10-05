@@ -103,7 +103,7 @@
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
-      "purpose": "Bypass the action-mode fail-closed checks for unverified hook contracts and hook-contract lock drift during connector setup, allowing enforcing hooks to be installed against agent versions outside the verified contract matrix.",
+      "purpose": "Bypass the action-mode fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
       "default": "unset (fail-closed in action mode)",
       "accepted_values": [
         "1",
@@ -232,6 +232,25 @@
         }
       ],
       "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_APP_PATH",
+      "category": "runtime_path",
+      "purpose": "macOS app bundle that install.sh replaces with the release's app; `none` skips the app.",
+      "default": "/Applications/DefenseClawMac.app when present",
+      "accepted_values": [
+        "any-absolute-path",
+        "none"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install.sh",
+          "description": "Finds the DefenseClawMac.app bundle to update"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_ATTRIBUTION_ROOT",
@@ -664,7 +683,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Codex policy timeout/process-tree test fixture; never read by production runtime paths"
         }
       ],
@@ -683,7 +702,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Test-only Codex policy grandchild helper"
         }
       ],
@@ -740,11 +759,30 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Codex policy descendant-cleanup fixture"
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_POLICY_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-event token that tells the Codex policy process-tree fixture helpers when to exit, so the test controls their lifetime by event instead of by sleep.",
+      "default": "unset",
+      "accepted_values": [
+        "test release-event token",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
+          "description": "Codex policy process-tree fixture release signal"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_CODEX_POLICY_READY_PATH",
@@ -759,7 +797,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Codex policy process-tree readiness fixture"
         }
       ],
@@ -778,7 +816,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/connector/codex_policy_test.go",
+          "location": "internal/gateway/connector/codex_policy_windows_test.go",
           "description": "Test-only Codex policy process-tree helper"
         }
       ],
@@ -929,6 +967,10 @@
         {
           "location": "internal/gateway/client.go",
           "description": "Client struct gates verbose logging on this var"
+        },
+        {
+          "location": "extensions/defenseclaw/src/log.ts",
+          "description": "OpenClaw plugin also prints its routine diagnostics when stdout is an interactive terminal"
         }
       ],
       "since": "0.1.0"
@@ -1142,24 +1184,6 @@
       "security_note": "Private authenticated executable binding only. It must remain tied to the exact signed Devin binary admitted by Setup and must never be treated as a general operator path override."
     },
     {
-      "name": "DEFENSECLAW_DIR",
-      "category": "runtime_path",
-      "purpose": "Used in generated openshell-sandbox shell wrappers to locate the DefenseClaw install dir from inside the sandbox.",
-      "default": "(templated at install time)",
-      "accepted_values": [
-        "any-absolute-path"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "Sandbox shell wrappers reference this"
-        }
-      ],
-      "since": "0.4.0"
-    },
-    {
       "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
       "category": "security_opt_out",
       "purpose": "Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy. Disabling means Bedrock traffic bypasses the proxy.",
@@ -1238,6 +1262,108 @@
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_E2E_HARNESS",
+      "category": "test_fixture",
+      "purpose": "Names the hook-only harness the live hook-only sandbox test drives (hermes, openhands, antigravity or omnigent); the test is skipped when it is unset.",
+      "default": "unset",
+      "accepted_values": [
+        "hermes",
+        "openhands",
+        "antigravity",
+        "omnigent",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "test/e2e/openshell/hookonly_e2e_test.go",
+          "description": "Live hook-only harness sandbox test (openshell_integration build tag, on branch test/openshell-live)"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_EGRESS_BYPASS",
+      "category": "hook_internal",
+      "purpose": "Comma-separated hosts that bypass the DefenseClaw egress proxy inside a sandbox (the hook ingress and credentialed provider hosts, where OpenShell injects credentials). The harness launchers, the login-shell profile and the sandbox exec wrapper export NO_PROXY from it.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "comma-separated host list",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "SetNoProxy sets it with NO_PROXY; the harness launchers export NO_PROXY from it"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_EGRESS_URL",
+      "category": "hook_internal",
+      "purpose": "DefenseClaw egress proxy URL (`http://<per-sandbox credential>@host.openshell.internal:<egress_port>`) set inside every open or balanced sandbox. OpenShell 0.1.1 drops `*_PROXY` variables from the sandbox environment, so the in-image harness launchers, the login-shell profile /etc/profile.d/defenseclaw-sandbox.sh and the sandbox exec wrapper export HTTPS_PROXY, HTTP_PROXY and NODE_USE_ENV_PROXY from it, in place of any the caller's environment carries, and NODE_NO_WARNINGS=1 (which silences Node's experimental-EnvHttpProxyAgent warning, and every other Node warning, the NODE_TLS_REJECT_UNAUTHORIZED=0 one included) unless the environment already sets it.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "http:// proxy URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "Spec.Env sets it; the harness launchers export the proxy variables from it"
+        },
+        {
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "egressEnvScript exports the proxy variables from it for the launchers, login shells and sandbox exec"
+        }
+      ],
+      "since": "0.9.0",
+      "security_note": "Carries the sandbox's egress proxy credential. Never log or persist the value."
+    },
+    {
+      "name": "DEFENSECLAW_ENTERPRISE_PROFILE",
+      "category": "runtime_path",
+      "purpose": "Pin the managed_enterprise profile (secure_client or standalone) in every managed service environment, next to DEFENSECLAW_DEPLOYMENT_MODE, so a config replacement cannot switch the decision and identity stack.",
+      "default": "unset (use config.yaml enterprise.profile; then secure_client on Windows/macOS, standalone on Linux)",
+      "accepted_values": [
+        "secure_client",
+        "standalone",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "Resolves and validates the enterprise profile against config.yaml before any managed trust check"
+        },
+        {
+          "location": "internal/managed/profile.go",
+          "description": "Profile resolution rules and the per-OS default"
+        },
+        {
+          "location": "internal/cli/root.go",
+          "description": "Refuses the pin from .env files so only the service definition sets it"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Immutable profile boundary. Must agree with config.yaml enterprise.profile; a mismatch refuses to start. Only meaningful with DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise; setting it on an unmanaged process is an error. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST",
@@ -1339,6 +1465,25 @@
         }
       ],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_FOREIGN_GUARD",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the administrator-owned defenseclaw-hook path baked in at render time, which the script asks for the foreign-hook decision before each Hermes pre_tool_call and at on_session_start.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
     },
     {
       "name": "DEFENSECLAW_GATEWAY_ADDR",
@@ -1444,75 +1589,156 @@
       "since": "0.7.0"
     },
     {
-      "name": "DEFENSECLAW_GEMINI_CONFIG_HOME",
-      "category": "upgrade_internal",
-      "purpose": "Carries the exact Gemini configuration directory derived from the authenticated GEMINI_CLI_HOME root through native Windows Setup, launcher, gateway recovery, and connector lifecycle children. Ambient copies are scrubbed; Gemini CLI itself never reads this private DefenseClaw binding.",
+      "name": "DEFENSECLAW_GUARD_AGENT_HOME",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the agent's own HOME, captured before the script hardens its environment, so the foreign-hook check reads the Hermes config the agent reads.",
       "default": "unset",
       "accepted_values": [
-        "absolute normalized GEMINI_CLI_HOME/.gemini path authenticated by native install state",
-        "unset"
+        "set by the script"
       ],
-      "security_impact": "medium",
+      "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "cmd/defenseclaw-setup/transaction.go",
-          "description": "Scrubs ambient copies and passes only the transaction-bound Gemini configuration directory to connector lifecycle children"
-        },
-        {
-          "location": "internal/nativeinstallstate/state.go",
-          "description": "Rehydrates the authenticated Gemini configuration directory for direct gateway and launcher recovery"
-        },
-        {
-          "location": "internal/config/claw.go",
-          "description": "Requires an absolute normalized private binding before resolving Gemini settings"
-        },
-        {
-          "location": "cli/defenseclaw/connector_paths.py",
-          "description": "Uses the authenticated private binding for native lifecycle path parity while rejecting malformed values"
+          "location": "internal/gateway/connector/hooks/hermes-hook.sh",
+          "description": "Captured at the top of the standalone Hermes hook"
         }
       ],
-      "since": "0.8.10",
-      "security_note": "Private authenticated lifecycle binding only. This is not a Gemini vendor environment variable, must never override GEMINI_CLI_HOME during ordinary discovery, and has no authority unless it came from the protected native install state or Setup transaction."
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
     },
     {
-      "name": "DEFENSECLAW_GUARDIAN_AGENT_VERSION",
-      "category": "runtime_path",
-      "purpose": "Systemd template override supplying the local agent version used for enterprise hook-contract validation.",
-      "default": "unset (falls back to cached discovery version when available)",
-      "accepted_values": [
-        "agent version string",
-        "unset"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "docs-site/content/docs/setup/enterprise-deployment.mdx",
-          "description": "Documented systemd template override for action-mode hook contract validation"
-        }
-      ],
-      "since": "0.8.0",
-      "security_note": "Action-mode hook contract validation — lets managed deployments pin the agent version the guardian validates before writing blocking hooks."
-    },
-    {
-      "name": "DEFENSECLAW_GUARDIAN_CONNECTOR",
-      "category": "runtime_path",
-      "purpose": "Systemd template override naming the connector reconciled by an enterprise hook guardian instance.",
+      "name": "DEFENSECLAW_GUARD_CAUSE",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: why the foreign-hook check gave no decision (its exit status, no answer, or an answer DefenseClaw could not read), named in the block message.",
       "default": "unset",
       "accepted_values": [
-        "registered hook-native connector name"
+        "set by the script"
       ],
-      "security_impact": "low",
+      "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "docs-site/content/docs/setup/enterprise-deployment.mdx",
-          "description": "Documented systemd template override for per-user hook guardian instances"
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
         }
       ],
-      "since": "0.8.0",
-      "security_note": "Template-scoped connector selection — avoids broad home scanning by keeping each privileged guardian instance bound to an explicit connector target."
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_EVENT",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the Hermes event name read from the hook payload, which selects whether the foreign-hook check runs.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_OUTPUT",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the Hermes block object printed when the foreign-hook check denies the call.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_REASON",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the reason code of a foreign-hook denial, logged and printed on stderr.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_RESULT",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the JSON answer of defenseclaw-hook --foreign-hook-check; only an explicit allow answer (deny false) continues to the gateway.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_SESSION",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the Hermes session id read from the hook payload, sent with the block to the gateway's foreign-hook session route when the check gave no decision.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
+    },
+    {
+      "name": "DEFENSECLAW_GUARD_STATUS",
+      "category": "hook_internal",
+      "purpose": "Shell variable of the standalone Linux and macOS hermes-hook.sh: the exit status of defenseclaw-hook --foreign-hook-check, named in the block message when the check gave no decision.",
+      "default": "unset",
+      "accepted_values": [
+        "set by the script"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hermes_foreign_guard.go",
+          "description": "Foreign-hook guard block rendered into hermes-hook.sh"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Assigned by the script before it is read, so a value in the agent's environment has no effect."
     },
     {
       "name": "DEFENSECLAW_HEC_TOKEN",
@@ -1578,10 +1804,6 @@
           "description": "Installer reads this"
         },
         {
-          "location": "scripts/upgrade.sh",
-          "description": "Upgrader reads this"
-        },
-        {
           "location": "internal/gateway/connector/hooks/inspect-tool.sh",
           "description": "Hooks read this"
         }
@@ -1589,61 +1811,27 @@
       "since": "0.1.0"
     },
     {
-      "name": "DEFENSECLAW_HTTP_COMMAND_INJECTION_BENIGN_CORPORA",
-      "category": "test_fixture",
-      "purpose": "Supplies path-separated external benign corpus files to the optional ActionFacts HTTP command-injection false-positive regression.",
-      "default": "unset (external corpus regression skipped)",
+      "name": "DEFENSECLAW_HOST_TZ",
+      "category": "hook_internal",
+      "purpose": "IANA time zone of the machine a sandbox was created from (`America/New_York`), set inside every OpenShell sandbox by `sandbox run`. The harness launchers, the login-shell profile and the sandbox exec wrapper export TZ from it when TZ is not set and the image has /usr/share/zoneinfo/<zone>, so the sandbox's clock reads like the host's instead of UTC.",
+      "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
-        "platform path-list of JSONL corpus files",
+        "IANA zone name",
         "unset"
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/actionfacts/http_command_injection_test.go",
-          "description": "Test-only external benign-corpus input; never read by production runtime paths"
-        }
-      ],
-      "since": "0.9.0"
-    },
-    {
-      "name": "DEFENSECLAW_HTTP_COMMAND_INJECTION_CORPUS",
-      "category": "test_fixture",
-      "purpose": "Supplies an external public JSONL corpus to the optional ActionFacts HTTP command-injection closed-proof regression.",
-      "default": "unset (external corpus regression skipped)",
-      "accepted_values": [
-        "path to a JSONL corpus file",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
+          "location": "internal/openshell/timezone.go",
+          "description": "Go constant and the host's zone the CLI sends with a create"
+        },
         {
-          "location": "internal/actionfacts/http_command_injection_test.go",
-          "description": "Test-only external public-corpus input; never read by production runtime paths"
+          "location": "internal/openshell/harness/shellenv.go",
+          "description": "timeZoneScript: the in-image shells export TZ from it"
         }
       ],
-      "since": "0.9.0"
-    },
-    {
-      "name": "DEFENSECLAW_HTTP_SQLI_CORPUS",
-      "category": "test_fixture",
-      "purpose": "Supplies an external public JSONL corpus to the optional ActionFacts HTTP SQL-injection closed-proof regression.",
-      "default": "unset (external corpus regression skipped)",
-      "accepted_values": [
-        "path to a JSONL corpus file",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "internal/actionfacts/http_sql_injection_test.go",
-          "description": "Test-only external public-corpus input; never read by production runtime paths"
-        }
-      ],
-      "since": "0.9.0"
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_HOOK_CONNECTOR",
@@ -1846,6 +2034,42 @@
       "security_note": "Hook PATH lockdown — stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
     },
     {
+      "name": "DEFENSECLAW_HOOK_SOCKET",
+      "category": "hook_internal",
+      "purpose": "Path of the standalone gateway's peer-authorized unix hook socket, assigned inside a rendered standalone Unix hook (connector shell hooks and the Codex notify bridge) before the socket and its directory owners are checked and the request is sent with curl --unix-socket. The script sets it itself, so an inherited value is overwritten.",
+      "default": "(rendered by setup for standalone Unix installs that name a hook socket; absent everywhere else)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_socket_transport.go",
+          "description": "Shell transport block that assigns and verifies the socket path"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_SOCKET_UID",
+      "category": "hook_internal",
+      "purpose": "Gateway service account uid that a rendered standalone Unix hook accepts, besides root, as the owner of the hook socket and its directory. The script sets it itself, so an inherited value is overwritten.",
+      "default": "(rendered by setup next to DEFENSECLAW_HOOK_SOCKET)",
+      "accepted_values": [
+        "uid"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_socket_transport.go",
+          "description": "Shell transport block owner check"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the connector hook-token cross-process lock fixture.",
@@ -1922,6 +2146,63 @@
       "since": "0.8.11"
     },
     {
+      "name": "DEFENSECLAW_HTTP_COMMAND_INJECTION_BENIGN_CORPORA",
+      "category": "test_fixture",
+      "purpose": "Supplies path-separated external benign corpus files to the optional ActionFacts HTTP command-injection false-positive regression.",
+      "default": "unset (external corpus regression skipped)",
+      "accepted_values": [
+        "platform path-list of JSONL corpus files",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/actionfacts/http_command_injection_test.go",
+          "description": "Test-only external benign-corpus input; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_HTTP_COMMAND_INJECTION_CORPUS",
+      "category": "test_fixture",
+      "purpose": "Supplies an external public JSONL corpus to the optional ActionFacts HTTP command-injection closed-proof regression.",
+      "default": "unset (external corpus regression skipped)",
+      "accepted_values": [
+        "path to a JSONL corpus file",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/actionfacts/http_command_injection_test.go",
+          "description": "Test-only external public-corpus input; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_HTTP_SQLI_CORPUS",
+      "category": "test_fixture",
+      "purpose": "Supplies an external public JSONL corpus to the optional ActionFacts HTTP SQL-injection closed-proof regression.",
+      "default": "unset (external corpus regression skipped)",
+      "accepted_values": [
+        "path to a JSONL corpus file",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/actionfacts/http_sql_injection_test.go",
+          "description": "Test-only external public-corpus input; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_INDEX",
       "category": "splunk_bridge",
       "purpose": "Splunk-bridge target index.",
@@ -1938,6 +2219,25 @@
         }
       ],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_INSTALL_CALLER",
+      "category": "upgrade_internal",
+      "purpose": "Set to `app` by the macOS app so install.sh does not quit or relaunch the running app itself.",
+      "default": "unset",
+      "accepted_values": [
+        "app",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install.sh",
+          "description": "Skips quitting and relaunching the app"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_INSTALL_DIR",
@@ -1958,6 +2258,26 @@
       "since": "0.2.0"
     },
     {
+      "name": "DEFENSECLAW_INSTALL_MANAGED_DESCRIPTOR",
+      "category": "test_fixture",
+      "purpose": "Adds a temporary managed runtime descriptor to the ones install.sh checks, so tests can prove the per-user installer refuses to run on a computer whose DefenseClaw is managed by the organization.",
+      "default": "unset (Linux /etc/defenseclaw/managed-runtime.json; macOS /opt/cisco/defenseclaw/etc/managed-runtime.json)",
+      "accepted_values": [
+        "absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install.sh",
+          "description": "Refuses a per-user install when the managed runtime descriptor exists"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Test-only. It can only add a descriptor path: install.sh always checks the platform descriptor as well, so setting it never skips the managed-host refusal."
+    },
+    {
       "name": "DEFENSECLAW_INSTALL_ROOT",
       "category": "runtime_path",
       "purpose": "Native Windows installer root injected by the stable defenseclaw.exe launcher so the managed Python CLI can locate the owning packaged install for installer-based upgrade handoff.",
@@ -1972,10 +2292,6 @@
         {
           "location": "cmd/defenseclaw-launcher/main.go",
           "description": "Launcher appends the verified install root to the managed Python process environment"
-        },
-        {
-          "location": "cli/tests/test_cmd_upgrade.py",
-          "description": "Windows native-upgrade tests cover rejection of an untrusted injected install root"
         }
       ],
       "since": "0.8.0",
@@ -1999,25 +2315,6 @@
         }
       ],
       "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_INTEL_REFUSAL_COMMAND_LOG",
-      "category": "test_fixture",
-      "purpose": "Records any dependency, network, service, or mutation command reached by the native Intel macOS exact-candidate refusal harness.",
-      "default": "unset",
-      "accepted_values": [
-        "absolute path inside the isolated refusal-test root",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/test-upgrade-macos-intel-refusal.sh",
-          "description": "Fails the native Intel release gate if a blocked command executes before architecture refusal"
-        }
-      ],
-      "since": "0.8.12"
     },
     {
       "name": "DEFENSECLAW_INTERNAL_HOOK_DELEGATION",
@@ -2091,7 +2388,7 @@
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable. Linux and macOS administrators can use managed.socket_path; managed Windows fixes the socket under trusted Program Files for the Cisco Secure Client peer.",
-      "default": "unset (managed_enterprise: Windows uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock; Linux/macOS use <dirname(data_dir)>/ipc/defenseclaw_ipc.sock. Other modes use <data_dir>/ipc/defenseclaw_ipc.sock)",
+      "default": "unset (managed_enterprise: Windows Secure Client uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\defenseclaw_ipc.sock and Windows standalone uses <TrustedProgramFiles>\\Cisco\\DefenseClaw\\ipc\\defenseclaw_ipc.sock; Linux/macOS use <dirname(data_dir)>/ipc/defenseclaw_ipc.sock. Other modes use <data_dir>/ipc/defenseclaw_ipc.sock)",
       "accepted_values": [
         "any-absolute-path",
         "unset"
@@ -2499,6 +2796,44 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_LEAK",
+      "category": "test_fixture",
+      "purpose": "Marker a test sets in its own environment to prove that Unix agent discovery does not run the agent executable, or pass the caller's environment to it, without allowExec.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/enumerator_unix_test.go",
+          "description": "Test-only environment leak marker for agent discovery"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_LEAK_CHECK",
+      "category": "test_fixture",
+      "purpose": "Marker a test sets in its own environment to prove that the trusted directory-tool runner starts its command with a clean environment.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/unixidentity/identity_test.go",
+          "description": "Test-only environment leak marker for the directory tool runner"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_LEDGER_ROOT",
       "category": "test_fixture",
       "purpose": "State-root anchor for the Windows guardian semantic-ledger test harness. The Go test writes t.TempDir() into this env var so the child PowerShell resolves StateRoot under an isolated directory rather than the machine default.",
@@ -2516,6 +2851,27 @@
         }
       ],
       "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_LIFECYCLE_UNIT",
+      "category": "runtime_path",
+      "purpose": "Set by the standalone config-apply unit (systemd) or launchd job to its own name, so the lifecycle it runs never stops or restarts the unit executing the transaction.",
+      "default": "unset (an administrator or MDM run quiesces every DefenseClaw unit)",
+      "accepted_values": [
+        "defenseclaw-enterprise-apply.service",
+        "com.cisco.defenseclaw.apply",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/enterpriseunix/env.go",
+          "description": "Accepts only the config-apply entry point and skips it when quiescing, rolling back and activating"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Only exempts the config-apply entry point from being stopped; any other value is ignored. The units that set it are root-owned."
     },
     {
       "name": "DEFENSECLAW_LLM_DEBUG",
@@ -2750,6 +3106,24 @@
       "security_note": "Managed enforcement fail-closed boundary — the value is generated by the privileged hook installer and is not an operator security opt-out."
     },
     {
+      "name": "DEFENSECLAW_MASTER_KEY",
+      "category": "credential",
+      "purpose": "Bearer derived from device.key (PBKDF2). Internal fallback; documented in GUARDRAIL_QUICKSTART for curl examples only. Operators should not rely on this credential.",
+      "default": "(derived at boot from device.key)",
+      "accepted_values": [
+        "sk-dc-<hex>"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/proxy.go",
+          "description": "deriveMasterKey"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
       "name": "DEFENSECLAW_MCPHUNT_PUBLIC_DIR",
       "category": "test_fixture",
       "purpose": "Supplies an external public MCPHunt result directory to the optional SQL value-lineage format regression.",
@@ -2769,22 +3143,50 @@
       "since": "0.9.0"
     },
     {
-      "name": "DEFENSECLAW_MASTER_KEY",
-      "category": "credential",
-      "purpose": "Bearer derived from device.key (PBKDF2). Internal fallback; documented in GUARDRAIL_QUICKSTART for curl examples only. Operators should not rely on this credential.",
-      "default": "(derived at boot from device.key)",
+      "name": "DEFENSECLAW_NO_SANDBOX",
+      "category": "security_opt_out",
+      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`). The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
+      "default": "unset",
       "accepted_values": [
-        "sk-dc-<hex>"
+        "1",
+        "unset"
       ],
-      "security_impact": "high",
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/openshell/wrapper/wrapper.go",
+          "description": "Shell wrapper block bypass"
+        },
+        {
+          "location": "internal/openshell/sandboxcli/wrappers.go",
+          "description": "sandbox enable/disable wrapper management"
+        },
+        {
+          "location": "internal/openshell/sandboxcli/doctor.go",
+          "description": "Doctor reports an active bypass"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_NO_UPDATE_CHECK",
+      "category": "debug",
+      "purpose": "Turns off the once-a-day 'new release available' notice in the CLI and TUI.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "internal/gateway/proxy.go",
-          "description": "deriveMasterKey"
+          "location": "cli/defenseclaw/update_notice.py",
+          "description": "Skips the latest-release lookup and notice"
         }
       ],
-      "since": "0.3.0"
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_O11Y_DASHBOARD_NAME_PREFIX",
@@ -2826,29 +3228,6 @@
       "security_note": "Executable selection — a non-default value changes which local program the compatibility bridge launches."
     },
     {
-      "name": "DEFENSECLAW_OBSERVABILITY_V8_PREFLIGHT_BINDING",
-      "category": "upgrade_internal",
-      "purpose": "Carries the controller-authenticated observability-v8 preflight snapshot into the fresh target migration child. It binds the validated config and recovery plan to the phase-two mutation process.",
-      "default": "unset",
-      "accepted_values": [
-        "JSON object no larger than 4096 bytes",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Passes the verified binding only to the isolated phase-two migration child"
-        },
-        {
-          "location": "cli/defenseclaw/migrations.py",
-          "description": "Requires and validates the binding before the v7-to-v8 hard-cut mutation"
-        }
-      ],
-      "since": "0.8.5"
-    },
-    {
       "name": "DEFENSECLAW_OPENCLAW_MAIN",
       "category": "hook_internal",
       "purpose": "Sentinel read by the OpenClaw plugin bootstrapper to locate its main module.",
@@ -2865,71 +3244,6 @@
         }
       ],
       "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
-      "category": "security_opt_out",
-      "purpose": "Accept a mutable OCI tag (e.g. 'latest') when installing openshell-sandbox instead of requiring a content-addressed digest or sha256 pin. Recommended only for local development.",
-      "default": "unset (fail-closed)",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": true,
-      "consumers": [
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Skips integrity verification when set"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Pinned-digest sandbox install — prevents tag-mutation supply-chain attacks where an upstream tag is silently re-pointed at a malicious image.",
-      "replacement_hint": "Pin via DEFENSECLAW_OPENSHELL_ARCH_DIGEST or DEFENSECLAW_OPENSHELL_BINARY_SHA256."
-    },
-    {
-      "name": "DEFENSECLAW_OPENSHELL_ARCH_DIGEST",
-      "category": "security_opt_out",
-      "purpose": "Pin the openshell-sandbox install to a specific platform manifest digest (sha256:...). Recommended pinning method for production. Read in conjunction with DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED.",
-      "default": "unset",
-      "accepted_values": [
-        "sha256:<hex>",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Verifies OCI manifest digest against this pin"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Pinned-digest sandbox install — content-addressed verification of the OCI manifest before extraction."
-    },
-    {
-      "name": "DEFENSECLAW_OPENSHELL_BINARY_SHA256",
-      "category": "security_opt_out",
-      "purpose": "Pin the final extracted openshell-sandbox binary to a specific sha256. Alternative to DEFENSECLAW_OPENSHELL_ARCH_DIGEST for cases where only the binary checksum is published.",
-      "default": "unset",
-      "accepted_values": [
-        "64-char hex sha256",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Marker check (presence enables sha256 verification path)"
-        },
-        {
-          "location": "scripts/install-openshell-sandbox.sh",
-          "description": "Verifies extracted binary sha256 against this pin"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Pinned-digest sandbox install — sha256 verification of the extracted binary."
     },
     {
       "name": "DEFENSECLAW_OTEL_ENABLED",
@@ -3292,25 +3606,6 @@
       "since": "0.4.0"
     },
     {
-      "name": "DEFENSECLAW_PHASE_TWO_MUTATOR_CHILD",
-      "category": "upgrade_internal",
-      "purpose": "Marks the trusted phase-two mutation child so upgrade recovery can distinguish the lease-holding subprocess from its controller.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/phase_two_mutator.py",
-          "description": "Marks the private mutation subprocess while it inherits the authenticated upgrade lease"
-        }
-      ],
-      "since": "0.8.5"
-    },
-    {
       "name": "DEFENSECLAW_PLIST_SRC",
       "category": "runtime_path",
       "purpose": "Override the LaunchDaemon plist source file the macOS installer copies to /Library/LaunchDaemons. Precedence: --plist flag > this env var > plist next to install.sh > repo-tree plist. Intended for admin bootstrap scripts that ship a pre-modified plist alongside the DefenseClaw bundle.",
@@ -3351,8 +3646,8 @@
     {
       "name": "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
       "category": "security_opt_out",
-      "purpose": "Accept a policy file as 'validated' even when OPA / Rego is not installed. Default rejects; this turns validation into a no-op when OPA is absent.",
-      "default": "unset (validation requires OPA)",
+      "purpose": "Skip the Rego compile check when neither opa nor defenseclaw-gateway is available. A standard install validates Rego with the OPA engine built into defenseclaw-gateway and does not need this; the default fails validation when no checker is found.",
+      "default": "unset (validation needs opa or defenseclaw-gateway)",
       "accepted_values": [
         "1",
         "unset"
@@ -3366,27 +3661,6 @@
         }
       ],
       "since": "0.4.0"
-    },
-    {
-      "name": "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
-      "category": "security_opt_out",
-      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw sandbox setup' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
-      "default": "unset (fail-closed)",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": true,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "_pre_pair_device gates the provenance fail-closed branch on this var"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Provenance-sentinel verification — prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker).",
-      "replacement_hint": "Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed."
     },
     {
       "name": "DEFENSECLAW_PROCESSUTIL_INHERITED_OUTPUT_CHILD",
@@ -3484,6 +3758,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_PROCESS_TREE_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-event token that tells the native Windows process-tree fixture helpers when to exit, so the test controls their lifetime by event instead of by sleep.",
+      "default": "unset",
+      "accepted_values": [
+        "test release-event token",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/processutil/command_windows_test.go",
+          "description": "Native Windows process-tree test fixture; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_PROCESS_TREE_PID_FILE",
       "category": "test_fixture",
       "purpose": "PID-record path shared with the process-tree cancellation fixture.",
@@ -3501,25 +3794,6 @@
         }
       ],
       "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_PROXY_TOKEN",
-      "category": "credential",
-      "purpose": "Test-harness proxy bearer. Used by scripts/test-proxy-sandbox.py only; aliases LITELLM_MASTER_KEY.",
-      "default": "unset",
-      "accepted_values": [
-        "any-string",
-        "unset"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/test-proxy-sandbox.py",
-          "description": "Test proxy bearer"
-        }
-      ],
-      "since": "0.4.0"
     },
     {
       "name": "DEFENSECLAW_REF",
@@ -3559,6 +3833,32 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_REPO",
+      "category": "upgrade_internal",
+      "purpose": "GitHub owner/name whose releases `defenseclaw upgrade` and the installers use (for testing on a fork).",
+      "default": "cisco-ai-defense/defenseclaw",
+      "accepted_values": [
+        "owner/name"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/upgrade_shim.py",
+          "description": "Release lookup and installer download"
+        },
+        {
+          "location": "scripts/install.sh",
+          "description": "Release asset downloads"
+        },
+        {
+          "location": "scripts/defenseclaw-upgrade.sh",
+          "description": "Latest-release lookup for the 0.8.x handoff"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_REQUIRE_PARTITION_MANIFESTS",
       "category": "test_fixture",
       "purpose": "Requires partition metadata when the external strict normalization-manifest regression is enabled.",
@@ -3576,26 +3876,6 @@
         }
       ],
       "since": "0.9.0"
-    },
-    {
-      "name": "DEFENSECLAW_RESCUE_COSIGN_CANDIDATE",
-      "category": "upgrade_internal",
-      "purpose": "Carries the absolute Cosign path discovered by the POSIX rescue trampoline as inert positional data through an empty environment into the trusted system Bash payload. The payload copies the candidate into its private work directory and accepts it only when the copied bytes match the pinned platform digest; otherwise it downloads and verifies the pinned Cosign release.",
-      "default": "unset (the rescue payload downloads the pinned Cosign release)",
-      "accepted_values": [
-        "absolute path discovered by command -v cosign",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/defenseclaw-rescue.sh",
-          "description": "The POSIX trampoline passes the discovered path through the clean-environment handoff; the Bash payload unsets the variable and uses only a private digest-verified copy"
-        }
-      ],
-      "since": "0.8.8",
-      "security_note": "Optimization hint only — the ambient executable is never run in place, and its copied bytes receive the same pinned-digest verification as a downloaded Cosign binary."
     },
     {
       "name": "DEFENSECLAW_REVEAL_PII",
@@ -3657,29 +3937,124 @@
       "since": "0.4.0"
     },
     {
-      "name": "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
-      "category": "security_opt_out",
-      "purpose": "Opt into the legacy broad regex cleanup of sandbox/openshell network namespaces when no saved namespace file exists. Used by the generated pre-sandbox and cleanup-sandbox scripts.",
-      "default": "0 (no regex sweep)",
+      "name": "DEFENSECLAW_SANDBOX_ID",
+      "category": "hook_internal",
+      "purpose": "The sandbox's DefenseClaw ingress binding id, which the sandbox manager sets inside every sandbox it launches, through the harness spec's environment. It is not the OpenShell sandbox id. It tells a nested DefenseClaw launch that it already runs sandboxed: a nested `sandbox run` runs the harness natively and needs no configuration, and the shell wrapper steps aside. Sandbox hooks drop it, and the gateway takes the sandbox id from the ingress binding instead.",
+      "default": "(set by DefenseClaw in the sandbox)",
       "accepted_values": [
-        "1",
-        "0",
+        "opaque DefenseClaw binding id",
         "unset"
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "security_note": "Sandbox bypass: while set, sandbox run and the shell wrappers run the harness natively on the host, as DEFENSECLAW_NO_SANDBOX does, without a notice. DefenseClaw sets it only inside the sandboxes it launches and refuses it from .env files, so a value on the host was planted or leaked.",
+      "replacement_hint": "Unset it outside a DefenseClaw sandbox.",
       "consumers": [
         {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "Embedded pre-sandbox script reads it before namespace cleanup"
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant used when building the sandbox environment"
         },
         {
-          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
-          "description": "Embedded cleanup-sandbox script reads it"
+          "location": "internal/openshell/harness/harness.go",
+          "description": "Spec.Env passes it to the sandbox so nested DefenseClaw invocations can detect the sandbox"
+        },
+        {
+          "location": "cli/defenseclaw/main.py",
+          "description": "Lets a nested `defenseclaw sandbox run` reach the gateway stub without a config, as in Go"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_doctor.py",
+          "description": "Doctor reports a set value as a security override (any non-empty value is active)"
         }
       ],
-      "since": "0.7.0",
-      "security_note": "Namespace cleanup scope — a broad regex sweep can delete unrelated network namespaces on a shared host."
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_NAME",
+      "category": "hook_internal",
+      "purpose": "Human-readable DefenseClaw sandbox name that the sandbox manager sets inside every sandbox it launches, through the harness spec's environment. Sandbox hooks drop it, and the gateway takes the sandbox name from the ingress binding instead.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "sandbox name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant used when building the sandbox environment"
+        },
+        {
+          "location": "internal/openshell/harness/harness.go",
+          "description": "Spec.Env passes it to the sandbox for attribution"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_RENDER_DIR",
+      "category": "test_fixture",
+      "purpose": "Names a directory TestSandboxArtifactsGolden writes each harness's rendered sandbox overlay under (<dir>/<connector>/<in-image path>), so a manifest drift can be reviewed by diffing the trees two revisions render.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/sandbox_artifacts_test.go",
+          "description": "Writes the rendered sandbox artifacts for review"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_TOKEN",
+      "category": "credential",
+      "purpose": "Per-sandbox binding token the sandbox hooks present to the DefenseClaw hook ingress. Delivered as an OpenShell provider credential by default (openshell.token_delivery: provider), so the agent only ever sees a revision-scoped placeholder that the supervisor substitutes at the ingress endpoint. Authorizes only that sandbox's own hook routes; revoked on delete. With provider delivery (the default) it is rotated on every start; with env delivery it is kept for the sandbox's life.",
+      "default": "(set by DefenseClaw in the sandbox)",
+      "accepted_values": [
+        "OpenShell credential placeholder",
+        "binding token (token_delivery: env)",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/openshell/sandbox_env.go",
+          "description": "Go constant naming the provider credential and sandbox env var"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/_sandbox.sh",
+          "description": "defenseclaw_sandbox_require_token fails every sandbox hook closed when it is missing or malformed"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/claude-code-hook.sh",
+          "description": "Sandbox variant sends it as the ingress Authorization bearer"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/codex-hook.sh",
+          "description": "Sandbox variant sends it as the ingress Authorization bearer"
+        },
+        {
+          "location": "internal/gateway/connector/claudecode_sandbox.go",
+          "description": "Rendered otelHeadersHelper prints it as the OTLP Authorization header"
+        },
+        {
+          "location": "internal/gateway/connector/codex_sandbox.go",
+          "description": "Rendered Codex notify bridge authenticates with it"
+        },
+        {
+          "location": "internal/openshell/harness/codex.go",
+          "description": "Codex launcher adds it as the OTLP exporter Authorization with -c flags"
+        }
+      ],
+      "since": "0.9.0",
+      "security_note": "Never log or persist the value. Sandbox hooks must read it from the environment at request time; a placeholder baked into static config does not resolve."
     },
     {
       "name": "DEFENSECLAW_SCRUB_BIN",
@@ -3705,7 +4080,7 @@
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS path the AI Discovery sensor helper listens on and the gateway dials. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. Managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
-      "default": "unset (managed_enterprise: Windows uses <TrustedProgramFiles>\\\\Cisco\\\\Cisco Secure Client\\\\DefenseClaw\\\\ipc\\\\sensor-helper.sock; Linux uses /run/defenseclaw/sensor-helper.sock; macOS brokers nothing because its managed gateway already runs as root. Other modes use <data_dir>/ipc/sensor-helper.sock)",
+      "default": "unset (managed_enterprise: Windows Secure Client uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock and Windows standalone uses <TrustedProgramFiles>\\Cisco\\DefenseClaw\\ipc\\sensor-helper.sock; Linux uses /run/defenseclaw-sensor/sensor-helper.sock; macOS standalone uses /var/run/defenseclaw-sensor/sensor-helper.sock; macOS Secure Client keeps /var/run/defenseclaw/sensor-helper.sock. Other modes use <data_dir>/ipc/sensor-helper.sock)",
       "accepted_values": [
         "any-absolute-path",
         "unset"
@@ -3720,6 +4095,25 @@
       ],
       "since": "0.8.11",
       "security_note": "Local-only socket path override, ignored under managed_enterprise. The helper creates the socket at mode 0660 owned by the gateway's group and re-checks the kernel-supplied peer uid at accept on Linux and macOS; Windows anchors the path to the trusted Program Files IPC directory and gates access with the socket DACL. The protocol is closed: a client can ask for the process table, the connection table, the event stream or DNS and cannot describe any of them, so a compromised gateway gains no reach it did not already have."
+    },
+    {
+      "name": "DEFENSECLAW_SENSOR_HELPER_TEST_PROCESS",
+      "category": "test_fixture",
+      "purpose": "Turns the sensor-helper test binary into the helper itself when a version test re-runs it to check --version and the flag handling of main().",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-sensor-helper/version_test.go",
+          "description": "Test-only child-process selector for the sensor-helper version tests"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_SETUP_CANCEL_TEST_HELPER",
@@ -3793,9 +4187,143 @@
         {
           "location": "cli/defenseclaw/commands/cmd_setup_observability.py",
           "description": "Click reads the setup token from the child process environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the token in the child process environment instead of argv (GAP-1888)"
         }
       ],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup llm' (--api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_GATEWAY_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup gateway' (--token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup splunk' (--access-token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw setup splunk' (--hec-token). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        },
+        {
+          "location": "cli/defenseclaw/tui/panels/setup.py",
+          "description": "The TUI Setup wizard passes the secret in the child process environment instead of argv (GAP-1888)"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_INIT_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw init' (--llm-api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_init.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_INIT_CISCO_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport for 'defenseclaw init' (--cisco-api-key). Set in the child process environment so the value is not exposed in command-line arguments, which other local users can read; same as the flag.",
+      "default": "unset",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_init.py",
+          "description": "Click reads the flag value from the environment instead of argv"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_SETUP_SERVICE_CONTROL_TEST_HELPER",
@@ -4111,110 +4639,6 @@
       "since": "0.7.0"
     },
     {
-      "name": "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR",
-      "category": "upgrade_internal",
-      "purpose": "Carries the private directory of authenticated bridge rollback artifacts into the fresh hard-cut controller.",
-      "default": "unset",
-      "accepted_values": [
-        "absolute owner-only directory (0700 on POSIX; protected owner-only DACL on Windows)",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Revalidates and retains resolver-supplied rollback artifacts before installed state changes"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Unix release resolver supplies the retained artifact directory"
-        },
-        {
-          "location": "scripts/upgrade.ps1",
-          "description": "Windows release resolver supplies the retained artifact directory"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_STAGED_BRIDGE_VERSION",
-      "category": "upgrade_internal",
-      "purpose": "Carries the authenticated bridge version across a staged hard-cut handoff; the fresh controller requires it to equal the installed source version.",
-      "default": "unset",
-      "accepted_values": [
-        "canonical X.Y.Z version",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Matches staged rollback artifacts to the installed bridge version"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Unix release resolver supplies the verified bridge version"
-        },
-        {
-          "location": "scripts/upgrade.ps1",
-          "description": "Windows release resolver supplies the verified bridge version"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION",
-      "category": "upgrade_internal",
-      "purpose": "Binds a staged hard-cut handoff to the authenticated target-controller version that the resolver installed out of place.",
-      "default": "unset",
-      "accepted_values": [
-        "canonical X.Y.Z version",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Requires the fresh target controller to match the resolver-authenticated target version before accepting bridge rollback custody"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Unix release resolver supplies the authenticated target version to the fresh out-of-place controller"
-        }
-      ],
-      "since": "0.8.5"
-    },
-    {
-      "name": "DEFENSECLAW_STAGED_UPGRADE",
-      "category": "upgrade_internal",
-      "purpose": "Marks a trusted resolver-to-controller staged hard-cut handoff before rollback artifacts are accepted.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Requires the staged handoff marker before consuming resolver-supplied rollback artifacts"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Unix release resolver sets the marker for the fresh installed controller"
-        },
-        {
-          "location": "scripts/upgrade.ps1",
-          "description": "Windows release resolver sets the marker for the fresh installed controller"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
       "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open. Invalid gateway responses still follow guardrail.hook_fail_mode.",
@@ -4335,23 +4759,61 @@
       "since": "0.3.0"
     },
     {
-      "name": "DEFENSECLAW_TEST_BASH",
+      "name": "DEFENSECLAW_TEST_AGENT_PROCESS_HELPER",
       "category": "test_fixture",
-      "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",
-      "default": "unset (auto-detect Bash, including Git Bash on Windows)",
+      "purpose": "Selects the test helper process that prints the agent process identity it sees, so the agentprocess tests can run it through the platform's shells.",
+      "default": "unset",
       "accepted_values": [
-        "absolute path to a Bash executable",
+        "1",
         "unset"
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "cli/tests/test_release_workflow_staged.py",
-          "description": "Selects the Bash executable used to run POSIX release-workflow contract tests"
+          "location": "internal/agentprocess/agentprocess_test.go",
+          "description": "Test-only agent process identity helper selector"
         }
       ],
-      "since": "0.8.7"
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_APPLY_TARGET_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that stands in for the per-user apply-target worker.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
+          "description": "Test-only apply-target worker helper selector"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_AWAITED_HOOK_CHILD",
+      "category": "test_fixture",
+      "purpose": "Selects the test helper process that exits at once with a block when it receives the expected hook argument list, so the Windows PowerShell hook bridge tests can check that a fast-exiting hook keeps its exit code and output.",
+      "default": "unset",
+      "accepted_values": [
+        "expected hook argument list",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/awaited_hook_fast_exit_windows_test.go",
+          "description": "Test-only fast-exiting hook helper selector"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_TEST_CODEX_MANAGED_DATA",
@@ -4451,25 +4913,6 @@
       "since": "0.8.0"
     },
     {
-      "name": "DEFENSECLAW_TEST_FAIL_AFTER_081_PLACEHOLDER_REPAIR",
-      "category": "test_fixture",
-      "purpose": "Injects a failure after the clean 0.8.1 placeholder repair to verify phase-one rollback.",
-      "default": "unset",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Authenticated resolver rollback fixture; never set by production upgrade paths"
-        }
-      ],
-      "since": "0.8.8"
-    },
-    {
       "name": "DEFENSECLAW_TEST_GRACEFUL_STOP_MARKER",
       "category": "test_fixture",
       "purpose": "Carries the marker used by the authenticated graceful-stop daemon fixture.",
@@ -4564,6 +5007,45 @@
       "since": "0.4.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_KIRO_SHELL_CHILD",
+      "category": "test_fixture",
+      "purpose": "Turns the Windows connector test binary into a stand-in for the GUI-subsystem hook launcher when the Kiro shell-boundary test runs a rendered Kiro hook command; the value names the hook surface it expects.",
+      "default": "unset",
+      "accepted_values": [
+        "v3",
+        "v2",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/kiro_windows_shell_test.go",
+          "description": "Test-only child-process selector for the Kiro Windows shell-boundary test"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LEAK",
+      "category": "test_fixture",
+      "purpose": "Marker a test sets in the parent environment to prove the per-user apply-target worker does not inherit it.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
+          "description": "Test-only environment leak marker for the apply-target worker"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_TEST_LLM_KEY",
       "category": "test_fixture",
       "purpose": "Placeholder LLM key used in some test setups when DEFENSECLAW_LLM_KEY needs an alternate target.",
@@ -4600,122 +5082,6 @@
         }
       ],
       "since": "0.8.0"
-    },
-    {
-      "name": "DEFENSECLAW_TEST_PHASE1_ACTIVE_SEAL_CRASH",
-      "category": "test_fixture",
-      "purpose": "Injects a process kill after the authenticated POSIX phase-one active manifest is durable but before its digest is committed to the outer recovery journal.",
-      "default": "unset",
-      "accepted_values": [
-        "after-active-manifest",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Kills the seal helper and parent controller at the orphan-manifest recovery boundary"
-        },
-        {
-          "location": "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-          "description": "Proves an authenticated orphan active manifest remains usable for fresh-process rollback"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_TEST_PHASE1_MIGRATION_CRASH",
-      "category": "test_fixture",
-      "purpose": "Injects a process kill after the POSIX bridge migration has changed canonical config but before an active-state manifest can be sealed.",
-      "default": "unset",
-      "accepted_values": [
-        "after-config",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-          "description": "Kills the fixture migration between canonical mutations"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "The bridge journal arms state-mutation recovery before fixture-controlled migration execution"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_TEST_PHASE1_POST_HEALTH_CRASH",
-      "category": "test_fixture",
-      "purpose": "Injects a process kill after the POSIX bridge gateway passes health but before phase-one journal closure.",
-      "default": "unset",
-      "accepted_values": [
-        "after-health",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Kills the bridge controller at the live-gateway post-health recovery boundary"
-        },
-        {
-          "location": "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-          "description": "Proves fresh recovery stops the live bridge using the bound split DataDir and config path"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_TEST_PHASE1_RECOVERY_CRASH",
-      "category": "test_fixture",
-      "purpose": "Injects a process-kill cut point while replaying the POSIX phase-one gateway publication journal so crash recovery is tested at each ownership boundary.",
-      "default": "unset",
-      "accepted_values": [
-        "after-gateway-displace",
-        "after-gateway-publish",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Kills the isolated journal-recovery helper at the selected publication cut point"
-        },
-        {
-          "location": "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-          "description": "Drives deterministic crash-and-replay coverage for both recovery cut points"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_TEST_PHASE1_ROLLBACK_CRASH",
-      "category": "test_fixture",
-      "purpose": "Injects a process-kill cut point after POSIX phase-one state restoration but before controller artifact restoration so durable mixed-progress recovery is tested.",
-      "default": "unset",
-      "accepted_values": [
-        "after-state-restore",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Kills the same-session rollback controller after exact source state is durable"
-        },
-        {
-          "location": "cli/tests/test_upgrade_bridge_phase1_rollback.py",
-          "description": "Proves the next fresh recovery process accepts source root metadata and completes artifact restoration"
-        }
-      ],
-      "since": "0.8.4"
     },
     {
       "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",
@@ -5024,33 +5390,9 @@
       "since": "0.8.0"
     },
     {
-      "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
-      "category": "security_opt_out",
-      "purpose": "Skip checksum / signature verification during 'defenseclaw upgrade' or scripts/upgrade.sh. Intended for emergency-fix scenarios where the signing CA chain is briefly unavailable.",
-      "default": "unset (fail-closed)",
-      "accepted_values": [
-        "1",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": true,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Python upgrade path checks this before downloading without a checksum"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Shell upgrade path checks this before proceeding without verification"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Upgrade-artifact integrity — prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM."
-    },
-    {
-      "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
-      "category": "upgrade_internal",
-      "purpose": "Marks a trusted upgrade/recovery child so an installed CLI cannot recursively hand off and an exact-owned gateway can delegate its readiness wait to the supervising controller.",
+      "name": "DEFENSECLAW_UPDATE_GOLDEN",
+      "category": "test_fixture",
+      "purpose": "Regenerates the host hook, sandbox artifact, OpenShell policy and provider profile golden files, and the bounded chain catalog, instead of comparing against them.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -5060,140 +5402,97 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"
+          "location": "internal/gateway/connector/hook_render_golden_test.go",
+          "description": "Rewrites the host hook byte manifest"
         },
+        {
+          "location": "internal/gateway/connector/sandbox_artifacts_test.go",
+          "description": "Rewrites the sandbox artifact goldens"
+        },
+        {
+          "location": "internal/openshell/policy/policy_test.go",
+          "description": "Rewrites the policy YAML goldens"
+        },
+        {
+          "location": "internal/openshell/profiles/profiles_test.go",
+          "description": "Rewrites the provider profile goldens"
+        },
+        {
+          "location": "internal/guardrail/tool_chain_catalog_json_test.go",
+          "description": "Rewrites policies/guardrail/tool-chains.json from the chain catalog"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
+      "category": "security_opt_out",
+      "purpose": "Retired 0.x upgrade override with no effect in 1.x. Still refused from .env files so an old dotenv cannot carry it forward.",
+      "default": "unset (no effect)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/cli/root.go",
+          "description": "Refuses the retired name when loading .env"
+        },
+        {
+          "location": "cli/defenseclaw/file_permissions.py",
+          "description": "Refuses the retired name when loading .env"
+        }
+      ],
+      "since": "0.5.0",
+      "deprecated": true,
+      "replacement_hint": "Remove it; 1.x checks every release asset against checksums.txt and has no unverified mode."
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
+      "category": "upgrade_internal",
+      "purpose": "Set by 0.8.x upgrade controllers on the processes they start. The 1.x handoff script clears it, and native Setup scopes it to restoring a pre-1.0 gateway during recovery.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
         {
           "location": "cmd/defenseclaw-setup/main.go",
           "description": "Scrubs ambient delegation and scopes it only to an authenticated prior-gateway launch during durable transaction recovery"
         },
         {
-          "location": "internal/cli/daemon.go",
-          "description": "Delegates gateway readiness to the supervising upgrade controller while retaining safe launch and immediate-exit checks"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Scopes the marker to the immutable post-hard-cut controller continuation"
+          "location": "scripts/defenseclaw-upgrade.sh",
+          "description": "Clears the 0.8.x controller marker before running the 1.x installer"
         }
       ],
       "since": "0.8.4"
     },
     {
-      "name": "DEFENSECLAW_UPGRADE_MUTATION_TOKEN",
-      "category": "upgrade_internal",
-      "purpose": "Carries the authenticated 32-character lowercase-hex upgrade attempt identifier into migration writers so attempt-owned temporary files can be named and cleaned without touching unrelated files.",
-      "default": "unset (writers use their ordinary temporary-file names)",
-      "accepted_values": [
-        "32-character lowercase hexadecimal attempt identifier",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Passes the phase-one recovery plan identifier to the isolated migration process"
-        },
-        {
-          "location": "cli/defenseclaw/config.py",
-          "description": "Tags atomic config-write temporary files as owned by the current upgrade attempt"
-        },
-        {
-          "location": "cli/defenseclaw/migrations.py",
-          "description": "Tags atomic migration-write temporary files as owned by the current upgrade attempt"
-        },
-        {
-          "location": "cli/defenseclaw/migration_state.py",
-          "description": "Tags atomic migration-state temporary files as owned by the current upgrade attempt"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_UPGRADE_TARBALL_SHA256",
-      "category": "security_opt_out",
-      "purpose": "Operator-provided sha256 pin for the gateway tarball downloaded by `defenseclaw upgrade`. Verified before extraction. When neither a sidecar .sha256 file nor this pin is supplied, the upgrade aborts unless DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.",
-      "default": "unset",
-      "accepted_values": [
-        "64-char hex sha256",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Python upgrade verifier"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Shell upgrade verifier"
-        }
-      ],
-      "since": "0.5.0",
-      "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
-    },
-    {
-      "name": "DEFENSECLAW_UPGRADE_TEST_MODE",
+      "name": "DEFENSECLAW_UPGRADE_LOCAL_DIR",
       "category": "test_fixture",
-      "purpose": "Explicitly enables the loopback-only unpublished release endpoint used by upgrade protocol release-candidate tests.",
+      "purpose": "Tests only: `defenseclaw upgrade` and the 0.8.x handoff take the installer and release assets from this directory.",
       "default": "unset",
       "accepted_values": [
-        "1",
-        "unset"
+        "any-absolute-path"
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Gates the fresh-controller candidate release endpoint override"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_UPGRADE_TEST_RELEASE_BASE_URL",
-      "category": "test_fixture",
-      "purpose": "Carries a numeric-loopback HTTP release asset base URL across the fresh-controller handoff for unpublished candidate testing.",
-      "default": "unset",
-      "accepted_values": [
-        "http://<numeric-loopback>:<port>[/path]",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Overrides the GitHub release download base only when upgrade test mode is explicitly enabled"
-        }
-      ],
-      "since": "0.8.4"
-    },
-    {
-      "name": "DEFENSECLAW_UPGRADE_WHL_SHA256",
-      "category": "security_opt_out",
-      "purpose": "Operator-provided sha256 pin for the Python CLI wheel downloaded by `defenseclaw upgrade`. Verified before installation. When neither a sidecar .sha256 file nor this pin is supplied, the upgrade aborts unless DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.",
-      "default": "unset",
-      "accepted_values": [
-        "64-char hex sha256",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
-          "description": "Python upgrade verifier"
+          "location": "cli/defenseclaw/upgrade_shim.py",
+          "description": "Copies the installer from a local release directory"
         },
         {
-          "location": "scripts/upgrade.sh",
-          "description": "Shell upgrade verifier"
+          "location": "scripts/defenseclaw-upgrade.sh",
+          "description": "Runs the installer with --local"
         }
       ],
-      "since": "0.5.0",
-      "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_V2_1177_RECREATE_LIVE",
@@ -5576,6 +5875,25 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_V2_LOCK_CONTENDED",
+      "category": "test_fixture",
+      "purpose": "Marker path the native CAS V2 cross-process lock fixture writes when its contender finds the lock held and starts to wait, so the test proves contention instead of sleeping.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute test marker path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
+          "description": "Native CAS V2 lock contention fixture"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_V2_LOCK_STATE",
       "category": "test_fixture",
       "purpose": "Recovery-state directory passed to the native CAS V2 cross-process lock fixture.",
@@ -5614,28 +5932,6 @@
       "since": "0.8.0"
     },
     {
-      "name": "DEFENSECLAW_VENV",
-      "category": "runtime_path",
-      "purpose": "Path to the DefenseClaw uv venv. Set by install.sh / upgrade.sh; operators normally don't override.",
-      "default": "${DEFENSECLAW_HOME}/.venv",
-      "accepted_values": [
-        "any-absolute-path"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "scripts/install.sh",
-          "description": "Installer venv path"
-        },
-        {
-          "location": "scripts/upgrade.sh",
-          "description": "Upgrader venv path"
-        }
-      ],
-      "since": "0.2.0"
-    },
-    {
       "name": "DEFENSECLAW_WEBEX_TOKEN",
       "category": "credential",
       "purpose": "Webex bot token default for webhook entries.",
@@ -5657,7 +5953,7 @@
     {
       "name": "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
       "category": "security_opt_out",
-      "purpose": "Relax the webhook SSRF guard to permit RFC1918 / loopback / link-local destinations. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
+      "purpose": "Relax the webhook SSRF guard to permit localhost and loopback destinations only; private (RFC 1918), link-local and cloud-metadata addresses stay blocked. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
       "default": "unset (SSRF guard blocks private IPs)",
       "accepted_values": [
         "1",
@@ -5850,6 +6146,26 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_WINDOWS_ROLLBACK_SIGNED_OUT_ACCOUNTS",
+      "category": "security_opt_out",
+      "purpose": "Skip the S4U logon that the rollback of a failed first Windows standalone install uses to put back a signed-out account's agent configuration. Those accounts are then listed as rollback leftovers.",
+      "default": "unset (signed-out accounts are restored through an S4U logon)",
+      "accepted_values": [
+        "0",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/enterprisehooks/rollback_first_install_windows.go",
+          "description": "windowsStandaloneSignedOutRollbackEnabled() skips the S4U restore of signed-out accounts when set to 0"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Cleanup opt-out: with 0, a signed-out account can keep agent hook configuration that points at the rolled-back install until an administrator removes the listed leftovers."
+    },
+    {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT",
       "category": "runtime_path",
       "purpose": "Identify the exact virtual Windows service account permitted to write the managed runtime tree.",
@@ -5891,6 +6207,10 @@
         {
           "location": "cmd/defenseclaw/service_windows.go",
           "description": "Redirects native Windows service stdout and stderr to the configured file"
+        },
+        {
+          "location": "cmd/defenseclaw-sensor-helper/log_windows.go",
+          "description": "Appends the sensor helper's service log to the configured file"
         }
       ],
       "since": "0.8.0",
@@ -5917,22 +6237,178 @@
       "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
     },
     {
-      "name": "MIGRATION_DEFENSECLAW_HOME",
-      "category": "runtime_path",
-      "purpose": "Passed by scripts/upgrade.sh to the migration step. Identifies the data dir the migration should operate on.",
-      "default": "(set by upgrade.sh)",
+      "name": "DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE",
+      "category": "hook_internal",
+      "purpose": "Tell the standalone Windows managed-hook teardown finalize that the uninstall purges, so it also removes each enrolled account's per-user DefenseClaw folder.",
+      "default": "unset (the finalize only names each per-user folder)",
       "accepted_values": [
-        "any-absolute-path"
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/windows_managed_hooks_teardown.go",
+          "description": "Removes each enrolled account's %USERPROFILE%\\.defenseclaw as LocalSystem after a committed uninstall with purge"
+        },
+        {
+          "location": "packaging/windows/DefenseClawEnterprise.psm1",
+          "description": "Sets it for the helpers of a standalone uninstall with purge and clears it for every other helper run"
+        }
+      ],
+      "since": "1.0.0",
+      "security_note": "Lifecycle-owned helper switch: the lifecycle sets or clears it for every helper it runs, so a caller's inherited value never reaches the finalize."
+    },
+    {
+      "name": "DEFENSECLAW_SSH_SHIM_PROBE",
+      "category": "hook_internal",
+      "purpose": "Set by DefenseClaw only for the one probe run of the ssh shim it puts first on the OpenShell CLI's PATH: the shim prints the value and exits without running ssh, which proves a PATH search finds and executes it. DefenseClaw removes it from the environment it gives the OpenShell CLI.",
+      "default": "unset (set only for the probe run)",
+      "accepted_values": [
+        "probe token",
+        "unset"
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "scripts/upgrade.sh",
-          "description": "Upgrade-time migration runner"
+          "location": "internal/openshell/sshshim.go",
+          "description": "Shim probe: set for the probe run, stripped from the OpenShell CLI's environment"
+        },
+        {
+          "location": "internal/openshell/sshshim_test.go",
+          "description": "Tests the probe answer and that the CLI never sees it"
         }
       ],
-      "since": "0.4.0"
+      "since": "0.9.0"
+    },
+    {
+      "name": "DEFENSECLAW_AGENT_HOME",
+      "category": "hook_internal",
+      "purpose": "The account's real HOME, saved unexported by the Unix hook hardening before it swaps in the per-hook HOME, so a hook can cold-start the account's stopped per-user gateway with the right HOME. The hook sets it itself, so an inherited value is overwritten.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening and the per-user gateway cold start"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_AUTOSTART",
+      "category": "security_opt_out",
+      "purpose": "Set to 0, false, no or off in the agent's environment to stop the Unix hooks from starting a stopped per-user gateway when their request is refused. Fail-closed hooks then block and fail-open hooks let the call through until the gateway is started.",
+      "default": "unset (hooks start a stopped per-user gateway)",
+      "accepted_values": [
+        "0",
+        "false",
+        "no",
+        "off"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Per-user gateway cold start from the hooks"
+        },
+        {
+          "location": "internal/gateway/connector/hook_test_env_helpers_test.go",
+          "description": "Turns the cold start off in the sanitized hook test environment"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_LOG_TIMESTAMPS",
+      "category": "debug",
+      "purpose": "Set to 0 to turn off the RFC 3339 UTC time stamps the gateway and the background watchdog put on each line of their log files.",
+      "default": "unset (lines are stamped)",
+      "accepted_values": [
+        "0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/logstamp.go",
+          "description": "StampChildLog and StampDetachedLog skip stamping when set to 0"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_STAMP_LOG",
+      "category": "hook_internal",
+      "purpose": "Internal marker set by DefenseClaw on a detached helper (the background watchdog) so it stamps its log lines like the gateway; cleared by the helper so its children do not inherit it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/logstamp.go",
+          "description": "StampDetachedLog reads and clears the marker"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_DELEGATED_FROM",
+      "category": "hook_internal",
+      "purpose": "Set to 'defenseclaw' by the Python CLI when it runs a gateway command for the user ('defenseclaw audit export' and 'audit findings' run 'defenseclaw-gateway audit ...'), so the gateway's usage errors name the command the user typed.",
+      "default": "unset",
+      "accepted_values": [
+        "defenseclaw",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_audit.py",
+          "description": "Sets it before running defenseclaw-gateway audit export/findings"
+        },
+        {
+          "location": "internal/cli/usage_args.go",
+          "description": "Names 'defenseclaw' instead of the gateway binary in usage errors"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCAN_RECORDED_BY_CALLER",
+      "category": "hook_internal",
+      "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert (GAP-2482).",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/scanner/plugin.go",
+          "description": "Sets it on the plugin scan child process"
+        },
+        {
+          "location": "cli/defenseclaw/commands/_scan_ui.py",
+          "description": "Skips recording the scan when it is 1"
+        }
+      ],
+      "since": "1.0.0"
     }
   ]
 }

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
@@ -242,6 +244,33 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	}
 	if _, err := os.Lstat(first.BundlePath()); !os.IsNotExist(err) {
 		t.Fatalf("finalized prior bundle still exists: %v", err)
+	}
+	// A rollback restores the selector it captured even when that selector's
+	// bundle has since disappeared (a deleted account's profile): the entry
+	// stays unusable and resolution fails closed, and the restore does not
+	// leave the transaction pending.
+	thirdSelector, err := CaptureWindowsManagedRuntimeSelector("codex")
+	if err != nil || !thirdSelector.Existed {
+		t.Fatalf("capture outer complete selector: existed=%v err=%v", thirdSelector.Existed, err)
+	}
+	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+		WindowsManagedRuntimeSelectorFullRestoreOptions{
+			Snapshot:        oldSelector,
+			ExpectedCurrent: thirdSelector.CAS,
+		},
+	); err != nil {
+		t.Fatalf("restore selector whose bundle was removed: %v", err)
+	}
+	if _, err := ResolveWindowsManagedRuntimeGeneration(resolve); err == nil {
+		t.Fatal("selector with a removed bundle resolved instead of failing closed")
+	}
+	if err := RestoreWindowsManagedRuntimeSelectorCAS(
+		WindowsManagedRuntimeSelectorFullRestoreOptions{
+			Snapshot:        thirdSelector,
+			ExpectedCurrent: oldSelector.CAS,
+		},
+	); err != nil {
+		t.Fatalf("restore outer complete selector: %v", err)
 	}
 
 	orphanDesired := thirdDesired
@@ -774,5 +803,132 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 				t.Fatal("authenticated connector contract drift matched immutable generation")
 			}
 		})
+	}
+}
+
+// A lifecycle that stopped the guardian between relaxing <data dir>\hooks for
+// a connector setup and hardening it again left the relaxed owner-private
+// DACL behind (2 ACEs, no Administrators). Every later retire of that user's
+// managed runtime generations then refused, as LocalSystem and as an elevated
+// administrator, and no lifecycle action could recover the host. The retire
+// restores the canonical DACL on exactly that shape.
+func TestWindowsManagedRuntimeGenerationGCRecoversSetupRelaxedHooks(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+	createWindowsManagedRuntimeTestHooksWithDACL(t, hookDir, fixture.target, windowsSetupRelaxedDirectorySDDL)
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err == nil {
+		t.Fatal("relaxed hooks directory validated as canonical")
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     fixture.options.Connector,
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err != nil || removed != 0 {
+		t.Fatalf("collect with a relaxed hooks directory: removed=%d err=%v", removed, err)
+	}
+	if err := validateWindowsManagedRuntimeGenerationRoots(fixture.options.DataDir, fixture.target); err != nil {
+		t.Fatalf("hooks directory was not restored to the canonical DACL: %v", err)
+	}
+}
+
+func createWindowsManagedRuntimeTestHooksWithDACL(t *testing.T, hookDir string, target *windows.SID, sddl string) {
+	t.Helper()
+	if err := os.Mkdir(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, hookDir, target)
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(hookDir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A managed Windows Kiro lock entry pins one of Kiro's reviewed managed
+// contracts, like every other managed footprint: no contract ID and the
+// sandbox-only Kiro contract are refused (WIN-R1-20).
+func TestWindowsManagedRuntimeValidContractRequiresRegisteredKiroContract(t *testing.T) {
+	if windowsManagedRuntimeValidContract("kiro", "") {
+		t.Fatal("kiro with no contract ID was accepted")
+	}
+	if windowsManagedRuntimeValidContract("kiro", "kiro-cli-hooks-v1") {
+		t.Fatal("kiro with the sandbox-only contract ID was accepted")
+	}
+	for _, id := range []string{connector.KiroWindowsManagedCLIContractID, connector.KiroWindowsManagedIDEContractID} {
+		if !windowsManagedRuntimeValidContract("kiro", id) {
+			t.Fatalf("kiro with its managed contract ID %s was refused", id)
+		}
+	}
+	if !windowsManagedRuntimeValidContract("codex", "codex-hooks-v1") {
+		t.Fatal("codex with its known contract ID was refused")
+	}
+}
+
+// 1.0.1 wrote managed Kiro bundles with no hook contract ID, which this build
+// no longer publishes. Every upgrade, repair and uninstall retires the
+// unselected bundles, and it refused that legacy one ("refusing to collect
+// an invalid managed runtime bundle"), so no lifecycle action could finish
+// (GAP-1322). Its identity matches, so it is collected.
+func TestWindowsManagedRuntimeGenerationGCCollectsLegacyContractlessBundle(t *testing.T) {
+	fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+	fixture.options.Connector = "kiro"
+	home := filepath.Dir(fixture.options.DataDir)
+	hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, fixture.target); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishWindowsManagedRuntimeSelector(windowsManagedRuntimeSelector{
+		SchemaVersion: windowsManagedRuntimeGenerationSchema,
+		Connector:     "kiro",
+		Targets:       []windowsManagedRuntimeSelectorTarget{},
+	}); err != nil {
+		t.Fatalf("publish protected selector without target SID: %v", err)
+	}
+	generationID, err := newWindowsManagedRuntimeGenerationID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := marshalWindowsManagedRuntimeBundle(windowsManagedRuntimeBundle{
+		SchemaVersion:      windowsManagedRuntimeGenerationSchema,
+		GenerationID:       generationID,
+		Connector:          "kiro",
+		TargetSID:          fixture.options.TargetSID,
+		DataDir:            fixture.options.DataDir,
+		HookExecutable:     fixture.options.HookExecutable,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGateway",
+		FailMode:           "closed",
+		ScopedToken:        "legacy-scoped-test-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := windowsManagedRuntimeBundlePath(fixture.options.DataDir, "kiro", generationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+		t.Fatalf("publish legacy bundle: %v", err)
+	}
+
+	removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+	if err != nil || removed != 1 {
+		t.Fatalf("collect legacy contractless bundle: removed=%d err=%v", removed, err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("legacy bundle survived GC: %v", err)
 	}
 }

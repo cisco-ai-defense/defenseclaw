@@ -133,9 +133,50 @@ def test_overview_keeps_runtime_health_separate_from_native_delivery_truth() -> 
     view = type("OverviewView", (), {"overview_model": model})()
     rendered = DefenseClawTUI._overview_observability_text(view)
     assert "collector/runtime health does not prove accepted delivery" in rendered
-    assert "bounded 24h, truncated; counts partial" in rendered
-    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
-        assert label in rendered
+    assert "bounded 24h, newest 4096 events" in rendered
+    assert "Claude Code (claudecode): partial drop-only evidence (1/3 batches)" in rendered
+    assert "OpenCode (opencode): accepted native delivery observed (3 batches)" in rendered
+
+
+def test_overview_native_delivery_line_does_not_repeat_state_and_hangs_wrapped_text() -> None:
+    """GAP-2545: no "accepted · accepted ..." and no flush-left wrapped lines."""
+
+    from defenseclaw.tui.app import DefenseClawTUI
+    from rich.console import Console, Group
+
+    model = _model()
+    model.set_native_delivery_summary(
+        NativeDeliverySummary(
+            state="available",
+            reason="",
+            observation_window_hours=24,
+            connectors=(
+                NativeDeliveryStatus(
+                    connector="claudecode",
+                    default=True,
+                    state="accepted",
+                    normalized_batches=154,
+                    drop_only_batches=122,
+                    detail=(
+                        "accepted native delivery observed (154 batches; 122 held only log/metric "
+                        "records that DefenseClaw does not map, skipped by design)"
+                    ),
+                ),
+            ),
+        )
+    )
+    view = type("OverviewView", (), {"overview_model": model})()
+    for width in (80, 120):
+        console = Console(width=width, record=True, color_system=None)
+        console.print(Group(*DefenseClawTUI._overview_native_delivery_renderables(view)))
+        lines = [line for line in console.export_text().splitlines() if line.strip()]
+        item = next(i for i, line in enumerate(lines) if "Claude Code (claudecode):" in line)
+        assert "accepted · accepted" not in lines[item]
+        assert lines[item].startswith("  Claude Code (claudecode): accepted native delivery observed")
+        detail_col = lines[item].index("accepted")
+        assert len(lines) > item + 1, "the detail wraps at this width"
+        for line in lines[item + 1 :]:
+            assert line[:detail_col].strip() == "", line
 
 
 def test_overview_standalone_hint_and_notices() -> None:
@@ -153,9 +194,20 @@ def test_overview_standalone_hint_and_notices() -> None:
             )
         )
     )
-    assert model.gateway_standalone_hint() == "set gateway.host and restart"
+    # A hook-only (codex) roster never uses the OpenClaw fleet uplink, so the
+    # Gateway row shows the sidecar and the OpenClaw advice stays hidden.
+    assert model.gateway_standalone_hint() == ""
+    assert model.subsystem_state("gateway") == "running"
+    assert "OpenClaw" not in model.service_detail("gateway")
     notices = model.build_notices()
-    assert not any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert not any(notice.level == "error" and "Gateway is not running" in notice.message for notice in notices)
+    assert not any("set gateway.host" in notice.message for notice in notices)
+
+    openclaw = OverviewPanelModel(OverviewConfig(data_dir="/tmp/dc", claw_mode="openclaw"), version="test")
+    openclaw.set_health(model.health)
+    assert openclaw.gateway_standalone_hint() == "set gateway.host and restart"
+    assert openclaw.subsystem_state("gateway") == "disabled"
+    notices = openclaw.build_notices()
     assert any(notice.level == "info" and "set gateway.host" in notice.message for notice in notices)
 
     model.set_health(HealthSnapshot(gateway=SubsystemHealth(state="reconnecting")))
@@ -312,6 +364,29 @@ def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference()
     assert storage.retention_failure == "run_failed"
 
 
+def test_agent_detail_names_tool_inspection_mode_and_singular_blocks() -> None:
+    # GAP-2515: the raw "both" enum and "1 tool blocks" leaked into the row.
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="openclaw", guardrail_connector="openclaw"),
+        version="test",
+    )
+    model.set_health(
+        HealthSnapshot(
+            connector=ConnectorHealth(
+                name="openclaw",
+                state="running",
+                tool_inspection_mode="both",
+                requests=8,
+                tool_blocks=1,
+                subprocess_blocks=1,
+            )
+        )
+    )
+    assert model.agent_detail() == (
+        "OpenClaw - pre-execution + response-scan - 8 req - 1 tool block - 1 subprocess block"
+    )
+
+
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
     # 8.13: in a multi-connector install the SERVICES "Agent" row collapses to
     # an "N connectors active" roll-up (per-connector detail lives in the
@@ -358,7 +433,7 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
             ),
         )
     )
-    assert multi.agent_detail() == "1/2 connectors running"
+    assert multi.agent_detail() == "1/2 connectors running · not running: Cursor"
     assert multi.subsystem_state("agent") == "degraded"
 
     # Older gateway without a connectors[] array -> configured count fallback.
@@ -367,7 +442,7 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
 
 
 def test_cursor_agent_detail_has_enabled_disabled_parity_and_preserves_codex() -> None:
-    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    disclosure = "overrides by Enterprise, Team or Project hooks can't be detected"
 
     enabled = OverviewPanelModel(OverviewConfig(claw_mode="cursor"), version="test")
     enabled.set_health(HealthSnapshot(connector=ConnectorHealth(name="cursor", state="running")))
@@ -446,8 +521,10 @@ def test_opencode_agent_state_requires_fresh_authenticated_heartbeat() -> None:
         assert "manual or automatic OpenCode registration" in model.agent_detail()
 
     model.set_health(snapshot())
-    assert model.subsystem_state("agent") == "degraded"
-    assert "stopped or idle" in model.agent_detail()
+    # No heartbeat yet: OpenCode is closed, which is idle, not degraded
+    # (GAP-1608).
+    assert model.subsystem_state("agent") == "idle"
+    assert "not open" in model.agent_detail()
     assert "pure" not in model.agent_detail().lower()
 
     model.set_health(snapshot(heartbeat=(now - timedelta(minutes=16)).isoformat()))
@@ -462,7 +539,8 @@ def test_opencode_agent_state_requires_fresh_authenticated_heartbeat() -> None:
 
     model.set_health(snapshot(heartbeat=(now - timedelta(minutes=1)).isoformat()))
     model.set_gateway_probe("offline", "sidecar API is unreachable")
-    assert model.subsystem_state("agent") == "degraded"
+    # The gateway is down, so the services it hosts read offline (GAP-1280).
+    assert model.subsystem_state("agent") == "offline"
     assert "gateway status is unavailable" in model.agent_detail()
 
 
@@ -901,18 +979,15 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     codex_home = tmp_path / "codex-home"
     opencode_home = tmp_path / "opencode-home"
     devin_config = tmp_path / "devin-config"
-    gemini_home = tmp_path / "gemini-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
     monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
         "devin": "Devin",
-        "geminicli": "Gemini CLI (deprecated; use Antigravity)",
         "copilot": "GitHub Copilot CLI",
     }
     for wire, want in cases.items():
@@ -937,10 +1012,6 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert "./.devin/hooks.v1.json" in connector_source_label("devin", "config")
     assert str(devin_config / "mcp_config.json") in connector_source_label("devin", "mcps")
     assert "closed beta" in connector_source_label("devin", "plugins")
-    gemini_guidance = connector_paths.cleanup_only_guidance("geminicli")
-    for category in ("skills", "plugins", "mcps", "config"):
-        assert connector_source_label("geminicli", category) == gemini_guidance
-    assert "Antigravity" in gemini_guidance
     assert ".github/mcp.json" in connector_source_label("copilot", "mcps")
     # opencode MCP is now managed by DefenseClaw (read+write via the bridge
     # path layer), so the source label points at its real config and no longer
@@ -1001,7 +1072,7 @@ def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
     rows = model.multi_connector_rows()
     assert [value for _, value in rows] == [
         "Codex (codex) — mode=observe",
-        "Cursor (cursor) — mode=action, priority-conflict-detection=unavailable (none inferred)",
+        "Cursor (cursor) — mode=action, overrides by Enterprise, Team or Project hooks can't be detected",
     ]
     # Indented sub-lines: blank label so the key:<16 formatting nests
     # them under the single "Agent" line.
@@ -1045,7 +1116,7 @@ def test_multi_connector_rows_append_effective_rule_pack() -> None:
         ("", "Codex (codex) — mode=action, strict"),
         (
             "",
-            "Cursor (cursor) — mode=observe, priority-conflict-detection=unavailable (none inferred)",
+            "Cursor (cursor) — mode=observe, overrides by Enterprise, Team or Project hooks can't be detected",
         ),
     ]
 
@@ -1095,3 +1166,235 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     # Malformed entries degrade gracefully instead of raising.
     assert format_scanner_overrides_summary((("", "high", "file", "block"),)) == ""
     assert format_scanner_overrides_summary((("secrets", "low", "file"),)) == ""  # wrong arity
+
+
+def test_guardrail_detail_names_the_rule_pack_not_a_placeholder_strategy() -> None:
+    def detail(pack_dir: str) -> str:
+        cfg = OverviewConfig(
+            guardrail_enabled=True, guardrail_mode="observe", guardrail_port=4000, guardrail_rule_pack_dir=pack_dir
+        )
+        return OverviewPanelModel(cfg, version="test").guardrail_detail()
+
+    assert detail("/p/guardrail/strict") == "observe, port 4000, strict pack"
+    assert detail("/p/guardrail/protected-codex/default") == "observe, port 4000, protected-codex pack"
+    assert detail("") == "observe, port 4000"
+
+
+def test_overview_health_signals_name_their_cause() -> None:
+    """GAP-1158: no proxy port for hook-only rosters, the zero-hook notice is
+    scoped to the gateway uptime, and a DEGRADED runtime says why."""
+
+    from defenseclaw.tui.services.overview_state import zero_connector_requests_notice
+    from defenseclaw.tui.services.runtime_state import RuntimeOverview
+
+    hook_only = OverviewConfig(
+        guardrail_enabled=True,
+        guardrail_mode="action",
+        guardrail_port=4000,
+        guardrail_connector="claudecode",
+        claw_mode="claudecode",
+    )
+    assert "port" not in OverviewPanelModel(hook_only, version="test").guardrail_detail()
+    proxy = OverviewConfig(guardrail_enabled=True, guardrail_port=4000, guardrail_connector="openclaw")
+    assert "port 4000" in OverviewPanelModel(proxy, version="test").guardrail_detail()
+
+    assert "since the gateway started" in zero_connector_requests_notice("claudecode", timedelta(minutes=6))
+
+    model = OverviewPanelModel(hook_only, version="test")
+    model.runtime = RuntimeOverview(
+        health_title="DEGRADED",
+        enabled=True,
+        scanned=True,
+        processes=845,
+        connections=6,
+        degraded_reason="partial coverage: shadow-egress idle",
+    )
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("shadow-egress idle" in m for m in messages), messages
+
+
+def test_no_config_overview_says_not_set_up() -> None:
+    """GAP-1163: with no config.yaml the Overview says DefenseClaw is not set up
+    and how to start, instead of 'Gateway status ... will retry'."""
+
+    from defenseclaw.tui.models import HintState
+    from defenseclaw.tui.widgets.hint_bar import HintEngine
+
+    model = OverviewPanelModel(None, version="test")
+    model.not_configured = True
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("not set up yet" in m and "defenseclaw init" in m for m in messages), messages
+    assert not any("not available yet" in m for m in messages)
+    hint = HintEngine().hint_for(HintState(active_panel="overview", not_configured=True))
+    assert "not set up yet" in hint
+
+
+def test_stopped_gateway_takes_its_services_offline_and_drops_stale_notices() -> None:
+    """GAP-1262/GAP-1280: once the probe says the gateway is down, the rows it
+    hosts stop reading "running" from the last /health payload."""
+
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="claudecode", connector_modes=(("claudecode", "action"), ("codex", "observe"))),
+        version="test",
+    )
+    model.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(minutes=3).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            watcher=SubsystemHealth(state="running"),
+            guardrail=SubsystemHealth(state="running"),
+            api=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="claudecode", state="running", requests=0),
+            connectors=(ConnectorHealth(name="claudecode", state="running", requests=0),),
+        )
+    )
+    model.set_gateway_probe("offline", "sidecar API is unreachable")
+
+    cards = {card.key: card for card in model.service_cards()}
+    assert cards["gateway"].state == "offline"
+    assert cards["gateway"].detail == "not running"
+    assert {cards[key].state for key in ("agent", "watcher", "guardrail", "api")} == {"offline"}
+    messages = [notice.message for notice in model.build_notices()]
+    assert any("Gateway is not running" in m for m in messages), messages
+    assert not any("hook event" in m for m in messages), messages
+
+    fresh = OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test")
+    fresh.set_gateway_probe("offline", "sidecar API is unreachable")
+    assert fresh.subsystem_state("gateway") == "offline"
+    assert fresh.subsystem_state("watcher") == "offline"
+
+
+def test_multi_connector_overview_has_no_false_drift_and_counts_modes() -> None:
+    """GAP-1220: the gateway's primary being another rostered connector is not
+    drift; the guardrail label shows the per-connector modes."""
+
+    cfg = OverviewConfig(
+        claw_mode="claudecode",
+        guardrail_enabled=True,
+        guardrail_mode="observe",
+        guardrail_connector="claudecode",
+        connector_modes=(("claudecode", "action"), ("amp", "observe"), ("codex", "observe")),
+    )
+    model = OverviewPanelModel(cfg, version="test")
+    model.set_health(
+        HealthSnapshot(
+            uptime_ms=int(timedelta(minutes=3).total_seconds() * 1000),
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="amp", state="running", requests=0),
+            connectors=(
+                ConnectorHealth(name="amp", state="running", requests=0),
+                ConnectorHealth(name="claudecode", state="running", requests=5),
+            ),
+        )
+    )
+
+    messages = [notice.message for notice in model.build_notices()]
+    assert not any("drift" in m for m in messages), messages
+    assert not any("hook event" in m for m in messages), messages
+    assert model.guardrail_mode_label() == "observe, 1 action"
+    assert model.guardrail_mode_label("claudecode") == "action"
+    assert model.guardrail_detail().startswith("observe, 1 action")
+
+
+def test_overview_and_audit_say_loading_until_the_first_read() -> None:
+    """GAP-1240: a slow first read is "loading", not "no audit events yet"."""
+
+    from defenseclaw.tui.panels.audit import AuditPanelModel
+
+    model = _model()
+    model.history_loading = True
+    assert any("Loading the audit history" in n.message for n in model.build_notices())
+
+    audit = AuditPanelModel()
+    audit.loading = True
+    assert "Loading audit events" in audit.render_text()
+    audit.loading = False
+    assert "No audit events yet" in audit.render_text()
+
+
+def test_overview_alert_hint_follows_the_connector_filter() -> None:
+    """GAP-1253: under a connector filter the banner doesn't send the user to
+    an empty Alerts list."""
+
+    from defenseclaw.tui.models import HintState
+    from defenseclaw.tui.widgets.hint_bar import HintEngine
+
+    hint = HintEngine().hint_for(
+        HintState(active_panel="overview", critical_alerts=0, connector_filter="Claude Code", hidden_critical_alerts=1)
+    )
+    assert "outside the Claude Code filter" in hint
+    assert "Press m" in hint
+
+
+def test_guardrail_detail_names_a_failing_judge() -> None:
+    """GAP-1288: the Guardrail card says when the judge's calls fail."""
+
+    from defenseclaw.tui.services.overview_state import HealthSnapshot, SubsystemHealth
+
+    cfg = OverviewConfig(guardrail_enabled=True, guardrail_mode="action", guardrail_connector="claudecode")
+    model = OverviewPanelModel(cfg, version="test")
+    model.set_health(
+        HealthSnapshot(
+            guardrail=SubsystemHealth(
+                state="running",
+                details={"judge_state": "failing", "judge_failed_calls": 10, "judge_recent_calls": 10},
+            )
+        )
+    )
+    assert "judge failing: 10/10 calls failed" in model.guardrail_detail()
+
+
+def test_telemetry_detail_names_full_disk_and_marks_local_sqlite_failing(monkeypatch) -> None:
+    """GAP-2215: the sink still says healthy, so the Overview must lead with the gateway's cause."""
+    import shutil
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: SimpleNamespace(total=100, used=100, free=0))
+    model = _model()
+    model.set_observability_status(
+        V8OperatorStatus(
+            source="/tmp/config.yaml",
+            data_dir="/tmp/dc",
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=7,
+            local_path="/tmp/dc/audit.db",
+            judge_bodies_path="",
+            destinations=(
+                V8DestinationStatus(
+                    name="local-sqlite",
+                    kind="sqlite",
+                    enabled=True,
+                    generated=True,
+                    capabilities=("logs",),
+                    selected_signals=("logs",),
+                    policy_form="implicit_local",
+                    endpoint="/tmp/dc/audit.db",
+                    route_count=1,
+                    buckets=("compliance.activity",),
+                    redaction_profiles=("none",),
+                ),
+            ),
+            buckets=(V8BucketStatus("compliance.activity", ("logs",), "none"),),
+            warnings=(),
+        )
+    )
+    details = {
+        "event_history_failure": "sqlite_write_failed",
+        "event_history_last_sqlite_class": "full",
+        "destinations": [{"name": "local-sqlite", "health_state": "healthy", "reason": "activated"}],
+    }
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="error", details=details)))
+
+    assert model.telemetry_detail() == (
+        "audit events cannot be written: the disk holding the audit database is full; "
+        "1 destination: local-sqlite (failing)"
+    )
+    (row,) = model.observability_destination_rows()
+    assert (row.state, row.health_reason) == (
+        "failing",
+        "audit events cannot be written: the disk holding the audit database is full",
+    )
+
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running", details=details)))
+    assert model.telemetry_detail() == "1 destination: local-sqlite (healthy)"

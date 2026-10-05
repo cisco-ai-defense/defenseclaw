@@ -46,13 +46,34 @@ func withWindowsEnterpriseTargetImpersonation(
 	expectedHome string,
 	fn func() error,
 ) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseTargetTokenResolver, fn)
+}
+
+// withWindowsEnterpriseS4UTargetImpersonation is
+// withWindowsEnterpriseTargetImpersonation for an account without a session,
+// under a token from an S4U logon. Only the rollback of a failed first
+// install uses it.
+func withWindowsEnterpriseS4UTargetImpersonation(
+	target *windows.SID,
+	expectedHome string,
+	fn func() error,
+) error {
+	return withWindowsEnterpriseTargetTokenImpersonation(target, expectedHome, windowsEnterpriseS4UTargetTokenResolver, fn)
+}
+
+func withWindowsEnterpriseTargetTokenImpersonation(
+	target *windows.SID,
+	expectedHome string,
+	resolve func(*windows.SID) (windows.Token, error),
+	fn func() error,
+) error {
 	if target == nil || windowsEnterpriseSystemIdentity(target) {
 		return fmt.Errorf("enterprise hooks: refusing invalid impersonation target SID %s", windowsSIDString(target))
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	token, err := windowsEnterpriseTargetTokenResolver(target)
+	token, err := resolve(target)
 	if err != nil {
 		return err
 	}
@@ -156,6 +177,18 @@ func runWindowsEnterpriseImpersonatedCallback(
 var errWindowsEnterpriseNotLocalSystem = errors.New(
 	"enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service",
 )
+
+// RequireWindowsEnterpriseTargetImpersonationIdentity reports whether this
+// process can act as a target user at all: only LocalSystem can obtain a
+// signed-in user's session token. An elevated administrator cannot.
+func RequireWindowsEnterpriseTargetImpersonationIdentity() error {
+	return windowsEnterpriseMutationIdentityCheck()
+}
+
+// ErrWindowsEnterpriseNotLocalSystem is what a per-user mutation returns when
+// the process is not LocalSystem, for example Setup run from an elevated
+// administrator prompt. Match it with errors.Is.
+var ErrWindowsEnterpriseNotLocalSystem = errWindowsEnterpriseNotLocalSystem
 
 func requireWindowsEnterpriseLocalSystem() error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

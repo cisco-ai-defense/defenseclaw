@@ -16,6 +16,14 @@ be running, and validation does not make a network request.
 defenseclaw guardrail validate-pack /path/to/rule-pack
 ```
 
+<Callout type="info" title="Enterprise deployments">
+Enterprise packages ship no `defenseclaw` CLI, so the `defenseclaw` commands
+on this page are not available on a managed host. There, validate with
+`defenseclaw-gateway rulepack validate --dir <pack>` and apply the pack
+through the managed config, as
+[Custom rule packs](/docs/enterprise/configuration#custom-rule-packs) shows.
+</Callout>
+
 A valid pack exits `0` and prints component counts plus a content digest. A
 pack that the helper successfully checks and finds invalid exits `1` with a
 bounded diagnostic that identifies the component path, error code, and reason.
@@ -23,10 +31,60 @@ If the authoritative helper is missing, cannot run, times out, or returns an
 incompatible response, the command exits `2` and reports that validation is
 unavailable. Exit `2` does not determine whether the pack itself is valid.
 
+A valid copy of the bundled default pack prints:
+
+```text title="defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/default"
+Rule pack valid: "/home/you/.defenseclaw/policies/guardrail/default"
+  rules: 239/243 enabled across 7 files
+  components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+  digest: c447c505a65bf39ecaf5b58f685cb9f7746c63a640cf722191b4b92817f3b5d9
+```
+
+`judges=4` counts the compiled-in exfil judge as well as the three judge files.
+An invalid pack names the component and the error code. A file the loader
+doesn't recognize, such as a `correlation-patterns.yaml`, fails the whole pack:
+
+```text title="Invalid pack (exit 1)"
+Rule pack invalid: "/home/you/.defenseclaw/policies/guardrail/my-org"
+  inventory_unexpected at correlation-patterns.yaml: unexpected YAML component
+```
+
 For CI or scripts, request the versioned JSON result:
 
 ```bash
 defenseclaw guardrail validate-pack /path/to/rule-pack --json
+```
+
+```json title="Valid pack (formatted; the command prints one line)"
+{
+  "kind": "validation",
+  "summary": {
+    "digest": "c447c505…",
+    "enabled_rule_count": 239,
+    "judge_category_count": 23,
+    "judge_count": 4,
+    "local_pattern_count": 11,
+    "rule_count": 243,
+    "rule_file_count": 7,
+    "sensitive_tool_count": 6,
+    "suppression_count": 9
+  },
+  "valid": true,
+  "wire_version": 1
+}
+```
+
+```json title="Invalid pack (formatted)"
+{
+  "error": {
+    "code": "inventory_unexpected",
+    "path": "correlation-patterns.yaml",
+    "reason": "unexpected YAML component"
+  },
+  "kind": "validation_error",
+  "valid": false,
+  "wire_version": 1
+}
 ```
 
 <Callout type="warn" title="Validation is fail-closed for files you provide">
@@ -100,24 +158,34 @@ never treats directory presence as proof that the pack is valid.
 
 ## Apply a validated pack
 
-Validation is a preflight; it does not change the running gateway. Point the
-global or per-connector `rule_pack_dir` at the validated directory, then restart
-the gateway through your normal setup or service workflow. Startup and restart
-load the pack through the same strict validator.
+Validation is a preflight; it does not change the running gateway. Switch to
+the validated pack with `defenseclaw guardrail use-pack`, which validates the
+pack again and then writes the global or one connector's `rule_pack_dir`. An
+invalid pack changes nothing. A running gateway loads a new `rule_pack_dir`
+only when it starts, so `use-pack` restarts a running gateway (pass
+`--no-restart` to skip; a stopped gateway is never started), and startup
+validates the pack with the same strict validator.
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org
-defenseclaw setup guardrail \
-  --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
-  --restart
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org        # every connector
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org --connector codex
+defenseclaw guardrail list-packs                                               # who uses which pack
 defenseclaw doctor
 ```
+
+A global switch removes every per-connector override and lists the ones it
+removed. `--connector X` changes only that connector; `use-pack --clear
+--connector X` puts it back on the global pack. If the validator is
+unavailable, built-in presets are applied with a warning, while custom packs
+are refused (exit `2`) unless you pass `--no-validate`.
 
 DefenseClaw does not watch rule-pack files for live changes. Editing a file in
 the active directory does not update an already running gateway, and
 `defenseclaw-gateway policy reload` reloads OPA policy rather than guardrail
-rule packs. Validate the finished directory and restart the gateway at the
-deployment boundary.
+rule packs. Validate the finished directory, then switch to it with `use-pack`
+(which restarts a running gateway) or restart the gateway yourself after
+editing the active pack in place.
 
 ## Safe editing loop
 
@@ -125,7 +193,7 @@ deployment boundary.
 2. Make one focused component change.
 3. Run `defenseclaw guardrail validate-pack PATH`.
 4. Run your rule fixtures or representative scans.
-5. Update `rule_pack_dir`, restart the gateway, and run `defenseclaw doctor`.
+5. Run `defenseclaw guardrail use-pack PATH` (or restart the gateway after editing the active pack in place), then run `defenseclaw doctor`.
 
 Do not use Python regular-expression behavior as a substitute for validation.
 Rule patterns are enforced by the Go gateway, so the gateway validator is the

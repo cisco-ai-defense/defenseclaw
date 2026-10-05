@@ -157,6 +157,54 @@ def test_guardrail_subsystem_expectation_requires_global_and_connector_enablemen
     assert _subsystem_expected_enabled(cfg, "guardrail") is expected
 
 
+def test_gateway_subsystem_expectation_is_off_when_discovery_found_no_openclaw(tmp_path):
+    # init defaults the connector to OpenClaw; with no OpenClaw installed the
+    # gateway reports its fleet client off, so doctor must not call that stale.
+    (tmp_path / "agent_discovery.json").write_text(
+        json.dumps({"agents": {"openclaw": {"installed": False, "binary_path": "", "version": ""}}}),
+        encoding="utf-8",
+    )
+
+    def cfg(host: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            data_dir=str(tmp_path),
+            gateway=SimpleNamespace(host=host, fleet_mode=""),
+            active_connectors=lambda: ["openclaw"],
+            active_connector=lambda: "openclaw",
+        )
+
+    assert _subsystem_expected_enabled(cfg("127.0.0.1"), "gateway") is False
+    assert _subsystem_expected_enabled(cfg("gw.example.com"), "gateway") is True
+
+
+@pytest.mark.parametrize(
+    ("enabled", "standalone", "platform", "deployment_mode", "expected"),
+    [
+        (True, False, "linux", "", True),
+        (True, False, "darwin", "", True),
+        (False, False, "linux", "", False),
+        (False, True, "linux", "", True),
+        (True, False, "win32", "", None),
+        (True, False, "linux", "managed_enterprise", None),
+    ],
+)
+def test_sandbox_subsystem_expectation_follows_openshell_enabled(
+    enabled,
+    standalone,
+    platform,
+    deployment_mode,
+    expected,
+):
+    # The gateway runs the sandbox subsystem when openshell.enabled is set,
+    # not only for the legacy standalone install.
+    cfg = SimpleNamespace(
+        openshell=SimpleNamespace(enabled=enabled, is_standalone=lambda: standalone),
+        deployment_mode=deployment_mode,
+    )
+    with patch("defenseclaw.commands.cmd_doctor.sys.platform", platform):
+        assert _subsystem_expected_enabled(cfg, "sandbox") is expected
+
+
 def test_gateway_auth_fails_actionably_when_token_missing(tmp_path):
     result = _DoctorResult()
 
@@ -1362,7 +1410,8 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
         ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[origin_main, replacement],
+            # The first call is the foreign-port-holder check.
+            side_effect=[origin_main, origin_main, replacement],
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",

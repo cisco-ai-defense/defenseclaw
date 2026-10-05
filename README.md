@@ -11,7 +11,7 @@
 <h1>DefenseClaw</h1>
 
 <p>
-  <strong>Security governance for OpenClaw and agentic AI runtimes.</strong><br />
+  <strong>Security governance for AI coding agents and agentic runtimes.</strong><br />
   Scan capabilities before use, inspect runtime traffic, and export durable audit evidence.
 </p>
 
@@ -28,6 +28,16 @@ scanners, and observability exporters. It is an enforcement and evidence layer;
 it does not prove that an agent, model interaction, or third-party capability is
 risk-free.
 
+## Get started
+
+```bash
+curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
+defenseclaw quickstart
+```
+
+Then read the [docs](https://cisco-ai-defense.github.io/defenseclaw/docs/). On
+native Windows, see [Install DefenseClaw](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/).
+
 ## Documentation
 
 The [DefenseClaw documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
@@ -41,7 +51,7 @@ operator workflows:
 | Upgrade | [Upgrade](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/) |
 | Windows | [Native Windows](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/windows/) |
 | Connectors | [Connector compatibility](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/) |
-| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/guardrail/) |
+| Guardrails | [Guardrail setup](https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/) |
 | Configuration | [Configuration reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/) |
 | CLI | [CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/) |
 | Observability | [Observability](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/) |
@@ -76,9 +86,8 @@ select. `make test`, `make check`, and `make py-lint` bootstrap that environment
 when needed. `make all` intentionally rebuilds and activates the current
 checkout for local development; the lower-level
 `make install`, `make dev-install`, and `scripts/install-dev.sh` targets enforce
-source-ownership rules and are not an upgrade path. Release-managed
-installations use the release-owned `scripts/upgrade.sh` or
-`scripts/upgrade.ps1` resolver described on the
+source-ownership rules and are not an upgrade path. Release installs upgrade
+with `defenseclaw upgrade`, which runs the latest release's installer; see the
 [upgrade page](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/).
 
 The principal source areas are:

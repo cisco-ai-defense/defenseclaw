@@ -22,6 +22,30 @@ const (
 	DeploymentModeEnv               = "DEFENSECLAW_DEPLOYMENT_MODE"
 	HookGuardianAuthorizationDirEnv = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
 	HookGuardianAuthorizationFile   = "protected_targets.json"
+	// HookGuardianUserCleanupFile, next to the authorization ledger, lists
+	// the DefenseClaw per-user registrations the hook guardian still has to
+	// remove from the homes of users it no longer enrolls.
+	HookGuardianUserCleanupFile = "user-cleanup.json"
+	// HookGuardianCredentialAttestationFile, next to the ledger, is the
+	// standalone Unix guardian's root-only record of what its last reconcile
+	// did to each target and which per-user credential key it rendered from
+	// (enterprisehooks.CredentialAttestation).
+	HookGuardianCredentialAttestationFile = "credential-attestation.json"
+	// HookGuardianRefusedSurfacesFile, next to the ledger, lists the
+	// (user, connector) pairs whose only installs are app or extension
+	// surfaces refused under enterprise.enrollment.unverified_versions:
+	// refuse. The standalone Unix enumerator writes it with the ledger's
+	// ownership and mode; the gateway refuses those hook calls.
+	HookGuardianRefusedSurfacesFile = "refused-surfaces.json"
+	// HookGuardianCredentialTransactionFile, next to the ledger, is the
+	// root-only record of the per-user credential rotation in progress
+	// (enterprisehooks.CredentialTransaction). The standalone Unix guardian
+	// renders from a staged key only while it names that key.
+	HookGuardianCredentialTransactionFile = "credential-transaction.json"
+	// HookGuardianReconcileLockFile, next to the ledger, serializes the
+	// standalone Unix guardian's reconciles with each other and with a
+	// credential rotation staging or committing a key.
+	HookGuardianReconcileLockFile = "reconcile.lock"
 	// WindowsServiceAccountEnv identifies the exact virtual service account
 	// permitted to write the managed runtime tree. It is installed in the
 	// administrator-owned per-service registry Environment value; it never

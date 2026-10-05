@@ -1,0 +1,426 @@
+---
+title: Workspace ONE UEM
+description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile with Omnissa Workspace ONE UEM on Windows and macOS, with Linux install and detection notes.
+keywords:
+  - DefenseClaw Workspace ONE
+  - Omnissa Workspace ONE UEM
+  - VMware Workspace ONE
+  - AirWatch
+  - Win32 app software distribution
+  - Workspace ONE scripts and sensors
+---
+
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+
+Workspace ONE UEM is an Omnissa product, formerly VMware Workspace ONE UEM
+([Omnissa documentation](https://docs.omnissa.com/)). This recipe deploys the
+[standalone profile](/docs/enterprise/concepts) to Windows and macOS devices
+with Workspace ONE apps, scripts and sensors, and the MDM kit (the scripts in
+`packaging/mdm`). For the contract every recipe follows, such as exit
+codes, detection and how config and keys are delivered, see
+[Install with an MDM](/docs/enterprise/mdm).
+
+| OS | Install | Keep applied | Detect |
+| --- | --- | --- | --- |
+| Windows | Win32 app from a ZIP | A Windows script that runs `ensure` | `detect.ps1` as the app's install-complete script |
+| macOS | Internal macOS app (the package) | A macOS script that runs `ensure` | A macOS sensor with `detect.sh` |
+| Linux | Linux App Management installs the package | Not covered: use [configuration management](/docs/enterprise/mdm/linux-config-management) | A Linux sensor with `detect.sh` |
+
+The MDM kit scripts accept only their own flags and stop on any other
+argument. Put every value in a script's settings block or on its command line
+as shown.
+
+## Prerequisites
+
+- Workspace ONE UEM with the Workspace ONE Intelligent Hub on the devices.
+  Win32 apps require the Hub
+  ([Windows app overview](https://docs.omnissa.com/Windows_Desktop_Management-VSaaS/uemWindeskAppOverview)),
+  and macOS scripts require Intelligent Hub 20.10 and Workflow Engine 20.10
+  or later
+  ([macOS scripts](https://docs.omnissa.com/macOS-Device-Management-VSaaS/AutomateScriptsmacOSDevices)).
+- Scripts and sensors cannot be assigned to employee-owned devices
+  ([Windows scripts](https://docs.omnissa.com/Windows_Desktop_Management-VSaaS/uemWindeskScripts)).
+- Windows: see [Windows requirements](/docs/enterprise/windows#requirements).
+  The standalone Setup runs on native x64 Windows only.
+- macOS: Apple silicon on macOS 13 or later. DefenseClaw ships no privacy
+  (PPPC) profile; see [macOS requirements](/docs/enterprise/macos#requirements)
+  for when you need one.
+- Your administrator config. See [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  The default config protects no agent.
+
+Verify every artifact against the release's cosign-signed `checksums.txt`
+before you upload it; see [Install with an MDM](/docs/enterprise/mdm).
+
+## Windows
+
+### How Workspace ONE runs Win32 apps and scripts
+
+| Behavior | Workspace ONE UEM | Source |
+| --- | --- | --- |
+| Identity | **Run as** **System** installs for the device. | [Win32 installation behavior](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/Win32ApplicationInstallationBehavior) |
+| Content | A ZIP needs an EXE or MSI inside it to run a PowerShell script. | [Upload and configure Win32 files](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/UploadandConfigureWin32FilesforSoftwareDistribution) |
+| Success and reboot | One **Installer Success Exit Code** and one **Installer Reboot Exit Code**. | [Upload and configure Win32 files](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/UploadandConfigureWin32FilesforSoftwareDistribution) |
+| Retry and timeout | **Retry Count**, **Retry Interval** and **Install Timeout**. The defaults are 3 retries, 5 minutes and 60 minutes. | [Win32 installation behavior](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/Win32ApplicationInstallationBehavior) |
+| Install complete | Defining criteria, or a custom script with a **Success Exit** code. | [Upload and configure Win32 files](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/UploadandConfigureWin32FilesforSoftwareDistribution) |
+| Scripts | PowerShell, in the user or system context, with a chosen architecture (32-bit, 64-bit or the device's) and a timeout in seconds. Exit `0` shows **Executed**, any other code **Failed**. | [Windows scripts](https://docs.omnissa.com/Windows_Desktop_Management-VSaaS/uemWindeskScripts) |
+| Variables | A script's **Variables** tab holds static values, including secrets, and the script reads them as `$env:<key>`. | [Windows scripts](https://docs.omnissa.com/Windows_Desktop_Management-VSaaS/uemWindeskScripts) |
+
+### Build the content
+
+On an administrator workstation with PowerShell 7.4 or later, run the kit's packager
+without `-IntuneWinAppUtil`. Despite its name, the content it builds does not
+depend on Intune:
+
+```powershell
+./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<SHA-256 from the cosign-verified checksums.txt>' `
+  -ConfigPath .\config.yaml `
+  -OutputDirectory .\ws1-defenseclaw-1.0.0 `
+  -ProductVersion 1.0.0
+Compress-Archive -Path .\ws1-defenseclaw-1.0.0\content\* -DestinationPath .\DefenseClaw-1.0.0.zip
+```
+
+The `content` folder holds the Setup, `config.yaml`, the
+`Install-DefenseClawIntune.ps1` launcher and `intune-package.json`. The
+launcher re-checks the SHA-256 pins in `intune-package.json` on the device,
+then starts `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure JSON=1`
+with an absolute `CONFIG=` path, because Setup refuses relative paths. It runs
+in 32- or 64-bit Windows PowerShell 5.1. The packager refuses a config that
+contains an inline `api_key`.
+
+Setup also refuses a config file that a non-administrator can change, or that
+sits in a folder a non-administrator can replace. If the device's app cache
+does not meet that, Setup stops with exit code `1603` and names the file.
+
+### Add PowerShell 7 as a dependency
+
+The standalone lifecycle runs on PowerShell 7 from the x64 MSI and refuses
+without it. Upload `PowerShell-7.x.y-win-x64.msi` in **Resources** >
+**Apps** > **Native Apps** > **Internal** > **ADD** > **Application File**, and answer
+**Yes** to **Is this a dependency file**. Then select it under **Files** >
+**App Dependencies** of the DefenseClaw app
+([Upload and configure Win32 files](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/UploadandConfigureWin32FilesforSoftwareDistribution)).
+The kit recommends PowerShell 7.4 or later.
+
+### Add the app
+
+Upload the ZIP in **Resources** > **Apps** > **Native Apps** > **Internal** >
+**ADD** > **Application File**, answer **No** to the dependency question, and
+set:
+
+| Tab | Setting | Value |
+| --- | --- | --- |
+| Details | **Supported Processor Architecture** | 64-bit |
+| Files | **App Dependencies** | The PowerShell 7 dependency |
+| Files | **App Uninstall Process** | **Use Custom Script**, with `packaging/mdm/windows/uninstall.ps1` (see [Uninstall on Windows](#uninstall-on-windows)) |
+| Deployment Options > How To Install | **Run as** | **System** |
+| | **Install Command** | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` |
+| | **Admin Privileges** | **Yes** |
+| | **Device Restart** | **Do Not Restart** |
+| | **Retry Count**, **Retry Interval** | `3`, `5` minutes |
+| | **Install Timeout** | `60` minutes |
+| | **Installer Reboot Exit Code** | `3010` |
+| | **Installer Success Exit Code** | `0` |
+| Deployment Options > When To Call Install Complete | **Identify Application By** | **Using Custom Script** |
+| | **Script Type** | PowerShell |
+| | **Command to Run the Script** | `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\detect.ps1 -MinimumVersion <version>` |
+| | **Custom Script File** | `packaging/mdm/windows/detect.ps1` |
+| | **Success Exit** | `0` |
+
+`detect.ps1` reads the protected enterprise marker through the 64-bit
+registry view, so it works in a 32- or 64-bit engine. It exits `0` and prints
+`DefenseClaw Enterprise <version>` when the standalone deployment is installed
+at that version or newer, and exits `1` otherwise.
+
+The first install needs the config in the content: `/ensure` without one
+exits `1639`.
+
+### Keep it healthy
+
+Add a Windows script in **Resources** > **Scripts** > **Add** > **Windows**
+([Windows scripts](https://docs.omnissa.com/Windows_Desktop_Management-VSaaS/uemWindeskScripts)):
+
+| Setting | Value |
+| --- | --- |
+| **Language** | PowerShell |
+| **Execution Context** | System |
+| **Timeout** | `900` seconds or more |
+| **Code** | `packaging/mdm/intune/windows/Remediate-Fix.ps1` |
+
+Assign it to the devices with a recurring trigger. The script runs
+`enterprise windows ensure --profile standalone --json`, which repairs from the
+installed payload and does nothing on a healthy device. It prints one short
+line and exits `0` when the device is healthy, repaired, or has no deployment
+yet. Otherwise it exits with the lifecycle's code, so the device's **Scripts**
+tab shows **Failed**. On unsigned (hash-pinned) releases the script's
+`ensure` keeps the marker's `hash_pinned` trust mode, so `detect.ps1` and
+`uninstall.ps1` keep accepting the unsigned CLI.
+
+### Deliver the AI Defense key on Windows
+
+The key is optional. Without it the local policy engine decides alone. Never
+put it in the ZIP, in `config.yaml` or in the script body.
+
+Add a second Windows script, **System** context, with the key as a variable
+named `AIDEFENSE_KEY` on its **Variables** tab. The script sends the value on
+standard input, never on a command line:
+
+```powershell
+# Stores the Cisco AI Defense key from the Workspace ONE script variable
+# AIDEFENSE_KEY. The value travels on standard input, never on a command line.
+$hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$marker = $hklm.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $marker) { throw 'DefenseClaw is not installed yet' }
+$cli = Join-Path ([string]$marker.GetValue('InstallRoot')) 'bin\defenseclaw.exe'
+$null = $env:AIDEFENSE_KEY | & $cli enterprise secret set --name ai-defense-api-key --from-stdin --json 2>&1
+exit $LASTEXITCODE
+```
+
+`enterprise secret set` needs an installed standalone deployment and an
+elevated context, which **System** provides. Each run stores the key and
+restarts the gateway, so run the script once, and again only when you rotate
+the key. Workspace ONE stores the value, so limit who can edit the script.
+Then set `enterprise.inspection.ai_defense.enabled: true` and
+`credential: ai-defense-api-key` in `config.yaml`. See
+[AI Defense key](/docs/enterprise/ai-defense-key).
+
+### Upgrade, roll back and change the config on Windows
+
+| Task | What to do |
+| --- | --- |
+| Upgrade | Build new content for the new release, add it as a new version of the app, and raise `-MinimumVersion` in the install-complete command. `/ensure` upgrades in place, keeps the state, and applies the config in the new content. |
+| Roll back | `ensure` refuses to downgrade on Windows. Follow [Roll back](/docs/enterprise/lifecycle#roll-back). |
+| Change the config | Build new content with the new `config.yaml` and add it as a new version. `/ensure` validates and applies it, and rolls back if applying fails. |
+
+### Uninstall on Windows
+
+`uninstall.ps1` finds the installed CLI through the protected registry marker
+and runs `enterprise windows uninstall --profile standalone --json`. That stops
+and deletes the services, removes DefenseClaw's hooks and machine-policy
+entries, removes the Add/Remove Programs entry and the marker, and removes the
+config, the key and the machine state. It works in 32- or 64-bit Windows
+PowerShell 5.1, prints a no-op result and exits `0` when nothing is installed.
+Pass `-Purge` to also remove each enrolled account's
+`%USERPROFILE%\.defenseclaw` and per-user binaries.
+
+### Windows logs
+
+| Where | What |
+| --- | --- |
+| Workspace ONE: the app's **Details View**, and the device's **Scripts** tab | Installation status and reason codes, and script status ([Upload and configure Win32 files](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/UploadandConfigureWin32FilesforSoftwareDistribution)) |
+| `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result, one JSON line per run |
+| `DefenseClaw` event log, source `DefenseClaw Lifecycle` (legacy copy: Application log, source `DefenseClaw Enterprise`) | Installed, upgraded, repaired, failed, busy and refused events |
+
+### Windows exit codes
+
+| Code | Meaning | In Workspace ONE |
+| --- | --- | --- |
+| `0` | Success, or nothing to do | Success (**Installer Success Exit Code**) |
+| `1603` | The action failed and rolled back, the config does not validate, Setup is not elevated, or a non-administrator can change the config file | Failure; retried up to **Retry Count**. Read `errors[].code` in the lifecycle log. |
+| `1618` | Another lifecycle run holds the lock | Failure for this attempt; the retry usually succeeds |
+| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, or a relative or environment-expanded `CONFIG=` path | Failure; fix the content, because a retry gives the same result |
+| `3010` | Reserved; Setup does not return it today | Reboot (**Installer Reboot Exit Code**) |
+
+See [Exit codes](/docs/enterprise/mdm#exit-codes) and
+[Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes).
+
+## macOS
+
+### How Workspace ONE runs macOS apps, scripts and sensors
+
+| Behavior | Workspace ONE UEM | Source |
+| --- | --- | --- |
+| Internal apps | Upload the `.pkg` with a metadata `.plist` made by the Workspace ONE Admin Assistant. | [Deploy internal macOS applications](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/DeployInternalmacOSApplications) |
+| App scripts | Written in Bash. A pre-install script that exits non-zero skips the install. A post-install failure is recorded as installed with warnings. | [Deploy internal macOS applications](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/DeployInternalmacOSApplications) |
+| Scripts | Bash, Python 3 or Zsh, in the user or system context, with a timeout in seconds. Exit `0` shows **Executed**, any other code **Failed**. Triggers include **Run Periodically** every 4, 6, 8 or 12 hours. | [macOS scripts](https://docs.omnissa.com/macOS-Device-Management-VSaaS/AutomateScriptsmacOSDevices) |
+| Sensors | Bash, Python 3 or Zsh, in the system or user context. The whole output is the value. | [macOS sensors](https://docs.omnissa.com/macOS-Device-Management-VSaaS/CollectDatawithSensorsmacOSDevices) |
+| Variables | Scripts and sensors read variables by name, such as `$myvariable`. Sensor variables are encrypted at rest and in transit. | [macOS scripts](https://docs.omnissa.com/macOS-Device-Management-VSaaS/AutomateScriptsmacOSDevices), [macOS sensors](https://docs.omnissa.com/macOS-Device-Management-VSaaS/CollectDatawithSensorsmacOSDevices) |
+
+### Install the package
+
+Upload the verified `defenseclaw-enterprise-<version>-darwin-arm64.pkg` in
+**Resources** > **Apps** > **Native Apps** > **Internal** > **ADD** >
+**Application File**, with the metadata file from the Workspace ONE Admin
+Assistant
+([Deploy internal macOS applications](https://docs.omnissa.com/SoftwareDistributionManagement-VSaaS/DeployInternalmacOSApplications)).
+On the app's **Scripts** settings:
+
+| Setting | Value |
+| --- | --- |
+| **Pre-Install Script** | The stage script below |
+| **Uninstall Method** | **Uninstall script**, with `packaging/mdm/macos/uninstall.sh` (change its first line to `#!/bin/bash`) |
+
+The pre-install script puts your config at the layout path
+`/opt/cisco/defenseclaw/etc/config.yaml` before the package installs, so the
+package's own `ensure --from-package` applies it on the first install. It never
+overwrites an existing config:
+
+```bash
+#!/bin/bash
+# DefenseClaw: put the administrator config in place before a first install.
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+layout=/opt/cisco/defenseclaw/etc
+[ -e "$layout/config.yaml" ] && exit 0
+umask 022
+mkdir -p "$layout"
+tmp=$(mktemp "$layout/.config.yaml.XXXXXX")
+cat >"$tmp" <<'DEFENSECLAW_CONFIG'
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+DEFENSECLAW_CONFIG
+chown root:wheel "$tmp"
+chmod 0640 "$tmp"
+mv -f "$tmp" "$layout/config.yaml"
+```
+
+Replace the YAML between the markers with your config. Never put the Cisco AI
+Defense key in it.
+
+The package's postinstall step runs `enterprise macos ensure --from-package`
+and fails the install if the lifecycle fails, after the lifecycle has rolled
+back. The result is kept in
+`/opt/cisco/defenseclaw/lifecycle/last-package-result.json`.
+
+### Keep it applied
+
+Add a script in **Resources** > **Scripting** > **Scripts** > **Add** >
+**macOS**, with **Language** **Bash**, **Execution Context** **System** and a
+**Timeout** of `1800` seconds. For the **Code**, paste
+`defenseclaw-enterprise.sh`, leave the source settings empty, and put the same
+YAML between the markers of its inline config:
+
+```bash
+DC_ACTION=ensure
+
+dc_inline_config() {
+    cat <<'DEFENSECLAW_CONFIG'
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+DEFENSECLAW_CONFIG
+}
+```
+
+Assign it with **Run Periodically** (for example every 12 hours). Each run,
+the wrapper stages the inline config in a root-only folder and runs
+`enterprise macos ensure` with it: it applies a changed config, repairs drift,
+or does nothing. It prints one lifecycle result document and exits with the
+lifecycle's code. On a device where the package is not installed yet it exits
+`1` with `mdm_not_installed`.
+
+### Detect on macOS
+
+Add a sensor in **Resources** > **Scripting** > **Sensors** > **Add** >
+**macOS**
+([macOS sensors](https://docs.omnissa.com/macOS-Device-Management-VSaaS/CollectDatawithSensorsmacOSDevices)):
+
+| Setting | Value |
+| --- | --- |
+| **Name** | `defenseclaw_status` (a lowercase letter first, then letters, digits and underscores) |
+| **Language** | Bash |
+| **Execution Context** | System |
+| **Response Data Type** | String |
+| **Code** | `detect.sh`, with the settings below |
+
+```bash
+DC_MIN_VERSION="1.0.0"
+DC_REQUIRE_HEALTHY=1
+DC_FORMAT="value"
+```
+
+The sensor always exits `0` and reports the installed version,
+`not-installed`, `outdated` or `unhealthy`.
+
+### Deliver the AI Defense key on macOS
+
+Add a second macOS script, **System** context, with the key as a variable named
+`AIDEFENSE_KEY`. `printf` is a shell built-in, so the value never appears on a
+command line:
+
+```bash
+#!/bin/bash
+# Stores the Cisco AI Defense key from the Workspace ONE variable AIDEFENSE_KEY.
+set -eu
+printf '%s' "$AIDEFENSE_KEY" | /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin --json
+```
+
+`enterprise secret set` stores the key and runs `ensure`. Storing the same key
+again changes nothing, so a periodic trigger is safe. It fails until the
+package is installed. Workspace ONE stores the value, so limit who can edit
+the script. Then set `enterprise.inspection.ai_defense.enabled:
+true` and `credential: ai-defense-api-key` in the config.
+
+### Upgrade, roll back and change the config on macOS
+
+| Task | What to do |
+| --- | --- |
+| Upgrade | Upload the new package as a new version of the app, and raise `DC_MIN_VERSION` in the sensor. The package's `ensure --from-package` upgrades in place and keeps the config and state. |
+| Roll back | Follow [Roll back](/docs/enterprise/lifecycle#roll-back). |
+| Change the config | Edit the inline config in the ensure script. The next run applies it; the lifecycle validates it first and rolls back if applying fails. |
+
+### macOS logs and exit codes
+
+| Where | What |
+| --- | --- |
+| Workspace ONE: the device's **Scripts** and **Sensors** tabs | Script status and logs, and sensor values |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
+| `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
+
+| Code | Meaning | In Workspace ONE |
+| --- | --- | --- |
+| `0` | Success, or nothing to do | **Executed** |
+| `1` | The action failed and rolled back, or the wrapper refused an input | **Failed**; read `errors[].code` in the script log |
+| `2` | Invalid settings, such as a missing or malformed value (`mdm_invalid_arguments`). A config that does not validate exits `1` (`config_invalid`). | **Failed**; fix the settings block |
+| `75` | Another lifecycle run or the installer holds a lock | **Failed** for this run; the next periodic run retries |
+
+## Linux
+
+Workspace ONE's Linux App Management installs, removes and versions `.deb` and
+`.rpm` files ([Linux App Management](https://docs.omnissa.com/LinuxDeviceManagement-VSaaS/LinuxAppManagement)),
+and Linux sensors run Bash or Python 3 in the system or current-user context
+([Linux sensors](https://docs.omnissa.com/LinuxDeviceManagement-VSaaS/SensorsforLinuxBasedDevices)).
+Workspace ONE's Linux Custom Configuration profile can also run configuration
+code (Omnissa lists Puppet, Bash, Python 3 and Ansible,
+[Linux profiles](https://docs.omnissa.com/LinuxDeviceManagement-VSaaS/LinuxProfiles)),
+which can stage the config and run `ensure` like the
+[configuration-management recipes](/docs/enterprise/mdm/linux-config-management).
+This recipe does not cover that route, and never put the AI Defense key in a
+profile:
+
+- Without a config at `/etc/defenseclaw/config.yaml`, the package installs the
+  default config, which protects no agent. Stage the config and the key with
+  your [configuration-management tool](/docs/enterprise/mdm/linux-config-management).
+- For detection, add a Linux sensor with `detect.sh` from `packaging/mdm/linux`,
+  **System** context, and `DC_FORMAT="value"` in its settings block.
+- The package's postinstall step never fails the package transaction. Check
+  the sensor, or `/var/lib/defenseclaw-enterprise/last-package-result.json`.

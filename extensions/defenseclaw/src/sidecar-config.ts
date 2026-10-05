@@ -16,7 +16,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize } from "node:path";
 import { homedir } from "node:os";
 import yaml from "js-yaml";
@@ -55,6 +55,7 @@ interface SidecarConfig {
 }
 
 let cached: SidecarConfig | undefined;
+let cachedKey = "";
 
 /** Resolve the exact DefenseClaw data root selected by the host process. */
 function resolveDefenseClawHome(): string {
@@ -73,15 +74,18 @@ function resolveDefenseClawHome(): string {
  * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar:
  * env var (gateway.token_env, default OPENCLAW_GATEWAY_TOKEN) wins over
  * the direct gateway.token value. Falls back to defaults if the file is
- * missing or malformed. Result is cached for the lifetime of the process.
+ * missing or malformed. The result is cached until config.yaml or .env
+ * changes: `defenseclaw setup openclaw` rewrites the token in .env while
+ * OpenClaw keeps running, and a stale token fails every sidecar call with
+ * an api-auth-failure security event (GAP-2286).
  */
 export function loadSidecarConfig(): SidecarConfig {
-  if (cached) return cached;
-
   // Resolve outside the permissive config-file fallback below. An invalid
   // explicit data-root override must fail closed instead of silently reading
   // an unrelated account-level installation.
   const defenseClawHome = resolveDefenseClawHome();
+  const key = configFilesKey(defenseClawHome);
+  if (cached && key === cachedKey) return cached;
 
   let host = DEFAULT_HOST;
   let apiPort = DEFAULT_API_PORT;
@@ -168,7 +172,23 @@ export function loadSidecarConfig(): SidecarConfig {
     hiltEnabled,
     enforcementMode,
   };
+  cachedKey = key;
   return cached;
+}
+
+/** Path, mtime and size of config.yaml and .env, to notice when either changes. */
+function configFilesKey(defenseClawHome: string): string {
+  return ["config.yaml", ".env"]
+    .map((name) => {
+      const path = join(defenseClawHome, name);
+      try {
+        const st = statSync(path);
+        return `${path}:${st.mtimeMs}:${st.size}`;
+      } catch {
+        return `${path}:missing`;
+      }
+    })
+    .join("|");
 }
 
 /**
@@ -198,4 +218,5 @@ function readDotEnvToken(defenseClawHome: string, key: string): string {
 /** Clear cached config (for testing). */
 export function _resetSidecarConfigCache(): void {
   cached = undefined;
+  cachedKey = "";
 }

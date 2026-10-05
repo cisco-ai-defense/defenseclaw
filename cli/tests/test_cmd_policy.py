@@ -186,10 +186,21 @@ class TestPolicyShow(PolicyCommandTestBase):
         self.assertIn("show-me", result.output)
         self.assertIn("Test policy", result.output)
 
+    def test_show_names_guardrail_threshold_severities(self):
+        # GAP-1228: "MEDIUM (2)", not a bare "2 (severity rank)".
+        result = self.invoke(["show", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("(severity rank)", result.output)
+        self.assertRegex(result.output, r"block_threshold:\s+(LOW|MEDIUM|HIGH|CRITICAL) \(\d\)")
+
     def test_show_nonexistent(self):
         result = self.invoke(["show", "does-not-exist"])
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("not found", result.output)
+        self.assertEqual(result.exit_code, 1)
+        # GAP-1818: CLI error style plus the valid names and the next step.
+        self.assertIn("Error: policy 'does-not-exist' not found.", result.output)
+        self.assertIn("Available policies:", result.output)
+        self.assertIn("default", result.output)
+        self.assertIn("defenseclaw policy list", result.output)
 
 
 class TestPolicyActivate(PolicyCommandTestBase):
@@ -230,6 +241,49 @@ class TestPolicyActivate(PolicyCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not found", result.output)
 
+    def test_activate_keeps_configured_webhooks(self):
+        """GAP-1273: built-ins carry ``webhooks: []``; activation must keep the list."""
+        import yaml
+        from defenseclaw.config import WebhookConfig
+
+        self.app.cfg.webhooks = [
+            WebhookConfig(name="ops", url="https://hooks.example.com/ops", type="slack", enabled=True),
+        ]
+        self.app.cfg.save()
+        for name in ("strict", "default"):
+            result = self.invoke(["activate", name])
+            self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual([w.name for w in self.app.cfg.webhooks], ["ops"])
+        self.assertEqual(self.app.cfg.webhooks[0].type, "slack")
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertEqual([w.get("name") for w in raw.get("webhooks") or []], ["ops"])
+
+    def test_activate_names_the_webhooks_it_added_and_skipped(self):
+        """GAP-1585: activation says which policy webhooks it added or skipped."""
+        import yaml
+        from defenseclaw.config import WebhookConfig
+
+        self.app.cfg.webhooks = [WebhookConfig(name="gen", url="https://hooks.example.com/gen", enabled=True)]
+        self.app.cfg.save()
+        self.assertEqual(self.invoke(["create", "whpol"]).exit_code, 0)
+        path = os.path.join(self.app.cfg.policy_dir, "whpol.yaml")
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        data["webhooks"] = [
+            {"name": "polwh", "url": "https://hooks.example.com/polwh", "enabled": True},
+            {"name": "gen", "url": "https://hooks.example.com/other", "enabled": False},
+        ]
+        with open(path, "w") as f:
+            yaml.safe_dump(data, f)
+        result = self.invoke(["activate", "whpol"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Added webhook polwh from the policy", result.output)
+        self.assertIn("Skipped webhook gen: a webhook with that name or URL is already configured", result.output)
+        again = self.invoke(["activate", "whpol"])
+        self.assertNotIn("Added webhook", again.output)
+        self.assertNotIn("Skipped webhook polwh", again.output)
+
     def test_activate_logs_action(self):
         self.invoke(["activate", "default"])
         events = self.app.store.list_events(10)
@@ -251,6 +305,56 @@ class TestPolicyDelete(PolicyCommandTestBase):
         result = self.invoke(["delete", "default"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("cannot delete", result.output)
+
+    def test_delete_reverts_an_edited_builtin(self):
+        """GAP-1458: ``policy delete strict`` drops the user copy ``policy edit`` saved."""
+        result = self.invoke(["edit", "guardrail", "-p", "strict", "--block-threshold", "3", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("policy delete strict", result.output)
+        user_copy = os.path.join(self.app.cfg.policy_dir, "strict.yaml")
+        self.assertTrue(os.path.isfile(user_copy))
+        self.assertIn("strict [built-in, edited]", self.invoke(["list"]).output)
+
+        result = self.invoke(["delete", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("built-in version is back", result.output)
+        self.assertFalse(os.path.exists(user_copy))
+        listed = self.invoke(["list"]).output
+        self.assertIn("strict [built-in]", listed)
+        self.assertNotIn("edited", listed)
+        # A second delete has nothing left to revert.
+        self.assertNotEqual(self.invoke(["delete", "strict"]).exit_code, 0)
+
+    def test_delete_active_edited_builtin_reloads_gateway(self):
+        """GAP-1723: the restored built-in reaches the running gateway and the output says so."""
+        from unittest.mock import patch
+
+        self.assertEqual(self.invoke(["activate", "strict", "--no-reload"]).exit_code, 0)
+        result = self.invoke(["edit", "guardrail", "-p", "strict", "--block-threshold", "3", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        with patch(
+            "defenseclaw.commands.cmd_policy._reload_gateway_policy", return_value=("reloaded", "")
+        ) as reload:
+            result = self.invoke(["delete", "strict"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("built-in version is back", result.output)
+        self.assertIn("Gateway reloaded the policy", result.output)
+        reload.assert_called_once()
+
+    def test_delete_asks_on_a_terminal_and_accepts_yes(self):
+        # GAP-1887: a user-authored policy is removed for good, so confirm first.
+        from unittest.mock import patch
+
+        self.invoke(["create", "askme"])
+        path = os.path.join(self.app.cfg.policy_dir, "askme.yaml")
+        with patch("defenseclaw.commands.cmd_policy._stdin_is_tty", return_value=True):
+            declined = self.runner.invoke(policy, ["delete", "askme"], obj=self.app, input="n\n")
+            self.assertEqual(declined.exit_code, 1, declined.output)
+            self.assertIn("Delete policy 'askme'", declined.output)
+            self.assertTrue(os.path.exists(path))
+            accepted = self.invoke(["delete", "askme", "--yes"])
+        self.assertEqual(accepted.exit_code, 0, accepted.output)
+        self.assertFalse(os.path.exists(path))
 
     def test_delete_nonexistent(self):
         result = self.invoke(["delete", "nope"])
@@ -499,6 +603,29 @@ class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
         with open(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")) as f:
             dj = json.load(f)
         self.assertEqual(dj["guardrail"]["block_threshold"], 3)
+
+    def test_edit_guardrail_threshold_takes_severity_names(self):
+        """GAP-1724/GAP-1725: names like policy show prints; no plumbing lines."""
+        import yaml
+
+        activated = self.invoke(["activate", "default"])
+        self.assertEqual(activated.exit_code, 0, activated.output)
+        result = self.invoke(
+            ["edit", "guardrail", "--block-threshold", "high", "--alert-threshold", "MEDIUM",
+             "-p", "default", "--no-reload"]
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("block_threshold=HIGH (3)", result.output)
+        with open(os.path.join(self.app.cfg.policy_dir, "default.yaml")) as f:
+            data = yaml.safe_load(f)
+        self.assertEqual((data["guardrail"]["block_threshold"], data["guardrail"]["alert_threshold"]), (3, 2))
+        for output in (activated.output, result.output):
+            self.assertNotIn("data.json", output)
+            self.assertNotIn("Config updated", output)
+
+        bad = self.invoke(["edit", "guardrail", "--block-threshold", "5", "-p", "default", "--no-reload"])
+        self.assertEqual(bad.exit_code, 2, bad.output)
+        self.assertIn("Use LOW, MEDIUM, HIGH, CRITICAL or 1-4", bad.output)
 
     def test_edit_nonactive_builtin_copies_without_sync(self):
         import yaml

@@ -10,8 +10,11 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import textwrap
 import time
-from collections.abc import Iterable, Iterator
+import weakref
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -20,9 +23,10 @@ from time import monotonic
 from typing import Any
 
 import requests
+from rich.cells import cell_len
 from rich.console import Group, RenderableType
 from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
-from rich.markup import escape as rich_escape
+from rich.measure import Measurement
 from rich.panel import Panel
 from rich.style import Style
 from rich.table import Table
@@ -34,14 +38,18 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
-from defenseclaw import __version__, connector_paths
+from defenseclaw import __version__
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
+    command_result_summary,
+    failure_result_summary,
     infer_command_risk,
+    is_command_hint,
+    is_listing_detail,
     parse_command_line,
     suggested_next_action,
 )
@@ -51,7 +59,9 @@ from defenseclaw.tui.executor import (
     captured_subprocess_kwargs,
     resolve_subprocess_argv,
 )
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
+from defenseclaw.tui.panels import setup_catalog, setup_center, setup_keys
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
 from defenseclaw.tui.panels.alerts import AlertPanelAction, AlertsPanelModel
@@ -79,12 +89,18 @@ from defenseclaw.tui.panels.overview import (
     string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
-from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
+from defenseclaw.tui.panels.policy import PoliciesPanelModel, policy_keymap_rows, policy_posture_text
+from defenseclaw.tui.panels.registries import (
+    RegistriesPanelModel,
+    RegistriesTab,
+    RegistryPanelAction,
+    registry_result_summary,
+)
 from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
+from defenseclaw.tui.panels.sandboxes import SandboxesPanelModel
 from defenseclaw.tui.panels.setup import (
+    WIZARD_COMMAND_FAMILIES,
     WIZARD_DESCRIPTIONS,
-    WIZARD_HOW_TO,
-    WIZARD_NAMES,
     SetupPanelAction,
     SetupPanelModel,
     SetupWizard,
@@ -92,11 +108,14 @@ from defenseclaw.tui.panels.setup import (
     llm_model_candidates,
     render_wizard_value,
     wizard_field_value,
+    wizard_secrets_to_env,
     wizard_state_summary,
 )
 from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
+from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
+from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
 from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
 from defenseclaw.tui.screens.consequence import (
@@ -105,12 +124,14 @@ from defenseclaw.tui.screens.consequence import (
     ConsequenceModalScreen,
 )
 from defenseclaw.tui.screens.detail import DetailScreen
+from defenseclaw.tui.screens.field_editor import FieldEditorScreen
 from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
 from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.model_picker import ModelPickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
+from defenseclaw.tui.screens.setup_picker import SetupPickerScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
     SetupResourceResult,
@@ -123,7 +144,7 @@ from defenseclaw.tui.screens.trusted_paths_editor import (
     trusted_paths_rows_from_config,
     untrusted_connector_dir,
 )
-from defenseclaw.tui.screens.uninstall import UninstallScreen
+from defenseclaw.tui.screens.uninstall import UninstallScreen, terminal_command_for_option
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.catalog_state import (
     CatalogCommandIntent,
@@ -146,21 +167,46 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
+    format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
     TUIReadRepository,
     TUIReadResult,
     TUIReadSnapshot,
 )
-from defenseclaw.tui.services.setup_state import validate_config_field
+from defenseclaw.tui.services.setup_state import credential_reload_summary, validate_config_field
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
 from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
 from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
+from defenseclaw.tui.widgets.data_table import MeasuredDataTable
+from defenseclaw.tui.widgets.fit_columns import FitColumn, FitColumnsTable
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
+from defenseclaw.tui.widgets.panel_split import (
+    ASIDE_MIN_WIDTH,
+    NAV_MIN_WIDTH,
+    NAV_WIDTH,
+    NavItem,
+    NavSwitcher,
+    PanelNav,
+    fit_rows,
+    nav_switcher,
+    split_aside,
+    split_layout,
+    step_nav,
+)
 from defenseclaw.tui.widgets.status_strip import render_status_strip
+from defenseclaw.tui.widgets.tab_fit import (
+    BADGE_RESERVE,
+    fit_tab_labels,
+    strip_width,
+)
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 from defenseclaw.tui.windows_clipboard import ClipboardError, copy_windows_clipboard
+
+# Connectors guarded by the LLM proxy rather than hooks: their calls are
+# guardrail inspections (tool inspections and LLM evaluations) (GAP-2496).
+_PROXY_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
 
 
 def _write_owner_only_text(path: Path, text: str, *, protect_parent: bool = False) -> None:
@@ -195,16 +241,29 @@ def _close_async_process_transport(process: asyncio.subprocess.Process) -> None:
         transport.close()
 
 
+def _no_connector_hint(stderr: bytes) -> str:
+    """The list commands' "no connector configured" hint from stderr (GAP-2073)."""
+
+    from defenseclaw.commands import NO_CONNECTOR_HINT
+
+    if NO_CONNECTOR_HINT in stderr.decode(errors="replace"):
+        return NO_CONNECTOR_HINT[:1].upper() + NO_CONNECTOR_HINT[1:]
+    return ""
+
+
 async def _communicate_captured(
     binary: str,
     args: tuple[str, ...],
 ) -> tuple[int, bytes, bytes]:
     """Run one captured child and deterministically reap it on cancellation."""
 
+    from defenseclaw import credential_provenance
+
     process = await asyncio.create_subprocess_exec(
         *resolve_subprocess_argv(binary, args),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=credential_provenance.child_environ(),  # GAP-1176
         **captured_subprocess_kwargs(),
     )
     try:
@@ -215,6 +274,27 @@ async def _communicate_captured(
     _close_async_process_transport(process)
     await asyncio.sleep(0)
     return process.returncode or 0, stdout, stderr
+
+
+# On Windows every Textual timer waits out each sleep on a thread of the
+# loop's default executor (a high-resolution waitable timer). The TUI keeps
+# over a dozen timers running (the pollers, the metric progress bars, the
+# strip tick, the screen refresh), more than the stock min(32, CPUs + 4)
+# workers of a 4-8 CPU machine, so the screen refresh and the panel render
+# threads queued behind 30-60 s poll sleeps and a tab took seconds to paint.
+_WINDOWS_EXECUTOR_WORKERS = 64
+_WIDENED_LOOPS: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
+
+
+def _widen_windows_default_executor(loop: asyncio.AbstractEventLoop, *, platform: str | None = None) -> None:
+    """Give Textual's per-timer sleeper threads room on Windows."""
+
+    if (os.name if platform is None else platform) != "nt" or loop in _WIDENED_LOOPS:
+        return
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=_WINDOWS_EXECUTOR_WORKERS, thread_name_prefix="defenseclaw-tui")
+    )
+    _WIDENED_LOOPS.add(loop)
 
 
 TOKENS = DEFAULT_TOKENS
@@ -262,6 +342,8 @@ _SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
     # ``--judge-provider`` by the arg builder), so it must be matched by label.
     SetupWizard.GUARDRAIL: frozenset({"Provider", "Scope"}),
     SetupWizard.CUSTOM_PROVIDERS: frozenset({"Action"}),
+    # setup shows the harness and consent rows; doctor hides them.
+    SetupWizard.SANDBOX: frozenset({"Action"}),
 }
 
 
@@ -273,6 +355,103 @@ _DEFENSECLAW_LOGO = (
     "██████╔╝███████╗██║     ███████╗██║ ╚████║███████║███████╗╚██████╗███████╗██║  ██║╚███╔███╔╝\n"
     "╚═════╝ ╚══════╝╚═╝     ╚══════╝╚═╝  ╚═══╝╚══════╝╚══════╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝"
 )
+_DEFENSECLAW_LOGO_WIDTH = max(len(line) for line in _DEFENSECLAW_LOGO.splitlines())
+_DEFENSECLAW_WORDMARK = "DEFENSECLAW"
+
+
+def _overview_banner_lines(width: int) -> int:
+    """Rows the Overview banner takes when the body is ``width`` cells wide."""
+
+    if width >= _DEFENSECLAW_LOGO_WIDTH:
+        return len(_DEFENSECLAW_LOGO.splitlines())
+    return 1
+
+
+class _TailKeepingLine:
+    """One row of text cut with "…" before ``tail``, so a key hint survives.
+
+    A plain ``overflow="ellipsis"`` cut the end of the Overview runtime
+    notice at 80 columns, and with it "no findings; N for details" (GAP-2551).
+    """
+
+    def __init__(self, message: str, tail: str) -> None:
+        self.message = message
+        self.tail = tail
+
+    def __rich_measure__(self, console: Any, options: Any) -> Measurement:
+        return Measurement(1, cell_len(self.message))
+
+    def __rich_console__(self, console: Any, options: Any):
+        width = options.max_width
+        text = Text(self.message, no_wrap=True, overflow="ellipsis")
+        if cell_len(self.message) > width and self.message.endswith(self.tail) and cell_len(self.tail) < width - 8:
+            text = Text(self.message[: -len(self.tail)], no_wrap=True, overflow="ellipsis")
+            text.truncate(width - cell_len(self.tail), overflow="ellipsis")
+            text.append(self.tail)
+        yield text
+
+
+def _hanging_text(head: str, tail: str, style: str) -> Table:
+    """``head tail`` whose wrapped lines start under ``tail``, not at the edge (GAP-2550)."""
+
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(no_wrap=True)
+    grid.add_column(overflow="fold")
+    grid.add_row(Text(head, style=style), Text(tail, style=style))
+    return grid
+
+
+class _OverviewBanner:
+    """The block-letter logo, or a one-line wordmark where the logo would wrap.
+
+    The logo is 92 cells wide; in an 80-column terminal Rich folded each row
+    into two, so the Overview opened on a smear of block glyphs that pushed
+    everything useful below the fold. The choice is made at render time, so
+    it follows the real body width (including resizes) without the
+    snapshot worker needing to know the terminal size.
+    """
+
+    def __init__(self, style: str) -> None:
+        self.style = style
+
+    def __rich_console__(self, console: Any, options: Any) -> Iterator[Text]:
+        if options.max_width >= _DEFENSECLAW_LOGO_WIDTH:
+            yield Text(_DEFENSECLAW_LOGO, style=self.style, no_wrap=True)
+        else:
+            yield Text(_DEFENSECLAW_WORDMARK, style=self.style, no_wrap=True)
+
+    def __rich_measure__(self, console: Any, options: Any) -> Measurement:
+        return Measurement(len(_DEFENSECLAW_WORDMARK), _DEFENSECLAW_LOGO_WIDTH)
+
+
+_ON_PATH_TTL_SECONDS = 15.0
+_on_path_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _on_path(name: str, *, now: float | None = None) -> bool:
+    """``shutil.which(name)`` with a short cache for render paths."""
+
+    now = monotonic() if now is None else now
+    cached = _on_path_cache.get(name)
+    if cached is not None and now - cached[0] < _ON_PATH_TTL_SECONDS:
+        return cached[1]
+    found = shutil.which(name) is not None
+    _on_path_cache[name] = (now, found)
+    return found
+
+
+def _detail_pairs_markup(title: str, pairs: Iterable[tuple[object, object]]) -> str:
+    """Detail-pane markup for a title and ``key: value`` rows.
+
+    Titles, keys and values are event/registry/inventory data (target
+    names, audit details, source ids), so they are escaped: a value such
+    as ``[red]x`` or ``[/]`` must show literally instead of restyling or
+    breaking the whole pane.
+    """
+
+    lines = [f"[bold #A78BFA]{rich_escape(str(title))}[/]"]
+    lines.extend(f"{rich_escape(str(key))}: {rich_escape(str(value))}" for key, value in pairs)
+    return "\n".join(lines)
 
 
 def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
@@ -285,23 +464,120 @@ def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
     return "▰" * filled + "▱" * (width - filled)
 
 
+def _wrap_at_separators(value: str, width: int) -> str:
+    """``value`` in lines of at most ``width`` cells, broken at spaces or after "." or "/".
+
+    Spaces come first: breaking only after "." or "/" cut "block CRITICAL ·
+    al" / "ert MEDIUM+" mid-word (GAP-2501). A piece longer than a line is
+    still cut, as ``overflow="fold"`` would.
+    """
+
+    if width <= 0 or len(value) <= width:
+        return value
+    lines: list[str] = []
+    line = ""
+    for piece in re.split(r"(?<=[./ ])", value):
+        while len(piece.rstrip()) > width:
+            if line.strip():
+                lines.append(line.rstrip())
+            line = ""
+            lines.append(piece[:width])
+            piece = piece[width:]
+        if line and len(line) + len(piece.rstrip()) > width:
+            lines.append(line.rstrip())
+            line = ""
+        line += piece
+    if line.strip():
+        lines.append(line.rstrip())
+    return "\n".join(lines)
+
+
+def _fit_units(units: Sequence[Text], width: int, sep: str = "   ") -> Text:
+    """``units`` joined by ``sep``, starting a new line before a unit that would not fit.
+
+    A folding cell breaks at any space, so at 80 columns "0 blocked   0
+    allowed" read "0 blocked   0" / "allowed" and "201 processes" lost its
+    unit (GAP-2521). Each unit stays whole unless it alone is too wide.
+    """
+
+    out = Text()
+    used = 0
+    for unit in units:
+        if used and used + len(sep) + unit.cell_len > width:
+            out.append("\n")
+            used = 0
+        elif used:
+            out.append(sep)
+            used += len(sep)
+        out.append_text(unit)
+        used += unit.cell_len
+    return out
+
+
+def _count_unit(count: object, label: str, color: str) -> Text:
+    """ "3 blocked" with the number in ``color``."""
+
+    unit = Text(str(count), style=color)
+    unit.append(f" {label}")
+    return unit
+
+
+# Stores opened by background readers; shutdown interrupts their queries.
+_LIVE_WORKER_STORES: weakref.WeakSet[Any] = weakref.WeakSet()
+
 PANELS = (
     ("overview", "1", "Overview"),
     ("alerts", "2", "Alerts"),
     ("skills", "3", "Skills"),
     ("mcps", "4", "MCPs"),
     ("plugins", "5", "Plugins"),
+    ("tools", "T", "Tools"),
     ("inventory", "6", "Inventory"),
+    ("sandboxes", "7", "Sandboxes"),
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
     ("ai", "V", "AI Discovery"),
     ("runtime", "N", "Runtime"),
     ("registries", "R", "Registries"),
+    ("policies", "P", "Policies"),
     ("setup", "0", "Setup"),
 )
 
-PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+# Letter panel keys work only in the case the tab strip and ? help show
+# (T A V N R P). Lowercase letters used to switch panels too, so the word
+# "krea" typed on Activity went r -> Registries, e -> registry require
+# (GAP-2438); lowercase ``t`` was already free for panel-local use.
+CASE_SENSITIVE_PANEL_KEYS = frozenset(key for _name, key, _label in PANELS if key.isalpha())
+PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS if key not in CASE_SENSITIVE_PANEL_KEYS}
+CASE_SENSITIVE_PANEL_SHORTCUTS = {key: name for name, key, _label in PANELS if key in CASE_SENSITIVE_PANEL_KEYS}
+# Panels whose own action takes the capital letter keep the lowercase letter
+# as the way to that panel: Sandboxes pulls a copy on P and p opens Policies.
+LOWERCASE_PANEL_FALLBACK: dict[str, frozenset[str]] = {"sandboxes": frozenset({"p", "r"})}
+# The DISCOVERED AI AGENTS name keeps up to this many cells while the vendor
+# and confidence columns are dropped (GAP-2434).
+AI_AGENT_NAME_MIN = 40
+
+# How long a successful command's progress strip stays before hiding itself.
+STRIP_SUCCESS_SECONDS = 8.0
+
+
+def _panel_label(panel: str) -> str:
+    """The tab label for ``panel`` ("MCPs", not ``"mcps".title()`` = "Mcps")."""
+
+    return next((label for name, _key, label in PANELS if name == panel), panel.title())
+
+
+def _catalog_loaded_text(panel: str, model: Any) -> str:
+    """How a catalog load ended; rows the agent skips are not counted as loaded (GAP-2531)."""
+
+    label = _panel_label(panel)
+    skipped = model.not_loaded_count() if hasattr(model, "not_loaded_count") else 0
+    if skipped:
+        return f"{label}: {len(model.items)} listed, {skipped} not loaded by the agent (see the row's detail)."
+    return f"{label}: {len(model.items)} loaded."
+
+
 PANEL_NAMES = {name for name, _key, _label in PANELS}
 
 
@@ -388,13 +664,16 @@ class _BodyStatic(Static):
             event.stop()
 
 
-class DefenseClawTUI(App[None]):
+class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     """Textual TUI foundation.
 
     This first slice intentionally implements shell, routing, command
     input, Activity streaming, and placeholder panels. Full panel parity
     is driven by the migration ledger and the design spec.
     """
+
+    # Screen gets "-short" up to 30 rows (see the #body-panel CSS).
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (31, "-tall")]
 
     CSS = TEXTUAL_CSS + """
     Screen {
@@ -407,15 +686,17 @@ class DefenseClawTUI(App[None]):
         width: 100%;
     }
 
+    /* Two rows: the tabs and their own underline. A border under that
+       drew a second full-width rule and cost a row on an 80x24 screen. */
     #header {
-        height: 3;
+        height: 2;
         padding: 0 1;
         background: TOKEN_SURFACE_PANEL;
-        border-bottom: heavy TOKEN_BORDER_MUTED;
     }
 
     #title {
-        width: 28;
+        width: auto;
+        margin-right: 1;
         color: TOKEN_ACCENT_CYAN;
         text-style: bold;
     }
@@ -445,6 +726,19 @@ class DefenseClawTUI(App[None]):
         background: TOKEN_SURFACE_BASE;
     }
 
+    /* On a short terminal (80x24) the blank rows above the body go to content. */
+    Screen.-short #body-panel {
+        margin: 0 1;
+        padding: 0 2 1 2;
+    }
+
+    /* ...and so do the blank rows under the header and each button bar, so
+       a list keeps its rows under an open detail (GAP-1380, GAP-1541). */
+    Screen.-short #body,
+    Screen.-short .panel-controls {
+        margin-bottom: 0;
+    }
+
     #body {
         height: auto;
         margin-bottom: 1;
@@ -466,10 +760,17 @@ class DefenseClawTUI(App[None]):
     }
 
     .panel-controls {
-        height: 3;
+        /* Buttons that don't fit scroll sideways (a scrollbar row appears)
+           instead of being cut off mid-word at 80 columns (GAP-1166). */
+        height: auto;
+        max-height: 4;
+        overflow-x: auto;
+        overflow-y: hidden;
+        scrollbar-size-horizontal: 1;
         margin-bottom: 1;
         padding: 0 1;
         border: round TOKEN_BORDER_MUTED;
+        border-subtitle-color: TOKEN_ACCENT_CYAN;
         background: TOKEN_SURFACE_RAISED;
     }
 
@@ -550,6 +851,10 @@ class DefenseClawTUI(App[None]):
 
     #panel-table {
         height: 1fr;
+        /* With a detail pane open at 80x24 the list kept only its header
+           (or nothing): keep the header and two rows, plus the sideways
+           scrollbar a wide table shows (GAP-1380). */
+        min-height: 4;
         border: none;
         background: TOKEN_SURFACE_BASE;
         color: TOKEN_TEXT_PRIMARY;
@@ -576,6 +881,70 @@ class DefenseClawTUI(App[None]):
 
     #panel-table.hidden {
         display: none;
+    }
+
+    /* Shared split layout (widgets/panel_split.py). #panel-split fills the
+       body under the header and button bar; the nav list and the aside size
+       to their content, up to its height. It is hidden on the Overview and
+       the help sheet, whose #body fills the panel instead. #panel-nav is
+       NAV_WIDTH columns wide. */
+    #panel-split {
+        height: 1fr;
+    }
+
+    #panel-main {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    #panel-nav {
+        width: 30;
+        height: auto;
+        max-height: 100%;
+        margin: 0 1 0 0;
+        padding: 0 1;
+        border: round TOKEN_BORDER_MUTED;
+        background: TOKEN_SURFACE_BASE;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #panel-aside {
+        width: 38%;
+        height: auto;
+        max-height: 100%;
+        margin: 0 0 0 1;
+        padding: 0 1;
+        border: round TOKEN_BORDER_ACTIVE;
+        border-title-color: TOKEN_ACCENT_VIOLET;
+        border-title-style: bold;
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    /* The config editor's aside only describes the focused field; a
+       narrower one gives the Value column room for whole paths at 160
+       columns (GAP-2253). Keep in sync with CONFIG_ASIDE_SHARE. */
+    #panel-split.narrow-aside #panel-aside {
+        width: 28%;
+    }
+
+    /* With a nav list the table gets a box titled with the active item,
+       sized to its rows (it scrolls past the split's height, or past 60%
+       when the aside sits below it). */
+    #panel-split.with-nav #panel-table {
+        height: auto;
+        max-height: 100%;
+        border: round TOKEN_BORDER_MUTED;
+        border-title-color: TOKEN_ACCENT_CYAN;
+        border-title-style: bold;
+    }
+
+    #panel-split.with-nav.aside-below #panel-table {
+        max-height: 60%;
+    }
+
+    #panel-split.with-nav #panel-table:focus {
+        border: round TOKEN_BORDER_ACTIVE;
     }
 
     #ai-model-table-label,
@@ -614,6 +983,10 @@ class DefenseClawTUI(App[None]):
         text-style: bold;
     }
 
+    #panel-table.ai-step-aside {
+        display: none;
+    }
+
     #ai-model-table.hidden,
     #ai-model-table-label.hidden,
     #ai-product-table-label.hidden {
@@ -626,6 +999,8 @@ class DefenseClawTUI(App[None]):
         margin-top: 1;
         padding: 1 2;
         border: round TOKEN_BORDER_ACTIVE;
+        border-title-color: TOKEN_ACCENT_VIOLET;
+        border-title-style: bold;
         background: TOKEN_SURFACE_RAISED;
         color: TOKEN_TEXT_PRIMARY;
         overflow-y: auto;
@@ -634,6 +1009,22 @@ class DefenseClawTUI(App[None]):
 
     #detail-panel.hidden {
         display: none;
+    }
+
+    /* Short terminals: a 16-row detail pane left the table only its header,
+       so the row being described was off screen. */
+    #detail-panel.compact {
+        max-height: 7;
+        margin-top: 0;
+        padding: 0 2;
+    }
+
+    /* An aside moved below the table keeps the table's first rows on a
+       short terminal; it scrolls. */
+    #detail-panel.compact.aside-below {
+        max-height: 5;
+        /* One blank row between the table and the card below it (GAP-2167). */
+        margin-top: 1;
     }
 
     #detail-panel-body {
@@ -652,6 +1043,10 @@ class DefenseClawTUI(App[None]):
 
     #activity.hidden {
         display: none;
+    }
+
+    #activity.compact {
+        height: 6;
     }
 
     #command-input {
@@ -773,6 +1168,9 @@ class DefenseClawTUI(App[None]):
         padding: 0 1;
         background: TOKEN_SURFACE_RAISED;
         color: TOKEN_TEXT_SECONDARY;
+        /* A cut status line ends with "…", not mid-word (GAP-1541). */
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     #hint {
@@ -808,7 +1206,7 @@ class DefenseClawTUI(App[None]):
         "TOKEN_ACCENT_BLUE", TOKENS.accent_blue
     ).replace(
         "TOKEN_ACCENT_AMBER", TOKENS.accent_amber
-    )
+    ).replace("TOKEN_ACCENT_VIOLET", TOKENS.accent_violet)
 
     # Textual >=8.2.0: enable cross-container drag-selection with
     # auto-scroll. Operators routinely want to copy log lines, activity
@@ -826,6 +1224,10 @@ class DefenseClawTUI(App[None]):
     #     than that produced a "snap" effect during testing.
     ENABLE_SELECT_AUTO_SCROLL = True
     SELECT_AUTO_SCROLL_LINES = 3
+    # Textual's own command palette claims Ctrl+P with priority, which made
+    # the advertised Ctrl+P panel jumper unreachable (and offered a second,
+    # unrelated theme switcher). DefenseClaw has its own palette (: / Ctrl+K).
+    ENABLE_COMMAND_PALETTE = False
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit", priority=True),
@@ -833,7 +1235,9 @@ class DefenseClawTUI(App[None]):
         Binding("?", "toggle_help", "Help"),
         Binding(":", "open_command", "Command"),
         Binding("ctrl+k", "open_command", "Command"),
-        Binding("ctrl+p", "open_panel_jumper", "Jump panel"),
+        # Priority, so it wins over Textual's own command palette on Ctrl+P
+        # (App.COMMAND_PALETTE_BINDING, itself a priority binding).
+        Binding("ctrl+p", "open_panel_jumper", "Jump panel", priority=True),
         # Ctrl+\ opens the theme picker. ``\`` was chosen because it's
         # not claimed by readline / GNU terminal conventions, doesn't
         # collide with the setup-wizard's Ctrl+T (reveal secrets), and
@@ -877,6 +1281,8 @@ class DefenseClawTUI(App[None]):
         inventory_model: InventoryPanelModel | None = None,
         ai_discovery_model: AIDiscoveryPanelModel | None = None,
         runtime_model: RuntimePanelModel | None = None,
+        sandbox_model: SandboxesPanelModel | None = None,
+        policy_model: PoliciesPanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -897,6 +1303,8 @@ class DefenseClawTUI(App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        # Set on each config-editor save: saved sections the CLI already applies.
+        self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
         # Operator's persisted session preferences (palette MRU,
         # per-panel "last seen" cursors, last filter, theme).
@@ -913,7 +1321,13 @@ class DefenseClawTUI(App[None]):
             # intentionally not a launch preference.
             self.active_panel = "overview"
         self.help_open = False
+        # Where the panel was scrolled when the help opened (the help shares
+        # the panel's scroller).
+        self._help_return_scroll = 0.0
         self.activity_lines: list[str] = []
+        # Where the last output line starts in the Activity log while it may
+        # still get its rest (GAP-2284); None once anything else is written.
+        self._activity_open_line: tuple[bool, int] | None = None
         self.body_text = ""
         # E1: per-render map of clickable connector-chip segments,
         # ``[(col_start, col_end, connector)]`` in visible columns of the chip
@@ -921,8 +1335,20 @@ class DefenseClawTUI(App[None]):
         # :meth:`_connector_chip_text` and consumed by
         # :meth:`_handle_body_chip_click`; empty when no chip is shown.
         self._chip_click_segments: list[tuple[int, int, str]] = []
+        # Shared split layout: the body's one-line nav switcher (panel, body
+        # line, click targets), the aside shown below the table on a narrow
+        # terminal, and the last aside drawn on the right.
+        self._nav_switcher_hit: tuple[str, int, NavSwitcher] | None = None
+        self._panel_aside_below: RenderableType | None = None
+        self._detail_max_height: int | None = None
+        self._aside_box: tuple[int, int, int] = (0, 0, 0)
+        self._aside_box_recheck = False
+        self._last_aside_signature: tuple[object, ...] | None = None
         self.detail_text = ""
         self.status_text = ""
+        # The panel that was on screen when the status line was last set.
+        self._status_panel: str | None = None
+        self._status_set_at = 0.0
         self.hint_text = ""
         self.command_running = False
         self.command_label = ""
@@ -947,13 +1373,17 @@ class DefenseClawTUI(App[None]):
         self.logs_model = logs_model or LogsPanelModel(self.data_dir, store=audit_store)
         self.audit_model = audit_model or AuditPanelModel(audit_store)
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
+        self.overview_model.not_configured = config is None
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
         self._runtime_model_injected = runtime_model is not None
         self.runtime_model = runtime_model or RuntimePanelModel()
         if runtime_model is not None:
             self.overview_model.set_runtime_overview(self.runtime_model.overview())
+        self._sandbox_init(sandbox_model)
+        self._policy_init(policy_model)
         self.setup_model = setup_model or SetupPanelModel(config)
+        self._catalog_load_seq: dict[str, int] = {}
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
             "mcps": self.mcps_model,
@@ -987,6 +1417,7 @@ class DefenseClawTUI(App[None]):
         self._read_repository = (
             TUIReadRepository(audit_db) if audit_db else None
         )
+        self._set_history_loading(self._read_repository is not None)
         self._slow_refresh_running = False
         self._roster_catalog_refresh_pending = False
         self._credentials_refresh_running = False
@@ -1085,17 +1516,27 @@ class DefenseClawTUI(App[None]):
         # Command-progress strip state machine. The strip is the single
         # source of truth for command lifecycle messaging — what ran,
         # what it's doing, and what to do next. ``idle`` means hidden;
-        # any other state keeps the strip on screen until the user
-        # explicitly dismisses it (success no longer auto-hides).
+        # a success hides itself after ``STRIP_SUCCESS_SECONDS`` (its hint
+        # says so) and leaves its result on the status line; a failure,
+        # cancellation or rejection stays until the user dismisses it.
         self._strip_state: str = "idle"
         self._strip_label: str = ""
         self._strip_started_at: float = 0.0
         self._strip_frozen_duration: float | None = None
         self._strip_last_output: str = ""
+        # Every output line of the current run (capped), so a --json result
+        # can be summarised instead of showing its last "}" (GAP-1681).
+        self._strip_output_lines: list[str] = []
+        # The last output line so far, and whether it is the last entry of
+        # _strip_output_lines, for a line that gets its rest later (GAP-2284).
+        self._strip_open_line: tuple[str, bool] = ("", False)
         self._strip_summary: str = ""
         self._strip_spinner_tick: int = 0
         self._command_registry = build_registry()
         self._command_palette_values: list[str] = []
+        # True once Up/Down moved the palette cursor since the last edit:
+        # Enter then runs the highlighted row, not the typed filter text.
+        self._palette_cursor_moved = False
         self._last_table_click: tuple[str, int] | None = None
         # Textual posts Tabs.TabActivated for programmatic ``tabs.active``
         # changes too. Keep a one-shot count for tab ids that _render_chrome
@@ -1174,7 +1615,7 @@ class DefenseClawTUI(App[None]):
                         tooltip="Run `defenseclaw agent discovery enable --yes`",
                     )
                     yield Button(
-                        "Scan AI Agents",
+                        "Run AI Discovery",
                         id="overview-scan-ai-discovery",
                         compact=True,
                         tooltip="Run `defenseclaw agent discovery scan`",
@@ -1193,6 +1634,8 @@ class DefenseClawTUI(App[None]):
                     )
                 with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
                     yield Button("Actionable", id="alerts-filter-actionable", compact=True)
+                    # h/l step through these chips; the digits stay panel
+                    # keys (GAP-1708).
                     yield Button("All", id="alerts-filter-all", compact=True)
                     yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
                     yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
@@ -1261,14 +1704,11 @@ class DefenseClawTUI(App[None]):
                     yield Button("Remove", id="registries-remove-source", compact=True, variant="error")
                 with Horizontal(id="setup-controls", classes="panel-controls hidden"):
                     yield Button("Wizards", id="setup-mode-wizards", compact=True)
-                    yield Button("Config", id="setup-mode-config", compact=True)
-                    yield Button("Open", id="setup-open", compact=True)
                     yield Button("Edit list", id="setup-edit-list", compact=True)
                     yield Button("Save", id="setup-save", compact=True)
                     yield Button("Revert", id="setup-revert", compact=True)
                     yield Button("Restart", id="setup-restart", compact=True)
                     yield Button("Clear restart", id="setup-clear-restart", compact=True)
-                    yield Button("Refresh keys", id="setup-refresh-credentials", compact=True)
                 with Horizontal(id="setup-wizard-controls", classes="panel-controls hidden"):
                     # Wizard-form sub-bar. Shows only while a wizard form
                     # is open (`setup_model.form_active`). Buttons route
@@ -1277,7 +1717,7 @@ class DefenseClawTUI(App[None]):
                     # exact same submission, cancellation, and field
                     # navigation semantics as the keystroke flow.
                     yield Button(
-                        "Run wizard",
+                        "Run",
                         id="setup-wizard-run",
                         compact=True,
                         variant="success",
@@ -1291,25 +1731,25 @@ class DefenseClawTUI(App[None]):
                         tooltip="Close the wizard form without running (Esc)",
                     )
                     yield Button(
-                        "Prev field",
+                        "◂ Field",
                         id="setup-wizard-prev",
                         compact=True,
                         tooltip="Move to the previous field (Shift+Tab / ↑)",
                     )
                     yield Button(
-                        "Next field",
+                        "Field ▸",
                         id="setup-wizard-next",
                         compact=True,
                         tooltip="Move to the next field (Tab / ↓)",
                     )
                     yield Button(
-                        "Toggle reveal",
+                        "Reveal",
                         id="setup-wizard-reveal",
                         compact=True,
                         tooltip="Show/hide secret values (Ctrl+T)",
                     )
                     yield Button(
-                        "Clear field",
+                        "Clear",
                         id="setup-wizard-clear",
                         compact=True,
                         tooltip="Clear the current field's value (Ctrl+U)",
@@ -1327,14 +1767,14 @@ class DefenseClawTUI(App[None]):
                         id="ai-enable",
                         compact=True,
                         variant="success",
-                        tooltip="Run `defenseclaw agent discovery enable --yes`",
+                        tooltip="Run `defenseclaw agent discovery enable --yes` (d)",
                     )
                     yield Button(
                         "Disable AI Discovery",
                         id="ai-disable",
                         compact=True,
                         variant="warning",
-                        tooltip="Run `defenseclaw agent discovery disable --yes`",
+                        tooltip="Run `defenseclaw agent discovery disable --yes` (d)",
                     )
                     yield Button(
                         "Scan now",
@@ -1364,7 +1804,7 @@ class DefenseClawTUI(App[None]):
                         "Export JSON",
                         id="ai-export",
                         compact=True,
-                        tooltip="Save the AI usage snapshot to disk",
+                        tooltip="Save the AI usage snapshot to disk (e)",
                     )
                 with Horizontal(id="runtime-controls", classes="panel-controls hidden"):
                     yield Button(
@@ -1398,6 +1838,54 @@ class DefenseClawTUI(App[None]):
                         compact=True,
                         tooltip="Open the highlighted finding (Enter)",
                     )
+                with Horizontal(id="sandboxes-controls", classes="panel-controls hidden"):
+                    for button_id, label, tip in (
+                        ("sandboxes-view", "View", "Switch Sandboxes / Activity / Asks (t)"),
+                        ("sandboxes-new", "New run", "Start a harness in a new sandbox; it gets this terminal (n)"),
+                        ("sandboxes-connect", "Connect", "Resume the sandbox and attach the harness (c)"),
+                        ("sandboxes-stop", "Stop", "Stop the sandbox (asks first); it is kept for connect (s)"),
+                        (
+                            "sandboxes-undo",
+                            "Undo",
+                            "Put the project folder back to its snapshot, or revert a copy's last pull --apply (U)",
+                        ),
+                        ("sandboxes-review", "Review", "Review changed files that can run code here (R)"),
+                        ("sandboxes-pull", "Pull", "Bring a copy's work back: show it, apply it or branch it (P)"),
+                        ("sandboxes-delete", "Delete", "Delete the sandbox (d)"),
+                        ("sandboxes-unblock", "Unblock", "Unblock the blocked destination (u)"),
+                        ("sandboxes-approve", "Approve", "Approve the selected ask (a)"),
+                        ("sandboxes-always", "Always", "Approve the selected ask for every sandbox (A)"),
+                        ("sandboxes-reject", "Reject", "Reject the selected ask (x)"),
+                        ("sandboxes-detail", "Details", "Open the highlighted row (Enter)"),
+                        ("sandboxes-wrappers", "Sandboxed on/off", "Make claude/codex run sandboxed by default (w)"),
+                        ("sandboxes-refresh", "Refresh", "Re-read the sandboxes now"),
+                    ):
+                        yield Button(label, id=button_id, compact=True, tooltip=tip)
+                # Actions only: the views are switched from the navigation
+                # list (or the one-line switcher and 1-7 on narrow screens).
+                with Horizontal(id="policies-controls", classes="panel-controls hidden"):
+                    for button_id, label, tip in (
+                        ("policies-mode", "Mode", "Switch the scope between observe and action (m)"),
+                        (
+                            "policies-block",
+                            "Block at",
+                            "Pick the block level: the scope's tool calls, or the policy's LLM traffic (b)",
+                        ),
+                        (
+                            "policies-alert",
+                            "Alert at",
+                            "Pick the alert level: the scope's tool calls, or the policy's LLM traffic (a)",
+                        ),
+                        ("policies-approval", "Approval", "Pick when the scope asks a human first (h)"),
+                        ("policies-rule-pack", "Rule pack", "Switch the scope's rule pack (p)"),
+                        ("policies-toggle", "Turn on", "Turn the opt-in pack on or off for the scope (Space)"),
+                        ("policies-scope", "Next scope", "Show the next scope: global, then each connector (s)"),
+                        ("policies-activate", "Activate", "Pick a policy, preview what changes, activate it (Enter)"),
+                        ("policies-change-pack", "Change pack", "Switch the rule pack for all connectors or one (Enter)"),
+                        ("policies-details", "Details", "Show the highlighted row (i)"),
+                        ("policies-refresh", "Refresh", "Re-read policies, packs and postures (r)"),
+                    ):
+                        yield Button(label, id=button_id, compact=True, tooltip=tip)
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
                 # All four panels share ``CatalogListModel`` semantics, so the
                 # bars below all map button-id → key → ``handle_key()`` and
@@ -1593,39 +2081,47 @@ class DefenseClawTUI(App[None]):
                         compact=True,
                         tooltip="Open the per-row action menu (o)",
                     )
-                yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
-                yield DataTable(
-                    id="ai-model-table",
-                    classes="hidden",
-                    show_row_labels=False,
-                    show_cursor=True,
-                    cursor_type="row",
-                    zebra_stripes=True,
-                )
-                yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
-                yield DataTable(
-                    id="panel-table",
-                    classes="hidden",
-                    show_row_labels=False,
-                    show_cursor=True,
-                    cursor_type="row",
-                    zebra_stripes=True,
-                )
-                # Scroll container so long alert / audit / log details
-                # are fully reachable. A bare ``Static`` is not
-                # scrollable in Textual (``is_scrollable`` needs a
-                # layout or child nodes), so its ``max-height`` silently
-                # clipped any detail past ~10 lines — the rich gateway
-                # finding + history blocks never showed. The inner
-                # ``Static`` carries the renderable; the wrapper scrolls.
-                with VerticalScroll(id="detail-panel", classes="hidden"):
-                    yield Static("", id="detail-panel-body")
+                # Shared table area (widgets/panel_split.py): an optional
+                # navigation list, the table + detail, and an optional aside.
+                # Panels opt in through _panel_nav / _panel_aside; with
+                # neither, #panel-main lays out exactly as before.
+                with Horizontal(id="panel-split"):
+                    yield PanelNav(id="panel-nav", classes="hidden")
+                    with Vertical(id="panel-main"):
+                        yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
+                        yield MeasuredDataTable(
+                            id="ai-model-table",
+                            classes="hidden",
+                            show_row_labels=False,
+                            show_cursor=True,
+                            cursor_type="row",
+                            zebra_stripes=True,
+                        )
+                        yield Static("AI PRODUCTS & TOOLS", id="ai-product-table-label", classes="hidden")
+                        yield MeasuredDataTable(
+                            id="panel-table",
+                            classes="hidden",
+                            show_row_labels=False,
+                            show_cursor=True,
+                            cursor_type="row",
+                            zebra_stripes=True,
+                        )
+                        # Scroll container so long alert / audit / log details
+                        # are fully reachable. A bare ``Static`` is not
+                        # scrollable in Textual (``is_scrollable`` needs a
+                        # layout or child nodes), so its ``max-height`` silently
+                        # clipped any detail past ~10 lines — the rich gateway
+                        # finding + history blocks never showed. The inner
+                        # ``Static`` carries the renderable; the wrapper scrolls.
+                        with VerticalScroll(id="detail-panel", classes="hidden"):
+                            yield Static("", id="detail-panel-body")
+                    yield Static("", id="panel-aside", classes="hidden")
             yield Input(
                 placeholder="Type defenseclaw version, doctor, or a TUI alias",
                 id="command-input",
                 disabled=True,
             )
-            yield DataTable(
+            yield MeasuredDataTable(
                 id="command-palette",
                 classes="hidden",
                 show_row_labels=False,
@@ -1708,6 +2204,17 @@ class DefenseClawTUI(App[None]):
                 worker.cancel()
             except Exception:  # noqa: BLE001 - teardown is best-effort.
                 pass
+        self._sandbox_unmount()
+        # Worker threads can't be cancelled, and the interpreter joins them at
+        # exit: stop their running SQLite reads so Ctrl+Q exits promptly with
+        # a large audit.db (GAP-1240).
+        for store in tuple(_LIVE_WORKER_STORES):
+            try:
+                store.db.interrupt()
+            except Exception:  # noqa: BLE001 - teardown is best-effort.
+                pass
+        if self._read_repository is not None:
+            self._read_repository.close()
         await self.executor.cancel()
         # Textual cancels workers during shutdown, but Windows' Proactor loop
         # must also be given time to run each worker's cancellation cleanup.
@@ -1766,6 +2273,10 @@ class DefenseClawTUI(App[None]):
                 self._render_chrome_if_generation(panel, self._panel_render_generation)
         return super().export_screenshot(title=title, simplify=simplify)
 
+    def on_load(self) -> None:
+        # Load runs before compose and mount start any timer.
+        _widen_windows_default_executor(asyncio.get_running_loop())
+
     def on_mount(self) -> None:
         self._app_shutting_down = False
         # Apply the operator's persisted theme (Textual >=8) before
@@ -1800,6 +2311,12 @@ class DefenseClawTUI(App[None]):
         # sudo-start. Poll it independently of the Runtime tab visit.
         self.set_interval(15.0, self._schedule_runtime_poll)
         self._schedule_runtime_poll()
+        # Sandboxes: REST refresh plus, once sandboxes are on, the live
+        # activity stream that raises blocked-destination and ask toasts.
+        self._sandbox_mount()
+        # Policies: read the catalog once so Overview's posture and the
+        # status strip name the active policy.
+        self._policy_mount()
         # Native delivery evidence changes while the TUI is open; refresh the
         # same bounded snapshot periodically without coupling it to 3s health.
         self.set_interval(30.0, self._schedule_observability_status_load)
@@ -1819,13 +2336,26 @@ class DefenseClawTUI(App[None]):
         # spin up CLI processes for screens the operator doesn't care
         # about.
         self.set_interval(60.0, self._schedule_slow_refresh)
-        self._write_activity(
-            "[bold #22D3EE]Textual backend[/] ready. "
-            "Go backend remains available with --backend go."
-        )
+        # (This used to say "Go backend remains available with --backend go",
+        # an option `defenseclaw tui` doesn't have.)
+        self._write_activity("[#94A3B8]Command output streams here. Press : or Ctrl+K to run a command.[/]")
         if self.first_run_model.active:
             self._write_activity("[#FBBF24]First-run setup[/] config is missing; embedded init flow is active.")
+        self.run_worker(self._check_for_update(), exclusive=False, thread=False)
         self._render_chrome()
+
+    async def _check_for_update(self) -> None:
+        """Tell the operator once per session when a newer release exists."""
+
+        from defenseclaw.update_notice import available_message
+
+        try:
+            message = await asyncio.to_thread(available_message)
+        except Exception:  # noqa: BLE001 - the notice is best effort
+            return
+        if message:
+            self.notify_toast("info", message)
+            self._write_activity(f"[#FBBF24]Update[/] {message}")
 
     def _schedule_slow_refresh(self) -> None:
         """Reload catalogs and inventory that the operator has opened.
@@ -1867,8 +2397,40 @@ class DefenseClawTUI(App[None]):
                 self._roster_catalog_refresh_pending = False
                 self._schedule_slow_refresh()
 
+    def on_paste(self, event: events.Paste) -> None:
+        """A paste on a Setup text row opens the text box with the pasted text.
+
+        Without this, pasting an API key into a wizard form or the config
+        editor did nothing: the Setup rows only take keys, and the paste
+        never reached a text field.
+        """
+
+        if len(self.screen_stack) > 1 or self.active_panel != "setup" or not event.text:
+            return
+        text = event.text.replace("\r\n", "\n").split("\n", 1)[0]
+        model = self.setup_model
+        if model.form_active and not model.goal_active and model.form_fields:
+            index = _clamp_int(getattr(model, "form_cursor", 0), 0, len(model.form_fields) - 1)
+            field = model.form_fields[index]
+            if _is_setup_form_text_field(field):
+                self._open_setup_field_editor("form", field.value + text)
+                event.stop()
+            return
+        if model.mode == "config" and not model.form_active:
+            field = self._current_setup_field()
+            if field is not None and _is_setup_config_text_field(field):
+                self._open_setup_field_editor("config", field.value + text)
+                event.stop()
+
     def on_key(self, event: events.Key) -> None:
         if len(self.screen_stack) > 1:
+            # Keys typed in the same burst as the one that opened a Setup text
+            # box were routed to the screen underneath first; hand the
+            # printable ones to the text box instead of dropping them.
+            top = self.screen
+            if isinstance(top, FieldEditorScreen) and event.is_printable and event.character:
+                top.type_text(event.character)
+                event.stop()
             return
 
         command = self.query_one("#command-input", Input)
@@ -1877,8 +2439,33 @@ class DefenseClawTUI(App[None]):
                 event.stop()
             return
 
+        if self.help_open and event.key == "escape":
+            # The help's footer promises that Esc closes it.
+            self._close_help()
+            event.stop()
+            event.prevent_default()
+            return
+
         table = self.query_one("#panel-table", DataTable)
         if self.focused is table and event.key in {"up", "down"} and not self._active_overlay_blocks_table():
+            return
+
+        # Enter, Esc or Down in a catalog filter box hands the keyboard back
+        # to the list without clearing the filter, so row keys work on the
+        # filtered rows.
+        focused = self.focused
+        if (
+            isinstance(focused, Input)
+            and focused.id == f"{self.active_panel}-filter"
+            and self.active_panel in self.catalog_models
+            and event.key in {"escape", "down", "enter"}
+        ):
+            table.focus()
+            if self.status_text == _CATALOG_FILTER_PROMPT:
+                # The prompt stayed after Enter left the box (GAP-1821).
+                self._set_status(self._catalog_filter_summary(self.active_panel))
+            event.stop()
+            event.prevent_default()
             return
 
         if self._handle_active_panel_key(event):
@@ -1905,7 +2492,10 @@ class DefenseClawTUI(App[None]):
             event.prevent_default()
             return
 
-        panel = PANEL_SHORTCUTS.get(event.key.lower())
+        character = event.character or ""
+        panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(character) or PANEL_SHORTCUTS.get(event.key.lower())
+        if panel is None and character in LOWERCASE_PANEL_FALLBACK.get(self.active_panel, frozenset()):
+            panel = CASE_SENSITIVE_PANEL_SHORTCUTS.get(character.upper())
         if panel is None:
             return
 
@@ -1995,49 +2585,14 @@ class DefenseClawTUI(App[None]):
     def _panel_hidden(self, panel: str) -> bool:
         """Return True if ``panel`` should be hidden from tabs + cycling.
 
-        Mirrors Go's ``Model.panelHidden`` (see ``internal/tui/app.go``).
-        Today only the Plugins panel is connector-gated — DefenseClaw
-        plugins are an OpenClaw-only concept (G4); showing the tab for
-        any other connector would yield an empty list and operator
-        confusion.
-
-        E3/A4: in a multi-connector install the gate follows the connector
-        filter so the tab tracks whatever catalog the operator is looking at,
-        and under the merged "All" view it shows whenever OpenClaw is anywhere
-        in the active set — not just when it is the primary. Both the tab gate
-        (here) and the body/bar render gate route through
-        :meth:`_plugins_visible_for_connector` so they always agree.
+        No panel is hidden today. Plugins used to be OpenClaw-only, but
+        Amp, Hermes and other connectors have plugins too (``plugin list``
+        shows them), so the tab is always reachable and shows each
+        connector's plugins or an empty state (GAP-1153). The hook stays so
+        a future connector-gated panel has one place to opt out.
         """
 
-        if panel != "plugins":
-            return False
-        return not self._plugins_visible_for_connector()
-
-    def _plugins_visible_for_connector(self) -> bool:
-        """Whether the Plugins panel is reachable for the current filter (A4).
-
-        Plugins are an OpenClaw-only concept, so the panel is shown only while
-        the operator is looking at OpenClaw's catalog:
-
-        * an explicit filter shows Plugins only when it is OpenClaw;
-        * under "All" (or a single-connector install) it shows when OpenClaw
-          is the resolved connector, or — in a multi-connector install — when
-          OpenClaw is *anywhere* in the active set.
-
-        The last clause is the A4 fix: the singular
-        ``PluginsPanelModel.is_visible_for_connector`` gate (fed the primary
-        connector under "All") hid Plugins whenever OpenClaw was
-        active-but-not-primary (e.g. roster ``[codex, openclaw]``). Resolving
-        from the active set here closes that without touching the catalog
-        state layer.
-        """
-
-        filt = self._connector_filter()
-        if filt:
-            return filt.lower() == "openclaw"
-        if "openclaw" in self._active_connector_names():
-            return True
-        return _active_connector(self.config).lower() == "openclaw"
+        return False
 
     def _visible_panels(self) -> list[str]:
         """Ordered list of panel names that should currently be visible.
@@ -2073,6 +2628,8 @@ class DefenseClawTUI(App[None]):
             return len(getattr(self.audit_model, "items", ()) or ())
         if panel == "activity":
             return getattr(self.activity_model, "count", 0)
+        if panel == "sandboxes":
+            return self.sandbox_model.total_count()
         if panel == "logs":
             lines = getattr(self.logs_model, "lines", {}) or {}
             if snapshot is not None:
@@ -2092,13 +2649,22 @@ class DefenseClawTUI(App[None]):
     def _panel_unread_count(self, panel: str) -> int:
         """Return ``max(0, total - seen)`` for the tab-badge renderer.
 
-        Capped at 99 so the tab strip stays one cell wide — anything
-        above that is already "lots of new things, just open the
-        panel". Skips badging on the currently active panel so the
-        cursor doesn't lap itself (you can't have unread content on a
-        panel you're staring at).
+        The tab strip shows the real number (``fit_tab_labels`` writes
+        "999+" only above 999), so the Alerts badge never reads 99 while
+        Overview says 118 (GAP-0978). Skips badging on the currently
+        active panel so the cursor doesn't lap itself (you can't have
+        unread content on a panel you're staring at), except Alerts,
+        whose badge is the open-alert count.
         """
 
+        if panel == "alerts":
+            # Alerts is an inbox: its badge is the open-alert count that
+            # Overview and the status bar show, not "new since last visit",
+            # so the same number appears everywhere (WIN2-U2-11). It stays
+            # on the open Alerts tab too: dropping it there freed two cells
+            # and relabelled other tabs ("4 MCP" -> "4 MCPs", GAP-2247).
+            # Under a connector scope, the scoped count (GAP-2441).
+            return max(0, self.alerts_model.connector_scope_count())
         if panel == self.active_panel:
             return 0
         total = self._panel_total_count(panel)
@@ -2108,7 +2674,7 @@ class DefenseClawTUI(App[None]):
             seen = self.state_store.get_seen_count(panel)
         except AttributeError:
             seen = 0
-        return min(99, max(0, total - seen))
+        return max(0, total - seen)
 
     def _update_tab_labels(self) -> None:
         """Refresh Tab labels with "(N)" unread badges in-place.
@@ -2123,13 +2689,18 @@ class DefenseClawTUI(App[None]):
             tabs = self.query_one("#tabs", Tabs)
         except NoMatches:
             return
-        for name, key, label in PANELS:
-            if self._panel_hidden(name):
-                continue
-            unread = self._panel_unread_count(name)
-            text = f"{key} {label}"
-            if unread:
-                text = f"{text} ({unread})"
+        self._sync_header_title()
+        visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
+        # Under ~170 columns fifteen full names don't fit: shorten the
+        # inactive tabs (key letters always stay) instead of scrolling.
+        labels = fit_tab_labels(
+            visible,
+            self.active_panel,
+            {name: self._panel_unread_count(name) for name, _key, _label in visible},
+            self._tab_strip_width(),
+        )
+        for name, _key, _label in visible:
+            text = labels[name]
             # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` returns the tab
             # widget directly and avoids exception-as-control-flow here.
             tab = tabs.get_tab(f"tab-{name}")
@@ -2143,15 +2714,149 @@ class DefenseClawTUI(App[None]):
             tab.label = text
             self._tab_label_cache[name] = text
 
+    def _header_title(self) -> str:
+        """The header brand, shortened on narrow terminals so every tab fits."""
+
+        width = int(getattr(self.size, "width", 0) or 0)
+        versioned = f"DefenseClaw {__version__}"
+        if width <= 0:
+            return versioned
+        if width >= 120 and self._tabs_fit_next_to(versioned, width):
+            return versioned
+        if width >= 96 and self._tabs_fit_next_to("DefenseClaw", width):
+            # The version is on Overview; its cells go to tab names, so a
+            # 200-column screen names every tab instead of a bare "R"
+            # (GAP-1283). The brand shows only once every tab keeps its full
+            # name beside it: from 140 to 157 columns it kept its 12 cells
+            # while five tabs were bare key letters (GAP-1544, GAP-2150), and
+            # at 175 columns it turned "3 Skills" (170) back into "3 Skill"
+            # (GAP-2517).
+            return "DefenseClaw"
+        # At 80 columns the brand would push tabs off screen; Overview still
+        # shows the wordmark.
+        return ""
+
+    def _tabs_fit_next_to(self, title: str, width: int) -> bool:
+        """True when every visible tab keeps its full name beside ``title``."""
+
+        strip = max(0, width - 2 - (len(title) + 1 if title else 0) - 12)
+        visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
+        labels = [f"{key} {label}" for _name, key, label in visible]
+        if not visible or strip_width(labels) + BADGE_RESERVE > strip:
+            return False
+        # The brand goes before any tab loses its name, counts and the room
+        # for the longest open name included: at 170 columns it stayed while
+        # "R" was bare, though 165 columns named every tab (GAP-2491).
+        unread = {name: self._panel_unread_count(name) for name, _key, _label in visible}
+        widest = max(visible, key=lambda row: len(row[2]))[0]
+        fitted = fit_tab_labels(visible, widest, unread, strip)
+        # The title also waits until every count keeps its "(n)" form beside
+        # it: taking those cells back turned "Alerts (1)" into "Alerts¹" at 215
+        # and 221 columns and back at 219 and 225 (GAP-2543). A width of 0
+        # gives the full labels.
+        return fitted == fit_tab_labels(visible, widest, unread, 0)
+
+    def _sync_header_title(self) -> None:
+        title = self._header_title()
+        if getattr(self, "_header_title_cache", None) == title:
+            return
+        try:
+            widget = self.query_one("#title", Static)
+        except NoMatches:
+            return
+        widget.update(title)
+        widget.display = bool(title)
+        self._header_title_cache = title
+
+    def _tab_strip_width(self) -> int:
+        """Cells the tab strip gets: the header minus title and buttons."""
+
+        width = int(getattr(self.size, "width", 0) or 0)
+        if width <= 0:
+            return 0
+        title_text = self._header_title()
+        title = len(title_text) + 1 if title_text else 0
+        # Header padding (2) plus the ":" and "?" buttons (5 wide + 1 margin).
+        return max(0, width - 2 - title - 12)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._update_tab_labels()
+        # Fit again once the new size has settled, so a label chosen for an
+        # in-between size does not stay ("R Registry…" with room left, GAP-1751).
+        self.call_after_refresh(self._update_tab_labels)
+        self.call_after_refresh(self._mark_overflowing_controls)
+        # The bars may get their new width only after that refresh: resized
+        # on Registries, 80x24 showed no "… more" marker (GAP-2315). Check
+        # once more after the layout has settled.
+        self.set_timer(0.25, self._mark_overflowing_controls)
+        # The nav list and aside appear and disappear at width thresholds.
+        if self.is_running and not self.help_open and len(self.screen_stack) <= 1:
+            panel = self.active_panel
+            # An open detail is sized for the old terminal too: without a
+            # re-render it kept that height until the next refresh tick
+            # (~15 s), clipped under KEYS or leaving blank rows (GAP-2603).
+            if (
+                panel == "setup"
+                or self._panel_nav(panel)
+                or self._panel_aside(panel) is not None
+                or self.detail_text
+            ):
+                self.call_after_refresh(self._render_chrome)
+                if self.detail_text:
+                    # That render can still measure the old layout: grown
+                    # from 80x24 the box stayed 16 rows under blank rows.
+                    # Measure the free rows again once the layout settles.
+                    self.set_timer(0.25, self._recheck_detail_box)
+            elif panel == "overview":
+                # Overview's cards are built for the current width (GAP-2509).
+                self.call_after_refresh(self._update_body_only)
+
+    def _mark_overflowing_controls(self) -> None:
+        """Say so on a button bar whose last buttons are cut off.
+
+        At 80 columns the bars scroll sideways and the last visible button was
+        cut mid-word ("Open de", "Selec") with nothing to show more exist
+        (GAP-1457). The bar's bottom border now reads "… more ▸" (or "◂ more"
+        once scrolled to the end).
+        """
+
+        try:
+            bars = list(self.query(".panel-controls"))
+        except Exception:  # noqa: BLE001 - teardown may race the refresh.
+            return
+        for bar in bars:
+            try:
+                overflow = bar.display and bar.max_scroll_x > 0
+                if not overflow:
+                    subtitle = ""
+                elif bar.scroll_x >= bar.max_scroll_x:
+                    subtitle = "◂ more"
+                else:
+                    subtitle = "… more ▸"
+                if bar.border_subtitle != subtitle:
+                    bar.border_subtitle = subtitle
+            except Exception:  # noqa: BLE001 - a cosmetic hint never breaks a render.
+                continue
+
     def action_switch_panel(self, panel: str) -> None:
         if panel not in PANEL_NAMES:
             visible = self._visible_panels()
             panel = visible[0] if visible else "overview"
         self._panel_passive_refresh_pending.clear()
+        previous_panel = self.active_panel
+        if previous_panel != panel:
+            # Whatever loaded while you were looking at the panel you leave
+            # is seen, so its badge counts only what arrives afterwards. The
+            # Logs file tail lands after the switch-in, and recording the
+            # count only on entry left "Logs(999+)" behind (GAP-2244).
+            try:
+                self.state_store.record_seen_count(
+                    previous_panel, self._panel_total_count(previous_panel)
+                )
+            except Exception:  # noqa: BLE001 - persistence is cosmetic
+                pass
         self.active_panel = panel
         self.help_open = False
-        if self.status_text.startswith("backend=textual  panel="):
-            self.status_text = ""
         if self._read_snapshot is not None:
             self._apply_read_snapshot(self._read_snapshot, panel)
         if panel == "logs":
@@ -2172,6 +2877,21 @@ class DefenseClawTUI(App[None]):
             pass
         self._schedule_state_save()
 
+        # A load message or result from the panel we just left ("MCPs: 0
+        # loaded." or "Exported 17 audit row(s) ..." on Sandboxes) is about
+        # that panel, not this one (GAP-1166, GAP-1512, GAP-1541). A command
+        # result ("Done: ...") follows you only for a few seconds; after that
+        # it is old news on every other panel (GAP-1821).
+        left = self._status_panel
+        fresh_result = (
+            _is_command_result(self.status_text)
+            and time.monotonic() - self._status_set_at < _COMMAND_RESULT_FOLLOW_S
+        )
+        if _is_load_status(self.status_text) or (
+            left not in (None, panel) and not self.command_running and not fresh_result
+        ):
+            self._set_status(self._status_text())
+
         self._panel_render_generation += 1
         generation = self._panel_render_generation
         # This phase intentionally contains no model refresh, SQLite query,
@@ -2182,6 +2902,14 @@ class DefenseClawTUI(App[None]):
         self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
+        if panel == "sandboxes":
+            self._schedule_sandbox_poll()
+        if panel == "policies":
+            model = self.policy_model
+            if not model.loaded:
+                self._schedule_policy_load()
+            if model.view == "sandbox_packs" and not model.sandbox_loaded:
+                self._schedule_policy_load(sandbox=True)
         if (
             panel == "runtime"
             and not self._runtime_model_injected
@@ -2292,9 +3020,9 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
 
-        activity.set_class(panel != "activity", "hidden")
+        activity.set_class(panel != "activity" or self.activity_model.shows_finished_output, "hidden")
         overview_visible = panel == "overview"
-        scroller.set_class(overview_visible, "overview-scroll")
+        scroller.set_class(overview_visible or self.help_open, "overview-scroll")
         # The acknowledgement frame is intentionally cheap, but any control
         # bar it reveals must already reflect the current model.  Deferring
         # button visibility/disabled state to the later content snapshot made
@@ -2340,6 +3068,7 @@ class DefenseClawTUI(App[None]):
         else:
             table.add_class("hidden")
         detail.add_class("hidden")
+        self._hide_panel_split_parts(panel)
 
         if not overview_visible:
             self._set_overview_metrics_visible(False)
@@ -2347,12 +3076,11 @@ class DefenseClawTUI(App[None]):
         self._render_command_strip()
         acknowledgement_status = self.status_text or self._status_text()
         self.status_text = acknowledgement_status
-        try:
-            self.query_one("#status", Static).update(
-                self._safe_body_renderable(acknowledgement_status)
-            )
-        except NoMatches:
-            pass
+        # Through _set_status so the health strip stays: painting the bare
+        # text left _last_status_signature on the full line, so later
+        # refreshes skipped the repaint and the bar read only "Ready." until
+        # a segment changed, 10-45 s later (GAP-2612).
+        self._set_status(acknowledgement_status)
 
     def _queue_deferred_panel_render(self, panel: str, generation: int) -> None:
         """Track work before its post-paint callback enters the render lane."""
@@ -2603,6 +3331,7 @@ class DefenseClawTUI(App[None]):
             from defenseclaw.db import Store
 
             worker_store = Store(str(value))
+            _LIVE_WORKER_STORES.add(worker_store)
             detached.audit_model.store = worker_store
             detached.alerts_model.store = worker_store
             return worker_store
@@ -2670,6 +3399,7 @@ class DefenseClawTUI(App[None]):
             )
         finally:
             if worker_store is not None:
+                _LIVE_WORKER_STORES.discard(worker_store)
                 try:
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.
@@ -2892,6 +3622,8 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         self.detail_text = detail
+        panel.border_title = None
+        panel.remove_class("aside-below")
         if not detail:
             panel.add_class("hidden")
             self._last_detail_signature = None
@@ -2966,6 +3698,9 @@ class DefenseClawTUI(App[None]):
         name to switch to, or ``None`` to cancel.
         """
 
+        if len(self.screen_stack) > 1:
+            # A priority binding reaches modals too; never stack a jumper on one.
+            return
         visible = [
             PanelChoice(name=name, label=label, hotkey=key)
             for name, key, label in PANELS
@@ -3015,8 +3750,34 @@ class DefenseClawTUI(App[None]):
         self.push_screen(ThemePickerScreen(current_theme=current), _on_dismiss)
 
     def action_toggle_help(self) -> None:
-        self.help_open = not self.help_open
+        if self.help_open:
+            self._close_help()
+            return
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            scroller = None
+        self._help_return_scroll = scroller.scroll_y if scroller is not None else 0.0
+        self.help_open = True
         self._render_chrome()
+        if scroller is not None:
+            scroller.scroll_home(animate=False)
+
+    def _close_help(self) -> None:
+        self.help_open = False
+        self._render_chrome()
+        # The first render runs on the help's layout: the Setup task detail
+        # was fitted to no box and kept its full text (lost "… i details"
+        # behind a scrollbar) until the next key (GAP-2072). Fit it again
+        # once the panel is laid out.
+        self.call_after_refresh(self._render_chrome)
+        # Scrolling the help moved the shared scroller; put the panel back
+        # where it was once its content is laid out again.
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return
+        self.call_after_refresh(scroller.scroll_to, y=self._help_return_scroll, animate=False)
 
     @on(Tabs.TabActivated, "#tabs")
     def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
@@ -3085,6 +3846,14 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_runtime_control(button_id)
             return
+        if button_id.startswith("sandboxes-"):
+            event.stop()
+            self._handle_sandbox_control(button_id)
+            return
+        if button_id.startswith("policies-"):
+            event.stop()
+            self._handle_policy_control(button_id)
+            return
         # All four catalog panels share ``CatalogListModel`` and the
         # ``_apply_catalog_action`` dispatcher, so the button-id →
         # handle_key mapping is uniform. Routing each prefix into its
@@ -3114,17 +3883,18 @@ class DefenseClawTUI(App[None]):
             self._set_status("Command drawer closed.")
             return
         if self.help_open:
-            self.help_open = False
-            self._render_chrome()
+            self._close_help()
             return
-        # `q` doubles as the strip's keyboard dismiss. We intentionally
-        # never auto-hide on success per UX decision, so this is the
-        # primary way users return the strip to idle.
+        # `q` doubles as the strip's keyboard dismiss: a failure stays until
+        # dismissed, a success hides itself after STRIP_SUCCESS_SECONDS.
         if self._strip_state != "idle" and self.active_panel != "activity":
             self._strip_clear()
             self._set_status("Cleared command status.")
             return
-        self._set_status("q is local close/no-op. Press Ctrl+C to quit.")
+        # Nothing to close. The status line is not drawn on every tab, so a
+        # toast says how to quit wherever the operator is.
+        self._set_status("Nothing to close. Press Ctrl+C to quit.")
+        self.notify("Nothing to close. Press Ctrl+C to quit DefenseClaw.", timeout=4)
 
     def action_cancel_or_quit(self) -> None:
         if self.command_running or self.executor.is_running:
@@ -3142,6 +3912,11 @@ class DefenseClawTUI(App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
+        # Closing the palette by running a row left "Command palette open."
+        # in the status bar (GAP-1213). Callers that report something else
+        # set their own status after this.
+        if self.status_text.startswith("Command palette open"):
+            self._set_status(self._status_text())
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
         palette = self.query_one("#command-palette", DataTable)
@@ -3154,6 +3929,7 @@ class DefenseClawTUI(App[None]):
             delta = -1 if event.key == "up" else 1
             target = max(0, min(palette.cursor_row + delta, len(self._command_palette_values) - 1))
             palette.move_cursor(row=target, column=0, animate=False)
+            self._palette_cursor_moved = True
             return True
         if event.key == "tab" and self._command_palette_values:
             selected = self._selected_palette_value()
@@ -3168,6 +3944,7 @@ class DefenseClawTUI(App[None]):
         palette = self.query_one("#command-palette", DataTable)
         matches = self._palette_matches(query)
         self._command_palette_values = [entry.tui_name for entry in matches]
+        self._palette_cursor_moved = False
         palette.remove_class("hidden")
         palette.clear(columns=True)
         # New 4-column layout: command | cat/risk badge | argv preview
@@ -3176,7 +3953,16 @@ class DefenseClawTUI(App[None]):
         palette.add_columns("Command", "Risk", "Would run", "Needs")
         for index, entry in enumerate(matches):
             name, badge, preview, hint = _palette_row_for_entry(entry)
-            palette.add_row(name, badge, preview, hint, key=str(index))
+            # Plain strings in a DataTable are parsed as markup, which ate
+            # the whole "[diagnostics/read-only]" badge: the Risk column was
+            # always blank. Text cells are drawn literally.
+            palette.add_row(
+                Text(name),
+                Text(badge, style=_palette_risk_style(badge)),
+                Text(preview),
+                Text(hint),
+                key=str(index),
+            )
         if matches:
             palette.move_cursor(row=0, column=0, animate=False)
         else:
@@ -3226,7 +4012,34 @@ class DefenseClawTUI(App[None]):
             return (rank, len(entry.tui_name), entry.tui_name)
 
         scored = ((rank, entry) for entry in self._command_registry if (rank := score(entry)) is not None)
-        return tuple(entry for _rank, entry in sorted(scored, key=lambda item: item[0])[:limit])
+        matches = tuple(entry for _rank, entry in sorted(scored, key=lambda item: item[0])[:limit])
+        return matches or self._palette_command_with_args(query)
+
+    def _palette_command_with_args(self, query: str) -> tuple[CmdEntry, ...]:
+        """The command a query starts with, when the rest are its arguments.
+
+        "tool block Write --connector claudecode" matched no row ("No
+        matching DefenseClaw command") although Enter runs it (GAP-1486); show
+        the command with the typed arguments as the row that will run.
+        """
+
+        typed = query.strip()
+        for prefix in ("defenseclaw-gateway ", "defenseclaw "):
+            if typed.lower().startswith(prefix):
+                typed = typed[len(prefix) :].strip()
+                break
+        tokens = typed.split()
+        lowered = [token.lower() for token in tokens]
+        best: CmdEntry | None = None
+        for entry in self._command_registry:
+            name = entry.tui_name.lower().split()
+            if len(name) < len(tokens) and lowered[: len(name)] == name:
+                if best is None or len(name) > len(best.tui_name.split()):
+                    best = entry
+        if best is None:
+            return ()
+        extra = tuple(tokens[len(best.tui_name.split()) :])
+        return (replace(best, tui_name=" ".join(tokens), cli_args=(*best.cli_args, *extra), needs_arg=False),)
 
     def _selected_palette_value(self) -> str:
         palette = self.query_one("#command-palette", DataTable)
@@ -3299,6 +4112,10 @@ class DefenseClawTUI(App[None]):
         suggestion = self._selected_palette_value().strip()
         if not suggestion or suggestion == typed:
             return raw_value
+        # The operator moved the cursor onto a row (Down x4 on the
+        # "discovery" matches): run that row (GAP-1154).
+        if self._palette_cursor_moved:
+            return suggestion
         # Only override when the suggestion is an extension of the
         # filter typed so far. That covers the autocomplete intent
         # ("agent discov" → highlighted "agent discovery enable")
@@ -3336,6 +4153,43 @@ class DefenseClawTUI(App[None]):
     def _on_tools_filter_changed(self, event: Input.Changed) -> None:
         self._on_catalog_filter_input_changed("tools", event.value)
 
+    def _clear_catalog_filter(self, panel: str) -> None:
+        model = self.catalog_models.get(panel)
+        if model is None:
+            return
+        model.clear_filter()
+        try:
+            self.query_one(f"#{panel}-filter", Input).value = ""
+        except NoMatches:
+            pass
+        self._set_status(f"{panel.title()} filter cleared.")
+        self._render_chrome()
+
+    def _focus_catalog_filter(self, panel: str) -> bool:
+        """``/`` on a catalog puts the cursor in its filter box.
+
+        The key used to fall through unhandled, so the letters typed next
+        ran row actions (``/al`` opened "skill allow alpha").
+        """
+
+        try:
+            self.query_one(f"#{panel}-filter", Input).focus()
+        except NoMatches:
+            return False
+        self._set_status(_CATALOG_FILTER_PROMPT)
+        return True
+
+    def _catalog_filter_summary(self, panel: str) -> str:
+        """Status after the filter box hands the keyboard back to the list."""
+
+        model = self.catalog_models.get(panel)
+        text = str(getattr(model, "filter_text", "") or "")
+        if model is None or not text:
+            return self._status_text()
+        shown = len(getattr(model, "filtered", ()) or ())
+        total = len(getattr(model, "items", ()) or ())
+        return f"Filter \"{text}\": {shown} of {total} {_panel_label(panel)} shown. Esc clears it."
+
     @on(DataTable.RowSelected, "#command-palette")
     def _on_command_palette_row_selected(self, event: DataTable.RowSelected) -> None:
         event.stop()
@@ -3344,6 +4198,9 @@ class DefenseClawTUI(App[None]):
             self._submit_command_text(selected)
 
     def _submit_command_text(self, value: str) -> None:
+        # Read the highlighted row before closing: closing clears the rows,
+        # which made the "typed text did not parse" fallback below a no-op.
+        highlighted = self._selected_palette_value()
         self._close_command_palette()
         stripped = value.strip()
         if not stripped:
@@ -3354,7 +4211,7 @@ class DefenseClawTUI(App[None]):
         try:
             parsed = parse_command_line(value)
         except CommandLineError as exc:
-            selected = self._selected_palette_value()
+            selected = highlighted
             if selected and selected != stripped:
                 try:
                     parsed = parse_command_line(selected)
@@ -3408,11 +4265,7 @@ class DefenseClawTUI(App[None]):
             self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
             return
 
-        self.run_worker(
-            self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
-            exclusive=False,
-            thread=False,
-        )
+        self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)
 
     @on(DataTable.RowHighlighted, "#panel-table")
     def _on_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -3426,6 +4279,12 @@ class DefenseClawTUI(App[None]):
         # the per-panel current-cursor comparison covers the async highlight
         # events Textual delivers a tick later (e.g. after clear()+add_row()).
         if self._restoring_table_cursor:
+            return
+        if event.cursor_row != event.data_table.cursor_row:
+            # A stale highlight: the table cursor already moved on (a render
+            # added rows, highlighting row 0, then restored the cursor). For
+            # Logs it paused the stream and showed the oldest lines after a
+            # source switch (GAP-1216).
             return
         if self.active_panel == "ai" and self.focused is not event.control:
             # The AI panel has two simultaneously mounted tables. A delayed
@@ -3449,10 +4308,26 @@ class DefenseClawTUI(App[None]):
         elif self.active_panel == "runtime":
             self.runtime_model.cursor = event.cursor_row
             self._sync_runtime_controls()
+        elif self.active_panel == "sandboxes":
+            self.sandbox_model.cursor = event.cursor_row
+            self._sync_sandbox_controls()
+        elif self.active_panel == "policies":
+            self.policy_model.cursor = event.cursor_row
+            if self.policy_model.cursor != event.cursor_row:
+                # A chain group header: the model moved on to a chain row,
+                # so put the table cursor there too.
+                self._render_chrome()
+            else:
+                self._update_body_only()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
+            # The detail follows the selected task.
+            self._update_body_only()
+            if self._setup_cursor() != event.cursor_row:
+                with self._programmatic_table_update():
+                    event.data_table.move_cursor(row=self._setup_cursor(), animate=False)
 
     @on(events.DescendantFocus, "#panel-table")
     def _on_panel_table_focused(self, event: events.DescendantFocus) -> None:
@@ -3543,6 +4418,12 @@ class DefenseClawTUI(App[None]):
                 self._apply_ai_discovery_action(self.ai_discovery_model.handle_key("enter"))
             else:
                 self._update_body_only()
+        elif self.active_panel == "policies":
+            self.policy_model.cursor = event.cursor_row
+            if repeated_click:
+                self._apply_policy_action(self.policy_model.handle_key("enter"))
+            else:
+                self._update_body_only()
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
             if repeated_click:
@@ -3568,8 +4449,15 @@ class DefenseClawTUI(App[None]):
         args: tuple[str, ...],
         *,
         display_name: str | None = None,
-    ) -> None:
+        stdin_input: str | None = None,
+        env_overrides: tuple[tuple[str, str], ...] | Mapping[str, str] | None = None,
+    ) -> int | None:
         """Stream a command through the executor and reflect state in the UI.
+
+        Returns the exit code (130 when cancelled), or ``None`` when the
+        command never ran (another command was in flight, or the executor
+        crashed). ``stdin_input`` (a secret for ``keys set --value-stdin``)
+        and ``env_overrides`` go to the child only; neither is logged.
 
         ``display_name`` is the human-readable label surfaced in the
         command-progress strip (the bordered box above the activity log).
@@ -3587,44 +4475,70 @@ class DefenseClawTUI(App[None]):
         masked_argv = tuple(
             (binary, *mask_argv(tuple(args)))
         )
+        if binary == "defenseclaw":
+            # A typed --token/--api-key goes to the child's env, as the
+            # wizards do (GAP-1888, GAP-2010): argv is visible to local users.
+            args, secret_env = wizard_secrets_to_env(args)
+            if secret_env:
+                env_overrides = (*(tuple(dict(env_overrides).items()) if env_overrides else ()), *secret_env)
         pre_started_at = self._last_gateway_started_at
         pre_doctor_mtime = self._doctor_cache_mtime()
+        run_kwargs: dict[str, Any] = {}
+        if stdin_input is not None:
+            run_kwargs["stdin_input"] = stdin_input
+        if env_overrides:
+            run_kwargs["env_overrides"] = dict(env_overrides)
+        result: int | None = None
         try:
-            async for event in self.executor.run(binary, args):
+            async for event in self.executor.run(binary, args, **run_kwargs):
                 if event.kind == "start":
                     self.command_running = True
                     self.command_label = label
                     self._command_started_at = time.monotonic()
                     self.commands_run += 1
-                    self.activity_model.add_entry(event.text, masked_argv=masked_argv)
-                    # event.text is the parsed command label (argv joined
-                    # with spaces); arguments routinely contain brackets
-                    # (e.g. ``defenseclaw scan skill[0]``). Escape so the
+                    # Activity, the drawer and Save output show the redacted
+                    # argv, as the confirm dialog does (GAP-1889); Rerun keeps
+                    # the real command and hidden inputs in memory.
+                    shown = " ".join(masked_argv)
+                    self.activity_model.add_entry(
+                        shown,
+                        masked_argv=masked_argv,
+                        rerun_command=event.text,
+                        rerun_stdin=stdin_input,
+                        rerun_env=tuple(dict(env_overrides).items()) if env_overrides else (),
+                    )
+                    # The command text routinely contains brackets (e.g.
+                    # ``defenseclaw scan skill[0]``). Escape so the
                     # markup-parsed RichLog never crashes.
                     self._write_activity(
-                        f"[#FBBF24]running[/] {rich_escape(event.text)}"
+                        f"[#FBBF24]running[/] {rich_escape(shown)}"
                     )
                     # The strip is the single source of truth for command
                     # lifecycle. Status text shows the ambient hint so we
                     # don't double up on "running …" in two places.
                     self._strip_running(label)
+                    # "Command cancelled." from an earlier preview is not
+                    # about this run (GAP-1606).
+                    if _is_command_result(self.status_text) or self.status_text == "Uninstall cancelled.":
+                        self._set_status(self._status_text())
                     self._refresh_hint()
                 elif event.kind == "output":
-                    self.activity_model.append_output(event.text)
+                    self.activity_model.append_output(event.text, continues=event.continues)
                     # Subprocess stdout/stderr is the highest-volume crash
                     # source: ``Selection [3]:`` / ``[INFO] foo`` / colored
                     # progress bars all break Rich's markup parser. Hand
                     # the line to the safe writer which escapes brackets.
-                    self._write_activity_safe(event.text)
+                    self._write_activity_safe(event.text, continues=event.continues)
                     # Surface a live tail so users on Overview can see the
                     # wizard prompt or scanner progress without switching
                     # panels. ``_strip_output`` filters whitespace.
-                    self._strip_output(event.text)
+                    self._strip_output(event.text, continues=event.continues)
                 elif event.kind == "done":
                     self.command_running = False
                     self.command_label = ""
                     self._command_started_at = 0.0
                     exit_code = event.exit_code or 0
+                    result = 130 if event.cancelled and exit_code == 0 else exit_code
                     # Re-probe side-effect signals AFTER the command
                     # finished. We compare to the snapshot taken before
                     # the executor loop, so a "restart" command that
@@ -3649,9 +4563,12 @@ class DefenseClawTUI(App[None]):
                         and post_doctor_mtime != pre_doctor_mtime
                         and exit_code == 0
                     )
-                    next_hint = suggested_next_action(label, exit_code)
+                    next_hint = suggested_next_action(label, exit_code, lines=self._strip_output_lines)
                     self.activity_model.finish_entry(
                         exit_code,
+                        # The header said "exit 0 (0:00:00)" for a 13 s run
+                        # because the duration was never passed (GAP-1160).
+                        timedelta(seconds=float(event.duration or 0.0)),
                         cancelled=event.cancelled,
                         config_reloaded=config_reloaded,
                         restart_completed=restart_completed,
@@ -3670,14 +4587,18 @@ class DefenseClawTUI(App[None]):
                         event.duration or 0.0,
                         cancelled=event.cancelled,
                     )
+                    # Every run path says how it ended (the uninstall chooser,
+                    # palette reruns and panel info commands did not); a
+                    # refresh status set below still wins (GAP-1606).
+                    self._report_command_result(label, result)
                     if event.exit_code == 0 and not event.cancelled:
                         await self._handle_successful_command(binary, args)
-                    elif binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+                    elif binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                         # A setup-family run failed (non-zero exit). Clear the
                         # "running..." badge so the Setup panel reflects the
                         # actual outcome and the user can retry without first
                         # closing/reopening the wizard.
-                        self.setup_model.mark_wizard_complete(args, success=False)
+                        self.setup_model.mark_wizard_complete(args, success=False, cancelled=bool(event.cancelled))
                     self._refresh_models_from_disk()
                     self._render_chrome()
                     self._refresh_hint()
@@ -3704,7 +4625,7 @@ class DefenseClawTUI(App[None]):
             # The submit code optimistically flagged the wizard row as
             # "running..." before the executor rejected the new run; clear
             # it so the panel doesn't show two spinning wizards forever.
-            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+            if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
         except Exception as exc:  # noqa: BLE001
@@ -3715,6 +4636,10 @@ class DefenseClawTUI(App[None]):
             self.command_running = False
             self.command_label = ""
             self._command_started_at = 0.0
+            # The history entry kept "running" after a crash (GAP-1552).
+            entries = self.activity_model.entries
+            if entries and not entries[-1].done:
+                self.activity_model.finish_entry(1, datetime.now(timezone.utc) - entries[-1].started_at)
             # Exception messages routinely include argv fragments; escape.
             self._write_activity(
                 f"[#F87171]command crashed: {rich_escape(str(exc))}[/]"
@@ -3725,9 +4650,11 @@ class DefenseClawTUI(App[None]):
             self._strip_label = label
             self._strip_last_output = str(exc)
             self._strip_finished(exit_code=1, duration=0.0)
-            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+            if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
                 self.setup_model.mark_wizard_complete(args, success=False)
             self._refresh_hint()
+            return None
+        return result
 
     def _render_chrome(self) -> None:
         # Textual clears ``is_running`` before it starts removing screen
@@ -3757,6 +4684,7 @@ class DefenseClawTUI(App[None]):
         # strip honest after refresh loops add new alerts / audit
         # entries while the operator is parked on a different panel.
         self._update_tab_labels()
+        self.call_after_refresh(self._mark_overflowing_controls)
         # A catalog-load worker (or the periodic refresh) can reach here
         # after the screen has begun tearing down, at which point #activity
         # and #body are gone and query_one raises NoMatches — surfacing as
@@ -3767,7 +4695,16 @@ class DefenseClawTUI(App[None]):
             body_widget = self.query_one("#body", Static)
         except NoMatches:
             return
-        activity.set_class(self.active_panel != "activity", "hidden")
+        activity.set_class(
+            self.active_panel != "activity" or self.activity_model.shows_finished_output, "hidden"
+        )
+        # On short terminals the 11-row output log left the Activity history
+        # (the 1/2 tabs, command list and gateway activity) no rows at all.
+        activity.set_class(0 < self.size.height < 30, "compact")
+        try:
+            self.query_one("#detail-panel", VerticalScroll).set_class(0 < self.size.height < 30, "compact")
+        except NoMatches:
+            pass
         self._render_overview_scope_indicator()
         # The Overview body can exceed the viewport (metric tiles + notices +
         # SERVICES/CONFIG/ENFORCEMENT/SCANNERS + the CONNECTORS roster), so let
@@ -3777,7 +4714,8 @@ class DefenseClawTUI(App[None]):
         body_scroller: VerticalScroll | None = None
         try:
             body_scroller = self.query_one("#body-scroll", VerticalScroll)
-            body_scroller.set_class(overview_active, "overview-scroll")
+            # The help sheet is taller than 80x24 too, so it scrolls the same way.
+            body_scroller.set_class(overview_active or self.help_open, "overview-scroll")
         except Exception:  # noqa: BLE001 - the wrapper is always present; never break a render.
             pass
         if overview_active:
@@ -3853,6 +4791,7 @@ class DefenseClawTUI(App[None]):
             self._render_native_widgets()
         self._render_panel_controls()
         self._render_panel_table()
+        self._render_panel_split()
         self._render_detail_panel()
         # The strip's visibility depends on active_panel (it stays hidden
         # on Activity since the live stream is right there), so any panel
@@ -3933,95 +4872,181 @@ class DefenseClawTUI(App[None]):
         """
 
         global_section: list[tuple[str, str]] = [
-            ("1-9 / 0 / V R A", "Switch panel by hotkey"),
+            ("1-9 0 A V N R P T", "Switch panel (Tab / Ctrl+P where digits are taken)"),
             ("Tab / Shift+Tab", "Next / previous panel"),
             (": or Ctrl+K", "Open command palette"),
             ("Ctrl+P", "Fuzzy panel jumper"),
-            ("?", "Toggle this help overlay"),
-            ("Ctrl+C", "Cancel running command (or quit when idle)"),
+            ("?", "Toggle this help (j/k or PgUp/PgDn scroll it)"),
+            ("Ctrl+\\", "Pick a colour theme"),
+            ("Y / Ctrl+S", "Copy / save the last command's output"),
+            ("D", "Run doctor in the background"),
+            ("Ctrl+C", "Quit DefenseClaw (cancels the running command first)"),
+            ("q", "Close the drawer or overlay (does not quit)"),
         ]
+
+        # ``m`` filters by connector only when more than one is set up; with
+        # one, Overview's ``m`` switches the connector and the signal panes
+        # say there is nothing to filter (GAP-1986).
+        if len(self._active_connector_names()) > 1:
+            overview_m = f"Filter by connector (applies to {_CONNECTOR_FILTER_PANELS})"
+            signal_m = ("m", "Filter by connector")
+        else:
+            overview_m = "Switch the active connector (re-runs its setup after a confirm)"
+            signal_m = ("m", "Filter by connector (once two or more are set up)")
 
         # Per-active-panel cheat sheets. Anything we don't have a
         # tailored block for falls through to a "no extra shortcuts"
         # placeholder so the overlay never goes blank on weird panels.
         panel_sheets: dict[str, list[tuple[str, str]]] = {
             "overview": [
+                ("j/k or PgUp/PgDn", "Scroll the dashboard"),
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
                 ("g", "Setup guardrail"),
-                ("m", "Switch connector mode"),
-                ("i / l", "Jump to Inventory / Logs"),
+                ("m", overview_m),
+                ("i / l / p", "Jump to Inventory / Logs / Policies"),
+                ("b", "Turn desktop notifications on or off"),
+                ("u", "Upgrade: checks the latest release first; nothing changes when up to date"),
+                ("X", "Uninstall (preview first)"),
             ],
             "alerts": [
                 ("j/k or Up/Down", "Navigate alerts"),
                 ("Enter", "Toggle detail pane"),
-                ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low)"),
-                ("Space", "Toggle select current alert"),
-                ("a / A or X", "Select all filtered / deselect all"),
+                ("h/l", "Previous / next severity chip (Actionable, All, Critical, High, Medium, Low)"),
+                ("/", "Search target / action / details"),
+                ("Space", "Mark / unmark the current alert"),
+                ("a / X", "Select all filtered / deselect all"),
                 ("x", "Acknowledge selected alerts"),
-                ("c / C", "Clear filtered / Clear ALL alerts"),
+                ("d", "Dismiss marked alerts (or the highlighted one)"),
+                ("c / C", "Dismiss filtered / dismiss ALL alerts"),
                 ("y", "Copy alert details to clipboard"),
+                ("r", "Refresh"),
+                ("PgUp / PgDn", "Scroll the open alert detail"),
+                ("Esc", "Close detail / clear search / clear severity filter"),
+                signal_m,
             ],
             "skills": [
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
+                ("/", "Filter (Enter or Esc returns to the list)"),
+                ("s / b / a / u", "Scan / block / allow / unblock selected"),
+                ("o", "Open the action menu (every action for the row)"),
+                ("R", "Show the row's registry entry"),
                 ("r", "Refresh"),
-                ("s / b / a", "Scan / block / allow selected"),
-                ("o", "Open action menu"),
             ],
             "mcps": [
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
+                ("/", "Filter (Enter or Esc returns to the list)"),
+                ("s / b / a / u", "Scan / block / allow / unblock selected"),
+                ("n", "Add or update an MCP server"),
+                ("o", "Open the action menu (every action for the row)"),
+                ("R", "Show the row's registry entry"),
                 ("r", "Refresh"),
-                ("s / b / a", "Scan / block / allow selected"),
-                ("o", "Open action menu"),
             ],
             "plugins": [
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
+                ("/", "Filter (Enter or Esc returns to the list)"),
+                ("s / b / a / u", "Scan / block / allow / unblock selected"),
+                ("o", "Open the action menu (every action for the row)"),
                 ("r", "Refresh"),
-                ("s / b / a", "Scan / block / allow selected"),
             ],
             "inventory": [
+                ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
                 ("j/k or Up/Down", "Navigate items"),
-                ("/", "Filter"),
-                ("r", "Refresh"),
+                ("Enter / Esc", "Open / close the detail pane"),
+                ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
+                ("o", "Toggle a faster scan of skills and plugins only"),
+                ("r", "Scan inventory"),
             ],
             "logs": [
+                ("h/l", "Switch source (Gateway / Verdicts / OTEL / Watchdog)"),
+                ("j/k or Up/Down", "Select a line"),
+                ("Enter", "Open the selected line"),
+                ("f", "Cycle filter presets (or click a filter chip)"),
+                ("e / w", "Errors only / warnings and worse"),
                 ("Space", "Pause / resume auto-scroll"),
                 ("/", "Search"),
-                ("e", "Errors only"),
-                ("w", "Warnings+"),
                 ("G / g", "Jump to end / start"),
+                ("a / t / s", "Verdicts: filter action / event type / severity"),
+                ("J", "Verdicts: judge response history"),
+                ("b", "Turn desktop notifications on or off"),
+                signal_m,
             ],
             "audit": [
                 ("j/k or Up/Down", "Navigate entries"),
-                ("/", "Filter"),
-                ("e", "Export to JSON"),
                 ("Enter", "Open detail"),
+                ("h/l", "Previous / next filter chip (All, Risk, Blocks, Scans, Credentials)"),
+                ("/", "Search with field:value terms"),
+                ("t / u", "Same target / same run as the selected event"),
+                ("e", "Export to JSON"),
+                ("r", "Refresh"),
+                signal_m,
             ],
             "activity": [
+                ("h / l", "Commands / gateway activity (Mutations)"),
                 ("j/k or Up/Down", "Navigate entries"),
                 ("Enter", "Expand / collapse output"),
+                ("t / Esc", "Terminal view / back to the history"),
                 ("!", "Rerun last command"),
-                ("Y", "Copy selected output"),
-                ("Ctrl+S", "Save selected output to file"),
             ],
             "ai": [
                 ("j/k or Up/Down", "Navigate the selected table"),
                 ("t", "Switch product / model table"),
+                ("Enter", "Open detail"),
+                ("/", "Search vendor / product / component"),
                 ("a", "Show all / recommended models"),
+                ("s", "Scan now"),
                 ("r", "Refresh discovery"),
-                ("e", "Export snapshot"),
+                ("e", "Export the snapshot to JSON"),
+                ("d", "Turn AI Discovery on / off"),
             ],
-            "registries": [
-                ("j/k or Up/Down", "Navigate registries"),
+            "runtime": [
+                ("j/k or Up/Down", "Navigate findings"),
+                ("Enter / Esc", "Open / close a finding"),
+                ("/", "Filter findings (Enter keeps it, Esc clears it)"),
+                ("e", "Enable the user-level planes"),
+                ("s", "Poll the planes now"),
+                ("p", "Expand / collapse the plane list"),
                 ("r", "Refresh"),
             ],
-            "setup": [
-                ("Enter", "Run wizard / step"),
-                ("r", "Refresh setup state"),
+            "sandboxes": [
+                ("j/k or Up/Down", "Navigate the selected view"),
+                ("t", "Switch Sandboxes / Activity / Asks"),
+                ("Enter", "Open the highlighted row"),
+                ("u", "Unblock the selected sandbox's blocked destination (this sandbox or always)"),
+                ("a / A / x", "Approve / always approve / reject an ask"),
+                ("c / n", "Connect / new run (the harness gets the terminal)"),
+                ("s / d", "Stop / delete the sandbox (both ask first)"),
+                ("U / R", "Undo the session / review its changes"),
+                ("P", "Pull a copy's work back (show, apply or branch); U then reverts the last apply"),
+                ("w", "Sandboxed on/off for claude and codex (shell wrapper)"),
+                ("r", "Refresh"),
             ],
+            "registries": [
+                ("h/l", "Sources / entries / approved sub-tab"),
+                ("j/k or Up/Down", "Navigate rows"),
+                ("Enter / Esc", "Open / close detail"),
+                ("PgUp / PgDn", "Scroll the open detail"),
+                ("s / S", "Sync the selected source / sync all"),
+                ("a / x", "Approve / reject the selected entry"),
+                ("e", "Require (or stop requiring) registry approval for the entry's type"),
+                ("d", "Remove the selected source"),
+                ("r", "Refresh"),
+                # The compact column headers had no legend (GAP-2229).
+                ("C/W/B/E", "Sources column: clean / warning / blocked / error entries (rejected ones are not counted)"),
+                ("A/R", "Entries column: A approved, R rejected, - neither"),
+            ],
+            "policies": [
+                *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
+                ("A", "Activity panel (a is the alert level on Posture and Policies)"),
+                ("p (Overview)", "Opens this panel; Runtime keeps p for its planes"),
+            ],
+            "setup": setup_keys.help_rows(self._setup_view(), setup_keys.setup_conditions(self.setup_model)),
         }
         active_keys = panel_sheets.get(
             self.active_panel,
@@ -4031,13 +5056,13 @@ class DefenseClawTUI(App[None]):
             (label for name, _key, label in PANELS if name == self.active_panel),
             self.active_panel.title(),
         )
+        if self.active_panel == "setup":
+            panel_label = f"{panel_label} ({_SETUP_VIEW_TITLES[self._setup_view()]})"
 
         running_section: list[tuple[str, str]] = [
             ("Ctrl+C", "Send SIGINT to the running subprocess"),
-            ("!", "Rerun the most recent command"),
-            ("Y", "Copy current output to clipboard"),
-            ("Ctrl+S", "Save current output to ~/.defenseclaw/tui/last-run.log"),
-            ("D", "Run defenseclaw doctor in the background"),
+            ("A", "Open Activity to watch the output live"),
+            ("Y / Ctrl+S", "Copy / save its output (~/.defenseclaw/last-run.log)"),
         ]
 
         return [
@@ -4062,6 +5087,10 @@ class DefenseClawTUI(App[None]):
             "[#475569]" + ("─" * 48) + "[/]",
             "",
         ]
+        # Wrap each description here so its continuation lines start
+        # under the description column, not at column 3 (GAP-1912). The
+        # body scrolls, so leave room for its 2-column scrollbar.
+        desc_width = max(20, self._body_width() - _HELP_DESC_INDENT - 2)
         for title, entries in self._help_sections():
             lines.append(f"[bold #FBBF24]{title}[/]")
             for key, desc in entries:
@@ -4070,7 +5099,10 @@ class DefenseClawTUI(App[None]):
                 # scannable at a glance.
                 key_text = key.ljust(22)
                 if desc:
-                    lines.append(f"  [#22D3EE]{key_text}[/] {desc}")
+                    # Never split a path at its hyphen (last-/run.log, GAP-2033).
+                    rows = textwrap.wrap(desc, desc_width, break_on_hyphens=False)
+                    wrapped = ("\n" + " " * _HELP_DESC_INDENT).join(rows or [desc])
+                    lines.append(f"  [#22D3EE]{key_text}[/] {wrapped}")
                 else:
                     lines.append(f"  {key_text}")
             lines.append("")
@@ -4086,6 +5118,8 @@ class DefenseClawTUI(App[None]):
         # E1: clear last render's chip click-map; panels that draw the chip
         # repopulate it via :meth:`_connector_chip_text`.
         self._chip_click_segments = []
+        # Same for a one-line nav switcher (_body_nav_switcher).
+        self._nav_switcher_hit = None
         if self.help_open:
             self.body_text = self._render_help_body()
             return self.body_text
@@ -4107,16 +5141,17 @@ class DefenseClawTUI(App[None]):
             return self.body_text
         if self.active_panel == "registries":
             self._table_columns = self.registries_model.data_table_columns()
-            self._table_rows = self.registries_model.data_table_rows()
+            # The table spans the body (6 columns of borders and padding).
+            width = int(getattr(self.size, "width", 0) or 0)
+            self._table_rows = self.registries_model.data_table_rows(max(0, width - 6))
             tab = self.registries_model.current_tab.name.title()
             empty = self.registries_model.empty_state()
-            suffix = f"\n\n{empty}" if empty else ""
-            self.body_text = (
-                f"[bold #22D3EE]Registries[/]  {tab}\n"
-                "Keys: 1 sources, 2 entries, 3 approved, r refresh, s sync source, S sync all, "
-                "a approve, x reject, d remove source."
-                f"{suffix}"
-            )
+            suffix = f"\n{rich_escape(empty)}" if empty else ""
+            note = self.registries_model.status_note()
+            suffix += f"  [dim]·  {rich_escape(note)}[/]" if note else ""
+            # Keys are in the hint bar and the ? sheet; the body stays one
+            # line so the table is on screen at 80x24.
+            self.body_text = f"[bold #22D3EE]Registries[/]  {tab}{suffix}"
             return self.body_text
         if self.active_panel == "inventory":
             self._sync_catalog_connector_filters()
@@ -4129,30 +5164,40 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "ai":
             self._table_columns = self.ai_discovery_model.data_table_columns()
             self._table_rows = self.ai_discovery_model.data_table_rows()
-            detail = ""
-            if self.ai_discovery_model.detail_open:
-                detail = self._ai_discovery_detail_text()
             empty = self.ai_discovery_model.empty_state()
-            header = ", ".join(self.ai_discovery_model.header_parts())
+            # "active=0" -> "active 0": the header is for people, not a log line.
+            header = " · ".join(
+                part.replace("model-lookup", "model lookup").replace("=", " ")
+                for part in self.ai_discovery_model.header_parts()
+            )
             filter_prompt = ""
             if self.ai_discovery_model.filtering:
                 filter_prompt = f"\nFilter: / {rich_escape(self.ai_discovery_model.filter_text)}"
             elif self.ai_discovery_model.filter_text:
                 filter_prompt = f"\nFilter: {rich_escape(self.ai_discovery_model.filter_text)}"
-            suffix = f"\n\n{detail}" if detail else f"\n\n{empty}" if empty else ""
-            self.body_text = (
-                f"[bold #22D3EE]AI Discovery[/]  {header}\n"
-                "Keys: r refresh usage, s scan, t switch table, a all/recommended models, "
-                "Enter detail, / filter. "
-                "Click either table to select a row."
-                f"{filter_prompt}"
-                f"{suffix}"
-            )
+            # The open row's detail is drawn once, in the detail pane below
+            # the tables; it used to be repeated here, which squeezed the
+            # product table down to its header. Keys are in the hint bar
+            # and the ? sheet.
+            suffix = f"\n{rich_escape(empty)}" if empty else ""
+            self.body_text = f"[bold #22D3EE]AI Discovery[/]  {rich_escape(header)}{filter_prompt}{suffix}"
             return self.body_text
         if self.active_panel == "runtime":
             self._table_columns = self.runtime_model.data_table_columns()
             self._table_rows = self.runtime_model.data_table_rows()
             self.body_text = self._runtime_body_text()
+            return self.body_text
+        if self.active_panel == "sandboxes":
+            if self._sandbox_supported():
+                # Under 100 columns the table leaves out what Enter's detail shows.
+                compact = 0 < self.size.width < 100
+                self._table_columns = self.sandbox_model.data_table_columns(compact)
+                self._table_rows = self.sandbox_model.data_table_rows(compact)
+            self.body_text = self._sandbox_body_text()
+            return self.body_text
+        if self.active_panel == "policies":
+            self._table_columns, self._table_rows = self.policy_model.table(self._policy_table_width())
+            self.body_text = self._policies_body_text()
             return self.body_text
         if self.active_panel == "setup":
             self._table_columns, self._table_rows = self._setup_table()
@@ -4160,9 +5205,6 @@ class DefenseClawTUI(App[None]):
             return self.body_text
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
-            if self.active_panel == "plugins" and not self._plugins_visible_for_connector():
-                self.body_text = f"[bold #22D3EE]Plugins[/]\n\n{self.plugins_model.openclaw_only_notice()}"
-                return self.body_text
             self._sync_catalog_connector_filters()
             self._table_columns = model.data_table_columns()
             self._table_rows = model.data_table_rows()
@@ -4195,12 +5237,15 @@ class DefenseClawTUI(App[None]):
         return self.body_text
 
     def _status_text(self) -> str:
-        return f"backend=textual  panel={self.active_panel}  hints=: command | ? help | q local close | Ctrl+C quit"
+        """Status line text when no action has reported a result yet."""
+
+        return "Ready."
 
     def _runtime_body_text(self) -> str:
         """Colored Runtime header: health first, then planes, coverage, findings."""
 
         model = self.runtime_model
+        model.short_screen = 0 < self.size.height < 32
         state = model.health_state()
         title = model.health_title()
         color = {
@@ -4211,6 +5256,7 @@ class DefenseClawTUI(App[None]):
         }[state]
         badge_color = {
             "up": TOKENS.accent_green,
+            "partial": TOKENS.accent_amber,
             "idle": TOKENS.accent_amber,
             "blind": TOKENS.accent_red,
         }
@@ -4221,25 +5267,30 @@ class DefenseClawTUI(App[None]):
         if snap.scanned_at:
             meta.append(f"[{TOKENS.text_muted}]polled {rich_escape(snap.scanned_at)}[/]")
 
+        # One header line and one sentence of health, then only what adds
+        # information: at 80x24 the old layout (blank spacer rows, a COVERAGE
+        # block of zeros, a "Keys:" line and "Click Enable Runtime" four
+        # times) pushed the findings table and the buttons off the screen.
         lines = [
-            f"[bold {TOKENS.accent_cyan}]AI Discovery Runtime[/]  "
+            f"[bold {TOKENS.accent_cyan}]Runtime[/]  "
             f"[bold {color}]● {title}[/]  "
             + "  ".join(meta),
-            "",
-            f"[bold {color}]{title}[/]  [{TOKENS.text_secondary}]{rich_escape(model.health_explanation())}[/]",
-            "",
-            f"[bold {TOKENS.text_primary}]PLANES[/]",
+            f"[{TOKENS.text_secondary}]{rich_escape(model.health_explanation(short=model.short_screen))}[/]",
         ]
         if not snap.planes:
-            lines.append(
-                f"  [{TOKENS.text_muted}]plane health unavailable: the gateway reported no planes[/]"
-            )
-        elif model.planes_expanded:
+            if snap.enabled:
+                lines.append(f"[{TOKENS.text_muted}]Planes: the gateway has not reported any yet.[/]")
+        elif model.planes_shown_expanded():
+            # Short terminals start on the one-line plane strip (p expands
+            # it) so the findings table stays on screen.
+            lines.append(f"[bold {TOKENS.text_primary}]PLANES[/]")
             for plane in snap.planes:
                 badge = plane.badge.upper()
                 hue = badge_color.get(plane.badge, TOKENS.text_muted)
                 if plane.running:
                     detail = f"watching via {plane.mechanism or 'unknown mechanism'}"
+                    if plane.reason:
+                        detail += f"; {plane.reason}"
                 else:
                     detail = plane.reason or "no reason reported"
                 lines.append(
@@ -4250,50 +5301,44 @@ class DefenseClawTUI(App[None]):
                 if fix:
                     lines.append(f"           [{TOKENS.accent_cyan}]→ {rich_escape(fix)}[/]")
         else:
-            for compact in model.plane_strip():
-                lines.append(f"  [{TOKENS.text_secondary}]{rich_escape(compact)}[/]")
+            strip = "  ·  ".join(rich_escape(compact) for compact in model.plane_strip())
+            lines.append(f"[{TOKENS.text_secondary}]Planes: {strip}[/]")
 
-        skipped = f"  [{TOKENS.text_muted}]({snap.processes_skipped} partial)[/]" if snap.processes_skipped else ""
-        unattrib = (
-            f"  [{TOKENS.accent_amber}]({snap.connections_unattributed} unattributed)[/]"
-            if snap.connections_unattributed
-            else ""
-        )
-        context = model.findings_context()
-        next_action = model.next_action()
-        lines.extend(
-            [
-                "",
-                f"[bold {TOKENS.text_primary}]COVERAGE[/]",
-                f"  [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes watched{skipped}",
-                f"  [{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections seen{unattrib}",
-                f"  [{TOKENS.accent_cyan}]{snap.host_plane_observations}[/] Plane C kernel events classified; "
-                f"[{TOKENS.text_muted}]{snap.host_plane_gated} excluded outside AI-agent lineage[/]",
-                f"  [{TOKENS.text_secondary}]{rich_escape(context)}[/]",
-            ]
-        )
-        if next_action:
-            lines.append(f"  [{TOKENS.accent_cyan}]→ {rich_escape(next_action)}[/]")
-
-        keys = (
-            "Keys: e enable user-level planes · r refresh · s poll now · p compact planes · "
-            "Enter finding · / filter"
-        )
-        lines.extend(["", f"[{TOKENS.text_muted}]{keys}[/]"])
+        if not snap.enabled:
+            lines.append(
+                f"[{TOKENS.text_muted}]Or run:[/] defenseclaw agent discovery runtime enable --no-enable-host-plane"
+            )
+        else:
+            skipped = f" ({snap.processes_skipped} partial)" if snap.processes_skipped else ""
+            unattrib = f" ({snap.connections_unattributed} unattributed)" if snap.connections_unattributed else ""
+            coverage = (
+                f"Watching [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes{skipped} · "
+                f"[{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections{unattrib}"
+            )
+            if snap.scanned_at:
+                # The findings context already says how much was watched.
+                coverage = f"[{TOKENS.text_secondary}]{rich_escape(model.findings_context())}[/]"
+            if snap.host_plane_observations or snap.host_plane_gated:
+                coverage += (
+                    f" · [{TOKENS.accent_cyan}]{snap.host_plane_observations}[/] kernel events from AI agents"
+                    f" [{TOKENS.text_muted}]({snap.host_plane_gated} from other processes ignored)[/]"
+                )
+            lines.append(coverage)
+            next_action = model.next_action()
+            if next_action:
+                lines.append(f"[{TOKENS.accent_cyan}]→ {rich_escape(next_action)}[/]")
 
         if model.filtering:
             lines.append(f"Filter: / {rich_escape(model.filter_text)}")
         elif model.filter_text:
             lines.append(f"Filter: {rich_escape(model.filter_text)}")
+        if model.filter_text and not model.filtered:
+            lines.append(f"[{TOKENS.text_muted}]No findings match the filter. Esc clears it.[/]")
 
         if model.detail_open:
             detail = model.detail_text()
             if detail:
                 lines.extend(["", rich_escape(detail)])
-        else:
-            empty = model.empty_state()
-            if empty and not model.filtered:
-                lines.extend(["", f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]"])
         return "\n".join(lines)
 
     def _render_native_widgets(self) -> None:
@@ -4313,9 +5358,32 @@ class DefenseClawTUI(App[None]):
         ai_visible = self.active_panel == "ai" and not self.help_open
         columns = self.ai_discovery_model.model_table_columns()
         rows = self.ai_discovery_model.model_table_rows()
-        model_visible = ai_visible and bool(rows)
-        model_label_visible = ai_visible and bool(self.ai_discovery_model.model_rows)
-        product_label.set_class(not ai_visible, "hidden")
+        # At 80x24 an open product detail left the products table no rows
+        # under the models table (GAP-1380); the models table steps aside
+        # until the detail closes.
+        product_detail_short = (
+            0 < self.size.height < 30
+            and self.ai_discovery_model.detail_open
+            and self.ai_discovery_model.active_table == "agents"
+        )
+        model_visible = ai_visible and bool(rows) and not product_detail_short
+        model_label_visible = (
+            ai_visible and bool(self.ai_discovery_model.model_rows) and not product_detail_short
+        )
+        # The same at 80x24 for a local-model detail: the products table
+        # left the detail only its top border (GAP-2321), so it steps aside.
+        model_detail_short = (
+            ai_visible
+            and 0 < self.size.height < 30
+            and self.ai_discovery_model.detail_open
+            and self.ai_discovery_model.active_table == "models"
+            and bool(rows)
+        )
+        try:
+            self.query_one("#panel-table", DataTable).set_class(model_detail_short, "ai-step-aside")
+        except NoMatches:
+            pass
+        product_label.set_class(not ai_visible or model_detail_short, "hidden")
         model_label.set_class(not model_label_visible, "hidden")
         if model_label_visible:
             scope_label = self.ai_discovery_model.model_scope_label()
@@ -4396,6 +5464,8 @@ class DefenseClawTUI(App[None]):
         activity = self.query_one("#activity-controls", Horizontal)
         ai = self.query_one("#ai-controls", Horizontal)
         runtime = self.query_one("#runtime-controls", Horizontal)
+        sandboxes = self.query_one("#sandboxes-controls", Horizontal)
+        policies = self.query_one("#policies-controls", Horizontal)
         # Catalog control bars — Skills/MCPs/Plugins/Tools are independent
         # ``Horizontal`` containers (rather than one shared bar keyed on
         # active_panel) so each panel can advertise the action keys it
@@ -4419,20 +5489,23 @@ class DefenseClawTUI(App[None]):
         logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
         logs_filters.set_class(self.active_panel != "logs" or self.help_open, "hidden")
         registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
-        setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
-        # Wizard sub-bar is doubly-scoped: panel == setup AND a wizard
-        # form is open. Hide it during the wizard list, config editor,
-        # and any other panel so the bar doesn't advertise actions
-        # that wouldn't fire.
-        setup_wizard.set_class(
-            self.active_panel != "setup"
-            or self.help_open
-            or not self.setup_model.form_active,
-            "hidden",
+        # Each Setup bar shows only when the current Setup view uses one of
+        # its buttons (first-run and the goal menu use none).
+        setup_buttons = (
+            self._setup_visible_buttons() if self.active_panel == "setup" and not self.help_open else frozenset()
         )
+        setup.set_class(not setup_buttons.intersection(setup_keys.SETUP_BUTTON_IDS), "hidden")
+        setup_wizard.set_class(not setup_buttons.intersection(setup_keys.SETUP_WIZARD_BUTTON_IDS), "hidden")
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
+        # Under 100 columns the KEYS line carries the Sandboxes keys and the
+        # rows get the bar's rows.
+        sandboxes.set_class(
+            self.active_panel != "sandboxes" or self.help_open or self._sandbox_button_bar_collapsed(),
+            "hidden",
+        )
+        policies.set_class(self.active_panel != "policies" or self.help_open, "hidden")
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
         # Keep the plugins bar panel-scoped. When a connector cannot
@@ -4469,6 +5542,10 @@ class DefenseClawTUI(App[None]):
             self._sync_ai_controls()
         if self.active_panel == "runtime" and not self.help_open:
             self._sync_runtime_controls()
+        if self.active_panel == "sandboxes" and not self.help_open:
+            self._sync_sandbox_controls()
+        if self.active_panel == "policies" and not self.help_open:
+            self._sync_policy_controls()
         if self.active_panel in self.catalog_models and not self.help_open:
             self._sync_catalog_controls(self.active_panel)
 
@@ -4573,19 +5650,25 @@ class DefenseClawTUI(App[None]):
         self.query_one("#registries-reject", Button).disabled = not entry_tab or selected_entry is None
         self.query_one("#registries-remove-source", Button).disabled = active != "sources" or selected_source is None
 
+    def _setup_view(self) -> setup_keys.SetupView:
+        return setup_keys.setup_view(self.setup_model, first_run=self.first_run_model.active)
+
+    def _setup_visible_buttons(self) -> frozenset[str]:
+        """Setup buttons the current Setup view uses (from its keymap)."""
+
+        view = self._setup_view()
+        visible = setup_keys.visible_buttons(view, setup_keys.setup_conditions(self.setup_model))
+        if self._setup_nav_shown():
+            # The nav list's "‹ Setup tasks" does what Wizards does.
+            visible = visible - {"setup-mode-wizards"}
+        return visible
+
     def _sync_setup_controls(self) -> None:
-        self._set_button_active("#setup-mode-wizards", self.setup_model.mode == "wizards")
-        self._set_button_active("#setup-mode-config", self.setup_model.mode == "config")
-        current = self.setup_model.current_section()
-        self.query_one("#setup-edit-list", Button).disabled = not (
-            self.setup_model.mode == "config"
-            and current is not None
-            and current.name in {"Observability", "Webhooks"}
-        )
-        self.query_one("#setup-save", Button).disabled = self.setup_model.mode != "config"
-        self.query_one("#setup-revert", Button).disabled = self.setup_model.mode != "config"
-        self.query_one("#setup-restart", Button).disabled = not self.setup_model.restart_queue.pending
-        self.query_one("#setup-clear-restart", Button).disabled = not self.setup_model.restart_queue.pending
+        # Each Setup view shows only the buttons its keymap names; buttons
+        # that don't apply are hidden, not greyed out.
+        visible = self._setup_visible_buttons()
+        for button_id in (*setup_keys.SETUP_BUTTON_IDS, *setup_keys.SETUP_WIZARD_BUTTON_IDS):
+            self._set_button_visible(f"#{button_id}", button_id in visible)
 
     def _sync_setup_wizard_controls(self) -> None:
         """Light up the wizard form action bar to match the live form state.
@@ -4687,6 +5770,18 @@ class DefenseClawTUI(App[None]):
         # Enable; the existing CLI flag is idempotent so this is safe.
         snapshot_known = snapshot is not None
         self._set_button_visible("#ai-enable", (not enabled) or (not snapshot_known))
+        # On in config but the gateway predates it: the same command restarts
+        # the gateway, so say that, as the hint and the d key do (GAP-2320).
+        enable_button = self.query_one("#ai-enable", Button)
+        if getattr(snapshot, "restart_pending", False):
+            enable_button.label = "Apply (restart gateway)"
+            enable_button.tooltip = (
+                "Restart the gateway so AI discovery starts: "
+                "`defenseclaw agent discovery enable --yes` (d)"
+            )
+        else:
+            enable_button.label = "Enable AI Discovery"
+            enable_button.tooltip = "Run `defenseclaw agent discovery enable --yes` (d)"
         self._set_button_visible("#ai-disable", enabled)
         # Scan only makes sense when discovery is on — discover requires
         # the daemon to be running, otherwise the CLI errors out.
@@ -4782,16 +5877,7 @@ class DefenseClawTUI(App[None]):
         # "filter-clear" has no key shortcut on the catalog model — wipe
         # the filter text directly so the body and table both repaint.
         if suffix == "filter-clear":
-            model = self.catalog_models.get(panel)
-            if model is None:
-                return
-            model.clear_filter()
-            try:
-                self.query_one(f"#{panel}-filter", Input).value = ""
-            except NoMatches:
-                pass
-            self._set_status(f"{panel.title()} filter cleared.")
-            self._render_chrome()
+            self._clear_catalog_filter(panel)
             return
         key = keys.get(suffix)
         if key is None:
@@ -4858,14 +5944,17 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         if filter_input.value != model.filter_text:
-            if not model.loaded and filter_input.has_focus:
+            if filter_input.has_focus:
                 # Initial catalog auto-loads can complete a repaint between
                 # Input.value changing and Textual delivering Input.Changed.
                 # Preserve fresh text only while this exact widget owns input
                 # focus. A failed/slow loader can otherwise repaint after the
                 # operator clicked Clear and resurrect a stale value from an
                 # unfocused or replaced Input. Input.Changed remains the
-                # canonical model update once Textual delivers it.
+                # canonical model update once Textual delivers it. Loaded
+                # catalogs repaint too (a block-triggered reload, the 2 s
+                # timer): writing the model's older text back dropped fast-
+                # typed characters ("ws1-notes" became "ws", GAP-1379).
                 model.set_filter(filter_input.value)
             else:
                 filter_input.value = model.filter_text
@@ -4934,6 +6023,25 @@ class DefenseClawTUI(App[None]):
         if button_id == "overview-keys-fill":
             self._submit_command_text("defenseclaw keys fill-missing")
             return
+
+    def _open_setup_guardrail_goals(self) -> None:
+        """Overview g: open Setup's Guardrail goals.
+
+        It ran the interactive ``setup guardrail`` wizard, whose connector
+        checkbox reads the terminal, not the Activity input, so the command
+        hung until Ctrl+C (GAP-2323). The goal forms run it non-interactively.
+        """
+
+        self.action_switch_panel("setup")
+        self.setup_model.active_wizard = SetupWizard.GUARDRAIL
+        opened = self.setup_model.open_goal_menu(SetupWizard.GUARDRAIL)
+        self._render_chrome()
+        if opened:
+            self._set_status("Guardrail setup: choose what you want to do, then Enter.")
+        elif self.setup_model.form_active:
+            self._set_status("Guardrail setup form opened. Tab between fields, Ctrl+R to run.")
+        else:
+            self._set_status(self.setup_model.form_error or "Guardrail setup is not available.")
 
     def _handle_alert_control(self, button_id: str) -> None:
         if button_id == "alerts-filter-actionable":
@@ -5043,17 +6151,23 @@ class DefenseClawTUI(App[None]):
             return
         key_by_button = {
             "logs-toggle-pause": "space",
-            "logs-notifications": "N",
+            "logs-notifications": "b",
             "logs-judge-history": "J",
         }
         if button_id in key_by_button:
             self._apply_logs_action(self.logs_model.handle_key(key_by_button[button_id]))
 
     def _handle_registries_control(self, button_id: str) -> None:
+        tab_by_button = {
+            "registries-tab-sources": RegistriesTab.SOURCES,
+            "registries-tab-entries": RegistriesTab.ENTRIES,
+            "registries-tab-approved": RegistriesTab.APPROVED,
+        }
+        if button_id in tab_by_button:
+            self.registries_model.set_tab(tab_by_button[button_id])
+            self._render_chrome()
+            return
         key_by_button = {
-            "registries-tab-sources": "1",
-            "registries-tab-entries": "2",
-            "registries-tab-approved": "3",
             "registries-refresh": "r",
             "registries-sync-source": "s",
             "registries-sync-all": "S",
@@ -5070,43 +6184,17 @@ class DefenseClawTUI(App[None]):
             self.setup_model.mode = "wizards"
             self._render_chrome()
             return
-        if button_id == "setup-mode-config":
-            self.setup_model.mode = "config"
-            self.setup_model.active_line = self.setup_model.first_editable_line()
-            self._render_chrome()
-            return
         # Wizard-form buttons share the keystroke handler so we get
         # `submit_wizard_form()` validation, secret-reveal toggling,
         # and field navigation for free. Routing through the same
         # `_apply_setup_action` pipe means CommandPreviewScreen,
         # CommandPreview gating, and `mark_wizard_complete` callbacks
         # all fire identically to Ctrl+R / Esc / Tab paths.
-        wizard_key_by_button = {
-            "setup-wizard-run": "ctrl+r",
-            "setup-wizard-cancel": "esc",
-            "setup-wizard-prev": "shift+tab",
-            "setup-wizard-next": "tab",
-            "setup-wizard-reveal": "ctrl+t",
-            "setup-wizard-clear": "ctrl+u",
-        }
-        if button_id in wizard_key_by_button:
+        if button_id in setup_keys.SETUP_WIZARD_BUTTON_IDS:
             if not self.setup_model.form_active:
                 self._set_status("Open a wizard first, then use these controls.")
                 return
-            self._apply_setup_action(
-                self._handle_setup_key(wizard_key_by_button[button_id])
-            )
-            return
-        key_by_button = {
-            "setup-open": "enter",
-            "setup-edit-list": "E",
-            "setup-save": "S",
-            "setup-revert": "R",
-            "setup-restart": "G",
-            "setup-clear-restart": "C",
-            "setup-refresh-credentials": "r",
-        }
-        key = key_by_button.get(button_id)
+        key = _SETUP_BUTTON_KEYS.get(button_id)
         if key is not None:
             self._apply_setup_action(self._handle_setup_key(key))
 
@@ -5134,6 +6222,7 @@ class DefenseClawTUI(App[None]):
             except NoMatches:
                 pass
             self.activity_lines = []
+            self._activity_open_line = None
             self._render_chrome()
             self._set_status(
                 f"Cleared {removed} Activity entr{'y' if removed == 1 else 'ies'}."
@@ -5162,7 +6251,7 @@ class DefenseClawTUI(App[None]):
     #
     # ``Y`` copies the most recent Activity entry's output to the OS
     # clipboard; ``Ctrl+S`` writes that same output to a stable path
-    # (``~/.defenseclaw/tui/last-run.log``) so the operator can ``tail
+    # (``~/.defenseclaw/last-run.log``) so the operator can ``tail
     # -f`` it from another terminal or attach it to a bug report
     # without scrolling the TUI back to the start of a long run.
     # ------------------------------------------------------------------
@@ -5246,7 +6335,9 @@ class DefenseClawTUI(App[None]):
             f"# saved   {datetime.now(timezone.utc).isoformat()}\n"
             "\n"
         )
-        body = "\n".join(entry.output)
+        # Plain text: colour codes made the saved log and the clipboard
+        # unreadable outside a terminal (GAP-1772).
+        body = "\n".join(_strip_ansi(line) for line in entry.output)
         return header, body
 
     def action_yank_output(self) -> None:
@@ -5436,7 +6527,7 @@ class DefenseClawTUI(App[None]):
             )
             _write_owner_only_text(
                 target,
-                header + "\n".join(entry.output) + "\n",
+                header + "\n".join(_strip_ansi(line) for line in entry.output) + "\n",
                 protect_parent=self.data_dir is not None,
             )
             # F-0782: command output frequently contains tokens/secrets, so
@@ -5468,7 +6559,10 @@ class DefenseClawTUI(App[None]):
             self._submit_command_text("defenseclaw agent discovery scan")
             return
         if button_id == "ai-refresh":
-            self._submit_command_text("defenseclaw agent usage --json")
+            # Same as the ``r`` key: reload the panel. Running the command
+            # through the palette printed JSON to Activity and left the
+            # panel stale until the next poll.
+            self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
             return
         if button_id == "ai-model-scope":
             self._apply_ai_discovery_action(
@@ -5620,25 +6714,37 @@ class DefenseClawTUI(App[None]):
             "": "gateway status pending",
         }.get(gateway_state, "gateway offline")
 
-        sev = self._alert_severity_counts_for_connectors(scope_connectors)
+        # Unfiltered, the Findings card counts every alert, as the Alerts
+        # panel (scope All) does: a connector-less alert (galileo export,
+        # gateway) is not "outside" any roster (GAP-2088).
         fleet_sev = self._alert_severity_counts("")
+        sev = self._alert_severity_counts(selected_connector) if selected_connector else fleet_sev
         critical = sev.get("CRITICAL", 0)
         high = sev.get("HIGH", 0)
         medium = sev.get("MEDIUM", 0)
         low = sev.get("LOW", 0)
         total_findings = critical + high + medium + low
         fleet_findings = sum(fleet_sev.values())
-        outside_roster_findings = max(fleet_findings - total_findings, 0) if scope_connectors and not selected_connector else 0
 
         cfg = self.overview_model.cfg
-        guardrail_mode = (cfg.guardrail_mode if cfg else "") or "observe"
+        # Per-connector modes: "observe, 1 action", or the filtered connector's
+        # own mode (GAP-1220).
+        guardrail_mode = self.overview_model.guardrail_mode_label(selected_connector) or "observe"
         guardrail_active = guardrail_running or guardrail_enabled
         guardrail_value_text = "ON" if guardrail_active else "OFF"
-        if guardrail_active:
+        # The gateway enforces the guardrail. With it stopped, "ON / action"
+        # read as live protection beside an all-offline SERVICES list
+        # (GAP-2248).
+        guardrail_gateway_down = guardrail_active and self.overview_model.gateway_down()
+        if guardrail_gateway_down:
+            guardrail_active = False
+            guardrail_value_text = "DOWN"
+            guardrail_detail = f"[{TOKENS.accent_amber}]{guardrail_mode} · gateway not running[/]"
+        elif guardrail_active:
             guardrail_bits: list[str] = [
                 f"[{TOKENS.accent_green}]{guardrail_mode}[/]"
             ]
-            if cfg and cfg.guardrail_port:
+            if cfg and cfg.guardrail_port and cfg.uses_guardrail_proxy_port():
                 guardrail_bits.append(f":{cfg.guardrail_port}")
             llm_label = self._compact_llm_provider(
                 cfg.llm_provider if cfg else "",
@@ -5671,6 +6777,9 @@ class DefenseClawTUI(App[None]):
                 errors = connector_health.errors
             else:
                 requests = inspections = errors = 0
+            # The newest-500-row window only gates the split and names the top
+            # event; the allowed/warned/blocked numbers use the persisted
+            # totals below so they add up to the headline past 500 (GAP-2583).
             allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown_for_connectors(
                 scope_connectors
             )
@@ -5695,21 +6804,31 @@ class DefenseClawTUI(App[None]):
             blocks_value = total_block
             fleet_blocks_value = fleet_total_block
             outside_roster_blocks = max(fleet_blocks_value - blocks_value, 0) if scope_connectors and not selected_connector else 0
-            finding_timestamps = self._finding_event_timestamps_for_connectors(scope_connectors)
+            finding_timestamps = self._finding_event_timestamps_for_connectors((selected_connector,) if selected_connector else ())
 
+            proxy_scope = self._proxy_only_scope(scope_connectors or (connector,))
+            calls_word = "Inspections" if proxy_scope else "Hook Calls"
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
+                # Words, not "recent a136 w1 b2" codes (GAP-1545).
                 call_detail_parts.append(
-                    f"recent [{TOKENS.accent_green}]a{allow_count}[/] "
-                    f"[{TOKENS.accent_amber}]w{alert_count}[/] "
-                    f"[{TOKENS.accent_red}]b{block_decisions}[/]"
+                    f"allowed [{TOKENS.accent_green}]{total_allow}[/] · "
+                    f"warned [{TOKENS.accent_amber}]{total_alert}[/] · "
+                    f"blocked [{TOKENS.accent_red}]{total_block}[/]"
                 )
                 if top_hook:
-                    call_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{top_hook}[/]")
+                    call_detail_parts.append(f"top event: [{TOKENS.accent_cyan}]{top_hook}[/]")
                 if selected_connector:
-                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
+                    call_detail_parts.append(f"all connectors {fleet_hook_calls}")
                 elif outside_roster_hook_calls:
                     call_detail_parts.append(f"outside roster {outside_roster_hook_calls}")
+            elif proxy_scope and hook_calls and (requests or inspections):
+                # The count is tool inspections plus LLM evaluations; name both
+                # instead of "3 inspected" under a larger number (GAP-2496).
+                if requests:
+                    call_detail_parts.append(f"[{TOKENS.accent_blue}]{requests}[/] LLM req")
+                if inspections:
+                    call_detail_parts.append(f"[{TOKENS.accent_blue}]{inspections}[/] tool calls")
             elif inspections or errors:
                 if inspections:
                     call_detail_parts.append(f"[{TOKENS.accent_blue}]{inspections}[/] inspected")
@@ -5722,27 +6841,29 @@ class DefenseClawTUI(App[None]):
             else:
                 call_detail_parts.append("agent active")
                 if selected_connector:
-                    call_detail_parts.append(f"fleet {fleet_hook_calls}")
+                    call_detail_parts.append(f"all connectors {fleet_hook_calls}")
             calls_detail = " · ".join(call_detail_parts)
 
             top_blocked_target, top_blocked_count = self._top_block_target_for_connectors(scope_connectors)
             block_detail_parts: list[str] = []
             if top_blocked_target:
                 short_target = top_blocked_target if len(top_blocked_target) <= 22 else top_blocked_target[:21] + "…"
-                block_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}")
+                block_detail_parts.append(
+                    f"most blocked: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}"
+                )
             if not block_detail_parts:
                 if blocks_value:
                     block_detail_parts.append(
-                        f"[{TOKENS.accent_red}]{blocks_value}[/] persisted"
+                        f"[{TOKENS.accent_red}]{blocks_value}[/] recorded"
                     )
                 elif not gateway_online:
                     block_detail_parts.append(
-                        f"[{TOKENS.text_muted}]0 persisted · {gateway_unavailable_label}[/]"
+                        f"[{TOKENS.text_muted}]none recorded · {gateway_unavailable_label}[/]"
                     )
                 else:
                     block_detail_parts.append("no blocks yet")
             if selected_connector:
-                block_detail_parts.append(f"fleet {fleet_blocks_value}")
+                block_detail_parts.append(f"all connectors {fleet_blocks_value}")
             elif outside_roster_blocks:
                 block_detail_parts.append(f"outside roster {outside_roster_blocks}")
             blocks_detail = " · ".join(block_detail_parts)
@@ -5752,11 +6873,11 @@ class DefenseClawTUI(App[None]):
             # replace the detail sub-lines with a per-connector split and
             # relabel the Hook Calls tile to the connector count. No-op for
             # single-connector installs (helpers return empty).
-            hook_calls_label = f"Hook Calls ({connector})"
+            hook_calls_label = f"{calls_word} ({connector})"
             blocks_label = "Blocks"
             findings_label = "Findings"
             if selected_connector:
-                hook_calls_label = f"Hook Calls ({selected_connector})"
+                hook_calls_label = f"{calls_word} ({selected_connector})"
                 blocks_label = f"Blocks ({selected_connector})"
                 findings_label = f"Findings ({selected_connector})"
             elif multi_connectors:
@@ -5785,12 +6906,9 @@ class DefenseClawTUI(App[None]):
                 medium,
                 low,
                 connector=selected_connector,
-                connectors=scope_connectors,
             )
             if selected_connector:
-                findings_detail = f"{findings_detail} · fleet {fleet_findings}"
-            elif outside_roster_findings:
-                findings_detail = f"{findings_detail} · outside roster {outside_roster_findings}"
+                findings_detail = f"{findings_detail} · all connectors {fleet_findings}"
 
             metrics = (
                 MetricDatum(
@@ -5978,6 +7096,10 @@ class DefenseClawTUI(App[None]):
             )
         else:
             active_alerts = current.active_alerts
+        # Connector hook stats count blocks apart from alerts, while the
+        # Alerts tab lists blocks and scan alerts too; never show fewer
+        # alerts here than that tab and the critical/high banner do.
+        active_alerts = max(active_alerts, self.alerts_model.total_count())
         counts = EnforcementCounts(
             blocked_skills=current.blocked_skills,
             allowed_skills=current.allowed_skills,
@@ -6040,7 +7162,7 @@ class DefenseClawTUI(App[None]):
                 if bucket in counts:
                     seen.add(self._event_count_key(row.event))
                     counts[bucket] += 1
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -6049,6 +7171,36 @@ class DefenseClawTUI(App[None]):
                 seen.add(key)
                 counts[bucket] += 1
         return counts
+
+    def _alerts_view_is_canonical(self) -> bool:
+        """True when the Alerts model reads the audit store's alert view.
+
+        That view already lists every hook block and rule finding once (a
+        block that a finding explains is the finding row), so the Overview
+        must count its rows and not add connector-hook rows on top: each
+        block was counted twice (GAP-2088).
+        """
+
+        return self.alerts_model is not None and getattr(self.alerts_model, "store", None) is not None
+
+    def _supplemental_hook_finding_events(self, scope: tuple[str, ...], since: datetime | None) -> list[Any]:
+        """Hook rows that stand in for alerts when no alert view is loaded."""
+
+        if self._alerts_view_is_canonical():
+            return []
+        return list(self._recent_hook_scope_summary(scope, since=since)["finding_events"])
+
+    def _connector_alert_count(self, connector: str, hook_alerts: int) -> int:
+        """ALERTS for one CONNECTORS row: what its Alerts scope lists (GAP-2089)."""
+
+        if not self._alerts_view_is_canonical():
+            return hook_alerts
+        scope = (connector.strip().lower(),)
+        return sum(
+            1
+            for row in self.alerts_model.flat_rows()
+            if row.kind != "scan_finding" and self._cached_event_matches_scope(row.event, scope)
+        )
 
     @staticmethod
     def _normalize_connector_scope(connectors: Iterable[str]) -> tuple[str, ...]:
@@ -6342,7 +7494,7 @@ class DefenseClawTUI(App[None]):
         action = (getattr(event, "action", "") or "").lower()
         if action == "connector-hook":
             return DefenseClawTUI._hook_decision(event) == "block"
-        return action in {"block", "guardrail-block", "deny", "quarantine"}
+        return action in {"block", "guardrail-block", "inspect-tool-block", "deny", "quarantine"}
 
     def _findings_metric_detail(
         self,
@@ -6377,7 +7529,7 @@ class DefenseClawTUI(App[None]):
         # bracket characters; escape before Rich parses the markup.
         return (
             f"{breakdown} · top: [{TOKENS.accent_cyan}]"
-            f"{rich_escape(short_target)}[/] {sev_letter}"
+            f"{rich_escape(short_target)}[/] ({sev_letter})"
         )
 
     def _ai_agents_metric_detail(self, ai_box: Any) -> str:
@@ -6443,6 +7595,18 @@ class DefenseClawTUI(App[None]):
         """
 
         return self._enforcement_scope_breakdown((connector,))
+
+    def _proxy_only_scope(self, connectors: Iterable[str]) -> bool:
+        """True when every connector in scope is guarded by the LLM proxy."""
+
+        names = {str(name or "").strip().lower() for name in connectors} - {""}
+        return bool(names) and names <= _PROXY_CONNECTORS
+
+    def _enforcement_calls_label(self, connectors: Iterable[str]) -> str:
+        """ENFORCEMENT row label: proxy connectors count inspections, not hooks."""
+
+        scope = tuple(connectors) or (self.overview_model.active_connector_name(),)
+        return "Inspections" if self._proxy_only_scope(scope) else "Hook calls"
 
     def _enforcement_scope_breakdown(self, connectors: Iterable[str]) -> tuple[int, int, int]:
         """Authoritative persisted ``(calls, alerts, blocks)`` for a scope."""
@@ -6587,7 +7751,7 @@ class DefenseClawTUI(App[None]):
         return [
             connector
             for connector, _mode in modes
-            if connector and not connector_paths.is_cleanup_only(connector)
+            if connector
         ]
 
     def _connector_filter(self) -> str:
@@ -6638,6 +7802,10 @@ class DefenseClawTUI(App[None]):
                 pass
             if hasattr(model, "connector_focus_enabled"):
                 model.connector_focus_enabled = focus_enabled
+        # The status bar and the Alerts tab badge count the alerts in this
+        # scope, so both change as the scope is picked (GAP-2441).
+        multi = len(self._active_connector_names()) > 1
+        self.alerts_model.set_connector_filter(connector if multi else "")
         if connector:
             friendly = friendly_connector_name(connector)
             self._set_status(f"Filtered to {friendly} ({connector}).")
@@ -6650,6 +7818,7 @@ class DefenseClawTUI(App[None]):
         overview_active = self.active_panel == "overview" and not self.help_open
         if overview_active:
             self._render_overview_scope_indicator()
+            self._update_tab_labels()
             self._schedule_overview_deferred_render()
             return
         self._render_chrome()
@@ -6830,6 +7999,28 @@ class DefenseClawTUI(App[None]):
         self._panel_render_pending.pop(panel, None)
         self._panel_passive_refresh_pending.discard(panel)
 
+    def _handle_setup_section_nav_click(self, x: int, y: int) -> bool:
+        """Clicks on the config breadcrumb's ``◂ prev | next ▸``."""
+
+        if (
+            self.active_panel != "setup"
+            or self.help_open
+            or self._setup_view() != "config"
+            or y != 0
+        ):
+            return False
+        try:
+            first = Text.from_markup(self.body_text.split("\n", 1)[0]).plain
+        except Exception:  # noqa: BLE001 - malformed markup: no click target
+            return False
+        start = first.rfind(_SETUP_SECTION_NAV)
+        if start < 0 or not start <= x < start + len(_SETUP_SECTION_NAV):
+            return False
+        divider = start + _SETUP_SECTION_NAV.index("|")
+        self._move_setup_section(-1 if x < divider else 1)
+        self._render_chrome()
+        return True
+
     def _handle_body_chip_click(self, x: int, y: int) -> bool:
         """Resolve a click on the ``#body`` Static to a connector chip action.
 
@@ -6842,6 +8033,10 @@ class DefenseClawTUI(App[None]):
         segment (the trailing hint) opens the filter picker as a fallback.
         """
 
+        if self._handle_nav_switcher_click(x, y):
+            return True
+        if self._handle_setup_section_nav_click(x, y):
+            return True
         segments = self._chip_click_segments
         if not segments:
             return False
@@ -6876,7 +8071,11 @@ class DefenseClawTUI(App[None]):
         # one spacer before the connector chip. The fallback ``body_text`` has
         # a different line layout, so content validation alone misses clicks on
         # the visible chip.
-        return y == len(_DEFENSECLAW_LOGO.splitlines()) + 2
+        try:
+            body_width = self.query_one("#body", Static).content_region.width
+        except NoMatches:
+            body_width = _DEFENSECLAW_LOGO_WIDTH
+        return y == _overview_banner_lines(body_width) + 2
 
     def _sync_signal_connector_filters(self) -> None:
         """Push the shared connector filter + column flag to the signal panes.
@@ -6900,7 +8099,7 @@ class DefenseClawTUI(App[None]):
         scored independently via the persisted grouped aggregate so the
         single tile row stays intact (D1=B) while the detail sub-line
         attributes complete activity to the right connector — e.g.
-        ``persisted codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists
+        ``codex 15 · cursor 10 · 2 with no calls``. ``blocks_detail`` lists
         only connectors that actually blocked something. Returns ``("", "")``
         when fewer than two connectors are active, leaving the
         single-connector detail lines unchanged.
@@ -6909,22 +8108,27 @@ class DefenseClawTUI(App[None]):
         connectors = self._active_connector_names()
         if not connectors:
             return "", ""
-        call_parts: list[str] = []
+        # Busiest connectors first, with their hook-call totals; idle ones
+        # are counted, not listed ("persisted amp a0 w0 b0 · persist…" named
+        # only the first of nine connectors; GAP-1545).
+        calls: list[tuple[int, str]] = []
         block_parts: list[str] = []
         for connector in connectors:
             allow, alert, block, _newest = self._connector_hook_stats_for_connectors(
                 (connector,)
             )
-            call_parts.append(
-                f"[{TOKENS.text_secondary}]persisted[/] [{TOKENS.accent_cyan}]{connector}[/] "
-                f"[{TOKENS.accent_green}]a{allow}[/] "
-                f"[{TOKENS.accent_amber}]w{alert}[/] "
-                f"[{TOKENS.accent_red}]b{block}[/]"
-            )
+            calls.append((allow + alert + block, connector))
             if block:
                 block_parts.append(
                     f"[{TOKENS.accent_cyan}]{connector}[/] [{TOKENS.accent_red}]{block}[/]"
                 )
+        busy = sorted((item for item in calls if item[0]), key=lambda item: (-item[0], item[1]))
+        call_parts = [f"[{TOKENS.accent_cyan}]{name}[/] {total}" for total, name in busy]
+        idle = len(calls) - len(busy)
+        if idle:
+            # Not "idle": the Agent row uses that for an agent that is not
+            # open, so one word meant two things on one screen (GAP-2005).
+            call_parts.append(f"[{TOKENS.text_muted}]{idle} with no calls[/]")
         return " · ".join(call_parts), " · ".join(block_parts)
 
     def _connector_status_map(self) -> dict[str, str]:
@@ -7005,10 +8209,11 @@ class DefenseClawTUI(App[None]):
             if not connector:
                 continue
             health_row = self._connector_health_for_metric(connector, use_single=True)
-            allow, alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
+            allow, hook_alerts, blocks, _newest = self._connector_hook_stats_for_connectors(
                 (connector,)
             )
-            calls = allow + alerts + blocks
+            calls = allow + hook_alerts + blocks
+            alerts = self._connector_alert_count(connector, hook_alerts)
             last = self._connector_last_activity(
                 connector,
                 health_row=health_row,
@@ -7020,6 +8225,10 @@ class DefenseClawTUI(App[None]):
             # look active.
             if cfg.connector_is_disabled(connector):
                 status = "disabled"
+            elif self.overview_model.gateway_down():
+                # connectors[] in the last /health kept every row a green
+                # "running" with the gateway stopped (GAP-2586).
+                status = "offline (gateway not running)"
             elif connector.strip().lower() == "opencode" and connector.strip().lower() not in status_map:
                 # A running gateway is not proof that OpenCode loaded its
                 # managed plugin. Older/malformed health without an OpenCode
@@ -7247,7 +8456,7 @@ class DefenseClawTUI(App[None]):
             ):
                 stamps.append(event.timestamp)
                 seen.add(self._event_count_key(event))
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -7336,7 +8545,7 @@ class DefenseClawTUI(App[None]):
         for event in alert_events:
             seen.add(self._event_count_key(event))
             consider(event)
-        for event in self._recent_hook_scope_summary(scope, since=since)["finding_events"]:
+        for event in self._supplemental_hook_finding_events(scope, since):
             key = self._event_count_key(event)
             if key in seen:
                 continue
@@ -7401,7 +8610,9 @@ class DefenseClawTUI(App[None]):
     #   _strip_clear()          on q-dismiss
     #
     # Per user request:
-    #   * never auto-hide on success — user must explicitly press q
+    #   * a success hides itself after STRIP_SUCCESS_SECONDS (the hint says
+    #     so) and leaves its result on the status line; the rest stay
+    #     until the user presses q (GAP-2058)
     #   * snippet on success is a summary, not a raw last line
     #   * strip is hidden when the user is on the Activity panel (live
     #     stream is right there, the strip would be redundant)
@@ -7484,24 +8695,40 @@ class DefenseClawTUI(App[None]):
         self._strip_started_at = monotonic()
         self._strip_frozen_duration = None
         self._strip_last_output = ""
+        self._strip_output_lines = []
+        self._strip_open_line = ("", False)
         self._strip_summary = ""
         self._strip_spinner_tick = 0
         self._render_command_strip()
 
-    def _strip_output(self, line: str) -> None:
-        """Record the most recent meaningful output line for live snippet."""
+    def _strip_output(self, line: str, *, continues: bool = False) -> None:
+        """Record the most recent meaningful output line for live snippet.
 
+        ``continues`` is the rest of the line recorded last, such as the
+        mark after "restarting..." (GAP-2284): that line is replaced.
+        """
+
+        head, recorded = self._strip_open_line if continues else ("", False)
+        line = head + line
         text = _strip_ansi(line).strip()
+        self._strip_open_line = (line, bool(text))
         if not text:
             return
         self._strip_last_output = text
+        if recorded and self._strip_output_lines:
+            self._strip_output_lines[-1] = text
+        elif len(self._strip_output_lines) < STRIP_OUTPUT_LINE_CAP:
+            self._strip_output_lines.append(text)
+        else:
+            self._strip_open_line = (line, False)
         if self._strip_state == "running":
             self._render_command_strip()
 
     def _strip_finished(
         self, exit_code: int, duration: float, *, cancelled: bool = False
     ) -> None:
-        """Move running → success/failure. Strip stays until dismissed."""
+        """Move running → success/failure. A success hides itself after
+        ``STRIP_SUCCESS_SECONDS``; a failure stays until dismissed."""
 
         self._strip_state = (
             "cancelled" if cancelled else ("success" if exit_code == 0 else "failure")
@@ -7511,22 +8738,40 @@ class DefenseClawTUI(App[None]):
         # it's short and looks like a result, otherwise just acknowledge
         # exit code; for failure show the last (likely error) line so the
         # user sees the actual reason without leaving the panel.
+        result = self._strip_json_result_summary()
         if self._strip_state == "cancelled":
             self._strip_summary = "cancelled by operator"
         elif self._strip_state == "success":
             tail = self._strip_last_output
-            self._strip_summary = (
-                tail if (tail and len(tail) <= 120) else "exit 0 · finished cleanly"
-            )
+            result = result or command_result_summary(self._strip_label, self._strip_output_lines)
+            if result:
+                self._strip_summary = result
+            elif (
+                tail
+                and len(tail) <= 120
+                and not _is_bare_json_punctuation(tail)
+                and not is_command_hint(tail)
+                and not is_listing_detail(tail)
+            ):
+                self._strip_summary = tail
+            else:
+                self._strip_summary = "exit 0 · finished cleanly"
         else:
             tail = self._strip_last_output
-            self._strip_summary = tail or f"exit {exit_code} · no output captured"
+            if _is_bare_json_punctuation(tail):
+                tail = ""
+            result = result or failure_result_summary(self._strip_label, self._strip_output_lines)
+            self._strip_summary = result or tail or f"exit {exit_code} · no output captured"
         # Append a contextual "next thing to try" hint when we have a
-        # confident suggestion (e.g. ``rerun readiness`` after `setup
+        # confident suggestion (e.g. the readiness key after `setup
         # guardrail`). Empty string means "no hint" — skip the footer
         # rather than rendering an awkward dangling separator.
         label = self._strip_label or "command"
-        hint = "" if cancelled else suggested_next_action(label, exit_code)
+        hint = (
+            ""
+            if cancelled
+            else suggested_next_action(label, exit_code, panel=self.active_panel, lines=self._strip_output_lines)
+        )
         if hint:
             self._strip_summary = f"{self._strip_summary} · next: {hint}"
         # Fire a transient toast as well so operators on a different
@@ -7544,6 +8789,37 @@ class DefenseClawTUI(App[None]):
                 failure_msg = f"{failure_msg} · next: {hint}"
             self.notify_toast("error", failure_msg)
         self._render_command_strip()
+        if self._strip_state == "success":
+            # The toast already announced the success; don't leave the receipt
+            # over the next screen (it hides about five rows at 80x24).
+            # Failures and cancellations stay until dismissed.
+            token = object()
+            self._strip_auto_hide_token = token
+            try:
+                self.set_timer(STRIP_SUCCESS_SECONDS, lambda: self._auto_hide_success_strip(token))
+            except Exception:  # noqa: BLE001 - no timer before mount; the strip just stays.
+                pass
+
+    def _auto_hide_success_strip(self, token: object) -> None:
+        if self._strip_state == "success" and getattr(self, "_strip_auto_hide_token", None) is token:
+            # The result and its "next:" step stay readable on the status
+            # line once the receipt goes (GAP-2058).
+            done = f"Done: {self._strip_label} · {self._strip_summary}" if self._strip_summary else ""
+            if done:
+                # The status line cuts at its right edge, which took the
+                # next step first at 80x24 (GAP-2133). Textual drops the last
+                # cell of a line that fills the status row exactly, so leave one.
+                done = _fit_keeping_next_step(done, max(24, self.size.width - 3))
+            self._strip_clear()
+            if done:
+                self._set_status(done)
+
+    def _strip_json_result_summary(self) -> str:
+        """Readable result of a registry ``--json`` run, or "" (GAP-1681)."""
+
+        if not self._strip_label.startswith("registry ") or not self._strip_output_lines:
+            return ""
+        return registry_result_summary("\n".join(self._strip_output_lines))
 
     def _strip_rejected(self, reason: str) -> None:
         """Strip enters rejected state for parse errors or busy-executor."""
@@ -7650,7 +8926,7 @@ class DefenseClawTUI(App[None]):
         # cramped 1-row layouts) and shows a check/cross afterwards.
         self.query_one("#command-progress-icon", Static).update(f"[{icon_color} bold]{icon}[/]")
         self.query_one("#command-progress-label", Static).update(
-            f"[{header_color} bold]{self._strip_label}[/]"
+            Text(self._strip_label, style=f"{header_color} bold")
         )
 
         # Elapsed-time tracker replaces the fake progress bar. The bar
@@ -7690,15 +8966,14 @@ class DefenseClawTUI(App[None]):
             snippet_color = TOKENS.accent_red
         truncated = _truncate_for_strip(snippet, panel.size.width or 120)
         # ``truncated`` is live subprocess tail (``Selection [3]:`` etc.).
-        # Without escaping, a single bracketed token in stdout takes the
-        # whole TUI frame down. Escape before letting Rich parse markup.
-        self.query_one("#command-progress-snippet", Static).update(
-            f"[{snippet_color}]{rich_escape(truncated)}[/]"
-        )
+        # Render it as plain Text: rich_escape leaves ``[90m... a=b-c`` (an
+        # SGR code whose ESC was lost) unescaped and Textual's markup parser
+        # crashed the doctor run on it (GAP-1543).
+        self.query_one("#command-progress-snippet", Static).update(Text(truncated, style=snippet_color))
 
         hint = {
             "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
-            "success": "press A for full output  ·  q or click Dismiss to clear",
+            "success": f"press A for full output  ·  hides in {STRIP_SUCCESS_SECONDS:.0f}s  ·  q or Dismiss clears now",
             "failure": "press A for full output  ·  q or click Dismiss to clear",
             "cancelled": "press A for full output  ·  q or click Dismiss to clear",
             "rejected": "press : to retry  ·  q or click Dismiss to clear",
@@ -7741,10 +9016,14 @@ class DefenseClawTUI(App[None]):
         state_by_key = {card.key: card.state or "unknown" for card in service_cards}
         detail_by_key = {card.key: card.detail or card.last_error for card in service_cards}
 
-        banner = Text(_DEFENSECLAW_LOGO, style=f"bold {TOKENS.accent_cyan}")
+        banner = _OverviewBanner(f"bold {TOKENS.accent_cyan}")
         uptime_suffix = ""
-        if health is not None and health.uptime_ms:
-            uptime_suffix = f"  uptime={health.uptime_ms // 1000}s"
+        # The last /health payload is kept while the gateway is down, so its
+        # uptime would read "uptime=91s" frozen beside "gateway not running"
+        # (GAP-2302). It reads "up 7m" like the SERVICES Gateway row and the
+        # status bar, not "uptime=445s" (GAP-2360).
+        if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
+            uptime_suffix = f"  up {format_duration(timedelta(milliseconds=health.uptime_ms))}"
         tagline = Text(
             f"  Enterprise AI Governance  v{__version__}{uptime_suffix}",
             style=f"italic {TOKENS.text_secondary}",
@@ -7756,7 +9035,8 @@ class DefenseClawTUI(App[None]):
         # ``OK`` etc. and crash the overview the moment any notice is
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
-        notice_block: list[Text] = []
+        notice_block: list[RenderableType] = []
+        short_notices = 0 < self.size.height < 32
         for notice in notices[:4]:
             if notice.level == "error":
                 icon, color = "[!]", TOKENS.accent_red
@@ -7766,22 +9046,55 @@ class DefenseClawTUI(App[None]):
                 icon, color = "[>]", TOKENS.accent_blue
             else:
                 icon, color = "[-]", TOKENS.accent_green
-            line = Text(" ")
-            line.append(icon, style=f"{color} bold")
-            line.append(" ")
-            line.append(notice.message)
+            # A grid so wrapped lines hang under the text, not under the icon
+            # (GAP-2533). Below 32 rows each notice is one row ending with "…"
+            # when cut: at 80x24 the wrapped rest fell under the button bar
+            # mid-sentence (GAP-1775). Taller screens wrap the full text.
+            line = Table.grid(expand=True)
+            line.add_column(no_wrap=True, width=len(icon) + 2)
+            line.add_column(ratio=1, no_wrap=short_notices, overflow="ellipsis")
+            message: RenderableType = Text(notice.message)
+            if short_notices and notice.keep_tail:
+                message = _TailKeepingLine(notice.message, notice.keep_tail)
+            line.add_row(Text.assemble(" ", (icon, f"{color} bold"), " "), message)
             notice_block.append(line)
         if not notice_block:
             quiet = Text(" ")
-            quiet.append("[OK]", style=f"{TOKENS.accent_green} bold")
-            quiet.append(" Runtime signals are quiet.")
+            review = self._overview_alert_review_notice()
+            if review:
+                quiet.append("[*]", style=f"{TOKENS.accent_amber} bold")
+                quiet.append(" " + review)
+            else:
+                quiet.append("[OK]", style=f"{TOKENS.accent_green} bold")
+                quiet.append(" Runtime signals are quiet.")
             notice_block.append(quiet)
 
+        # Below 100 columns the card is too narrow for a detail column (it
+        # folded "canonical destination plan loading" four letters a line),
+        # so the detail goes under the state instead.
+        narrow_services = self.size.width < 100
+        # The detail column of the narrow layout: the card's inner width (as
+        # for CONFIGURATION) minus the dot, the label and the grid padding.
+        services_detail_width = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5) - 16
         services_table = Table.grid(padding=(0, 1), expand=True)
         services_table.add_column(no_wrap=True, width=2)
-        services_table.add_column(no_wrap=True, width=12)
-        services_table.add_column(no_wrap=True, width=10)
-        services_table.add_column(overflow="fold")
+        # 13 = the longest label ("AI Discovery") plus a space, so it never
+        # touches its state (GAP-2391). At 80 columns the card is 31 wide and
+        # that extra space cut the API address to "127.0.0.1:193…", so the
+        # narrow layout keeps 12; the grid padding still leaves a space
+        # (GAP-2412).
+        services_table.add_column(no_wrap=True, width=12 if narrow_services else 13)
+        # The last column takes ratio=1 so only it absorbs the spare width.
+        # Without a ratio, an expanded grid spreads it over every column, so
+        # with short details (gateway stopped) the label and state columns
+        # widened and jumped right (GAP-2391).
+        if narrow_services:
+            # fold, not "…": a detail longer than the column (an address)
+            # wraps instead of losing its end (GAP-2412).
+            services_table.add_column(overflow="fold", ratio=1)
+        else:
+            services_table.add_column(no_wrap=True, width=10)
+            services_table.add_column(overflow="fold", ratio=1)
         services_layout = (
             ("Gateway", "gateway"),
             ("Agent", "agent"),
@@ -7795,10 +9108,26 @@ class DefenseClawTUI(App[None]):
         )
         for display_name, key in services_layout:
             state = state_by_key.get(key, "unknown")
+            # The gateway does not report sink health yet; a permanent
+            # "unknown" row only adds noise (GAP-1158).
+            if key == "sinks" and not _service_reported(state):
+                continue
             color = state_color(state)
             normalized = (state or "").strip().lower()
             dot = "●" if normalized in {"running", "active", "enabled", "clean", "allowed"} else "○"
             detail = detail_by_key.get(key, "") or ""
+            if narrow_services:
+                state_cell = Text(state or "unknown", style=color)
+                if detail:
+                    # Break between ", " items, as ENFORCEMENT does: a folding
+                    # cell broke at any space, so "2 skill dirs, 2" / "plugin
+                    # dirs" and "25 active, 0" / "new, enhanced" (GAP-2546).
+                    items = [Text(item) for item in re.split(r"(?<=,) ", detail)]
+                    state_cell.append("\n" + _fit_units(items, services_detail_width, sep=" ").plain, style=TOKENS.text_secondary)
+                services_table.add_row(
+                    Text(dot, style=color), Text(display_name, style=TOKENS.text_primary), state_cell
+                )
+                continue
             services_table.add_row(
                 Text(dot, style=color),
                 Text(display_name, style=TOKENS.text_primary),
@@ -7810,8 +9139,15 @@ class DefenseClawTUI(App[None]):
         selected_scan: dict[str, int] | None = None
 
         cfg_table = Table.grid(padding=(0, 2), expand=True)
-        cfg_table.add_column(width=17, no_wrap=True)
-        cfg_table.add_column(overflow="fold")
+        if narrow_services:
+            # Below 100 columns the value column was about 12 wide, so values
+            # broke mid-word and mid-path ("per-connecto|r packs"); a value
+            # that does not fit beside its label goes on the line under it
+            # (GAP-2324).
+            cfg_table.add_column(overflow="fold")
+        else:
+            cfg_table.add_column(width=17, no_wrap=True)
+            cfg_table.add_column(overflow="fold")
         if selected_connector:
             cfg_rows: list[tuple[str, RenderableType]] = [
                 (label, Text(value)) for label, value in self._connector_configuration_lines(selected_connector)
@@ -7823,7 +9159,7 @@ class DefenseClawTUI(App[None]):
                     "Redaction",
                     Text.from_markup(rich_escape(_v8_redaction_summary(self.overview_model.observability_status))),
                 ),
-                ("Policy posture", Text(_policy_posture(cfg))),
+                ("Policy posture", Text(_policy_posture(cfg, getattr(self.overview_model, "active_policy", None)))),
                 ("Enforcement", Text(_enforcement_label(cfg))),
                 (
                     "Human approval",
@@ -7834,8 +9170,8 @@ class DefenseClawTUI(App[None]):
                     ),
                 ),
                 ("Environment", Text((cfg.environment if cfg else "") or "unknown")),
-                ("Policy dir", Text((cfg.policy_dir if cfg else "") or "—")),
-                ("Data dir", Text((cfg.data_dir if cfg else "") or "—")),
+                ("Policy dir", Text(_home_short((cfg.policy_dir if cfg else "") or "—"))),
+                ("Data dir", Text(_home_short((cfg.data_dir if cfg else "") or "—"))),
             ]
             # 8.13: when more than one connector is active, replace the
             # primary-only "Agent: <connector>" line with a concise
@@ -7847,7 +9183,10 @@ class DefenseClawTUI(App[None]):
         if overview_connector_rows and not selected_connector:
             cfg_rows[0] = (
                 "Agents",
-                Text(f"{len(overview_connector_rows)} active", style=TOKENS.text_secondary),
+                Text(
+                    _agents_summary(cfg, len(overview_connector_rows), self.overview_model.gateway_down()),
+                    style=TOKENS.text_secondary,
+                ),
             )
         llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
         llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
@@ -7868,11 +9207,33 @@ class DefenseClawTUI(App[None]):
             api_addr = string_detail(health.api.details, "addr")
             if api_addr:
                 cfg_rows.append(("API", Text(api_addr)))
+        # The CONFIGURATION card's inner width: half the body less borders.
+        cfg_inner = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5)
         for label, value in cfg_rows:
-            cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
+            if not narrow_services:
+                cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
+                continue
+            value_text = value if isinstance(value, Text) else Text(str(value))
+            if len(label) + 2 + value_text.cell_len <= cfg_inner:
+                cell = Text(label, style=TOKENS.text_secondary)
+                cell.append("  ")
+                cell.append_text(value_text)
+                cfg_table.add_row(cell)
+                continue
+            if not value_text.spans and value_text.cell_len > cfg_inner - 2:
+                # Break at a space, or a URL or path after "." or "/", not
+                # mid-word ("https://us.api.inspect.aidefe" / "nse...",
+                # GAP-2443; "block CRITICAL · al" / "ert", GAP-2501).
+                value_text = Text(_wrap_at_separators(value_text.plain, cfg_inner - 2), style=value_text.style)
+            indented = Table.grid()
+            indented.add_column(width=2)
+            indented.add_column(overflow="fold")
+            indented.add_row("", value_text)
+            cfg_table.add_row(Group(Text(label, style=TOKENS.text_secondary), indented))
 
         enf_table = Table.grid(padding=(0, 2), expand=True)
         enf_table.add_column(width=12, no_wrap=True)
+        enf_value_width = cfg_inner - 14
         enf_table.add_column(overflow="fold")
         # 8.13: when a connector is selected the ENFORCEMENT panel narrows to
         # that connector's real Alerts/Hook calls/Blocks (the connector-
@@ -7882,13 +9243,17 @@ class DefenseClawTUI(App[None]):
         enf_selected = selected_connector
         if enf_selected:
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            # Same count as the Alerts panel in this scope, not only the
+            # hook "alert" verdicts: blocks with findings read "Alerts 0"
+            # next to "Critical 8" (GAP-2183).
+            alert_n = self._connector_alert_count(enf_selected, alert_n)
             alerts_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             enf_table.add_row(
                 Text("Alerts", style=TOKENS.text_secondary),
                 Text.from_markup(f"[{alerts_color} bold]{alert_n:<3}[/] {_mini_bar(alert_n, 20)}"),
             )
             enf_table.add_row(
-                Text("Hook calls", style=TOKENS.text_secondary),
+                Text(self._enforcement_calls_label((enf_selected,)), style=TOKENS.text_secondary),
                 Text.from_markup(f"[{TOKENS.accent_green}]{calls_n}[/]"),
             )
             blocks_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
@@ -7908,7 +9273,10 @@ class DefenseClawTUI(App[None]):
                 ),
             )
             enf_table.add_row(
-                Text("Hook calls", style=TOKENS.text_secondary),
+                Text(
+                    self._enforcement_calls_label(self._active_connector_names()),
+                    style=TOKENS.text_secondary,
+                ),
                 Text.from_markup(f"[{TOKENS.accent_green}]{calls_n}[/]"),
             )
             blocks_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
@@ -7938,10 +9306,13 @@ class DefenseClawTUI(App[None]):
             else:
                 enf_table.add_row(
                     Text("Skills", style=TOKENS.text_secondary),
-                    Text.from_markup(
-                        f"[{TOKENS.text_primary}]{selected_scan['skills']}[/]   "
-                        f"[{TOKENS.accent_red}]{selected_scan['skills_blocked']}[/] blocked   "
-                        f"[{TOKENS.accent_green}]{selected_scan['skills_allowed']}[/] allowed"
+                    _fit_units(
+                        (
+                            Text(str(selected_scan["skills"]), style=TOKENS.text_primary),
+                            _count_unit(selected_scan["skills_blocked"], "blocked", TOKENS.accent_red),
+                            _count_unit(selected_scan["skills_allowed"], "allowed", TOKENS.accent_green),
+                        ),
+                        enf_value_width,
                     ),
                 )
                 enf_table.add_row(
@@ -7959,35 +9330,36 @@ class DefenseClawTUI(App[None]):
                 Text("Total scans", style=TOKENS.text_secondary),
                 Text.from_markup(f"[{TOKENS.accent_green}]{counts.total_scans}[/]"),
             )
-            enf_table.add_row(
-                Text("Skills", style=TOKENS.text_secondary),
-                Text.from_markup(
-                    f"[{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed"
-                ),
-            )
-            enf_table.add_row(
-                Text("MCPs", style=TOKENS.text_secondary),
-                Text.from_markup(
-                    f"[{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
-                    f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
-                ),
-            )
+            for label, blocked, allowed in (
+                ("Skills", counts.blocked_skills, counts.allowed_skills),
+                ("MCPs", counts.blocked_mcps, counts.allowed_mcps),
+            ):
+                enf_table.add_row(
+                    Text(label, style=TOKENS.text_secondary),
+                    _fit_units(
+                        (
+                            _count_unit(blocked, "blocked", TOKENS.accent_red),
+                            _count_unit(allowed, "allowed", TOKENS.accent_green),
+                        ),
+                        enf_value_width,
+                    ),
+                )
 
         keys = self.overview_model.keys_status()
         sc_table = Table.grid(padding=(0, 2), expand=True)
         sc_table.add_column(width=2, no_wrap=True)
         sc_table.add_column(width=14, no_wrap=True)
         sc_table.add_column(overflow="fold")
-        # Mirror Go TUI: probe external scanners via PATH each render so
-        # an operator who runs `brew install skill-scanner` sees the row
-        # flip from "missing" to "installed" on the next 2 s refresh.
+        # Mirror Go TUI: probe external scanners via PATH so an operator who
+        # runs `brew install skill-scanner` sees the row flip from "missing"
+        # to "installed". The probe is cached for a few seconds: a PATH walk
+        # on every 2 s repaint is disk I/O on the UI thread.
         # Built-ins (aibom + codeguard) ship inside the CLI and are
         # always available. Note: the field is named `aibom` (AI Bill
         # Of Materials) — historic copies of this list spelled it
         # "aibon", which is a typo.
-        skill_available = bool(shutil.which("skill-scanner"))
-        mcp_available = bool(shutil.which("mcp-scanner"))
+        skill_available = _on_path("skill-scanner")
+        mcp_available = _on_path("mcp-scanner")
         scanner_rows: list[tuple[str, str, str, str]] = [
             (
                 "skill-scanner",
@@ -8076,21 +9448,26 @@ class DefenseClawTUI(App[None]):
                     )
                 else:
                     colored_parts.append(f"[{color}]{part}[/]")
-            header_markup = "  ".join(colored_parts) if colored_parts else f"[{TOKENS.text_secondary}]no data[/]"
+            header_units = colored_parts or [f"[{TOKENS.text_secondary}]no data[/]"]
             if doctor.age_label:
-                header_markup += f"  [{TOKENS.text_muted}]· {doctor.age_label}[/]"
+                header_units.append(f"[{TOKENS.text_muted}]· {doctor.age_label}[/]")
             if doctor.stale:
-                header_markup += (
-                    f"  [{TOKENS.accent_amber}](stale — [/]"
+                header_units.append(
+                    f"[{TOKENS.accent_amber}](stale — [/]"
                     f"[{TOKENS.accent_amber} bold]\\[d][/]"
                     f"[{TOKENS.accent_amber}] to rerun)[/]"
                 )
-            doctor_lines: list[RenderableType] = [Text.from_markup(header_markup)]
+            # Whole "N pass" / "· 2m ago" items per line: a plain wrap at 80
+            # columns left "· 2m" / "ago" (GAP-2546).
+            doctor_lines: list[RenderableType] = [
+                _fit_units([Text.from_markup(unit) for unit in header_units], cfg_inner, sep="  ")
+            ]
             if doctor.run_outcome:
                 outcome_color = {
                     "healthy": TOKENS.accent_green,
                     "warning": TOKENS.accent_amber,
                     "failed": TOKENS.accent_red,
+                    "stale": TOKENS.accent_blue,
                 }.get(doctor.run_outcome, TOKENS.accent_amber)
                 doctor_lines.append(
                     Text.from_markup(
@@ -8150,32 +9527,38 @@ class DefenseClawTUI(App[None]):
                         f"[{TOKENS.accent_green}]All checks passing — nothing to address.[/]"
                     )
                 )
+            if doctor.note:
+                doctor_lines.append(Text(doctor.note, style=TOKENS.text_secondary))
             doctor_body = Group(*doctor_lines)
 
         if ai_box.rows:
-            ai_table = Table.grid(padding=(0, 2), expand=True)
-            ai_table.add_column(width=4, no_wrap=True)
-            ai_table.add_column(width=26, no_wrap=True, overflow="ellipsis")
-            ai_table.add_column(width=20, no_wrap=True, overflow="ellipsis")
-            ai_table.add_column(width=8, no_wrap=True)
-            ai_table.add_column(overflow="ellipsis")
-            for row in ai_box.rows[:6]:
-                ai_table.add_row(
+            # Fixed 26/20-wide columns overflowed 80 columns, so Rich shrank
+            # them all ("[OK…", "s…" / "3m" / "a…"). Like CONNECTORS, the rows
+            # stay one line and drop vendor, then confidence (GAP-2414). The
+            # name counts in full while they are dropped: a 12-cell minimum
+            # cut "Tabby Terminal AI Integra…" beside the vendor (GAP-2434).
+            ai_columns = (
+                FitColumn("STATE"),
+                FitColumn("AGENT", flex_min=AI_AGENT_NAME_MIN),
+                FitColumn("VENDOR", priority=1),
+                FitColumn("CONF", priority=2, justify="right"),
+                FitColumn("LAST SEEN"),
+            )
+            ai_rows = [
+                (
                     Text(row.state_badge),
                     Text(row.name, style=TOKENS.text_primary),
                     Text(row.vendor, style=TOKENS.text_secondary),
                     Text(row.confidence),
                     Text(row.seen_label, style=TOKENS.text_muted),
                 )
+                for row in ai_box.rows[:6]
+            ]
             if ai_box.overflow:
-                ai_table.add_row(
-                    Text(""),
-                    Text(f"+{ai_box.overflow} more", style=TOKENS.text_secondary),
-                    Text(""),
-                    Text(""),
-                    Text(""),
+                ai_rows.append(
+                    (Text(""), Text(f"+{ai_box.overflow} more", style=TOKENS.text_secondary), Text(""), Text(""), Text(""))
                 )
-            ai_body: RenderableType = ai_table
+            ai_body: RenderableType = FitColumnsTable(ai_columns, ai_rows, show_header=False)
         else:
             ai_body = Text(
                 ai_box.message or "ai discovery offline — run: defenseclaw agent discovery status",
@@ -8255,9 +9638,10 @@ class DefenseClawTUI(App[None]):
             ("d", "Doctor"),
             ("i", "Inventory"),
             ("g", "Guardrail"),
-            ("m", "Mode"),
+            ("m", "Connector"),
+            ("p", "Policies"),
             ("l", "Logs"),
-            ("N", "Notify"),
+            ("b", "Notify"),
             ("u", "Upgrade"),
             ("X", "Uninstall"),
             ("?", "Help"),
@@ -8302,7 +9686,35 @@ class DefenseClawTUI(App[None]):
 
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
-        return ("overview", self.help_open, stable_text)
+        # The CONFIGURATION card is laid out for the width at render time, so
+        # a new width is new content: after a resize it kept the old width's
+        # wrapping until the next data change (GAP-2509).
+        width = int(getattr(self.size, "width", 0) or 0)
+        # Notices are one "…" line below 32 rows and wrap above it, so the
+        # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
+        # wrapped notice, its end hidden under the button bar (GAP-2519).
+        short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
+        return ("overview", self.help_open, width, short, stable_text)
+
+    def _runtime_sample_time(self) -> str:
+        """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
+
+        A clock time, not an age: Overview redraws only when its content
+        changes, so "34s ago" stayed "34s ago" while the gateway was down
+        (GAP-2302).
+        """
+
+        raw = getattr(getattr(self.runtime_model, "snapshot", None), "scanned_at", "") or ""
+        try:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        local = stamp.astimezone()
+        if local.date() == datetime.now(local.tzinfo).date():
+            return local.strftime("%H:%M:%S")
+        return local.strftime("%b %d %H:%M")
 
     def _overview_runtime_panel(self) -> RenderableType:
         """Always-visible Runtime coverage so Overview is not a services-only wall."""
@@ -8316,19 +9728,42 @@ class DefenseClawTUI(App[None]):
         }.get(runtime.health_title, TOKENS.text_secondary)
         table = Table.grid(padding=(0, 1), expand=True)
         table.add_column(overflow="fold")
+        # The card's inner width, as for CONFIGURATION in the same columns.
+        card_inner = max(20, (int(getattr(self.size, "width", 0) or 0) - 8) // 2 - 5)
+        if self.overview_model.gateway_down():
+            # Runtime data comes from the gateway. With it stopped the last
+            # sample ("DEGRADED · 17 processes · inference heartbeat: up")
+            # read as live beside an all-offline SERVICES list (GAP-2248).
+            table.add_row(Text("○ NO DATA - gateway not running", style=f"bold {TOKENS.text_muted}"))
+            taken = self._runtime_sample_time()
+            last = f"Last sample at {taken}; it" if taken else "Runtime coverage"
+            table.add_row(
+                Text(
+                    f"{last} updates again once the gateway runs: press : and run \"start\".",
+                    style=TOKENS.text_muted,
+                )
+            )
+            return Panel(
+                table,
+                title=Text("RUNTIME", style=f"bold {TOKENS.accent_cyan}"),
+                title_align="left",
+                border_style=TOKENS.accent_cyan,
+                padding=(0, 1),
+            )
         if runtime.health_title:
             header = Text()
             header.append(f"● {runtime.health_title}", style=f"bold {title_color}")
+            units = [header]
             if runtime.processes or runtime.connections or runtime.findings:
-                header.append(
-                    f"   {runtime.findings} findings   "
-                    f"{runtime.processes} processes   "
-                    f"{runtime.connections} connections",
-                    style=TOKENS.text_secondary,
-                )
-            table.add_row(header)
+                units += [
+                    Text(f"{runtime.findings} findings", style=TOKENS.text_secondary),
+                    Text(f"{runtime.processes} processes", style=TOKENS.text_secondary),
+                    Text(f"{runtime.connections} connections", style=TOKENS.text_secondary),
+                ]
+            table.add_row(_fit_units(units, card_inner))
         if runtime.plane_summary:
-            table.add_row(Text(runtime.plane_summary, style=TOKENS.text_secondary))
+            planes = [Text(plane, style=TOKENS.text_secondary) for plane in runtime.plane_summary.split("  ")]
+            table.add_row(_fit_units(planes, card_inner, sep="  "))
         if runtime.host_observations or runtime.host_gated:
             table.add_row(
                 Text(
@@ -8371,28 +9806,22 @@ class DefenseClawTUI(App[None]):
 
         if not rows:
             return None
-        table = Table.grid(padding=(0, 2), expand=True)
-        table.add_column(no_wrap=True)  # CONNECTOR
-        table.add_column(no_wrap=True)  # MODE
-        table.add_column(no_wrap=True)  # RULE PACK
-        table.add_column(no_wrap=True)  # LAST ACTIVITY
-        table.add_column(justify="right", no_wrap=True)  # CALLS
-        table.add_column(justify="right", no_wrap=True)  # BLOCKS
-        table.add_column(justify="right", no_wrap=True)  # ALERTS
-        table.add_column(no_wrap=True)  # STATUS
-        header_style = f"bold {TOKENS.text_secondary}"
-        table.add_row(
-            Text("CONNECTOR", style=header_style),
-            Text("MODE", style=header_style),
-            Text("RULE PACK", style=header_style),
-            Text("LAST ACTIVITY", style=header_style),
-            Text("CALLS", style=header_style),
-            Text("BLOCKS", style=header_style),
-            Text("ALERTS", style=header_style),
-            Text("STATUS", style=header_style),
+        # Rich cut every column at 80 ("MO…", "C…" and "3…" for 303 calls):
+        # the least useful columns are dropped first and the numbers stay
+        # whole (GAP-2385).
+        columns = (
+            FitColumn("CONNECTOR"),
+            FitColumn("MODE", priority=3),
+            FitColumn("RULE PACK", priority=1),
+            FitColumn("LAST ACTIVITY", priority=2),
+            FitColumn("CALLS", justify="right"),
+            FitColumn("BLOCKS", justify="right"),
+            FitColumn("ALERTS", justify="right"),
+            FitColumn("STATUS", priority=4),
         )
+        table_rows: list[tuple[Text, ...]] = []
         selected = self._connector_filter()
-        disclosure_lines: list[Text] = []
+        disclosure_lines: list[RenderableType] = []
         for row in rows:
             normalized = row.status.strip().lower() or "unknown"
             color_dot = state_color(normalized)
@@ -8409,19 +9838,23 @@ class DefenseClawTUI(App[None]):
             )
             color_blocks = TOKENS.accent_red if row.blocks else TOKENS.text_muted
             color_alerts = TOKENS.accent_amber if row.alerts else TOKENS.text_muted
-            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
-            if disclosure:
-                disclosure_lines.append(Text(f"{name} ({row.connector}): {disclosure}", style=TOKENS.text_muted))
-            table.add_row(
-                Text(f"{name} ({row.connector})", style=name_style),
-                Text(row.mode or "?", style=TOKENS.text_secondary),
-                Text(row.rule_pack or "default", style=TOKENS.text_secondary),
-                Text(row.last_activity, style=TOKENS.text_muted),
-                Text(str(row.calls), style=TOKENS.text_primary),
-                Text(str(row.blocks), style=color_blocks),
-                Text(str(row.alerts), style=color_alerts),
-                status_cell,
+            notice = self.overview_model.connector_priority_conflict_notice(row.connector)
+            if notice:
+                # Wrapped lines start under the sentence (GAP-2561).
+                disclosure_lines.append(_hanging_text(f"{name}:", notice, TOKENS.text_muted))
+            table_rows.append(
+                (
+                    Text(f"{name} ({row.connector})", style=name_style),
+                    Text(row.mode or "?", style=TOKENS.text_secondary),
+                    Text(row.rule_pack or "default", style=TOKENS.text_secondary),
+                    Text(row.last_activity, style=TOKENS.text_muted),
+                    Text(str(row.calls), style=TOKENS.text_primary),
+                    Text(str(row.blocks), style=color_blocks),
+                    Text(str(row.alerts), style=color_alerts),
+                    status_cell,
+                )
             )
+        table = FitColumnsTable(columns, table_rows, header_style=f"bold {TOKENS.text_secondary}")
         hint = Text(
             "Press m to filter every view by connector · with one selected, Enter opens its Alerts.",
             style=f"italic {TOKENS.text_muted}",
@@ -8440,39 +9873,49 @@ class DefenseClawTUI(App[None]):
         summary = self.overview_model.native_delivery_summary
         if summary is None:
             return [
-                Text(
-                    "Native connector OTLP delivery · bounded evidence loading · "
-                    "collector/runtime health does not prove accepted delivery",
-                    style=TOKENS.text_muted,
+                _hanging_text(
+                    "Native connector OTLP delivery ·",
+                    "bounded evidence loading · collector/runtime health does not prove accepted delivery",
+                    TOKENS.text_muted,
                 )
             ]
-        scope = f"bounded {summary.observation_window_hours}h"
-        if summary.event_rows_truncated:
-            scope += ", truncated; counts partial"
+        from defenseclaw.observability.custody_status import native_evidence_scope
+
+        scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
         lines: list[RenderableType] = [
-            Text(
-                f"Native connector OTLP delivery · {scope} · collector/runtime health does not prove accepted delivery",
-                style=TOKENS.text_secondary,
+            _hanging_text(
+                "Native connector OTLP delivery ·",
+                f"{scope} · collector/runtime health does not prove accepted delivery",
+                TOKENS.text_secondary,
             )
         ]
         if not summary.connectors:
             reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
             lines.append(Text(f"  no evidence{reason}", style=TOKENS.text_muted))
             return lines
-        for item in summary.connectors:
-            instance = "" if item.default else " · additional instance"
+        from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+        # The detail already names the state ("accepted native delivery
+        # observed ..."), so the state word is only a color here, and a
+        # grid gives wrapped detail a hanging indent instead of lines flush
+        # with the panel edge (GAP-2545).
+        rows = Table.grid(padding=(0, 1))
+        rows.add_column(width=1)
+        rows.add_column(no_wrap=True)
+        rows.add_column(overflow="fold")
+        for label, item in native_delivery_display_rows(summary.connectors):
+            instance = f" · {label}" if label else ""
             style = {
                 "all_drop_only": TOKENS.accent_red,
                 "partial_drop_only": TOKENS.accent_amber,
                 "accepted": TOKENS.accent_green,
             }.get(item.state, TOKENS.text_muted)
-            lines.append(
-                Text(
-                    f"  {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
-                    f"{item.state.replace('_', '-')} · {item.detail}",
-                    style=style,
-                )
+            rows.add_row(
+                "",
+                Text(f"{friendly_connector_name(item.connector)} ({item.connector}){instance}:", style=style),
+                Text(item.detail, style=style),
             )
+        lines.append(rows)
         return lines
 
     def _overview_observability_panel(self) -> RenderableType:
@@ -8482,95 +9925,85 @@ class DefenseClawTUI(App[None]):
         storage = self.overview_model.observability_storage_status()
         status_error = self.overview_model.observability_status_error
         if rows:
-            table = Table.grid(padding=(0, 2), expand=True)
+            # Fixed minimum widths wider than the screen made Rich drop NAME
+            # and KIND at 80 columns, so the rows read "healthy (acti…" with
+            # no name (GAP-2385). Low-value columns now go first.
             if storage is not None:
-                for width in (18, 12, 9, 14, 18, 9, 21, 20, 28, 24):
-                    table.add_column(no_wrap=True, min_width=width)
-                table.add_column(overflow="ellipsis")
-                table.add_row(
-                    *(
-                        Text(label, style=TOKENS.text_secondary)
-                        for label in (
-                            "NAME",
-                            "KIND",
-                            "POLICY",
-                            "HEALTH",
-                            "SIGNALS",
-                            "BUCKETS",
-                            "REDACTION",
-                            "QUEUE",
-                            "CONFIGURED LIMITS",
-                            "LAST RESULT",
-                            "TARGET",
+                columns = (
+                    FitColumn("NAME"),
+                    FitColumn("KIND", priority=9),
+                    FitColumn("POLICY", priority=5),
+                    FitColumn("HEALTH"),
+                    FitColumn("SIGNALS", priority=8),
+                    FitColumn("BUCKETS", priority=2),
+                    FitColumn("REDACTION", priority=6),
+                    FitColumn("QUEUE", priority=7),
+                    FitColumn("CONFIGURED LIMITS", priority=1),
+                    FitColumn("LAST RESULT", priority=4),
+                    FitColumn("TARGET", priority=3, flex_min=16),
+                )
+                table_rows: list[tuple[Text, ...]] = []
+                for row in rows:
+                    health = row.health_label
+                    table_rows.append(
+                        (
+                            Text(row.name, style=TOKENS.text_primary),
+                            Text(row.kind, style=TOKENS.text_secondary),
+                            Text(row.policy_state, style=state_color(row.policy_state)),
+                            Text(health, style=state_color(row.state)),
+                            Text(row.signals, style=TOKENS.text_secondary),
+                            Text(row.buckets, style=TOKENS.text_secondary),
+                            Text(row.redaction, style=TOKENS.accent_cyan),
+                            Text(row.queue, style=TOKENS.text_secondary),
+                            Text(row.limits, style=TOKENS.text_secondary),
+                            Text(row.activity, style=TOKENS.text_secondary),
+                            Text(row.endpoint, style=TOKENS.text_muted),
                         )
                     )
-                )
-                for row in rows:
-                    health = row.state
-                    if row.health_reason:
-                        health += f" ({row.health_reason})"
-                    table.add_row(
-                        Text(row.name, style=TOKENS.text_primary),
-                        Text(row.kind, style=TOKENS.text_secondary),
-                        Text(row.policy_state, style=state_color(row.policy_state)),
-                        Text(health, style=state_color(row.state)),
-                        Text(row.signals, style=TOKENS.text_secondary),
-                        Text(row.buckets, style=TOKENS.text_secondary),
-                        Text(row.redaction, style=TOKENS.accent_cyan),
-                        Text(row.queue, style=TOKENS.text_secondary),
-                        Text(row.limits, style=TOKENS.text_secondary),
-                        Text(row.activity, style=TOKENS.text_secondary),
-                        Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
-                    )
             else:
-                table.add_column(no_wrap=True, min_width=18)  # NAME
-                table.add_column(no_wrap=True, min_width=11)  # TARGET
-                table.add_column(no_wrap=True, min_width=16)  # SCOPE
-                table.add_column(no_wrap=True, min_width=12)  # KIND
-                table.add_column(no_wrap=True, min_width=10)  # STATE
-                table.add_column(no_wrap=True, min_width=18)  # SIGNALS
-                table.add_column(no_wrap=True, min_width=13)  # ROUTING
-                table.add_column(overflow="ellipsis")  # ENDPOINT
-                table.add_row(
-                    Text("NAME", style=TOKENS.text_secondary),
-                    Text("TARGET", style=TOKENS.text_secondary),
-                    Text("SCOPE", style=TOKENS.text_secondary),
-                    Text("KIND/PRESET", style=TOKENS.text_secondary),
-                    Text("STATE", style=TOKENS.text_secondary),
-                    Text("SIGNALS", style=TOKENS.text_secondary),
-                    Text("ROUTING", style=TOKENS.text_secondary),
-                    Text("ENDPOINT", style=TOKENS.text_secondary),
+                columns = (
+                    FitColumn("NAME"),
+                    FitColumn("TARGET", priority=6),
+                    FitColumn("SCOPE", priority=4),
+                    FitColumn("KIND/PRESET", priority=7),
+                    FitColumn("STATE"),
+                    FitColumn("SIGNALS", priority=5),
+                    FitColumn("ROUTING", priority=3),
+                    FitColumn("ENDPOINT", priority=2, flex_min=16),
                 )
-                for row in rows:
-                    color = state_color(row.state)
-                    table.add_row(
+                table_rows = [
+                    (
                         Text(row.name, style=TOKENS.text_primary),
                         Text(row.target, style=TOKENS.text_secondary),
                         Text(row.scope, style=TOKENS.text_secondary),
                         Text(row.kind, style=TOKENS.text_secondary),
-                        Text(row.state, style=color),
+                        Text(row.state, style=state_color(row.state)),
                         Text(row.signals, style=TOKENS.text_secondary),
                         Text(row.routing or "—", style=TOKENS.accent_cyan),
-                        Text(row.endpoint, style=TOKENS.text_muted, overflow="ellipsis"),
+                        Text(row.endpoint, style=TOKENS.text_muted),
                     )
+                    for row in rows
+                ]
+            table = FitColumnsTable(columns, table_rows, header_style=TOKENS.text_secondary)
             prefix: list[RenderableType] = []
             if storage is not None:
                 retention_health = storage.retention_health or "unavailable"
                 if storage.retention_failure:
                     retention_health += f" ({storage.retention_failure})"
+                # Wraps under its text like the lines below it (GAP-2567).
                 prefix.append(
-                    Text(
-                        "Local SQLite · "
+                    _hanging_text(
+                        "Local SQLite ·",
                         f"retention={storage.retention} · controller={retention_health} · "
                         f"judge capture={storage.judge_capture}",
-                        style=TOKENS.text_secondary,
+                        TOKENS.text_secondary,
                     )
                 )
                 prefix.append(
-                    Text(
-                        f"Event history: {storage.local_path} · Judge bodies: {storage.judge_bodies_path}",
-                        style=TOKENS.text_muted,
-                        overflow="ellipsis",
+                    _hanging_text(
+                        "Event history:",
+                        f"{storage.local_path} · Judge bodies: {storage.judge_bodies_path}",
+                        TOKENS.text_muted,
                     )
                 )
             body: RenderableType = Group(
@@ -8579,16 +10012,16 @@ class DefenseClawTUI(App[None]):
                 table,
                 Text(
                     "Names are identities: a new name adds a route; the same name updates it. "
-                    "Manage in 0 Setup → Observability / Galileo.",
+                    "Manage in 0 Setup → Alerts & telemetry → Export telemetry.",
                     style=f"italic {TOKENS.text_muted}",
                 ),
             )
         else:
             message = (
-                f"Canonical observability status unavailable: {status_error}"
+                f"Telemetry status unavailable: {status_error}"
                 if status_error
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
-                "Observability / Galileo, then restart the gateway."
+                "Alerts & telemetry → Export telemetry, then restart the gateway."
             )
             body = Group(
                 *self._overview_native_delivery_renderables(),
@@ -8630,9 +10063,9 @@ class DefenseClawTUI(App[None]):
                 f"[{color_alerts}]{row.alerts:>8}[/]"
                 f"  [{color_dot}]{dot} {row.status or 'unknown'}[/]"
             )
-            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
-            if disclosure:
-                lines.append(f"  [{TOKENS.text_muted}]{name}: {disclosure}[/]")
+            notice = self.overview_model.connector_priority_conflict_notice(row.connector)
+            if notice:
+                lines.append(f"  [{TOKENS.text_muted}]{friendly_connector_name(row.connector)}: {notice}[/]")
         body = "\n".join(lines)
         return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
 
@@ -8649,9 +10082,9 @@ class DefenseClawTUI(App[None]):
                 "collector/runtime health does not prove accepted delivery"
             )
         else:
-            scope = f"bounded {summary.observation_window_hours}h"
-            if summary.event_rows_truncated:
-                scope += ", truncated; counts partial"
+            from defenseclaw.observability.custody_status import native_evidence_scope
+
+            scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
             delivery_lines.append(
                 f"  Native connector OTLP delivery · {scope} · "
                 "collector/runtime health does not prove accepted delivery"
@@ -8659,20 +10092,21 @@ class DefenseClawTUI(App[None]):
             if not summary.connectors:
                 reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
                 delivery_lines.append(f"    no evidence{reason}")
-            for item in summary.connectors:
-                instance = "" if item.default else " · additional instance"
+            from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+            for label, item in native_delivery_display_rows(summary.connectors):
+                instance = f" · {label}" if label else ""
                 delivery_lines.append(
-                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
-                    f"{item.state.replace('_', '-')} · {item.detail}"
+                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: {item.detail}"
                 )
         delivery_text = "\n".join(delivery_lines)
         if not rows:
             message = (
-                f"Canonical observability status unavailable: "
+                f"Telemetry status unavailable: "
                 f"{rich_escape(self.overview_model.observability_status_error)}"
                 if self.overview_model.observability_status_error
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
-                "Observability / Galileo, then restart the gateway."
+                "Alerts & telemetry → Export telemetry, then restart the gateway."
             )
             return (
                 f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n{delivery_text}\n  {message}\n\n"
@@ -8693,9 +10127,7 @@ class DefenseClawTUI(App[None]):
                 f"{'CONFIGURED LIMITS':<30}LAST RESULT / TARGET",
             ]
             for row in rows:
-                health = row.state
-                if row.health_reason:
-                    health += f" ({row.health_reason})"
+                health = row.health_label
                 lines.append(
                     f"  {rich_escape(row.name[:19]):<20}{rich_escape(row.kind[:13]):<14}"
                     f"{rich_escape(row.policy_state[:10]):<11}{rich_escape(health[:21]):<22}"
@@ -8735,7 +10167,7 @@ class DefenseClawTUI(App[None]):
             )
         lines.append(
             "  Names are identities: a new name adds; the same name updates. "
-            "Manage in 0 Setup → Observability / Galileo."
+            "Manage in 0 Setup → Alerts & telemetry → Export telemetry."
         )
         return (
             f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
@@ -8744,6 +10176,16 @@ class DefenseClawTUI(App[None]):
             + "\n".join(lines)
             + "\n\n"
         )
+
+    def _overview_alert_review_notice(self) -> str:
+        """Replaces "Runtime signals are quiet" while critical/high alerts wait (GAP-2496)."""
+
+        model = getattr(self, "alerts_model", None)
+        count = model.critical_count() if model is not None else 0
+        if not count:
+            return ""
+        noun = "alert needs" if count == 1 else "alerts need"
+        return f"{count} critical/high {noun} review - press 2 for Alerts."
 
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
         notices = self.overview_model.build_notices()
@@ -8770,7 +10212,11 @@ class DefenseClawTUI(App[None]):
                 f"[{color}][{notice.level.upper()}][/] {rich_escape(notice.message)}"
             )
         if not notice_lines:
-            notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
+            review = self._overview_alert_review_notice()
+            if review:
+                notice_lines.append(f"[{TOKENS.accent_amber}][WARN][/] {review}")
+            else:
+                notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
 
         enf_selected = self._connector_filter()
         if enf_selected:
@@ -8782,7 +10228,7 @@ class DefenseClawTUI(App[None]):
                     "Redaction",
                     _v8_redaction_summary(self.overview_model.observability_status),
                 ),
-                ("Policy posture", _policy_posture(cfg)),
+                ("Policy posture", _policy_posture(cfg, getattr(self.overview_model, "active_policy", None))),
                 ("Enforcement", _enforcement_label(cfg)),
                 ("Environment", (cfg.environment if cfg else "") or "unknown"),
                 ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
@@ -8793,7 +10239,10 @@ class DefenseClawTUI(App[None]):
             # Multi: replace the redundant "Agent: <primary>" line (index 0)
             # with a unified "Agents: N active" header. The per-connector
             # detail lives in the CONNECTORS section appended below.
-            config_lines[0] = ("Agents", f"{len(overview_connector_rows)} active")
+            config_lines[0] = (
+                "Agents",
+                _agents_summary(cfg, len(overview_connector_rows), self.overview_model.gateway_down()),
+            )
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
@@ -8827,7 +10276,11 @@ class DefenseClawTUI(App[None]):
             ("Watchdog", state_by_key.get("watcher", "unknown"), detail_by_key.get("watcher", "")),
             ("Guardrail", state_by_key.get("guardrail", "unknown"), detail_by_key.get("guardrail", "")),
             ("API", state_by_key.get("api", "unknown"), detail_by_key.get("api", "")),
-            ("Sinks", state_by_key.get("sinks", "unknown"), detail_by_key.get("sinks", "")),
+            *(
+                (("Sinks", state_by_key["sinks"], detail_by_key.get("sinks", "")),)
+                if _service_reported(state_by_key.get("sinks", ""))
+                else ()
+            ),
             ("Telemetry", state_by_key.get("telemetry", "unknown"), detail_by_key.get("telemetry", "")),
             ("AI Discovery", state_by_key.get("ai_discovery", "unknown"), detail_by_key.get("ai_discovery", "")),
         ]
@@ -8846,6 +10299,7 @@ class DefenseClawTUI(App[None]):
             # lazily, so show "scan pending" + trigger a one-shot load).
             self._request_enforcement_inventory(enf_selected)
             calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            alert_n = self._connector_alert_count(enf_selected, alert_n)  # GAP-2183
             alert_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
             block_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
             selected_scan = self._connector_scan_metrics(enf_selected)
@@ -8861,7 +10315,7 @@ class DefenseClawTUI(App[None]):
                 )
             enforcement_text = (
                 f"  Alerts           [{alert_color} bold]{alert_n}[/]   "
-                f"Hook calls [{TOKENS.accent_green}]{calls_n}[/]   "
+                f"{self._enforcement_calls_label((enf_selected,))} [{TOKENS.accent_green}]{calls_n}[/]   "
                 f"Blocks [{block_color} bold]{block_n}[/]\n"
                 + silent_line
                 + scan_lines
@@ -8876,7 +10330,8 @@ class DefenseClawTUI(App[None]):
                 f"  Active alerts    [{alert_color} bold]{counts.active_alerts}[/]   "
                 f"Total scans [{TOKENS.accent_green}]{counts.total_scans}[/]\n"
                 + silent_line
-                + f"  Hook calls       [{TOKENS.accent_green}]{calls_n}[/]   "
+                + f"  {self._enforcement_calls_label(self._active_connector_names()):<17}"
+                f"[{TOKENS.accent_green}]{calls_n}[/]   "
                 f"Blocks [{block_color} bold]{block_n}[/]\n"
                 + f"  Skills           [{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
                 f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed\n"
@@ -8894,6 +10349,7 @@ class DefenseClawTUI(App[None]):
                     "healthy": TOKENS.accent_green,
                     "warning": TOKENS.accent_amber,
                     "failed": TOKENS.accent_red,
+                    "stale": TOKENS.accent_blue,
                 }.get(doctor.run_outcome, TOKENS.accent_amber)
                 doctor_summary += (
                     f"  [{outcome_color} bold]outcome={doctor.run_outcome}[/]"
@@ -8924,8 +10380,8 @@ class DefenseClawTUI(App[None]):
             ai_lines.append(f"  {ai_box.message or 'no AI agents detected yet'}")
 
         uptime = ""
-        if health is not None and health.uptime_ms:
-            uptime = f"  uptime={health.uptime_ms // 1000}s"
+        if health is not None and health.uptime_ms and not self.overview_model.gateway_down():
+            uptime = f"  up {format_duration(timedelta(milliseconds=health.uptime_ms))}"
         keys = self.overview_model.keys_status()
         if keys.available:
             keys_line = keys.label or "all required set"
@@ -9001,51 +10457,68 @@ class DefenseClawTUI(App[None]):
             for tab in self.inventory_model.subtab_info()
         )
         scope = self.inventory_model.scope_state()
-        chips = " ".join(
-            f"[{TOKENS.accent_violet} bold]{chip.label}[/]"
-            if chip.active
-            else f"[{TOKENS.text_muted}]{chip.label}[/]"
-            for chip in scope.chips
+        scanned = [chip.category for chip in scope.chips if chip.active]
+        scan_scope = (
+            "all categories"
+            if not self.inventory_model.category_scope
+            else ", ".join(scanned) + (" (fast)" if self.inventory_model.is_fast_scan() else "")
         )
-        filter_text = f"  filter={self.inventory_model.filter or 'all'}"
+        filter_text = (
+            f"  [{TOKENS.text_muted}]showing:[/] {self.inventory_model.filter}" if self.inventory_model.filter else ""
+        )
         # 8.13: surface the shared connector filter chip (multi-connector
         # installs) so it's explicit which connector's inventory is shown and
         # how to change it. Empty for single-connector installs.
         connector_chip = self._connector_chip_text()
+        # Keys are in the hint bar and the ? sheet; a "Keys:" line here
+        # pushed the table below the fold at 80x24.
         return (
-            "[bold #22D3EE]Inventory[/]\n"
+            f"[bold #22D3EE]Inventory[/]  [{TOKENS.text_muted}]r scans:[/] {scan_scope}{filter_text}\n"
             f"{connector_chip}"
-            f"{tabs}\n"
-            f"{scope.label}: {chips} {scope.hint}{filter_text}\n"
-            "Keys: h/l sub-tabs, 1 all, 2/3/4 filter Skills or Plugins, r reload, o fast scope, Enter detail."
+            f"{tabs}"
         )
 
     def _logs_body_text(self) -> str:
+        """Header, search and (for Verdicts) the extra filter rows.
+
+        The source tabs and filter presets are the two button bars right
+        below, so they are not repeated here. They were, with numbers
+        ("2 Verdicts") that read as shortcuts although digits switch
+        panels, and at 80x24 those rows hid every log line.
+        """
+
         header = self.logs_model.header_state()
-        tabs = "  ".join(
-            f"[{TOKENS.accent_violet} bold]{index}:{tab.label}[/]"
-            if tab.active
-            else f"[{TOKENS.text_secondary}]{index} {tab.label}[/]"
-            for index, tab in enumerate(header.tabs, start=1)
-        )
+        source = next((tab.label for tab in header.tabs if tab.active), "")
         status_color = TOKENS.accent_green if header.status.style_key == "live" else TOKENS.accent_amber
         lines = [
-            "[bold #22D3EE]Logs[/]",
-            f"{tabs}  [{status_color} bold]{header.status.label}[/]  {header.line_count_label}",
+            f"[bold #22D3EE]Logs[/]  [{TOKENS.accent_violet} bold]{rich_escape(source)}[/]  "
+            f"[{status_color} bold]{header.status.label}[/]  {header.line_count_label}",
         ]
         if header.search_label:
-            lines.append(f"[{TOKENS.accent_cyan}]{header.search_label}[/]")
+            lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(header.search_label)}[/]")
         if header.search_prompt:
-            lines.append(f"[{TOKENS.accent_cyan}]{header.search_prompt}[/]")
+            lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(header.search_prompt)}[/]")
         for group in self.logs_model.chip_groups():
+            if group.group == "preset":
+                continue
             chips = "  ".join(
-                f"[{TOKENS.accent_violet} bold]{(chip.shortcut + ' ' if chip.shortcut else '')}{chip.label}[/]"
+                f"[{TOKENS.accent_violet} bold]{chip.label}[/]"
                 if chip.active
-                else f"[{TOKENS.text_secondary}]{(chip.shortcut + ' ' if chip.shortcut else '')}{chip.label}[/]"
+                else f"[{TOKENS.text_secondary}]{chip.label}[/]"
                 for chip in group.chips
             )
-            lines.append(f"{group.label} {chips}")
-        lines.append(self.logs_model.hint_text())
+            lines.append(f"{group.shortcut} {group.label} {chips}")
+        if not self._table_rows:
+            error = self.logs_model.error_messages.get(self.logs_model.source, "")
+            if error:
+                lines.append(f"[{TOKENS.accent_amber}]{rich_escape(error)}[/]")
+            elif self.logs_model.lines.get(self.logs_model.source):
+                lines.append(f"[{TOKENS.text_muted}]No lines match this filter. Press 1 for All.[/]")
+            else:
+                lines.append(
+                    f"[{TOKENS.text_muted}]No {rich_escape(source)} lines yet. They appear here once "
+                    "the gateway is running (run doctor from : if it isn't).[/]"
+                )
         return "\n".join(lines)
 
     def _audit_body_text(self) -> str:
@@ -9061,10 +10534,10 @@ class DefenseClawTUI(App[None]):
         # ``_render_chrome`` call after a setup change like toggling
         # redaction).
         actions = "  ".join(f"\\[{action.key}] {action.label}" for action in toolbar.actions)
-        lines = [
-            "[bold #22D3EE]Audit Trail[/]  [#9FB2CC]Click common filters above, or search with field:value terms.[/]",
-            f"{toolbar.summary_label}  {actions}",
-        ]
+        # The rest of the keys are in the hint bar and the ? sheet; the body
+        # keeps to one header line, the active filter and the search prompt
+        # so the event table stays on screen at 80x24.
+        lines = [f"[bold #22D3EE]Audit Trail[/]  {toolbar.summary_label}  [{TOKENS.text_muted}]{actions}[/]"]
         # ``filter_label`` and ``search_prompt`` are operator-supplied:
         # the filter chip and the ``/`` search field both echo whatever
         # the user typed (e.g. ``target:[skill]``). Without escaping,
@@ -9077,21 +10550,47 @@ class DefenseClawTUI(App[None]):
             lines.append(rich_escape(toolbar.filter_label))
         if toolbar.search_prompt:
             lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(toolbar.search_prompt)}[/]")
+            lines.append(
+                f"[{TOKENS.text_muted}]Search by field: severity:HIGH action:block target:skill run:<id>. "
+                "Enter applies, Esc clears.[/]"
+            )
         if self.audit_model.error_message:
             lines.append(
                 f"[{TOKENS.accent_amber}]{rich_escape(self.audit_model.error_message)}; "
                 "showing the last successful snapshot.[/]"
             )
-        lines.append(
-            "Search examples: severity:HIGH action:block target:skill run:<id>. "
-            "Use Same target or Same run to correlate the selected event."
-        )
+        if not self.audit_model.items and not self.audit_model.error_message:
+            if self.audit_model.loading:
+                lines.append(
+                    f"[{TOKENS.text_muted}]Loading audit events... a large audit database can take "
+                    "a minute to read.[/]"
+                )
+            else:
+                lines.append(
+                    f"[{TOKENS.text_muted}]No audit events yet. Scans, blocks, approvals and config "
+                    "changes are recorded here as they happen.[/]"
+                )
+        elif not self.audit_model.filtered and not self.audit_model.filtering:
+            # A search with no matches showed an empty table and no text
+            # (GAP-1631).
+            lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
+        # Re-renders pass the current text back in (a resize, a panel
+        # render). Only new text restarts the clock and changes the owning
+        # panel, or a "Done: ..." stayed on every panel after a resize
+        # (GAP-1821).
+        if text != self.status_text or self._status_panel is None:
+            self._status_panel = self.active_panel
+            self._status_set_at = time.monotonic()
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
+        if _status_text_fills_line(text, self.size.width):
+            # A "Done: ..." fitted to the line lost its last cell to the "…"
+            # of the cut-off health strip ("press i for readines…", GAP-2133).
+            rendered = text
         # ``text`` is operator-supplied via every ``_set_status`` caller —
         # including ``self.audit_model.active_filter_label()`` and the
         # logs search prompt — both of which echo whatever was typed
@@ -9112,10 +10611,33 @@ class DefenseClawTUI(App[None]):
         self._last_status_signature = rendered
 
     def _write_activity(self, text: str) -> None:
+        self._activity_open_line = None
         self.activity_lines.append(text)
-        self.query_one("#activity", RichLog).write(text)
+        self._activity_log_write(self.query_one("#activity", RichLog), text)
 
-    def _write_activity_safe(self, text: str) -> None:
+    def _activity_log_write(self, log: RichLog, content: object) -> None:
+        width = self._activity_write_width(log)
+        if width is None:
+            log.write(content)
+        else:
+            log.write(content, width=width)
+
+    def _activity_write_width(self, log: RichLog) -> int | None:
+        """Wrap width for a line written while the Activity log is hidden.
+
+        A hidden RichLog has no width, so it wrapped each line at its
+        78-column minimum and kept that wrap when shown in a 160-column
+        terminal (GAP-1911). Use the width the log gets when shown: the
+        screen less the log's margin, border, padding and scrollbar.
+        """
+
+        region = getattr(log, "scrollable_content_region", None)
+        if region is None or region.width > 0:
+            return None
+        width = self.size.width - 8
+        return width if width > log.min_width else None
+
+    def _write_activity_safe(self, text: str, *, continues: bool = False) -> None:
         """Write subprocess output to the Activity RichLog without ever
         crashing the markup parser AND honouring terminal ANSI colors.
 
@@ -9142,16 +10664,66 @@ class DefenseClawTUI(App[None]):
         the resulting content as opaque (no further markup parsing
         re-trips the bracket crash). One call covers both problems
         without needing a separate ``rich_escape`` step.
+
+        ``continues`` adds ``text`` to the output line written last, which
+        was shown before its newline arrived ("restarting..." and then its
+        mark): that line is written again whole (GAP-2284).
         """
 
+        log = self.query_one("#activity", RichLog)
+        if continues and self.activity_lines and self._activity_log_drop_open_line(log):
+            text = self.activity_lines.pop() + text
         self.activity_lines.append(text)
-        self.query_one("#activity", RichLog).write(Text.from_ansi(text))
+        self._activity_open_line = self._activity_log_mark(log)
+        self._activity_log_write(log, Text.from_ansi(text))
+
+    @staticmethod
+    def _activity_log_mark(log: RichLog) -> tuple[bool, int]:
+        """Where the next write lands: (still deferred, index)."""
+
+        deferred = getattr(log, "_deferred_renders", None)
+        if not getattr(log, "_size_known", True) and deferred is not None:
+            return True, len(deferred)
+        return False, len(getattr(log, "lines", ()))
+
+    def _activity_log_drop_open_line(self, log: RichLog) -> bool:
+        """Remove the open output line from the Activity log; False if it can't."""
+
+        if self._activity_open_line is None or log.max_lines is not None:
+            return False
+        deferred, start = self._activity_open_line
+        if deferred != self._activity_log_mark(log)[0]:
+            return False  # the log got its size since, so the line moved
+        if deferred:
+            queue = log._deferred_renders
+            if len(queue) <= start:
+                return False
+            while len(queue) > start:
+                queue.pop()
+            return True
+        if len(log.lines) <= start:
+            return False
+        del log.lines[start:]
+        cache = getattr(log, "_line_cache", None)
+        if cache is not None:
+            cache.clear()
+        log.refresh()
+        return True
 
     def _export_audit(self, path: Path | None) -> Path:
         target = path or Path("defenseclaw-audit-export.json")
         if not target.is_absolute():
             target = (self.data_dir or Path.cwd()) / target
         target = target.resolve(strict=False)
+        # Each export is a new timestamped file; the fixed name silently
+        # replaced the previous export (GAP-1533).
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = target.with_name(f"{target.stem}-{stamp}{target.suffix}")
+        counter = 2
+        while candidate.exists():
+            candidate = target.with_name(f"{target.stem}-{stamp}-{counter}{target.suffix}")
+            counter += 1
+        target = candidate
         managed_data_dir = self.data_dir.resolve(strict=False) if self.data_dir is not None else None
         protect_parent = managed_data_dir is not None and target.parent.is_relative_to(managed_data_dir)
         rows = []
@@ -9196,10 +10768,22 @@ class DefenseClawTUI(App[None]):
             if self.command_running and self._command_started_at
             else 0
         )
+        critical_alerts = self.alerts_model.critical_count()
+        hidden_critical = 0
+        connector_filter = self._connector_filter() if active_panel in {"overview", "alerts"} else ""
+        if connector_filter:
+            # Alerts opens filtered to the connector, so count what it will
+            # show; an alert with no connector is outside the filter (GAP-1253).
+            # The Alerts hint counts the same rows as its list (GAP-1582).
+            self._sync_signal_connector_filters()
+            scoped = self.alerts_model.scope_severity_counts()
+            scoped_critical = scoped["CRITICAL"] + scoped["HIGH"]
+            hidden_critical = max(critical_alerts - scoped_critical, 0)
+            critical_alerts = scoped_critical
         hint_state = HintState(
             active_panel=active_panel,
             filter_active=self._active_filter_label(),
-            critical_alerts=self.alerts_model.critical_count(),
+            critical_alerts=critical_alerts,
             total_alerts=sum(self.alerts_model.severity_counts().values()),
             commands_run=self.commands_run,
             command_running=self.command_running,
@@ -9207,13 +10791,42 @@ class DefenseClawTUI(App[None]):
             command_elapsed_secs=elapsed_secs,
             logs_paused=bool(self.logs_model.paused),
             new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
+            panel_view=self._hint_panel_view(active_panel),
+            panel_keys=self.sandbox_model.keys_line() if active_panel == "sandboxes" else "",
+            panel_conditions=self._hint_panel_conditions(active_panel),
+            panel_has_rows=bool(self._table_rows) if active_panel == "sandboxes" else True,
+            not_configured=self.config is None,
+            connector_filter=friendly_connector_name(connector_filter) if connector_filter else "",
+            hidden_critical_alerts=hidden_critical,
         )
         hint.refresh_hint(hint_state, self._hint_status_model())
         self.hint_text = str(getattr(hint, "content", ""))
 
+    def _hint_panel_conditions(self, active_panel: str) -> tuple[str, ...]:
+        if self.active_panel == "setup":
+            return tuple(sorted(setup_keys.setup_conditions(self.setup_model)))
+        if active_panel == "ai":
+            return self.ai_discovery_model.hint_conditions()
+        return ()
+
+    def _hint_panel_view(self, active_panel: str) -> str:
+        if active_panel == "sandboxes":
+            return self.sandbox_model.view
+        if active_panel == "policies":
+            return self.policy_model.view
+        if self.active_panel == "setup":
+            return self._setup_view()
+        if active_panel == "registries" and self.registries_model.detail_open:
+            return "detail"
+        return ""
+
     def _active_filter_label(self) -> str:
         if self.active_panel == "alerts":
-            return self.alerts_model.active_filter_label()
+            alerts = self.alerts_model
+            if not (alerts.filter_text or alerts.severity_filter or alerts.show_all_severities):
+                # The default actionable queue is not a filter to clear.
+                return ""
+            return alerts.active_filter_label()
         if self.active_panel == "audit":
             return self.audit_model.active_filter_label()
         if self.active_panel == "logs":
@@ -9279,7 +10892,14 @@ class DefenseClawTUI(App[None]):
             redaction_on = True
             redaction_label = _v8_redaction_summary(self.overview_model.observability_status)
             mode = (cfg.guardrail_mode or "").strip().lower()
-            if mode:
+            active_policy = self.policy_model.active_policy()
+            if not cfg.guardrail_enabled:
+                # "policy default · action" implied enforcement while the
+                # guardrail was off (GAP-1561).
+                policy_posture = "guardrail off"
+            elif active_policy is not None:
+                policy_posture = f"policy {active_policy.name}" + (f" · {mode}" if mode else "")
+            elif mode:
                 policy_posture = f"policy {mode}"
 
         return StatusModel(
@@ -9292,10 +10912,50 @@ class DefenseClawTUI(App[None]):
             redaction_on=redaction_on,
             policy_posture=policy_posture,
             commands_run=int(self.commands_run),
-            active_alerts=self.alerts_model.critical_count() or self.overview_model.enforcement.active_alerts,
+            active_alerts=(
+                self.alerts_model.connector_scope_count()
+                if self.alerts_model.connector_filter
+                else self.alerts_model.total_count() or self.overview_model.enforcement.active_alerts
+            ),
             command_running=self.command_running,
             version=__version__,
         )
+
+    def _panel_table_shape(self) -> object:
+        """What besides its columns identifies the shared table's layout.
+
+        A change rebuilds the table instead of patching its rows. Setup's
+        task groups (and config sections) share one column set, and patching
+        rows kept the previous group's column widths painted on a real
+        terminal, cutting off a longer task name.
+        """
+
+        if self.active_panel == "registries":
+            # Auto-width columns never shrink when rows are patched, so a
+            # status that got shorter after a good sync kept its wide column
+            # until a restart (GAP-2347). The widest cell per column decides.
+            return tuple(max((len(cell) for cell in column), default=0) for column in zip(*self._table_rows))
+        if self.active_panel != "setup":
+            return False
+        model = self.setup_model
+        if model.form_active:
+            # Textual's auto-width columns never shrink when rows are patched,
+            # but the hint is wrapped to the room the current rows leave. When
+            # a connector change dropped the long "Verify After Setup" row the
+            # hint was cut at the edge instead of wrapping (GAP-2131), so the
+            # cells that size the columns before the hint rebuild the table.
+            return ("form", tuple(row[:-1] for row in self._table_rows))
+        view = self._setup_view()
+        if view == "wizards":
+            # The Status cells wrap to the width (GAP-2502), and patched rows
+            # keep their old column widths, so a resize rebuilds the table.
+            return (view, setup_center.active_group(model), int(getattr(self.size, "width", 0) or 0))
+        if view == "config":
+            # The column sizes depend on the width (narrow screens ellipsize
+            # values), so a resize rebuilds the table instead of keeping the
+            # wide layout's column widths (GAP-1166).
+            return (view, model.active_section, int(getattr(self.size, "width", 0) or 0))
+        return view
 
     def _render_panel_table(self) -> None:
         table = self.query_one("#panel-table", DataTable)
@@ -9321,7 +10981,7 @@ class DefenseClawTUI(App[None]):
             self._table_columns,
             self._table_rows,
             cursor_row,
-            self.active_panel == "setup" and self.setup_model.form_active,
+            self._panel_table_shape(),
         )
         if signature == self._last_table_signature:
             table.remove_class("hidden")
@@ -9507,6 +11167,11 @@ class DefenseClawTUI(App[None]):
         # move_cursor fires RowHighlighted; suppress the handler's model
         # write so restoring the cursor here can't pause the Logs stream.
         table.move_cursor(row=cursor_row, column=0, animate=False)
+        if self.active_panel == "logs" and not self.logs_model.paused and cursor_row >= len(self._table_rows) - 1:
+            # Following the tail: scroll again once the layout settles and the
+            # horizontal scrollbar exists, so the newest line sits above it
+            # rather than hidden under it (GAP-1216).
+            table.call_after_refresh(lambda: table.scroll_to(y=table.max_scroll_y, animate=False))
         # Textual's DataTable binds left/right/enter to its own cursor
         # actions, which silently swallows the keys the setup wizard form
         # relies on. Keep its visual cursor but relinquish focus in that mode.
@@ -9530,7 +11195,9 @@ class DefenseClawTUI(App[None]):
         )
         key = f"panel-row-{self._next_table_row_key}"
         self._next_table_row_key += 1
-        self._rendered_table_row_keys.append(table.add_row(*cells, key=key))
+        # A wrapped cell (a setup hint) makes its row as tall as it needs.
+        height = None if any(isinstance(value, str) and "\n" in value for value in row) else 1
+        self._rendered_table_row_keys.append(table.add_row(*cells, key=key, height=height))
 
     def _update_panel_table_delta(
         self,
@@ -9608,18 +11275,210 @@ class DefenseClawTUI(App[None]):
             self._append_panel_table_row(table, row)
         return True
 
+    # --- shared split layout (widgets/panel_split.py) ------------------------
+    #
+    # Three hooks, if-chains like the rest of the panel touchpoints. They run
+    # on every render (the 2 s refresh too), so they must be pure and cheap.
+
+    def _panel_nav(self, panel: str) -> tuple[NavItem, ...]:
+        """The navigation list for ``panel``; empty when it has none.
+
+        Shown left of the table from ``NAV_MIN_WIDTH`` columns. Narrower
+        terminals rely on the panel's own one-line switcher in ``#body``
+        (``_body_nav_switcher`` draws one from the same items).
+        """
+
+        if panel == "setup":
+            return self._setup_panel_nav()
+        if panel == "policies":
+            return self._policy_panel_nav()
+        return ()
+
+    def _panel_aside(self, panel: str) -> RenderableType | None:
+        """Detail for the selected row of ``panel``; None when it has none.
+
+        Shown right of the table from ``ASIDE_MIN_WIDTH`` columns, otherwise
+        in ``#detail-panel`` below the table when ``_detail_text()`` is
+        empty. Return ``Aside(title, body)`` to title the pane.
+        """
+
+        if panel == "setup":
+            return self._setup_panel_aside()
+        if panel == "policies":
+            return self._policy_panel_aside()
+        return None
+
+    def _select_panel_nav(self, panel: str, key: str) -> bool:
+        """Choose the nav item whose ``NavItem.key`` is ``key``.
+
+        Called for a click on the nav list or the body switcher; panels call
+        it from their own keys too. Return True when something changed (the
+        caller re-renders).
+        """
+
+        if panel == "setup":
+            return self._select_setup_nav(key)
+        if panel == "policies":
+            return self._select_policy_nav(key)
+        return False
+
+    def _body_nav_switcher(self, items: tuple[NavItem, ...], line: int) -> str:
+        """One-line switcher markup for body line ``line``; clicks select items."""
+
+        switcher = nav_switcher(items, max(20, self._body_width()))
+        self._nav_switcher_hit = (self.active_panel, line, switcher)
+        return switcher.markup
+
+    def _body_width(self) -> int:
+        # #body-panel has a 1-column margin and 2 columns of padding per side.
+        width = int(getattr(self.size, "width", 0) or 0)
+        return (width if width > 0 else 80) - 6
+
+    def _handle_nav_switcher_click(self, x: int, y: int) -> bool:
+        hit = self._nav_switcher_hit
+        if hit is None or self.help_open:
+            return False
+        panel, line, switcher = hit
+        if panel != self.active_panel or y != line:
+            return False
+        key = switcher.key_at(x)
+        if key is None:
+            return False
+        if self._select_panel_nav(panel, key):
+            self._render_chrome()
+        return True
+
+    @on(PanelNav.Selected)
+    def _on_panel_nav_selected(self, event: PanelNav.Selected) -> None:
+        event.stop()
+        if len(self.screen_stack) > 1 or self.help_open:
+            return
+        if self._select_panel_nav(self.active_panel, event.key):
+            self._render_chrome()
+
+    def _render_panel_split(self) -> None:
+        """Show the active panel's nav list and aside where the width allows."""
+
+        self._panel_aside_below = None
+        try:
+            split = self.query_one("#panel-split", Horizontal)
+            nav = self.query_one("#panel-nav", PanelNav)
+            aside_widget = self.query_one("#panel-aside", Static)
+            table = self.query_one("#panel-table", DataTable)
+        except NoMatches:
+            return
+        panel = self.active_panel
+        # The Overview and the help sheet fill the panel with #body instead.
+        idle = self.help_open or panel == "overview"
+        split.set_class(idle, "hidden")
+        items = () if idle else tuple(self._panel_nav(panel))
+        aside = None if idle else self._panel_aside(panel)
+        width = int(getattr(self.size, "width", 0) or 0)
+        layout = split_layout(width, has_nav=bool(items), has_aside=aside is not None)
+        split.set_class(layout.nav, "with-nav")
+        split.set_class(layout.aside_below, "aside-below")
+        nav.set_class(not layout.nav, "hidden")
+        table_title = ""
+        if layout.nav:
+            nav.show_items(items)
+            current = next((item for item in items if item.active), None)
+            table_title = rich_escape(current.label) if current is not None else ""
+        else:
+            nav.clear_items()
+        if (table.border_title or "") != table_title:
+            table.border_title = table_title or None
+        aside_widget.set_class(not layout.aside, "hidden")
+        narrow_aside = layout.aside and panel == "setup" and self._setup_view() == "config"
+        if split.has_class("narrow-aside") != narrow_aside:
+            split.set_class(narrow_aside, "narrow-aside")
+            # The config editor fits its Value column to #panel-main's width:
+            # fit it again once the narrower aside is laid out (GAP-2253).
+            self.call_after_refresh(self._render_chrome)
+        if layout.aside and aside is not None:
+            title, body = split_aside(aside)
+            signature = (panel, title, body)
+            if signature != self._last_aside_signature:
+                aside_widget.border_title = rich_escape(title) if title else None
+                aside_widget.update(self._safe_body_renderable(body) if isinstance(body, str) else body)
+                self._last_aside_signature = signature
+        elif self._last_aside_signature is not None:
+            aside_widget.border_title = None
+            aside_widget.update("")
+            self._last_aside_signature = None
+        if layout.aside_below:
+            self._panel_aside_below = aside
+
+    def _hide_panel_split_parts(self, panel: str) -> None:
+        """Panel switch: drop the previous panel's nav, aside and titles."""
+
+        self._panel_aside_below = None
+        self._last_aside_signature = None
+        try:
+            split = self.query_one("#panel-split", Horizontal)
+            nav = self.query_one("#panel-nav", PanelNav)
+            aside_widget = self.query_one("#panel-aside", Static)
+            table = self.query_one("#panel-table", DataTable)
+            detail = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return
+        split.set_class(panel == "overview" or self.help_open, "hidden")
+        split.remove_class("with-nav", "aside-below", "narrow-aside")
+        nav.add_class("hidden")
+        nav.clear_items()
+        aside_widget.add_class("hidden")
+        aside_widget.border_title = None
+        table.border_title = None
+        detail.border_title = None
+        detail.remove_class("aside-below")
+
     def _render_detail_panel(self) -> None:
         panel = self.query_one("#detail-panel", VerticalScroll)
         body = self.query_one("#detail-panel-body", Static)
         detail = self._detail_text()
         self.detail_text = detail
-        if not detail:
+        # A panel's own detail wins; otherwise a narrow terminal shows the
+        # aside here (see _render_panel_split).
+        below = None if detail else self._panel_aside_below
+        panel.set_class(below is not None, "aside-below")
+        height, rows, width = self._aside_below_box() if below is not None else (0, 0, 0)
+        self._aside_box = (height, rows, width)
+        if detail:
+            height = self._detail_box_height()
+        if below is not None and not self._aside_box_recheck:
+            # The box is measured before a panel switch's layout settles (the
+            # Setup card took the old panel's height, then grew by a row the
+            # next time help closed, GAP-2167). Measure again once it has.
+            self._aside_box_recheck = True
+            self.call_after_refresh(self._recheck_aside_below_box)
+        if self._detail_max_height != (height or None):
+            # Inline beats the CSS cap; None hands the cap back to the CSS.
+            panel.styles.max_height = height or None
+            self._detail_max_height = height or None
+        if not detail and below is None:
             if not panel.has_class("hidden"):
                 panel.add_class("hidden")
                 body.update("")
+            panel.border_title = None
             self._last_detail_signature = None
             return
         panel.remove_class("hidden")
+        if below is not None:
+            title, content = split_aside(below)
+            more = getattr(below, "more", "")
+            if more and rows > 0 and isinstance(content, Text):
+                # Fit one column narrower than the box: text that filled the
+                # box exactly got a scrollbar after the help overlay closed,
+                # re-wrapped one column narrower, and lost its "… i details"
+                # ending behind the scrollbar (GAP-2072).
+                content = fit_rows(content, self.console, max(1, width - 1), rows, more)
+            signature = (self.active_panel, "aside", title, content)
+            if signature != self._last_detail_signature:
+                panel.border_title = rich_escape(title) if title else None
+                body.update(self._safe_body_renderable(content) if isinstance(content, str) else content)
+                panel.scroll_home(animate=False)
+                self._last_detail_signature = signature
+            return
+        panel.border_title = None
         # Same idempotence guard as the body widget. Detail panes are
         # rendered identically every tick when nothing changed (e.g.
         # an alert row is selected and Activity is streaming); the
@@ -9641,29 +11500,116 @@ class DefenseClawTUI(App[None]):
             # behind.
             panel.scroll_home(animate=False)
             self._last_detail_signature = detail_signature
+            # The detail takes rows from the table: scroll the selected row
+            # back into view once the layout settles, or at 80x24 AI
+            # Discovery showed Codex while OpenCode's detail was open
+            # (GAP-1596).
+            self.call_after_refresh(self._keep_table_cursor_visible)
+
+    def _detail_box_height(self) -> int:
+        """Inline max height for an open panel detail; 0 keeps the CSS cap."""
+
+        try:
+            main = self.query_one("#panel-main")
+            panel = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return 0
+        if not panel.has_class("compact"):
+            # A tall terminal left ~17 rows empty above a 16-row detail whose
+            # last lines (Registries Blocked/Errors/Rejected) were hidden with
+            # only a one-cell scrollbar thumb as a cue (GAP-2600): grow into
+            # the rows the table does not need, never below the CSS cap.
+            return max(16, self._aside_below_box()[0])
+        # At 80x24 the Alerts connector strip and a wrapped heading left
+        # #panel-main 10 rows: the table's 4-row minimum plus the 7-row
+        # compact cap pushed the box's bottom border off the panel (GAP-2606).
+        # Shrink the box to what is left so it closes and scrolls.
+        main_height = int(main.content_size.height or 0)
+        room = main_height - 4 - panel.styles.margin.top
+        return max(3, room) if 0 < main_height and room < 7 else 0
+
+    def _recheck_detail_box(self) -> None:
+        if not self.is_running or self.help_open or not self.detail_text:
+            return
+        if (self._detail_box_height() or None) != self._detail_max_height:
+            self._render_detail_panel()
+
+    def _recheck_aside_below_box(self) -> None:
+        self._aside_box_recheck = False
+        if self._panel_aside_below is None or self.help_open:
+            return
+        if self._aside_below_box() != self._aside_box:
+            self._render_detail_panel()
+
+    def _aside_below_box(self) -> tuple[int, int, int]:
+        """``(height, rows, width)`` of ``#detail-panel`` showing an aside.
+
+        The CSS caps the pane at 5 rows on a short terminal (16 on a tall
+        one). At 80x24 that cut every Setup task detail mid-sentence while the
+        short task lists left rows empty above it (GAP-1999), so the pane
+        takes every row the table's own rows don't need. ``rows`` and
+        ``width`` are the text area inside the border and padding; all three
+        are 0 before the first layout.
+        """
+
+        try:
+            main = self.query_one("#panel-main")
+            split = self.query_one("#panel-split", Horizontal)
+            table = self.query_one("#panel-table", DataTable)
+            panel = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return 0, 0, 0
+        main_height = int(main.content_size.height or 0)
+        if main_height <= 0:
+            return 0, 0, 0
+        # Header row, the rows, a border with a nav, a sideways scrollbar; the
+        # CSS keeps at least 4 (and at most 60% with a nav).
+        table_rows = table.row_count + 1 + table.styles.gutter.height
+        if table.show_horizontal_scrollbar:
+            table_rows += 1
+        table_rows = max(4, table_rows)
+        margin = panel.styles.margin.top
+        if split.has_class("with-nav"):
+            # The boxed table keeps its height (up to 60%), so the pane gets
+            # only what is left or its bottom border falls off the screen.
+            height = max(3, main_height - min(table_rows, main_height * 60 // 100) - margin)
+        else:
+            # The plain table gives up rows (down to 4) for the CSS cap.
+            height = max(5 if panel.has_class("compact") else 16, main_height - table_rows - margin)
+        gutter = panel.styles.gutter
+        return height, height - gutter.height, int(main.content_size.width or 0) - gutter.width
+
+    def _keep_table_cursor_visible(self) -> None:
+        try:
+            table = self.query_one("#panel-table", DataTable)
+        except NoMatches:
+            return
+        scroll = getattr(table, "_scroll_cursor_into_view", None)
+        if table.row_count and callable(scroll):
+            scroll(animate=False)
 
     def _detail_text(self) -> str:
         if self.active_panel == "alerts":
             return self.alerts_model.detail_text()
+        if self.active_panel == "policies":
+            # The aside hook carries the Policies detail (right of the table,
+            # or below it once opened with i on a narrow terminal).
+            return ""
         if self.active_panel == "registries" and self.registries_model.detail_open:
             detail = self.registries_model.selected_detail_info()
             if detail is None:
                 return ""
-            lines = [f"[bold #A78BFA]{detail.title}[/]"]
-            lines.extend(f"{key}: {value}" for key, value in detail.fields)
-            return "\n".join(lines)
+            return _detail_pairs_markup(detail.title, detail.fields)
         if self.active_panel == "audit" and self.audit_model.detail_open:
             pairs = self.audit_model.detail_pairs()
             if not pairs:
                 return ""
-            return "[bold #A78BFA]EVENT[/]\n" + "\n".join(f"{key}: {value}" for key, value in pairs[:18])
+            return _detail_pairs_markup("EVENT", pairs[:18])
         if self.active_panel == "inventory" and self.inventory_model.detail_open:
             detail = self.inventory_model.detail_info()
             if detail is None:
                 return ""
-            lines = ["[bold #A78BFA]" + detail.title + "[/]"]
-            lines.extend(f"{key}: {value}" for key, value in detail.fields)
-            return "\n".join(lines)
+            return _detail_pairs_markup(detail.title, detail.fields)
         if self.active_panel in self.catalog_models:
             model = self.catalog_models[self.active_panel]
             if model.detail_open:
@@ -9673,14 +11619,13 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "logs" and self.logs_model.source in {"verdicts", "otel"}:
             pairs = self.logs_model.selected_detail_pairs()
             if pairs:
-                return "[bold #A78BFA]LOG DETAIL[/]\n" + "\n".join(
-                    f"{key}: {value}" for key, value in pairs[:14]
-                )
+                return _detail_pairs_markup("LOG DETAIL", pairs[:14])
         return ""
 
     def _ai_discovery_detail_text(self) -> str:
+        # Product, signal and detector text come from the scanned host.
         lines = [self.ai_discovery_model.detail_header(), *self.ai_discovery_model.detail_lines(limit=8)]
-        return "\n".join(line for line in lines if line)
+        return "\n".join(rich_escape(line) for line in lines if line)
 
     def _update_body_only(self) -> None:
         body_widget = self.query_one("#body", Static)
@@ -9713,6 +11658,7 @@ class DefenseClawTUI(App[None]):
                 body_widget.update(self._safe_body_renderable(text))
                 self._last_body_signature = body_signature
         self._render_panel_controls()
+        self._render_panel_split()
         self._render_detail_panel()
 
     def _active_table_cursor(self) -> int:
@@ -9723,38 +11669,87 @@ class DefenseClawTUI(App[None]):
         if self.active_panel in self.catalog_models:
             return self.catalog_models[self.active_panel].cursor
         if self.active_panel == "logs":
-            return self.logs_model.cursor[self.logs_model.source]
+            return self.logs_model.table_cursor_row()
         if self.active_panel == "audit":
             return self.audit_model.cursor
         if self.active_panel == "inventory":
             return self.inventory_model.cursor
         if self.active_panel == "ai":
             return self.ai_discovery_model.cursor
+        if self.active_panel == "sandboxes":
+            return self.sandbox_model.cursor
+        if self.active_panel == "policies":
+            return self.policy_model.cursor
+        if self.active_panel == "runtime":
+            return self.runtime_model.cursor
         if self.active_panel == "setup":
             return self._setup_cursor()
         return 0
 
+    def _panel_search_active(self) -> bool:
+        """Whether the active panel's ``/`` search box is taking typed text."""
+
+        model = {
+            "alerts": self.alerts_model,
+            "audit": self.audit_model,
+            "ai": self.ai_discovery_model,
+            "runtime": self.runtime_model,
+        }.get(self.active_panel)
+        if model is not None:
+            return bool(getattr(model, "filtering", False))
+        if self.active_panel == "logs":
+            return bool(self.logs_model.searching)
+        return False
+
     def _handle_active_panel_key(self, event: events.Key) -> bool:
         if self.help_open:
-            return False
+            return self._scroll_help_body(_panel_key(event))
         key = _panel_key(event)
+        # While a panel search box is open, a printable key is text: pass the
+        # character exactly as typed. _panel_key folds most capitals for the
+        # shortcuts, so typing "MARKER-ASK" showed "MARkER-ASk" (GAP-1214).
+        searching = self._panel_search_active()
+        if searching and (typed := _typed_character(event)) is not None:
+            key = typed
         # 8.13: the connector filter is shared, so ``m`` opens the filter
         # picker on the signal panes too (Alerts/Audit/Logs). These panes
         # don't otherwise bind ``m``. Catalog/Overview/Inventory route ``m``
         # in their own branches below.
-        if (
-            key == "m"
-            and len(self._active_connector_names()) > 1
-            and self.active_panel in {"alerts", "audit", "logs"}
-        ):
-            self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+        if not searching and key == "m" and self.active_panel in {"alerts", "audit", "logs"}:
+            actives = self._active_connector_names()
+            if len(actives) > 1:
+                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+            else:
+                # ``m`` did nothing here with one connector (GAP-1986).
+                current = _active_connector(self.config)
+                only = friendly_connector_name(current) if current else "one connector"
+                self._set_status(
+                    f"Only {only} is set up, so there is nothing to filter by connector. "
+                    "Add one in 0 Setup > Protect an agent."
+                )
             return True
         if self.active_panel == "runtime":
+            self.runtime_model.short_screen = 0 < self.size.height < 32
             return self._apply_runtime_action(self.runtime_model.handle_key(key))
+        if self.active_panel == "sandboxes":
+            # ``U`` (undo) differs from ``u`` (unblock); _panel_key folds it.
+            if event.character == "U":
+                key = "U"
+            return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
+        if self.active_panel == "policies":
+            return self._apply_policy_action(self.policy_model.handle_key(_vim_key(key)))
         if self.active_panel == "alerts":
+            if self.alerts_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the detail pane shows five lines; PgUp/PgDn read
+                # the rest without leaving the table (GAP-0999).
+                return self._scroll_detail_panel(key)
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
         if self.active_panel == "registries":
+            if self.registries_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # The source/entry detail cut its last lines (Blocked/Errors/
+                # Rejected, Approved/URL) and no key moved it (GAP-2591).
+                return self._scroll_detail_panel(key)
             action = self.registries_model.handle_key(key)
             return self._apply_registry_action(action)
         if self.active_panel in self.catalog_models:
@@ -9764,7 +11759,19 @@ class DefenseClawTUI(App[None]):
             if key == "m" and len(self._active_connector_names()) > 1:
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
+            if key == "/":
+                return self._focus_catalog_filter(self.active_panel)
             catalog_key = _catalog_key(key)
+            model = self.catalog_models[self.active_panel]
+            if model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the detail pane stops after the Scan line; PgUp/PgDn
+                # reach the verdict, findings and Actions lines (GAP-2087).
+                return self._scroll_detail_panel(key)
+            if catalog_key == "esc" and not model.detail_open and model.filter_text:
+                # The hint says "Esc clears the filter"; Esc on the list did
+                # nothing (GAP-1379, GAP-1402).
+                self._clear_catalog_filter(self.active_panel)
+                return True
             if catalog_key not in {"j", "k", "up", "down", "esc", "r"}:
                 self._sync_catalog_cursor_from_table(self.active_panel)
             action = self.catalog_models[self.active_panel].handle_key(catalog_key)
@@ -9793,11 +11800,15 @@ class DefenseClawTUI(App[None]):
                 else:
                     self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
-            if key in {"i", "l"}:
-                self.action_switch_panel({"i": "inventory", "l": "logs"}[key])
+            if key in {"i", "l", "p"}:
+                self.action_switch_panel({"i": "inventory", "l": "logs", "p": "policies"}[key])
                 return True
-            if key in {"N", "X"}:
-                if key == "N":
+            if key == "g":
+                self._open_setup_guardrail_goals()
+                return True
+            # ``b`` (bell), not ``N``: N is the Runtime tab key (GAP-1159).
+            if key in {"b", "X"}:
+                if key == "b":
                     self.run_worker(self._open_notifications_toggle(), exclusive=False, thread=False)
                 else:
                     self.run_worker(self._open_uninstall_modal(), exclusive=False, thread=False)
@@ -9805,6 +11816,20 @@ class DefenseClawTUI(App[None]):
             intent = self.overview_model.action_intent(key)
             if intent is None:
                 return False
+            # One rule with the action-bar buttons and the palette: a
+            # read-only command (d doctor, s skill scan) runs at once; the
+            # rest show the preview first. d asked to confirm while the Run
+            # Doctor button ran it straight away (GAP-2350).
+            try:
+                parsed = parse_command_line(" ".join(intent.argv))
+            except CommandLineError:
+                parsed = None
+            if parsed is not None and not parsed.needs_preview:
+                # Named after the key's task ("Done: Scan all · ..."), not the
+                # raw argv (GAP-2388).
+                parsed = replace(parsed, display_name=intent.label)
+                self.run_worker(self._run_and_report(parsed), exclusive=False, thread=False)
+                return True
             self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
             return True
         if self.active_panel == "inventory":
@@ -9817,6 +11842,15 @@ class DefenseClawTUI(App[None]):
             return self._apply_inventory_action(action)
 
         if self.active_panel == "ai":
+            if not self.ai_discovery_model.filtering and key in {"e", "d"}:
+                # GAP-2103: Export JSON and Enable/Disable had no key.
+                if key == "e":
+                    self._handle_ai_control("ai-export")
+                else:
+                    snapshot = self.ai_discovery_model.snapshot
+                    enabled = bool(snapshot and snapshot.enabled)
+                    self._handle_ai_control("ai-disable" if enabled else "ai-enable")
+                return True
             action = self.ai_discovery_model.handle_key(_vim_key(key))
             return self._apply_ai_discovery_action(action)
         if self.active_panel == "activity":
@@ -9825,9 +11859,44 @@ class DefenseClawTUI(App[None]):
             if self.first_run_model.active:
                 action = self.first_run_model.handle_key(_vim_key(key))
                 return self._apply_first_run_action(action)
-            action = self._handle_setup_key(_vim_key(key))
+            action = self._handle_setup_key(_vim_key(key), character=_typed_character(event))
             return self._apply_setup_action(action)
         return False
+
+    def _scroll_detail_panel(self, key: str) -> bool:
+        try:
+            scroller = self.query_one("#detail-panel", VerticalScroll)
+        except NoMatches:
+            return False
+        if key in {"pagedown", "page_down"}:
+            scroller.scroll_page_down(animate=False)
+        else:
+            scroller.scroll_page_up(animate=False)
+        return True
+
+    def _scroll_help_body(self, key: str) -> bool:
+        """Scroll the ``?`` sheet; at 80x24 most of it is below the fold."""
+
+        try:
+            scroller = self.query_one("#body-scroll", VerticalScroll)
+        except NoMatches:
+            return False
+        key = key.lower()
+        if key in {"down", "j"}:
+            scroller.scroll_relative(y=3, animate=False, immediate=True)
+        elif key in {"up", "k"}:
+            scroller.scroll_relative(y=-3, animate=False, immediate=True)
+        elif key in {"pagedown", "page_down", "space", "ctrl+f"}:
+            scroller.scroll_page_down(animate=False)
+        elif key in {"pageup", "page_up", "ctrl+b"}:
+            scroller.scroll_page_up(animate=False)
+        elif key == "home":
+            scroller.scroll_to(y=0, animate=False, immediate=True)
+        elif key == "end":
+            scroller.scroll_to(y=scroller.max_scroll_y, animate=False, immediate=True)
+        else:
+            return False
+        return True
 
     def _scroll_overview_body(self, key: str) -> bool:
         """Handle fast keyboard scrolling for the dense Overview dashboard."""
@@ -9843,13 +11912,17 @@ class DefenseClawTUI(App[None]):
             scroller = self.query_one("#body-scroll", VerticalScroll)
         except NoMatches:
             return False
+        # Step 6 rows on a tall dashboard, but never more than the viewport
+        # minus one overlap row: at 80x24 only ~4 rows show, and a fixed
+        # 6-row step skipped rows that could then never be seen (GAP-2270).
+        step = max(1, min(6, scroller.scrollable_content_region.height - 1))
         if key in scroll_line_keys:
             self._mark_overview_scroll_activity()
-            scroller.scroll_relative(y=6, animate=False, immediate=True)
+            scroller.scroll_relative(y=step, animate=False, immediate=True)
             return True
         if key in scroll_up_keys:
             self._mark_overview_scroll_activity()
-            scroller.scroll_relative(y=-6, animate=False, immediate=True)
+            scroller.scroll_relative(y=-step, animate=False, immediate=True)
             return True
         if key in page_down_keys:
             self._mark_overview_scroll_activity()
@@ -9906,6 +11979,10 @@ class DefenseClawTUI(App[None]):
             return False
         if action.hint:
             self._set_status(action.hint)
+        elif _is_registry_focus_status(self.status_text):
+            # The jump from Skills/MCPs is done; the next move on this panel
+            # (a sub-tab, another row) clears it (GAP-1597).
+            self._set_status(self._status_text())
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
         self._render_chrome()
@@ -9918,9 +11995,15 @@ class DefenseClawTUI(App[None]):
             self._set_status(action.hint)
         if action.registry_focus is not None:
             focus = action.registry_focus
-            self.registries_model.focus_entry(focus.entry_type, focus.name)
+            found = self.registries_model.focus_entry(focus.entry_type, focus.name)
             self.action_switch_panel("registries")
-            self._set_status(f"Focused registry entry {focus.name}.")
+            # codeguard is a local skill, not a registry entry: don't claim
+            # it was focused (GAP-1597).
+            self._set_status(
+                _REGISTRY_FOCUS_FOUND.format(name=focus.name)
+                if found
+                else _REGISTRY_FOCUS_MISSING.format(name=focus.name)
+            )
             return True
         if action.open_mcp_set_form:
             self.run_worker(self._open_mcp_set_form(), exclusive=False, thread=False)
@@ -9933,7 +12016,7 @@ class DefenseClawTUI(App[None]):
                 else:
                     self.tools_model.refresh()
             else:
-                self.run_worker(self._load_catalog_model(panel), exclusive=False, thread=False)
+                self.run_worker(self._load_catalog_model(panel, announce=True), exclusive=False, thread=False)
         elif action.intent is not None:
             self._run_catalog_intent(action.intent)
         self._render_chrome()
@@ -9983,9 +12066,13 @@ class DefenseClawTUI(App[None]):
         if not action.handled:
             return False
         if getattr(action, "intent", None) is not None and action.intent.kind == "export":
+            rows = len(self.audit_model.filtered)
+            view = self.audit_model.active_filter_label() or "all loaded events"
             path = self._export_audit(action.intent.path)
             self._render_chrome()
-            self._set_status(f"Audit exported to {path}.")
+            # Say what was written: the rows of the current view, named, in a
+            # new file (GAP-1215, GAP-1533).
+            self._set_status(f"Exported {rows} audit row(s) ({view}) to {path}.")
             return True
         if getattr(action, "hint", ""):
             self._set_status(action.hint)
@@ -10001,7 +12088,7 @@ class DefenseClawTUI(App[None]):
         if getattr(action, "hint", ""):
             self._set_status(action.hint)
         if getattr(action, "intent", None) is not None:
-            self.run_worker(self._load_inventory_model(), exclusive=False, thread=False)
+            self.run_worker(self._load_inventory_model(announce=True), exclusive=False, thread=False)
         self._render_chrome()
         return True
 
@@ -10075,15 +12162,74 @@ class DefenseClawTUI(App[None]):
                 thread=False,
             )
         if action.refresh_credentials:
-            self.run_worker(self._load_setup_credentials(), exclusive=False, thread=False)
+            self.run_worker(self._reload_setup_credentials(action.hint), exclusive=False, thread=False)
         if action.open_model_picker:
             self.run_worker(self._open_model_picker(), exclusive=False, thread=False)
+        if action.open_field_editor:
+            # Pushed synchronously (not from a worker) so the very next key
+            # already lands in the text box when someone types quickly.
+            self._open_setup_field_editor(action.open_field_editor, action.field_editor_value)
+        if action.open_picker:
+            self.run_worker(self._open_setup_picker(action.open_picker), exclusive=False, thread=False)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
+        if self.setup_model.sandbox_machine_wanted():
+            self._schedule_sandbox_machine_check()
         self._render_chrome()
         if status_message:
             self._set_status(status_message)
         return True
+
+    async def _open_setup_picker(self, kind: str) -> None:
+        """``i`` task detail, ``g`` grouped sections, ``/`` field finder."""
+
+        model = self.setup_model
+        if kind == "detail":
+            info = model.active_wizard_info()
+            await self._open_detail_screen(
+                f"Setup · {setup_catalog.wizard_label(info.wizard)}",
+                setup_catalog.setup_detail_pairs(model),
+            )
+            return
+        if kind == "sections":
+            if not model.sections:
+                self._set_status("No config sections to show.")
+                return
+            choice = await self.push_screen_wait(
+                SetupPickerScreen(
+                    "Config sections",
+                    setup_catalog.section_picker_rows(model.sections, model.active_section),
+                    selected_id=str(model.active_section),
+                )
+            )
+            if choice is None:
+                return
+            model.select_section(int(choice))
+            self._set_status(f"Config · {model.sections[model.active_section].name}")
+            self._render_chrome()
+            return
+        if kind == "fields":
+            entries = setup_catalog.field_entries(model.sections)
+
+            def rows(query: str) -> tuple[Any, ...]:
+                return setup_catalog.field_picker_rows(setup_catalog.filter_field_entries(query, entries))
+
+            choice = await self.push_screen_wait(
+                SetupPickerScreen(
+                    "Find a config field",
+                    rows,
+                    filterable=True,
+                    placeholder="Field name or key, e.g. port or guardrail.mode",
+                )
+            )
+            if choice is None:
+                return
+            section_text, line_text = choice.split(":", 1)
+            model.select_section(int(section_text))
+            model.active_line = int(line_text)
+            field = model.current_field()
+            self._set_status(f"Found {field.label}." if field is not None else "Field found.")
+            self._render_chrome()
 
     def _apply_first_run_action(self, action: Any) -> bool:
         if not action.handled:
@@ -10099,7 +12245,8 @@ class DefenseClawTUI(App[None]):
             if sent:
                 return True
         if key == "!":
-            last = self.activity_model.last_command
+            entry = self.activity_model.entries[-1] if self.activity_model.entries else None
+            last = (entry.rerun_command or entry.command) if entry is not None else ""
             if not last:
                 self._set_status("No Activity command to rerun.")
                 return True
@@ -10108,18 +12255,26 @@ class DefenseClawTUI(App[None]):
             except CommandLineError as exc:
                 self._set_status(f"Cannot rerun command: {exc}")
                 return True
+            if entry is not None and (entry.rerun_stdin is not None or entry.rerun_env):
+                parsed = replace(parsed, stdin_input=entry.rerun_stdin, env_overrides=entry.rerun_env)
             if parsed.needs_preview:
                 self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
             else:
                 self.run_worker(
-                    self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
+                    self._run_command(
+                        parsed.binary,
+                        parsed.args,
+                        display_name=parsed.display_name,
+                        stdin_input=parsed.stdin_input,
+                        env_overrides=parsed.env_overrides,
+                    ),
                     exclusive=False,
                     thread=False,
                 )
             return True
         self.activity_model.handle_key(_vim_key(key))
         self._render_chrome()
-        return key in {"1", "2", "up", "down", "j", "k", "enter", "t", "q", "esc"}
+        return key in {"h", "l", "left", "right", "up", "down", "j", "k", "enter", "t", "q", "esc"}
 
     def _forward_activity_stdin(self, key: str) -> bool:
         if key in {"up", "down", "j", "k", "esc", "q"}:
@@ -10139,6 +12294,60 @@ class DefenseClawTUI(App[None]):
         self._set_status("Sent input to running command.")
         return True
 
+    def _wrap_last_table_column(
+        self,
+        columns: tuple[str, ...],
+        rows: tuple[tuple[str, ...], ...],
+        *,
+        main_width: int = 0,
+    ) -> tuple[tuple[str, ...], ...]:
+        """Wrap the last cell (a hint) to the room the other columns leave.
+
+        A table row is one line, so a long hint was cut at the screen edge;
+        wrapped, its row grows instead (``_append_panel_table_row``).
+        """
+        width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+        if width <= 0 or not rows:
+            return rows
+        # One column of padding each side per cell, plus the panel's border,
+        # padding and scrollbar. A wrapped cell is as wide as its longest line.
+        others = sum(
+            max(len(column), *(_longest_line(str(row[index])) for row in rows)) + 2
+            for index, column in enumerate(columns[:-1])
+        )
+        room = width - others - 2 - 8
+        if main_width:
+            # Beside the Setup nav the table has only the main column; the
+            # screen width cut the goal descriptions at the border (GAP-1775).
+            room = main_width - others - 2 - 4
+        if room < 24:
+            # Too narrow to wrap: end the hint with "…" instead of cutting it
+            # mid-word at the edge ("The connector wh", GAP-2386). The
+            # focused field's full hint is in the body line above.
+            return tuple((*row[:-1], _truncate_ellipsis(row[-1], max(room, 1))) for row in rows)
+        return tuple(
+            (*row[:-1], "\n".join(textwrap.wrap(row[-1], room)) if len(row[-1]) > room else row[-1])
+            for row in rows
+        )
+
+    def _fit_setup_section_values(self, rows: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+        """Fit a section row's value (Field, Value, Kind, Hint) to the room the Field column leaves.
+
+        A section's value is read-only text, such as the sandbox wizard's
+        machine check (one line per check). A line wider than the room was
+        cut at the screen edge, and on one line the machine check hid the
+        checks after it.
+        """
+        width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+        if width <= 0 or not rows:
+            return rows
+        room = width - (max(len("Field"), *(len(row[0]) for row in rows)) + 2) - 2 - 8
+        if room < 24:
+            return rows
+        return tuple(
+            (row[0], _fit_section_value(row[1], room), *row[2:]) if row[2] == "section" else row for row in rows
+        )
+
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         if self.first_run_model.active:
             return (
@@ -10146,158 +12355,350 @@ class DefenseClawTUI(App[None]):
                 tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
             )
         if self.setup_model.goal_active:
-            return (
-                ("Goal", "What it does"),
-                tuple((goal.label, goal.summary) for goal in self.setup_model.goals),
-            )
+            columns = ("Goal", "What it does")
+            labels = [goal.label for goal in self.setup_model.goals]
+            # On a narrow terminal long goal names ("Set up a proxy connector
+            # with the local stack") wrap too, so the description keeps room
+            # to be read in full.
+            # The goal menu has the nav on its left and no aside: the body's
+            # margins and padding, then the nav and its gap (GAP-1775).
+            main_width = self._setup_width() - 6 - NAV_WIDTH - 1 if self._setup_nav_shown() else 0
+            width = int(getattr(self.size, "width", 0) or 0) if self.is_running else 0
+            if width and ((main_width + 8) if main_width else width) - max(map(len, labels), default=0) - 12 < 36:
+                labels = ["\n".join(textwrap.wrap(label, 30)) if len(label) > 30 else label for label in labels]
+            rows = tuple(zip(labels, (goal.summary for goal in self.setup_model.goals), strict=True))
+            return columns, self._wrap_last_table_column(columns, rows, main_width=main_width)
         if self.setup_model.form_active:
-            return (
-                ("Field", "Value", "Kind", "Hint"),
-                tuple(
-                    (
-                        field.label,
-                        render_wizard_value(field, reveal=self.setup_model.form_reveal),
-                        str(field.kind),
-                        field.hint,
-                    )
-                    for field in self.setup_model.form_fields
-                ),
+            columns = ("Field", "Value", "Kind", "Hint")
+            rows = tuple(
+                (
+                    field.label,
+                    render_wizard_value(field, reveal=self.setup_model.form_reveal),
+                    str(field.kind),
+                    field.hint,
+                )
+                for field in self.setup_model.form_fields
             )
+            return columns, self._wrap_last_table_column(columns, self._fit_setup_section_values(rows))
         if self.setup_model.mode == "config":
             if not self.setup_model.sections:
                 return ("Field", "Value", "Hint"), ()
             section = self.setup_model.sections[self.setup_model.active_section]
+            if self._setup_nav_shown():
+                # Next to the section nav the focused field's hint is in the
+                # body (or the aside), so the table keeps Field and Value room.
+                # Values longer than the room left end with "…": a path cut
+                # at the edge ("/Users/dcm-fc3/.defensecl") looked like a
+                # wrong path (GAP-1554).
+                # Group headers (".. Unified LLM (for scanners ...) ..")
+                # sized the Field column, cutting paths to "/Users/dcm-fc3/.d…"
+                # at 160 columns (GAP-2253): they take the fields' width.
+                fields_width = max(
+                    (len(field.label) for field in section.fields if not field.label.startswith("..")), default=34
+                )
+                header_room = max(20, min(34, fields_width))
+                # A long group header continues in its empty Value cell
+                # (".. Unified LLM .." + "for scanners + guardrail")
+                # instead of ".. Unified LLM (sha…" (GAP-2362).
+                cells = [_config_label_cells(field, header_room, 34) for field in section.fields]
+                labels = [label for label, _value in cells]
+                checks = [_truncate_ellipsis(_validation_label(field), 30) for field in section.fields]
+                value_room = self._setup_config_value_room(labels, checks)
+                return (
+                    ("Field", "Value", "Validation"),
+                    tuple(
+                        (label, _truncate_ellipsis(value, value_room), check)
+                        for (label, value), check in zip(cells, checks, strict=True)
+                    ),
+                )
+            # Long group headers (".. Unified LLM (for scanners ...) ..") would
+            # size the Field column and push values off an 80-column screen;
+            # the focused field's full label is in the body line above.
+            width = int(getattr(getattr(self, "size", None), "width", 0) or 0)
+            if 0 < width < 100:
+                # Narrow: the hint is already in the body line, and long values
+                # end with "…" so the Validation column stays on screen (GAP-1166).
+                value_room = max(12, width - 34 - 12 - 10)
+                return (
+                    ("Field", "Value", "Validation"),
+                    tuple(
+                        (
+                            label,
+                            _truncate_ellipsis(value, value_room),
+                            _truncate_ellipsis(_validation_label(field), 12),
+                        )
+                        for field in section.fields
+                        for label, value in (_config_label_cells(field, 30, 30),)
+                    ),
+                )
             return (
                 ("Field", "Value", "Validation", "Hint"),
                 tuple(
                     (
-                        field.label,
-                        _config_display_value(field),
+                        label,
+                        value,
                         _validation_label(field),
                         field.hint,
                     )
                     for field in section.fields
+                    for label, value in (_config_label_cells(field, 34, 34),)
                 ),
             )
-        rows = []
-        for info in self.setup_model.wizard_infos():
-            rows.append((info.name, info.status, "defenseclaw " + " ".join(info.command), info.description))
-        return ("Wizard", "Status", "Command", "Description"), tuple(rows)
+        # Task list: the selected group's tasks (the nav or the body switcher
+        # picks the group). What a task runs is in its detail.
+        rows = setup_center.task_rows(self.setup_model, self._setup_task_statuses())
+        return ("Task", "Status"), self._wrap_setup_task_status(rows)
+
+    def _setup_panel_nav(self) -> tuple[NavItem, ...]:
+        """Setup's side of ``_panel_nav``: task groups, or config sections."""
+
+        if self.first_run_model.active:
+            return ()
+        view = self._setup_view()
+        if view == "config":
+            return setup_center.config_nav(self.setup_model)
+        if view in {"wizards", "goals"}:
+            return setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+        return ()
+
+    def _setup_nav_shown(self) -> bool:
+        """True when the nav list is on screen (it replaces the body switcher)."""
+
+        if self._setup_width() < NAV_MIN_WIDTH or self.first_run_model.active:
+            return False
+        return self._setup_view() in {"wizards", "goals", "config"}
+
+    def _setup_panel_aside(self) -> RenderableType | None:
+        """Setup's side of ``_panel_aside``.
+
+        The task list always has a detail (below the table when narrow). The
+        config editor's body already describes the focused field, so it only
+        uses the pane on the right; the goal menu's table needs the width.
+        """
+
+        if self.first_run_model.active:
+            return None
+        view = self._setup_view()
+        if view == "wizards":
+            return setup_center.task_aside(self.setup_model, self._setup_task_statuses())
+        if view == "config" and self._setup_width() >= ASIDE_MIN_WIDTH:
+            return setup_center.config_aside(self.setup_model)
+        return None
+
+    def _select_setup_nav(self, key: str) -> bool:
+        """Setup's side of ``_select_panel_nav`` (a nav or switcher click)."""
+
+        if self.first_run_model.active:
+            return False
+        return setup_center.select_nav(self.setup_model, key)
+
+    def _setup_width(self) -> int:
+        width = int(getattr(self.size, "width", 0) or 0)
+        return width if width > 0 else 80
+
+    def _wrap_setup_task_status(self, rows: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+        """Wrap a task's Status to the room the Task column leaves.
+
+        Beside the nav and the task detail the table is 64 cells wide at 160
+        columns, so "✓ on · action, 1 observe · ran ok" was cut to "… · ran"
+        at the border (GAP-2502). Wrapped, its row grows instead.
+        """
+
+        if not rows:
+            return rows
+        width = self._setup_width()
+        # The body (margins and padding), then the nav and the task detail on
+        # the right, as the split's CSS lays them out.
+        split = width - 6
+        main = split
+        if self._setup_nav_shown():
+            main -= NAV_WIDTH + 1
+        if width >= ASIDE_MIN_WIDTH:
+            main -= int(split * TASK_ASIDE_SHARE) + 1
+        # Table border and scrollbar, the Task column with its two padding
+        # cells, then the Status padding.
+        task = max(len("Task"), *(len(label) for label, _status in rows))
+        room = main - 4 - (task + 2) - 2
+        if room < 12:
+            return rows
+        return tuple(
+            (label, "\n".join(textwrap.wrap(status, room)) if len(status) > room else status)
+            for label, status in rows
+        )
+
+    def _setup_config_value_room(self, labels: Sequence[str], checks: Sequence[str]) -> int:
+        """Cells the config editor's Value column has beside the section nav."""
+
+        try:
+            main = int(self.query_one("#panel-main").size.width)
+        except NoMatches:
+            main = 0
+        if main <= 0:
+            # Before the first layout: the body (margins and padding), the
+            # nav and, from ASIDE_MIN_WIDTH, the config editor's narrower aside.
+            split = self._setup_width() - 6
+            main = split - NAV_WIDTH - 1
+            if self._setup_width() >= ASIDE_MIN_WIDTH:
+                main -= int(split * CONFIG_ASIDE_SHARE) + 1
+        # Table border and scrollbar, then each column's text plus its
+        # two padding cells.
+        # The column titles count too: "Validation" was cut to "Valid".
+        label_width = max((len(text) for text in labels), default=0)
+        check_width = max(len("Validation"), *(len(text) for text in checks))
+        return max(12, main - 4 - (label_width + 2) - (check_width + 2) - 2)
+
+    def _setup_line(self, text: str, *, style: str = "", indent: int = 7) -> str:
+        """One body line: plain ``text`` cut to the body width, escaped, styled."""
+
+        plain = _truncate_ellipsis(" ".join(text.split()), max(20, self._setup_width() - indent))
+        escaped = rich_escape(plain)
+        return "[" + style + "]" + escaped + "[/]" if style else escaped
+
+    def _setup_wrapped_line(self, text: str, *, style: str = "", indent: int = 7) -> str:
+        """``text`` wrapped to at most two body lines (the second one cut).
+
+        The focused field's hint was cut to one line, so at 80x24 it read
+        "Choose an active connector policy targe…" (GAP-2352).
+        """
+
+        room = max(20, self._setup_width() - indent)
+        lines = textwrap.wrap(" ".join(text.split()), room) or [""]
+        if len(lines) > 2:
+            lines = [lines[0], _truncate_ellipsis(" ".join(lines[1:]), room)]
+        escaped = "\n".join(rich_escape(line) for line in lines)
+        return "[" + style + "]" + escaped + "[/]" if style else escaped
+
+    def _setup_task_statuses(self) -> dict[SetupWizard, setup_catalog.TaskStatus]:
+        return setup_center.task_statuses(self.setup_model)
+
+    def _setup_header(self) -> str:
+        """``Setup · 19 tasks ok · 1 needs attention — i readiness checks``.
+
+        Tasks by status (see setup_catalog.task_status), then the ``i`` hint
+        when it fits. The count says "tasks": "11 ok — i readiness details"
+        read as the number of readiness checks, which differs (GAP-2444).
+        """
+
+        statuses = self._setup_task_statuses()
+        ok, attention = setup_center.header_counts(statuses)
+        parts = [(f"{ok} task{'' if ok == 1 else 's'} ok", TOKENS.accent_green)]
+        if attention:
+            parts.append((f"{attention} need{'s' if attention == 1 else ''} attention", TOKENS.accent_amber))
+        if self.setup_model.restart_queue.pending:
+            parts.append(("gateway restart queued", TOKENS.accent_amber))
+        room = self._body_width() - len("Setup · ")
+        plain = " · ".join(text for text, _style in parts)
+        tail = next(
+            (tail for tail in (" — i readiness checks", " — i checks", "") if len(plain) + len(tail) <= room),
+            "",
+        )
+        counts = " · ".join("[" + style + "]" + rich_escape(text) + "[/]" for text, style in parts)
+        return f"[bold {TOKENS.accent_cyan}]Setup[/] · {counts}" + (f"[{TOKENS.text_muted}]{tail}[/]" if tail else "")
 
     def _setup_body_text(self) -> str:
         self._chip_click_segments = []
+        model = self.setup_model
         if self.first_run_model.active:
-            self._chip_click_segments = []
             return (
                 "[bold #22D3EE]DefenseClaw first-run setup[/]\n"
-                f"{self.first_run_model.empty_state()}\n\n"
-                "Keys: up/down select, left/right change, Ctrl+R run init, 0 Setup.\n"
-                "This uses the canonical init backend and keeps the full setup wizard available."
+                + self._setup_line(self.first_run_model.empty_state(), style=TOKENS.text_secondary)
             )
-        if self.setup_model.goal_active:
-            wizard_idx = int(self.setup_model.active_wizard)
-            wizard = WIZARD_NAMES[wizard_idx]
-            summary = wizard_state_summary(self.setup_model.active_wizard, self.setup_model.config)
-            summary_line = f"[{TOKENS.text_secondary}]{rich_escape(summary)}[/]\n" if summary else ""
-            return (
-                f"[bold #22D3EE]Setup[/] · [bold]{wizard}[/] · What do you want to do?\n"
-                f"{summary_line}"
-                f"[{TOKENS.text_muted}]Enter choose · ↑/↓ move · Esc back · "
-                f"Advanced opens the full form[/]"
+        if model.goal_active:
+            label = setup_catalog.wizard_label(model.active_wizard)
+            summary = wizard_state_summary(model.active_wizard, model.config)
+            head = f"[bold #22D3EE]Setup[/] · [bold]{rich_escape(label)}[/] · What do you want to do?"
+            return head + (f"\n{self._setup_line(summary, style=TOKENS.text_secondary)}" if summary else "")
+        if model.form_active:
+            label = setup_catalog.wizard_label(model.active_wizard)
+            description = WIZARD_DESCRIPTIONS[int(model.active_wizard)]
+            goal = model.active_goal
+            if goal is not None and goal.label:
+                # The wizard-wide line ("See which API keys are missing and
+                # set them.") misdescribed a picked goal such as "Remove a
+                # stored credential" (GAP-1395).
+                description = f"{goal.label}. {goal.summary}" if goal.summary else f"{goal.label}."
+            focused = model.focused_row_metadata()
+            head = (
+                f"[bold #22D3EE]{rich_escape(label)}[/] "
+                + self._setup_line(f"— {description}", style=TOKENS.text_muted, indent=9 + len(label))
             )
-        if self.setup_model.form_active:
-            wizard_idx = int(self.setup_model.active_wizard)
-            wizard = WIZARD_NAMES[wizard_idx]
-            description = WIZARD_DESCRIPTIONS[wizard_idx]
-            how_to = WIZARD_HOW_TO[wizard_idx]
-            error = f"\n[#F87171]{self.setup_model.form_error}[/]" if self.setup_model.form_error else ""
-            focused = self.setup_model.focused_row_metadata()
-            reveal = "ON" if self.setup_model.form_reveal else "OFF"
-            preview = self.setup_model.wizard_command_preview()
-            missing = self.setup_model.missing_required_fields()
-            missing_line = (
-                f"\n[#FBBF24]Required fields still empty:[/] {', '.join(missing)}" if missing else ""
+            will_run = "[bold]Will run:[/] " + self._setup_line(
+                f"$ {model.wizard_command_preview()}", style=TOKENS.accent_green, indent=17
             )
-            disk_change_line = (
-                "\n[#FBBF24]Config changed on disk.[/] Your unsaved form values were preserved; "
-                "run or cancel this form to use refreshed defaults."
-                if self.setup_model.disk_change_pending
-                else ""
+            # Third line: the most urgent fact wins — a submit error, a
+            # config change on disk, missing required fields, then the
+            # focused field's hint.
+            if form_error := model.current_form_error():
+                third = self._setup_line(form_error, style="#F87171")
+            elif model.disk_change_pending:
+                third = self._setup_line(
+                    "Config changed on disk. Your unsaved form values were preserved; "
+                    "run or cancel this form to use refreshed defaults.",
+                    style="#FBBF24",
+                )
+            else:
+                missing = model.missing_required_fields()
+                prefix = f"Required: {', '.join(missing)} · " if missing else ""
+                hint = focused.hint or (focused.action.description if focused.action else "")
+                third = self._setup_wrapped_line(
+                    f"{prefix}{focused.label}: {hint}" if hint else f"{prefix}{focused.label}",
+                    style="#FBBF24" if missing else TOKENS.text_secondary,
+                )
+            return f"{head}\n{will_run}\n{third}"
+        if model.mode == "config":
+            return self._setup_config_body_text()
+        head = self._setup_header()
+        if self._setup_nav_shown():
+            return head
+        # No room for the nav list: a one-line group switcher instead.
+        return head + "\n" + self._body_nav_switcher(self._setup_panel_nav(), 1)
+
+    def _setup_config_body_text(self) -> str:
+        model = self.setup_model
+        section = model.current_section()
+        if section is None:
+            return "[bold #22D3EE]Config[/] · no sections"
+        hints = model.save_restart_hints()
+        blocking = len(getattr(hints, "blocking_errors", hints.validation_errors))
+        counts = f"{hints.changes} changed · {blocking} blocking"
+        if self._setup_nav_shown():
+            # The nav list names the open section; no breadcrumb needed.
+            head = "[bold #22D3EE]Config[/] · " + self._setup_line(counts, indent=16)
+        else:
+            position, total = setup_catalog.section_position(model.sections, model.active_section)
+            crumb = f"{section.name} ({position}/{total}) · {counts}"
+            head = (
+                "[bold #22D3EE]Config[/] · "
+                + self._setup_line(crumb, indent=7 + 9 + len(_SETUP_SECTION_NAV) + 3)
+                + f"   [{TOKENS.accent_cyan}]{rich_escape(_SETUP_SECTION_NAV)}[/]"
             )
-            focused_line = (
-                f"[{TOKENS.accent_violet} bold]→ {focused.label}[/] "
-                f"[{TOKENS.text_secondary}]({focused.kind})[/]"
-            )
-            focused_action = (
-                f"  [{TOKENS.text_muted}]{focused.action.hotkey} {focused.action.description}[/]"
-                if focused.action
-                else ""
-            )
-            return (
-                f"[bold #22D3EE]Setup Wizard[/]  [bold]{wizard}[/]   "
-                f"[{TOKENS.text_muted}]{description}[/]\n"
-                f"[{TOKENS.text_secondary}]{how_to}[/]\n"
-                f"[bold]Will run:[/] [{TOKENS.accent_green}]$ {preview}[/]\n"
-                f"{focused_line}{focused_action}\n"
-                f"[{TOKENS.text_muted}]"
-                f"Keys: ↑/↓ move · ←/→ or space cycle choice · type to edit · "
-                f"Ctrl+T reveal={reveal} · [bold]Ctrl+R run[/] · Esc cancel"
-                f"[/]"
-                f"{disk_change_line}"
-                f"{missing_line}"
-                # Escape ``focused.hint`` so a wizard hint that quotes a
-                # bracketed identifier (e.g. ``set webhooks[0].url``) can't
-                # collapse the styled span via Rich's silent tag-drop.
-                f"{focused.hint and chr(10) + '[' + TOKENS.text_secondary + ']' + rich_escape(focused.hint) + '[/]' or ''}"
-                f"{error}"
-            )
-        if self.setup_model.mode == "config":
-            section = self.setup_model.sections[self.setup_model.active_section] if self.setup_model.sections else None
-            hints = self.setup_model.save_restart_hints()
-            focused = self.setup_model.focused_row_metadata()
-            sections = "  ".join(
-                f"[{TOKENS.accent_violet} bold]{label.name}[/]"
-                if label.active
-                else f"[{TOKENS.text_secondary}]{label.name}[/]"
-                for label in self.setup_model.section_labels()
-            )
-            disk_change_line = (
-                "\n[#FBBF24]Config changed on disk.[/] Your draft is preserved; "
-                "S merges edited fields or R reloads the disk version."
-                if self.setup_model.disk_change_pending
-                else ""
-            )
-            return (
-                f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
-                f"{sections}\n"
-                f"Focused: {focused.label}  Key: {focused.key or '-'}  "
-                f"Validation: {focused.validation.severity}"
-                f"{' - ' + focused.validation.message if focused.validation.message else ''}\n"
-                f"{focused.hint}\n"
-                f"Changes: {hints.changes}  Validation: {len(hints.validation_errors)}  "
-                f"{hints.save_hint}\n"
-                f"{hints.restart_hint}\n"
-                f"{'  '.join(hints.action_bar)}\n"
-                "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
-                "S save, R revert, w wizards."
-                f"{disk_change_line}"
-            ).strip()
-        readiness_rows = self.setup_model.readiness_checks
-        readiness = "\n".join(f"{check.status.upper()}: {check.title} - {check.detail}" for check in readiness_rows[:8])
-        credentials = self.setup_model.credential_empty_state()
-        suffix = f"\n\n{credentials}" if credentials else ""
-        info = self.setup_model.active_wizard_info()
-        focused = self.setup_model.focused_row_metadata()
-        return (
-            "[bold #22D3EE]Setup Wizards[/]\n"
-            f"Selected workflow: {info.name} - {info.description}\n"
-            f"{info.how_to}\n"
-            f"Focused action: {focused.action.hotkey if focused.action else 'Enter'} "
-            f"{focused.action.description if focused.action else ''}\n"
-            "Keys: up/down select, Enter open form, c config editor, r refresh credentials, "
-            "credentials wizard: f fill missing, s set selected.\n\n"
-            f"{readiness}{suffix}"
-        )
+        focused = model.focused_row_metadata()
+        name = f"{focused.label} ({focused.key})" if focused.key else focused.label
+        if focused.validation.severity == "error" and focused.validation.message:
+            second = self._setup_line(f"{name} · {focused.validation.message}", style="#F87171")
+        else:
+            detail = focused.hint or (focused.action.description if focused.action else "")
+            second = self._setup_line(f"{name} · {detail}" if detail else name, style=TOKENS.text_secondary)
+        facts: list[str] = []
+        if model.disk_change_pending:
+            facts.append("Config changed on disk; your draft is kept (save merges edited fields, revert reloads)")
+        # "Saved 12:08 UTC · Restart the gateway (G) to apply it" (GAP-1554).
+        if hints.saved_hint:
+            facts.append(hints.saved_hint)
+        if hints.restart_pending:
+            reason = hints.restart_reason
+            cli_live = self._setup_cli_live_sections
+            if reason and reason != "config saved in the TUI":
+                facts.append(f"Restart the gateway (G) to apply: {reason}")
+            elif cli_live:
+                facts.append(f"CLI uses {cli_live} now · G: restart gateway")
+            else:
+                facts.append("Restart the gateway (G) to apply it")
+        # From the aside width up, the aside describes the focused field.
+        lines = [head] if self._setup_width() >= ASIDE_MIN_WIDTH else [head, second]
+        if facts:
+            lines.append(self._setup_line(" · ".join(facts), style="#FBBF24"))
+        return "\n".join(lines)
 
     def _setup_cursor(self) -> int:
         if self.first_run_model.active:
@@ -10308,7 +12709,7 @@ class DefenseClawTUI(App[None]):
             return getattr(self.setup_model, "form_cursor", 0)
         if self.setup_model.mode == "config":
             return self.setup_model.active_line
-        return int(self.setup_model.active_wizard)
+        return setup_catalog.task_row(self.setup_model.active_wizard)
 
     def _set_setup_cursor(self, row: int) -> None:
         if row < 0:
@@ -10324,7 +12725,9 @@ class DefenseClawTUI(App[None]):
                 section = self.setup_model.sections[self.setup_model.active_section]
                 self.setup_model.active_line = min(row, max(0, len(section.fields) - 1))
         else:
-            self.setup_model.active_wizard = SetupWizard(min(row, len(WIZARD_NAMES) - 1))
+            wizard = setup_catalog.task_at(setup_center.active_group(self.setup_model), row)
+            if wizard is not None:
+                self.setup_model.active_wizard = wizard
 
     def _move_setup_form_cursor(self, delta: int) -> None:
         fields = self.setup_model.form_fields
@@ -10353,11 +12756,18 @@ class DefenseClawTUI(App[None]):
             if (field.flag and field.flag in driver_flags) or field.label in driver_labels:
                 self.setup_model.recompute_dependent_fields()
 
+    def _setup_on_first_section(self) -> bool:
+        order = setup_catalog.section_order(self.setup_model.sections)
+        return bool(order) and self.setup_model.active_section == order[0]
+
     def _move_setup_section(self, delta: int) -> None:
         if not self.setup_model.sections:
             return
-        self.setup_model.active_section = (self.setup_model.active_section + delta) % len(self.setup_model.sections)
-        self.setup_model.active_line = self.setup_model.first_editable_line()
+        # Walk sections in the grouped order the breadcrumb counts in
+        # (Core ... Legacy), not raw build order.
+        self.setup_model.select_section(
+            setup_catalog.step_section(self.setup_model.sections, self.setup_model.active_section, delta)
+        )
 
     def _cycle_setup_config_field(self, delta: int) -> bool:
         field = self._current_setup_field()
@@ -10369,13 +12779,6 @@ class DefenseClawTUI(App[None]):
         if field.options:
             return self._set_setup_config_text(_cycle_value(field.value, field.options, delta))
         return False
-
-    def _append_setup_config_text(self, *, value: str = "", trim: bool = False) -> bool:
-        field = self._current_setup_field()
-        if field is None or not field.interactive or field.kind in {"bool", "choice", "header"}:
-            return False
-        next_value = field.value[:-1] if trim else field.value + value
-        return self._set_setup_config_text(next_value)
 
     def _set_setup_config_text(self, value: str) -> bool:
         if not self.setup_model.sections:
@@ -10406,15 +12809,26 @@ class DefenseClawTUI(App[None]):
         return section.fields[self.setup_model.active_line]
 
     def _active_overlay_blocks_table(self) -> bool:
+        """True when ↑/↓ on the focused table belong to the panel handler."""
+
         if self.active_panel == "setup":
-            return self.setup_model.form_active or self.setup_model.goal_active
+            # The goal menu and form skip rows; the task list walks on into
+            # the next group, past the end of the table.
+            return self.setup_model.form_active or self.setup_model.goal_active or self._setup_view() == "wizards"
         return False
 
-    def _handle_setup_key(self, key: str) -> SetupPanelAction:
+    def _handle_setup_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
+        """Route a Setup key. ``character`` is the raw printable character
+        (case and spaces intact) when the key typed one."""
+
+        # ``?`` (help) and ``:`` (command palette) are global in every Setup
+        # view; they never type into a field.
+        if key in {"?", ":"}:
+            return SetupPanelAction(False)
         if self.setup_model.goal_active:
             return self._handle_setup_goal_key(key)
         if self.setup_model.form_active:
-            return self._handle_setup_form_key(key)
+            return self._handle_setup_form_key(key, character=character)
         if key == "S":
             return self.setup_model.review_save_action()
         if key == "G":
@@ -10427,34 +12841,44 @@ class DefenseClawTUI(App[None]):
                 return SetupPanelAction(True, hint="Restart queue cleared.", clear_restart_queue=True)
             return SetupPanelAction(True, hint="No restart is queued.")
         if key == "R":
-            self.setup_model.set_config(self.config)
-            return SetupPanelAction(True, hint="Config reverted from current runtime config.")
+            # R is the global Registries key, as the tab strip and ? show.
+            # It used to revert the config from every Setup view, dropping
+            # unsaved edits; the config editor reverts on r (GAP-2151).
+            return SetupPanelAction(False)
         if self.setup_model.mode == "config":
-            return self._handle_setup_config_key(key)
+            return self._handle_setup_config_key(key, character=character)
         return self._handle_setup_wizard_key(key)
 
     def _handle_setup_wizard_key(self, key: str) -> SetupPanelAction:
+        # Up/down walk the tasks in display order and carry on into the next
+        # or previous group; left/right switch group. Digits are left alone
+        # so they always switch panels.
         if key in {"up", "k"}:
-            self.setup_model.active_wizard = SetupWizard(max(0, int(self.setup_model.active_wizard) - 1))
+            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, -1)
             return SetupPanelAction(True)
         if key in {"down", "j"}:
-            self.setup_model.active_wizard = SetupWizard(
-                min(len(WIZARD_NAMES) - 1, int(self.setup_model.active_wizard) + 1)
-            )
+            self.setup_model.active_wizard = setup_catalog.step_wizard(self.setup_model.active_wizard, 1)
             return SetupPanelAction(True)
-        if key in {"left", "["}:
-            self.setup_model.active_wizard = SetupWizard(
-                (int(self.setup_model.active_wizard) + len(WIZARD_NAMES) - 1) % len(WIZARD_NAMES)
-            )
+        if key in {"left", "[", "right", "]"}:
+            # Step through the nav as it is listed, so Right on the last
+            # group reaches "Config editor" instead of wrapping past it
+            # (GAP-2060).
+            delta = -1 if key in {"left", "["} else 1
+            items = setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+            target = step_nav(items, delta)
+            if target == setup_center.NAV_CONFIG:
+                setup_center.select_nav(self.setup_model, target)
+                if delta > 0:
+                    # Right enters on the first section, so Left there steps
+                    # straight back to the group it came from (GAP-2559).
+                    order = setup_catalog.section_order(self.setup_model.sections)
+                    if order:
+                        self.setup_model.select_section(order[0])
+                return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
+            self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
-        if key in {"right", "]"}:
-            self.setup_model.active_wizard = SetupWizard((int(self.setup_model.active_wizard) + 1) % len(WIZARD_NAMES))
-            return SetupPanelAction(True)
-        if key.isdigit():
-            value = int(key)
-            if value < len(WIZARD_NAMES):
-                self.setup_model.active_wizard = SetupWizard(value)
-                return SetupPanelAction(True)
+        if key == "i":
+            return SetupPanelAction(True, open_picker="detail")
         if key in {"enter", "e", "space"}:
             if not self.setup_model.wizard_available(self.setup_model.active_wizard):
                 return SetupPanelAction(
@@ -10468,9 +12892,9 @@ class DefenseClawTUI(App[None]):
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
-            return SetupPanelAction(True, hint="Config editor opened.")
+            return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
         if key == "r":
-            return SetupPanelAction(True, refresh_credentials=True, hint="Refreshing credential snapshot.")
+            return SetupPanelAction(True, refresh_credentials=True, hint="Reloading API keys...")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
             return self.setup_model.credential_action(key)
         return SetupPanelAction(False)
@@ -10491,26 +12915,25 @@ class DefenseClawTUI(App[None]):
         if key in {"down", "j", "tab"}:
             self.setup_model.move_goal_cursor(1)
             return SetupPanelAction(True)
-        if key.isdigit():
-            index = int(key)
-            if 0 <= index < len(goals):
-                self.setup_model.goal_cursor = index
-                self.setup_model.select_active_goal()
-                return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
-            return SetupPanelAction(True)
+        # Digits switch panels here too; only an open form types them.
         if key in {"enter", "space", "e", "right"}:
             self.setup_model.select_active_goal()
             return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
         return SetupPanelAction(False)
 
-    def _handle_setup_form_key(self, key: str) -> SetupPanelAction:
+    def _handle_setup_form_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
         fields = self.setup_model.form_fields
         if not fields:
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True)
         cursor = _clamp_int(getattr(self.setup_model, "form_cursor", 0), 0, len(fields) - 1)
         self.setup_model.form_cursor = cursor
-        if key in {"esc", "escape", "q"}:
+        text_row = _is_setup_form_text_field(fields[cursor])
+        # ``q`` on a text row starts typing (a value can begin with q);
+        # elsewhere it closes the form like Esc.
+        if key in {"esc", "escape"} or (key == "q" and not text_row):
+            if self.setup_model.back_to_goal_menu():
+                return SetupPanelAction(True, hint="Back to the goal list.")
             self.setup_model.close_wizard_form()
             return SetupPanelAction(True, hint="Setup wizard form closed.")
         if key in {"tab", "down"}:
@@ -10523,7 +12946,8 @@ class DefenseClawTUI(App[None]):
             self._replace_setup_form_value(cursor, "")
             return SetupPanelAction(True)
         if key == "backspace":
-            self._replace_setup_form_value(cursor, fields[cursor].value[:-1])
+            if text_row:
+                return SetupPanelAction(True, open_field_editor="form", field_editor_value=fields[cursor].value[:-1])
             return SetupPanelAction(True)
         if key == "ctrl+t":
             if self.setup_model.toggle_form_reveal():
@@ -10544,20 +12968,44 @@ class DefenseClawTUI(App[None]):
             if key == "enter" and getattr(field, "picker", ""):
                 # Searchable model picker instead of submitting the form.
                 return SetupPanelAction(True, open_model_picker=True)
+            if key == "enter" and text_row:
+                return SetupPanelAction(True, open_field_editor="form")
             if key == "enter":
                 return self.setup_model.submit_wizard_form()
-        if len(key) == 1 and field.kind not in {"section", "preset", "whtype", "regid"}:
-            self._replace_setup_form_value(cursor, field.value + key)
-            return SetupPanelAction(True)
+        if text_row and (seed := _typed_seed(key, character)):
+            # A printable key opens the text box with that key applied.
+            return SetupPanelAction(True, open_field_editor="form", field_editor_value=field.value + seed)
         return SetupPanelAction(True)
 
-    def _handle_setup_config_key(self, key: str) -> SetupPanelAction:
-        if key in {"w", "`"}:
+    def _handle_setup_config_key(self, key: str, *, character: str | None = None) -> SetupPanelAction:
+        # Navigation pickers: ``g`` lists sections by group, ``/`` finds a
+        # field in any section.
+        if key == "g":
+            return SetupPanelAction(True, open_picker="sections")
+        if key == "/":
+            return SetupPanelAction(True, open_picker="fields")
+        if key in {"w", "`", "esc"}:
+            # Esc goes back like every other Setup view (GAP-2222). Unsaved
+            # edits stay in the editor, so say so instead of dropping them.
             self.setup_model.mode = "wizards"
-            return SetupPanelAction(True, hint="Setup wizards opened.")
+            changed = len(self.setup_model.config_diff())
+            if changed:
+                noun = "change" if changed == 1 else "changes"
+                return SetupPanelAction(
+                    True,
+                    hint=f"Back to the Setup tasks. {changed} unsaved config {noun} kept: c reopens the editor, S saves.",
+                )
+            return SetupPanelAction(True, hint="Back to the Setup tasks.")
         if key in {"tab", "right", "]"}:
             self._move_setup_section(1)
             return SetupPanelAction(True)
+        if key in {"left", "["} and self._setup_on_first_section():
+            # Left mirrors the Right that opened the editor: back to the last
+            # task group instead of wrapping to the last section (GAP-2559).
+            items = setup_center.task_nav(self.setup_model, self._setup_task_statuses())
+            group = items[-2] if len(items) > 1 else None
+            if group is not None and setup_center.select_nav(self.setup_model, group.key):
+                return SetupPanelAction(True, hint=f"Back to {group.label}. Tab/Shift+Tab switch config sections.")
         if key in {"shift+tab", "left", "["}:
             self._move_setup_section(-1)
             return SetupPanelAction(True)
@@ -10566,7 +13014,7 @@ class DefenseClawTUI(App[None]):
             if section is not None and section.name == "Observability":
                 return SetupPanelAction(
                     True,
-                    hint="Opening canonical Observability destination editor.",
+                    hint="Opening the Observability destination editor.",
                     open_resource_editor="observability",
                 )
             if section is not None and section.name == "Webhooks":
@@ -10583,11 +13031,20 @@ class DefenseClawTUI(App[None]):
             section = self.setup_model.sections[self.setup_model.active_section]
             self.setup_model.active_line = min(len(section.fields) - 1, self.setup_model.active_line + 1)
             return SetupPanelAction(True)
+        field = self._current_setup_field()
+        text_row = _is_setup_config_text_field(field)
         if key in {"enter", "space"}:
+            if field is not None and not field.interactive:
+                # A read-only row says why (an admin lock names the policy).
+                return SetupPanelAction(True, hint=field.hint or "This field is read-only.")
+            if text_row and field is not None:
+                seed = field.value + " " if key == "space" else None
+                return SetupPanelAction(True, open_field_editor="config", field_editor_value=seed)
             self._cycle_setup_config_field(1)
             return SetupPanelAction(True)
         if key == "backspace":
-            self._append_setup_config_text(trim=True)
+            if text_row and field is not None:
+                return SetupPanelAction(True, open_field_editor="config", field_editor_value=field.value[:-1])
             return SetupPanelAction(True)
         if key == "ctrl+u":
             self._set_setup_config_text("")
@@ -10597,17 +13054,38 @@ class DefenseClawTUI(App[None]):
         if key == "r":
             self.setup_model.set_config(self.config)
             return SetupPanelAction(True, hint="Config edits reverted.")
-        if len(key) == 1:
-            changed = self._append_setup_config_text(value=key)
-            return SetupPanelAction(True, hint="" if changed else "This field is read-only.")
+        if len(key) == 1 and key.isdigit():
+            # Digits are panel keys, as the tab bar shows. They used to open
+            # the selected field's editor with the digit appended (30 -> 301);
+            # Enter edits a field (GAP-1282).
+            return SetupPanelAction(False)
+        if key == "q" or (character or key) in CASE_SENSITIVE_PANEL_KEYS:
+            # q closes the drawer or overlay, as the ? sheet says, and T, A, V,
+            # N and P switch panels like the digits. q typed "30q" into the
+            # selected Timeout field (GAP-2520).
+            return SetupPanelAction(False)
+        seed = _typed_seed(key, character)
+        if seed:
+            # Letters the editor uses as commands (j k s r w ...) were
+            # handled above. Other printable keys never type into a field:
+            # "c" then "q" gave "30cq"; the hint bar says Enter edits (GAP-2520).
+            if text_row and field is not None:
+                return SetupPanelAction(True, hint="Press Enter to edit this value.")
+            if field is not None and field.interactive:
+                return SetupPanelAction(True, hint="Press Enter or Space to change this value.")
+            reason = field.hint if field is not None else ""
+            return SetupPanelAction(True, hint=reason or "This field is read-only.")
         return SetupPanelAction(False)
 
-    def _save_setup_config(self, restart_reason: str = "config saved from Textual TUI") -> SetupPanelAction:
-        errors = self.setup_model.validation_errors()
+    def _save_setup_config(self, restart_reason: str = "config saved in the TUI") -> SetupPanelAction:
+        # Only errors on fields the operator changed block the save; an
+        # untouched questionable value is written back exactly as loaded.
+        errors = self.setup_model.blocking_validation_errors()
         if errors:
             return SetupPanelAction(True, hint=f"Fix config validation: {errors[0]}")
         if not self.setup_model.has_changes():
             return SetupPanelAction(True, hint="No config changes to save.")
+        saved_entries = self.setup_model.config_diff()
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
@@ -10625,11 +13103,54 @@ class DefenseClawTUI(App[None]):
             if storage_changed:
                 self._schedule_signal_data_refresh()
             self._schedule_active_panel_refresh("config-save")
-            self.setup_model.queue_restart(restart_reason)
+            # Record the gateway's current start time so the next health poll
+            # can clear the banner once the gateway really restarted.
+            self.setup_model.queue_restart(
+                restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
+            )
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
-        return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
+        self._schedule_config_save_audit(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        if self._setup_cli_live_sections:
+            return SetupPanelAction(
+                True,
+                hint=(
+                    f"Config changes saved; CLI commands (mcp set, skill and plugin install) use the new "
+                    f"{self._setup_cli_live_sections} now; the gateway applies it after a restart (G)."
+                ),
+            )
+        # Say what happens next for the gateway state the TUI knows, not
+        # "restart queued if gateway is running" (GAP-2433).
+        if self.overview_model.gateway_down():
+            return SetupPanelAction(True, hint="Config changes saved; they apply when the gateway starts.")
+        return SetupPanelAction(True, hint="Config changes saved. Restart the gateway (G) to apply them.")
+
+    def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
+        """Record the saved keys as a config-update audit event (GAP-2121).
+
+        The gateway hand-off is an HTTP call, so it runs in a thread worker;
+        before the app is mounted (model-level callers) it runs inline.
+        """
+
+        from defenseclaw.tui.services.config_audit import record_config_save
+
+        cfg = self.config
+
+        def record() -> None:
+            if not record_config_save(cfg, entries) and self.is_running:
+                self.call_from_thread(
+                    self._set_status,
+                    "Config changes saved; the audit event was not recorded (is the gateway running?).",
+                )
+
+        if not entries:
+            return
+        if not self.is_running:
+            record_config_save(cfg, entries)
+            return
+        self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
         result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
@@ -10640,6 +13161,76 @@ class DefenseClawTUI(App[None]):
         self._render_chrome()
         if action.hint:
             self._set_status(action.hint)
+
+    def _open_setup_field_editor(self, target: str, seed: str | None = None) -> None:
+        """Edit the focused wizard-form or config-editor row in a text box."""
+
+        if target == "form":
+            fields = self.setup_model.form_fields
+            if not self.setup_model.form_active or not fields:
+                return
+            index = _clamp_int(getattr(self.setup_model, "form_cursor", 0), 0, len(fields) - 1)
+            form_field = fields[index]
+
+            def apply_form_value(result: str | None) -> None:
+                if result is None:
+                    self._set_status("Edit cancelled.")
+                    return
+                # The form may have closed or been rebuilt while the box was open.
+                current = self.setup_model.form_fields
+                if (
+                    not self.setup_model.form_active
+                    or index >= len(current)
+                    or current[index].label != form_field.label
+                ):
+                    self._set_status("The form changed while editing; nothing was applied.")
+                    return
+                self._replace_setup_form_value(index, result)
+                self._render_chrome()
+
+            self.push_screen(
+                FieldEditorScreen(
+                    form_field.label,
+                    value=form_field.value if seed is None else seed,
+                    hint=form_field.hint,
+                    password=form_field.kind == "password",
+                    validator=_setup_form_validator(form_field),
+                ),
+                apply_form_value,
+            )
+            return
+        config_field = self._current_setup_field()
+        if not _is_setup_config_text_field(config_field):
+            return
+        section_index = self.setup_model.active_section
+        line = self.setup_model.active_line
+
+        def apply_config_value(result: str | None) -> None:
+            if result is None:
+                self._set_status("Edit cancelled.")
+                return
+            current = self._current_setup_field()
+            if (
+                self.setup_model.active_section != section_index
+                or self.setup_model.active_line != line
+                or current is None
+                or current.key != config_field.key
+            ):
+                self._set_status("The config editor changed while editing; nothing was applied.")
+                return
+            self._set_setup_config_text(result)
+            self._render_chrome()
+
+        self.push_screen(
+            FieldEditorScreen(
+                config_field.label,
+                value=config_field.value if seed is None else seed,
+                hint=config_field.hint or config_field.key,
+                password=config_field.kind == "password",
+                validator=_setup_config_validator(config_field),
+            ),
+            apply_config_value,
+        )
 
     async def _open_model_picker(self) -> None:
         fields = self.setup_model.form_fields
@@ -10671,10 +13262,6 @@ class DefenseClawTUI(App[None]):
         # ultimately "" under the merged "All" view, so the form writes
         # ``--connector`` instead of silently defaulting to the primary.
         connector = model.action_connector(selected)
-        effective_connector = connector or str(getattr(model, "connector", "") or "")
-        if connector_paths.is_cleanup_only(effective_connector):
-            self._set_status(connector_paths.cleanup_only_guidance(effective_connector))
-            return
         result = await self.push_screen_wait(
             MCPSetFormScreen(initial_name=initial_name, connector=connector)
         )
@@ -10688,6 +13275,7 @@ class DefenseClawTUI(App[None]):
             category="enforce",
             risk="mutation",
             needs_preview=True,
+            env_overrides=tuple(result.env),
         )
         await self._confirm_and_run_parsed(parsed)
 
@@ -10755,7 +13343,8 @@ class DefenseClawTUI(App[None]):
         CLI's "trust this directory?" prompt — it surfaces the same decision in
         the panel rather than firing ``click.confirm`` under a full-screen TUI.
         """
-        parent = untrusted_connector_dir(connector, getattr(self.config, "data_dir", None))
+        # Discovery runs every agent binary; keep it off the UI thread.
+        parent = await asyncio.to_thread(untrusted_connector_dir, connector, getattr(self.config, "data_dir", None))
         if not parent:
             return True
         rows = trusted_paths_rows_from_config(self.config)
@@ -10791,14 +13380,23 @@ class DefenseClawTUI(App[None]):
         # by _derive_command_label, e.g. "defenseclaw setup claudecode".
         if cancelled_label.startswith("defenseclaw "):
             argv = tuple(cancelled_label.split()[1:])
-            if argv and argv[0] in {"setup", "sandbox", "registry", "keys"}:
-                self.setup_model.mark_wizard_complete(argv, success=False)
+            if argv and argv[0] in WIZARD_COMMAND_FAMILIES:
+                self.setup_model.mark_wizard_complete(argv, success=False, cancelled=True)
         self._refresh_hint()
 
     async def _handle_successful_command(self, binary: str, args: tuple[str, ...]) -> None:
+        if binary == "defenseclaw-gateway" and args[:1] in {("restart",), ("start",)}:
+            # A successful restart (G on the queued-restart banner) applies the
+            # queued config; the banner used to stay up afterwards (GAP-1161).
+            self.setup_model.clear_restart_queue()
+            return
         if binary != "defenseclaw" or not args:
             return
         command = args[0]
+        if command in WIZARD_COMMAND_FAMILIES:
+            # Every family a Setup task runs, guardrail / agent / acp too:
+            # those tasks' rows otherwise kept spinning "running".
+            self.setup_model.mark_wizard_complete(args, success=True)
         if command == "init":
             self.first_run_model.active = False
             self.active_panel = "overview"
@@ -10806,15 +13404,29 @@ class DefenseClawTUI(App[None]):
         elif command == "setup":
             self._refresh_cached_config()
             self.setup_model.clear_restart_queue()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "keys":
             await self._load_setup_credentials()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command in {"sandbox", "registry"}:
             self._refresh_cached_config()
-            self.setup_model.mark_wizard_complete(args, success=True)
         elif command == "doctor":
             self._load_doctor_cache()
+        elif command == "policy" or (
+            command == "guardrail"
+            and len(args) > 1
+            and args[1] in {"use-pack", "enable", "disable", "mode", "block-at", "alert-at", "hilt", "protection"}
+        ):
+            if command == "guardrail":
+                self._refresh_cached_config()
+            self._schedule_policy_load(sandbox=self.policy_model.sandbox_loaded)
+        elif command == "agent":
+            # Enable/disable/scan (and runtime enable/scan) change what the AI
+            # Discovery and Runtime panels show; reload now instead of leaving
+            # the old state (and the old Enable/Disable buttons) up until the
+            # next 15-30 s poll.
+            if tuple(args[1:3]) == ("discovery", "runtime"):
+                await self._load_runtime_model()
+            else:
+                await self._load_ai_discovery_model()
         elif panel := _catalog_panel_invalidated_by_command(args):
             await self._refresh_loaded_catalog_after_mutation(panel)
 
@@ -11013,8 +13625,14 @@ class DefenseClawTUI(App[None]):
 
         self.config = new_cfg
         self.data_dir = new_data_dir
+        self.overview_model.not_configured = new_cfg is None
         self.overview_model.set_cfg(new_overview_cfg)
         self.setup_model.set_config(new_cfg, external=external)
+        self.sandbox_model.set_config(new_cfg)
+        self.policy_model.set_config(new_cfg)
+        if self.policy_model.loaded:
+            # Scope postures (mode, approval, packs) come from config.yaml.
+            self._schedule_policy_load()
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
         if (
@@ -11089,6 +13707,7 @@ class DefenseClawTUI(App[None]):
             else None
         )
         self._read_snapshot = None
+        self._set_history_loading(self._read_repository is not None)
         self._snapshot_panel_revisions.clear()
         self._last_data_refresh_error = ""
         if self.status_text.startswith("Data refresh stale:"):
@@ -11157,6 +13776,16 @@ class DefenseClawTUI(App[None]):
         finally:
             self._credentials_refresh_running = False
 
+    async def _reload_setup_credentials(self, hint: str) -> None:
+        """Reload the API keys, then say it finished (GAP-2255).
+
+        "Refreshing credential snapshot." stayed in the status bar for good.
+        """
+
+        await self._load_setup_credentials()
+        if not hint or self.status_text == hint:
+            self._set_status(credential_reload_summary(self.setup_model.credential_snapshot))
+
     async def _load_setup_credentials(self) -> None:
         try:
             returncode, stdout, stderr = await _communicate_captured(
@@ -11181,22 +13810,28 @@ class DefenseClawTUI(App[None]):
         self.setup_model.set_credential_snapshot(rows)
         self._render_chrome()
 
-    async def _load_inventory_model(self) -> None:
+    async def _load_inventory_model(self, *, announce: bool | None = None) -> None:
+        if announce is None:
+            # Quiet background refreshes, as for the catalogs (GAP-1581).
+            announce = not getattr(self.inventory_model, "loaded", False)
         names = self._active_connector_names()
         # 8.13 pass 2: a multi-connector install inventories every connector and
         # merges the snapshots into one view with a CONNECTOR column. Single-
         # connector installs keep the original one-shot ``aibom scan``.
         if len(names) > 1:
             self.inventory_model.show_connector_column = True
-            await self._load_inventory_merged(names)
+            await self._load_inventory_merged(names, announce=announce)
             return
         self.inventory_model.show_connector_column = False
         intent = self.inventory_model.load_intent()
-        self._set_status(intent.hint or "Loading inventory...")
+        loading = intent.hint or "Loading inventory..."
+        if announce and self.active_panel == "inventory":
+            self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
             self.inventory_model.apply_loaded(None, exc)
+            self._end_load("inventory", loading, announce, self.inventory_model.message, self.inventory_model.message)
             self._render_chrome()
             return
         if returncode != 0:
@@ -11204,15 +13839,19 @@ class DefenseClawTUI(App[None]):
                 None,
                 stderr.decode(errors="replace").strip() or f"exit {returncode}",
             )
+            self._end_load("inventory", loading, announce, self.inventory_model.message, self.inventory_model.message)
             self._render_chrome()
             return
         try:
             self.inventory_model.apply_json(stdout.decode(errors="replace"))
         except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
             self.inventory_model.apply_loaded(None, exc)
+        if hint := _no_connector_hint(stderr):
+            self.inventory_model.message = hint
+        self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
 
-    async def _load_inventory_merged(self, names: list[str]) -> None:
+    async def _load_inventory_merged(self, names: list[str], *, announce: bool = True) -> None:
         """Inventory every active connector and merge the snapshots.
 
         Each connector's ``aibom scan`` runs with ``--connector <name>`` so its
@@ -11221,7 +13860,11 @@ class DefenseClawTUI(App[None]):
         narrowed to the active connector filter in-memory.
         """
 
-        self._set_status(f"Loading inventory for {len(names)} connectors...")
+        loading = f"Loading inventory for {len(names)} connectors..."
+        # A background load of another panel ("Loading plugins for 5
+        # connectors..." on Tools) is not about the panel on screen (GAP-1402).
+        if announce and self.active_panel == "inventory":
+            self._set_status(loading)
         results: list[tuple[str, str | None]] = []
         for name in names:
             intent = self.inventory_model.load_intent_for(name)
@@ -11238,12 +13881,18 @@ class DefenseClawTUI(App[None]):
         if not any(text for _name, text in results):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
+        self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
 
     async def _load_runtime_model(self) -> None:
         """Fetch the runtime-plane snapshot into the panel."""
-        self._set_status("Loading runtime planes...")
-        await self._refresh_runtime_snapshot(render=True)
+        loading = "Loading runtime planes..."
+        self._set_status(loading)
+        answered = await self._refresh_runtime_snapshot(render=True)
+        self._finish_load_status(
+            loading,
+            "Runtime updated." if answered else "Runtime: the gateway did not answer; showing the last snapshot.",
+        )
 
     def _schedule_runtime_poll(self) -> None:
         if getattr(self, "_app_shutting_down", False):
@@ -11261,7 +13910,9 @@ class DefenseClawTUI(App[None]):
         finally:
             self._runtime_poll_running = False
 
-    async def _refresh_runtime_snapshot(self, *, render: bool) -> None:
+    async def _refresh_runtime_snapshot(self, *, render: bool) -> bool:
+        """Fetch the runtime snapshot; True when the gateway answered."""
+
         payload = await asyncio.to_thread(_fetch_ai_runtime, self.config)
         if payload is not None:
             self.runtime_model.set_snapshot(payload)
@@ -11271,11 +13922,22 @@ class DefenseClawTUI(App[None]):
                 self._schedule_overview_sampled_refresh()
             else:
                 self._render_chrome()
+        return payload is not None
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
-        self._set_status(intent.hint or "Loading AI discovery...")
-        await self._poll_ai_usage(force_render=True)
+        previous = self.status_text
+        hint = intent.hint or "Loading AI discovery..."
+        self._set_status(hint)
+        loaded = await self._poll_ai_usage(force_render=True)
+        # The hint stayed up for minutes after the snapshot was in (GAP-1821).
+        if self.status_text == hint:
+            if not loaded:
+                self._set_status("AI discovery did not refresh: the gateway is offline or refused the token.")
+            elif _is_command_result(previous):
+                self._set_status(previous)
+            else:
+                self._set_status("AI discovery refreshed.")
 
     async def _open_catalog_action_menu(self, panel: str) -> None:
         model = self.catalog_models[panel]
@@ -11284,7 +13946,7 @@ class DefenseClawTUI(App[None]):
         subtitle = getattr(selected, "name", "") if selected is not None else ""
         choice = await self.push_screen_wait(
             ActionMenuScreen(
-                f"{panel.title()} Actions",
+                f"{_panel_label(panel)} actions",
                 tuple(_menu_action(action) for action in actions),
                 subtitle=subtitle,
             )
@@ -11371,7 +14033,7 @@ class DefenseClawTUI(App[None]):
             ActionMenuScreen(
                 "Filter by Connector",
                 tuple(actions),
-                subtitle="Applies across Overview, Alerts, Audit, Logs",
+                subtitle=f"Applies to {_CONNECTOR_FILTER_PANELS}",
                 selected_index=selected_index,
             )
         )
@@ -11421,13 +14083,25 @@ class DefenseClawTUI(App[None]):
         if command is None:
             self._set_status("Uninstall action has no command.")
             return
+        terminal_command = terminal_command_for_option(action.action_id)
+        if terminal_command:
+            # Removing ~/.defenseclaw is refused while this TUI is open, so
+            # name the terminal command instead of running it (GAP-2585).
+            self._set_status(f"Quit the TUI (Ctrl+C), then run: {terminal_command}")
+            self.notify(
+                f"This TUI keeps ~/.defenseclaw open. Quit it (Ctrl+C), then run in a terminal: {terminal_command}",
+                timeout=12,
+            )
+            return
         self.active_panel = "activity"
         self._render_chrome()
         self.run_worker(
             self._run_command(
                 command.binary,
                 command.args,
-                display_name=getattr(command, "label", "uninstall"),
+                # CommandSpec carries display_name ("uninstall dry-run"), not
+                # label, so the footer read "Done: uninstall." (GAP-1709).
+                display_name=getattr(command, "display_name", "") or "uninstall",
             ),
             exclusive=False,
             thread=False,
@@ -11447,36 +14121,51 @@ class DefenseClawTUI(App[None]):
         else:
             self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
 
-    async def _load_catalog_model(self, panel: str) -> None:
+    async def _load_catalog_model(self, panel: str, *, announce: bool | None = None) -> None:
+        """Load one catalog panel.
+
+        ``announce`` puts "Loading ..." on the status line. By default only a
+        first load does: the slow refresh and post-action reloads of a loaded
+        table are quiet, or the status line read "Loading plugins for 8
+        connectors..." for minutes and hid "Done: ..." (GAP-1581).
+        """
+
         model = self.catalog_models[panel]
+        if announce is None:
+            announce = not getattr(model, "loaded", False)
+        model.loading = True
+        # Only the newest load of a panel may apply its rows: an older one
+        # (the slow refresh, an earlier r) finishing last put the previous
+        # enforcement state back on screen (GAP-1921).
+        seq = self._catalog_load_seq.get(panel, 0) + 1
+        self._catalog_load_seq[panel] = seq
         names = self._active_connector_names()
         asset_panel = panel in {"skills", "mcps", "plugins"}
-        current_connector = str(getattr(model, "connector", "") or "")
-        if asset_panel and not names and connector_paths.is_cleanup_only(current_connector):
-            guidance = connector_paths.cleanup_only_guidance(current_connector)
-            model.apply_loaded([])
-            model.message = guidance
-            self._set_status(guidance)
-            self._render_chrome()
-            return
         # 8.13 pass 2: Skills/MCPs/Plugins merge every active connector's list
         # into one table with a CONNECTOR column. Tools is a process-global
         # enforcement view, so it never merges. Single-connector installs keep
         # the original one-shot load (no column, no per-connector fan-out).
         if len(names) > 1 and asset_panel:
             model.show_connector_column = True
-            await self._load_catalog_merged(panel, model, names)
+            await self._load_catalog_merged(panel, model, names, announce=announce, seq=seq)
             return
         model.show_connector_column = False
         intent = model.load_intent_for(names[0]) if asset_panel and names else model.load_intent()
-        self._set_status(intent.hint or f"Loading {panel}...")
+        loading = intent.hint or f"Loading {panel}..."
+        if announce and self.active_panel == panel:
+            self._set_status(loading)
         try:
             returncode, stdout, stderr = await _communicate_captured(intent.binary, intent.args)
         except OSError as exc:
+            if self._catalog_load_seq.get(panel) != seq:
+                return
             model.apply_loaded([], exc)
+            self._end_load(panel, loading, announce, model.message, model.message)
             self._render_chrome()
             return
 
+        if self._catalog_load_seq.get(panel) != seq:
+            return
         if returncode != 0:
             model.apply_loaded([], stderr.decode(errors="replace").strip() or f"exit {returncode}")
         else:
@@ -11484,10 +14173,32 @@ class DefenseClawTUI(App[None]):
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
                 model.apply_loaded([], exc)
+            if hint := _no_connector_hint(stderr):
+                model.message = hint
+        self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
 
+    def _end_load(self, panel: str, loading: str, announce: bool, error: str, done: str) -> None:
+        """Say how a load ended: always for a failure, else only if announced."""
+
+        if announce:
+            self._finish_load_status(loading, error or done)
+        elif error and self.active_panel == panel:
+            self._set_status(error)
+
+    def _finish_load_status(self, loading: str, result: str) -> None:
+        """Replace a "Loading ..." status with how the load ended.
+
+        Loads used to leave "Loading skills..." on the status line forever,
+        even after an error. Only the load's own message is replaced, so a
+        status the operator caused meanwhile is kept.
+        """
+
+        if self.status_text == loading:
+            self._set_status(result)
+
     async def _load_catalog_merged(
-        self, panel: str, model: Any, names: list[str]
+        self, panel: str, model: Any, names: list[str], *, announce: bool = True, seq: int | None = None
     ) -> None:
         """Load ``panel`` once per active connector and merge the rows.
 
@@ -11497,26 +14208,30 @@ class DefenseClawTUI(App[None]):
         rows are then narrowed to the active connector filter in-memory.
         """
 
-        self._set_status(f"Loading {panel} for {len(names)} connectors...")
-        results: list[tuple[str, str | None]] = []
-        for name in names:
-            intent = model.load_intent_for(name)
+        loading = f"Loading {panel} for {len(names)} connectors..."
+        if announce and self.active_panel == panel:
+            self._set_status(loading)
+        async def load_one(name: str, intent: Any) -> tuple[str, str | None]:
             try:
                 returncode, stdout, _stderr = await _communicate_captured(intent.binary, intent.args)
             except OSError:
-                results.append((name, None))
-                continue
-            if returncode != 0:
-                results.append((name, None))
-            else:
-                results.append((name, stdout.decode(errors="replace")))
+                return name, None
+            return name, stdout.decode(errors="replace") if returncode == 0 else None
+
+        # All connectors at once: one after another, four CLI starts on
+        # Windows kept the old rows on screen for ~30 s after r (GAP-1921).
+        intents = [(name, model.load_intent_for(name)) for name in names]
+        results = list(await asyncio.gather(*(load_one(name, intent) for name, intent in intents)))
+        if seq is not None and self._catalog_load_seq.get(panel) != seq:
+            return
         model.apply_merged(results)
         if not any(text for _name, text in results):
             model.message = f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
+        self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
 
-    async def _confirm_and_run_intent(self, intent: Any) -> None:
+    async def _confirm_and_run_intent(self, intent: Any) -> int | None:
         # N1: a catalog intent that flags itself ``risk="destructive"`` (today
         # only plugin remove, which deletes files from disk) is confirmed
         # through the C1 consequence danger-modal — red border + an explicit
@@ -11525,8 +14240,10 @@ class DefenseClawTUI(App[None]):
         # commands keep the standard preview path (they reach
         # ``_confirm_and_run_parsed`` directly, not through here).
         if getattr(intent, "risk", "read-only") == "destructive":
-            await self._confirm_and_run_destructive_intent(intent)
-            return
+            return await self._confirm_and_run_destructive_intent(intent)
+        if getattr(intent, "terminal", False):
+            await self._confirm_and_run_terminal_intent(intent)
+            return None
         parsed = ParsedCommand(
             binary=intent.binary,
             args=tuple(intent.args),
@@ -11534,53 +14251,84 @@ class DefenseClawTUI(App[None]):
             category=intent.category,
             risk=getattr(intent, "risk", "read-only"),
             needs_preview=True,
+            stdin_input=getattr(intent, "secret_stdin", None),
+            env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
+            consequence=str(getattr(intent, "consequence", "") or ""),
         )
-        await self._confirm_and_run_parsed(parsed)
-        # Setup wizards (currently the Registry wizard) can request
-        # follow-up commands that should run only after the primary
-        # command finishes. The follow-ups themselves are queued through
-        # the same confirm-and-run path so the user still sees the
-        # preview screen and live output.
-        for follow_up in getattr(intent, "follow_up", ()) or ():
-            await self._confirm_and_run_intent(follow_up)
+        exit_code = await self._confirm_and_run_parsed(
+            parsed, stay_on_panel=bool(getattr(intent, "stay_on_panel", False))
+        )
+        return await self._run_follow_ups(intent, exit_code)
+
+    async def _run_follow_ups(self, intent: Any, exit_code: int | None) -> int | None:
+        """Run ``intent.follow_up`` one at a time after the first command.
+
+        Setup wizards (Registry, Splunk, notification routing) queue extra
+        commands. Each one goes through the same preview/run path, starts
+        only after the previous command finished, and only if it exited 0.
+        """
+
+        follow_ups = tuple(getattr(intent, "follow_up", ()) or ())
+        for index, follow_up in enumerate(follow_ups):
+            if exit_code != 0:
+                remaining = len(follow_ups) - index
+                reason = "was cancelled" if exit_code is None else f"exited {exit_code}"
+                noun = "command" if remaining == 1 else "commands"
+                self._write_activity(
+                    f"[#FBBF24]Skipped {remaining} follow-up {noun}[/]: "
+                    f"{rich_escape(str(getattr(intent, 'label', 'the previous command')))} {reason}."
+                )
+                return exit_code
+            exit_code = await self._confirm_and_run_intent(follow_up)
+        return exit_code
 
     def _destructive_intent_modal(self, intent: Any) -> ConsequenceModalModel:
         """Build the C1 consequence modal for a destructive catalog intent (N1).
 
-        A single ``danger`` action carries the command; the consequence modal
-        paints a red border and requires the danger re-press before it
-        dismisses with the action, so the dispatch only fires on an explicit
-        second confirm.
+        A safe "Go back" action is preselected, so stray Enter presses close
+        the modal. The ``danger`` action carries the command: it has to be
+        picked (its ``d`` hotkey or the arrow keys) and then confirmed twice,
+        because the consequence modal re-asks before a danger action runs.
         """
 
         command_line = " ".join((intent.binary, *intent.args))
+        consequence = getattr(intent, "consequence", "") or ""
         return ConsequenceModalModel(
             title=f"Confirm: {intent.label}",
             summary="This is a destructive action and cannot be undone.",
             details=(f"Will run: {command_line}",),
-            consequence="This deletes files from disk.",
+            consequence=consequence or "This deletes files from disk.",
             actions=(
+                ConsequenceAction(
+                    action_id="back",
+                    hotkey="b",
+                    label="Go back",
+                    description="Closes this without running anything.",
+                ),
                 ConsequenceAction(
                     action_id="run",
                     hotkey="d",
                     label=intent.label,
-                    description="Runs the command and deletes the files from disk.",
+                    description=(
+                        "Runs the command." if consequence else "Runs the command and deletes the files from disk."
+                    ),
                     variant="error",
                     danger=True,
                 ),
             ),
-            default_action_id="run",
+            default_action_id="back",
             border_color=TOKENS.accent_red,
         )
 
-    async def _confirm_and_run_destructive_intent(self, intent: Any) -> None:
+    async def _confirm_and_run_destructive_intent(self, intent: Any) -> int | None:
         chosen = await self.push_screen_wait(
             ConsequenceModalScreen(self._destructive_intent_modal(intent))
         )
-        if chosen is None:
+        if chosen is None or chosen.action_id != "run":
             self._write_activity(f"[#FBBF24]Cancelled:[/] {intent.label}")
             self._set_status("Command cancelled.")
-            return
+            self._release_cancelled_wizard(intent.binary, tuple(intent.args))
+            return None
         # Confirmed (and danger-re-pressed): jump to Activity where the live
         # output is visible, record the alias in the palette MRU, then run.
         if self.active_panel != "activity":
@@ -11591,20 +14339,30 @@ class DefenseClawTUI(App[None]):
             self.state_store.save()
         except Exception:  # noqa: BLE001 - palette MRU is cosmetic
             pass
-        self.run_worker(
-            self._run_command(intent.binary, tuple(intent.args), display_name=intent.label),
-            exclusive=False,
-            thread=False,
+        exit_code = await self._run_command(
+            intent.binary,
+            tuple(intent.args),
+            display_name=intent.label,
+            stdin_input=getattr(intent, "secret_stdin", None),
+            env_overrides=tuple(getattr(intent, "env_overrides", ()) or ()),
         )
-        for follow_up in getattr(intent, "follow_up", ()) or ():
-            await self._confirm_and_run_intent(follow_up)
+        self._report_command_result(intent.label, exit_code)
+        return await self._run_follow_ups(intent, exit_code)
 
-    async def _confirm_and_run_parsed(self, parsed: ParsedCommand) -> None:
+    async def _confirm_and_run_parsed(self, parsed: ParsedCommand, *, stay_on_panel: bool = False) -> int | None:
+        """Preview ``parsed``, then run it and wait for it to finish.
+
+        Returns the exit code, or ``None`` when the preview was cancelled or
+        the command never started. Callers already run inside a worker, so
+        awaiting here keeps follow-up commands from racing this one.
+        """
+
         confirmed = await self.push_screen_wait(CommandPreviewScreen(parsed))
         if not confirmed:
             self._write_activity(f"[#FBBF24]Cancelled:[/] {parsed.display_name}")
             self._set_status("Command cancelled.")
-            return
+            self._release_cancelled_wizard(parsed.binary, parsed.args)
+            return None
         # Any command that needed a preview is non-read-only (setup,
         # mutation, destructive, …) — most of them are interactive
         # wizards. The user just confirmed they want to run it, so jump
@@ -11612,7 +14370,7 @@ class DefenseClawTUI(App[None]):
         # Without this jump the user sat on Overview staring at an empty
         # yellow "running" strip with no clue the wizard was waiting on
         # them.
-        if parsed.risk != "read-only" and self.active_panel != "activity":
+        if parsed.risk != "read-only" and not stay_on_panel and self.active_panel != "activity":
             self.action_switch_panel("activity")
         # Record the TUI alias in the palette MRU so the next time the
         # operator opens the palette without a query, the things they
@@ -11625,11 +14383,46 @@ class DefenseClawTUI(App[None]):
             self.state_store.save()
         except Exception:  # noqa: BLE001 - palette MRU is cosmetic
             pass
-        self.run_worker(
-            self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
-            exclusive=False,
-            thread=False,
+        exit_code = await self._run_command(
+            parsed.binary,
+            parsed.args,
+            display_name=parsed.display_name,
+            stdin_input=parsed.stdin_input,
+            env_overrides=parsed.env_overrides,
         )
+        self._report_command_result(parsed.display_name, exit_code)
+        return exit_code
+
+    def _release_cancelled_wizard(self, binary: str, args: tuple[str, ...]) -> None:
+        """A Setup task whose confirm was cancelled kept "running Ns" (GAP-1478)."""
+
+        if binary == "defenseclaw" and args and args[0] in WIZARD_COMMAND_FAMILIES:
+            self.setup_model.mark_wizard_complete(args, success=False, cancelled=True)
+            self._render_chrome()
+
+    def _report_command_result(self, display_name: str, exit_code: int | None) -> None:
+        """Say how a command ended in the status bar.
+
+        The status bar kept "Command cancelled." from an earlier cancel after
+        a later run succeeded (GAP-1213, GAP-1354), on every run path: the
+        preview, the destructive consequence modal and a typed read-only
+        command.
+        """
+
+        # The same result text from a re-run is still a new result.
+        self.status_text = ""
+        if exit_code == 0:
+            dry_run = "dry-run" in display_name or "dry run" in display_name
+            self._set_status(f"Done: {display_name}{' (nothing changed)' if dry_run else ''}.")
+        elif exit_code == 130:
+            self._set_status(f"Cancelled: {display_name}.")
+        elif exit_code is not None:
+            self._set_status(f"{display_name} failed (exit {exit_code}). Activity shows the output.")
+
+    async def _run_and_report(self, parsed: ParsedCommand) -> int | None:
+        exit_code = await self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name)
+        self._report_command_result(parsed.display_name, exit_code)
+        return exit_code
 
     def _schedule_data_refresh(self, *, force: bool = False) -> None:
         """Schedule one generation-aware SQLite refresh off the UI loop."""
@@ -11688,6 +14481,24 @@ class DefenseClawTUI(App[None]):
             thread=False,
         )
 
+    def _mark_log_tail_seen(self, before: int) -> None:
+        """Count a raw-log tail read for the Logs visit as seen (GAP-2244).
+
+        Every tail read is started from the Logs panel. Lines it brings in
+        were loaded for that visit, so they never become an unread badge,
+        even when the read lands just after you switch away.
+        """
+
+        try:
+            after = self._panel_total_count("logs")
+            if self.active_panel == "logs":
+                seen = after
+            else:
+                seen = self.state_store.get_seen_count("logs") + max(0, after - before)
+            self.state_store.record_seen_count("logs", seen)
+        except Exception:  # noqa: BLE001 - persistence is cosmetic
+            pass
+
     async def _run_log_file_refresh(self, request: LogFileReadRequest) -> None:
         """Read a bounded raw-log tail on a worker, then atomically apply it."""
 
@@ -11695,7 +14506,10 @@ class DefenseClawTUI(App[None]):
             snapshot = await asyncio.to_thread(self.logs_model.read_file_request, request)
             if getattr(self, "_app_shutting_down", False):
                 return
+            before = self._panel_total_count("logs")
             changed = self.logs_model.apply_file_snapshot(snapshot)
+            if changed:
+                self._mark_log_tail_seen(before)
             if changed and self.logs_model.source == request.source:
                 self.logs_model._clamp_cursor()  # noqa: SLF001 - snapshot boundary.
                 if self.screen_stack and len(self.screen_stack) <= 1:
@@ -11710,9 +14524,18 @@ class DefenseClawTUI(App[None]):
         if pending and not getattr(self, "_app_shutting_down", False):
             self._schedule_active_log_file_refresh()
 
+    def _set_history_loading(self, loading: bool) -> None:
+        """Say "loading" instead of "no events" until the first read lands."""
+
+        self.overview_model.history_loading = loading
+        self.audit_model.loading = loading
+
     def _handle_data_refresh_result(self, result: TUIReadResult, *, force: bool) -> None:
         snapshot = result.snapshot
         should_render = False
+        if self.audit_model.loading and (snapshot is not None or result.error):
+            self._set_history_loading(False)
+            should_render = True
         if snapshot is not None and (result.changed or force or self._read_snapshot is None):
             self._read_snapshot = snapshot
             self._apply_read_snapshot(snapshot, self.active_panel)
@@ -11892,6 +14715,7 @@ class DefenseClawTUI(App[None]):
             )
         finally:
             if worker_store is not None:
+                _LIVE_WORKER_STORES.discard(worker_store)
                 try:
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.
@@ -11950,6 +14774,12 @@ class DefenseClawTUI(App[None]):
         """Refresh Overview's disk-backed counts without blocking input."""
 
         if getattr(self, "_app_shutting_down", False):
+            return
+        if self._read_repository is not None:
+            # The repository snapshot already carries alerts, counts and
+            # egress. Reading them again here ran the full alert query on a
+            # second thread after every 3 s health poll (GAP-1816).
+            self._load_doctor_cache()
             return
         if not self.is_running:
             self._refresh_overview_disk_models()
@@ -12013,6 +14843,7 @@ class DefenseClawTUI(App[None]):
             )
         finally:
             if worker_store is not None:
+                _LIVE_WORKER_STORES.discard(worker_store)
                 try:
                     worker_store.close()
                 except Exception:  # noqa: BLE001 - reader teardown is best-effort.
@@ -12287,7 +15118,7 @@ class DefenseClawTUI(App[None]):
                 allow_scrolled=True,
             )
 
-    async def _poll_ai_usage(self, *, force_render: bool) -> None:
+    async def _poll_ai_usage(self, *, force_render: bool) -> bool:
         snapshot = await asyncio.to_thread(_fetch_ai_usage, self.config)
         if snapshot is None:
             if self.ai_discovery_model.snapshot is None:
@@ -12296,7 +15127,7 @@ class DefenseClawTUI(App[None]):
                 self._schedule_overview_sampled_refresh()
             if force_render or self.active_panel == "ai":
                 self._render_chrome()
-            return
+            return False
         self.overview_model.set_ai_usage(snapshot)
         self.ai_discovery_model.set_snapshot(snapshot)
         self.ai_discovery_model.message = ""
@@ -12304,6 +15135,7 @@ class DefenseClawTUI(App[None]):
             self._schedule_overview_sampled_refresh()
         if force_render or self.active_panel == "ai":
             self._render_chrome()
+        return True
 
     def _sync_setup_readiness(self) -> None:
         """Rebuild the Setup readiness rows from current inputs.
@@ -12644,6 +15476,40 @@ def _project_omnigent_effective_readiness(
     )
 
 
+_GATEWAY_STARTUP_GRACE_SECONDS = 90
+
+
+def _gateway_listener_pending(trust: object, *, now: float | None = None) -> bool:
+    """True when the managed gateway started recently and has no API listener yet."""
+
+    if getattr(trust, "code", "") != "missing_listener":
+        return False
+    record = getattr(trust, "record", None)
+    try:
+        started = int(getattr(record, "start_time", "") or 0)
+    except (TypeError, ValueError):
+        return False
+    if started <= 0:
+        return False
+    age = (time.time() if now is None else now) - started
+    return 0 <= age <= _GATEWAY_STARTUP_GRACE_SECONDS
+
+
+def _refreshed_gateway_token(config: object, token: str) -> str:
+    """The gateway token after rereading ``<data_dir>/.env``; "" when it did not change."""
+
+    data_dir = str(getattr(config, "data_dir", "") or "")
+    resolve_token = getattr(getattr(config, "gateway", None), "resolved_token", None)
+    if not data_dir or not callable(resolve_token):
+        return ""
+    try:
+        config_module._load_dotenv_into_os(data_dir)  # noqa: SLF001 - the loader's refresh rule
+        fresh = str(resolve_token() or "")
+    except Exception:  # noqa: BLE001 - an unreadable .env keeps the original 401.
+        return ""
+    return fresh if fresh != token else ""
+
+
 def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     """Probe the configured authenticated sidecar status without using proxy state.
 
@@ -12683,12 +15549,33 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
 
         trust = _trusted_gateway_listener(config)
     except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
-        return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
+        return GatewayHealthResult("error", "gateway listener identity is unavailable")
     if not trust.trusted:
-        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+        if getattr(trust, "code", "") == "missing":
+            # No PID file: the gateway was never started or was stopped.
+            # Report it as offline so the Overview gives the start command
+            # instead of an identity error (GAP-1110).
+            return GatewayHealthResult("offline", "the gateway is not running")
+        if _gateway_listener_pending(trust):
+            # Our gateway process is up but has not bound its API port yet:
+            # right after a restart that is startup, not an identity
+            # problem (GAP-2513).
+            return GatewayHealthResult("starting", "starting")
+        return GatewayHealthResult("error", f"gateway listener identity is unverified: {trust.detail}")
 
     try:
-        document = client.status()
+        try:
+            document = client.status()
+        except requests.HTTPError as exc:
+            # The gateway rotated its token (a restart or an OpenClaw token
+            # refresh rewrites ~/.defenseclaw/.env), but this process still
+            # holds the copy it read at launch: reread .env and retry once
+            # instead of a lasting 401 until the TUI restarts (GAP-2547).
+            rejected = exc.response is not None and exc.response.status_code in {401, 403}
+            fresh = _refreshed_gateway_token(config, token) if rejected else ""
+            if not fresh:
+                raise
+            document = OrchestratorClient(host=host, port=port, token=fresh, timeout=3).status()
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 0
         if status in {401, 403}:
@@ -12764,7 +15651,7 @@ def _fetch_v8_operator_status(
             safe_path = re.sub(r"[^A-Za-z0-9_.$\[\]-]", "?", path)[:256]
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
             return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
-        return None, "canonical v8 status could not be loaded; run defenseclaw observability validate"
+        return None, "telemetry status could not be loaded; run defenseclaw observability validate"
 
 
 def _fetch_native_delivery_summary(
@@ -12776,6 +15663,7 @@ def _fetch_native_delivery_summary(
 
     from defenseclaw.observability.custody_status import (
         NativeDeliverySummary,
+        gateway_api_addr,
         inspect_connector_custody,
         summarize_native_delivery,
     )
@@ -12789,7 +15677,9 @@ def _fetch_native_delivery_summary(
     if not database:
         database = str(Path(root) / "audit.db")
     try:
-        return summarize_native_delivery(inspect_connector_custody(database, root))
+        return summarize_native_delivery(
+            inspect_connector_custody(database, root, api_addr=gateway_api_addr(config))
+        )
     except Exception:  # noqa: BLE001 - TUI absence is bounded evidence, never a failure.
         return NativeDeliverySummary("no_evidence", "evidence_unavailable", 24)
 
@@ -12833,6 +15723,10 @@ def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
         return None
     payload = dict(payload)
     payload.setdefault("fetched_at", datetime.now(timezone.utc).isoformat())
+    # GAP-2260: tell "off in config" apart from "on in config, gateway not restarted".
+    ai_cfg = getattr(config, "ai_discovery", None)
+    if ai_cfg is not None:
+        payload.setdefault("configured_enabled", bool(getattr(ai_cfg, "enabled", False)))
     try:
         return AIUsageSnapshot.from_mapping(payload)
     except Exception:  # noqa: BLE001
@@ -13201,34 +16095,8 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
-    cleanup_only_actives = [
-        connector
-        for connector in actives
-        if isinstance(connector, str) and connector_paths.is_cleanup_only(connector)
-    ]
-    actives = [
-        connector
-        for connector in actives
-        if not (
-            isinstance(connector, str)
-            and connector_paths.is_cleanup_only(connector)
-        )
-    ]
-    if cleanup_only_actives and not actives and not roster_error:
-        roster_error = connector_paths.cleanup_only_guidance(cleanup_only_actives[0])
-
-    raw_claw_mode = str(getattr(claw, "mode", "") or "")
-    display_claw_mode = (
-        (actives[0] if actives else "")
-        if connector_paths.is_cleanup_only(raw_claw_mode)
-        else raw_claw_mode
-    )
-    raw_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
-    display_guardrail_connector = (
-        (actives[0] if actives else "")
-        if connector_paths.is_cleanup_only(raw_guardrail_connector)
-        else raw_guardrail_connector
-    )
+    display_claw_mode = str(getattr(claw, "mode", "") or "")
+    display_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
 
     # A one-entry ``guardrail.connectors`` map is still connector-scoped.
     # Project its effective values into the legacy singular Overview fields;
@@ -13341,6 +16209,12 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         connector_modes=connector_modes,
         connector_packs=connector_packs,
         connector_disabled=connector_disabled,
+        # A sandbox that is not set up reads "disabled" with the gateway
+        # down too, not "offline" (GAP-2361). Identity check, as status.
+        sandbox_enabled=getattr(getattr(config, "openshell", None), "enabled", False) is True,
+        # AI discovery that is off reads "disabled" with the gateway down
+        # too, not "offline" (GAP-2378).
+        ai_discovery_enabled=getattr(getattr(config, "ai_discovery", None), "enabled", False) is True,
         # A2: visible diagnostic when the roster enumeration failed.
         roster_error=roster_error,
         # N3: active-policy scanner action overrides (data.json), so the
@@ -13387,13 +16261,22 @@ def _panel_key(event: events.Key) -> str:
     # the logical key name "backspace".
     if event.key in {"backspace", "delete"} or event.character in {"\x7f", "\x08"}:
         return "backspace"
+    # A terminal delivers Ctrl+<letter> with its control character (Ctrl+R
+    # is "\x12"); panels match the key name ("ctrl+r"), as tests' synthetic
+    # keys spell it.
+    if event.key.startswith("ctrl+") and event.character and not event.character.isprintable():
+        return event.key
     if event.character:
         # Capital-letter keys that panels distinguish from their
         # lowercase form (e.g. ``M`` materialize bundled vs ``m`` no-op,
         # ``T`` Tools panel vs ``t`` activity transcript). Anything
         # outside this set is lowercased so global vim-style shortcuts
         # ignore Shift/CapsLock state.
-        if event.character in {"A", "C", "E", "G", "J", "M", "N", "R", "S", "T", "V", "X"}:
+        # ``D`` (background doctor) and ``Y`` (copy last output) are global
+        # bindings: folding them to ``d``/``y`` let Alerts turn Shift+D into
+        # "dismiss alert" and Overview into a foreground doctor preview.
+        # ``P`` is the Policies shortcut; Runtime keeps ``p`` for its planes.
+        if event.character in {"A", "C", "D", "E", "G", "J", "M", "N", "P", "R", "S", "T", "V", "X", "Y"}:
             return event.character
         return event.character.lower()
     return event.key
@@ -13439,6 +16322,7 @@ def _catalog_panel_invalidated_by_command(args: tuple[str, ...]) -> str | None:
                 "remove",
                 "restore",
                 "scan",
+                "unblock",
             },
         ),
         "tool": (
@@ -13457,6 +16341,138 @@ def _vim_key(key: str) -> str:
     return "esc" if key == "escape" else key
 
 
+def _typed_character(event: events.Key) -> str | None:
+    """The printable character a key typed, with its case, or None."""
+
+    character = event.character
+    if character and len(character) == 1 and character.isprintable():
+        return character
+    return None
+
+
+# Config keys the CLI reads from config.yaml on every command, so CLI
+# admission (mcp set, skill and plugin install) enforces a saved change at
+# once; only the gateway's own checks wait for the restart (GAP-2145).
+_CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
+
+
+def _cli_live_config_sections(entries: Iterable[Any]) -> str:
+    """The saved sections the CLI already applies ("asset_policy"), or ""."""
+
+    saved = {str(getattr(entry, "key", "")).split(".", 1)[0] for entry in entries}
+    return ", ".join(section for section in _CLI_LIVE_CONFIG_SECTIONS if section in saved)
+
+
+def _typed_seed(key: str, character: str | None) -> str:
+    """Text a Setup key should add to a field: the raw character, else ""."""
+
+    if character is not None:
+        return character
+    if key == "space":
+        return " "
+    return key if len(key) == 1 and key.isprintable() else ""
+
+
+_SETUP_FORM_NON_TEXT_KINDS = frozenset({"bool", "section", "preset", "whtype", "regid"})
+
+
+def _is_setup_form_text_field(field: Any) -> bool:
+    return field is not None and field.kind not in _SETUP_FORM_NON_TEXT_KINDS and not field.options
+
+
+def _is_setup_config_text_field(field: Any) -> bool:
+    return (
+        field is not None
+        and field.interactive
+        and field.kind not in {"bool", "choice", "header"}
+        and not field.options
+    )
+
+
+def _setup_form_validator(field: Any) -> Callable[[str], str | None] | None:
+    if field.kind != "int":
+        return None
+
+    def validate(value: str) -> str | None:
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            int(text)
+        except ValueError:
+            return "Enter a whole number."
+        return None
+
+    return validate
+
+
+def _setup_config_validator(field: Any) -> Callable[[str], str | None]:
+    def validate(value: str) -> str | None:
+        result = validate_config_field(field.with_value(value))
+        return result.message if result.severity == "error" else None
+
+    return validate
+
+
+# "  " + the 22-column key + " " in the ? help overlay.
+_HELP_DESC_INDENT = 25
+
+_SETUP_VIEW_TITLES = {
+    "wizards": "task list",
+    "goals": "goal menu",
+    "form": "wizard form",
+    "config": "config editor",
+    "first-run": "first-run",
+}
+
+# The key each Setup button presses. Wizard-form buttons share the keystroke
+# handler so submit validation, reveal and field moves match Ctrl+R / Esc /
+# Tab exactly; test_setup_keys.py checks these against the Setup keymaps.
+_SETUP_BUTTON_KEYS = {
+    "setup-mode-wizards": "w",
+    "setup-edit-list": "E",
+    "setup-save": "S",
+    "setup-revert": "r",
+    "setup-restart": "G",
+    "setup-clear-restart": "C",
+    "setup-wizard-run": "ctrl+r",
+    "setup-wizard-cancel": "esc",
+    "setup-wizard-prev": "shift+tab",
+    "setup-wizard-next": "tab",
+    "setup-wizard-reveal": "ctrl+t",
+    "setup-wizard-clear": "ctrl+u",
+}
+
+# Clickable section arrows on the config editor's breadcrumb line.
+_SETUP_SECTION_NAV = "◂ prev | next ▸"
+
+
+def _truncate_ellipsis(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 1:
+        return value[:width]
+    return value[: width - 1] + "…"
+
+
+def _longest_line(value: str) -> int:
+    return max(len(line) for line in value.split("\n"))
+
+
+# The Setup table shows five lines at 80x24: a section value of at most four
+# stays on screen with the field below it.
+_SECTION_VALUE_MAX_LINES = 4
+
+
+def _fit_section_value(value: str, width: int) -> str:
+    """Wrap each line of ``value`` to ``width`` if it all fits in four lines, else cut each line."""
+    lines = value.split("\n")
+    wrapped = [part for line in lines for part in textwrap.wrap(line, width, subsequent_indent="  ") or [line]]
+    if len(wrapped) <= _SECTION_VALUE_MAX_LINES:
+        return "\n".join(wrapped)
+    return "\n".join(_truncate_ellipsis(line, width) for line in lines)
+
+
 def _truncate_display(value: str, width: int) -> str:
     if len(value) <= width:
         return value
@@ -13469,6 +16485,12 @@ def _styled_cell(column: str, value: str) -> Text:
     text = Text(value)
     normalized = value.strip().lower()
     column_key = column.strip().lower()
+    if column_key == "status" and (glyph_style := setup_center.glyph_style(value)):
+        # Setup task states: ✓ set up, ! needs attention, ○ not set up, – n/a.
+        text.stylize(glyph_style)
+        if value.startswith("!"):
+            text.stylize("bold")
+        return text
     if column_key in {"state", "status", "active", "enabled"} or normalized in {
         "active",
         "allowed",
@@ -13698,12 +16720,103 @@ def _format_elapsed(seconds: float) -> str:
     return f"{minutes}m{remaining:02d}s"
 
 
+STRIP_OUTPUT_LINE_CAP = 2000
+
+
+def _is_bare_json_punctuation(text: str) -> bool:
+    """True for the closing ``]`` / ``}`` of --json output: no use as a summary."""
+
+    stripped = text.strip()
+    return bool(stripped) and not stripped.strip("[]{},")
+
+
 def _truncate_for_strip(value: str, width: int) -> str:
-    limit = max(24, width - 38)
+    # The snippet has a row of its own in the card, so it may use the card's
+    # width; "width - 38" cut the registry summary at 80 columns (GAP-1754).
+    return _fit_keeping_next_step(value, max(24, width - 2))
+
+
+_NEXT_STEP_SEP = " · next: "
+
+
+def _status_text_fills_line(text: str, width: int) -> bool:
+    """True when ``text`` leaves no room for the status line's health strip."""
+
+    try:
+        cells = Text.from_markup(text).cell_len
+    except Exception:  # noqa: BLE001 - not markup; count it as typed.
+        cells = len(text)
+    # The status line pads one cell on each side; the strip needs its
+    # "  │  " separator and a few cells to say anything.
+    return cells + 12 > max(0, width - 2)
+
+
+def _fit_keeping_next_step(value: str, limit: int) -> str:
+    """Cut ``value`` to ``limit`` cells, shortening the result before its
+    "· next: ..." step so the step stays readable at 80x24 (GAP-2133)."""
+
     cleaned = value.replace("\n", " ").strip()
     if len(cleaned) <= limit:
         return cleaned
+    head, sep, step = cleaned.rpartition(_NEXT_STEP_SEP)
+    room = limit - len(sep) - len(step)
+    if sep and room >= 12:
+        return f"{head[: room - 1].rstrip()}…{sep}{step}"
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+_LOAD_STATUS_RE = re.compile(r"^(Loading .+\.\.\.|.+: \d+ loaded\.|Inventory updated\.)$")
+
+
+def _is_load_status(text: object) -> bool:
+    return bool(_LOAD_STATUS_RE.match(str(text or "")))
+
+
+# How a command ended (``_report_command_result`` and the cancel paths).
+_COMMAND_RESULT_RE = re.compile(
+    r"^(Done: .+|Cancelled: .+|Command cancelled\.|.+ failed \(exit \d+\)\. Activity shows the output\.)$"
+)
+
+
+_REGISTRY_FOCUS_FOUND = "Showing registry entry {name}."
+_REGISTRY_FOCUS_MISSING = "{name} is not from a registry source. Showing all registry entries."
+
+
+def _is_registry_focus_status(text: str) -> bool:
+    return text.startswith("Showing registry entry ") or text.endswith(
+        " is not from a registry source. Showing all registry entries."
+    )
+
+
+# Panels the shared connector filter (``m``) narrows; the help overlay and
+# the picker's subtitle both name them (GAP-1986).
+_CONNECTOR_FILTER_PANELS = "Overview, Alerts, Audit, Logs, Skills, MCPs, Plugins, Tools, Inventory"
+
+_CATALOG_FILTER_PROMPT = "Type to filter. Enter or Esc goes back to the list."
+
+# Seconds a command result keeps showing after you switch panels (GAP-1821).
+_COMMAND_RESULT_FOLLOW_S = 15.0
+
+
+def _is_command_result(text: object) -> bool:
+    return bool(_COMMAND_RESULT_RE.match(str(text or "")))
+
+
+def _service_reported(state: str) -> bool:
+    return (state or "").strip().lower() not in {"", "unknown"}
+
+
+def _palette_risk_style(badge: str) -> str:
+    """Colour for a palette category/risk badge: danger stands out."""
+
+    risk = badge.rstrip("]").rpartition("/")[2]
+    if risk == "destructive":
+        return f"bold {TOKENS.accent_red}"
+    if risk in {"restart", "secret"}:
+        return TOKENS.accent_amber
+    if risk == "read-only":
+        return TOKENS.text_muted
+    return TOKENS.text_secondary
 
 
 def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
@@ -13731,6 +16844,15 @@ def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
         preview = preview + " " + " ".join(entry.cli_args)
     hint = entry.arg_hint if entry.needs_arg else ""
     return entry.tui_name, badge, preview, hint
+
+
+def _home_short(path: str) -> str:
+    """``path`` with the home directory shown as ``~`` (display only)."""
+
+    home = os.path.expanduser("~").rstrip("/\\")
+    if home and len(home) > 1 and (path == home or path.startswith((home + "/", home + "\\"))):
+        return "~" + path[len(home) :]
+    return path
 
 
 def _diagnose_summary_line(lines: list[str]) -> str:
@@ -13782,26 +16904,25 @@ def _derive_command_label(binary: str, args: tuple[str, ...]) -> str:
 
 
 def _severity_breakdown_markup(critical: int, high: int, medium: int, low: int) -> str:
-    """Render a compact ``C0 H3 M5 L2`` breakdown in colored markup.
+    """Render a ``Critical 5 · High 2`` breakdown in colored markup.
 
     Used in metric-tile detail rows so users can see severity context at
-    a glance without opening the Alerts panel. Zero counts are dimmed so
-    only non-zero values draw the eye.
+    a glance without opening the Alerts panel. Only non-zero severities are
+    listed, in words: the old ``C5 H2 M0 L0`` codes were not explained
+    anywhere (GAP-1545).
     """
 
-    def cell(letter: str, count: int, accent: str) -> str:
-        if count <= 0:
-            return f"[{TOKENS.text_muted}]{letter}0[/]"
-        return f"[{accent} bold]{letter}{count}[/]"
-
-    return " ".join(
-        (
-            cell("C", critical, TOKENS.accent_red),
-            cell("H", high, TOKENS.accent_orange),
-            cell("M", medium, TOKENS.accent_amber),
-            cell("L", low, TOKENS.accent_blue),
+    cells = [
+        f"[{accent} bold]{word} {count}[/]"
+        for word, count, accent in (
+            ("Critical", critical, TOKENS.accent_red),
+            ("High", high, TOKENS.accent_orange),
+            ("Medium", medium, TOKENS.accent_amber),
+            ("Low", low, TOKENS.accent_blue),
         )
-    )
+        if count > 0
+    ]
+    return " · ".join(cells) if cells else f"[{TOKENS.text_muted}]none open[/]"
 
 
 def _metric_severity_bucket(severity: str) -> str:
@@ -13861,7 +16982,25 @@ def _event_histogram(
     return tuple(counts)
 
 
-def _policy_posture(cfg: OverviewConfig | None) -> str:
+def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) -> str:
+    """Overview's "Policy posture": the active named policy's real thresholds.
+
+    ``active`` is the ``policy_catalog.PolicySummary`` the Policies loader read
+    (``strict · block MEDIUM+ · alert LOW+``). Until it arrives (or when the
+    catalog can't be read) the wording falls back to the guardrail mode and
+    rule pack. A multi-connector install whose connectors diverge says so.
+    """
+
+    if cfg is None and active is None:
+        return "unknown"
+    if active is not None:
+        posture = policy_posture_text(active)
+        if cfg is not None and len(cfg.connector_modes) > 1:
+            packs = {p for _conn, p in cfg.connector_packs if p}
+            modes = {m for _conn, m in cfg.connector_modes if m}
+            if len(packs) > 1 or len(modes) > 1:
+                posture += " · per-connector packs (see roster)"
+        return posture
     if cfg is None:
         return "unknown"
     mode = cfg.guardrail_mode or "observe"
@@ -13886,6 +17025,10 @@ def _policy_posture(cfg: OverviewConfig | None) -> str:
 def _enforcement_label(cfg: OverviewConfig | None) -> str:
     if cfg is None:
         return "not configured"
+    if not cfg.guardrail_enabled and cfg.connector_modes:
+        # After "defenseclaw uninstall" the connectors stay in the config
+        # but nothing is enforced (GAP-1561).
+        return "off - guardrail disabled, nothing is guarded"
     # Multi-connector: naming a single primary connector ("antigravity hook
     # observability") hides the other active connectors. Report the count
     # instead; the per-connector modes live in the roster below.
@@ -13903,13 +17046,29 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
     return f"{connector} {surface} {posture} ({mode})"
 
 
+def _agents_summary(cfg: OverviewConfig | None, count: int, gateway_down: bool = False) -> str:
+    """``"6 active"``, or the CLI status wording when the guardrail is off.
+
+    With the gateway stopped nothing is live, so the row says so beside the
+    offline SERVICES list instead of "9 active" (GAP-2492).
+    """
+
+    if cfg is not None and not cfg.guardrail_enabled:
+        return f"{count} configured, guardrail off (nothing is guarded)"
+    if gateway_down:
+        return f"{count} configured (gateway not running)"
+    return f"{count} active"
+
+
 def _cycle_value(current: str, options: tuple[str, ...], delta: int) -> str:
     if not options:
         return current
     try:
         index = options.index(current)
     except ValueError:
-        index = 0
+        # Nothing picked yet (Remove a connector, GAP-2387): → picks the
+        # first option, ← the last.
+        return options[0] if delta > 0 else options[-1]
     return options[(index + delta) % len(options)]
 
 
@@ -13919,14 +17078,54 @@ def _clamp_int(value: int, lower: int, upper: int) -> int:
     return max(lower, min(value, upper))
 
 
+# Share of the split the config editor's aside takes (the
+# "#panel-split.narrow-aside #panel-aside" CSS rule; GAP-2253).
+CONFIG_ASIDE_SHARE = 0.28
+# The task detail beside the Setup task table (the #panel-aside CSS width).
+TASK_ASIDE_SHARE = 0.38
+
+
 def _config_display_value(field: Any) -> str:
     value = str(getattr(field, "value", "") or "")
     if getattr(field, "kind", "") == "password":
         return "(empty)" if not value else "****"
-    return value
+    # Paths under the home directory read "~/..." so they fit the Value
+    # column ("/Users/dcm-fc3/.d…" at 160 columns, GAP-2253); the side
+    # pane and the edit box keep the full path.
+    return _home_short(value)
+
+
+def _config_label_cells(field: Any, header_room: int, label_room: int) -> tuple[str, str]:
+    """The config editor's Field and Value cells for one row.
+
+    A group header (".. Unified LLM (for scanners + guardrail) ..") has
+    no value, so the words that do not fit the Field column move to the Value
+    cell at a word boundary instead of ending in "…" (GAP-2362). A trailing
+    "(...)" note moves whole: ".. Unified LLM .." and "for scanners +
+    guardrail", as a phrase split at the column gap read ".. Unified LLM
+    (shared by" with a run of spaces in it (GAP-2493).
+    """
+
+    label = str(getattr(field, "label", "") or "")
+    is_group = getattr(field, "kind", "") == "header" and label.startswith("..")
+    if not is_group or str(getattr(field, "value", "") or ""):
+        return _truncate_ellipsis(label, label_room), _config_display_value(field)
+    if len(label) <= header_room:
+        return label, ""
+    name, paren, note = label.removesuffix("..").rstrip().partition(" (")
+    if paren and note.endswith(")") and len(f"{name} ..") <= header_room:
+        return f"{name} ..", note[:-1]
+    cut = label.rfind(" ", 0, header_room + 1)
+    if cut <= 2:
+        return _truncate_ellipsis(label, header_room), ""
+    return label[:cut], label[cut + 1 :]
 
 
 def _validation_label(field: Any) -> str:
+    if getattr(field, "kind", "") == "header":
+        # A group header has nothing to validate; a read-only row says so
+        # here, not in its Value (GAP-2253).
+        return "" if str(getattr(field, "label", "")).startswith("..") else "read-only"
     result = validate_config_field(field)
     if result.message:
         return f"{result.severity}: {result.message}"

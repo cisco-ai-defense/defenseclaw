@@ -31,36 +31,55 @@ before locating or editing Windows state.
 <Files>
   <Folder name="~/.defenseclaw" defaultOpen>
     <File name="config.yaml" />
-    <File name="audit.db" />
     <File name=".env" />
+    <File name="audit.db" />
+    <File name="device.key" />
     <File name="doctor_cache.json" />
     <File name="picked_connector" />
+    <File name="hook_contract_lock.json" />
+    <File name="custom-providers.json (optional)" />
+    <File name="judge_bodies.db (when judge bodies are retained)" />
+    <File name="gateway.log" />
+    <File name="watchdog.log" />
     <Folder name=".venv">
       <File name="…" />
     </Folder>
     <Folder name="hooks">
       <File name="<connector>-hook.sh" />
     </Folder>
+    <Folder name="logs">
+      <File name="hook-failures.jsonl" />
+    </Folder>
     <Folder name="policies" defaultOpen>
-      <Folder name="guardrail">
-        <Folder name="default">
+      <Folder name="guardrail" defaultOpen>
+        <Folder name="default" defaultOpen>
           <Folder name="rules">
+            <File name="c2.yaml" />
+            <File name="cognitive.yaml" />
             <File name="commands.yaml" />
+            <File name="enterprise-data.yaml" />
+            <File name="local-patterns.yaml" />
             <File name="secrets.yaml" />
             <File name="sensitive-paths.yaml" />
+            <File name="trust-exploit.yaml" />
           </Folder>
           <Folder name="judge">
             <File name="injection.yaml" />
             <File name="pii.yaml" />
             <File name="tool-injection.yaml" />
           </Folder>
+          <File name="sensitive-tools.yaml" />
           <File name="suppressions.yaml" />
         </Folder>
         <Folder name="strict" />
         <Folder name="permissive" />
       </Folder>
-      <Folder name="codeguard" />
+      <Folder name="rego" />
     </Folder>
+    <Folder name="codeguard-rules" />
+    <Folder name="plugins" />
+    <Folder name="quarantine" />
+    <Folder name="backups" />
     <Folder name="connector_backups">
       <Folder name="<connector>">
         <File name="<logical-name>.json" />
@@ -68,6 +87,10 @@ before locating or editing Windows state.
     </Folder>
   </Folder>
 </Files>
+
+`hooks/`, `hook_contract_lock.json`, and `connector_backups/` appear once a
+connector is set up; `backups/` holds the timestamped copies that commands
+such as `setup redaction` write before they change `config.yaml`.
 
 ## Doctor cache
 
@@ -123,25 +146,41 @@ missing cache is normal before the first Doctor run.
 The shape below shows the normal source-authoring surface. Every block is
 optional, and setup commands preserve comments and unrelated hand edits. Use
 `defenseclaw config reference observability` for the generated all-knobs
-reference instead of copying every default into this file.
+observability reference instead of copying every default into this file, and
+`defenseclaw config reference --format json-schema` for the schema of every
+section (each field with its allowed values). `defenseclaw config validate`
+points to the JSON schema when a field is wrong.
 
 ```yaml
 config_version: 8             # strict current schema; upgrade migrates supported v7 files
 
 claw:
-  mode: claudecode             # single-connector mode; setup aliases select this with --connector.
-                               # Set to `multi` automatically when more than one
-                               # connector is active (see guardrail.connectors below).
-                               # This value is mirrored to the OTel resource attr
-                               # `defenseclaw.claw.mode`.
+  mode: claudecode             # the primary connector; setup aliases select this with --connector.
+                               # With several connectors active it names the primary one
+                               # (see guardrail.connectors below). It is mirrored to the
+                               # OTel resource attr `defenseclaw.claw.mode` only while a
+                               # single connector is active.
 
 gateway:
   host: 127.0.0.1              # upstream agent gateway host (OpenClaw/ZeptoClaw fleet link)
   port: 18789                  # upstream agent gateway port
+  fleet_mode: auto             # auto | enabled | disabled: when to dial host:port (see below)
   api_port: 18970              # gateway REST API port (hooks + TUI dial this)
   api_bind: ""                 # REST API bind override; normally 127.0.0.1 when empty
   config_reload:
     mode: hot                  # hot | restart; omitted means hot
+  watcher:                     # install watcher for new skills, plugins and MCP servers
+    enabled: true
+    skill:
+      enabled: true
+      take_action: true        # apply skill_actions (quarantine/block) to a rejected new skill; false = alert only
+      dirs: []                 # non-empty replaces the connector's own skill folders
+    plugin:
+      enabled: true
+      take_action: true        # same for new plugins (plugin_actions)
+      dirs: []
+    mcp:
+      take_action: true        # block a rejected new MCP server in the connector's MCP config
 
 # One observability graph owns collection, local history, routing, redaction,
 # sampling, metrics policy, and every optional destination. Defaults collect
@@ -227,7 +266,7 @@ observability:
 # for the connector-aware variant.
 llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
-  model: claude-sonnet-4-5
+  model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
   base_url: ""                 # optional override; LiteLLM picks a default per provider
   role: unified                # unified | agent | judge
@@ -290,7 +329,7 @@ routing:
   models:
     - name: fast              # classifier alias; unique within this catalog
       provider: openai
-      model: gpt-4o-mini
+      model: gpt-5.4-mini
       base_url: https://api.openai.com
       api_key_env: OPENAI_API_KEY
       capabilities: [general]
@@ -311,12 +350,14 @@ routing:
 guardrail:
   enabled: true
   connector: claudecode        # actively enforced connector
-  mode: action                 # observe | action
-  scanner_mode: local          # local | remote | both
+  mode: action                 # observe | action (default observe)
+  scanner_mode: local          # local | remote | both (default both)
   rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
+  block_at: ""                 # CRITICAL | HIGH | MEDIUM | LOW; empty -> the rule pack's level
+  alert_at: ""                 # same values; never above block_at
   port: 4000                   # guardrail proxy port
   block_message: ""            # custom; empty -> default
-  detection_strategy: regex_only  # regex_only | regex_judge | judge_first
+  detection_strategy: regex_judge  # default; regex_only | regex_judge | judge_first
 
   cisco:
     endpoint: ""
@@ -329,7 +370,7 @@ guardrail:
   # changing what the agent talks to.
   judge:
     enabled: false
-    model: anthropic/claude-sonnet-4-20250514
+    model: anthropic/claude-sonnet-4-6
     api_base: ""
     api_key_env: DEFENSECLAW_LLM_KEY
     llm: {}                    # same shape as top-level `llm:` above
@@ -355,6 +396,7 @@ guardrail:
       hook_fail_mode: closed   # open | closed; inherits guardrail.hook_fail_mode
       block_message: ""        # custom; inherits guardrail.block_message
       rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict  # inherits guardrail.rule_pack_dir
+      block_at: HIGH           # inherits guardrail.block_at, then the rule pack's level
       hilt:
         enabled: true
         min_severity: HIGH
@@ -371,17 +413,50 @@ webhooks:
     min_severity: HIGH
 ```
 
-When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1` except in
-standalone OpenShell mode: if `guardrail.host` is non-empty and is not the
-literal `localhost`, the management API inherits that host. Pin
-`gateway.api_bind: 127.0.0.1` when the API must stay loopback-only. See
+When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. The only
+exception is a host that still carries the removed legacy standalone sandbox
+(`openshell.mode: standalone` with a `guardrail.host` that is non-empty and not
+the literal `localhost`): the management API inherits `guardrail.host` until
+`defenseclaw sandbox legacy-cleanup` resets the config. An explicit
+`gateway.api_bind` always wins. See
 [Gateway API: bind address](/docs/reference/gateway-api#bind-address).
+
+The `openshell:` block for the NVIDIA OpenShell sandbox is described in
+[OpenShell sandbox settings](#openshell-sandbox-settings) below.
+
+### OpenClaw fleet link
+
+The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and
+`gateway.port` only when there is one to reach. `gateway.fleet_mode: enabled`
+always dials and `disabled` never does. With `auto`, the default:
+
+- the `openclaw` and `zeptoclaw` connectors dial;
+- `codex` and `claudecode` dial only when `gateway.host` is not loopback;
+- every other connector, and an install with no connector, does not dial.
+
+`claw.mode` defaults to `openclaw`, so an install that never picked a
+connector (a sandbox-only install, for example) names OpenClaw without having
+it. When only `claw.mode` names OpenClaw (`guardrail.connector` is empty and
+`guardrail.connectors` has no `openclaw` entry), `gateway.host` is loopback,
+`fleet_mode` is unset or `auto`, and OpenClaw is not installed, the gateway
+does not dial. OpenClaw counts as installed when an `openclaw.json` exists at
+`claw.config_file` or in `claw.home_dir`, or an `openclaw` binary is on `PATH`
+or in `/usr/local/bin`, `/opt/homebrew/bin`, `~/.npm-global/bin` or
+`~/.local/bin`. Instead of reconnecting forever, `defenseclaw-gateway status`
+shows the Gateway subsystem `DISABLED` with
+`OpenClaw gateway off (OpenClaw is not installed)`, doctor reports
+`OpenClaw gateway: off (OpenClaw is not installed)`, the TUI and the Mac app
+show the same text, and `OPENCLAW_GATEWAY_TOKEN` is not required. The gateway
+checks when it starts, so restart it after installing OpenClaw, or set
+`fleet_mode: enabled` to dial regardless.
+
+### Routing and observability behavior
 
 The `routing` block affects OpenClaw and ZeptoClaw only when they use the proxy's
 OpenAI-compatible Chat Completions path. Hook connectors and other provider API
 shapes keep their existing path. `defenseclaw keys list` dynamically discovers
 each non-empty `api_key_env`; the classifier never receives the key value. See
-[Semantic model routing](/docs/setup/semantic-routing) for the exact lifecycle,
+[Semantic model routing](/docs/guardrail/semantic-routing) for the exact lifecycle,
 privacy boundary, and compatibility matrix.
 
 The source file stays small because omissions compile to explicit effective
@@ -420,7 +495,8 @@ Exactly one generated local SQLite destination is mandatory. It is configured
 only through `observability.local`, not listed under `destinations`, and cannot
 be disabled or filtered. Omitting `retention_days` uses the seven-day rolling
 default shown above. Set a larger value only when the additional local storage
-and retention scope are intentional. `retention_days: 0` means retain forever
+and retention scope are intentional. The same window bounds AI discovery scan
+history in `<data_dir>/inventory.db`. `retention_days: 0` means retain forever
 and produces a capacity warning. `guardrail.retain_judge_bodies` independently
 controls whether new raw judge bodies are captured.
 
@@ -460,9 +536,334 @@ Live reload rejects storage identity changes such as `data_dir`, audit DB path,
 judge bodies DB path, and `gateway.device_key_file` unless restart mode is
 enabled or the operator restarts the gateway manually.
 
-The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
+The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/guardrail/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 
-## `guardrail.connectors` and `claw.mode: multi`
+## OpenShell sandbox settings
+
+The `openshell:` block configures NVIDIA OpenShell 0.1 sandboxes, the
+[`defenseclaw sandbox`](/docs/reference/sandbox-cli) commands. You rarely
+edit it by hand. `sandbox setup` writes `enabled`, `harnesses`, and
+`upstream_telemetry`, and `sandbox enable` and `disable` keep `wrappers` in
+step with your shell rc files. `sandbox policy allow` and `block` edit the
+egress lists, and "always" answers to an unblock or an ask are saved to
+`egress.unblocked` or `egress.block`. See also
+[Sandbox](/docs/sandboxes/guide). Policy packs, how the layers combine, and the
+administrator's `openshell.admin` limits are explained in
+[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs).
+
+<Callout title="Where sandboxes run">
+Sandboxes run on Linux and on Apple-silicon Macs, with the DefenseClaw
+gateway and the OpenShell gateway both running as your own user. On a Mac
+they are OpenShell MicroVMs, which mount no host folders, so
+`openshell.workdir.mode` is always `copy` there (see
+[macOS](/docs/sandboxes/guide#macos)). In a `managed_enterprise`
+install the gateway doesn't start the sandbox runtime yet: `/health`
+reports the `sandbox` subsystem as `disabled`, and `sandbox setup` and
+`sandbox run` refuse to start. The `openshell` keys, `openshell.admin`
+included, are still validated there.
+</Callout>
+
+The posture is layered. The selected **sandbox policy pack** supplies every
+default, the keys below override it, the options of `sandbox run` override
+those, and `openshell.admin` clamps the result. Keys the pack governs have no
+loader default, so an unset key follows the pack: `profile`, `yolo`,
+`workdir.mode`, `workdir.max_upload_mb`, `egress.ports`,
+`egress.large_upload_mb`, `egress.block_large_uploads`, `egress.feed`, and
+`mcp.import`. The mask, unmask,
+block, and allow lists add to the pack's lists. Some settings exist only in a
+pack, so a custom pack is the way to change them: the approvals mode, the
+review list, `mcp.blocked_tools`, `mcp.project_servers` (whether the MCP
+servers a repository defines may start), and `hooks.on_tamper` (whether a
+sandbox whose hooks were bypassed is stopped or only reported).
+
+```yaml
+openshell:
+  enabled: false               # true starts the sandbox runtime; sandbox setup sets it
+  binary: openshell            # the upstream openshell CLI
+  gateway:
+    name: ""                   # OpenShell gateway registration; "" = the active one
+    workspace: ""              # OpenShell workspace; "" = default
+  ingress_port: 0              # sandbox hook ingress; 0 = gateway.api_port + 1
+  egress_port: 0               # DefenseClaw egress proxy; 0 = gateway.api_port + 2
+  pack: ""                     # "" = open; a built-in, a name under pack_dir, or an absolute path
+  pack_dir: ~/.defenseclaw/policies/sandbox   # default <data_dir>/policies/sandbox
+  profile: ""                  # "" follows the pack; open | balanced | strict
+  yolo: null                   # null follows the pack; true | false
+  llm: auto                    # model credential a run shares; see below
+  keep_headless: false         # true keeps a --prompt run's sandbox
+  workdir:
+    mode: ""                   # "" follows the pack; mount | copy
+    masks: []                  # secret-file globs added to the pack's masks
+    unmask: []                 # project globs that stay visible despite a mask
+    max_upload_mb: 0           # copy-mode size limit; 0 follows the pack
+    git_depth: 200             # history depth of the copy-mode clone
+    on_exit: ask               # ask | keep | undo
+    undo_ignored:
+      enabled: false           # true: undo restores these directories (Linux mount mode)
+      max_mb: 500              # cap on one undo point's copies, in MiB
+      dirs: [node_modules, .venv, venv]
+  egress:
+    block: []                  # host patterns added to the pack's block list
+    allow: []                  # host patterns added to the allow list
+    unblocked: []              # "always" unblocks and approvals the daemon saves
+    ports: []                  # replaces the pack's proxy ports when non-empty
+    large_upload_mb: 0         # first-seen-host upload alert in MiB; 0 follows the pack
+    block_large_uploads: false # true also cuts that upload; false follows the pack
+    feed: ""                   # "" follows the pack; builtin | none
+  image:
+    base: ""                   # "" = the pinned NVIDIA community base image
+    harness_versions: {}       # harness name -> exact version
+  approvals:
+    debounce_ms: 3000          # batch approvals until hooks are quiet this long
+    agent_proposals: null      # null = true
+  resources:
+    cpu: ""                    # "" = unlimited
+    memory: ""                 # "" = unlimited
+  harnesses: []                # harnesses set up for sandboxes
+  wrappers: []                 # harnesses with the shell wrapper
+  mcp:
+    import: null               # null follows the pack
+    host_ports: []             # host ports opened for host-side MCP servers
+  upstream_telemetry: false    # OpenShell's own anonymous usage telemetry
+  token_delivery: provider     # provider | env
+  middleware:
+    enabled: false             # reserved; nothing reads it yet
+  admin: {}                    # administrator limits; see below
+```
+
+### Sandbox keys
+
+| Key | Default | Values and rules |
+| --- | --- | --- |
+| `enabled` | `false` | The sandbox switch. `true` starts the sandbox runtime with the API: the hook ingress and egress proxy listeners and the sandbox manager behind the [sandbox API](/docs/reference/gateway-api#sandbox-api). It also turns on the port checks under [Validation and reload](#validation-and-reload), and a change restarts the API listener. `sandbox setup` sets it to `true`, and `sandbox teardown` to `false`. |
+| `binary` | `openshell` | The upstream `openshell` CLI, used for terminal attach, command runs, file transfer, and provider profile imports. A command name looked up on `PATH`, or an absolute path. A relative path with a separator, such as `bin/openshell` or `./openshell`, is refused: it would run from the project folder. |
+| `gateway.name` | `""` | The local OpenShell gateway registration. Empty selects the active registration. At most 128 characters. |
+| `gateway.workspace` | `""` | The OpenShell workspace (tenant). Empty selects `default`. At most 128 characters. |
+| `ingress_port` | `0` | The sandbox hook ingress port, 0–65535. `0` means `gateway.api_port + 1` (18971 by default). Its OpenShell provider profile is `defenseclaw-ingress-<port>`. Sandboxes keep the port their image and policy were built for, so re-create them after a change. |
+| `egress_port` | `0` | The egress proxy port, 0–65535. `0` means `gateway.api_port + 2` (18972 by default). |
+| `pack` | `""` | The sandbox policy pack: `open`, `balanced`, `strict`, a custom pack name under `pack_dir`, or an absolute path (or `~/…`) to a `pack.yaml` or its directory. Empty selects `open`. |
+| `pack_dir` | `<data_dir>/policies/sandbox` | Where custom packs live, as `<name>/pack.yaml`. An absolute path, or one starting with `~/`. Empty turns custom pack names off. |
+| `profile` | `""` | `open`, `balanced`, or `strict`. Empty follows the pack's network mode. |
+| `yolo` | `null` | Skip-permissions mode for the harness. `null` follows the pack. |
+| `keep_headless` | `false` | `true` keeps the sandbox a headless `sandbox run` creates (`--prompt`, or the harness's print mode, such as the shell wrapper's `claude -p`), as `--keep` does for one run. By default it is deleted when the run ends and nothing is left in it to bring back or undo, by the rules of `--rm`. |
+| `llm` | `auto` | The model credential a run shares with its sandbox: `auto` (the first key found for the harness, an Amazon Bedrock key last), `none`, `anthropic`, `claude-oauth`, `openai`, `bedrock`, or `gemini`. It is the default of `sandbox run --llm`, so the runs the shell wrappers, the TUI and the macOS app start take it too; `--llm` overrides it for one run. A provider the harness has no profile for falls back to `auto`; one whose key is not set refuses the run. |
+| `workdir.mode` | `""` | `mount` (live bind mount) or `copy`. Empty follows the pack. |
+| `workdir.masks` | `[]` | Project globs of secret files, added to the pack's masks. |
+| `workdir.unmask` | `[]` | Project globs that stay visible even though a mask covers them, added to the pack's own unmask list. |
+| `workdir.max_upload_mb` | `0` | Copy-mode size limit in MiB, 0–1048576. `0` follows the pack. |
+| `workdir.git_depth` | `200` | History depth of the copy-mode clone, 0–1000000. `0` uses 200. |
+| `workdir.undo_ignored.enabled` | `false` | Whether a mounted project's undo point keeps a copy of the directories in `workdir.undo_ignored.dirs` that git ignores (in a folder without git, the dependency directories its snapshot skips), so `sandbox undo` restores them as the session found them. Copies are file clones where the filesystem supports them (btrfs, XFS) and byte copies otherwise (ext4). It applies from the next session's start, on Linux in mount mode; copy mode, every sandbox on a Mac, has no undo point. |
+| `workdir.undo_ignored.max_mb` | `500` | The cap on one undo point's copies in MiB, 0–1048576; `0` means 500. A directory whose copy would pass it keeps none, and undo reports it as before. |
+| `workdir.undo_ignored.dirs` | `[node_modules, .venv, venv]` | Directory names kept, matched at any depth: one path segment, not `.git`, up to 64 names. Empty means the default. |
+| `workdir.on_exit` | `ask` | What happens to a mounted project's changes when a session ends: `ask`, `keep`, or `undo`. Without a terminal, or with `--yes`, `ask` keeps them. |
+| `egress.block` | `[]` | Host patterns added to the pack's block list. An unblock can't lift an entry; remove it to reach the host. A "reject always" answer to an ask adds its hosts here. |
+| `egress.allow` | `[]` | Host patterns added to the allow list. An entry exempts the host from the blocklist feed, and one that names a private host (an exact name, an intranet wildcard such as `*.corp`, or an address) opens it. Under `strict`, a direct connection to an entry is approved without asking. Entries that cover every host or a whole top-level domain are ignored, and all entries are ignored when `admin.allow_unblock` is `false`. |
+| `egress.unblocked` | `[]` | Hosts the daemon saves when you choose "always" for an unblock or an approval. Validated like `egress.allow`, and ignored when `admin.allow_unblock` is `false`. Unlike `egress.allow`, an entry here lifts only blocklist-feed and allowlist refusals: it never opens a private address the name resolves to. |
+| `egress.ports` | `[]` | Destination ports for the egress proxy, 1–65535, unique, at most 64. A non-empty list replaces the pack's ports. |
+| `egress.large_upload_mb` | `0` | Report an upload of more than this many MiB to a host the sandbox hasn't contacted before, 0–1048576. `0` follows each sandbox's pack, including a run's `--pack`. A change reaches running sandboxes on the next reload. |
+| `egress.block_large_uploads` | `false` | `true` also cuts that upload before the chunk that crosses the threshold and refuses the sandbox's later requests to the host (and to other new hosts under its domain or at its address), for every sandbox. The feed shows a ✗ with the threshold, and `defenseclaw sandbox unblock` lifts the block for a host. Hosts on an allow list you or your administrator wrote, and hosts you unblocked, are only reported. `false` follows each sandbox's pack (`egress.block_large_uploads`); it can't turn a pack's block off. The block acts on the report, so a sandbox whose pack turns the report off (`large_upload_mb: 0`) keeps it off, and `sandbox policy explain` says why. See [Large-upload alert threshold](/docs/sandboxes/policy-packs#large-upload-alert-threshold). |
+| `egress.feed` | `""` | `builtin` turns the built-in blocklist feed on, `none` turns the feeds off. Empty follows the pack. |
+| `image.base` | `""` | A bring-your-own base image. The image build refuses a base that isn't pinned by digest (`<image>@sha256:<64 hex digits>`). Empty selects the pinned NVIDIA OpenShell community base image. |
+| `image.harness_versions` | `{}` | Harness name to exact version, at most 64 entries. The image build refuses a version outside DefenseClaw's reviewed hook contract. |
+| `approvals.debounce_ms` | `3000` | 0–600000. How long hooks must be quiet before the sandbox manager applies a batch of approvals: every OpenShell policy reload closes open connections. |
+| `approvals.agent_proposals` | `null` | Whether the agent may submit its own connection requests for triage; `false` rejects them. `null` means `true`. |
+| `resources.cpu` | `""` | CPU request: cores (`"2"`, `"1.5"`) or millicores (`"500m"`). Empty means unlimited. `sandbox run --cpu` overrides it. |
+| `resources.memory` | `""` | Memory request: bytes with an optional `Ki`, `Mi`, `Gi`, `Ti` or `k`, `K`, `M`, `G`, `T` suffix (`"512Mi"`, `"4Gi"`). Empty means unlimited. `sandbox run --memory` overrides it. |
+| `harnesses` | `[]` | The harnesses set up for sandboxes, such as `claudecode` and `codex`. `sandbox setup` writes it, and `setup`, `image build`, and `doctor` default to it (then to Claude Code and Codex). At most 64, unique. |
+| `wrappers` | `[]` | The harnesses whose command runs in a sandbox through the shell wrapper. `sandbox enable` and `disable` record it; the wrapper itself lives in your shell rc file. At most 64, unique. |
+| `mcp.import` | `null` | Whether the harness's MCP servers come along. `null` follows the pack. |
+| `mcp.host_ports` | `[]` | Host ports you agreed to open for MCP servers running on your machine, 1–65535, unique, at most 64. Each port is still checked against the pack and `openshell.admin`, and DefenseClaw's own listeners are never opened. |
+| `upstream_telemetry` | `false` | Whether OpenShell's own anonymous usage telemetry stays on. `sandbox setup` turns it off in the OpenShell gateway's environment (`OPENSHELL_TELEMETRY_ENABLED=false`) unless you keep it (`--upstream-telemetry`), and records your choice here. On Linux, `sandbox doctor` reports a mismatch, and `--fix` repairs it. |
+| `token_delivery` | `provider` | How a sandbox receives its hook ingress credential. `provider`: as an OpenShell provider credential, so the agent only sees a placeholder, rotated on every start. `env`: as a plain `DEFENSECLAW_SANDBOX_TOKEN` variable the agent can read, kept for the sandbox's life. Both are revoked when the sandbox is deleted. See [Hook ingress](/docs/reference/gateway-api#hook-ingress). |
+| `middleware.enabled` | `false` | Reserved for an experimental supervisor-middleware switch. Nothing reads it yet. |
+
+**Host patterns** in `egress.block`, `egress.allow`, `egress.unblocked`,
+`admin.egress_block`, and `admin.egress_allow_only` (and in a pack's egress
+lists) use the egress proxy's grammar: a host name, `*.<host>` for every
+subdomain (not the host itself), an IP address, or a CIDR prefix such as
+`198.51.100.0/24`. Addresses compare by value, so `2001:db8::1`, its
+uncompressed spelling, and an IPv4-mapped spelling of an IPv4 address all
+match the same entry. A bare `*` is refused: choose the profile instead
+(`open` allows by default, `strict` turns the web off). Schemes, ports,
+paths, and wildcards inside a name are refused, and so are host names whose
+last label does not start with a letter (`127.1`, `0x7f000001`), because
+resolvers read them as addresses. Matching ignores case and a trailing dot.
+One list widens a host name: on `admin.egress_block`, `example.net` blocks
+the host and all its subdomains, the way an administrator blocking a domain
+means it. Every other list matches a host name exactly.
+Lists hold at most 4096 entries.
+
+**Project globs** (`workdir.masks`, `workdir.unmask`, and
+`sandbox run --unmask`, like a pack's masks) are relative to the project folder
+and use forward slashes. Absolute paths, `~`, drive letters, backslashes, and
+`..` segments are refused. Lists hold at most 1024 entries.
+
+**Names** in `harnesses`, `wrappers`, `image.harness_versions`, and
+`admin.allowed_harnesses` start with a letter or digit, then use letters,
+digits, `.`, `_`, and `-`, up to 128 characters. An `image.harness_versions`
+key can't contain `.`, which the configuration loader would read as a nested
+key.
+
+### Packs at a glance
+
+The built-in packs are:
+
+- `open`, the default: open web through the DefenseClaw egress proxy with the
+  exfiltration blocklist, a live project mount, and skip-permissions mode on.
+  A direct connection request is approved automatically unless the policy
+  refuses it (the blocklists, a public IP address, a port off the list) or it
+  reaches into your machine or private network, which asks.
+- `balanced`: a curated developer allowlist, and triaged approvals. The
+  allowlist is the egress proxy's allowlist feed, host for host. The proxy
+  can't see inside HTTPS tunnels, so its source hosts (GitHub, GitLab,
+  Bitbucket) accept pushes and uploads as well as fetches; a push still needs
+  a credential inside the sandbox.
+- `strict`: no web beyond the harness's model provider, manual approvals, copy
+  mode, the harness's own prompts kept, and no MCP servers.
+
+Every built-in pack masks common secret files (`.env`, `.env.*`, keys and
+certificates, cloud, Kubernetes and Docker credentials) and keeps committed
+templates such as `.env.example` visible (the pack's `workspace.unmask`).
+Whatever the pack, the end-of-session review also flags changes to harness
+and agent-tool project config (`.claude/`, `.mcp.json`, `.codex/`,
+`.cursor/`, `.gemini/`, `AGENTS.md`, `CLAUDE.md`, and similar), to lock
+files, and to `pack.yaml` files: a harness run later outside the sandbox acts
+on them without asking.
+
+Raising the profile above a pack's own network mode, for example
+`profile: balanced` on the `open` pack, brings in the `balanced` pack's
+curated allowlist. Allow entries that cover every host or a whole top-level
+domain (`*.com`) are ignored, and custom packs may not contain them.
+
+A custom pack is one strict YAML file with the same sections as the built-in
+ones. Unknown or repeated keys, anchors, symbolic links, and built-in names are
+refused. The pack file and its directory must belong to you or to root and
+must not be writable by their group or by every user. A pack in a sticky
+directory that other users can write to, such as `/tmp`, loads only when root
+owns it. Because you own your custom packs, keep them out of folders you mount
+into a sandbox: a folder that holds the policy is never shared with the
+sandbox. See [Write a custom pack](/docs/sandboxes/policy-packs#write-a-custom-pack).
+
+### Admin keys
+
+`openshell.admin` holds the administrator's limits. Every key is optional; an
+unset key adds no limit, and the `allow_*` switches restrict only when set to
+`false`. Each key is explained, with examples, in
+[Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs#admin-constraints).
+
+```yaml
+openshell:
+  admin:                     # every key is optional
+    required_pack: ""        # its profile, yolo, workdir mode, MCP import, feeds and ports are floors
+    required_pack_digest: "" # sha256:<hex> pins the required pack's content
+    min_profile: ""          # strict > balanced > open
+    allow_yolo: null         # null = no constraint; false forbids
+    allow_mount: null
+    allow_host_ports: null
+    allow_unblock: null      # also governs approve-always, user allow entries, turning the feed off
+    allow_learn_mode: null
+    allowed_harnesses: []
+    egress_block: []         # always blocked, never unblockable
+    egress_allow_only: []    # forces an allowlist profile
+    block_large_uploads: false # true: every sandbox's large uploads to new hosts are cut
+    require_copy_for: []     # absolute or ~/ path globs that must run in copy mode
+    max_resources: {cpu: "", memory: ""}
+    locked: []               # keys run options may not loosen
+```
+
+| Key | Values | Effect |
+| --- | --- | --- |
+| `required_pack` | Pack reference, like `pack` | Every run uses this pack, and its profile, skip-permissions default, workspace mode, MCP import, blocklist feed, and proxy ports are floors. |
+| `required_pack_digest` | `sha256:` and 64 lowercase hex digits | Pins the required pack's content: the digest `defenseclaw sandbox pack show` reports. Needs `required_pack`. |
+| `min_profile` | `open`, `balanced`, `strict` | The loosest profile allowed. |
+| `allow_yolo` | `true`, `false`, `null` | `false` keeps every harness's permission prompts. |
+| `allow_mount` | `true`, `false`, `null` | `false` forces copy mode and refuses every host folder mount. |
+| `allow_host_ports` | `true`, `false`, `null` | `false` refuses every host port. |
+| `allow_unblock` | `true`, `false`, `null` | `false` refuses unblocks and approve-always, ignores saved unblocks and the allow entries of users and of custom packs they chose, and keeps the blocklist feed on. A one-time approval then can't reach a feed-listed or private-network destination. |
+| `allow_learn_mode` | `true`, `false`, `null` | `false` refuses learn mode. |
+| `allowed_harnesses` | Harness names | Only these harnesses may run. |
+| `egress_block` | Host patterns | Always blocked, for every sandbox. Nothing unblocks or approves them. A host name also blocks its subdomains (`example.net` covers `www.example.net`). |
+| `egress_allow_only` | Host patterns | The only hosts any sandbox may reach. Raises the profile to at least `balanced`. Entries match exactly: list `*.<host>` for subdomains. |
+| `block_large_uploads` | `true`, `false` | `true` turns the large-upload block on for every sandbox (see `egress.block_large_uploads`) and keeps its report on: a pack's `large_upload_mb: 0` gets 25 MiB, and a threshold above 25 MiB (a pack's or `egress.large_upload_mb`) is lowered to 25 MiB, or to the required pack's own when that is higher. An unblock still lifts it for one host unless `allow_unblock` is `false`. |
+| `require_copy_for` | Path globs, at most 1024 | Projects that must run in copy mode. |
+| `max_resources.cpu`, `max_resources.memory` | Same formats as `resources` | Ceilings for every sandbox. |
+| `locked` | Up to 16 of `pack`, `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import`, `mcp.host_ports`, `resources` | Keys whose configured value run options may not loosen. |
+
+`required_pack` pins the pack and makes its posture a floor: your keys and run
+options may tighten its profile, skip-permissions default, workspace mode, MCP
+import, blocklist feed, and proxy ports, but every attempt to loosen them is
+refused. That includes a request to skip permissions or to mount a host folder
+when the required pack keeps the prompts or works on a copy. In a
+`managed_enterprise` install, a custom required pack must be a file that root
+owns and no other user can modify, together with every directory above it,
+such as an absolute path under an administrator-owned directory. The default
+`pack_dir` in the data directory usually does not qualify.
+
+`locked` keeps the configured value of each listed key against run options
+that would loosen it, while options that only tighten it still apply:
+`--safe`, `--copy`, `--no-mcp`, a `--profile` at least as strict as the
+configured one, a `--pack` at least as strict as the configured pack in every
+setting (or, when `pack` itself is not locked, in every setting behind a
+locked key, such as the pack's skip-permissions default for `yolo`), a
+smaller `--cpu` or `--memory`, and `--unmask` or `--host-port` entries the
+configuration already lists.
+
+`require_copy_for` entries are absolute path globs or start with `~/`. `*`,
+`?`, and `[...]` match within one path segment, and `**` across segments. A
+relative entry is refused, because it would never match, and a pattern that
+starts with `**/` covers every mounted folder, since any folder may hold a
+match below it. The list also covers mounting a folder above a listed project,
+a project folder DefenseClaw can't check, and differently cased spellings of
+the path.
+
+Every loosening that `openshell.admin` refuses is reported as "blocked by
+your organization's DefenseClaw policy: `<key>`", and the same limits gate
+runtime actions such as unblocking a destination or opening a host port. In a
+`managed_enterprise` install the administrator owns `config.yaml`, so the
+admin block is authoritative. Elsewhere it is still enforced, but it is
+advisory, because you can edit the file. `sandbox policy explain` and
+`sandbox doctor` say which applies.
+
+### Validation and reload
+
+The v8 schema rejects unknown keys in every `openshell` block. DefenseClaw also
+refuses to load a `config.yaml` whose `openshell` values break these rules:
+
+- `ingress_port` and `egress_port` must differ when both are set;
+- when `enabled` is `true`, the effective ingress and egress ports must differ
+  from each other, from `gateway.api_port`, and from `guardrail.port`. A
+  derived port that would pass 65535 (a `gateway.api_port` of 65534 or higher)
+  must be set explicitly;
+- enum values, port ranges, host patterns, globs, names, and CPU and memory
+  quantities must be valid, and size and depth values must not be negative;
+- `admin.required_pack_digest` must be a well-formed digest and needs
+  `admin.required_pack`, and every `admin.locked` entry must be a lockable key.
+
+The checks don't open pack files, so a missing or broken custom pack named in
+`pack` or `admin.required_pack` isn't reported when the config loads.
+`sandbox policy show` reports it, and so does the next `sandbox run`;
+`sandbox pack validate` checks a pack file on its own.
+
+The gateway reloads the `openshell` block in place, with either
+`gateway.config_reload.mode`. A change that fails these checks is rejected,
+and the running config stays in place. A reload re-resolves the egress policy
+of every running sandbox, so changes to the egress keys, the large-upload
+threshold included, reach them within seconds.
+Turning `enabled` on or off, or moving `ingress_port` or
+`egress_port` while `enabled` is `true`, restarts the API listener inside the
+running gateway. The one exception is entering or leaving the legacy
+standalone mode (`openshell.mode`), which needs a gateway restart.
+
+### Legacy keys
+
+`mode` and `sandbox_home` remain for the removed legacy standalone sandbox.
+They are read only by the legacy bind rule above and by
+[`defenseclaw sandbox legacy-cleanup`](/docs/reference/sandbox-cli#sandbox-legacy-cleanup).
+`policy_dir`, `version`, `auto_pair`, and `host_networking` are accepted and
+ignored. No migration rewrites the block.
+
+
+## `guardrail.connectors` (several connectors)
 
 A single gateway can enforce guardrail policy for several **hook** connectors at once. Each connector that's active gets a `guardrail.connectors.<name>` block; the gateway resolves policy per connector and falls back to the global `guardrail.*` values for anything a block leaves unset.
 
@@ -473,9 +874,63 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `hook_fail_mode` | `open` \| `closed` | `guardrail.hook_fail_mode` |
 | `block_message` | string | `guardrail.block_message` |
 | `rule_pack_dir` | path | `guardrail.rule_pack_dir` |
+| `block_at` | `CRITICAL` \| `HIGH` \| `MEDIUM` \| `LOW` (any case) — lowest severity that blocks | `guardrail.block_at`, then the rule pack's level |
+| `alert_at` | same values — lowest severity that alerts; never above the block level | `guardrail.alert_at`, then the rule pack's level |
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
 
-`claw.mode` becomes **`multi`** automatically once more than one connector is active. That sentinel is mirrored onto the OTel resource attribute `defenseclaw.claw.mode`, so a fan-out gateway is distinguishable from a single-connector one in dashboards and SIEM. The singular `guardrail.connector` is untouched and still drives single-connector installs — the map is purely additive. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
+With more than one connector active, `claw.mode` and `guardrail.connector` keep naming the primary connector (the first one in alphabetical order unless setup keeps the existing primary). The gateway then leaves the OTel resource attribute `defenseclaw.claw.mode` off, so a gateway serving several connectors is distinguishable from a single-connector one in dashboards and SIEM; read each event's connector attribute for the connector that produced it. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/guardrail/multi-connector).
+
+## Enterprise settings (`enterprise.*`)
+
+A managed deployment (`deployment_mode: managed_enterprise`) reads an
+administrator-owned config: `/etc/defenseclaw/config.yaml` on Linux,
+`/opt/cisco/defenseclaw/etc/config.yaml` on macOS, and
+`C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` on Windows. The
+`enterprise` block tunes it. The config is rejected if the block appears in a
+config whose `deployment_mode` is not `managed_enterprise`. In the
+`secure_client` profile, `profile` is the only key allowed. For explanations
+and examples, see the [enterprise settings reference](/docs/enterprise/configuration#settings-reference).
+
+| Key | Values (default) | OS | Notes |
+| --- | --- | --- | --- |
+| `enterprise.profile` | `secure_client` \| `standalone` (Windows and macOS: `secure_client`; Linux: `standalone`) | all | Linux accepts only `standalone` |
+| `enterprise.inspection.ai_defense.enabled` | bool (`false`) | all | Adds Cisco AI Defense to the local engine |
+| `enterprise.inspection.ai_defense.credential` | credential name | all | Lowercase letters, digits, and dashes; must be valid when AI Defense is enabled. Store the value with `enterprise secret set`. An inline `cisco_ai_defense.api_key` is rejected |
+| `enterprise.enrollment.mode` | `auto` \| `manifest` (`auto`) | all | With `manifest` you publish `targets.yaml` and the enumerator does nothing. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`) |
+| `enterprise.enrollment.include_users` | list | all | Linux and macOS: also enrolls these accounts, bypassing the uid range and the login-shell check. Windows: accepted, but every profile is already a candidate, so it changes nothing |
+| `enterprise.enrollment.exclude_users` | list | all | Never enrolled; wins over every include. Linux and macOS also match a numeric uid |
+| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local, Active Directory and Microsoft Entra ID groups by name or SID, decided from session tokens (cached for signed-out users) and the local account database |
+| `enterprise.enrollment.exempt_users` | list | all | Linux and macOS: inspected but not enrolled. Windows: machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows |
+| `enterprise.enrollment.unenrolled_users` | `inspect` \| `deny` (`inspect`) | Linux, macOS | How machine-policy connectors treat users who are not enrolled. On Windows an unenrolled user always fails closed |
+| `enterprise.enrollment.root` | `inspect` \| `deny` \| `exempt` (`inspect`) | Linux, macOS | root is never enrolled. `deny` refuses root's hook calls. `exempt` currently behaves like `inspect` |
+| `enterprise.enrollment.uid_min` | integer (`0`) | Linux, macOS | `0` reads `UID_MIN` from `/etc/login.defs` on Linux (fallback 1000) and uses 501 on macOS |
+| `enterprise.enrollment.uid_max` | integer (`0`) | Linux, macOS | The highest uid enrolled, for local and directory accounts. `0`: login.defs `UID_MAX` (fallback 60000) bounds only local accounts on Linux; macOS uses 2147483646 |
+| `enterprise.enrollment.home_roots` | list of absolute paths | Linux, macOS | Extra home parents the guardian may write, beyond `/home` and `/var/home` (Linux) or `/Users` (macOS) |
+| `enterprise.enrollment.agent_prefixes` | list of absolute paths | Linux, macOS | Extra administrator install prefixes where the enumerator and guardian look for agent CLIs. Paths under homes and temporary directories are refused |
+| `enterprise.machine_policy.default.*` and `enterprise.machine_policy.connectors.<name>.*` | see the next table | all | Resolution order: the connector's value, then `default`, then the built-in value. This block does not enable a connector; `guardrail.connectors` does |
+| `enterprise.trust.mode`, `enterprise.trust.allowed_signers` | `authenticode` \| `hash_pinned`; SHA-256 thumbprints | Windows | Narrow the standalone lifecycle's payload trust: `authenticode` refuses a hash-pinned run and any run over a hash-pinned deployment (`1639`); `hash_pinned` or unset admits both; `allowed_signers` pins signers like `--allowed-signer`. Linux and macOS accept and validate them but do not use them |
+| `enterprise.coexistence.per_user_install` | `migrate` \| `block` \| `ignore` | — | Reserved: accepted and validated, no effect in this release |
+| `enterprise.coexistence.disable_self_update` | bool (`true`) | Windows | Sets `HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate` only when the value is absent, which also stops the per-user `install.ps1`. On every managed host the update notice stays off and the per-user installer, upgrade and rollback refuse, whatever this key says |
+| `enterprise.network.https_proxy`, `enterprise.network.no_proxy` | proxy URL; host list | all | The gateway's outbound proxy: AI Defense, LLM providers (which need an `http://` proxy URL), the passthrough, webhooks, the remote model router and telemetry exporters go through it. Linux and macOS also set `HTTPS_PROXY` and `NO_PROXY` (both cases) in the gateway's service environment; the Windows gateway sets them in its own process. A change needs a gateway restart |
+
+| `machine_policy` key | Values | Built-in default |
+| --- | --- | --- |
+| `ownership` | `merge` \| `verify_only` \| `off` | `merge` |
+| `managed_hooks_only` | `enforce` \| `preserve` | `enforce` |
+| `foreign_hooks` | `remove` \| `report` \| `allow` | `remove` |
+| `higher_precedence_sources` | `fail` \| `warn` | `fail` |
+| `allowed_hooks` | list of SHA-256 digests | none; the `default` list and the connector's list are merged |
+| `version_floor` | `enforce` \| `report` \| `off`; only under `connectors.claudecode` | `enforce`; see [Claude Code version floor](/docs/enterprise/machine-policy#claude-code-version-floor) |
+
+How each OS applies these keys to each connector is on
+[Machine policy](/docs/enterprise/machine-policy).
+
+The standalone lifecycle on Linux and macOS also requires `config_version: 8`,
+`enterprise.profile: standalone` if you set it, and `data_dir` set to exactly
+`/var/lib/defenseclaw` (Linux) or `/opt/cisco/defenseclaw/runtime` (macOS). If
+you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
+`18970`. Connectors are enabled by `guardrail.connectors`, as in any other
+config; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 
 ## Custom-provider overlay (`~/.defenseclaw/custom-providers.json`)
 
@@ -510,7 +965,7 @@ Custom-provider instances live in a separate JSON overlay so the same instance d
         "profile_name": "",
         "inference_profile": "us.",
         "deployment_aliases": {
-          "fast": "anthropic.claude-3-haiku-20240307-v1:0"
+          "fast": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
         }
       },
 
@@ -526,7 +981,7 @@ Custom-provider instances live in a separate JSON overlay so the same instance d
         "api_version": "2024-10-21",
         "auth_mode": "api_key",
         "deployment_aliases": {
-          "gpt-4o": "prod-gpt4o-eus"
+          "gpt-5.4": "prod-gpt54-eus"
         }
       }
     }
@@ -576,8 +1031,20 @@ There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or
 data directory. Configure the sidecar API listener with `gateway.api_bind` and
 `gateway.api_port`, and the separate guardrail proxy listener with
 `guardrail.host` and `guardrail.port`; `gateway.host`/`gateway.port` are the
-upstream agent-gateway address. Set log verbosity through the sidecar's
-`--log-level` flag (see `defenseclaw-gateway start --help`).
+upstream agent-gateway address. The gateway has no log-level flag; for extra
+diagnostics, set one of the variables under **Debug / verbose logging** in
+[Environment variables](/docs/reference/env-vars#debug--verbose-logging), such as
+`DEFENSECLAW_SIDECAR_DIAG=1`, in the gateway's environment and restart it.
+
+**Proxy variables.** The gateway's telemetry exporters (OTLP, Galileo, Splunk
+HEC, HTTP JSONL) follow `HTTPS_PROXY` and `NO_PROXY` from the gateway's
+environment (an `enterprise.network.https_proxy` takes precedence); loopback
+destinations always connect directly. The proxy URL must be
+`http(s)://host[:port]`: with a user name or password the gateway logs a
+warning and the exporters connect directly. Restart the gateway from a shell
+that has the variables set after changing them. Whenever a proxy variable is
+set, the CLI and the gateway add the instance-metadata endpoints
+(`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`) to `NO_PROXY`.
 
 ## Per-connector source-of-truth files
 
@@ -588,12 +1055,12 @@ upstream agent-gateway address. Set log verbosity through the sidecar's
 | Claude Code | `~/.claude/settings.json` |
 | Codex | `~/.codex/config.toml` |
 | Cursor | `~/.cursor/hooks.json` |
-| Devin | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
-| Gemini CLI (retired cleanup only) | `~/.gemini/settings.json`; new setup is unavailable. |
+| Devin (Devin CLI and Devin Desktop's Devin Local) | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
 | OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
 | Antigravity | `~/.gemini/config/hooks.json`; Google documents no configuration-home environment override, and DefenseClaw owns only this global registration. Antigravity also discovers `<workspace>/.agents/hooks.json`, which DefenseClaw does not patch to avoid duplicate ownership. |
 | Hermes | `~/.hermes/config.yaml` |
+| Kiro | `~/.kiro/hooks/defenseclaw.json` (Kiro IDE and `kiro-cli --v3`), `~/.kiro/agents/defenseclaw.json` (Kiro CLI 2.x) and `~/.kiro/settings/cli.json`; a workspace copy under `<workspace>/.kiro/hooks/` with `--workspace` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
 | OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`; and `defenseclaw_omnigent.pth` in OmniGent's Python environment. The CLI server must receive the selected YAML through `--config`. |
@@ -607,7 +1074,7 @@ when the current file still matches the recorded managed-file identity. If the
 file has drifted, connector-specific teardown removes only DefenseClaw-owned
 entries and preserves unrelated operator edits.
 
-Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope.
+Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope. The workspace is one value for the whole install, so `defenseclaw setup <connector> --workspace` refuses while other connectors are configured (their hooks would move into that folder and stop guarding the rest); use `defenseclaw setup guardrail --workspace <dir>` to scope every connector to one folder on purpose.
 
 Every hook setup also writes the resolved connector path contract to `~/.defenseclaw/hook_contract_lock.json`. The `locations` block records the pinned workspace, hook config file, generated hook script, and the MCP/skills/rules/plugins/agents surfaces that DefenseClaw will scan for that connector. Use `defenseclaw doctor` to compare that lock against the files the active SDK can actually load.
 

@@ -438,6 +438,41 @@ class TestStandardManifestDirectoryStructure(unittest.TestCase):
                 result = scan_plugin(root)
                 self.assertFalse(self._has_location(result, "STRUCT-HIDDEN", f"/{directory_name}"))
                 self.assertNotIn("MANIFEST-MISSING", [finding.rule_id for finding in result.findings])
+                # Manifest findings name the real file, not the schema label (GAP-2214).
+                self.assertTrue(self._has_location(result, "PERM-NONE", f"/{directory_name}/plugin.json"))
+
+    def test_merged_permission_names_the_manifest_that_declares_it(self):
+        # GAP-2243: fs:* comes only from .claude-plugin/plugin.json, so its
+        # finding must not point at package.json.
+        root = os.path.join(self.tmp, "merged")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        os.makedirs(os.path.join(root, "hooks"))
+        with open(os.path.join(root, "package.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "p", "version": "1.0.0", "permissions": ["fs:read:/x"]}, f)
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "p", "version": "1.0.0", "permissions": ["fs:*"]}, f)
+        with open(os.path.join(root, "hooks", "run.js"), "w", encoding="utf-8") as f:
+            f.write("module.exports = {};\n")
+
+        result = scan_plugin(root)
+
+        perm_findings = [finding for finding in result.findings if finding.rule_id == "PERM-DANGEROUS"]
+        self.assertEqual(len(perm_findings), 1)
+        self.assertTrue(self._has_location(result, "PERM-DANGEROUS", "/.claude-plugin/plugin.json"))
+
+    def test_full_wildcard_permission_is_dangerous(self):
+        # GAP-2277: a bare "*" grants everything, so it must not scan clean.
+        root = os.path.join(self.tmp, "full-wildcard")
+        os.makedirs(os.path.join(root, ".claude-plugin"))
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w", encoding="utf-8") as f:
+            json.dump({"name": "p", "version": "1.0.0", "permissions": ["*"]}, f)
+
+        result = scan_plugin(root)
+
+        rule_ids = [finding.rule_id for finding in result.findings]
+        self.assertIn("PERM-DANGEROUS", rule_ids)
+        self.assertNotIn("PERM-NONE", rule_ids)
+        self.assertTrue(self._has_location(result, "PERM-DANGEROUS", "/.claude-plugin/plugin.json"))
 
     def test_regular_file_named_like_manifest_directory_remains_hidden(self):
         root = os.path.join(self.tmp, "regular-file")
@@ -662,7 +697,8 @@ class TestNoManifestStillScans(unittest.TestCase):
         result = scan_plugin(plugin_file)
         rule_ids = [finding.rule_id for finding in result.findings]
 
-        self.assertIn("MANIFEST-MISSING", rule_ids)
+        # A single-file plugin has no manifest by design (GAP-2165).
+        self.assertNotIn("MANIFEST-MISSING", rule_ids)
         self.assertTrue(
             any("EVAL" in rule_id for rule_id in rule_ids if rule_id),
             f"Expected eval finding from direct Amp plugin scan, got: {rule_ids}",

@@ -42,17 +42,26 @@ fi
 {{end}}
 
 . "${HOOK_DIR}/_hardening.sh"
-defenseclaw_harden_resources
+{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+# does not read and pins the baked PATH before the first child process
+# (mktemp in defenseclaw_harden_env) or helper call.
+. "${HOOK_DIR}/_sandbox.sh"
+{{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
 
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Sandbox}}# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status, so no failed, refused or unparseable reply may turn into an allow.
+# OpenHands blocks on exit status 2, which every failure below returns.
+FAIL_MODE="closed"
+readonly FAIL_MODE{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"{{end}}
 DEFENSECLAW_HOOK_CONNECTOR="openhands"
 DEFENSECLAW_HOOK_NAME="openhands-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  defenseclaw_handle_missing_token openhands openhands-hook "openhands hook"
-fi
+{{if .Sandbox}}defenseclaw_sandbox_require_token openhands openhands-hook "openhands hook"{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  defenseclaw_handle_missing_token openhands openhands-hook "openhands hook" "${HOOK_DIR}/{{.TokenFile}}"
+fi{{end}}
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: openhands hook refusing oversized payload" >&2
@@ -63,7 +72,9 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   exit 0
 }
 API_ADDR="{{.APIAddr}}"
-if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
+{{if .Sandbox}}# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"{{else}}if [ "{{if .ScopedToken}}1{{else}}0{{end}}" = "1" ]; then
   DEFENSECLAW_GATEWAY_TOKEN=
   if [ -f "${HOOK_DIR}/{{.TokenFile}}" ]; then
     IFS= read -r DEFENSECLAW_GATEWAY_TOKEN < "${HOOK_DIR}/{{.TokenFile}}" || true
@@ -73,7 +84,7 @@ elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
-API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 
 fail_unreachable() {
   defenseclaw_log_hook_failure openhands openhands-hook "$1" transport "$FAIL_MODE"
@@ -95,7 +106,7 @@ fail_response() {
   exit 2
 }
 
-AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -117,17 +128,37 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/openhands/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/openhands/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: openhands-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
-  fail_unreachable "gateway unreachable"
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+# A refused connection means this account's gateway is not running (after
+# a reboot, for example): start it once and retry. See
+# defenseclaw_gateway_cold_start in _hardening.sh.
+defenseclaw_hook_post() {
+  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/openhands/hook" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: openhands-hook/1.0" \
+    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+    "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
+    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
+    --max-time 10 \
+    -d "$PAYLOAD" 2>/dev/null
 }
+RESPONSE=$(defenseclaw_hook_post) || {
+  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
+  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -143,7 +174,28 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if .Sandbox}}# Every DefenseClaw verdict names its action: an empty or unknown one is a
+# reply the workload may have shaped, never an allow. A block always exits 2,
+# the status OpenHands enforces, with or without a rendered directive.
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|alert|confirm) ;;
+  block)
+    if [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; then
+      REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+      if [ -z "$REASON" ]; then
+        REASON="Blocked by DefenseClaw OpenHands policy."
+      fi
+      OUTPUT="$(printf '{"decision":"deny","reason":"%s"}' "$(defenseclaw_json_escape "$REASON")")"
+    fi
+    echo "$OUTPUT"
+    exit 2
+    ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
   DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
   if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then

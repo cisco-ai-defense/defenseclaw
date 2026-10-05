@@ -52,6 +52,14 @@ const (
 	// that do not produce a filesystem event (notably Windows registry policy)
 	// and retries watches for policy directories created after startup.
 	defaultHookGuardPolicyAuditInterval = 30 * time.Second
+	// hookGuardSupersededGrace is how long a newer setup selection may
+	// supersede this gateway before it is reported as degraded. A setup
+	// command that restarts the gateway hands off well inside it (GAP-1412).
+	hookGuardSupersededGrace = 90 * time.Second
+
+	// hookGuardBusyRearmMaxDelay caps the backoff between repairs re-armed
+	// after another process held a connector file open.
+	hookGuardBusyRearmMaxDelay = 30 * time.Second
 )
 
 var newHookConfigFSWatcher = fsnotify.NewWatcher
@@ -63,6 +71,15 @@ type hookRuntimePolicy struct {
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
+
+// hookGuardRepairOutcome is the terminal result of one Setup-backed repair.
+// rearmed reports that the repair failed only because another process held a
+// connector file open and the guard queued another attempt on its own.
+type hookGuardRepairOutcome struct {
+	connector string
+	err       error
+	rearmed   bool
+}
 
 // HookConfigGuard watches the active connector's agent config file(s) and
 // auto-heals (re-installs) the DefenseClaw hook block when a user deletes or
@@ -111,7 +128,16 @@ type HookConfigGuard struct {
 	// lastPolicyFailure suppresses an identical permanent policy diagnostic on
 	// every audit tick while still reporting a changed failure immediately.
 	lastPolicyFailure string
-	done              chan struct{}
+	// supersededSince is when a newer setup selection was first seen.
+	supersededSince time.Time
+	// busyRepairs counts consecutive repairs that failed on a busy connector
+	// file; it sets the re-arm backoff and resets after any other outcome.
+	busyRepairs int
+	// repairObserver receives every repair outcome after audit, telemetry and
+	// the heal notifier have run. Tests use it as the repair-completed /
+	// repair-failed event instead of polling the files Setup is replacing.
+	repairObserver func(hookGuardRepairOutcome)
+	done           chan struct{}
 }
 
 // NewHookConfigGuard constructs a guard. debounce <= 0 falls back to the
@@ -702,6 +728,7 @@ func (g *HookConfigGuard) repairCurrent(
 	if present && evidenceCurrent {
 		return nil
 	}
+	requested := append([]string(nil), changed...)
 	if present && !evidenceCurrent {
 		changed = append(changed, "stale runtime registration evidence")
 	}
@@ -711,7 +738,59 @@ func (g *HookConfigGuard) repairCurrent(
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	return g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	outcome := hookGuardRepairOutcome{
+		connector: conn.Name(),
+		err:       err,
+		rearmed:   g.rearmAfterBusyRepair(requested, err),
+	}
+	g.mu.Lock()
+	observe := g.repairObserver
+	g.mu.Unlock()
+	if observe != nil {
+		observe(outcome)
+	}
+	return err
+}
+
+// rearmAfterBusyRepair queues another repair when Setup failed only because
+// another process held a connector file open. Without it the hook block stays
+// missing until some unrelated edit produces a new file event, because the
+// failed attempt's own writes fall inside the self-write suppression window.
+// Consecutive busy failures back off from the debounce interval up to
+// hookGuardBusyRearmMaxDelay. Caller holds repairMu.
+func (g *HookConfigGuard) rearmAfterBusyRepair(requested []string, err error) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if err == nil || !connector.FileBusyError(err) || !g.started || g.retiring || len(requested) == 0 {
+		g.busyRepairs = 0
+		return false
+	}
+	delay := g.debounce << min(g.busyRepairs, 6)
+	if delay <= 0 || delay > hookGuardBusyRearmMaxDelay {
+		delay = hookGuardBusyRearmMaxDelay
+	}
+	g.busyRepairs++
+	// Nothing was published, so there is no self-write to suppress. Events
+	// queued during the failed attempt join the re-armed request with the
+	// later due time: they keep the backoff, and an unrelated edit that
+	// arrived meanwhile keeps its path name.
+	g.suppressUntil = time.Time{}
+	due := time.Now().Add(delay - g.debounce)
+	if g.pending == nil {
+		g.pending = make(map[string]time.Time, len(requested))
+	}
+	for item, queued := range g.pending {
+		if queued.Before(due) {
+			g.pending[item] = due
+		}
+	}
+	for _, item := range requested {
+		if queued, ok := g.pending[item]; !ok || queued.Before(due) {
+			g.pending[item] = due
+		}
+	}
+	return true
 }
 
 // processPending evaluates debounced events: if any guarded config file no
@@ -781,6 +860,21 @@ func (g *HookConfigGuard) processPolicyAudit() {
 func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err error) {
 	message := err.Error()
 	g.mu.Lock()
+	if errors.Is(err, connector.ErrSetupSelectionSuperseded) {
+		// A setup command recorded a newer selection and is restarting the
+		// gateway: a planned handoff, not a degraded guardrail, unless it
+		// lasts past the grace window (GAP-1412).
+		now := time.Now()
+		if g.supersededSince.IsZero() {
+			g.supersededSince = now
+		}
+		if now.Sub(g.supersededSince) < hookGuardSupersededGrace {
+			g.mu.Unlock()
+			return
+		}
+	} else {
+		g.supersededSince = time.Time{}
+	}
 	if g.lastPolicyFailure == message {
 		g.mu.Unlock()
 		return
@@ -806,6 +900,7 @@ func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err erro
 func (g *HookConfigGuard) clearPolicyFailure() {
 	g.mu.Lock()
 	g.lastPolicyFailure = ""
+	g.supersededSince = time.Time{}
 	g.mu.Unlock()
 }
 
@@ -845,7 +940,7 @@ func (g *HookConfigGuard) healLocked(
 	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
 	defer cancel()
 
-	setupErr := conn.Setup(hctx, opts)
+	setupErr := connector.SetupRecordingCreatedDirs(hctx, conn, opts)
 
 	// Setup may have recreated a deleted parent directory even when a later
 	// verification step fails. Rebind before handling its result so the guard

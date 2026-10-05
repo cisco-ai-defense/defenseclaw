@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"go.opentelemetry.io/otel/propagation"
 )
 
@@ -48,7 +49,7 @@ var hookTraceV6Propagator propagation.TextMapPropagator = propagation.TraceConte
 //     refused trace splice even though the OTel middleware sees it
 //     before the mux 404.
 //  2. Loopback — every shipped hook script (cursor, codex,
-//     claude-code, hermes, geminicli, copilot, windsurf) POSTs to
+//     claude-code, hermes, copilot) POSTs to
 //     127.0.0.1:<api-port>; the codex notify-bridge ships a
 //     127.0.0.1 URL too. A non-loopback caller has no legitimate
 //     reason to splice into the hook trace tree, so we drop the
@@ -71,6 +72,13 @@ func shouldExtractHookTrace(r *http.Request) bool {
 	// hook trace propagation, regardless of path shape. This
 	// closes the gap left by the auth-runs-after-OTel order.
 	if !connector.IsLoopback(r) {
+		return false
+	}
+	// Sandbox traffic reaches the ingress from loopback through the
+	// OpenShell supervisor, so loopback proves nothing about a sandbox:
+	// its hook spans never take a parent it names, which could be any
+	// host trace.
+	if _, sandboxed := sandboxauth.FromContext(r.Context()); sandboxed {
 		return false
 	}
 	if p == "/api/v1/codex/notify" {

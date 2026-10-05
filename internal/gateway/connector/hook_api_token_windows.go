@@ -201,6 +201,52 @@ func hookAPIValidateOwner(path string, _ os.FileInfo) error {
 	return hookAPIValidateWindowsPathElement(path, false, true)
 }
 
+// hookAPIValidateOwnerFor is hookAPIValidateOwner that also trusts
+// trustedOwnerSID: the per-user target account a privileged guardian verifies
+// without that user's token. An empty or malformed SID trusts nothing extra.
+func hookAPIValidateOwnerFor(path string, _ os.FileInfo, trustedOwnerSID string) error {
+	return hookAPIValidateWindowsPathElementTrusting(path, false, true, hookAPIParseTrustedOwnerSID(trustedOwnerSID))
+}
+
+// hookAPIValidateDirectoryFor is hookAPIValidateDirectory that also trusts
+// trustedOwnerSID (see hookAPIValidateOwnerFor).
+func hookAPIValidateDirectoryFor(path, trustedOwnerSID string) error {
+	extra := hookAPIParseTrustedOwnerSID(trustedOwnerSID)
+	if extra == nil {
+		return hookAPIValidateDirectory(path)
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("hook API token directory must be absolute: %q", path)
+	}
+	clean := filepath.Clean(path)
+	protectChildren := true
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		if err := hookAPIValidateWindowsPathElementTrusting(cur, true, protectChildren, extra); err != nil {
+			return err
+		}
+		protectChildren = false
+		if cur == filepath.Dir(cur) {
+			break
+		}
+	}
+	return nil
+}
+
+// hookAPIParseTrustedOwnerSID accepts only a well-formed user or group SID;
+// LocalSystem-like and well-known SIDs add nothing the default trust does not
+// already cover, and anything malformed trusts nothing.
+func hookAPIParseTrustedOwnerSID(value string) *windows.SID {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.HasPrefix(value, "S-1-") {
+		return nil
+	}
+	sid, err := windows.StringToSid(value)
+	if err != nil || sid == nil || !sid.IsValid() {
+		return nil
+	}
+	return sid
+}
+
 // validateHookAPITokenBoundFileCustodyPlatform applies the hook-token custody
 // contract to an already-bound regular-file handle. Hook credentials differ
 // from generic user-private files on Windows: managed installs intentionally
@@ -254,6 +300,10 @@ func hookAPIValidateDirectoryElement(path string) error {
 }
 
 func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren bool) error {
+	return hookAPIValidateWindowsPathElementTrusting(path, wantDir, protectChildren, nil)
+}
+
+func hookAPIValidateWindowsPathElementTrusting(path string, wantDir, protectChildren bool, extra *windows.SID) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -294,7 +344,7 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if err != nil {
 		return fmt.Errorf("inspect Windows owner for %s: %w", path, err)
 	}
-	if !hookAPIWindowsTrustedPrincipal(owner) {
+	if !hookAPIWindowsTrustedPrincipalOrExtra(owner, extra) {
 		return fmt.Errorf("owner %s is not trusted for hook API token path %s", hookAPIWindowsSIDString(owner), path)
 	}
 	dacl, _, err := sd.DACL()
@@ -304,10 +354,21 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 	if dacl == nil {
 		return fmt.Errorf("null Windows DACL is not trusted: %s", path)
 	}
-	return hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, wantDir, protectChildren)
+	return hookAPIRejectUntrustedWindowsWriteACEsTrusting(path, dacl, wantDir, protectChildren, extra)
+}
+
+func hookAPIWindowsTrustedPrincipalOrExtra(sid, extra *windows.SID) bool {
+	if extra != nil && sid != nil && sid.Equals(extra) {
+		return true
+	}
+	return hookAPIWindowsTrustedPrincipal(sid)
 }
 
 func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, wantDir, protectChildren bool) error {
+	return hookAPIRejectUntrustedWindowsWriteACEsTrusting(path, dacl, wantDir, protectChildren, nil)
+}
+
+func hookAPIRejectUntrustedWindowsWriteACEsTrusting(path string, dacl *windows.ACL, wantDir, protectChildren bool, extra *windows.SID) error {
 	const (
 		accessAllowedCompoundACEType       = 0x4
 		accessAllowedObjectACEType         = 0x5
@@ -347,7 +408,7 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 		if !protectChildren && hookAPIWindowsStockAncestorGrant(ace.Mask, sid) {
 			continue
 		}
-		if !hookAPIWindowsTrustedPrincipal(sid) {
+		if !hookAPIWindowsTrustedPrincipalOrExtra(sid, extra) {
 			return fmt.Errorf("untrusted Windows principal %s has write-like access mask 0x%x on %s", hookAPIWindowsSIDString(sid), uint32(ace.Mask), path)
 		}
 	}

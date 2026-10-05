@@ -70,7 +70,7 @@ func TestParseCompileObservabilityV8ReferenceConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(compiled.Plan.Destinations()) != 8 { // generated local + seven examples
+	if len(compiled.Plan.Destinations()) != 10 { // generated local + nine examples
 		t.Fatalf("reference destinations = %d", len(compiled.Plan.Destinations()))
 	}
 	galileo, ok := compiled.Plan.Destination("galileo")

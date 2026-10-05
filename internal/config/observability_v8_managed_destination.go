@@ -61,7 +61,11 @@ const (
 // destination fields. Callers obtain them from the validated top-level config.
 type ObservabilityV8ManagedAIDOptions struct {
 	DeploymentMode string
-	Endpoint       string
+	// Profile is the resolved enterprise profile. Only the Secure Client
+	// profile has the CMID-authenticated destination; a standalone
+	// deployment exports to the administrator's own destinations.
+	Profile  string
+	Endpoint string
 	// SourceContentHash is sha256 over the exact accepted config source bytes.
 	// It is a runtime-generation binding, not a user-configurable destination
 	// field and not the masked observability plan digest.
@@ -82,7 +86,8 @@ func WithObservabilityV8ManagedAIDDestination(
 	plan *ObservabilityV8Plan,
 	options ObservabilityV8ManagedAIDOptions,
 ) (*ObservabilityV8Plan, error) {
-	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" {
+	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" ||
+		managed.IsStandaloneProfile(options.Profile) {
 		return plan, nil
 	}
 	origin, ok := observabilityV8ManagedAIDOrigin(options.Endpoint)

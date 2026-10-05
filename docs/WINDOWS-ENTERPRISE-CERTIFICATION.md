@@ -10,6 +10,12 @@ Run the host-mutating procedure only on a disposable Windows endpoint or
 ephemeral CI runner with an independent administrator recovery channel. Do not
 run it on a production workstation.
 
+**Scope.** This runbook certifies the Cisco Secure Client profile. The
+harness, `scripts/test-windows-enterprise-hardening.ps1`, has no standalone
+profile yet, so a run does not certify a standalone deployment.
+
+For the standalone profile across Windows, macOS and Linux, follow the [enterprise manual test plan](ENTERPRISE-TEST-PLAN.md).
+
 ## Acceptance boundary
 
 The deployed endpoint passes only when all of these statements have direct
@@ -245,7 +251,9 @@ and prints JSON, but creates no user, service, directory, or policy:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -270,7 +278,9 @@ From an elevated 64-bit PowerShell 7 window:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -292,7 +302,9 @@ supplying credentials:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -403,7 +415,9 @@ second build:
   -BrokerBinary .\v1\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\v1\defenseclaw-gateway.exe `
+  -ACPBinary .\v1\defenseclaw-acp.exe `
   -HookBinary .\v1\defenseclaw-hook.exe `
+  -SensorHelperBinary .\v1\defenseclaw-sensor-helper.exe `
   -CLIBinary .\v1\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -413,7 +427,9 @@ second build:
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
   -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
+  -UpgradeACPBinary .\v2\defenseclaw-acp.exe `
   -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
+  -UpgradeSensorHelperBinary .\v2\defenseclaw-sensor-helper.exe `
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `

@@ -22,8 +22,8 @@ or ordered `routes` for selector-specific policy. Collection gates run first.
 | `jsonl` | logs | `name`, `kind`, `enabled`, `path`, `rotation`, `batch`, `send`, `routes` |
 | `console` | logs | `name`, `kind`, `enabled`, `batch`, `send`, `routes` |
 | `prometheus` | metrics | `name`, `kind`, `enabled`, `listen`, `path`, `send`, `routes` |
-| `splunk_hec` | logs | `name`, `kind`, `enabled`, `endpoint`, `token_env`, `index`, `source`, `sourcetype`, `sourcetype_overrides`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes` |
-| `http_jsonl` | logs | `name`, `kind`, `enabled`, `endpoint`, `method`, `bearer_env`, `headers`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes` |
+| `splunk_hec` | logs | `name`, `kind`, `enabled`, `endpoint`, `token_env`, `token_credential`, `index`, `source`, `sourcetype`, `sourcetype_overrides`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes` |
+| `http_jsonl` | logs | `name`, `kind`, `enabled`, `endpoint`, `method`, `bearer_env`, `bearer_credential`, `headers`, `tls`, `timeout_ms`, `network_safety`, `batch`, `send`, `routes` |
 | `otlp` | logs, traces, metrics (Galileo preset: traces) | `name`, `kind`, `preset`, `enabled`, `protocol`, `endpoint`, `headers`, `logger_name`, `tls`, `timeout_ms`, `network_safety`, `signal_overrides`, `batch`, `send`, `routes` |
 
 ## Complete source field catalog
@@ -96,7 +96,7 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.local` | object |  |  |  |
 | `observability.local.path` | string |  |  | Defaults dynamically to <data_dir>/audit.db. |
 | `observability.local.judge_bodies_path` | string |  |  | Defaults dynamically to <data_dir>/judge_bodies.db. |
-| `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
+| `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
 | `observability.destinations` | array |  |  |  |
 | `observability.destinations[].name` | constraint |  |  | Required. |
 | `observability.destinations[].kind` | constant |  | `"jsonl"` | Required. |
@@ -128,7 +128,8 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.destinations[].routes[].redaction_profile` | constraint |  |  |  |
 | `observability.destinations[].listen` | string |  |  | Required. |
 | `observability.destinations[].endpoint` | string |  |  | Required. |
-| `observability.destinations[].token_env` | string |  |  | Required. |
+| `observability.destinations[].token_env` | string |  |  | Required unless token_credential is set. |
+| `observability.destinations[].token_credential` | string |  |  | Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile. |
 | `observability.destinations[].index` | string |  |  |  |
 | `observability.destinations[].source` | string |  |  |  |
 | `observability.destinations[].sourcetype` | string |  |  |  |
@@ -146,9 +147,11 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.destinations[].batch.scheduled_delay_ms` | integer | `5000` |  | Maximum normal batching delay in milliseconds. |
 | `observability.destinations[].method` | string | `"POST"` | `POST, PUT, PATCH` |  |
 | `observability.destinations[].bearer_env` | string |  |  |  |
+| `observability.destinations[].bearer_credential` | string |  |  | Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile. |
 | `observability.destinations[].headers` | object |  |  |  |
 | `observability.destinations[].headers.<name>` | one of |  |  | User-named entry. |
 | `observability.destinations[].headers.<name>.env` | string |  |  | Required. |
+| `observability.destinations[].headers.<name>.credential` | string |  |  | Required. Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile. |
 | `observability.destinations[].preset` | constant |  | `"galileo"` |  |
 | `observability.destinations[].protocol` | string | `"grpc"` | `grpc, grpc/protobuf, http, http/protobuf` |  |
 | `observability.destinations[].logger_name` | string |  |  | OTel log instrumentation-scope name. Valid only when this destination selects logs. |

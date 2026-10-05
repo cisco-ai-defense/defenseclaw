@@ -35,6 +35,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -167,6 +168,12 @@ type GuardrailProxy struct {
 	// X-DC-Auth header. Production callers MUST never set this —
 	// it bypasses the security floor entirely.
 	skipAuthForTest bool
+
+	// refreshedGatewayToken returns the gateway token the OpenClaw client
+	// adopted from openclaw.json after boot ("" when none). The proxy
+	// accepts it in X-DC-Auth next to the boot token until restart, so
+	// the OpenClaw plugin keeps working after a token rotation (GAP-2346).
+	refreshedGatewayToken func() string
 }
 
 // SetDefaultAgentName sets the agent name fallback for OTel spans when
@@ -195,6 +202,28 @@ func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 	p.notifier = n
 }
 
+// SetRefreshedGatewayTokenSource wires the OpenClaw client's runtime-adopted
+// gateway token into proxy authentication (GAP-2346). Call it before the
+// proxy starts serving.
+func (p *GuardrailProxy) SetRefreshedGatewayTokenSource(fn func() string) {
+	p.refreshedGatewayToken = fn
+}
+
+// matchesRefreshedGatewayToken reports whether X-DC-Auth carries the gateway
+// token adopted by auth repair after boot. Like APIServer.tokenAuth since
+// GAP-2259, the boot token stays valid until the next restart.
+func (p *GuardrailProxy) matchesRefreshedGatewayToken(r *http.Request) bool {
+	if p.refreshedGatewayToken == nil {
+		return false
+	}
+	dcAuth := r.Header.Get("X-DC-Auth")
+	if dcAuth == "" {
+		return false
+	}
+	refreshed := p.refreshedGatewayToken()
+	return refreshed != "" && constantTimeStringMatch(strings.TrimPrefix(dcAuth, "Bearer "), refreshed)
+}
+
 // agentNameForRequest picks the most specific agent name available.
 // Stream-provided hints win over the router default.
 func (p *GuardrailProxy) agentNameForRequest(hint string) string {
@@ -211,6 +240,19 @@ func (p *GuardrailProxy) agentNameForRequest(hint string) string {
 // relying on the free-text agent name.
 func (p *GuardrailProxy) agentIDForRequest() string {
 	return SharedAgentRegistry().AgentID()
+}
+
+// recordProxyConnectorRequest counts one guarded model request for a proxy
+// connector (OpenClaw, ZeptoClaw), whose traffic never reaches the hook
+// handlers that count requests for hook connectors. Hook connectors are left
+// out so their requests are not counted twice (GAP-2406).
+func (p *GuardrailProxy) recordProxyConnectorRequest() {
+	if p == nil || p.health == nil || p.connector == nil {
+		return
+	}
+	if name := p.connector.Name(); connector.IsProxyConnector(name) {
+		p.health.RecordConnectorRequestFor(name)
+	}
 }
 
 // connectorName returns the active connector's name for telemetry labels.
@@ -640,6 +682,11 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	select {
 	case err := <-errCh:
 		p.health.SetGuardrail(StateError, err.Error(), nil)
+		if errors.Is(err, syscall.EADDRINUSE) {
+			// GAP-1701: name the setting to change.
+			return fmt.Errorf("proxy: listen %s: %w (another program or account holds this port; "+
+				"move this account's guardrail proxy with: defenseclaw setup guardrail --port <free port> --non-interactive)", addr, err)
+		}
 		return fmt.Errorf("proxy: listen %s: %w", addr, err)
 	case <-time.After(200 * time.Millisecond):
 		p.health.SetGuardrail(StateRunning, "", map[string]interface{}{
@@ -760,6 +807,88 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 	})
 }
 
+// passthroughUpstreamAuth picks the upstream credential of a passthrough
+// request. Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
+// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
+// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
+func passthroughUpstreamAuth(h http.Header) string {
+	if aiAuth := h.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
+		return aiAuth
+	}
+	if azKey := h.Get("api-key"); azKey != "" {
+		return "Bearer " + azKey
+	}
+	if xKey := h.Get("x-api-key"); xKey != "" {
+		return "Bearer " + xKey
+	}
+	if auth := h.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
+		return auth
+	}
+	return ""
+}
+
+// setPassthroughUpstreamAuth sets the single resolved auth header: Anthropic
+// expects x-api-key, Azure expects api-key, others use Authorization.
+func setPassthroughUpstreamAuth(h http.Header, provider, upstreamAuth string) {
+	if upstreamAuth == "" {
+		return
+	}
+	switch provider {
+	case "anthropic":
+		h.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+	case "azure":
+		h.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
+	default:
+		h.Set("Authorization", upstreamAuth)
+	}
+}
+
+// handleReadOnlyPassthrough forwards a GET or HEAD that the fetch
+// interceptor redirected (model lists, pricing, Ollama /api/tags) to its
+// X-DC-Target-URL. Such a request has no body to inspect, so it is sent on
+// as is. An empty 200 made OpenClaw fail to parse the model list (GAP-2213).
+func (p *GuardrailProxy) handleReadOnlyPassthrough(w http.ResponseWriter, r *http.Request) {
+	if !p.authenticateRequest(w, r) {
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid API key")
+		return
+	}
+	targetOrigin := strings.TrimRight(r.Header.Get("X-DC-Target-URL"), "/")
+	if !isKnownProviderDomain(targetOrigin + r.URL.Path) {
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s passthrough to unknown domain: %s (path=%s)\n", r.Method, scrubURLSecrets(targetOrigin), r.URL.Path)
+		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
+		return
+	}
+	upstreamURL := targetOrigin + r.URL.RequestURI()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	upstreamReq, err := http.NewRequestWithContext(ctx, r.Method, upstreamURL, nil)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
+		return
+	}
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+		if _, herr := CopyForwardableHeaders(upstreamReq.Header, r.Header); herr != nil {
+			writeOpenAIError(w, httpStatusForHeaderError(herr), "invalid forwarded headers: "+herr.Error())
+			return
+		}
+	}
+	setPassthroughUpstreamAuth(upstreamReq.Header, inferProviderFromURL(targetOrigin+r.URL.Path), passthroughUpstreamAuth(r.Header))
+	fmt.Fprintf(os.Stderr, "[guardrail] %s passthrough → %s\n", r.Method, scrubURLSecrets(upstreamURL))
+	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream error: ", err))
+		return
+	}
+	defer resp.Body.Close()
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 32*1024*1024))
+}
+
 // handlePassthrough handles provider-native API paths (e.g. /v1/messages for
 // Anthropic, /v1beta/models/*/generateContent for Gemini) that the fetch
 // interceptor redirects to the proxy while preserving the original path.
@@ -768,9 +897,13 @@ func (p *GuardrailProxy) requestLogger(next http.Handler) http.Handler {
 // original request body and headers verbatim to the real upstream URL
 // (from X-DC-Target-URL + original path). No format translation is needed.
 func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		// GET on unknown paths (health probes, etc.) — just 200 OK.
-		w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if r.Header.Get("X-DC-Target-URL") == "" {
+			// GET on unknown paths (health probes, etc.) — just 200 OK.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		p.handleReadOnlyPassthrough(w, r)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -935,6 +1068,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	} else {
 		p.emitEgress(r.Context(), mkEgress("allow", "known-provider"))
 	}
+	p.recordProxyConnectorRequest()
 
 	// Extract text for inspection. Parse multiple API formats:
 	//  - Chat Completions: {"messages": [...]}
@@ -1105,15 +1239,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 
 		t0 := time.Now()
-		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
 		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
-		// trigger a block; we keep the stricter verdict.
-		if inspectionText != inspectRaw {
-			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", inspectRaw, partial.Messages, label, mode)
-			verdict = mergePromptVerdicts(verdict, rawVerdict)
-		}
+		// trigger a block; we keep the stricter verdict, as one evaluation
+		// (GAP-2288).
+		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -1138,6 +1269,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// history informs the LLM — which is (a) client-dependent
 			// and (b) semantically weaker than a system directive.
 			p.enqueueBlockNotification(verdict, "prompt", partial.Model)
+			// The OpenClaw event router marks the turn that carries this
+			// text as blocked (GAP-2231).
+			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			// Return 200 with the block message as an assistant turn so
 			// the agent surfaces it to the user rather than treating it as
 			// an error and retrying with a different provider.
@@ -1165,7 +1299,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// enqueueBlockNotification above) is the canonical channel for
 	// informing the LLM about past enforcement actions, so we don't
 	// lose any security context by dropping these echo turns.
-	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); stripped > 0 {
+	//
+	// A body covered by an AWS SigV4 signature is never rewritten: the proxy
+	// cannot re-sign it, and Bedrock refuses every changed body with "The
+	// request signature we calculated does not match" (GAP-1893).
+	signedBody := requestBodyIsSigned(r)
+	if launderedBody, stripped := launderInboundHistory(json.RawMessage(body), r.URL.Path); !signedBody && stripped > 0 {
 		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
 		body = []byte(launderedBody)
 		if p.logger != nil {
@@ -1184,7 +1323,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// notice on the next turn. With this block, every supported provider
 	// surface carries the notification forward as either a system
 	// message or merged instructions string.
-	if p.notify != nil {
+	if p.notify != nil && !signedBody {
 		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
 			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
@@ -1211,19 +1350,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Priority: (1) X-AI-Auth from the fetch interceptor (normalized to
 	// "Bearer <key>" regardless of the original header), (2) api-key (Azure),
 	// (3) x-api-key (Anthropic), (4) Authorization — skipping sk-dc-* master keys.
-	upstreamAuth := ""
-	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" && !strings.HasPrefix(aiAuth, "Bearer sk-dc-") {
-		upstreamAuth = aiAuth
-	}
-	if upstreamAuth == "" {
-		if azKey := r.Header.Get("api-key"); azKey != "" {
-			upstreamAuth = "Bearer " + azKey
-		} else if xKey := r.Header.Get("x-api-key"); xKey != "" {
-			upstreamAuth = "Bearer " + xKey
-		} else if auth := r.Header.Get("Authorization"); auth != "" && !strings.HasPrefix(auth, "Bearer sk-dc-") {
-			upstreamAuth = auth
-		}
-	}
+	upstreamAuth := passthroughUpstreamAuth(r.Header)
 	// Fallback: when the caller supplied X-DC-Target-URL but no credential
 	// headers (the "third_party_injected" mode used by ZeptoClaw/PulseClaw),
 	// consult the enterprise token resolver (secrets-sidecar hydrated key)
@@ -1312,22 +1439,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.recordProxyForwardedHeadersV8(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
 	}
 	// Set the single resolved auth header for the upstream provider.
-	if upstreamAuth != "" {
-		// Anthropic expects x-api-key, Azure expects api-key, others use Authorization.
-		switch provider {
-		case "anthropic":
-			upstreamReq.Header.Set("x-api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		case "azure":
-			upstreamReq.Header.Set("api-key", strings.TrimPrefix(upstreamAuth, "Bearer "))
-		default:
-			upstreamReq.Header.Set("Authorization", upstreamAuth)
-		}
-	}
+	setPassthroughUpstreamAuth(upstreamReq.Header, provider, upstreamAuth)
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
-		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
+		if provider == "bedrock" {
+			writeBedrockUpstreamError(w, upstreamErrorMessage("upstream error: ", err))
+		} else {
+			writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream error: ", err))
+		}
 		return
 	}
 	defer resp.Body.Close()
@@ -2516,6 +2637,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		writeOpenAIError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
+	p.recordProxyConnectorRequest()
 	req.RawBody = body
 	req.ExtraParams = extractExtraParams(body)
 
@@ -2734,15 +2856,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 		t0 := time.Now()
 
-		verdict := p.inspector.Inspect(agentCtx, "prompt", inspectionText, req.Messages, req.Model, mode)
 		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
-		// trigger a block; we keep the stricter verdict.
-		if inspectionText != inspectText {
-			rawVerdict := p.inspector.Inspect(agentCtx, "prompt", inspectText, req.Messages, req.Model, mode)
-			verdict = mergePromptVerdicts(verdict, rawVerdict)
-		}
+		// trigger a block; we keep the stricter verdict, as one evaluation
+		// (GAP-2288).
+		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {
@@ -2778,6 +2897,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
+			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
 				p.writeBlockedStream(w, req.Model, msg)
 			} else {
@@ -2887,7 +3007,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			selectedPromptProvider = strings.TrimSpace(routedDecision.Provider)
 		}
 		pendingPromptMeta.Provider = selectedPromptProvider
-		pendingPromptMeta.Model = req.Model
+		pendingPromptMeta.Model = telemetryModelID(req.Model)
 		promptID = p.emitLLMPromptEventV8(
 			ctx, pendingPromptMeta, inspectText, req.RawBody,
 		)
@@ -3049,7 +3169,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			llmCtx, r, req, providerName, promptID, "", "", lifecycleOutcome, "", nil,
 		)
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
-		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
 	responseModel := resp.Model
@@ -4087,7 +4207,7 @@ func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Requ
 	// Delegate to the connector when available — each connector knows its
 	// own auth scheme (tokens, loopback trust, etc.).
 	if p.connector != nil {
-		if p.connector.Authenticate(r) {
+		if p.connector.Authenticate(r) || p.matchesRefreshedGatewayToken(r) {
 			return true
 		}
 		reason := "invalid_token"
@@ -4102,6 +4222,9 @@ func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Requ
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if p.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.gatewayToken)) == 1 {
+			return true
+		}
+		if p.matchesRefreshedGatewayToken(r) {
 			return true
 		}
 	}
@@ -4151,6 +4274,7 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 		proxyAuthenticationMetricV8Producer,
 		"guardrail-proxy",
 		metricReason,
+		apiAuthenticationFailureFacts{},
 	)
 }
 
@@ -4314,7 +4438,7 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: setting up %s\n", newName)
-	if err := newConn.Setup(ctx, p.setupOpts); err != nil {
+	if err := connector.SetupRecordingCreatedDirs(ctx, newConn, p.setupOpts); err != nil {
 		oldName := "<none>"
 		if oldConn != nil {
 			oldName = oldConn.Name()
@@ -5159,7 +5283,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := guardrailRuntimeActionForGuardrailFindings(
+	action := guardrailToolCallActionForGuardrailFindings(
 		p.cfg, allFindings, false,
 	)
 	if action == guardrailActionConfirm {
@@ -5490,7 +5614,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
 		failModel("upstream_error", err)
-		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
+		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
 	defer resp.Body.Close()

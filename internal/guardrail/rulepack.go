@@ -32,8 +32,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"gopkg.in/yaml.v3"
@@ -411,26 +413,45 @@ func decodeEmbeddedYAML[T any](rel string) (*T, error) {
 	return &out, nil
 }
 
+// rulePackDirectoryUnreadable names why the rule-pack directory could not be
+// inspected. It carries the operating system's reason, never a path: the
+// caller already names the directory.
+func rulePackDirectoryUnreadable(err error) *RulePackError {
+	const reason = "rule-pack directory cannot be inspected"
+	if errors.Is(err, fs.ErrPermission) {
+		return rulePackErr(".", "directory_unreadable", reason+
+			" (access denied): the account the gateway runs as needs read and list access to the directory and to each of its parent folders")
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		return rulePackErr(".", "directory_unreadable", reason+" ("+errno.Error()+")")
+	}
+	return rulePackErr(".", "directory_unreadable", reason)
+}
+
 func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, rulePackErr(".", "directory_not_found", "rule-pack directory does not exist")
 		}
-		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+		return nil, rulePackDirectoryUnreadable(err)
 	}
 	if !info.IsDir() {
 		return nil, rulePackErr(".", "not_directory", "rule-pack path is not a directory")
 	}
 	resolvedDir, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return nil, rulePackErr(".", "directory_unreadable", "rule-pack directory cannot be inspected")
+		return nil, rulePackDirectoryUnreadable(err)
 	}
 
 	inventory := &rulePackInventory{files: make(map[string]diskRulePackFile)}
 	entries := 0
 	err = filepath.WalkDir(resolvedDir, func(full string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrPermission) {
+				return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be read by this account (permission denied); folders need 0755 and files 0644")
+			}
 			return rulePackErr(safeRelativePath(resolvedDir, full), "inventory_unreadable", "rule-pack inventory cannot be inspected")
 		}
 		if full == resolvedDir {
@@ -875,7 +896,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				return rulePackErr(rel, "duplicate_rule_id", fmt.Sprintf("rule %d id duplicates another rule", ruleIndex))
 			}
 			seenIDs[ruleID] = struct{}{}
-			if err := validateRequiredRegex(rel, fmt.Sprintf("rule %d pattern", ruleIndex), rule.Pattern); err != nil {
+			if err := validateRequiredRegex(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
 				return err
 			}
 			hasExpression := rule.Expression != "" || (rule.decoded && rule.expressionSet)
@@ -899,16 +920,15 @@ func (rp *RulePack) validateRuleFiles() error {
 				}
 				program, code := compiler.Compile(rule.Expression)
 				if code != semantic.CompileOK {
-					return rulePackErr(
-						rel,
-						"semantic_"+string(code),
-						fmt.Sprintf("rule %d expression is invalid", ruleIndex),
-					)
+					return rulePackErr(rel, "semantic_"+string(code), semanticCompileReason(ruleFieldLabel(ruleIndex, ruleID), code))
 				}
 				if rule.Enabled == nil || *rule.Enabled {
 					semanticCost += program.StaticCost()
 					if semanticCost > maxEnabledSemanticStaticCost {
-						return rulePackErr(rel, "semantic_catalog_cost_limit", "enabled semantic rules exceed the catalog cost limit")
+						return rulePackErr(rel, "semantic_catalog_cost_limit", fmt.Sprintf(
+							"enabled semantic rules exceed the catalog cost limit of %d (rule %d brings the estimated total to %d); "+
+								"disable or simplify semantic rules, or split them across packs",
+							maxEnabledSemanticStaticCost, ruleIndex, semanticCost))
 					}
 				}
 			}
@@ -1261,9 +1281,31 @@ func validateRequiredRegex(rel, field, pattern string) error {
 		return rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
 	}
 	if _, err := regexp.Compile(pattern); err != nil {
-		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression")
+		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
 	}
 	return nil
+}
+
+// safeRuleIDPattern bounds the rule ids echoed in validation errors.
+var safeRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+
+// ruleFieldLabel names a rule by its id and its 1-based place in the file, so
+// an author can find it (GAP-1225). An id outside the safe set is left out.
+func ruleFieldLabel(index int, id string) string {
+	if safeRuleIDPattern.MatchString(id) {
+		return fmt.Sprintf("rule %s (entry %d)", id, index+1)
+	}
+	return fmt.Sprintf("rule entry %d", index+1)
+}
+
+// regexErrorReason returns the RE2 reason (for example "missing closing ]")
+// without the expression text, so no source regex reaches the error.
+func regexErrorReason(err error) string {
+	var syntaxErr *syntax.Error
+	if errors.As(err, &syntaxErr) && syntaxErr.Code != "" {
+		return ": " + string(syntaxErr.Code)
+	}
+	return ""
 }
 
 func validSeverity(severity string) bool {
@@ -1403,4 +1445,52 @@ func (rp *RulePack) String() string {
 		summary.RuleFileCount,
 		summary.RuleCount,
 	)
+}
+
+// semanticRuleStaticCostLimit mirrors the semantic compiler's per-rule
+// worst-case cost bound (internal/guardrail/semantic limits.go,
+// maxRuleStaticCost), which it does not export. It is only quoted in the
+// refusal; the compiler enforces its own value, and a test keeps the two
+// equal.
+const semanticRuleStaticCostLimit uint64 = 6_000_000
+
+// semanticCompileReason explains a refused semantic expression without
+// echoing it. The cost refusals name the limit and how to get under it; the
+// other codes say what kind of problem it is. An author used to see only
+// "rule 0 expression is invalid" (GAP-1898). label names the rule by id and
+// entry (ruleFieldLabel).
+func semanticCompileReason(label string, code semantic.CompileCode) string {
+	switch code {
+	case semantic.CompileStaticCost:
+		return fmt.Sprintf("%s expression's estimated worst-case evaluation cost is above the per-rule limit of %d "+
+			"(lists and strings are costed at their maximum sizes); a list macro (exists, all, map, filter) nested inside "+
+			"another multiplies the cost, so test one list, prefer ==, in or startsWith over contains or matches inside "+
+			"a nested macro, or split the check into separate rules", label, semanticRuleStaticCostLimit)
+	case semantic.CompileStaticCostUnbounded:
+		return fmt.Sprintf("%s expression has no bounded worst-case evaluation cost (it uses a value whose size "+
+			"cannot be bounded); test the rule-pack fields directly", label)
+	}
+	if why, ok := semanticCompileProblems[code]; ok {
+		return fmt.Sprintf("%s expression is invalid: %s", label, why)
+	}
+	return fmt.Sprintf("%s expression is invalid", label)
+}
+
+// semanticCompileProblems describes each refused-expression code in words.
+var semanticCompileProblems = map[semantic.CompileCode]string{
+	semantic.CompileExpressionEncoding: "it is not valid UTF-8",
+	semantic.CompileExpressionSize:     "it is too long",
+	semantic.CompileSyntax:             "it has a syntax error",
+	semantic.CompileASTNodes:           "it has too many terms; split it into separate rules",
+	semantic.CompileASTDepth:           "it is nested too deeply; split it into separate rules",
+	semantic.CompileType: "it does not type-check: it names something that is not a rule-pack field or function, " +
+		"or compares values of different types (quote string literals, for example \"rm\")",
+	semantic.CompileResultType:         "it must evaluate to true or false",
+	semantic.CompileSurface:            "it uses a field or function that rule-pack expressions don't allow",
+	semantic.CompileEnumDomain:         "it compares a field with a value that field never has",
+	semantic.CompileComprehensionDepth: "it nests list macros (exists, all, map, filter) too deeply",
+	semantic.CompileRegexForm:          "call matches() on a string with one pattern argument",
+	semantic.CompileRegexDynamic:       "the matches() pattern must be a string literal",
+	semantic.CompileRegexSize:          "the matches() pattern is too long",
+	semantic.CompileRegexSyntax:        "the matches() pattern is not a valid RE2 regular expression",
 }

@@ -21,7 +21,7 @@ export default function NotFound() {
           Open the docs
         </Link>
         <Link
-          href="/docs/setup/guardrail"
+          href="/docs/guardrail"
           className="inline-flex items-center gap-2 rounded-md border border-fd-border bg-fd-card px-4 py-2 text-sm font-medium transition hover:bg-fd-muted"
         >
           Setup Guardrail

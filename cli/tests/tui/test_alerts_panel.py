@@ -179,6 +179,45 @@ def test_alert_detail_hydration_preserves_visible_non_info_promotion() -> None:
     assert detail.event.severity == "HIGH"
 
 
+def test_alert_detail_for_a_block_finding_names_target_rule_and_connector() -> None:
+    # RHEL-U3-05: the audit row behind a canonical finding has no target and
+    # only "finding.observed" as details, and hydration blanked the pane.
+    projected = alerts_from_v8_history(
+        (
+            _v8_alert_row(
+                "marker-finding",
+                bucket="security.finding",
+                event_name="finding.observed",
+                severity="CRITICAL",
+                action="scan-finding",
+                payload={
+                    "defenseclaw.finding.target_ref": "kiro:preToolUse",
+                    "defenseclaw.finding.rule_id": "R1-MARKER-BLOCK",
+                    "defenseclaw.finding.title": "Test marker command (block)",
+                    "defenseclaw.scan.scanner": "hook-rules",
+                },
+            ),
+        )
+    )[0]
+
+    class Store:
+        @staticmethod
+        def get_event(_event_id: str) -> AlertEvent:
+            return AlertEvent(
+                id=projected.id, severity="CRITICAL", action="scan-finding", target="", details="finding.observed"
+            )
+
+    model = AlertsPanelModel(store=Store())
+    model.set_events([projected])
+    model.detail_open = True
+
+    text = model.detail_text()
+
+    assert "Target: kiro:preToolUse" in text
+    assert "Rule: R1-MARKER-BLOCK: Test marker command (block)" in text
+    assert "Connector: codex" in text
+
+
 def test_alert_detail_survives_malformed_sqlite_history() -> None:
     class CorruptDatabase:
         def execute(self, *_args: object, **_kwargs: object) -> None:
@@ -239,7 +278,7 @@ def test_alerts_filter_selection_and_counts() -> None:
     model.deselect_all()
     assert model.selected_ids == set()
 
-    action = model.handle_key("2")
+    action = model.handle_key("h")  # High -> Critical
     assert action.filter_change is not None
     assert action.filter_change.panel == "alerts"
     assert action.filter_change.filter_type == "severity"
@@ -284,6 +323,9 @@ def test_alert_mutation_intents_always_send_actual_ids() -> None:
     filtered = model.handle_key("c")
     assert filtered.intent is not None
     assert filtered.intent.args == ("alerts", "dismiss", "--id", "a1")
+    # Bulk dismiss goes through the danger modal (second keypress), not the
+    # Run-focused preview a stray "c" plus Enter would confirm.
+    assert filtered.intent.risk == "destructive"
 
     all_loaded = model.handle_key("C")
     assert all_loaded.intent is not None
@@ -330,7 +372,7 @@ def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
     assert "In scope 4" in model.summary_text()
     assert "No actionable" not in model.empty_state()
 
-    assert model.handle_key("1").handled is True
+    assert model.handle_key("l").handled is True
     assert model.active_scope_key() == "all"
     assert model.active_filter_label() == "All severities"
     assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3", "a4"}
@@ -480,6 +522,10 @@ def test_alerts_slash_search_and_exact_severity_filter() -> None:
     assert model.handle_key("escape").handled is True
     assert model.filter_text == ""
     assert model.filtered
+    # RHEL-U2-10: the hint says Esc clears a severity filter; a second Esc does.
+    assert model.handle_key("escape").handled is True
+    assert model.active_filter_label() == "Actionable"
+    assert model.handle_key("escape").handled is False
 
 
 def test_alerts_connector_column_and_shared_filter() -> None:
@@ -776,3 +822,125 @@ def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
     # truth.
     assert "Summary:" not in copied
     assert "Details: connector=" not in copied
+
+
+def test_hook_finding_detail_shows_the_decision_from_its_evaluation() -> None:
+    """GAP-0999: the finding row has no action; the hook decision for the same
+    evaluation says the call was blocked."""
+
+    finding = _v8_alert_row(
+        "finding",
+        bucket="security.finding",
+        event_name="finding.observed",
+        severity="CRITICAL",
+        action="scan-finding",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.scan.scanner": "hook-rules"},
+    )
+    decision = _v8_alert_row(
+        "decision",
+        bucket="guardrail.evaluation",
+        event_name="hook_decision",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.guardrail.effective_action": "block"},
+    )
+
+    (alert,) = alerts_from_v8_history((finding,), (decision,))
+
+    assert ("Decision", "block") in alert.facts
+    assert ("Decision", "block") not in alerts_from_v8_history((finding,))[0].facts
+
+
+def test_post_tool_finding_reads_like_the_cli(monkeypatch) -> None:
+    """GAP-1456: list and detail show the hook decision and the pack title,
+    not the evaluation's "allow", "Secret finding" or a redacted summary."""
+
+    import defenseclaw.commands.cmd_alerts as cmd_alerts
+
+    monkeypatch.setattr(cmd_alerts, "_rule_pack_titles", lambda: {"SEC-AWS-KEY": "AWS access key"})
+    finding = _v8_alert_row(
+        "f1",
+        bucket="security.finding",
+        event_name="finding.observed",
+        severity="HIGH",
+        action="scan-finding",
+        payload={
+            "defenseclaw.evaluation.id": "ev-1",
+            "defenseclaw.finding.rule_id": "SEC-AWS-KEY",
+            "defenseclaw.finding.title": "Secret finding",
+            "defenseclaw.finding.target_ref": "claudecode:PostToolUse",
+            "defenseclaw.finding.evidence_summary": "<redacted-sensitive len=20>",
+        },
+    )
+    decision = _v8_alert_row(
+        "d1",
+        bucket="guardrail.evaluation",
+        event_name="hook_decision",
+        payload={"defenseclaw.evaluation.id": "ev-1", "defenseclaw.guardrail.effective_action": "allow"},
+    )
+    store = SimpleNamespace(
+        hook_details_for_alerts=lambda ids: {"f1": ["action=allow raw_action=block would_block=true mode=action"]},
+    )
+
+    (alert,) = alerts_panel._with_hook_decisions(store, list(alerts_from_v8_history((finding,), (decision,))))
+
+    assert ("Rule", "SEC-AWS-KEY: AWS access key") in alert.facts
+    assert ("Decision", "detected after the tool ran (cannot block)") in alert.facts
+    assert ("Decision", "allow") not in alert.facts
+    label = alerts_panel._alert_details_label(alert)
+    assert "redacted" not in label
+    assert label.startswith("SEC-AWS-KEY: AWS access key")
+
+
+def test_copilot_local_and_cli_findings_share_one_target() -> None:
+    """GAP-2619: a VS Code Local-harness finding (copilot:PreToolUse) and a
+    Copilot CLI one (copilot:preToolUse) show the same Target."""
+
+    rows = tuple(
+        _v8_alert_row(
+            f"f-{i}",
+            bucket="security.finding",
+            event_name="finding.observed",
+            severity="CRITICAL",
+            action="scan-finding",
+            payload={"defenseclaw.finding.target_ref": ref, "defenseclaw.scan.scanner": "hook-rules"},
+        )
+        for i, ref in enumerate(("copilot:PreToolUse", "copilot:preToolUse"))
+    )
+
+    assert {alert.target for alert in alerts_from_v8_history(rows)} == {"copilot:preToolUse"}
+
+
+def test_copilot_detail_target_and_history_cover_both_harnesses() -> None:
+    """GAP-2619: the detail pane of a VS Code Local alert (stored
+    copilot:PreToolUse) shows copilot:preToolUse, and its History lists the
+    Copilot CLI events of that hook point too."""
+
+    db = sqlite3.connect(":memory:")
+    db.execute(
+        "CREATE TABLE audit_events (id TEXT, timestamp TEXT, action TEXT, target TEXT,"
+        " actor TEXT, details TEXT, severity TEXT, run_id TEXT)"
+    )
+    db.executemany(
+        "INSERT INTO audit_events VALUES (?, ?, 'connector-hook', ?, 'hook', '', 'HIGH', '')",
+        [
+            ("local", "2026-10-04T16:09:00Z", "copilot:PreToolUse"),
+            ("cli", "2026-10-04T16:08:00Z", "copilot:preToolUse"),
+            ("claude", "2026-10-04T16:07:00Z", "claudecode:PreToolUse"),
+        ],
+    )
+    selected = AlertEvent(
+        id="local",
+        severity="HIGH",
+        action="scan-finding",
+        target="copilot:PreToolUse",
+        timestamp=datetime(2026, 10, 4, 16, 9, tzinfo=timezone.utc),
+    )
+    model = AlertsPanelModel(store=SimpleNamespace(db=db))
+    model.set_events([selected])
+    model.toggle_expand_or_detail()
+
+    info = model.get_detail_info()
+    assert info is not None
+    assert info.event.target == "copilot:preToolUse"
+    assert [item.id for item in info.history] == ["local", "cli"]
+    assert {item.target for item in info.history} == {"copilot:preToolUse"}
+    assert dict(model.detail_pairs())["Target"] == "copilot:preToolUse"

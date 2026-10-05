@@ -383,7 +383,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h])) or vector(0)",
+          "expr": "sum(((last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]) - (last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1d] offset 1h) or last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -435,7 +435,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h])) or vector(0)",
+          "expr": "sum(((last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]) - (last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1d] offset 1h) or last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]))) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -471,7 +471,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total{source=~\"$source\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -668,7 +668,7 @@
     {
       "type": "timeseries",
       "title": "Signals by category",
-      "description": "Discovery observations by signal.category across the selected range. Per-sidecar cumulative counter maxima preserve sparse runs that may export only once.",
+      "description": "Discovery observations by signal.category across the selected range. A series first seen in the range counts in full, so a signal that exported only once still shows.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -681,7 +681,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))",
+          "expr": "sum by (signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
@@ -714,7 +714,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (state) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))",
+          "expr": "sum by (state) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
           "legendFormat": "{{state}}",
           "refId": "A"
         }
@@ -747,7 +747,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -804,7 +804,7 @@
       },
       "targets": [
         {
-          "expr": "topk(15, sum by (detector) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range])))",
+          "expr": "topk(15, sum by (detector) (((last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__range]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -1425,7 +1425,7 @@
     {
       "type": "logs",
       "title": "AI discovery per-signal log",
-      "description": "Canonical v8 per-signal records (`event.name=ai_component.discovered|changed|confidence.changed|removed`). Use log details or search for a vendor, product, or detector.",
+      "description": "Canonical v8 per-signal records (`event.name=ai_component.discovered|changed|confidence.changed|removed`). Use log details or search for a vendor, product, detector, or user.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1469,7 +1469,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],

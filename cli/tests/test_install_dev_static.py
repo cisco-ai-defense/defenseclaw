@@ -97,12 +97,68 @@ def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> No
 
     first_init = quickstart.index(init_command)
     no_tty_init = quickstart.index(init_command, first_init + len(init_command))
-    assert no_tty_init < quickstart.index(setup_guard)
-    setup_failure = quickstart[
-        quickstart.index(setup_guard) : quickstart.index("\n\t\t\tfi; \\", quickstart.index(setup_guard))
-    ]
+    no_tty_setup = quickstart.index(setup_guard, no_tty_init)
+    setup_failure = quickstart[no_tty_setup : quickstart.index("\n\t\t\tfi; \\", no_tty_setup)]
     assert "Could not add newly detected connectors" in setup_failure
+    # GAP-1148: name the re-run, not an unrelated discovery command.
+    assert "defenseclaw setup --add-detected --yes" in setup_failure
+    assert "agent discover --refresh" not in quickstart
     assert "exit 1;" in setup_failure
+
+
+def test_make_all_migrates_existing_data_before_setup() -> None:
+    # GAP-1468: make all over a release home must refresh the seeded rule
+    # packs (and the config schema) the way the release upgrade's migrate does.
+    text = MAKEFILE.read_text(encoding="utf-8")
+    all_target = text[text.index("\nall:") : text.index("\n\n", text.index("\nall:"))]
+    assert all_target.index("_source-dev-install") < all_target.index("source-migrate")
+    assert all_target.index("source-migrate") < all_target.index("quickstart")
+    recipe = text[text.index("\nsource-migrate:") : text.index("\npath:")]
+    assert '[ -f "$$data_dir/config.yaml" ]' in recipe
+    assert '"$(INSTALL_DIR)/defenseclaw$(EXE)" migrate' in recipe
+    assert "exit 1;" in recipe
+
+
+def test_make_all_restarts_a_running_gateway_it_replaced() -> None:
+    # GAP-1575: a second make all left the old gateway running on the replaced
+    # binary and still said "installed and ready".
+    text = MAKEFILE.read_text(encoding="utf-8")
+    all_target = text[text.index("\nall:") : text.index("\n\n", text.index("\nall:"))]
+    assert all_target.index("source-migrate") < all_target.index("source-restart-gateway")
+    assert all_target.index("source-restart-gateway") < all_target.index("quickstart")
+    recipe = text[text.index("\nsource-restart-gateway:") : text.index("\npath:")]
+    status = recipe.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" status')
+    assert status < recipe.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" restart')
+    assert "defenseclaw-gateway restart" in recipe
+    hint = text[text.index("\ngateway-install:") : text.index("\nplugin-install:")]
+    assert 'pgrep -x "$(GATEWAY)"' not in hint
+
+
+def test_windows_make_all_stops_the_running_gateway_before_replacing_it() -> None:
+    # GAP-1784: Windows renamed the running gateway's file aside and the
+    # account could no longer stop or restart the process left on it.
+    text = MAKEFILE.read_text(encoding="utf-8")
+    install = text[text.index("\n_source-dev-install:") : text.index("\ncli-install:")]
+    windows = install[install.index("ifeq ($(OS),Windows_NT)") : install.index("dev-publish-gateway")]
+    assert windows.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" stop') < windows.index('touch "$(SOURCE_GATEWAY_STOPPED)"')
+    assert "then build again" in windows and "exit 1;" in windows
+    restart = text[text.index("\nsource-restart-gateway:") : text.index("\npath:")]
+    marker = restart.index('[ -f "$(SOURCE_GATEWAY_STOPPED)" ]')
+    assert marker < restart.index('"$(INSTALL_DIR)/$(GATEWAY)$(EXE)" start') < restart.index('$(EXE)" restart')
+
+
+def test_make_all_keeps_an_existing_config_instead_of_rerunning_first_run() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
+    keep = quickstart.index('elif [ -z "$${PROFILE:-}" ] && [ -f "$$cfg_file" ]; then')
+
+    # Only an explicit CONNECTOR runs init before the existing-config check;
+    # the TTY and no-TTY init paths come after it.
+    assert quickstart.index('"$$dc_bin" init \\') > keep
+    assert quickstart.index('"$$dc_bin" init --non-interactive --yes', quickstart.index("--connector")) > keep
+    branch = quickstart[keep : quickstart.index("\t\telif ", keep + 1)]
+    assert '"$$dc_bin" setup --add-detected --yes --restart' in branch
+    assert " init " not in branch.replace("defenseclaw init", "")
 
 
 def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
@@ -116,7 +172,7 @@ def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
     for target in (
         "cli-test",
         "cli-test-cov",
-        "cli-test-snap",
+        "tui-test",
         "py-connector-matrix-test",
         "test-verbose",
         "test-file",
@@ -147,3 +203,13 @@ def test_skip_install_never_publishes_unclaimed_shared_cli() -> None:
     assert guard < publish < alternate < skipped
     assert 'SKIP_INSTALL="${skip_install}"' in text
     assert "export SKIP_INSTALL" in text
+
+
+def test_make_all_does_not_invent_a_connector_when_skipping_openclaw() -> None:
+    # GAP-2050: an unset CONNECTOR was echoed as "CONNECTOR=codex".
+    text = MAKEFILE.read_text(encoding="utf-8")
+    assert "CONNECTOR:-codex" not in text
+    start = text.index("\nmaybe-openclaw-plugin-install:")
+    recipe = text[start : text.index("\n\n", start)]
+    assert "echo" not in recipe
+    assert "OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)" in text

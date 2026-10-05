@@ -5,6 +5,7 @@ package audit
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"time"
@@ -62,10 +63,9 @@ func (s *Store) CollectSQLiteHealth(ctx context.Context) (SQLiteHealthSnapshot, 
 		// recorded CheckpointMs described work that never happened. Scan the row
 		// and report a blocked checkpoint as busy so retryBusyObserved retries it
 		// -- the phrasing is what isSQLiteBusy matches.
-		var busy, walFrames, checkpointed int
-		if scanErr := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").
-			Scan(&busy, &walFrames, &checkpointed); scanErr != nil {
-			return scanErr
+		busy, checkpointErr := s.passiveCheckpoint(ctx)
+		if checkpointErr != nil {
+			return checkpointErr
 		}
 		if busy != 0 {
 			return fmt.Errorf("sqlite_busy: wal_checkpoint(PASSIVE) was blocked")
@@ -76,4 +76,49 @@ func (s *Store) CollectSQLiteHealth(ctx context.Context) (SQLiteHealthSnapshot, 
 	}
 	snapshot.CheckpointMs = float64(time.Since(startedAt).Milliseconds())
 	return snapshot, nil
+}
+
+// passiveCheckpoint runs PRAGMA wal_checkpoint(PASSIVE) on the dedicated
+// checkpoint connection and returns its busy column. A checkpoint copies WAL
+// frames into the database file and syncs it, which can take seconds on slow
+// storage. Run on the single writer connection, it made every mandatory append
+// wait behind that I/O, so an append with a short deadline failed although
+// nothing held the write lock. A PASSIVE checkpoint never blocks a writer on
+// another connection. The caller must hold acquireReady so Close cannot run
+// underneath it.
+func (s *Store) passiveCheckpoint(ctx context.Context) (int, error) {
+	db, err := s.checkpointConn()
+	if err != nil {
+		return 0, err
+	}
+	var busy, walFrames, checkpointed int
+	err = db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &walFrames, &checkpointed)
+	return busy, err
+}
+
+func (s *Store) checkpointConn() (*sql.DB, error) {
+	if s.dbPathGuard == nil || s.dbPathGuard.inMemory {
+		// Every connection to :memory: opens a separate database.
+		return s.db, nil
+	}
+	s.checkpointMu.Lock()
+	defer s.checkpointMu.Unlock()
+	if s.checkpointDB == nil {
+		db, err := openSQLite(s.dbPath)
+		if err != nil {
+			return nil, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
+		}
+		// sql.Open is lazy. Force the open, then repeat the path guard's
+		// post-open checks so the cached pool is bound to the validated file.
+		if err := db.Ping(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("audit: verify SQLite checkpoint connection: %w", err)
+		}
+		if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("audit: revalidate database paths for checkpoint connection: %w", err)
+		}
+		s.checkpointDB = db
+	}
+	return s.checkpointDB, nil
 }

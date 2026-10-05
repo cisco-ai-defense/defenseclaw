@@ -282,6 +282,26 @@ type HookRegistrationPosture struct {
 	HookExecutable        string `json:"hook_executable,omitempty"`
 	CodexEnforcement      bool   `json:"codex_enforcement,omitempty"`
 	ClaudeCodeEnforcement bool   `json:"claudecode_enforcement,omitempty"`
+	// HookSocket and HookSocketServiceUID record the standalone unix hook
+	// socket transport the hooks were rendered with (see
+	// managedPluginHookSocket). Both are empty for the TCP transport, so
+	// locks written by per-user, Secure Client and Windows installs are
+	// unchanged. HookTransportDrifted compares them with the configured
+	// transport.
+	HookSocket           string `json:"hook_socket,omitempty"`
+	HookSocketServiceUID int    `json:"hook_socket_service_uid,omitempty"`
+	// HookCredentialBinding records which per-user credentials the hooks
+	// were rendered with: the bound identity and a truncated digest of the
+	// credentials (see hookCredentialBinding). Empty for every install that
+	// does not bind credentials to a user. HookCredentialDrifted compares
+	// it with the configured credentials.
+	HookCredentialBinding string `json:"hook_credential_binding,omitempty"`
+	// ForeignHookGuard records the administrator-owned hook binary the
+	// standalone Hermes shell hook was rendered to run for the foreign-hook
+	// guard (see shellHookForeignGuardBinary). Empty for every other hook
+	// and install. HookForeignGuardDrifted compares it with the configured
+	// guard.
+	ForeignHookGuard string `json:"foreign_hook_guard,omitempty"`
 }
 
 // LoadActiveConnector reads the previously active connector name from
@@ -1123,6 +1143,7 @@ func newHookContractLockEntry(
 	}
 	resolution := resolveHookContractForOptions(name, opts)
 	contract := resolution.Contract
+	hookSocket, hookSocketServiceUID := managedPluginHookSocket(opts)
 	entry := HookContractLockEntry{
 		Connector:              normalizeConnectorName(name),
 		RawAgentVersion:        resolution.RawVersion,
@@ -1145,6 +1166,10 @@ func newHookContractLockEntry(
 			HookExecutable:        opts.HookExecutable,
 			CodexEnforcement:      opts.CodexEnforcement,
 			ClaudeCodeEnforcement: opts.ClaudeCodeEnforcement,
+			HookSocket:            hookSocket,
+			HookSocketServiceUID:  hookSocketServiceUID,
+			HookCredentialBinding: hookCredentialBinding(opts),
+			ForeignHookGuard:      shellHookForeignGuardBinary(opts, name),
 		},
 		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
@@ -1263,7 +1288,7 @@ func HookRuntimeRegistrationCurrent(
 		return false, nil
 	}
 	if _, supersedes := supersedingCodexSetupSelection(opts.DataDir, stored); supersedes {
-		return false, errors.New("newer explicit Codex setup selection supersedes the active registration owner")
+		return false, ErrSetupSelectionSuperseded
 	}
 	expected := NewHookContractLockEntry(opts, conn, defenseClawVersion)
 	expectedShared := takeSharedHookScriptDigests(expected.HookScriptDigests)
@@ -1419,6 +1444,59 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	return HookContractCompatibilityDrifted(previous, current)
 }
 
+// HookTransportDrifted reports whether the hooks recorded by lock were
+// rendered for a different gateway transport than opts now selects: TCP
+// against the standalone unix hook socket, another socket path, or another
+// trusted service uid. A lock written before the transport was recorded
+// counts as TCP, so hooks installed before an upgrade that added the socket
+// fail verification and the guardian reinstalls them.
+//
+// Unix verification does not compare hook bytes, so without this check a
+// target protected before the socket was configured would keep posting to
+// the TCP port with the shared connector bearer. Like script digests, this
+// is a repair signal and is deliberately not part of HookContractLockDrifted.
+func HookTransportDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
+	wantSocket, wantUID := managedPluginHookSocket(opts)
+	haveSocket, haveUID := "", 0
+	if posture := lock.RegistrationPosture; posture != nil {
+		haveSocket, haveUID = posture.HookSocket, posture.HookSocketServiceUID
+	}
+	if haveSocket == "" {
+		haveUID = 0
+	}
+	return haveSocket != wantSocket || haveUID != wantUID
+}
+
+// hookCredentialBinding is the non-secret record of the per-user
+// credentials opts renders: the bound identity and the first 16 bytes of a
+// SHA-256 over the credentials. The lock sits in the user's own data
+// directory next to credentials the user already holds, so the digest
+// discloses nothing new; it only lets verification notice that the
+// credentials changed. Empty when opts binds no identity.
+func hookCredentialBinding(opts SetupOpts) string {
+	identity := strings.TrimSpace(opts.HookCredentialIdentity)
+	if identity == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte("defenseclaw.hook-credential-binding.v1\x00" + identity + "\x00" +
+		strings.TrimSpace(opts.APIToken) + "\x00" + strings.TrimSpace(opts.OTLPPathToken)))
+	return identity + ":" + hex.EncodeToString(digest[:16])
+}
+
+// HookCredentialDrifted reports whether the hooks recorded by lock were
+// rendered with other credentials than opts selects: the connector-scoped
+// credential shared by every user (a lock without a binding), another
+// user's, or credentials derived from an older key. Like
+// HookTransportDrifted it is a repair signal for Unix verification, which
+// does not compare hook or agent configuration bytes.
+func HookCredentialDrifted(lock HookContractLockEntry, opts SetupOpts) bool {
+	have := ""
+	if posture := lock.RegistrationPosture; posture != nil {
+		have = posture.HookCredentialBinding
+	}
+	return have != hookCredentialBinding(opts)
+}
+
 func cursorHookContractUnchanged(previous, current HookContractLockEntry) bool {
 	if normalizeConnectorName(previous.Connector) != "cursor" || normalizeConnectorName(current.Connector) != "cursor" {
 		return false
@@ -1462,6 +1540,57 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	// changed script bytes are the thing setup/guardian repair is supposed to
 	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
+}
+
+// HookContractChangedByDefenseClawRelease reports whether the only
+// compatibility drift is a ContractID that DefenseClaw itself now resolves
+// differently for the same agent version. Admission refreshes such a lock
+// instead of refusing it; any agent version change still drifts.
+//
+// The writer's DefenseClawVersion is deliberately not compared: a release
+// binary always resolves the same contract for the same agent version, so a
+// changed contract with an unchanged agent comes from a different contract
+// table. A source build (make all) carries the checked-in development version,
+// which equals the last release (GAP-1467), so the version string cannot tell
+// the two tables apart.
+func HookContractChangedByDefenseClawRelease(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || previous.ContractID == "" ||
+		current.ContractID == "" || previous.ContractID == current.ContractID {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
+}
+
+// HookContractAgentUpdateAdmitted reports whether drift is an agent update to
+// a version that still resolves to a hook contract (tested, or an untested
+// newer version with no known problems). Admission refreshes the lock for it
+// instead of refusing. A contract change without an agent version change is
+// not an update, and Secure Client (strict resolution) refuses every agent
+// change as before.
+func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || StrictHookContractResolution() {
+		return false
+	}
+	if stableRawAgentVersionForContract(previous) == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion {
+		return false
+	}
+	return current.CompatibilityStatus == HookCompatibilityKnown && strings.TrimSpace(current.ContractID) != ""
+}
+
+// AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
+// recorded when a DefenseClaw release last admitted the connector. A refusal
+// for an unchanged agent comes from the running release's own contract table,
+// not from the agent.
+func AgentUnchangedSinceLock(previous HookContractLockEntry, rawAgentVersion string) bool {
+	if strings.TrimSpace(previous.Connector) == "" {
+		return false
+	}
+	previousRaw := stableRawAgentVersionForContract(previous)
+	current := HookContractLockEntry{Connector: previous.Connector, RawAgentVersion: rawAgentVersion}
+	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current)
 }
 
 // stableRawAgentVersionForContract removes only upstream presentation text
@@ -2004,6 +2133,11 @@ func loadProtectedHookContractEntry(dataDir, connectorName string) (HookContract
 // tick with different evidence. Matching evidence never displaces a freshly
 // persisted lock, which hands authority back to hook_contract_lock.json as soon
 // as Setup succeeds.
+// ErrSetupSelectionSuperseded reports that an explicit setup action recorded a
+// newer agent selection than the running gateway's registration owner. A
+// setup command that restarts the gateway writes it just before the handoff.
+var ErrSetupSelectionSuperseded = errors.New("newer explicit Codex setup selection supersedes the active registration owner")
+
 func supersedingCodexSetupSelection(
 	dataDir string,
 	entry HookContractLockEntry,
@@ -2179,6 +2313,17 @@ func validLowerHexSHA256(value string) bool {
 type cachedAgentSignal struct {
 	Version    string `json:"version"`
 	BinaryPath string `json:"binary_path"`
+	Installed  *bool  `json:"installed"`
+}
+
+// CachedAgentNotFound reports whether the last agent discovery recorded in
+// agent_discovery.json looked for the connector's agent and found no binary.
+// A missing cache or entry, or a binary whose version could not be read,
+// returns false, so callers keep their default until discovery has positively
+// found nothing. init and every setup that picks a connector refresh the cache.
+func CachedAgentNotFound(dataDir, connectorName string) bool {
+	signal, ok := loadCachedAgentSignal(dataDir, connectorName)
+	return ok && signal.Installed != nil && !*signal.Installed && strings.TrimSpace(signal.BinaryPath) == ""
 }
 
 func loadCachedAgentSignal(dataDir, connectorName string) (cachedAgentSignal, bool) {

@@ -140,7 +140,7 @@ func TestCompleteFirewallRelaxationSemanticOwnerRejectsPartialAndInertText(t *te
 	}
 }
 
-func TestCompleteFirewallRelaxationAttemptAlertsInEveryProfile(t *testing.T) {
+func TestCompleteFirewallRelaxationAttemptProfilePosture(t *testing.T) {
 	positives := []string{
 		"iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT",
 		"iptables -P INPUT ACCEPT && iptables -P OUTPUT ACCEPT && iptables -P FORWARD ACCEPT && echo 'Default policies set to ACCEPT'",
@@ -185,9 +185,15 @@ func TestCompleteFirewallRelaxationAttemptAlertsInEveryProfile(t *testing.T) {
 						},
 					},
 				)
-				if response.Action != guardrailActionAlert ||
-					response.RawAction != guardrailActionAlert ||
-					response.Severity != "HIGH" || response.WouldBlock ||
+				// The list is judged as the sequence of its commands, so the
+				// complete relaxation rule applies too and blocks in strict.
+				wantAction, wantSeverity := guardrailActionAlert, "HIGH"
+				if profile == "strict" {
+					wantAction, wantSeverity = guardrailActionBlock, "CRITICAL"
+				}
+				if response.Action != wantAction ||
+					response.RawAction != wantAction ||
+					response.Severity != wantSeverity || response.WouldBlock ||
 					!findingStringHasRuleID(response.Findings, completeFirewallRelaxationAttemptRuleID) {
 					t.Fatalf("profile=%s response=%+v", profile, response)
 				}

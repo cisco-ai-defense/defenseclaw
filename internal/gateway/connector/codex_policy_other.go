@@ -11,12 +11,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func codexSystemRequirementsPath() (string, error) {
+	if runtime.GOOS == "darwin" {
+		// /etc is a root-owned symlink to /private/etc on macOS; the
+		// trusted-path checks refuse symlinked ancestors, so read the same
+		// file through its canonical path.
+		return "/private/etc/codex/requirements.toml", nil
+	}
 	return "/etc/codex/requirements.toml", nil
 }
 
@@ -72,15 +81,35 @@ func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, b
 }
 
 func startCodexAppServerTree(cmd *exec.Cmd) (func(), error) {
+	// Run the app-server in its own process group and kill the group: killing
+	// only the npm node wrapper left the native codex child holding stderr
+	// open, so a probe that ran out of time never returned (GAP-1850).
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	killTree := func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	if cmd.Cancel != nil {
+		cmd.Cancel = killTree
+	}
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 2 * time.Second
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
+			_ = killTree()
 			_ = cmd.Wait()
 		})
 	}, nil

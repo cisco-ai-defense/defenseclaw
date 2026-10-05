@@ -33,7 +33,7 @@ func TestValidateWindowsNamespacePurgeProductionRootAcceptsOnlyExactLayouts(t *t
 		"certification": certification,
 	} {
 		t.Run("accept_"+name, func(t *testing.T) {
-			if err := validateWindowsNamespacePurgeProductionRoot(path); err != nil {
+			if err := validateWindowsNamespacePurgeProductionRoot("", path); err != nil {
 				t.Fatalf("validate trusted namespace root %s: %v", path, err)
 			}
 		})
@@ -50,16 +50,49 @@ func TestValidateWindowsNamespacePurgeProductionRootAcceptsOnlyExactLayouts(t *t
 		"arbitrary root":       filepath.Join(programFiles, "Unrelated", "DefenseClaw"),
 	} {
 		t.Run("reject_"+name, func(t *testing.T) {
-			if err := validateWindowsNamespacePurgeProductionRoot(path); err == nil {
+			if err := validateWindowsNamespacePurgeProductionRoot("", path); err == nil {
 				t.Fatalf("untrusted namespace root was accepted: %s", path)
 			}
 		})
 	}
 }
 
+func TestValidateWindowsNamespacePurgeProductionRootIsProfileScoped(t *testing.T) {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		t.Fatalf("resolve trusted Program Files: %v", err)
+	}
+	secureClient := filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
+	standalone := filepath.Join(programFiles, "Cisco", "DefenseClaw")
+	standaloneCert := filepath.Join(programFiles, "Cisco", "DefenseClaw-Cert", "0a1b2c3d4e")
+	for _, tc := range []struct {
+		profile string
+		path    string
+		accept  bool
+	}{
+		{"", secureClient, true},
+		{"secure_client", secureClient, true},
+		{"", standalone, false},
+		{"secure_client", standaloneCert, false},
+		{"standalone", standalone, true},
+		{"standalone", standaloneCert, true},
+		{"standalone", secureClient, false},
+		{"Standalone", standalone, false},
+		{"other", standalone, false},
+	} {
+		err := validateWindowsNamespacePurgeProductionRoot(tc.profile, tc.path)
+		if tc.accept && err != nil {
+			t.Fatalf("profile %q root %s: %v", tc.profile, tc.path, err)
+		}
+		if !tc.accept && err == nil {
+			t.Fatalf("profile %q accepted foreign root %s", tc.profile, tc.path)
+		}
+	}
+}
+
 func TestValidateWindowsNamespacePurgeRequestRejectsInvalidGatewayServiceSID(t *testing.T) {
 	oldRootScope := windowsNamespacePurgeRootScope
-	windowsNamespacePurgeRootScope = func(string) error { return nil }
+	windowsNamespacePurgeRootScope = func(string, string) error { return nil }
 	t.Cleanup(func() { windowsNamespacePurgeRootScope = oldRootScope })
 
 	request := WindowsNamespacePurgeRequest{
@@ -442,7 +475,7 @@ func newWindowsNamespacePurgeEmptyTestRoot(t *testing.T) (WindowsNamespacePurgeR
 	oldAncestorTrust := windowsNamespacePurgeAncestorTrust
 	oldRootScope := windowsNamespacePurgeRootScope
 	windowsNamespacePurgeAncestorTrust = func(string) error { return nil }
-	windowsNamespacePurgeRootScope = func(string) error { return nil }
+	windowsNamespacePurgeRootScope = func(string, string) error { return nil }
 	t.Cleanup(func() {
 		windowsNamespacePurgeAncestorTrust = oldAncestorTrust
 		windowsNamespacePurgeRootScope = oldRootScope

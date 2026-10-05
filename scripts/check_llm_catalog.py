@@ -30,16 +30,29 @@ Validation rules:
   new provider to the catalog never hard-breaks this gate before the
   mapping is taught here.
 
-LiteLLM's registry is bundled data, so this check needs no network and no
-credentials; its freshness is pinned to the ``litellm==`` version in
-``pyproject.toml``. Runtime dispatch is handled by the Bifrost SDK, not
-LiteLLM — this check validates ids, it does not drive routing.
+Two modes, so the per-PR gate cannot go red on a date or an upstream edit:
 
-Run via ``make check-llm-catalog``.
+* Default (``make check-llm-catalog``, the required PR gate): hermetic.
+  The registry is the snapshot bundled inside the installed ``litellm``
+  wheel (``model_prices_and_context_window_backup.json``, pinned through
+  ``uv.lock``), and deprecations are judged as of ``GATE_AS_OF``. The
+  result changes only when the catalog, the LiteLLM pin or
+  ``GATE_AS_OF`` changes. It needs no network and does not import
+  ``litellm``.
+* ``--live`` (``make check-llm-catalog-live``, the scheduled
+  ``LLM Catalog Radar`` workflow): ``litellm.model_cost`` as loaded at
+  import, which by default is LiteLLM's upstream registry, judged as of
+  today. It reports drift as it happens; refresh the catalog (and bump
+  ``GATE_AS_OF``) when it fails.
+
+Runtime dispatch is handled by the Bifrost SDK, not LiteLLM — this check
+validates ids, it does not drive routing.
 """
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import json
 import sys
 from datetime import date
@@ -68,6 +81,36 @@ BEDROCK_REGION_PREFIXES = ("us.", "eu.", "apac.", "global.", "au.", "jp.", "us-g
 
 # kind values treated as self-hosted; their model lists are not validated.
 LOCAL_KINDS = {"local"}
+
+# Date the hermetic PR gate judges deprecations against. Never date.today():
+# a wall-clock date turns every deprecation date in the registry into a
+# failure on unrelated PRs the day it passes. Bump it when refreshing the
+# catalog after the live radar reports drift.
+GATE_AS_OF = date(2026, 10, 1)
+
+BUNDLED_REGISTRY = "model_prices_and_context_window_backup.json"
+
+
+def load_bundled_registry() -> dict | None:
+    """Return the registry snapshot bundled in the installed ``litellm``.
+
+    Reads the JSON file directly, without importing ``litellm`` (its import
+    fetches the upstream registry over the network by default). Returns
+    ``None`` when ``litellm`` is not installed or ships no snapshot.
+    """
+    spec = importlib.util.find_spec("litellm")
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    path = Path(next(iter(spec.submodule_search_locations))) / BUNDLED_REGISTRY
+    if not path.is_file():
+        return None
+    registry = json.loads(path.read_text(encoding="utf-8"))
+    # LiteLLM exposes each entry's ``aliases`` as extra top-level keys.
+    for entry in list(registry.values()):
+        if isinstance(entry, dict) and isinstance(entry.get("aliases"), list):
+            for alias in entry["aliases"]:
+                registry.setdefault(str(alias), entry)
+    return registry
 
 
 def resolve(model_cost: dict, provider_ll: str, model: str) -> str | None:
@@ -127,12 +170,53 @@ def check_catalog(
     return problems
 
 
-def main() -> int:
-    try:
-        import litellm  # noqa: PLC0415
-    except ImportError:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="check against LiteLLM's live registry and today's date (scheduled radar)",
+    )
+    args = parser.parse_args(argv)
+
+    if args.live:
+        try:
+            import litellm  # noqa: PLC0415
+        except ImportError:
+            litellm = None
+        model_cost = getattr(litellm, "model_cost", None)
+        today = date.today()
+        source = f"live litellm registry as of {today.isoformat()}"
+        try:
+            from litellm.litellm_core_utils.get_model_cost_map import (  # noqa: PLC0415
+                get_model_cost_map_source_info,
+            )
+
+            info = get_model_cost_map_source_info()
+        except (ImportError, AttributeError):
+            # Without source info the radar cannot tell the upstream registry
+            # from the bundled snapshot, so it fails rather than pass unchecked.
+            print(
+                "check_llm_catalog: error: cannot confirm litellm used the upstream registry "
+                "(get_model_cost_map_source_info is unavailable)",
+                file=sys.stderr,
+            )
+            return 2
+        if info.get("source") == "local":
+            # The upstream fetch failed or was disabled.
+            reason = info.get("fallback_reason") or "LITELLM_LOCAL_MODEL_COST_MAP is set"
+            source = f"bundled litellm registry as of {today.isoformat()}; upstream not used: {reason}"
+            # The radar exists to check upstream drift, so it fails rather
+            # than pass against the bundled snapshot.
+            print(f"check_llm_catalog: error: {source}", file=sys.stderr)
+            return 2
+    else:
+        model_cost = load_bundled_registry()
+        today = GATE_AS_OF
+        source = f"bundled litellm registry as of {today.isoformat()}"
+    if not model_cost:
         print(
-            "check_llm_catalog: litellm not importable — install the cli extra "
+            "check_llm_catalog: litellm registry unavailable — install the cli extra "
             "(litellm is the registry this check reads).",
             file=sys.stderr,
         )
@@ -143,10 +227,13 @@ def main() -> int:
         return 2
 
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-    problems = check_catalog(catalog, litellm.model_cost, date.today())
+    problems = check_catalog(catalog, model_cost, today)
 
     if problems:
-        print("check_llm_catalog: stale model ids in bundles/llm/model_catalog.json", file=sys.stderr)
+        print(
+            f"check_llm_catalog: stale model ids in bundles/llm/model_catalog.json ({source})",
+            file=sys.stderr,
+        )
         for provider, model, reason in problems:
             print(f"  [{provider}] {model} — {reason}", file=sys.stderr)
         print(
@@ -156,7 +243,7 @@ def main() -> int:
         )
         return 1
 
-    print("check_llm_catalog: all catalog model ids are current.")
+    print(f"check_llm_catalog: all catalog model ids are current ({source}).")
     return 0
 
 

@@ -1,6 +1,6 @@
 ---
 title: Amp
-description: The Amp connector installs a system TypeScript policy plugin that gates tool execution and model-bound results, uses Amp's native confirmation UI, and records the five documented plugin lifecycle events.
+description: The Amp connector installs a TypeScript policy plugin in Amp's user plugin directory that gates tool execution and model-bound results, uses Amp's native confirmation UI, and records the five documented plugin lifecycle events.
 keywords:
   - DefenseClaw Amp connector
   - Amp policy plugin
@@ -9,8 +9,11 @@ keywords:
   - Amp Galileo
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Amp connector installs a dependency-free TypeScript policy plugin into
-Amp's documented system-plugin directory. The plugin sends
+Amp's user plugin directory, `~/.config/amp/plugins` (Amp's docs call these
+system plugins; they are per user, not machine-wide). The plugin sends
 `session.start`, `agent.start`, `tool.call`, `tool.result`, and `agent.end`
 events to the local DefenseClaw gateway. Amp waits for `tool.call` before
 running the tool and lets `tool.result` replace unsafe output before it reaches
@@ -23,10 +26,12 @@ proxy Amp's model traffic.
 
 ## Platform support
 
+<ConnectorSupport id="amp" />
+
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | DefenseClaw installs Amp's user-scoped system policy plugin under `~/.config/amp/plugins`. |
-| Native Windows x64 | **Supported** | Packaged Setup installs the same plugin contract under `%USERPROFILE%\.config\amp\plugins`, protects it with a user-only ACL, and exercises it in the deterministic Windows release gate. |
+| macOS and Linux | **Supported** | DefenseClaw installs its policy plugin in Amp's user plugin directory, `~/.config/amp/plugins`. |
+| Native Windows x64 | **Supported** | `defenseclaw setup amp` installs the same plugin under `%USERPROFILE%\.config\amp\plugins` and limits it to your account with a user-only ACL. |
 
 ## Setup
 
@@ -56,7 +61,7 @@ defenseclaw setup amp --workspace 'C:\path\to\repo' --mode action
 
 </Tabs>
 
-The system policy plugin is user-scoped in every case. Pass `--workspace`
+The plugin is user-scoped in every case. Pass `--workspace`
 when DefenseClaw must also inventory that repository's `.amp/settings.json`
 or `.jsonc`, `.amp/plugins`, project skills, checks, guidance, MCP servers,
 and custom agents. Without a pinned workspace, global setup still governs Amp
@@ -64,7 +69,7 @@ tool calls but deliberately limits discovery to user and managed surfaces.
 
 Setup writes one owner-only managed file:
 
-| Platform | System plugin |
+| Platform | Plugin file |
 | --- | --- |
 | macOS and Linux | `~/.config/amp/plugins/defenseclaw.ts` |
 | Native Windows | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` |
@@ -74,12 +79,18 @@ with private file permissions or the Windows user-only ACL. Setup preserves an
 existing file, teardown restores it, and a user-modified managed file is never
 silently removed.
 
+Plugin lists, scans and the AIBOM treat this file as connector configuration,
+not as an operator plugin, so it is not listed there. `defenseclaw plugin
+remove|disable|block|quarantine defenseclaw --connector amp` refuse it, because
+Amp runs unguarded without it. To stop guarding Amp, run `defenseclaw setup
+remove amp`.
+
 The shipped policy allow-list matches only
 `.config/amp/plugins/defenseclaw.ts`. It does not trust sibling files or the
 whole Amp plugins directory.
 
 <Callout type="warning" title="Amp plugin trust boundary">
-Amp executes project and system plugin TypeScript, including top-level code,
+Amp executes project and user plugin TypeScript, including top-level code,
 when each plugin loads. DefenseClaw does not sandbox, disable, or govern that
 initialization. Amp also does not define the ordering of handlers registered by
 multiple plugins, so DefenseClaw cannot guarantee that it inspects another
@@ -88,7 +99,7 @@ synthesize the outcome. Enforcement covers host-emitted `tool.call` requests
 that reach the managed DefenseClaw handler after it has loaded.
 
 In action mode, `defenseclaw doctor` warns when it discovers other direct
-project or system `.ts` plugins so operators can review this boundary. The
+project or user `.ts` plugins so operators can review this boundary. The
 warning is informational: DefenseClaw never executes those files during
 discovery and does not remove operator plugins.
 </Callout>
@@ -147,7 +158,7 @@ DefenseClaw cannot preserve:
 | MCP | Read-only discovery and scanning from `amp.mcpServers` in user/workspace JSON or JSONC settings, plus skill-bundled `mcp.json`. Use `amp mcp add` or Amp settings for writes. |
 | Skills | List, scan, and write AgentSkills under the documented user/workspace roots. Custom `amp.skills.path` roots are discovered. Claude-compatible roots, including plugin-cache `skills/` components under `~/.claude/plugins/cache/`, are discovered only when `amp.skills.disableClaudeCodeSkills` is false. |
 | Guidance/checks | Read-only discovery and scanning for Amp's effective workspace/ancestor guidance up to `$HOME`, on-demand subtree guidance, user/OS-managed guidance, and project/global checks. |
-| Plugins | Discovery and scanning for project `.amp/plugins` and system `~/.config/amp/plugins`; setup manages only `defenseclaw.ts`. |
+| Plugins | Discovery and scanning for project `.amp/plugins` and user `~/.config/amp/plugins`; setup manages only `defenseclaw.ts`. |
 | Agents | Custom agents declared with `amp.createAgent(...)` and modes registered with `amp.registerAgentMode(...)` are discovered from bounded literal plugin definitions. An optional `// @amp-agent-mode` inventory annotation is also accepted. There is no standalone Amp agent-file surface to mutate. |
 | CodeGuard | Opt-in installation as an Amp AgentSkill; never installed implicitly by connector setup. |
 
@@ -208,18 +219,107 @@ make an Amp span eligible.
 
 The supported connector runs Amp and DefenseClaw on the same host with the
 gateway reachable over loopback. Amp Orbs run remotely and do not automatically
-load a local system plugin or reach a local gateway, so Orb enforcement is not
+load a local plugin or reach a local gateway, so Orb enforcement is not
 part of this connector's support claim.
 
 ## Hook capabilities
 
 <HookEventsList connector="amp" />
 
+## In an OpenShell sandbox
+
+<Callout type="warn" title="Amp cannot run in a sandbox yet">
+DefenseClaw builds an Amp sandbox image, but Amp is **unverified**, so
+`defenseclaw sandbox run amp` refuses the image. Amp needs an Amp account API
+key (`AMP_API_KEY`) for every run: without one it stops at the account check
+before any agent turn, and it has no local or bring-your-own model endpoint.
+DefenseClaw's image check drives the harness with a mock model, so it cannot
+pass for Amp until a check runs with a real key.
+
+`defenseclaw sandbox run amp` builds the whole image first (several GB) and
+only then refuses it. The unverified image stays:
+`defenseclaw sandbox image list` shows it with HOOKS VERIFIED `no`, and
+`defenseclaw sandbox image prune` keeps it because it is the newest Amp
+image. Remove it with `docker image rm <tag>`; the next prune forgets its
+record.
+</Callout>
+
+The [sandbox guide](/docs/sandboxes/guide) covers the `sandbox` commands. What
+the Amp image already holds:
+
+- **User tier.** Amp loads plugins only from `~/.config/amp/plugins` and a
+  project's `.amp/plugins`; it has no machine-wide plugin location. The DefenseClaw
+  plugin therefore lives in the image home
+  (`/sandbox/.config/amp/plugins/defenseclaw.ts`), where the agent can edit or
+  delete it. The launcher points Amp at that home, drops the variables that
+  load other plugins or settings, and refuses `--settings-file`. DefenseClaw
+  reports a sandbox whose hooks go silent while the harness is active, and
+  OpenShell's network policy holds either way.
+- **Skip-permissions.** Amp would start with `--dangerously-allow-all`;
+  `--safe` keeps its prompts and drops that flag from the arguments you pass.
+- **Sign-in.** The Amp account API key is the only sign-in. The daemon's
+  `defenseclaw-amp` provider profile binds `AMP_API_KEY` to `ampcode.com`
+  (not tested live); `sandbox run` has no `--llm` choice for Amp.
+- **Image.** Amp 0.0.1785334225-g9abe75, with the npm registry integrity and
+  the native binary's SHA-256 checked. On that build the plugin loads before
+  any server call and fails closed; hooks reaching DefenseClaw and blocking
+  still need a run with a key.
+
+## Enterprise deployments
+
+In an [enterprise deployment](/docs/enterprise) the guardian writes the
+managed plugin into each enrolled user's Amp plugins directory
+(`~/.config/amp/plugins/defenseclaw.ts`, or
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on Windows) and repairs
+it when the user changes it. Amp has no machine-wide plugin location, so the
+plugin lives in a folder the user owns, and Amp coverage is advisory against
+a user who sets out to avoid it:
+
+- **Another config directory.** Amp loads plugins from the `amp/plugins`
+  folder under `XDG_CONFIG_HOME` (by default `~/.config`). A session started
+  with `XDG_CONFIG_HOME` or `HOME` pointing at another folder does not load
+  DefenseClaw's plugin (`amp plugins list` shows only Amp's own), so its tool
+  calls are not inspected or logged, the guardian never repairs that
+  session, and status and verify keep reporting the user's Amp ready.
+  `DEFENSECLAW_*` environment overrides do not turn the plugin off.
+- **Plugin order.** Amp does not define the order in which plugins run (see
+  the trust boundary above).
+
+A plugin that loaded stays closed when its DefenseClaw check fails: a
+killed or stopped check blocks the call.
+
+What reduces it:
+
+- Where you need enforcement, prefer agents that DefenseClaw governs
+  through machine policy (Claude Code, Codex, Cursor, GitHub Copilot and
+  OpenCode).
+- Use application control (fapolicyd on Linux, Santa or similar on macOS,
+  WDAC or AppLocker on Windows) so users can start Amp only the way you
+  allow, for example only from an administrator-owned launcher that resets
+  `XDG_CONFIG_HOME` and `HOME`.
+
+See R1 and R3 in the
+[enterprise threat model](/docs/enterprise/threat-model#residual-risks).
+
 ## Disable
 
+If Amp is the only connector DefenseClaw guards, turn the guardrail off:
+
 ```bash
-defenseclaw setup remove amp --yes
+defenseclaw guardrail disable --yes
 ```
+
+If other connectors are configured too, turn off Amp alone and keep the
+rest running:
+
+```bash
+defenseclaw guardrail disable --connector amp --yes
+```
+
+Both keep Amp's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Amp from the configured
+connectors instead, run `defenseclaw setup remove amp --yes`; add `--force`
+when it is the last connector.
 
 Teardown removes the unchanged managed plugin or restores its backup. Restart
 or relaunch Amp so every new thread starts without the removed plugin.

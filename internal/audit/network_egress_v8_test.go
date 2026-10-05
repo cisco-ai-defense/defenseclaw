@@ -96,6 +96,27 @@ func TestNetworkEgressV8RuntimeOwnsAllowedAndBlockedLogs(t *testing.T) {
 	}
 }
 
+// TestNetworkEgressV8EmitsTheTrimmedDecisionCode keeps a padded decision code
+// from failing the identifier pattern and costing the blocked decision its
+// mandatory record.
+func TestNetworkEgressV8EmitsTheTrimmedDecisionCode(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	if err := logger.LogNetworkEgress(context.Background(), NetworkEgressEvent{
+		Hostname: "blocked.example", PolicyOutcome: "denied", DecisionCode: " NETWORK_POLICY_DECISION\t", Blocked: true,
+	}); err != nil {
+		t.Fatalf("LogNetworkEgress: %v", err)
+	}
+	_, records := runtime.snapshot()
+	if len(records) != 1 || !records[0].Mandatory() {
+		t.Fatalf("records=%d, want one mandatory blocked record", len(records))
+	}
+	if got := securityActionBody(t, records[0])["defenseclaw.network.decision_code"]; got != "NETWORK_POLICY_DECISION" {
+		t.Fatalf("decision_code=%#v want the trimmed code", got)
+	}
+}
+
 func TestNetworkEgressV8CollectionDropSuppressesCanonicalAndLegacyFanout(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionDrop)

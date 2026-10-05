@@ -129,6 +129,51 @@ func TestScanV8EmitsOccurrenceFindingsBeforeSummaryAndPreservesMetricParity(t *t
 	}
 }
 
+// GAP-2000: a judge or AI Defense finding merged into the hook-rules scan is
+// exported under its own lane, like `defenseclaw alerts` shows it.
+func TestScanV8HookLaneFindingsNameTheirScanner(t *testing.T) {
+	logger := newTestLogger(t)
+	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+	logger.SetRuntimeV8Emitter(runtime)
+	result := &scanner.ScanResult{
+		Scanner: "hook-rules", Target: "claudecode/PreToolUse", TargetType: "tool_call",
+		Timestamp: time.Now().UTC(), Duration: time.Millisecond,
+		Findings: []scanner.Finding{
+			{ID: "JUDGE-EXFIL-FILE", RuleID: "JUDGE-EXFIL-FILE", Severity: scanner.SeverityHigh,
+				Title: "Sensitive File Access", Scanner: "hook-rules", Tags: []string{"llm-judge"}},
+			{ID: "JUDGE-PII-SSN", RuleID: "JUDGE-PII-SSN", Severity: scanner.SeverityHigh,
+				Title: "SSN", Scanner: "hook-rules", Tags: []string{"pii", "redacted"}},
+			{ID: "AID-PII", RuleID: "AID-PII", Severity: scanner.SeverityMedium,
+				Title: "PII", Scanner: "hook-rules", Tags: []string{"ai-defense"}},
+			{ID: "CMD-MARKER", RuleID: "CMD-MARKER", Severity: scanner.SeverityHigh,
+				Title: "Marker rule", Scanner: "hook-rules", Tags: []string{"command"}},
+		},
+	}
+	if err := logger.LogScanWithVerdict(result, "block"); err != nil {
+		t.Fatal(err)
+	}
+	_, records := runtime.snapshot()
+	want := map[string]string{
+		"JUDGE-EXFIL-FILE": "llm-judge", "JUDGE-PII-SSN": "llm-judge",
+		"AID-PII": "ai-defense", "CMD-MARKER": "hook-rules",
+	}
+	seen := 0
+	for _, record := range records {
+		if record.EventName() != observability.EventName(observability.TelemetryEventFindingObserved) {
+			continue
+		}
+		body := securityActionBody(t, record)
+		rule, _ := body["defenseclaw.finding.rule_id"].(string)
+		if got := body["defenseclaw.scan.scanner"]; got != want[rule] {
+			t.Errorf("%s scanner=%v, want %s", rule, got, want[rule])
+		}
+		seen++
+	}
+	if seen != len(want) {
+		t.Fatalf("finding records=%d, want %d", seen, len(want))
+	}
+}
+
 func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T) {
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
@@ -149,6 +194,29 @@ func TestScanV8FailureUsesFailedFamilyWithoutInventingFindingStatus(t *testing.T
 	body := securityActionBody(t, records[0])
 	if _, exists := body["defenseclaw.finding.status"]; exists {
 		t.Fatalf("failed scan invented finding status: %#v", body)
+	}
+	// GAP-1987: a scan that never ran is not clean on any signal.
+	if verdict, exists := body["defenseclaw.scan.verdict"]; exists {
+		t.Fatalf("failed scan log verdict=%v, want absent", verdict)
+	}
+	counted := false
+	for _, metric := range runtime.metricSnapshot() {
+		if metric.EventName() != observability.EventName(observability.TelemetryInstrumentDefenseClawScanCount) {
+			continue
+		}
+		counted = true
+		if got := metricAttributes(t, metric)["defenseclaw.metric.verdict"]; got != "error" {
+			t.Fatalf("failed scan count verdict=%v, want error (attributes %v)", got, metricAttributes(t, metric))
+		}
+	}
+	if !counted {
+		t.Fatal("failed scan emitted no scan.count metric")
+	}
+	if got := scanV8Verdict(result, "clean"); got != "error" {
+		t.Fatalf("explicit clean on a failed scan = %q, want error", got)
+	}
+	if _, present := scanV8VerdictEnum("error").Get(); present {
+		t.Fatal("error verdict reached the clean/warn/block enum")
 	}
 }
 
@@ -354,6 +422,7 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		RequestID: "request-runtime", SessionID: "session-runtime",
 		TraceID: "0123456789abcdef0123456789abcdef", SpanID: "0123456789abcdef",
 		AgentID: "agent-runtime", AgentInstanceID: "instance-runtime", Connector: "codex",
+		UserID: "1002", UserIDKind: "posix_uid", UserName: "bob",
 	}
 
 	gotEvaluationID, scanID, err := logger.LogInspectFindingsWithCorrelation(t.Context(), source, corr)
@@ -380,6 +449,11 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		body := securityActionBody(t, record)
 		if body["defenseclaw.evaluation.id"] != evaluationID || body["defenseclaw.scan.id"] != scanID {
 			t.Fatalf("record[%d] identifiers=%#v", index, body)
+		}
+		// Finding and scan-verdict rows name the caller, as hook decisions do.
+		if body["user.id"] != "1002" || body["defenseclaw.user.id_kind"] != "posix_uid" ||
+			body["defenseclaw.user.name"] != "bob" {
+			t.Fatalf("record[%d] caller=%#v", index, body)
 		}
 		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != wantEvidence {
 			t.Fatalf("finding evidence summary=%#v", body)
@@ -435,5 +509,54 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 	}
 	if !foundByRuleMetric {
 		t.Fatal("runtime inspection omitted the dashboard by-rule metric")
+	}
+}
+
+// GAP-1381: a path-targeted scan names the asset by its last path element,
+// and a scan with findings but no admission verdict is not "clean".
+func TestScanV8NamesPathTargetsAndKeepsFindingsOutOfClean(t *testing.T) {
+	for target, want := range map[string]string{
+		"/home/u/.claude/skills/ws1-notes/":   "ws1-notes",
+		`C:\Users\u\.claude\skills\ws1-notes`: "ws1-notes",
+		"skill://demo":                        "skill://demo",
+		"http://127.0.0.1:8000/mcp":           "http://127.0.0.1:8000/mcp",
+		// GAP-2338: names the identifier grammar rejects still name the target.
+		"/home/u/.hermes/hermes-agent/plugins/__pycache__": "plugins/__pycache__",
+		`C:\Users\u\plugins\My Plugin`:                     "plugins/My_Plugin",
+	} {
+		if got, ok := scanV8TargetRef(target).Get(); !ok || got != want {
+			t.Errorf("scanV8TargetRef(%q) = %q, %v; want %q", target, got, ok, want)
+		}
+	}
+	withFinding := &scanner.ScanResult{Findings: []scanner.Finding{{Severity: scanner.SeverityInfo}}}
+	if got := scanV8Verdict(withFinding, ""); got != "warn" {
+		t.Errorf("verdict with findings = %q, want warn", got)
+	}
+	if got := scanV8Verdict(&scanner.ScanResult{}, ""); got != "clean" {
+		t.Errorf("verdict without findings = %q, want clean", got)
+	}
+	if got := scanV8Verdict(withFinding, "block"); got != "block" {
+		t.Errorf("explicit verdict = %q, want block", got)
+	}
+}
+
+// GAP-2440: plugins nested in a category folder under a plugins root keep
+// that category, so same-named plugins stay distinct in audit.
+func TestScanV8PluginTargetRefKeepsCategoryFolder(t *testing.T) {
+	for _, tc := range []struct{ target, targetType, want string }{
+		{"/opt/hermes/plugins/browser/firecrawl", "plugin", "browser/firecrawl"},
+		{"/opt/hermes/plugins/web/firecrawl", "plugin", "web/firecrawl"},
+		{`C:\Users\u\hermes\plugins\image_gen\openrouter`, "plugin", "image_gen/openrouter"},
+		{"/home/u/.hermes/plugins/notes", "plugin", "notes"},
+		// GAP-2453: Hermes lists its bundled platforms/* plugins by the bare
+		// name; a user-root platforms folder keeps category/name.
+		{"/home/u/.hermes/hermes-agent/plugins/platforms/discord", "plugin", "discord"},
+		{"/home/u/.hermes/plugins/platforms/mine", "plugin", "platforms/mine"},
+		{"/home/u/.claude/skills/review/notes", "skill", "notes"},
+	} {
+		result := &scanner.ScanResult{Target: tc.target, TargetType: tc.targetType}
+		if got, ok := scanV8ResultTargetRef(result).Get(); !ok || got != tc.want {
+			t.Errorf("scanV8ResultTargetRef(%q, %s) = %q, %v; want %q", tc.target, tc.targetType, got, ok, tc.want)
+		}
 	}
 }

@@ -12,10 +12,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -42,8 +45,9 @@ var devinBlockEvents = []string{
 }
 
 // NewDevinConnector integrates the native Devin CLI lifecycle-hook contract.
-// It intentionally has no relationship to the retired Cascade/Windsurf state:
-// the legacy connector remains available only to installer teardown code.
+// Devin Desktop's default agent, Devin Local, shares the Devin CLI harness and
+// its hook config, so this connector covers both. Devin Desktop's legacy
+// Cascade agent uses a different hook contract and is not covered.
 func NewDevinConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "devin",
@@ -65,19 +69,45 @@ func NewDevinConnector() *hookOnlyConnector {
 }
 
 func devinConfigRoot(opts SetupOpts) string {
+	return devinConfigRootFor(runtime.GOOS, opts)
+}
+
+// devinConfigRootFor is devinConfigRoot for an explicit GOOS so the macOS
+// rule is covered by tests on every host.
+func devinConfigRootFor(goos string, opts SetupOpts) string {
 	if root := strings.TrimSpace(opts.ConfigHome); root != "" {
 		return filepath.Clean(root)
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
+		// A privileged service acting for another user (the managed
+		// guardian under WithUserHomeDir) must resolve that user's roaming
+		// AppData, not its own environment's %APPDATA%. A redirected
+		// roaming AppData is not followed.
+		if home := activeUserHomeOverride(); home != "" {
+			return filepath.Join(filepath.Clean(home), "AppData", "Roaming", "devin")
+		}
 		if root := strings.TrimSpace(os.Getenv("APPDATA")); root != "" {
 			return filepath.Join(filepath.Clean(root), "devin")
 		}
+	}
+	if goos == "darwin" {
+		// The Devin CLI keeps its config under the XDG directory on macOS
+		// too (~/.config/devin/config.json), not ~/Library/Application
+		// Support, which os.UserConfigDir returns there.
+		if root := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); filepath.IsAbs(root) {
+			return filepath.Join(filepath.Clean(root), "devin")
+		}
+		return homePath(".config", "devin")
 	}
 	if root, err := os.UserConfigDir(); err == nil && strings.TrimSpace(root) != "" {
 		return filepath.Join(filepath.Clean(root), "devin")
 	}
 	return homePath(".config", "devin")
 }
+
+// DevinHooksConfigPath returns the Devin hook config file Setup writes for
+// opts. It is exported for operator-facing messages.
+func DevinHooksConfigPath(opts SetupOpts) string { return devinHooksPath(opts) }
 
 func devinHooksPath(opts SetupOpts) string {
 	if DevinHooksPathOverride != "" {
@@ -109,12 +139,23 @@ func devinMCPWritePaths(opts SetupOpts) []string {
 }
 
 func devinSkillPaths(opts SetupOpts) []string {
-	return uniqueNonEmptyStrings([]string{
+	return uniqueNonEmptyStrings(append([]string{
 		filepath.Join(devinConfigRoot(opts), "skills"),
 		homePath(".agents", "skills"),
 		workspacePath(opts, ".devin", "skills"),
 		workspacePath(opts, ".agents", "skills"),
-	})
+	}, devinDesktopLegacySkillPaths(opts)...))
+}
+
+// devinDesktopLegacySkillPaths and devinDesktopLegacyRulePaths are the
+// pre-rename Devin Desktop locations the vendor still loads. They are
+// inventory inputs only; DefenseClaw never writes there.
+func devinDesktopLegacySkillPaths(opts SetupOpts) []string {
+	return legacyconnector.DesktopLegacySkillPaths(homePath(), workspaceRoot(opts))
+}
+
+func devinDesktopLegacyRulePaths(opts SetupOpts) []string {
+	return legacyconnector.DesktopLegacyRulePaths(homePath(), workspaceRoot(opts))
 }
 
 func devinSkillWritePaths(opts SetupOpts) []string {
@@ -133,7 +174,7 @@ func devinAgentPaths(opts SetupOpts) []string {
 }
 
 func devinRulePaths(opts SetupOpts) []string {
-	return uniqueNonEmptyStrings([]string{
+	return uniqueNonEmptyStrings(append([]string{
 		filepath.Join(devinConfigRoot(opts), "AGENTS.md"),
 		filepath.Join(devinConfigRoot(opts), "AGENT.md"),
 		workspacePath(opts, "AGENTS.md"),
@@ -141,7 +182,7 @@ func devinRulePaths(opts SetupOpts) []string {
 		workspacePath(opts, "AGENTS.local.md"),
 		workspacePath(opts, ".devin", "rules"),
 		workspacePath(opts, ".devin", "global_rules.md"),
-	})
+	}, devinDesktopLegacyRulePaths(opts)...))
 }
 
 func devinProfileDecode(payload map[string]interface{}) HookProfileRequest {
@@ -362,6 +403,12 @@ func devinOwnedHookCommandsForOS(goos string, opts SetupOpts, hookScript string)
 		commands = append(commands, filepath.Join(opts.DataDir, "hooks", "devin-hook.sh"))
 	}
 	if goos != "windows" {
+		// The administrator-owned command a Unix standalone install renders
+		// is DefenseClaw's whatever the caller's options say, so teardown and
+		// a per-user setup reclaim it too.
+		for _, binary := range devinManagedHookBinaryCandidates(opts) {
+			commands = append(commands, devinManagedHookCommandFor(binary))
+		}
 		return uniqueNonEmptyStrings(commands)
 	}
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
@@ -373,6 +420,46 @@ func devinOwnedHookCommandsForOS(goos string, opts SetupOpts, hookScript string)
 		)
 	}
 	return uniqueNonEmptyStrings(commands)
+}
+
+// devinManagedHookCommand is the hook command a Unix standalone managed
+// Devin install registers: the administrator-owned hook binary in managed
+// mode, `'<binary>' hook --connector devin --enterprise-managed`, as the
+// machine-policy connectors use. That binary applies the organization's
+// foreign-hook guard, reaches the gateway only through the peer-verified
+// hook socket and fails closed; the per-user devin-hook.sh ran none of the
+// guard and treated most failures as allow. Empty for every other install
+// (per-user, Secure Client, Windows), which keep their commands.
+func devinManagedHookCommand(goos string, opts SetupOpts) string {
+	if goos == "windows" {
+		return ""
+	}
+	binary := managedPluginForeignHookGuard(opts)
+	if binary == "" {
+		return ""
+	}
+	return devinManagedHookCommandFor(binary)
+}
+
+func devinManagedHookCommandFor(binary string) string {
+	binary = strings.TrimSpace(binary)
+	if binary == "" || !strings.HasPrefix(binary, "/") || strings.ContainsAny(binary, "\x00\r\n") {
+		return ""
+	}
+	return shellSingleQuote(binary) + " " + nativeHookFlag + "devin --enterprise-managed"
+}
+
+// devinManagedHookBinaryCandidates are the administrator-owned hook binaries
+// a Unix standalone install may have registered for Devin: the one in opts
+// and the fixed Linux and macOS standalone locations.
+func devinManagedHookBinaryCandidates(opts SetupOpts) []string {
+	binaries := []string{managedPluginForeignHookGuard(opts)}
+	for _, goos := range []string{"linux", "darwin"} {
+		if layout, err := managed.StandaloneLayoutFor(goos); err == nil {
+			binaries = append(binaries, path.Join(layout.BinDir, "defenseclaw-hook"))
+		}
+	}
+	return uniqueNonEmptyStrings(binaries)
 }
 
 func devinOwnedHooksPresent(conn *hookOnlyConnector, opts SetupOpts) (bool, error) {

@@ -63,6 +63,20 @@ func IsBuiltinCursorConnector(conn Connector) bool {
 	return ok && cursor != nil && cursor.name == "cursor"
 }
 
+// IsBuiltinHookOnlyConnector reports whether conn is the built-in hook-only
+// implementation registered under name. Enterprise guardians use it as a
+// concrete-type allowlist: a plugin connector can claim a built-in name.
+func IsBuiltinHookOnlyConnector(conn Connector, name string) bool {
+	builtin, ok := conn.(*hookOnlyConnector)
+	return ok && builtin != nil && builtin.name == name
+}
+
+// IsBuiltinAMPConnector reports whether conn is the built-in Amp connector.
+func IsBuiltinAMPConnector(conn Connector) bool {
+	amp, ok := conn.(*AMPConnector)
+	return ok && amp != nil && amp.hookOnlyConnector != nil && amp.name == "amp"
+}
+
 // RenderWindowsCursorEnterpriseAdapter renders the shared, token-free adapter
 // installed in Cursor's protected machine hook directory. Managed enterprise
 // hooks are always fail closed; an explicit request for fail-open is rejected

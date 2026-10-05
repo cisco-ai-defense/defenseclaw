@@ -1,0 +1,696 @@
+---
+title: Linux configuration management
+description: Idempotent Ansible, Puppet, Chef, Salt and plain apt or dnf recipes that install, configure, verify, upgrade and remove the standalone DefenseClaw enterprise package on Linux.
+keywords:
+  - DefenseClaw Ansible
+  - DefenseClaw Puppet
+  - DefenseClaw Chef
+  - DefenseClaw Salt
+  - defenseclaw-enterprise deb rpm
+  - Linux configuration management
+---
+
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+
+These recipes deploy the [standalone profile](/docs/enterprise/concepts) to
+Linux hosts with a configuration-management tool. They install the
+`defenseclaw-enterprise` deb or rpm, and the package's lifecycle does the
+rest. For the contract every
+recipe follows, such as exit codes, detection and how config and keys are
+delivered, see [Install with an MDM](/docs/enterprise/mdm). For the layout and
+the systemd units, see [Linux](/docs/enterprise/linux).
+
+## The procedure every recipe follows
+
+Every recipe below does the same five steps, in this order, and each step is
+idempotent:
+
+1. **Stage the config.** Write your administrator config to a root-only
+   candidate file, `/etc/mdm/defenseclaw/config.yaml` (`0600`, in a `0700`
+   folder). On a host with no DefenseClaw config yet, also write it to
+   `/etc/defenseclaw/config.yaml` (owner root, `0640`, in a `0755` folder), so
+   the package applies it on the first install. Never overwrite that file
+   afterwards.
+2. **Install the package.** Download it, check its SHA-256 against the
+   release's cosign-verified `checksums.txt`, and install or upgrade it with
+   the package manager. The package's postinstall step runs
+   `defenseclaw-gateway enterprise linux ensure --from-package` and writes
+   `/var/lib/defenseclaw-enterprise/last-package-result.json`. It never fails
+   the package transaction, so the next step checks the result.
+3. **Converge.** Run
+   `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json`.
+   It applies the candidate config, repairs drift, or does nothing
+   (`"noop": true`). It exits `0`, `1` (failed and rolled back, including a
+   config that does not validate: `errors[].code` is `config_invalid`), `2`
+   (invalid arguments, such as a relative `--config` path or conflicting flags)
+   or `75` (another lifecycle run holds the lock, retry).
+4. **Store the key**, if you use Cisco AI Defense, with
+   `enterprise secret set` from your tool's secret store, on standard input or
+   from a root-only file. Never put it in the config or on a command line.
+5. **Verify.** `enterprise linux verify --json` is read-only and exits `1`
+   when a file, permission, service or readiness check fails.
+
+Why the candidate file: after the first install, the recipes change the
+config only through `ensure --config`. The lifecycle validates the candidate
+before it replaces `/etc/defenseclaw/config.yaml`, and rolls back if applying
+it fails. The `defenseclaw-enterprise-apply.path` unit also runs `ensure` when
+someone edits the live file directly, but by then an invalid config is already
+in place.
+
+Owner and mode matter. The lifecycle sets `/etc/defenseclaw/config.yaml` to
+`0640`, owner root, group `defenseclaw`. The configuration-management recipes
+set only the owner and the mode of that file and never its group, so the tool
+and the lifecycle do not change it back and forth. The plain apt/dnf script
+writes the file only when it is missing, before the first install.
+
+## Requirements
+
+- A systemd host (systemd 239 or later, a package dependency). Without a
+  running systemd the postinstall step does nothing. See
+  [Linux requirements](/docs/enterprise/linux#requirements).
+- Root on the host: every recipe runs as root.
+- Your administrator config. See [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  The default config protects no agent.
+
+## Get and verify the release
+
+On an administrator workstation, download the signed checksum list, check
+its signature, and read the SHA-256 of each package you deploy. Those values
+are the pins in the recipes.
+
+```bash
+VERSION=1.0.0   # the release you deploy
+BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
+curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle"
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+grep "defenseclaw-enterprise-$VERSION-linux-" checksums.txt
+```
+
+| Artifact | Name |
+| --- | --- |
+| Debian and Ubuntu package | `defenseclaw-enterprise-<version>-linux-<arch>.deb` |
+| RHEL-family package | `defenseclaw-enterprise-<version>-linux-<arch>.rpm` |
+| Payload archive | `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` |
+
+`<arch>` is `amd64` or `arm64`. The packages carry no embedded signature: the
+SHA-256 pin from the cosign-verified `checksums.txt` is what proves them. When
+a release also publishes `<package>.asc` and
+`defenseclaw-enterprise-release-key.asc`, you can check the detached signature
+too:
+
+```bash
+gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-release.gpg
+gpgv --keyring ./defenseclaw-release.gpg defenseclaw-enterprise-1.0.0-linux-amd64.rpm.asc defenseclaw-enterprise-1.0.0-linux-amd64.rpm
+```
+
+The example config below is valid for Linux. Replace it with your own:
+
+```yaml title="config.yaml"
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+policy_dir: /etc/defenseclaw/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+```
+
+## Ansible
+
+This play uses `ansible.builtin` modules only
+([copy](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/copy_module.html),
+[get_url](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/get_url_module.html),
+[apt](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/apt_module.html),
+[dnf](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/dnf_module.html),
+[command](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/command_module.html)).
+Keep the key in Ansible Vault as `vault_defenseclaw_ai_defense_key`; the key
+task has `no_log: true` and sends the value on standard input.
+
+```yaml title="defenseclaw.yml"
+- name: DefenseClaw standalone enterprise
+  hosts: defenseclaw_linux
+  become: true
+  vars:
+    defenseclaw_version: "1.0.0"
+    # SHA-256 values from the release's cosign-verified checksums.txt
+    defenseclaw_pins:              # one entry per architecture and format you deploy
+      defenseclaw-enterprise-1.0.0-linux-amd64.deb: "<sha256>"
+      defenseclaw-enterprise-1.0.0-linux-amd64.rpm: "<sha256>"
+      defenseclaw-enterprise-1.0.0-linux-arm64.deb: "<sha256>"
+      defenseclaw-enterprise-1.0.0-linux-arm64.rpm: "<sha256>"
+    defenseclaw_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_facts['architecture']] }}"
+    defenseclaw_format: "{{ 'deb' if ansible_facts['pkg_mgr'] == 'apt' else 'rpm' }}"
+    defenseclaw_package: "defenseclaw-enterprise-{{ defenseclaw_version }}-linux-{{ defenseclaw_arch }}.{{ defenseclaw_format }}"
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+  tasks:
+    - name: Create the root-only staging folder
+      ansible.builtin.file:
+        path: /etc/mdm/defenseclaw
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Stage the candidate config
+      ansible.builtin.copy:
+        src: files/defenseclaw/config.yaml
+        dest: /etc/mdm/defenseclaw/config.yaml
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Create the config folder
+      ansible.builtin.file:
+        path: /etc/defenseclaw
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Put the config in place before the first install
+      ansible.builtin.copy:
+        src: files/defenseclaw/config.yaml
+        dest: /etc/defenseclaw/config.yaml
+        owner: root
+        mode: "0640"
+        force: false
+
+    - name: Download the package and check its SHA-256
+      ansible.builtin.get_url:
+        url: "https://github.com/cisco-ai-defense/defenseclaw/releases/download/{{ defenseclaw_version }}/{{ defenseclaw_package }}"
+        dest: "/var/cache/{{ defenseclaw_package }}"
+        checksum: "sha256:{{ defenseclaw_pins[defenseclaw_package] }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install or upgrade the package (Debian, Ubuntu)
+      ansible.builtin.apt:
+        deb: "/var/cache/{{ defenseclaw_package }}"
+      when: ansible_facts['pkg_mgr'] == 'apt'
+
+    - name: Install or upgrade the package (RHEL family)
+      ansible.builtin.dnf:
+        name: "/var/cache/{{ defenseclaw_package }}"
+        state: present
+        # The rpm has no embedded signature; the SHA-256 check above proves it.
+        disable_gpg_check: true
+      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+
+    - name: Apply the config and converge
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - ensure
+          - --from-package
+          - --config
+          - /etc/mdm/defenseclaw/config.yaml
+          - --json
+      register: defenseclaw_ensure
+      until: defenseclaw_ensure.rc != 75
+      retries: 5
+      delay: 30
+      changed_when: defenseclaw_ensure.rc == 0 and not (defenseclaw_ensure.stdout | from_json).noop
+      failed_when: defenseclaw_ensure.rc != 0
+
+    - name: Store the Cisco AI Defense key
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - secret
+          - set
+          - --name
+          - ai-defense-api-key
+          - --from-stdin
+          - --json
+        stdin: "{{ vault_defenseclaw_ai_defense_key }}"
+      no_log: true
+      register: defenseclaw_secret
+      until: defenseclaw_secret.rc != 75
+      retries: 5
+      delay: 30
+      changed_when: defenseclaw_secret.rc == 0 and not (defenseclaw_secret.stdout | from_json).noop
+      failed_when: defenseclaw_secret.rc != 0
+      when: vault_defenseclaw_ai_defense_key is defined
+
+    - name: Verify the deployment
+      ansible.builtin.command:
+        argv: ["{{ defenseclaw_gateway }}", enterprise, linux, verify, --json]
+      changed_when: false
+```
+
+Notes:
+
+- `get_url` skips the download when the file already matches the checksum, and
+  `apt` and `dnf` change nothing when that version is installed.
+- The `dnf` module checks signatures of local packages unless
+  `disable_gpg_check` is set. The package has no embedded signature, so the
+  task sets it and relies on the SHA-256 check.
+- `enterprise secret set` writes the key and runs `ensure`. Storing the same
+  key again changes nothing, so the task reports no change.
+
+## Puppet
+
+This class uses the core `file`, `package` and `exec` types
+([file](https://github.com/puppetlabs/puppet/blob/main/references/types/file.md),
+[package](https://github.com/puppetlabs/puppet/blob/main/references/types/package.md),
+[exec](https://github.com/puppetlabs/puppet/blob/main/references/types/exec.md))
+and [Sensitive](https://help.puppet.com/core/8/Content/PuppetCore/lang_data_sensitive.htm)
+for the key. Put the package and `config.yaml` in the module's `files`
+folder, and the key in Hiera as `defenseclaw::ai_defense_key`, encrypted with
+your Hiera backend.
+
+```puppet title="manifests/defenseclaw.pp"
+class profile::defenseclaw (
+  String $version = '1.0.0',
+  String $sha256 = '<sha256 of the package for this host>',
+) {
+  $arch = $facts['os']['architecture'] ? { 'aarch64' => 'arm64', 'arm64' => 'arm64', default => 'amd64' }
+  $format = $facts['os']['family'] ? { 'Debian' => 'deb', default => 'rpm' }
+  $provider = $format ? { 'deb' => 'dpkg', default => 'rpm' }
+  $pkg = "defenseclaw-enterprise-${version}-linux-${arch}.${format}"
+  $gateway = '/opt/defenseclaw/bin/defenseclaw-gateway'
+  $ensure_cmd = "${gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json"
+
+  file { '/etc/mdm':
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+  }
+  file { '/etc/mdm/defenseclaw':
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0700',
+  }
+  file { '/etc/mdm/defenseclaw/config.yaml':
+    ensure  => file,
+    owner   => 'root',
+    group   => 'root',
+    mode    => '0600',
+    content => file('profile/defenseclaw/config.yaml'),
+  }
+  file { '/etc/defenseclaw':
+    ensure => directory,
+    owner  => 'root',
+    mode   => '0755',
+  }
+  # Written only when missing; the lifecycle owns the file after the first install.
+  file { '/etc/defenseclaw/config.yaml':
+    ensure  => file,
+    owner   => 'root',
+    mode    => '0640',
+    replace => false,
+    content => file('profile/defenseclaw/config.yaml'),
+  }
+  file { "/var/cache/${pkg}":
+    ensure         => file,
+    owner          => 'root',
+    group          => 'root',
+    mode           => '0644',
+    source         => "puppet:///modules/profile/defenseclaw/${pkg}",
+    checksum       => 'sha256',
+    checksum_value => $sha256,
+  }
+  package { 'defenseclaw-enterprise':
+    ensure   => latest,
+    provider => $provider,
+    source   => "/var/cache/${pkg}",
+    require  => [File["/var/cache/${pkg}"], File['/etc/defenseclaw/config.yaml']],
+  }
+  # Apply a changed config or package now.
+  exec { 'defenseclaw-ensure':
+    command     => $ensure_cmd,
+    refreshonly => true,
+    subscribe   => [File['/etc/mdm/defenseclaw/config.yaml'], Package['defenseclaw-enterprise']],
+    tries       => 5,
+    try_sleep   => 30,
+  }
+  # Repair drift: run ensure only when verify fails.
+  exec { 'defenseclaw-repair':
+    command   => $ensure_cmd,
+    unless    => "${gateway} enterprise linux verify --json",
+    require   => Exec['defenseclaw-ensure'],
+    tries     => 5,
+    try_sleep => 30,
+  }
+
+  $key = lookup('defenseclaw::ai_defense_key', Optional[String], 'first', undef)
+  if $key {
+    file { '/etc/mdm/defenseclaw/ai-defense-api-key':
+      ensure    => file,
+      owner     => 'root',
+      group     => 'root',
+      mode      => '0600',
+      content   => Sensitive($key),
+      show_diff => false,
+    }
+    exec { 'defenseclaw-secret':
+      command     => "${gateway} enterprise secret set --name ai-defense-api-key --from-file /etc/mdm/defenseclaw/ai-defense-api-key --json",
+      refreshonly => true,
+      subscribe   => File['/etc/mdm/defenseclaw/ai-defense-api-key'],
+      require     => Exec['defenseclaw-repair'],
+      tries       => 5,
+      try_sleep   => 30,
+    }
+  }
+}
+```
+
+Notes:
+
+- `ensure => latest` with a `source` installs the package, and upgrades it when
+  `source` points at a newer file; the `dpkg` and `rpm` providers read the
+  version from the file.
+- `exec` retries any failing exit code with `tries` and `try_sleep`, so a busy
+  lock (`75`) is retried.
+- The key stays in a root-only file so that Puppet can tell when it changes.
+  If you do not want that copy, run `enterprise secret set` from standard
+  input in a one-off task instead.
+
+## Chef
+
+This recipe uses the `directory`, `file`, `cookbook_file`, `remote_file`,
+`dpkg_package` or `rpm_package`, and `execute` resources
+([file](https://docs.chef.io/client/19/resources/bundled/file/),
+[remote_file](https://docs.chef.io/client/19/resources/bundled/remote_file/),
+[dpkg_package](https://docs.chef.io/client/19/resources/bundled/dpkg_package/),
+[rpm_package](https://docs.chef.io/client/19/resources/bundled/rpm_package/),
+[execute](https://docs.chef.io/client/19/resources/bundled/execute/)). Put
+`config.yaml` in the cookbook's `files` folder and the key in an encrypted
+data bag item `defenseclaw/ai_defense` with a `key` field.
+
+```ruby title="recipes/default.rb"
+version = '1.0.0'
+sha256 = '<sha256 of the package for this host>'
+arch = node['kernel']['machine'] == 'aarch64' ? 'arm64' : 'amd64'
+format = platform_family?('debian') ? 'deb' : 'rpm'
+pkg = "defenseclaw-enterprise-#{version}-linux-#{arch}.#{format}"
+gateway = '/opt/defenseclaw/bin/defenseclaw-gateway'
+ensure_cmd = "#{gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json"
+
+directory '/etc/mdm/defenseclaw' do
+  owner 'root'
+  group 'root'
+  mode '0700'
+  recursive true
+end
+
+cookbook_file '/etc/mdm/defenseclaw/config.yaml' do
+  source 'config.yaml'
+  owner 'root'
+  group 'root'
+  mode '0600'
+  notifies :run, 'execute[defenseclaw-ensure]', :delayed
+end
+
+directory '/etc/defenseclaw' do
+  owner 'root'
+  mode '0755'
+end
+
+# Written only when missing; the lifecycle owns the file after the first install.
+cookbook_file '/etc/defenseclaw/config.yaml' do
+  source 'config.yaml'
+  owner 'root'
+  mode '0640'
+  action :create_if_missing
+end
+
+remote_file "/var/cache/#{pkg}" do
+  source "https://github.com/cisco-ai-defense/defenseclaw/releases/download/#{version}/#{pkg}"
+  checksum sha256
+  owner 'root'
+  group 'root'
+  mode '0644'
+end
+
+declare_resource(format == 'deb' ? :dpkg_package : :rpm_package, 'defenseclaw-enterprise') do
+  source "/var/cache/#{pkg}"
+  action :upgrade
+  notifies :run, 'execute[defenseclaw-ensure]', :immediately
+end
+
+execute 'defenseclaw-ensure' do
+  command ensure_cmd
+  action :nothing
+  retries 5
+  retry_delay 30
+end
+
+execute 'defenseclaw-repair' do
+  command ensure_cmd
+  not_if "#{gateway} enterprise linux verify --json"
+  retries 5
+  retry_delay 30
+end
+
+key = data_bag_item('defenseclaw', 'ai_defense')['key'] rescue nil
+if key
+  file '/etc/mdm/defenseclaw/ai-defense-api-key' do
+    content key
+    owner 'root'
+    group 'root'
+    mode '0600'
+    sensitive true
+    notifies :run, 'execute[defenseclaw-secret]', :immediately
+  end
+
+  execute 'defenseclaw-secret' do
+    command "#{gateway} enterprise secret set --name ai-defense-api-key --from-file /etc/mdm/defenseclaw/ai-defense-api-key --json"
+    action :nothing
+    retries 5
+    retry_delay 30
+  end
+end
+```
+
+Notes:
+
+- `action :upgrade` installs the package, and upgrades it when `source` points
+  at a newer file.
+- `retries` and `retry_delay` retry any failure, so a busy lock (`75`) is
+  retried. `sensitive true` keeps the key out of Chef's logs and reports.
+- `remote_file` checks the download against `checksum`, the SHA-256 pin.
+
+## Salt
+
+This state uses `file.directory`, `file.managed`, `pkg.installed` and
+`cmd.run`
+([file](https://docs.saltproject.io/en/latest/ref/states/all/salt.states.file.html),
+[pkg](https://docs.saltproject.io/en/latest/ref/states/all/salt.states.pkg.html),
+[cmd](https://docs.saltproject.io/en/latest/ref/states/all/salt.states.cmd.html),
+[retry](https://docs.saltproject.io/en/latest/ref/states/requisites.html)).
+Put `config.yaml` in `salt://defenseclaw/`, and the key in Pillar as
+`defenseclaw:ai_defense_key`, encrypted with your Pillar renderer.
+
+```yaml title="defenseclaw/init.sls"
+{% set version = '1.0.0' %}
+{% set sha256 = '<sha256 of the package for this host>' %}
+{% set arch = 'arm64' if grains['cpuarch'] == 'aarch64' else 'amd64' %}
+{% set format = 'deb' if grains['os_family'] == 'Debian' else 'rpm' %}
+{% set pkg = 'defenseclaw-enterprise-' ~ version ~ '-linux-' ~ arch ~ '.' ~ format %}
+{% set gateway = '/opt/defenseclaw/bin/defenseclaw-gateway' %}
+{% set ensure_cmd = gateway ~ ' enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json' %}
+
+defenseclaw-staging:
+  file.directory:
+    - name: /etc/mdm/defenseclaw
+    - user: root
+    - group: root
+    - mode: '0700'
+    - makedirs: True
+
+defenseclaw-candidate-config:
+  file.managed:
+    - name: /etc/mdm/defenseclaw/config.yaml
+    - source: salt://defenseclaw/config.yaml
+    - user: root
+    - group: root
+    - mode: '0600'
+    - require:
+      - file: defenseclaw-staging
+
+# Written only when missing; the lifecycle owns the file after the first install.
+defenseclaw-layout-config:
+  file.managed:
+    - name: /etc/defenseclaw/config.yaml
+    - source: salt://defenseclaw/config.yaml
+    - user: root
+    - mode: '0640'
+    - makedirs: True
+    - dir_mode: '0755'
+    - replace: False
+
+defenseclaw-package-file:
+  file.managed:
+    - name: /var/cache/{{ pkg }}
+    - source: https://github.com/cisco-ai-defense/defenseclaw/releases/download/{{ version }}/{{ pkg }}
+    - source_hash: sha256={{ sha256 }}
+    - user: root
+    - group: root
+    - mode: '0644'
+
+defenseclaw-enterprise:
+  pkg.installed:
+    - sources:
+      - defenseclaw-enterprise: /var/cache/{{ pkg }}
+    - require:
+      - file: defenseclaw-layout-config
+      - file: defenseclaw-package-file
+
+defenseclaw-ensure:
+  cmd.run:
+    - name: {{ ensure_cmd }}
+    - onchanges:
+      - file: defenseclaw-candidate-config
+      - pkg: defenseclaw-enterprise
+    - retry:
+        attempts: 5
+        interval: 30
+        until: True
+
+defenseclaw-repair:
+  cmd.run:
+    - name: {{ ensure_cmd }}
+    - unless: {{ gateway }} enterprise linux verify --json
+    - require:
+      - cmd: defenseclaw-ensure
+    - retry:
+        attempts: 5
+        interval: 30
+        until: True
+
+{% if salt['pillar.get']('defenseclaw:ai_defense_key') %}
+defenseclaw-key-file:
+  file.managed:
+    - name: /etc/mdm/defenseclaw/ai-defense-api-key
+    - contents_pillar: defenseclaw:ai_defense_key
+    - user: root
+    - group: root
+    - mode: '0600'
+    - show_changes: False
+    - require:
+      - file: defenseclaw-staging
+
+defenseclaw-secret:
+  cmd.run:
+    - name: {{ gateway }} enterprise secret set --name ai-defense-api-key --from-file /etc/mdm/defenseclaw/ai-defense-api-key --json
+    - onchanges:
+      - file: defenseclaw-key-file
+    - require:
+      - cmd: defenseclaw-repair
+    - retry:
+        attempts: 5
+        interval: 30
+        until: True
+{% endif %}
+```
+
+Notes:
+
+- `pkg.installed` with `sources` reads the version from the file and installs
+  it when it differs from the installed version.
+- `file.managed` checks the download against `source_hash`, and
+  `show_changes: False` keeps the key out of the state output.
+- `retry` runs a failed state again, so a busy lock (`75`) is retried.
+
+## Plain apt and dnf
+
+Run as root, in the folder with `config.yaml` and the verified package:
+
+```bash
+install -d -m 0700 -o root -g root /etc/mdm/defenseclaw
+install -m 0600 -o root -g root config.yaml /etc/mdm/defenseclaw/config.yaml
+install -d -m 0755 -o root -g root /etc/defenseclaw
+[ -e /etc/defenseclaw/config.yaml ] || install -m 0640 -o root -g root config.yaml /etc/defenseclaw/config.yaml
+
+apt-get install -y ./defenseclaw-enterprise-1.0.0-linux-amd64.deb   # Debian, Ubuntu
+dnf install -y ./defenseclaw-enterprise-1.0.0-linux-amd64.rpm       # RHEL family
+
+rc=75
+for attempt in 1 2 3 4 5; do
+  /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package \
+    --config /etc/mdm/defenseclaw/config.yaml --json && { rc=0; break; } || rc=$?
+  [ "$rc" -eq 75 ] || break
+  sleep 30
+done
+echo "ensure exited $rc"
+```
+
+Store the key from an administrator session, on standard input:
+
+```bash
+read -rs KEY && printf '%s' "$KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin --json; unset KEY
+```
+
+To upgrade, install the newer package the same way and run `ensure` again.
+The package managers do not replace a newer package with an older one unless
+you ask for a downgrade, so to go back a version see
+[Roll back](/docs/enterprise/lifecycle#roll-back).
+
+## Payload archive instead of the package
+
+Hosts without dpkg or rpm can use the `.tar.gz` payload. Extract it as root
+into a root-only folder and run `ensure` with `--payload` pointing at the
+folder that holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/linux#install).
+On such a host, drop `--from-package` from the converge command, so `ensure`
+keeps the payload channel it was installed from. A host installed from the
+package refuses a payload upgrade with `package_owned_binaries`: keep each host
+on one channel.
+
+## Check health
+
+| Check | Command or file |
+| --- | --- |
+| Verify, read-only | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json` (exit `1` on a problem) |
+| Status, read-only | `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json` |
+| The package's own result | `/var/lib/defenseclaw-enterprise/last-package-result.json` |
+| Installed package | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise` |
+| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy`, if you copy it to the host |
+
+The deployment also runs `verify` daily through
+`defenseclaw-enterprise-verify.timer`. See [Detection](/docs/enterprise/mdm#detection)
+and [Status and verify](/docs/enterprise/operations#status-and-verify).
+
+## Uninstall
+
+Remove DefenseClaw from the tool's run list first, so the next run does not
+reinstall it. Then remove the package: its pre-remove step runs
+`enterprise linux uninstall`, which stops the services, removes DefenseClaw's
+hooks and machine-policy entries, and removes the machine state (config,
+credentials, state and logs) and the `defenseclaw` service account. Each user
+keeps `~/.defenseclaw` and the per-user binaries. To remove those too, run the
+kit's `packaging/mdm/linux/uninstall.sh --purge` instead, which runs the
+lifecycle's uninstall with `--purge` and then removes the package. On Debian
+and Ubuntu, purging the package (`apt-get purge defenseclaw-enterprise`) also
+deletes what a failed uninstall left of those folders. To keep the machine
+state for a reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
+Delete `/etc/mdm/defenseclaw` when you no longer need the
+staged config and key.
+
+## Exit codes
+
+| Code | Meaning | What the recipes do |
+| --- | --- | --- |
+| `0` | Success, or nothing to do | Report a change only when the result has `"noop": false` |
+| `1` | The action failed and rolled back, or the config does not validate (`config_invalid`) | Fail the run; read `errors[].code` in the result and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
+| `2` | Invalid arguments, such as a relative `--config` path | Fail the run; fix the command |
+| `75` | Another lifecycle run holds the lock | Retry after a delay |
+
+For the full table, see [Exit codes](/docs/enterprise/mdm#exit-codes).

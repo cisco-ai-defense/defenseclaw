@@ -148,7 +148,7 @@ def _check_inline_commands(path: Path) -> bool:
     relative = path.relative_to(SUPPORTING_DOCS_ROOT)
     if len(relative.parts) != 1:
         return False
-    return not relative.name.startswith(("PR", "CONNECTOR-REMAINING-FIXES"))
+    return not relative.name.startswith("PR")
 
 
 def documented_commands() -> list[DocumentedCommand]:

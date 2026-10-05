@@ -42,6 +42,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
+from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
 
 @dataclass(frozen=True)
@@ -238,6 +239,7 @@ class ThemePickerScreen(ModalScreen[str | None]):
     def _refresh_list(self) -> None:
         target = self.query_one("#theme-picker-list", Static)
         lines: list[str] = []
+        selected_line = 0
         last_group: str | None = None
         for index, choice in enumerate(THEME_CHOICES):
             if choice.group != last_group:
@@ -248,13 +250,17 @@ class ThemePickerScreen(ModalScreen[str | None]):
                 last_group = choice.group
             marker = ">" if index == self.selected_index else " "
             if index == self.selected_index:
+                selected_line = len(lines)
                 inner = f"[#22D3EE bold]{choice.label}[/]  [#475569]({choice.name})[/]"
             else:
                 inner = f"{choice.label}  [#475569]({choice.name})[/]"
             # Wrap each row in a click action link so clicking it selects +
             # previews that theme (handled by ``action_pick``).
             lines.append(f"{marker} [@click=screen.pick({index})]{inner}[/]")
-        target.update("\n".join(lines))
+        # The dialog is capped at 80% of the screen; keep the selection
+        # inside the part that is drawn.
+        size = rows_that_fit(int(self.app.size.height * 0.8), 8, cap=22)
+        target.update("\n".join(window_lines(lines, selected_line, size)))
 
 
 __all__ = [

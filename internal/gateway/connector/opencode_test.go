@@ -17,7 +17,6 @@
 package connector
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -33,6 +32,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -232,15 +232,20 @@ func TestOpenCodeSetupRollsBackPluginAndReceiptWhenFinalPublicationFails(t *test
 }
 
 func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testing.T) {
-	node, err := exec.LookPath("node")
-	if err != nil {
-		t.Skip("node is required for the OpenCode plugin rotation test")
-	}
 	aToken := strings.Repeat("a", 64)
 	bToken := strings.Repeat("b", 64)
-	authorizations := make(chan string, 3)
+	var authorizationsMu sync.Mutex
+	var authorizations []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authorizations <- r.Header.Get("Authorization")
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if payload.Event == "tool.execute.before" {
+			authorizationsMu.Lock()
+			authorizations = append(authorizations, r.Header.Get("Authorization"))
+			authorizationsMu.Unlock()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"hook_output":{"decision":"allow"}}`))
 	}))
@@ -283,11 +288,19 @@ func TestOpenCodePluginReloadsScopedTokenAndFailsCredentialErrorsClosed(t *testi
 			t.Fatal("rendered OpenCode plugin contains a rotation credential")
 		}
 	}
+	// The harness applies the config hook before it is ready, as OpenCode
+	// does at startup: its load heartbeat pays the process's first gateway
+	// request (fetch's first use and connection), which on a fresh or busy
+	// Windows runner can outlast the plugin's own 10s gateway timeout, and an
+	// evaluation that timed out would fail open without reaching the stub.
 	harness := `
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
-const loaded = await import(pathToFileURL(process.argv[1]).href);
+const href = pathToFileURL(process.argv[1]).href;
+const loaded = await import(href);
 const plugin = await loaded.DefenseClaw({ directory: "" });
+await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
+console.log("` + nodeHarnessReady + `");
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 for await (const _ of lines) {
   try {
@@ -301,79 +314,36 @@ for await (const _ of lines) {
   }
 }
 `
-	processCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(processCtx, node, "--input-type=module", "-e", harness, pluginPath)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-	})
-	scanner := bufio.NewScanner(stdout)
+	session := startNodeHarnessSession(t, harness, pluginPath)
 	for index, token := range []string{aToken, bToken, aToken} {
 		if index > 0 {
 			if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := fmt.Fprintln(stdin, "evaluate"); err != nil {
-			t.Fatal(err)
-		}
-		if !scanner.Scan() {
-			t.Fatalf("read OpenCode evaluation %d: %v; stderr=%s", index, scanner.Err(), stderr.String())
-		}
-		if got := scanner.Text(); got != "allow" {
+		if got := session.request(fmt.Sprintf("evaluation %d", index), "evaluate"); got != "allow" {
 			t.Fatalf("OpenCode evaluation %d = %q, want allow", index, got)
 		}
 	}
 	if err := atomicWriteFile(tokenPath, []byte("malformed-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fmt.Fprintln(stdin, "evaluate-invalid"); err != nil {
-		t.Fatal(err)
-	}
-	if !scanner.Scan() {
-		t.Fatalf("read OpenCode credential failure: %v; stderr=%s", scanner.Err(), stderr.String())
-	}
-	if got := scanner.Text(); got != "block:DefenseClaw hook credential is unavailable." {
+	if got := session.request("malformed credential", "evaluate-invalid"); got != "block:DefenseClaw hook credential is unavailable." {
 		t.Fatalf("OpenCode credential failure = %q, want redacted unconditional block", got)
 	}
 	if err := atomicWriteFile(tokenPath, []byte(strings.Repeat("x", 4097)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fmt.Fprintln(stdin, "evaluate-oversized"); err != nil {
-		t.Fatal(err)
-	}
-	if !scanner.Scan() {
-		t.Fatalf("read OpenCode oversized credential failure: %v; stderr=%s", scanner.Err(), stderr.String())
-	}
-	if got := scanner.Text(); got != "block:DefenseClaw hook credential is unavailable." {
+	if got := session.request("oversized credential", "evaluate-oversized"); got != "block:DefenseClaw hook credential is unavailable." {
 		t.Fatalf("OpenCode oversized credential failure = %q, want redacted unconditional block", got)
 	}
-	if err := stdin.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("OpenCode rotation process: %v; stderr=%s", err, stderr.String())
-	}
+	session.close()
 
-	for index, want := range []string{"Bearer " + aToken, "Bearer " + bToken, "Bearer " + aToken} {
-		if got := <-authorizations; got != want {
-			t.Fatalf("OpenCode authorization %d = %q, want restored generation", index, got)
-		}
+	authorizationsMu.Lock()
+	got := append([]string(nil), authorizations...)
+	authorizationsMu.Unlock()
+	if want := []string{"Bearer " + aToken, "Bearer " + bToken, "Bearer " + aToken}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OpenCode sent %d authorizations, want the 3 restored generations in order", len(got))
 	}
 	pluginAfter, err := os.ReadFile(pluginPath)
 	if err != nil {
@@ -475,14 +445,10 @@ func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
 }
 
 func TestOpenCodeBridgeDistinguishesBlockingAndObserveOnlyHooks(t *testing.T) {
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatalf("read bridge: %v", err)
-	}
-	text := string(body)
+	text := renderOpenCodePluginTemplate(t, templateData{APIAddr: "127.0.0.1:18970", FailMode: "closed"})
 	beforeStart := strings.Index(text, `"tool.execute.before": async`)
 	beforeAwait := strings.Index(text, `const verdict = await defenseclawPost(`)
-	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw new Error(verdict.reason);`)
+	beforeThrow := strings.Index(text, `if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);`)
 	if beforeStart < 0 || beforeAwait < beforeStart || beforeThrow < beforeAwait {
 		t.Fatal("tool.execute.before must await the gateway verdict and throw synchronously on block")
 	}
@@ -611,10 +577,6 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	if err != nil {
 		t.Skip("node is required for the executable OpenCode plugin contract")
 	}
-	body, err := hookFS.ReadFile("hooks/opencode-plugin.js")
-	if err != nil {
-		t.Fatal(err)
-	}
 	dir := testenv.PrivateTempDir(t)
 	tokenPath := filepath.Join(dir, ".hook-opencode.token")
 	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
@@ -622,15 +584,11 @@ func TestOpenCodeBridgeExecutableMCPIdentityAndFailurePosture(t *testing.T) {
 	}
 	render := func(failMode string) []byte {
 		t.Helper()
-		text := strings.NewReplacer(
-			"{{.APIAddr}}", "127.0.0.1:18970",
-			"{{.TokenFileJS}}", javaScriptStringContent(tokenPath),
-			"{{.FailMode}}", failMode,
-		).Replace(string(body))
-		if strings.Contains(text, "{{.") {
-			t.Fatalf("rendered %s plugin retains a template placeholder", failMode)
-		}
-		return []byte(text)
+		return []byte(renderOpenCodePluginTemplate(t, templateData{
+			APIAddr:     "127.0.0.1:18970",
+			TokenFileJS: javaScriptStringContent(tokenPath),
+			FailMode:    failMode,
+		}))
 	}
 	openPlugin := filepath.Join(dir, "opencode-open.mjs")
 	closedPlugin := filepath.Join(dir, "opencode-closed.mjs")
@@ -1105,4 +1063,53 @@ func openCodeTestPathContains(paths []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Both in-agent plugins render each managed-only safeguard as given (the
+// foreign-hook guard binary, the listener proof switch and the install
+// marker), and a per-user render leaves it empty. Only a standalone managed
+// install selects the guard binary, and only as an absolute path; the marker
+// verification requires is the rendered declaration.
+func TestPluginTemplatesRenderTheManagedOnlySafeguards(t *testing.T) {
+	guard := testForeignHookGuardBinary()
+	marker := filepath.Join(t.TempDir(), "Cisco", "DefenseClaw-HookRuntime")
+	for _, tc := range []struct {
+		variable, value string
+		set             func(*templateData, string)
+	}{
+		{"DC_FOREIGN_GUARD", javaScriptStringContent(guard), func(d *templateData, v string) { d.ForeignHookGuardJS = v }},
+		{"DC_LISTENER_PROOF", "1", func(d *templateData, v string) { d.ListenerProofJS = v }},
+		{"DC_INSTALL_MARKER", javaScriptStringContent(marker), func(d *templateData, v string) { d.InstallMarkerJS = v }},
+	} {
+		for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
+			declaration, terminator := "const "+tc.variable+" = ", ";\n"
+			if asset == "amp-plugin.ts" {
+				declaration, terminator = "const "+tc.variable+": string = ", "\n"
+			}
+			for _, value := range []string{tc.value, ""} {
+				data := templateData{APIAddr: "127.0.0.1:18970", TokenFileJS: javaScriptStringContent(filepath.Join(t.TempDir(), "token")), FailMode: "closed", Managed: true}
+				tc.set(&data, value)
+				if want := declaration + `"` + value + `"` + terminator; !strings.Contains(renderPluginAssetForTest(t, asset, data), want) {
+					t.Fatalf("%s rendered without %q", asset, want)
+				}
+			}
+			if tc.variable == "DC_FOREIGN_GUARD" {
+				opts := SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}
+				if got, want := string(managedPluginForeignHookGuardMarker(opts, declaration, terminator)), declaration+`"`+tc.value+`"`+terminator; got != want {
+					t.Fatalf("%s: verification marker %q, want the rendered %q", asset, got, want)
+				}
+			}
+		}
+	}
+	for _, opts := range []SetupOpts{
+		{ForeignHookGuardBinary: guard},
+		{ManagedEnterprise: true, ForeignHookGuardBinary: "relative/defenseclaw-hook"},
+	} {
+		if got := managedPluginForeignHookGuard(opts); got != "" {
+			t.Fatalf("guard binary for %+v = %q, want none", opts, got)
+		}
+	}
+	if got := managedPluginForeignHookGuard(SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}); got != guard {
+		t.Fatalf("managed guard binary = %q", got)
+	}
 }

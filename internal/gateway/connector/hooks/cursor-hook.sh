@@ -82,7 +82,43 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
 fi
 {{end}}
 
-# Plan B4 / S0.4: shell-side hook hardening — sourced BEFORE the
+{{if .Sandbox}}# OpenShell sandbox: the image registers every hook with failClosed, so
+# Cursor denies the action when this hook exits non-zero or prints no valid
+# object, and exit 2 or a deny object denies it outright. Every failure path
+# below prints the event's deny object and exits 2; the EXIT trap installed
+# after defenseclaw_harden_env turns an unexpected status (set -e, set -u)
+# into 2 as well.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! . "${HOOK_DIR}/_hardening.sh"; then
+  echo "defenseclaw: hook hardening helper unavailable, blocking cursor tool (sandbox hooks fail closed)" >&2
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+fi
+# _sandbox.sh drops every inherited variable the hook does not read and pins
+# the baked PATH before the first child process (mktemp in
+# defenseclaw_harden_env) or helper call.
+if [ ! -r "${HOOK_DIR}/_sandbox.sh" ] || ! . "${HOOK_DIR}/_sandbox.sh"; then
+  echo "defenseclaw: sandbox transport helper unavailable, blocking cursor tool (sandbox hooks fail closed)" >&2
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+fi
+if ! defenseclaw_harden_resources; then
+  echo "defenseclaw: resource hardening failed, blocking cursor tool (sandbox hooks fail closed)" >&2
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+fi
+if ! defenseclaw_harden_env; then
+  echo "defenseclaw: environment hardening failed, blocking cursor tool (sandbox hooks fail closed)" >&2
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+fi
+trap '_dc_cursor_rc=$?; _defenseclaw_hook_cleanup; case "$_dc_cursor_rc" in 0|2) ;; *) exit 2 ;; esac' EXIT
+
+# OpenShell sandbox hooks always fail closed, with no environment override:
+# the workload can make the ingress, or the relay in front of it, answer any
+# status, so no failed, refused or unparseable reply may turn into an allow.
+FAIL_MODE="closed"
+readonly FAIL_MODE
+{{else}}# Plan B4 / S0.4: shell-side hook hardening — sourced BEFORE the
 # missing-token branch so the bypass goes through
 # defenseclaw_handle_missing_token and honors
 # DEFENSECLAW_STRICT_AVAILABILITY (matches claude-code-hook /
@@ -92,7 +128,7 @@ defenseclaw_harden_resources
 defenseclaw_harden_env
 
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
-DEFENSECLAW_HOOK_CONNECTOR="cursor"
+{{end}}DEFENSECLAW_HOOK_CONNECTOR="cursor"
 DEFENSECLAW_HOOK_NAME="cursor-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
@@ -107,10 +143,35 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   emit_cursor_allow
   exit 0
 }
-CURSOR_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" "hook_event_name" 2>/dev/null || true)"
+{{if .Sandbox}}# jq, not the awk field scanner: the image verifies only the tools the
+# sandbox hooks list as runtime binaries.
+CURSOR_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r 'if type == "object" then (.hook_event_name // empty) else empty end | strings' 2>/dev/null || true)"
+{{else}}CURSOR_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" "hook_event_name" 2>/dev/null || true)"
+{{end}}
+{{if .Sandbox}}if ! ( defenseclaw_sandbox_require_token cursor cursor-hook "cursor tool" ); then
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+fi
+# The per-sandbox binding token is an OpenShell provider placeholder; the
+# supervisor substitutes the real credential only on the ingress endpoint.
+unset DEFENSECLAW_GATEWAY_TOKEN
+API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
-if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-  MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
+fail_unreachable() {
+  defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
+  echo "defenseclaw: sandbox ingress unreachable, blocking cursor tool (sandbox hooks fail closed): $1" >&2
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+}
+
+fail_response() {
+  defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
+  echo "defenseclaw: cursor hook error, blocking cursor tool (sandbox hooks fail closed): $1" >&2
+  emit_cursor_deny "DefenseClaw hook failed closed"
+  exit 2
+}
+{{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+  MISSING_TOKEN_REASON="missing gateway token: ${HOOK_DIR}/{{.TokenFile}} not found"
   defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
@@ -155,8 +216,8 @@ fail_response() {
   emit_cursor_deny "DefenseClaw hook failed closed"
   exit 0
 }
-
-AUTH_HEADER_ARGS=()
+{{end}}
+{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -179,17 +240,37 @@ if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   done < <(defenseclaw_user_identity_args)
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
+{{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
+# OpenShell relay occasionally drops a request, and the ingress dedupes by key.
+RESPONSE="$(defenseclaw_sandbox_post "/api/v1/cursor/hook" "$PAYLOAD" \
+  "$DC_SANDBOX_MAX_TIME" "$DC_SANDBOX_RETRY_MAX_TIME" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: cursor-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
-  --connect-timeout 2 \
-  --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
-  fail_unreachable "gateway unreachable"
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
+  fail_unreachable "sandbox ingress unreachable"
+}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+fi
+# A refused connection means this account's gateway is not running (after
+# a reboot, for example): start it once and retry. See
+# defenseclaw_gateway_cold_start in _hardening.sh.
+defenseclaw_hook_post() {
+  curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
+    -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: cursor-hook/1.0" \
+    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+    "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
+    --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \
+    --max-time 10 \
+    -d "$PAYLOAD" 2>/dev/null
 }
+RESPONSE=$(defenseclaw_hook_post) || {
+  defenseclaw_gateway_cold_start "$?" || fail_unreachable "gateway unreachable"
+  RESPONSE=$(defenseclaw_hook_post) || fail_unreachable "gateway unreachable"
+}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -205,7 +286,24 @@ fi
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
-if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{if .Sandbox}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+  fail_response "failed to parse action from response"
+}
+case "$ACTION" in
+  allow|block|confirm|alert) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
+if [ "$ACTION" = "block" ]; then
+  # Exit 2 denies whatever the object says; the event-native object carries
+  # DefenseClaw's reason when the gateway rendered one.
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+    echo "$OUTPUT"
+  else
+    emit_cursor_deny "Blocked by DefenseClaw Cursor policy."
+  fi
+  exit 2
+fi
+{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 else
   # Gateway answered but carried no hook_output (e.g. an observe-mode

@@ -368,6 +368,9 @@ func TestOmnigentSitePackagesRejectsUntrustedInterpreter(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir)
 	t.Setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+	// Keep the stub outside HOME: macOS runners put t.TempDir under HOME,
+	// where a per-user gateway admits an owner-only interpreter.
+	t.Setenv("HOME", t.TempDir())
 	previous := OmnigentSitePackagesPathOverride
 	OmnigentSitePackagesPathOverride = ""
 	t.Cleanup(func() { OmnigentSitePackagesPathOverride = previous })

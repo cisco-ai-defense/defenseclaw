@@ -23,15 +23,15 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path
+from defenseclaw.config import config_path, legacy_standalone_configured
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 from defenseclaw.scanner_binary import resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
@@ -63,6 +63,49 @@ _OPENCODE_HEARTBEAT_FRESHNESS = timedelta(minutes=15)
 _OPENCODE_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 _OPENCODE_REGISTRATION_SOURCES = frozenset({"manual", "automatic"})
 _RUNTIME_HEALTHY_STATES = frozenset({"running", "active", "ready", "up", "healthy", "ok"})
+
+
+# Only the standalone profile reports its profile in `status`. The Secure
+# Client and unmanaged output (text rows and JSON keys) stays exactly as it
+# was before enterprise profiles existed.
+_STANDALONE_ENTERPRISE_PROFILE = "standalone"
+
+
+def _enterprise_profile(cfg) -> str:
+    """Return the managed_enterprise profile, or "" for unmanaged installs.
+
+    Mirrors internal/managed/profile.go: the service pin wins, then the
+    config's ``enterprise.profile``, then the per-OS default (standalone on
+    Linux, secure_client elsewhere). Read-only; never raises.
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return ""
+    pinned = os.environ.get("DEFENSECLAW_ENTERPRISE_PROFILE", "").strip().lower()
+    if pinned:
+        return pinned
+    configured = ""
+    try:
+        import yaml
+
+        with open(config_path()) as handle:
+            raw = yaml.safe_load(handle) or {}
+        enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
+        if isinstance(enterprise, dict):
+            configured = str(enterprise.get("profile") or "").strip().lower()
+    except (OSError, ValueError, ImportError):
+        configured = ""
+    except Exception:  # noqa: BLE001 - status must never fail on a malformed config
+        configured = ""
+    if configured:
+        return configured
+    return _default_enterprise_profile()
+
+
+def _default_enterprise_profile() -> str:
+    """Return the per-OS default profile: standalone on Linux, secure_client elsewhere."""
+    import sys
+
+    return "standalone" if sys.platform.startswith("linux") else "secure_client"
 
 
 def _opencode_registration_source_valid(value: object) -> bool:
@@ -121,9 +164,12 @@ def _opencode_runtime_truth(
 
     heartbeat_raw = row.get("load_heartbeat_at")
     if not isinstance(heartbeat_raw, str) or not heartbeat_raw.strip():
+        # OpenCode reports the load when it starts, so a closed OpenCode is
+        # idle, not degraded (GAP-1632; doctor shows it as a skip, GAP-1565).
         return (
-            "degraded",
-            "runtime load unverified: no authenticated load heartbeat; OpenCode may be stopped or idle",
+            "idle",
+            "no authenticated load heartbeat yet: OpenCode has not loaded the plugin since the "
+            "gateway started, which is normal while OpenCode is closed",
         )
     heartbeat = _runtime_timestamp(heartbeat_raw)
     if heartbeat is None:
@@ -167,9 +213,14 @@ def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
         readiness, detail = _omnigent_runtime_readiness(cfg)
     except Exception as exc:  # noqa: BLE001 - presentation must remain available.
         readiness, detail = "warn", f"policy readiness unavailable: {exc}"
-    if readiness != "pass":
+    if readiness not in {"pass", "bound"}:
         return "degraded", detail
     return raw_state, detail
+
+
+# GAP-1149: counting alerts reads every audit row, which took minutes on a
+# 2 GB audit database; status shows "not counted" (JSON: null) after this.
+_ALERT_COUNT_SECONDS = 3.0
 
 
 def _label(text: str) -> str:
@@ -188,22 +239,53 @@ def _status_row(key: str, value: str) -> None:
     whole "Environment:  " region. Empty values render as a dim
     em-dash to keep the row tracking its column.
     """
-    label_padded = (key + ":").ljust(_STATUS_LABEL_WIDTH)
+    # Keep at least one space after the colon for labels as long as the
+    # column ("Model routing:").
+    label_padded = (key + ":").ljust(max(_STATUS_LABEL_WIDTH, len(key) + 2))
     rendered_value = ux.dim("—") if not value else value
     ux.echo(f"  {ux._style(label_padded, fg='bright_black', bold=True)}{rendered_value}")
 
 
-def _openshell_available(cfg) -> bool:
-    binary = getattr(getattr(cfg, "openshell", None), "binary", "")
-    if binary and shutil.which(str(binary)):
-        return True
-    # ``openshell`` is the historical default launcher name. Older installs
-    # may instead provide the companion ``openshell-sandbox`` executable, so
-    # retain that compatibility fallback only for the default/unset value.
-    # A missing operator-supplied path must not silently select another binary.
-    if binary and str(binary) != "openshell":
-        return False
-    return bool(shutil.which("openshell-sandbox"))
+def _status_columns() -> int:
+    """Terminal width to wrap status lines to, or 0 when stdout is not a terminal."""
+
+    import shutil
+    import sys
+
+    try:
+        if not sys.stdout.isatty():
+            return 0
+    except (AttributeError, ValueError):
+        return 0
+    return shutil.get_terminal_size((100, 24)).columns
+
+
+def _echo_wrapped(text: str, hang: int) -> None:
+    """Echo one status line, wrapped at spaces to the terminal width.
+
+    The terminal hard-wrapped long lines mid-word to column 1 ("does not
+    prove a" / "ccepted delivery"). Break at a space instead and hang the
+    rest ``hang`` columns in (GAP-2566). Width counts visible text only,
+    so styled spans survive; a single word wider than the line stays whole.
+    Piped output is not wrapped, so each item stays on one line for grep.
+    """
+
+    import re
+
+    width = _status_columns()
+    if not width or len(click.unstyle(text)) <= width:
+        ux.echo(text)
+        return
+    parts = re.split(r"( +)", text)
+    line, used = parts[0], len(click.unstyle(parts[0]))
+    for sep, word in zip(parts[1::2], parts[2::2]):
+        size = len(click.unstyle(word))
+        if click.unstyle(line).strip() and used + len(sep) + size > width:
+            ux.echo(line)
+            line, used = " " * hang + word, hang + size
+        else:
+            line, used = line + sep + word, used + len(sep) + size
+    ux.echo(line)
 
 
 @click.command()
@@ -221,7 +303,7 @@ def _openshell_available(cfg) -> bool:
 def status(app: AppContext, as_json: bool) -> None:
     """Show DefenseClaw status.
 
-    Displays environment, sandbox health, scanner availability,
+    Displays environment, sandbox state, scanner availability,
     enforcement counts, and activity summary. On multi-connector installs
     it also lists the active connector roster with each peer's mode.
 
@@ -235,7 +317,13 @@ def status(app: AppContext, as_json: bool) -> None:
     if as_json:
         import json
 
-        click.echo(json.dumps(_status_payload(app), indent=2))
+        payload = _status_payload(app)
+        problems = list(getattr(app, "config_problems", None) or [])
+        if problems:
+            payload["config_errors"] = problems
+        click.echo(json.dumps(payload, indent=2))
+        if problems:
+            raise SystemExit(1)
         return
 
     # Title block — `═` divider matches the legacy double-line look
@@ -244,23 +332,42 @@ def status(app: AppContext, as_json: bool) -> None:
     ux.echo(ux._style("DefenseClaw Status", fg="cyan", bold=True))
     ux.echo(ux._style("══════════════════", fg="cyan"))
 
+    from defenseclaw import __version__
+
+    _status_row("Version", f"{__version__} (all components: defenseclaw version)")
     _status_row("Environment", cfg.environment)
     if getattr(cfg, "deployment_mode", ""):
         _status_row("Deployment", cfg.deployment_mode)
+    profile = _enterprise_profile(cfg)
+    if profile == _STANDALONE_ENTERPRISE_PROFILE:
+        _status_row("Enterprise", f"{profile} (managed by your organization)")
     _status_row("Data dir", cfg.data_dir)
     _status_row("Config", str(config_path()))
+    config_problems = list(getattr(app, "config_problems", None) or [])
+    if config_problems:
+        _status_row(
+            "Config check",
+            ux._style(f"{len(config_problems)} problem(s), listed above", fg="yellow")
+            + ux.dim(" (details: defenseclaw config validate)"),
+        )
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
 
-    # Sandbox
-    if _openshell_available(cfg):
-        _status_row("Sandbox", ux._style("available", fg="green"))
-    else:
+    # Sandbox. The legacy openshell-sandbox mode was removed; a host that
+    # still carries its config is pointed at the cleanup command.
+    if legacy_standalone_configured(cfg):
         _status_row(
             "Sandbox",
-            ux._style("not available", fg="yellow") + ux.dim(" (OpenShell not found)"),
+            ux._style("legacy install detected", fg="yellow")
+            + ux.dim(" (run: defenseclaw sandbox legacy-cleanup)"),
         )
+    elif _sandboxes_enabled(cfg):
+        _status_row("Sandbox", ux._style("on", fg="green") + ux.dim(" (details: defenseclaw sandbox status)"))
+    elif _host_is_windows():
+        _status_row("Sandbox", ux.dim("not supported on Windows"))
+    else:
+        _status_row("Sandbox", ux.dim("off (set up with: defenseclaw sandbox setup)"))
 
     # Scanners
     ux.section("Scanners")
@@ -283,7 +390,7 @@ def status(app: AppContext, as_json: bool) -> None:
     # policy that declares none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
-        ux.echo(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}")
+        _echo_wrapped(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}", 20)
 
     # Counts from DB. The numeric labels stay tight-aligned to match
     # the legacy 16-char column; we color the labels and leave the
@@ -297,7 +404,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # exit-0 (it is an informational command parsed by the TUI/scripts and
         # should not hard-fail on a transient DB read); the error is visible.
         try:
-            counts = app.store.get_counts()
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
         except Exception as exc:  # noqa: BLE001 — surface the error, don't hide it
             counts = None
             db_error = str(exc)
@@ -322,20 +429,20 @@ def status(app: AppContext, as_json: bool) -> None:
                 ("Total scans", counts.total_scans),
                 ("Active alerts", counts.alerts),
             ):
+                if val is None:
+                    val = ux.dim("not counted (too many audit events to count quickly; list them: defenseclaw alerts)")
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
 
     # Canonical v8 collection, routing, redaction, and destination status.
-    _print_observability_status(cfg)
+    _print_observability_status(cfg, config_has_problems=bool(config_problems))
 
     # Sidecar status
     ux.echo()
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
+    bind = gateway_api_client_host(cfg)
     client = OrchestratorClient(
         host=bind,
         port=cfg.gateway.api_port,
@@ -350,28 +457,119 @@ def status(app: AppContext, as_json: bool) -> None:
     # (N rows), so the output never branches on connector count.
     health = _fetch_runtime_bound_health(client, cfg)
     if health is not None:
-        _status_row("Sidecar", ux._style("running", fg="green"))
+        from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
+
+        if _gateway_runs_replaced_binary(cfg):
+            _status_row(
+                "Sidecar",
+                ux._style("running a replaced binary; run defenseclaw-gateway restart", fg="yellow"),
+            )
+        else:
+            _status_row(
+                "Sidecar",
+                ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
+            )
+        _print_audit_log_health(cfg, health)
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
+        _print_llm_judge(health)
         _print_hook_guardian(cfg)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
-            "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
+            "Subsystems:    defenseclaw-gateway status",
         )
     else:
-        _status_row("Sidecar", ux._style("not running", fg="yellow"))
+        try:
+            from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
+
+            holder = _foreign_gateway_port_holder(cfg)
+        except Exception:  # noqa: BLE001 - status stays best effort
+            holder = ""
+        # GAP-2081: a live gateway.pid with no /health answer is a gateway
+        # that is still starting or hung, as defenseclaw-gateway status says;
+        # "start it" was a dead end (start says it is already running).
+        hung_pid = 0 if holder else _live_gateway_pid(cfg)
+        if holder:
+            _status_row(
+                "Sidecar",
+                ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
+            )
+        elif hung_pid:
+            _status_row(
+                "Sidecar",
+                ux._style(
+                    f"running (PID {hung_pid}) but not answering /health; it is still starting or hung",
+                    fg="yellow",
+                ),
+            )
+        else:
+            _status_row(
+                "Sidecar",
+                ux._style("not running; start it: defenseclaw-gateway start", fg="yellow"),
+            )
+        _print_audit_log_health(cfg, None)
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        _print_agents(cfg)
+        _print_agents(cfg, sidecar_down=True, sidecar_hung=bool(hung_pid))
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        hint(
-            "Start sidecar:  defenseclaw-gateway start",
-            "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
-        )
+        if holder:
+            first_hint = (
+                "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
+                f"{_free_api_port_hint(cfg)} --non-interactive"
+            )
+        elif hung_pid:
+            first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        else:
+            first_hint = "Start sidecar:  defenseclaw-gateway start"
+        hint(first_hint, "Subsystems:    defenseclaw-gateway status")
+    if config_problems:
+        raise SystemExit(1)
+
+
+def _live_gateway_pid(cfg) -> int:
+    """PID of a live gateway recorded in ``gateway.pid``, else 0 (best effort)."""
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return 0
+    try:
+        from defenseclaw.commands.cmd_doctor import _read_pid_from_file
+
+        return _read_pid_from_file(os.path.join(data_dir, "gateway.pid"))
+    except Exception:  # noqa: BLE001 - status stays best effort
+        return 0
+
+
+def _format_uptime(ms: object) -> str:
+    """``3725000`` → ``1h 2m``; empty for a missing or bad value."""
+    if isinstance(ms, bool) or not isinstance(ms, (int, float)) or ms < 0:
+        return ""
+    minutes = int(ms // 60000)
+    days, rem = divmod(minutes, 1440)
+    hours, mins = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {mins}m"
+    return f"{mins}m" if mins else "<1m"
+
+
+def _sidecar_running_detail(health: dict, host: str, port: object) -> str:
+    """`` (PID 1234, up 2h 5m, API http://127.0.0.1:18970)`` for the Sidecar row (GAP-1789)."""
+    parts = []
+    pid = health.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        parts.append(f"PID {pid}")
+    uptime = _format_uptime(health.get("uptime_ms"))
+    if uptime:
+        parts.append(f"up {uptime}")
+    if host and port:
+        shown = f"[{host}]" if ":" in str(host) else str(host)
+        parts.append(f"API http://{shown}:{port}")
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 _FRIENDLY_CONNECTOR_NAMES = {
@@ -382,8 +580,6 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "hermes": "Hermes",
     "cursor": "Cursor",
     "devin": "Devin",
-    "windsurf": "Retired Cascade (cleanup only)",
-    "geminicli": "Gemini CLI (deprecated; use Antigravity)",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
@@ -392,7 +588,8 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
-_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
+# Plain words, as on the TUI Overview (GAP-2561).
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "(overrides by Enterprise, Team or Project hooks can't be detected)"
 
 
 def _friendly_connector_name(name: str | None) -> str:
@@ -430,10 +627,17 @@ def _connector_scope_text(cfg) -> str:
     return "global user config"
 
 
+def _guardrail_turned_off(gc) -> bool:
+    """Whether ``guardrail.enabled`` is explicitly false in the config."""
+    return getattr(gc, "enabled", True) is False
+
+
 def _print_agents(
     cfg,
     *,
     health: dict | None = None,
+    sidecar_down: bool = False,
+    sidecar_hung: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -454,6 +658,7 @@ def _print_agents(
     except Exception:
         manual_actives = []
     health_map = _fetch_health_connectors(health=health)
+    not_started = _connectors_not_started(health)
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -480,12 +685,19 @@ def _print_agents(
         return
 
     gc = getattr(cfg, "guardrail", None)
+    # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
+    # default ``uninstall``) makes the gateway tear every hook connector
+    # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
+    # OpenClaw gateway connection instead (#958) and keeps its own state.
+    guardrail_off = _guardrail_turned_off(gc) and any(c != "openclaw" for c in actives)
 
     def _is_enabled(name: str) -> bool:
         # An explicit ``enabled: false`` override (set by
         # ``guardrail disable --connector X``) means the connector was torn
         # down and is no longer enforcing. Default True so single-connector
         # installs and never-disabled connectors keep reading as active.
+        if guardrail_off and name != "openclaw":
+            return False
         if gc is None or not hasattr(gc, "effective_enabled"):
             return True
         try:
@@ -495,10 +707,40 @@ def _print_agents(
 
     enabled_count = sum(1 for c in actives if _is_enabled(c))
     disabled_count = len(actives) - enabled_count
-    header = f"{enabled_count} active"
+    # GAP-1937: a connector whose setup failed at gateway start is not
+    # enforced; count it the way `defenseclaw-gateway status` does.
+    not_running_count = sum(1 for c in actives if _is_enabled(c) and c not in health_map and c in not_started)
+    header = f"{enabled_count - not_running_count} active"
+    if not_running_count:
+        header += f", {not_running_count} not running"
     if disabled_count:
         header += f", {disabled_count} disabled"
+    if guardrail_off and not enabled_count:
+        header = ux._style(f"{len(actives)} configured, guardrail off (nothing is guarded)", fg="yellow")
+    if sidecar_down and enabled_count:
+        # Hooks are configured but nothing answers them: each connector falls
+        # back to its fail-mode (open = calls run unchecked, closed = blocked).
+        header = (
+            f"{enabled_count} configured, no hook verdicts while the sidecar is not answering"
+            if sidecar_hung
+            else f"{enabled_count} configured, not enforced while the sidecar is stopped"
+        )
+        if disabled_count:
+            header += f" ({disabled_count} disabled)"
+        header = ux._style(header, fg="yellow")
     _status_row("Agents", header)
+    if guardrail_off:
+        ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
+    if sidecar_down and enabled_count:
+        _echo_wrapped(
+            " " * 16
+            + ux.dim(
+                "Hooks fall back to each connector's fail-mode: open lets calls run "
+                "unchecked, closed blocks them. "
+                + ("Check it: defenseclaw-gateway status" if sidecar_hung else "Start it: defenseclaw-gateway start")
+            ),
+            16,
+        )
     for conn in actives:
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
@@ -514,7 +756,7 @@ def _print_agents(
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
             disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{disclosure_suffix}")
-            ux.echo(f"                {disabled_text} — {disabled_label}")
+            _echo_wrapped(f"                {disabled_text} — {disabled_label}", 18)
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
@@ -529,19 +771,27 @@ def _print_agents(
                 )
             elif conn == "omnigent":
                 runtime_state, runtime_detail = _omnigent_effective_runtime_state(cfg, runtime_state)
+            elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
+                # The gateway does not dial an OpenClaw gateway that is only
+                # the claw.mode default and is not installed (#958).
+                runtime_state, runtime_detail = "off", "OpenClaw is not installed"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
-            ux.echo(
+            suffix += _hook_runtime_degraded_suffix(cfg, conn)
+            _echo_wrapped(
                 f"                {friendly} ({conn}) — mode={mode or '?'}"
-                f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}"
+                f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}",
+                18,
             )
             _print_agent_counters(hc, indent="                  ")
         else:
             dim_text = ux.dim(
                 f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
             )
-            if conn == "opencode":
+            if conn == "opencode" and not sidecar_down:
+                # With the sidecar stopped the header already says no
+                # connector is enforced; tag none of them (GAP-1871).
                 runtime_state, runtime_detail = _opencode_runtime_truth(
                     None,
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
@@ -549,9 +799,21 @@ def _print_agents(
                 )
                 suffix = _connector_state_verb(runtime_state)
                 suffix += ux.dim(f" ({runtime_detail})")
-                ux.echo(f"                {dim_text}{suffix}")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
+                suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn.strip().lower() in not_started:
+                # Setup failed when the gateway started (GAP-1714).
+                suffix = _connector_state_verb("not running") + ux.dim(
+                    " (setup failed when the gateway started, so it is not enforced; "
+                    f"see gateway.log, then run: defenseclaw setup {conn.strip().lower()})"
+                )
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             else:
-                ux.echo(f"                {dim_text}")
+                # A drifted or removed hook registration shows with the
+                # gateway stopped too (GAP-1230).
+                _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
 
 
 def _canonical_data_dir(value) -> str | None:
@@ -609,7 +871,8 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     health = document.get("health")
     if not isinstance(health, dict):
         return None
-    return health
+    # The verified runtime PID, for the Sidecar row (GAP-1789).
+    return {**health, "pid": trust.pid} if "pid" not in health else health
 
 
 def _fetch_health_connectors(
@@ -664,7 +927,10 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
     try:
         from defenseclaw.fail_mode import connector_fail_mode_report
 
-        return connector_fail_mode_report(cfg, connector)
+        # Passive: the effective-policy check starts the Codex app-server,
+        # which calls OpenAI and the model provider; that belongs to doctor
+        # (GAP-1466).
+        return connector_fail_mode_report(cfg, connector, inspect_effective_policy=False)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         guardrail = getattr(cfg, "guardrail", None)
         resolver = getattr(guardrail, "effective_hook_fail_mode", None)
@@ -682,6 +948,33 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
             "drift": ["report-unavailable"],
             "sources": [],
         }
+
+
+def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
+    """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
+    try:
+        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+
+        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
+        return ""
+    if not problems:
+        return ""
+    return (
+        " — "
+        + ux._style("DEGRADED", fg="red", bold=True)
+        + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
+    )
+
+
+def _connectors_not_started(health: dict | None) -> set[str]:
+    """Configured connectors the gateway could not set up at start (GAP-1714)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    names = details.get("connectors_not_started") if isinstance(details, dict) else None
+    if not isinstance(names, list):
+        return set()
+    return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
 
 
 def _connector_state_verb(state: str) -> str:
@@ -723,10 +1016,11 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
         if sub_blocks
         else ux.dim(f"subprocess blocks: {sub_blocks}")
     )
-    ux.echo(
+    _echo_wrapped(
         f"{indent}{ux.dim(f'requests: {requests}')}  {err_text}  "
         f"{ux.dim(f'tool inspections: {inspections}')}  {block_text_tool}  "
-        f"{block_text_sub}"
+        f"{block_text_sub}",
+        len(indent),
     )
 
 
@@ -735,9 +1029,22 @@ def _print_application_protection(cfg, health: dict | None = None) -> None:
     enabled = bool(state.get("enabled", getattr(getattr(cfg, "application_protection", None), "enabled", False)))
     status_text = ux._style("enabled", fg="green") if enabled else ux._style("disabled", fg="yellow")
     health_state = str(state.get("health_state") or "").strip()
-    if health_state:
+    if health_state and health_state.lower() not in ("enabled", "disabled"):
         status_text += ux.dim(f" ({health_state})")
     _status_row("App protect", status_text)
+    if not enabled:
+        # GAP-1498: no "(disabled)" echo, no scan that will never run; say
+        # what the feature does and how to turn it on.
+        _echo_wrapped(
+            "                "
+            + ux.dim(
+                "guards AI apps that discovery finds; to turn it on, set "
+                "application_protection.enabled: true in the config file "
+                "('defenseclaw config path') and restart the gateway"
+            ),
+            16,
+        )
+        return
     guardrail_mode = str(state.get("guardrail_mode") or "observe")
     asset_mode = str(state.get("asset_policy_mode") or "observe")
     trust_check = "on" if bool(state.get("require_trusted_binary_paths")) else "off"
@@ -883,6 +1190,87 @@ def _print_semantic_routing(cfg, health: dict | None = None) -> None:
     _status_row("Model routing", ux._style(value, fg=color))
 
 
+def _print_audit_log_health(cfg, health: dict | None) -> None:
+    """Warn when audit events are not being recorded (GAP-1528).
+
+    Enforcement keeps working when the audit database cannot be written (a
+    full disk), so without this row status looked healthy while blocks were
+    missing from alerts and audit.
+    """
+    from defenseclaw.audit_capacity import audit_disk_full_notice
+
+    value = audit_disk_full_notice(str(getattr(cfg, "audit_db", "") or ""))
+    if not value:
+        value = _gateway_audit_write_failure(health)
+        if value:
+            value += "; run 'defenseclaw doctor'"
+    if value:
+        _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
+
+
+def _gateway_audit_write_failure(health: dict | None) -> str:
+    """The gateway's own report that audit writes fail, in plain words, or "".
+
+    The free-space check misses volumes that report some room but reject
+    writes (APFS showed 32 MiB free on a full volume), so this signal from the
+    gateway is what status and alerts rely on (GAP-1528).
+    """
+    telemetry = health.get("telemetry") if isinstance(health, dict) else None
+    if not isinstance(telemetry, dict):
+        return ""
+    state = str(telemetry.get("state") or "").strip().lower()
+    if not state or state in _RUNTIME_HEALTHY_STATES:
+        return ""
+    from defenseclaw.commands.cmd_doctor import _telemetry_error_reason
+
+    reason = _telemetry_error_reason(telemetry.get("details"))
+    if not reason:
+        return ""
+    since = str(telemetry.get("since") or "").strip()
+    return reason + (f" (since {since})" if since and not since.startswith("0001") else "")
+
+
+def gateway_audit_write_failure(cfg) -> str:
+    """Ask the running gateway whether audit writes fail; "" when they don't or it can't tell."""
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(cfg),
+            port=cfg.gateway.api_port,
+            token=cfg.gateway.resolved_token(),
+        )
+        return _gateway_audit_write_failure(_fetch_runtime_bound_health(client, cfg))
+    except Exception:
+        return ""
+
+
+def _print_llm_judge(health: dict | None) -> None:
+    """Show the LLM judge row when the gateway has made judge calls.
+
+    A judge whose provider failed every call was invisible here: the hook
+    lane kept the rule verdicts and only the audit rows said so (GAP-1120).
+    """
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    if not isinstance(details, dict) or not details.get("judge_state"):
+        return
+    state = str(details.get("judge_state"))
+    total = details.get("judge_recent_calls", 0)
+    failed = details.get("judge_failed_calls", 0)
+    if state == "ok":
+        _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
+        return
+    if state == "failing":
+        value = f"failing: all of its last {total} call(s) failed, so only the rules decide"
+    else:
+        value = f"degraded: {failed} of its last {total} call(s) failed"
+    last_error = str(details.get("judge_last_error") or "").strip()
+    if last_error:
+        value += f"; last error: {last_error}"
+    _status_row("LLM judge", ux._style(value + "; run 'defenseclaw doctor'", fg="yellow"))
+
+
 def _load_application_protection_state(cfg) -> dict:
     data_dir = getattr(cfg, "data_dir", "") or ""
     if not data_dir:
@@ -958,7 +1346,7 @@ def _hook_guardian_status(cfg) -> dict:
     return data
 
 
-def _print_observability_status(cfg) -> None:
+def _print_observability_status(cfg, *, config_has_problems: bool = False) -> None:
     """Render the compiler-owned canonical v8 destination plan."""
 
     from defenseclaw.config import config_path_for_data_dir
@@ -968,8 +1356,11 @@ def _print_observability_status(cfg) -> None:
     try:
         status = inspect_v8_operator_status(config_path_for_data_dir(cfg.data_dir))
     except Exception as exc:  # noqa: BLE001 - status remains useful when the sidecar is stopped.
-        ux.echo("    " + ux._style(f"canonical v8 plan unavailable: {exc}", fg="yellow"))
-        _print_native_delivery_status(_native_delivery_summary(cfg))
+        # The config check above already names the problem and its remedy;
+        # the loader's raw diagnostic repeated both (GAP-1995).
+        reason = "the config has a problem, listed above" if config_has_problems else str(exc)
+        ux.echo("    " + ux._style(f"destination plan unavailable: {reason}", fg="yellow"))
+        _print_native_delivery_status(_native_delivery_summary(cfg), configured=_configured_connectors(cfg))
         return
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
@@ -977,20 +1368,33 @@ def _print_observability_status(cfg) -> None:
     for destination in status.destinations:
         state = ux._style("enabled", fg="green") if destination.enabled else ux._style("disabled", fg="bright_black")
         signals = ",".join(destination.selected_signals) or "none"
-        ux.echo(
+        _echo_wrapped(
             f"    {ux.bold(f'{destination.name:<26s}')}"
             f"{ux.dim(f'[{destination.kind}]')} {state}  "
-            f"{signals}  {destination.redaction_label}"
+            f"{signals}  {destination.redaction_label}",
+            30,
         )
         if destination.endpoint:
             ux.echo(f"      {ux.dim('target:')} {destination.endpoint}")
-    _print_native_delivery_status(_native_delivery_summary(cfg, audit_db=status.local_path))
+    _print_native_delivery_status(
+        _native_delivery_summary(cfg, audit_db=status.local_path),
+        configured=_configured_connectors(cfg),
+    )
+
+
+def _configured_connectors(cfg) -> set[str] | None:
+    """Connectors set up now, as doctor scopes its OTLP rows (GAP-2242)."""
+
+    from defenseclaw.commands.cmd_doctor import _otlp_configured_connectors
+
+    return _otlp_configured_connectors(cfg)
 
 
 def _native_delivery_summary(cfg, *, audit_db: str = ""):
     """Return the shared bounded, path-free native OTLP evidence summary."""
 
     from defenseclaw.observability.custody_status import (
+        gateway_api_addr,
         inspect_connector_custody,
         summarize_native_delivery,
     )
@@ -1008,29 +1412,58 @@ def _native_delivery_summary(cfg, *, audit_db: str = ""):
     database = database or str(getattr(cfg, "audit_db", "") or "")
     if not database:
         database = os.path.join(data_dir, "audit.db")
-    return summarize_native_delivery(inspect_connector_custody(database, data_dir))
+    return summarize_native_delivery(
+        inspect_connector_custody(database, data_dir, api_addr=gateway_api_addr(cfg))
+    )
 
 
-def _print_native_delivery_status(summary) -> None:
-    """Render delivery truth separately from collector/runtime health."""
+def _print_native_delivery_status(summary, *, configured: set[str] | None = None) -> None:
+    """Render delivery truth separately from collector/runtime health.
 
-    hours = summary.observation_window_hours
-    scope = f"bounded {hours}h"
-    if summary.event_rows_truncated:
-        scope += ", truncated; counts partial"
+    ``configured`` (when known) keeps per-connector rows for connectors set up
+    now. Evidence outlives ``setup remove``, so removed connectors fold into
+    one "not configured" line, as doctor does (GAP-2242).
+    """
+
+    from defenseclaw.observability.custody_status import native_evidence_scope
+
+    scope = native_evidence_scope(summary.observation_window_hours, summary.event_rows_truncated)
     delivery_context = f"native OTLP delivery ({scope}; collector/runtime health does not prove accepted delivery):"
-    ux.echo("    " + ux.dim(delivery_context))
+    _echo_wrapped("    " + ux.dim(delivery_context), 6)
     if not summary.connectors:
         reason = f"; {summary.reason.replace('_', ' ')}" if summary.reason else ""
         ux.echo(f"      {ux.dim(f'no evidence ({scope}{reason})')}")
         return
-    for item in summary.connectors:
-        instance = "" if item.default else " (additional instance)"
-        state = item.state.replace("_", "-")
+    from defenseclaw.connector_paths import normalize
+    from defenseclaw.observability.custody_status import native_delivery_display_rows
+
+    connectors = summary.connectors
+    removed: list[str] = []
+    if configured is not None:
+        connectors = tuple(item for item in connectors if normalize(item.connector) in configured)
+        for item in summary.connectors:
+            if normalize(item.connector) not in configured and item.connector not in removed:
+                removed.append(item.connector)
+    import shutil
+    import textwrap
+
+    columns = shutil.get_terminal_size((100, 24)).columns
+    for label, item in native_delivery_display_rows(connectors):
+        name = item.connector + (f" ({label})" if label else "")
         color = "green" if item.state == "accepted" else "yellow"
         if item.state == "no_evidence":
             color = "bright_black"
-        ux.echo(f"      {ux.bold(item.connector + instance)}  {ux._style(state, fg=color)} — {item.detail}")
+        # The detail already starts with the state ("accepted native delivery
+        # observed ..."), so the state word is the color only, and wrapped
+        # lines hang under the detail instead of column 1 (GAP-2549, as the
+        # TUI does since GAP-2545).
+        indent = " " * (6 + len(name) + 2)
+        wrapped = textwrap.wrap(item.detail, max(columns - len(indent), 30)) or [item.detail]
+        ux.echo(f"      {ux.bold(name)}  {ux._style(wrapped[0], fg=color)}")
+        for rest in wrapped[1:]:
+            ux.echo(indent + ux._style(rest, fg=color))
+    if removed:
+        ux.echo("      " + ux.dim("not configured (telemetry history only, not checked): " + ", ".join(removed)))
 
 
 def _scanner_overrides_summary(cfg) -> str:
@@ -1109,6 +1542,8 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         return ""
 
     def _enabled(name: str) -> bool:
+        if name != "openclaw" and _guardrail_turned_off(gc):
+            return False
         if gc is None or not hasattr(gc, "effective_enabled"):
             return True
         try:
@@ -1197,17 +1632,28 @@ def _status_payload(app) -> dict:
     payload: dict = {
         "environment": cfg.environment,
         "deployment_mode": getattr(cfg, "deployment_mode", ""),
-        "data_dir": cfg.data_dir,
-        "config": str(config_path()),
-        "audit_db": cfg.audit_db,
-        "scope": _connector_scope_text(cfg),
-        "sandbox": {"available": _openshell_available(cfg)},
-        "scanners": _scanner_status_map(cfg),
     }
+    profile = _enterprise_profile(cfg)
+    if profile == _STANDALONE_ENTERPRISE_PROFILE:
+        payload["enterprise_profile"] = profile
+    payload.update(
+        {
+            "data_dir": cfg.data_dir,
+            "config": str(config_path()),
+            "audit_db": cfg.audit_db,
+            "scope": _connector_scope_text(cfg),
+            "sandbox": {
+                "available": False,
+                "enabled": _sandboxes_enabled(cfg),
+                "legacy_standalone": legacy_standalone_configured(cfg),
+            },
+            "scanners": _scanner_status_map(cfg),
+        }
+    )
 
     if app.store:
         try:
-            counts = app.store.get_counts()
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
         except Exception as exc:  # noqa: BLE001 — surface, don't hide (SU-05)
             payload["enforcement"] = None
             payload["activity"] = None
@@ -1227,11 +1673,9 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    bind = "127.0.0.1"
-    if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
-        bind = cfg.guardrail.host
-    from defenseclaw.gateway import OrchestratorClient
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
+    bind = gateway_api_client_host(cfg)
     try:
         client = OrchestratorClient(
             host=bind,
@@ -1250,3 +1694,14 @@ def _status_payload(app) -> dict:
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
+
+
+def _sandboxes_enabled(cfg) -> bool:
+    # Identity check, as doctor's: a stand-in config must not read as on.
+    return getattr(getattr(cfg, "openshell", None), "enabled", False) is True
+
+
+def _host_is_windows() -> bool:
+    from defenseclaw.platform_support import host_os
+
+    return host_os() == "windows"

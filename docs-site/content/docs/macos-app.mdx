@@ -1,0 +1,213 @@
+---
+title: macOS app
+description: DefenseClaw for macOS, the native menu-bar companion app. Its panels, and how the menu bar, notifications, the Overview card, the Sandboxes panel and the Sandbox wizard work with NVIDIA OpenShell sandboxes.
+keywords:
+  - DefenseClaw macOS app
+  - DefenseClaw menu bar
+  - DefenseClaw Sandboxes panel
+  - OpenShell sandbox notifications
+  - unblock sandbox destination
+---
+
+DefenseClaw for macOS is a native companion app for Apple-silicon Macs
+running macOS 14 or newer. It adds a menu-bar status view, dashboards, setup
+forms, and one-click install and update of the DefenseClaw runtime. It works
+only with the DefenseClaw installation on this Mac: the gateway API on
+`127.0.0.1`, and the audit database, logs, and configuration under
+`~/.defenseclaw`. Actions that change something run the `defenseclaw` CLI,
+and their output appears in the **Activity** panel. Sandbox unblocks and ask
+answers go straight to the DefenseClaw daemon's API instead.
+
+## Install
+
+1. Download `DefenseClawMac-<version>-macos-arm64.dmg` from the
+   [Download](/docs/get-started/download) page (it is attached to each GitHub
+   release).
+2. Open the DMG, drag **DefenseClawMac** to **Applications**, and launch it.
+3. If the DefenseClaw CLI and gateway are not installed yet, the **Set Up
+   DefenseClaw** window offers **Install DefenseClaw Runtime**. It downloads
+   the matching release's `install.sh`, checks it against the release's
+   `checksums.txt`, and installs the CLI and gateway into `~/.defenseclaw`
+   and `~/.local/bin`. Progress shows in **Activity**. If you already
+   installed DefenseClaw with `install.sh`, the app uses that installation.
+4. The same window then sets up the agents to guard: detected agents are
+   pre-selected, and you pick observe or action mode.
+
+Releases are signed and notarized when the release has Apple signing set up;
+otherwise the app is only ad-hoc signed and macOS Gatekeeper asks before the
+first launch. **Update** in the app installs the latest release the same way
+and keeps your configuration, tokens, and audit database. Running `install.sh`
+again also updates the app in `/Applications` or `~/Applications`; see
+[Upgrade](/docs/get-started/upgrade).
+
+## Panels
+
+The main window's sidebar groups the panels:
+
+| Group | Panels |
+| --- | --- |
+| Monitor | **Overview** (gateway health, connectors, enforcement counts, Doctor, AI Discovery), **Alerts**, **Logs**, **Audit**, **Activity** (output of the commands the app runs) |
+| Govern | **Skills**, **MCPs**, **Plugins**, **Tools**, [**Sandboxes**](#sandboxes-panel) |
+| Discover | **Inventory**, **AI Discovery**, **Runtime** (what actually ran), **Registries** |
+| Configure | **Setup**: the setup forms, including the [Sandbox wizard](#sandbox-wizard), and the config editor |
+
+Most panels match the [TUI](/docs/tui) panels. The app has no Policies panel:
+manage policies and rule packs in the TUI (`P`) or with the CLI.
+**Settings** has General, Monitoring, Notifications, and Connection tabs.
+
+The menu-bar popover shows the gateway state, each connector's mode with its
+call and block counts, and recent events, with **Open DefenseClaw**,
+**Ack All**, **Pause** (stops monitoring until you resume), and **Quit**.
+Closing the main window keeps DefenseClaw running in the menu bar.
+
+## OpenShell sandboxes
+
+<Callout type="info" title="On a Mac, sandboxes are MicroVMs that work on a copy">
+Docker Desktop's Linux VM kernel has no Landlock, so on a Mac DefenseClaw runs
+sandboxes in OpenShell MicroVMs (OpenShell's `vm` driver: Apple silicon only,
+experimental upstream). A MicroVM mounts no host folders, so every run works
+on a copy of your project, and `defenseclaw sandbox pull <name>` brings the
+changes back (see [sandboxes on macOS](/docs/sandboxes/macos)). The status line names
+the gateway's driver: `(MicroVM)`, or `(docker)`.
+</Callout>
+
+For a task-by-task summary, see
+[Sandboxes in the TUI and macOS app](/docs/sandboxes/apps#the-macos-app). This
+section is the full reference.
+
+When sandboxes are on (see the [sandbox guide](/docs/sandboxes/guide)), the app
+shows the sandboxes the DefenseClaw daemon runs in four places: the menu bar,
+desktop notifications, an Overview card and the Sandboxes panel. It reads the
+daemon's `/api/v1/sandbox` API on every refresh of the app (every 5 seconds by
+default). When a refresh fails, the app keeps the last good snapshot and says
+so. A harness session needs a terminal, so the app never starts or attaches
+one: it copies the `defenseclaw sandbox run` or `defenseclaw sandbox connect`
+command for you to paste into Terminal.
+
+### Menu bar
+
+The menu-bar popover gets a **Sandboxes** section once sandboxes are on:
+
+- the number of active sandboxes (or "unavailable"); click it to open the
+  Sandboxes panel;
+- up to three active sandboxes with their harness and uptime, marked orange
+  when one has an alert;
+- up to two blocked destinations, each with **Unblock**, which lifts the block
+  for that sandbox only (unblock everywhere from the panel);
+- up to two waiting asks, with **Approve** and **Reject**.
+
+### Notifications
+
+With **Notify on sandbox blocked destinations and asks (with Unblock)** on
+(Settings, Notifications; on by default), the app posts a notification for:
+
+| Event | Notification | Buttons |
+| --- | --- | --- |
+| A blocked destination you can unblock | "Blocked `<host>`": the sandbox tried to reach it, and why | **Unblock for this sandbox**, **Review** |
+| An ask | "`<sandbox>` asks for access", and what it wants to reach | **Review** |
+| A new git repository in a mounted project | "`<sandbox>`: planted git repository" | **Review** |
+| Hooks that cannot reach DefenseClaw | "`<sandbox>`: hooks are not reaching DefenseClaw" | **Review** |
+
+**Unblock for this sandbox** needs an unlocked Mac: from the lock screen,
+macOS asks you to unlock first, so nobody at a locked Mac can lift a block. It
+lifts the block for that one sandbox; unblocking a host in every sandbox is a
+confirmed choice in the Sandboxes panel only. **Review**, or a click on the
+notification, opens the Sandboxes panel.
+
+Notifications name the destination and the sandbox only, never request
+content. A destination blocked again within a minute does not notify again,
+and events from before the app started do not notify at all. Sandbox
+notifications also show while the app is in front.
+
+### Overview card
+
+The Overview panel shows a **Sandboxes** card once sandboxes are on: the
+status line, and the counts of active sandboxes, blocked sites, waiting asks
+and alerts. **Open Sandboxes** opens the panel.
+
+### Sandboxes panel
+
+Open **Sandboxes** in the sidebar (Govern), or press `⌘⇧B`. The sidebar item
+shows how many asks are waiting. The header has the daemon's status line and
+your organization's policy when `openshell.admin` is set, plus two buttons:
+**Copy run command** copies `cd <project> && defenseclaw sandbox run claude`,
+and **Refresh** reads the daemon again. When sandboxes are off, the panel
+offers **Open Setup**; when they are unavailable, **Run sandbox doctor**.
+
+The panel has four parts:
+
+- **Sandboxes:** a table with Name, Phase, Harness, Pack/Profile, Mode, Up,
+  Sites (contacted and blocked) and Alerts (hover for the list).
+- **The selected sandbox:** its harness, project, skip-permissions mode, tool
+  calls, hook events (the verdicts per hook event, such as
+  `PreToolUse 12 · PostToolUse 11 · Stop 2`), last tool block, undo, the run image when it has one (on a MicroVM
+  gateway, the image its harness settings are baked into) and alerts, with
+  these actions:
+  - **Stop…** asks first, then runs `defenseclaw sandbox stop <name> --yes`;
+    `defenseclaw sandbox connect <name>` resumes it. A detached run still
+    going ends: DefenseClaw marks it interrupted and keeps its log for
+    `defenseclaw sandbox logs <name>`.
+  - **Review changes** runs `defenseclaw sandbox review <name>`.
+  - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
+    which stops the sandbox and puts the project folder back to its
+    pre-session snapshot.
+  - **Copy connect command** copies the resume command.
+
+  A sandbox that works on a copy (every sandbox on a MicroVM gateway) has no
+  review. Instead:
+  - **Copy pull command** copies `defenseclaw sandbox pull <name>`. In
+    Terminal it shows the changes, and `--apply`, `--branch` or
+    `--patch-out FILE` brings them back.
+  - **Pull to branch** runs `defenseclaw sandbox pull <name> --branch`: the
+    work lands on branch `dc/<name>` and your working tree stays as it is. A
+    change that can run code on your Mac is not brought back this way; pull
+    it in Terminal, where it asks.
+  - **Undo…** asks first, then runs `defenseclaw sandbox undo <name> --yes`,
+    which reverts the last `pull --apply`. Edits you made since stay; if one
+    changed the same files, nothing is reverted and Activity says why.
+- **Asks:** each waiting ask with **Approve**, **Always…** (asks first: every
+  future sandbox may reach the destination too) and **Reject**.
+- **Activity:** the 60 newest events of the live feed. A blocked destination
+  you can lift has an **Unblock** menu: **Only in** the sandbox, or **In every
+  sandbox (always)…**, which asks first and adds the host to
+  `openshell.egress.unblocked`. Private networks stay closed either way. A
+  lifted block reads "unblocked".
+
+The alerts are the same as in the TUI: hook tamper, a planted git repository,
+hooks that cannot reach DefenseClaw, silent hooks, and a sandbox without a
+DefenseClaw binding; see
+[Alerts and notifications](/docs/tui#alerts-and-notifications). The actions
+are unavailable while the installation is read-only.
+
+### Sandbox wizard
+
+**Setup → Sandbox** runs the one-time sandbox setup, like the TUI's
+[Sandbox wizard](/docs/tui#sandbox-wizard), with the same command:
+`defenseclaw sandbox setup --non-interactive` plus the flags your answers
+choose. Its fields are the action (`setup`, or `doctor` to only check this
+machine), **Claude Code** and **Codex** (at least one; defaults follow
+`openshell.harnesses`), **Shell wrappers** and **Build images now**. There is
+no telemetry question: the Homebrew gateway does not read `gateway.env`, so
+setup cannot turn OpenShell's anonymous usage telemetry off on a Mac (see
+[sandbox setup](/docs/sandboxes/guide)). Nor is there a mounts question: setup
+sets `compute_driver = "vm"` in the gateway's `gateway.toml`, restarts the
+gateway once, and every run works on a copy. The first run of each image
+prepares its MicroVM disk, which takes about a minute and 5 GB.
+
+The app never installs OpenShell. When OpenShell or e2fsprogs (which the
+MicroVM driver formats its disks with) is missing, run this in Terminal first;
+it installs NVIDIA's `nvidia/openshell` Homebrew formula and e2fsprogs, and
+starts the gateway with `brew services`:
+
+```bash
+defenseclaw sandbox setup --install-openshell
+```
+
+### Config editor
+
+**Setup → Config Editor** has an **OpenShell Sandboxes** section for the
+`openshell:` keys. Keys an administrator constrains through `openshell.admin`
+are read-only and say why ("read-only: blocked by your organization's
+DefenseClaw policy" with the reason), following the same rules as the TUI's
+[config editor](/docs/tui#sandbox-settings-in-the-config-editor). In a
+`managed_enterprise` install the whole section is read-only.

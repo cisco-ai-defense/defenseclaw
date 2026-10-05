@@ -14,9 +14,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// defenseclaw-hook is the native Windows hook/notification entrypoint. Release
-// builds link it with -H=windowsgui so graphical agent applications can invoke
-// DefenseClaw synchronously without Windows allocating a transient console.
+// defenseclaw-hook is the native hook/notification entrypoint. On Windows,
+// release builds link it with -H=windowsgui so graphical agent applications
+// can invoke DefenseClaw synchronously without Windows allocating a transient
+// console. On Linux and macOS it is the administrator-owned binary that
+// standalone managed deployments register (hook --connector X
+// --enterprise-managed): it runs as the agent's user, trusts only the
+// root-owned runtime descriptor, and verifies the gateway's uid before
+// sending a byte.
 package main
 
 import (
@@ -38,7 +43,14 @@ func main() {
 	// Identity inspection must not depend on mutable per-user hook state. Setup
 	// invokes this exact mode before signing and after installation so archived
 	// hook bytes are bound to the payload manifest's source commit.
+	// A person checking the hook binary types --version (GAP-1415).
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		useParentConsoleForStdout()
+		fmt.Printf("defenseclaw-hook version %s (commit=%s, built=%s)\n", version, commit, date)
+		return
+	}
 	if isIdentityEntrypoint(os.Args[1:]) {
+		useParentConsoleForStdout()
 		if err := writeMachineIdentity(os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "defenseclaw-hook: write identity: %v\n", err)
 			os.Exit(1)

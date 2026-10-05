@@ -1469,6 +1469,65 @@ func TestEventHistoryCanonicalFamiliesCannotRestoreRawCompatibilityColumns(t *te
 	}
 }
 
+// GAP-1945: a compatibility-only row (connector-hook) kept the judge's quoted
+// prompt text in its details and structured columns under strict.
+func TestEventHistoryCompatibilityColumnsFollowTheLocalProfile(t *testing.T) {
+	const rawMarker = "compat-quoted-prompt-unique-marker"
+	for _, profileName := range []observabilityredaction.ProfileName{
+		observabilityredaction.ProfileNone,
+		observabilityredaction.ProfileStrict,
+	} {
+		t.Run(string(profileName), func(t *testing.T) {
+			store := newV8HistoryStore(t)
+			writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: profileName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := Event{
+				ID: "compat-hook-" + string(profileName), Timestamp: time.Date(2026, 10, 2, 21, 57, 12, 0, time.UTC),
+				Action: string(ActionConnectorHook), Target: "UserPromptSubmit", Actor: "defenseclaw",
+				Details:    "connector=claudecode action=block reason=judge-exfil: quoted " + rawMarker,
+				Severity:   "INFO",
+				Connector:  "claudecode",
+				Structured: map[string]any{"reason": "judge-exfil: quoted " + rawMarker},
+			}
+			stampAuditEventEnvelope(&event)
+			record, err := buildCompatibilityAuditV8Record(
+				event, observability.ClassificationContext{RawSeverity: event.Severity},
+				controlPlaneV8Source(event, controlPlaneV8FamilyNone), "persistence", "",
+				RuntimeV8BuildContext{ConfigGeneration: 23, ConfigDigest: testEventHistoryGraphDigest},
+				router.AdmissionOrdinary,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projection := projectV8HistoryRecord(t, record, profileName)
+			ctx := contextWithLegacyEventProjection(context.Background(), event)
+			if err := writer.AppendContext(ctx, record, projection); err != nil {
+				t.Fatal(err)
+			}
+			row := loadV8HistoryRow(t, store, record.RecordID())
+			if profileName == observabilityredaction.ProfileNone {
+				if row.Details != event.Details || row.Target != event.Target ||
+					!strings.Contains(row.StructuredJSON, rawMarker) {
+					t.Fatalf("profile none changed the compatibility columns: %#v", row)
+				}
+				return
+			}
+			for field, value := range map[string]string{
+				"target": row.Target, "details": row.Details, "structured_json": row.StructuredJSON,
+			} {
+				if strings.Contains(value, rawMarker) || strings.Contains(value, "UserPromptSubmit") {
+					t.Fatalf("%s kept content the %s profile removed: %q", field, profileName, value)
+				}
+			}
+			if row.Action != string(ActionConnectorHook) || row.Connector != "claudecode" || row.Actor != "defenseclaw" {
+				t.Fatalf("strict dropped metadata: %#v", row)
+			}
+		})
+	}
+}
+
 func TestEventHistoryWriterSigningFailureLeavesNoRow(t *testing.T) {
 	store := newV8HistoryStore(t)
 	signer := &testProjectionSigner{keyID: "integrity-key-v1", err: errors.New("signing failed")}
@@ -1736,7 +1795,10 @@ func TestEventHistoryWriterReportsBoundedProjectionUnsignedAndWriteHealth(t *tes
 	}
 }
 
-func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) {
+// GAP-1537/GAP-1660: any signed commit after a write failure clears it (the
+// gateway kept reporting "audit events cannot be written" while optional
+// rows were being written); a healthy writer reports nothing for it.
+func TestEventHistoryWriterRecoversAfterAnySignedCommitFollowingFailure(t *testing.T) {
 	store := newV8HistoryStore(t)
 	health := &testEventHistoryHealthReporter{}
 	writer, err := NewEventHistoryWriterForGeneration(
@@ -1753,6 +1815,13 @@ func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) 
 		WHEN NEW.id = 'history-recovery-failure' BEGIN SELECT RAISE(ABORT, 'private path'); END`); err != nil {
 		t.Fatal(err)
 	}
+	healthy := newV8HistoryRecord(t, "history-recovery-healthy", "private")
+	if err := writer.Append(healthy, projectV8HistoryRecord(t, healthy, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	if len(health.transitions) != 0 {
+		t.Fatalf("optional commit of a healthy writer reported health: %+v", health.transitions)
+	}
 	failed := newV8HistoryRecord(t, "history-recovery-failure", "private")
 	if err := writer.Append(failed, projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone)); err == nil {
 		t.Fatal("write failure was hidden")
@@ -1763,9 +1832,6 @@ func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) 
 	}
 	if err := writer.Append(optional, projectV8HistoryRecord(t, optional, observabilityredaction.ProfileNone)); err != nil {
 		t.Fatal(err)
-	}
-	if len(health.transitions) != 1 {
-		t.Fatalf("optional signed commit recovered write health: %+v", health.transitions)
 	}
 	mandatory := newMandatoryV8HistoryRecord(t, "history-recovery-mandatory")
 	if err := writer.Append(mandatory, projectV8HistoryRecord(t, mandatory, observabilityredaction.ProfileNone)); err != nil {
@@ -2262,4 +2328,63 @@ func mustProjectionBytes(t *testing.T, projection observabilityredaction.Project
 		t.Fatal(err)
 	}
 	return encoded
+}
+
+// GAP-1831: gateway.log names the cause of a failed write; health does not.
+func TestEventHistoryWriteFailureLogLineNamesTheCause(t *testing.T) {
+	err := eventHistoryFailure(
+		EventHistoryHealthWriteFailed,
+		&eventHistoryWriteError{cause: errors.New("database is locked (5)\n(SQLITE_BUSY)")},
+	)
+	line := eventHistoryWriteFailureLogLine(EventHistorySQLiteClass("busy_locked"), 5, err)
+	want := "[audit] event-history write failed (sqlite class=busy_locked code=5): " +
+		"audit: insert v8 event-history row failed: database is locked (5) (SQLITE_BUSY)"
+	if line != want {
+		t.Fatalf("log line = %q, want %q", line, want)
+	}
+	if strings.Contains(err.Error(), "locked") {
+		t.Fatalf("health error gained driver text: %v", err)
+	}
+	long := eventHistoryWriteFailureLogLine("other", 0, &eventHistoryWriteError{cause: errors.New(strings.Repeat("x", 1000))})
+	if len(long) > 500 || !strings.HasSuffix(long, "...") {
+		t.Fatalf("long cause not bounded: %d bytes", len(long))
+	}
+}
+
+// GAP-2192: under strict a setup row's details read as the internal event
+// name (legacy.audit.setup.guardrail). The row now says why they are gone.
+func TestEventHistoryStrictSetupRowDetailsNameTheProfile(t *testing.T) {
+	store := newV8HistoryStore(t)
+	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileStrict})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := Event{
+		ID: "setup-guardrail-strict", Timestamp: time.Date(2026, 10, 3, 3, 33, 13, 0, time.UTC),
+		Action: string(ActionSetupGuardrail), Target: "config", Actor: "cli",
+		Details:  "mode=action scanner_mode=both port=4000 model=judge hilt=False",
+		Severity: "INFO",
+	}
+	stampAuditEventEnvelope(&event)
+	record, err := buildCompatibilityAuditV8Record(
+		event, observability.ClassificationContext{RawSeverity: event.Severity},
+		controlPlaneV8Source(event, controlPlaneV8FamilyNone), "persistence", "",
+		RuntimeV8BuildContext{ConfigGeneration: 23, ConfigDigest: testEventHistoryGraphDigest},
+		router.AdmissionOrdinary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := projectV8HistoryRecord(t, record, observabilityredaction.ProfileStrict)
+	ctx := contextWithLegacyEventProjection(context.Background(), event)
+	if err := writer.AppendContext(ctx, record, projection); err != nil {
+		t.Fatal(err)
+	}
+	row := loadV8HistoryRow(t, store, record.RecordID())
+	if strings.HasPrefix(row.Details, "legacy.audit.") || strings.Contains(row.Details, "scanner_mode") {
+		t.Fatalf("strict setup row details = %q, want a profile note without the removed details", row.Details)
+	}
+	if row.Details != "details removed by redaction profile strict" || row.Action != string(ActionSetupGuardrail) {
+		t.Fatalf("strict setup row = %#v", row)
+	}
 }

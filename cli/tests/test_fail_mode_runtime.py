@@ -16,7 +16,6 @@ from defenseclaw.context import AppContext
 from defenseclaw.fail_mode import (
     ConnectorFailModeState,
     connector_fail_mode_report,
-    reconcile_connector_registration,
     resolve_connector_fail_mode,
 )
 
@@ -437,7 +436,11 @@ def test_windows_registration_freshness_uses_authenticated_packaged_root(
 
     assert _WINDOWS_REGISTRATION_FRESHNESS(cfg, "codex") is None
     assert observed["install_root"] == str(install_root)
-    assert observed["config_path"] == str(codex_home / "managed_config.toml")
+    # Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
+    # per-user install is checked at config.toml and a managed-layer
+    # registration is reported stale.
+    assert observed["config_path"] == str(codex_home / "config.toml")
+    assert observed["codex_per_user"] is True
 
 
 def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
@@ -457,156 +460,6 @@ def test_windows_registration_freshness_surfaces_codex_effective_policy_block(
 
     assert drift == "registration-policy-blocked"
     assert observed["connector"] == "codex"
-
-
-def test_windows_windsurf_freshness_uses_bound_hook_target_not_ambient_or_mcp(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    bound = tmp_path / "bound-profile"
-    ambient = tmp_path / "ambient-profile"
-    hook_path = bound / ".codeium" / "windsurf" / "hooks.json"
-    mcp_path = bound / ".codeium" / "windsurf" / "mcp_config.json"
-    install_root = tmp_path / "Programs" / "DefenseClaw"
-    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
-    monkeypatch.setattr("defenseclaw.fail_mode.Path.home", lambda: ambient)
-    (data_dir / "hook_contract_lock.json").write_text(
-        json.dumps(
-            {
-                "connectors": {
-                    "windsurf": {
-                        "locations": {"hook_config_paths": [str(hook_path)]},
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    observed: dict[str, str] = {}
-    monkeypatch.setattr(
-        "defenseclaw.doctor_hooks._packaged_windows_install_root",
-        lambda value: str(install_root) if value == str(data_dir) else None,
-    )
-
-    def validate(**kwargs: str) -> SimpleNamespace:
-        observed.update(kwargs)
-        return SimpleNamespace(healthy=True, state="current")
-
-    monkeypatch.setattr(
-        "defenseclaw.doctor_hooks.validate_windows_hook_registration",
-        validate,
-    )
-
-    assert _WINDOWS_REGISTRATION_FRESHNESS(
-        SimpleNamespace(data_dir=str(data_dir)), "windsurf"
-    ) is None
-    assert observed["config_path"] == str(hook_path)
-    assert observed["config_path"] != str(mcp_path)
-    assert str(ambient) not in observed["config_path"]
-
-
-def test_windows_windsurf_freshness_rejects_lock_target_outside_bound_profile(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    data_dir = tmp_path / "data"
-    data_dir.mkdir()
-    bound = tmp_path / "bound-profile"
-    ambient_hook = tmp_path / "ambient-profile" / ".codeium" / "windsurf" / "hooks.json"
-    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
-    (data_dir / "hook_contract_lock.json").write_text(
-        json.dumps(
-            {
-                "connectors": {
-                    "windsurf": {
-                        "locations": {"hook_config_paths": [str(ambient_hook)]},
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    assert (
-        _WINDOWS_REGISTRATION_FRESHNESS(
-            SimpleNamespace(data_dir=str(data_dir)), "windsurf"
-        )
-        == "registration-profile-binding-stale"
-    )
-
-
-def test_windows_windsurf_invalid_profile_binding_reports_drift(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv(
-        "WINDSURF_USER_HOME",
-        str(tmp_path / "profile" / ".." / "redirected"),
-    )
-
-    assert (
-        _WINDOWS_REGISTRATION_FRESHNESS(
-            SimpleNamespace(data_dir=str(tmp_path / "data")), "windsurf"
-        )
-        == "registration-profile-binding-missing"
-    )
-
-
-def test_windsurf_reconcile_passes_explicit_bound_profile(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    bound = tmp_path / "bound-profile"
-    ambient = tmp_path / "ambient-profile"
-    gateway = tmp_path / "defenseclaw-gateway.exe"
-    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
-    monkeypatch.setattr("defenseclaw.fail_mode.Path.home", lambda: ambient)
-    monkeypatch.setattr("defenseclaw.fail_mode._is_windows", lambda: True)
-    monkeypatch.setattr("defenseclaw.fail_mode.shutil.which", lambda _name: str(gateway))
-    observed: dict[str, object] = {}
-
-    def run(args: list[str], **kwargs: object) -> SimpleNamespace:
-        observed["args"] = args
-        observed["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-    current = ConnectorFailModeState(
-        connector="windsurf",
-        desired="closed",
-        configured="closed",
-        runtime="closed",
-        sources=(),
-        drift=(),
-    )
-    monkeypatch.setattr("defenseclaw.fail_mode.subprocess.run", run)
-    monkeypatch.setattr(
-        "defenseclaw.fail_mode.resolve_connector_fail_mode",
-        lambda _cfg, _connector: current,
-    )
-    cfg = SimpleNamespace(data_dir=str(tmp_path / "data"))
-
-    assert reconcile_connector_registration(cfg, "windsurf") is current
-    args = observed["args"]
-    assert isinstance(args, list)
-    assert args[args.index("--config-home") + 1] == str(bound)
-    assert str(ambient) not in args
-
-
-def test_windsurf_reconcile_rejects_invalid_profile_before_execution(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv(
-        "WINDSURF_USER_HOME",
-        str(tmp_path / "profile" / ".." / "redirected"),
-    )
-    run = MagicMock()
-    monkeypatch.setattr("defenseclaw.fail_mode.subprocess.run", run)
-
-    with pytest.raises(OSError, match="profile binding is invalid"):
-        reconcile_connector_registration(
-            SimpleNamespace(data_dir=str(tmp_path / "data")),
-            "windsurf",
-        )
-
-    run.assert_not_called()
 
 
 def test_windows_codex_presence_uses_native_registration_validator(
@@ -888,6 +741,19 @@ def test_runtime_digest_hashes_raw_windows_binary_bytes(tmp_path: Path) -> None:
     assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + hashlib.sha256(body).hexdigest()
 
 
+def test_runtime_digest_hashes_a_launcher_larger_than_128_mib(tmp_path: Path) -> None:
+    # GAP-1922: a source-built defenseclaw-hook.exe is about 148 MiB.
+    artifact = tmp_path / "defenseclaw-hook.exe"
+    size = 150 * 1024 * 1024
+    with artifact.open("wb") as stream:
+        stream.truncate(size)
+    digest = hashlib.sha256()
+    chunk = bytes(1024 * 1024)
+    for _ in range(size // len(chunk)):
+        digest.update(chunk)
+    assert fail_mode_runtime._sha256_regular_file(artifact) == "sha256:" + digest.hexdigest()
+
+
 def test_v2_shared_digest_is_authoritative_over_legacy_entry_duplicate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -997,3 +863,56 @@ def test_unix_registration_freshness_requires_current_script_path(
             encoding="utf-8",
         )
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def test_global_fail_mode_leaves_a_stopped_gateway_stopped_and_lists_effective_modes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: observe connectors already run fail-open, and a mixed roster
+    # (hermes has no runtime registration) must not start a stopped gateway.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "hermes": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile,
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    reconcile.assert_called_once_with(cfg, "claudecode")
+    assert "closed → open" not in result.output
+    assert "(hermes): already open; saved as its own setting" in result.output
+    assert "left stopped" in result.output and "defenseclaw-gateway start" in result.output
+    assert cfg.guardrail.connectors["hermes"].hook_fail_mode == "open"
+
+
+def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # GAP-1370: the change list shows the installed runtime value that
+    # guardrail status shows, and Cursor in action mode stays fail-closed.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "", "cursor": ""})
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.mode = "observe"
+    cfg.guardrail.connectors["cursor"].mode = "action"
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    stale = SimpleNamespace(runtime="closed", desired="open", current=False, drift=("installed hook",))
+    with (
+        patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+        patch("defenseclaw.commands.cmd_guardrail.resolve_connector_fail_mode", return_value=stale),
+        patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"),
+        patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    assert result.exit_code == 0, result.output
+    restart.assert_not_called()
+    assert "(codex): closed → open" in result.output
+    assert "(codex): already open" not in result.output
+    assert "(cursor): stays closed" in result.output
+    assert "Cursor action mode keeps hook failures closed" in result.output

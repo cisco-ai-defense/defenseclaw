@@ -1,0 +1,250 @@
+---
+title: AI Defense key
+description: Store the Cisco AI Defense API key of a standalone deployment as a protected credential on Windows, Linux and macOS, turn AI Defense on, check and rotate the key, and deliver it with an MDM.
+keywords:
+  - DefenseClaw AI Defense API key
+  - enterprise secret set
+  - protected credential
+  - systemd LoadCredential
+  - MDM secret delivery
+---
+
+In the standalone profile the local policy engine always decides. You can
+add Cisco AI Defense to it with an API key. The key is a **protected
+credential**: a file in an administrator-only directory that only the
+gateway service can read. It never appears in the config, on a command
+line, or in the environment.
+
+- An inline `cisco_ai_defense.api_key` in the config is refused.
+- `cisco_ai_defense.api_key_env` and `.env` files are ignored in this
+  profile.
+- If the key is missing or fails its trust check, the gateway logs an error
+  and the local engine keeps deciding alone.
+
+See [Concepts](/docs/enterprise/concepts) for the terms.
+
+## Before you start
+
+On Linux and macOS the key can be stored before or after the install. Stored
+before the install, it stays readable by root only (`enterprise secret set`
+reports `not_installed` as a warning and exits 0), and the install gives the
+gateway its access, so a config that references the key installs at once.
+
+On Windows, install the deployment first: `enterprise secret set` and
+`secret remove` refuse with `no standalone managed deployment is installed`,
+exit 1603.
+
+The MDM wrappers follow the same order for you; see
+[Deliver the key with an MDM](#deliver-the-key-with-an-mdm).
+
+## Where the key is stored
+
+| OS | File | Owner and mode | How the gateway reads it |
+| --- | --- | --- | --- |
+| Linux, systemd 247 or later | `/etc/defenseclaw/secrets/<name>` | root, `0600`; directory root, `0700` | systemd passes it with `LoadCredential=`. The gateway cannot read the secrets directory itself. |
+| Linux, older systemd | `/etc/defenseclaw/secrets/<name>` | root, group `defenseclaw`, `0640`; directory `0750` | Reads the file through its group |
+| macOS | `/opt/cisco/defenseclaw/etc/secrets/<name>` | root, group `_defenseclaw`, `0640`; directory `0750` | Reads the file through its group |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw\secrets\<name>` | Owner Administrators. Protected DACL: full control for SYSTEM and Administrators; read for `NT SERVICE\DefenseClawGateway` only. On the `secrets` folder the gateway gets only the rights to traverse it and read its attributes and security descriptor, so it can check the file's parents. | Reads the file as its service identity |
+
+Before the gateway uses a stored key, it checks the file:
+
+- **Linux and macOS.** A root-owned regular file with one link, that other
+  users cannot read, in directories only administrators can write.
+- **Windows.** Only SYSTEM, Administrators and the gateway service may read
+  it. `enterprise secret set` runs this check right after writing and
+  deletes the file if it fails.
+
+The value must be a single line of at most 16 KiB, without NUL bytes. Linux
+and macOS remove one trailing line ending; Windows removes all leading and
+trailing whitespace.
+
+## Store the key
+
+Pick a credential name: lowercase letters, digits and dashes, starting with
+a letter or digit. The examples use `ai-defense-api-key`.
+
+<Tabs items={['Linux', 'macOS', 'Windows']}>
+  <Tab value="Linux">
+
+Read the key without echoing it, then pipe it in:
+
+```bash
+read -rs AID_KEY
+printf '%s' "$AID_KEY" | sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin
+unset AID_KEY
+```
+
+Or read it from a root-only file:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-file /root/ai-defense-api-key
+```
+
+The command stores the key, then runs `ensure` with reason `secret`, which
+restarts the gateway so it reads the key. The apply path unit would also
+pick up the change. The output starts with `✓ secret set: done` and
+`- stored credential ai-defense-api-key`, followed by the apply steps.
+
+  </Tab>
+  <Tab value="macOS">
+
+```bash
+read -rs AID_KEY
+printf '%s' "$AID_KEY" | sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name ai-defense-api-key --from-stdin
+unset AID_KEY
+```
+
+The command stores the key, then runs `ensure` with reason `secret`, which
+restarts the gateway so it reads the key. The output starts with
+`✓ secret set: done` and `- stored credential ai-defense-api-key`.
+
+  </Tab>
+  <Tab value="Windows">
+
+Run from an elevated PowerShell 7 session. `--from-file` accepts only a
+file that non-administrators cannot write. On Windows client editions a new
+folder under `C:\` inherits write access for authenticated users, so create
+an administrator-only folder first, write the key into it from a prompt that
+does not echo it, store it, and delete the file:
+
+```powershell
+$Stage = 'C:\ProgramData\DefenseClaw-Staging'
+New-Item -ItemType Directory -Path $Stage -Force | Out-Null
+icacls $Stage /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+$Key = Read-Host -AsSecureString 'Cisco AI Defense API key'
+[System.Net.NetworkCredential]::new('', $Key).Password | Set-Content -NoNewline -Path "$Stage\ai-defense-api-key.txt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-file "$Stage\ai-defense-api-key.txt"
+Remove-Item "$Stage\ai-defense-api-key.txt"
+Remove-Variable Key
+```
+
+This is the same staging folder the
+[Windows install](/docs/enterprise/windows#2-write-the-config) uses.
+
+The command stores the key and restarts the `DefenseClawGateway` service
+if it is running. A stopped gateway reads the key when it next starts.
+
+  </Tab>
+</Tabs>
+
+Pass exactly one of `--from-stdin` or `--from-file`. Add `--json` for a
+machine-readable result.
+
+## Turn on AI Defense
+
+Name the credential in the config and set `enabled: true`:
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  inspection:
+    ai_defense:
+      enabled: true
+      credential: ai-defense-api-key
+cisco_ai_defense:
+  endpoint: https://us.api.inspect.aidefense.security.cisco.com   # the default; change for another region
+```
+
+Apply the config as usual: on Linux and macOS the apply job runs `ensure`
+when the file changes; on Windows run ensure again with the new file (see
+[Change the config](/docs/enterprise/lifecycle#change-the-config)).
+`credential` is required when `enabled` is `true`. You can turn AI Defense
+on before or after you store the key: until the key is present, the
+gateway logs an error and the local engine decides alone.
+
+If outbound HTTPS goes through a proxy, set `enterprise.network`; see
+[Network proxy](/docs/enterprise/configuration#network-proxy). The AI
+Defense client uses it on every OS.
+
+## Check the key
+
+`enterprise secret status` lists each stored credential without its value:
+name, the first 12 characters of the value's SHA-256, modification time and
+(Linux and macOS) file mode.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret status
+```
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret status --json
+```
+
+To confirm a key matches the one you hold, compare the digest prefix with
+the first 12 characters of the key's SHA-256, for example from
+`printf '%s' "$AID_KEY" | sha256sum` on Linux or
+`printf '%s' "$AID_KEY" | shasum -a 256` on macOS.
+
+The lifecycle status (`enterprise linux status`, `enterprise macos status`
+or `enterprise windows status`, with `--json`) has an
+`inspection.ai_defense` field:
+
+| Value | Linux and macOS | Windows |
+| --- | --- | --- |
+| `disabled` | `enabled` is `false` | `enabled` is `false` |
+| `ok` | Cisco AI Defense answered a request with the stored key | `enabled` is `true` and the gateway is ready |
+| `unavailable:<code>` | AI Defense is enabled but not working. `<code>` is `credential_unavailable` (the key is missing or fails its trust check), `auth_failed` (the key was rejected), `proxy_auth_required`, `proxy_config`, `unreachable`, `not_initialized` or `error`. `status` and `verify` also warn `ai_defense_unavailable` | `unavailable:gateway_not_ready`: `enabled` is `true` but the gateway is not ready |
+| `unknown` | The gateway has not reported yet, for example right after a restart, before the key has been tried | The gateway did not report its inspection state |
+
+On Linux and macOS the value comes from the gateway's own `/health`, so `ok`
+means the key works. On Windows, `ok` reflects the config and gateway
+readiness and does not prove the key was accepted: check the gateway log for
+an error from the `cisco-inspect` subsystem after the restart, where a
+missing or untrusted key is logged. See
+[Logs and events](/docs/enterprise/operations#logs-and-events).
+
+## Rotate the key
+
+Run `enterprise secret set` again with the same name and the new value.
+The file is replaced atomically and the gateway restarts, as above. Revoke
+the old key in AI Defense after `secret status` shows the new digest.
+
+## Remove the key
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret remove --name ai-defense-api-key
+```
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret remove --name ai-defense-api-key
+```
+
+On Linux and macOS the output names the credential:
+`- removed credential ai-defense-api-key`, or
+`- credential ai-defense-api-key was not stored; nothing to remove`.
+
+Set `enabled: false` in the config as well. Otherwise the gateway keeps
+logging that the credential is missing, while the local engine decides
+alone.
+
+## Deliver the key with an MDM
+
+Never put the key in an MDM script body or on a command line: neither is
+secret storage. The MDM
+wrappers take the key from standard input or from a file only
+administrators can write, apply the deployment first, then store the key:
+
+| Wrapper | Key options |
+| --- | --- |
+| `defenseclaw-enterprise.sh` (Linux and macOS) | `--secret-name ai-defense-api-key` with `--secret-stdin` or `--secret-file FILE` |
+| `Invoke-DefenseClawEnterprise.ps1` (Windows) | `-SecretName ai-defense-api-key` with `-SecretFromStdin` or `-SecretPath FILE` |
+
+The wrapper refuses a key file that a non-administrator can write
+(`mdm_untrusted_input`), and reports `mdm_secret_failed` when storing the
+key fails after the deployment applied. See
+[Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
+for recipes.
+
+## Exit codes
+
+| Result | Linux and macOS | Windows |
+| --- | --- | --- |
+| Stored, listed or removed | `0` | `0` |
+| Invalid input: both or neither of `--from-stdin` and `--from-file`, or an empty, multi-line or oversized value | `2` | `1639` |
+| Invalid credential name | `1` | `1639` |
+| Not elevated or not root, not installed (Windows only), or the write failed | `1` | `1603` |
+| The follow-up `ensure` failed and rolled back | `1` | Not applicable |
+| Another lifecycle run holds the lock | `75` | Not applicable |
+| The gateway restart failed after the key was stored | Not applicable | `1603` |
+
+On Windows a `--from-file` path that non-administrators can write is also
+refused with `1639`.

@@ -12,6 +12,10 @@ type TargetCredentials struct {
 	UID      int
 	GID      int
 	SID      string
+	// Username is the account's name as the account database spells it,
+	// when the lookup that produced these credentials reports one. It is
+	// informational: RunAsTarget does not use it.
+	Username string
 }
 
 // RunAsTarget validates target identity and executes fn with the target user's

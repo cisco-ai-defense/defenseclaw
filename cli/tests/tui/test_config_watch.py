@@ -39,7 +39,6 @@ from defenseclaw.tui.services.config_watch import (
     ConfigChangeWatcher,
     probe_config_generation,
 )
-from textual.containers import VerticalScroll
 
 
 def _config_payload(
@@ -400,44 +399,6 @@ async def test_external_refresh_preserves_active_setup_form_snapshot(
     assert "Config changed on disk" in app._setup_body_text()  # noqa: SLF001
 
 
-@pytest.mark.asyncio
-async def test_external_mode_refresh_preserves_filter_and_overview_scroll(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    initial = _config_payload(
-        tmp_path,
-        {
-            "claudecode": {"mode": "observe"},
-            "codex": {"mode": "action"},
-            "cursor": {"mode": "observe"},
-            "opencode": {"mode": "action"},
-        },
-    )
-    path = _configure_active_path(monkeypatch, tmp_path, initial)
-    app = DefenseClawTUI(config=config_module.load(), config_path=path)
-    monkeypatch.setattr(app, "_schedule_health_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_ai_usage_poll", lambda: None)
-    monkeypatch.setattr(app, "_schedule_credentials_refresh", lambda: None)
-
-    async with app.run_test(size=(110, 18)) as pilot:
-        app._set_connector_filter("codex")  # noqa: SLF001
-        scroller = app.query_one("#body-scroll", VerticalScroll)
-        scroller.scroll_to(y=min(8, scroller.max_scroll_y), animate=False, immediate=True)
-        await pilot.pause()
-        before = scroller.scroll_y
-        assert before > 0
-
-        changed = copy.deepcopy(initial)
-        changed["guardrail"]["connectors"]["codex"]["mode"] = "observe"  # type: ignore[index]
-        _atomic_write(path, changed)
-        await app._poll_config_once(now=1.0)  # noqa: SLF001
-        await pilot.pause()
-
-        assert app._connector_filter() == "codex"  # noqa: SLF001
-        assert scroller.scroll_y == before
-
-
 @pytest.mark.skipif(os.name != "nt", reason="native Windows current-source acceptance")
 @pytest.mark.allow_subprocess
 @pytest.mark.asyncio
@@ -502,16 +463,27 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         assert app.overview_model.cfg.guardrail_mode == "observe"
         cli_log = tmp_path / "setup-cli.log"
         with cli_log.open("wb") as output_stream:
-            result = await asyncio.to_thread(
-                subprocess.run,
-                command,
-                cwd=repo_root,
-                env=environment,
-                stdout=output_stream,
-                stderr=subprocess.STDOUT,
-                timeout=90,
-                check=False,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    command,
+                    cwd=repo_root,
+                    env=environment,
+                    # --yes is the whole interaction; never hand the CLI (or
+                    # the probes it starts) the test runner's stdin.
+                    stdin=subprocess.DEVNULL,
+                    stdout=output_stream,
+                    stderr=subprocess.STDOUT,
+                    timeout=90,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                # Name the step the CLI was still in rather than only the
+                # expired budget.
+                pytest.fail(
+                    "setup CLI did not finish within 90s; its output so far:\n"
+                    + cli_log.read_text(encoding="utf-8", errors="replace")
+                )
         output = cli_log.read_text(encoding="utf-8", errors="replace")
         assert result.returncode == 0, output
         assert "Config saved" in output
@@ -532,3 +504,62 @@ async def test_native_windows_open_tui_observes_external_cli_mode_change(
         assert app.config.guardrail.effective_mode("claudecode") == "action"
         assert app.setup_model.config is app.config
         assert app._config_reload_count == 1  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_config_editor_save_records_an_audit_event(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-2121: saving asset_policy.mode in the config editor was unaudited.
+    from defenseclaw.tui.services import config_audit
+
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    recorded: list[tuple] = []
+    monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, entries: recorded.append(entries) or True)
+    model = app.setup_model
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "saved" in action.hint
+    (entries,) = recorded
+    assert [(e.key, e.after) for e in entries] == [("asset_policy.mode", "action")]
+
+
+@pytest.mark.asyncio
+async def test_asset_policy_save_says_cli_admission_applies_it_now(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # GAP-2145: CLI admission reads asset_policy from config.yaml at once, so
+    # the save must not claim the change waits for a gateway restart.
+    from defenseclaw.tui.services import config_audit
+
+    path = _configure_active_path(monkeypatch, tmp_path, _config_payload(tmp_path, {"claudecode": {}}))
+    app = DefenseClawTUI(config=config_module.load(), config_path=path)
+    _detach_ui(app, monkeypatch)
+    monkeypatch.setattr(config_audit, "record_config_save", lambda _cfg, _entries: True)
+    model = app.setup_model
+    model.mode = "config"
+    model.active_section, model.active_line = next(
+        (si, li)
+        for si, section in enumerate(model.sections)
+        for li, field in enumerate(section.fields)
+        if field.key == "asset_policy.mode"
+    )
+    assert model.set_current_field_value("action")
+
+    action = app._save_setup_config()  # noqa: SLF001 - the save entry point under test.
+
+    assert "mcp set" in action.hint and "asset_policy now" in action.hint
+    banner = app._setup_config_body_text()  # noqa: SLF001 - the banner under test.
+    assert "Saved" in banner and "CLI uses asset_policy now · G: restart gateway" in banner

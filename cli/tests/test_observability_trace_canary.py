@@ -105,6 +105,33 @@ def test_trace_canary_failure_uses_closed_class_and_never_helper_stderr() -> Non
     assert secret not in str(caught.value)
 
 
+def test_trace_canary_accepts_delivery_failed_class() -> None:
+    completed = _run(
+        returncode=1,
+        stdout='{"destination":"galileo","acknowledged":false,"failure_class":"delivery_failed"}\n',
+    )
+    with (
+        patch(
+            "defenseclaw.observability.trace_canary.resolve_gateway_binary",
+            return_value="gateway",
+        ),
+        patch(
+            "defenseclaw.observability.trace_canary.subprocess.run",
+            return_value=completed,
+        ),
+        pytest.raises(TraceCanaryError) as caught,
+    ):
+        run_trace_canary(
+            destination="galileo",
+            config_path="/data/config.yaml",
+            data_dir="/data",
+            timeout=15,
+        )
+
+    assert caught.value.failure_class == "delivery_failed"
+    assert "could not deliver" in caught.value.message
+
+
 @pytest.mark.parametrize(
     "stdout",
     [

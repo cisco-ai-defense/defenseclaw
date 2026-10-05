@@ -22,6 +22,7 @@ to the skill-scanner CLI.  Maps SDK ScanResult/Finding → DefenseClaw models.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import sys
@@ -45,6 +46,86 @@ if TYPE_CHECKING:
     pass
 
 _log = logging.getLogger(__name__)
+
+
+def _frontmatter_yara_analyzers(analyzers: list) -> list:
+    """YARA-scan the SKILL.md frontmatter description too (GAP-1376).
+
+    The SDK's static analyzer runs YARA on the SKILL.md body only, but the
+    description is the text an agent always loads, so an instruction-override
+    phrase there must be found like the same phrase in the body.
+    """
+    try:
+        from skill_scanner.core.analyzers.base import BaseAnalyzer
+        from skill_scanner.core.analyzers.static import StaticAnalyzer
+    except ImportError:
+        return []
+    static = next(
+        (
+            a for a in analyzers
+            if isinstance(a, StaticAnalyzer) and getattr(a, "yara_scanner", None) is not None
+        ),
+        None,
+    )
+    if static is None:
+        return []
+
+    class _FrontmatterYaraAnalyzer(BaseAnalyzer):
+        def __init__(self) -> None:
+            super().__init__("static_frontmatter", policy=static.policy)
+
+        def analyze(self, skill):  # type: ignore[no-untyped-def]
+            text = getattr(skill, "description", "") or ""
+            if not text.strip():
+                return []
+            findings = []
+            for match in static.yara_scanner.scan_content(text, "SKILL.md"):
+                if not static._is_rule_enabled(match.get("rule_name", "")):
+                    continue
+                findings.extend(static._create_findings_from_yara_match(match, skill))
+            return findings
+
+    return [_FrontmatterYaraAnalyzer()]
+
+
+# Skip warnings already printed in this process, so `skill scan --all` says
+# once why the LLM analyzer is off instead of once per skill (GAP-2628).
+_warned_llm_skips: set[str] = set()
+
+
+def _warn_llm_skipped_once(reason: str) -> None:
+    if reason in _warned_llm_skips:
+        return
+    _warned_llm_skips.add(reason)
+    print(
+        f"warning: LLM analyzer skipped: {reason}; continuing with local analyzers",
+        file=sys.stderr,
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _aws_credentials_found() -> bool:
+    """Whether the AWS credential chain LiteLLM signs Bedrock calls with
+    resolves (environment, profile, SSO, container or instance role).
+
+    Without credentials every LLM call failed with "Unable to locate
+    credentials" while the scan still reported success (GAP-2628). Checked
+    once per process; a missing boto3 is left to LiteLLM to report.
+    """
+    try:
+        import boto3
+    except ImportError:
+        return True
+    try:
+        return boto3.Session().get_credentials() is not None
+    except Exception as exc:  # noqa: BLE001 - any chain error means no usable credentials
+        _log.debug("skill-scanner: AWS credential lookup failed: %s", exc)
+        return False
+
+
+def _bedrock_region(llm: LLMConfig) -> str:
+    region = llm.bedrock.region if llm.bedrock is not None else ""
+    return (region or llm.region or "").strip()
 
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
@@ -86,6 +167,16 @@ class SkillScannerWrapper:
 
     def name(self) -> str:
         return "skill-scanner"
+
+    def batch_workers(self, **_scan_options) -> int:
+        """Items ``skill scan --all`` may scan at once (GAP-2643).
+
+        The LLM analyzer waits on the network for each skill, so those scans
+        overlap; the local analyzers alone stay one at a time.
+        """
+        from defenseclaw.commands._scan_ui import LLM_SCAN_WORKERS
+
+        return LLM_SCAN_WORKERS if self.config.use_llm else 1
 
     def scan(self, target: str) -> ScanResult:
         import time
@@ -148,11 +239,26 @@ class SkillScannerWrapper:
             api_key = llm.resolved_api_key() or os.environ.get(
                 "SKILL_SCANNER_LLM_API_KEY", ""
             )
-            if effective_model and llm_analyzer_ready(
+            ready = bool(effective_model) and llm_analyzer_ready(
                 llm,
                 model=effective_model,
                 api_key=api_key,
+            )
+            if (
+                ready
+                and "bedrock/" in effective_model.lower()
+                and not api_key
+                and not os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+                and not _aws_credentials_found()
             ):
+                # Keyless Bedrock signs with the AWS credential chain; say
+                # once why the LLM lane is off instead of failing every call.
+                mode = llm.keyless_auth_mode() or "aws credentials"
+                _warn_llm_skipped_once(
+                    f"no AWS credentials found for Bedrock (auth_mode={mode}); "
+                    "check the instance profile or the AWS credential chain"
+                )
+            elif ready:
                 build_kwargs["use_llm"] = True
                 if model:
                     build_kwargs["llm_model"] = model
@@ -187,6 +293,7 @@ class SkillScannerWrapper:
             build_kwargs["use_aidefense"] = True
 
         analyzers = build_analyzers(**build_kwargs)
+        analyzers.extend(_frontmatter_yara_analyzers(analyzers))
         scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
         start = time.monotonic()
@@ -223,6 +330,17 @@ class SkillScannerWrapper:
             if value and env_var not in os.environ:
                 os.environ[env_var] = value
 
+        if litellm_model(llm).lower().startswith("bedrock/"):
+            # The SDK reads the Bedrock region from AWS_REGION only (default
+            # us-east-1), so pass the configured one on. botocore tries the
+            # instance-metadata credentials once with a 1 s timeout; retry a
+            # slow answer like the gateway's Go SDK does (GAP-2628).
+            region = _bedrock_region(llm)
+            if region and not os.environ.get("AWS_REGION"):
+                os.environ["AWS_REGION"] = region
+            if llm.keyless_auth_mode() == "instance_role":
+                os.environ.setdefault("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "3")
+
     def _convert(self, sdk_result: object, target: str, elapsed: float) -> ScanResult:
         """Convert SDK ScanResult → DefenseClaw ScanResult."""
         scanner_name = self.name()
@@ -231,6 +349,7 @@ class SkillScannerWrapper:
             location = getattr(sf, "file_path", "") or ""
             line = getattr(sf, "line_number", None)
             if line and location:
+                line = _snippet_file_line(target, location, line, getattr(sf, "snippet", ""))
                 location = f"{location}:{line}"
 
             tags: list[str] = []
@@ -252,6 +371,10 @@ class SkillScannerWrapper:
                 description=getattr(sf, "description", ""),
                 location=location,
                 remediation=getattr(sf, "remediation", "") or "",
+                # The scanner's own rule id (COMMAND_INJECTION_EVAL, ...), the
+                # same one the watcher files; without it the gateway made up
+                # a title slug for path scans (GAP-1683).
+                rule_id=str(getattr(sf, "rule_id", "") or ""),
                 # Canonical finding identity names the producer, not the
                 # upstream SDK's internal analyzer, which remains in tags.
                 scanner=scanner_name,
@@ -265,3 +388,29 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
+
+
+def _snippet_file_line(target: str, file_path: str, line: int, snippet: object) -> int:
+    """The file line that holds *snippet*, when the SDK's line is off.
+
+    GAP-1599: the SDK counts SKILL.md lines from the end of the front
+    matter, so a match on line 6 of the file read "SKILL.md:1". Keep the
+    SDK's line when it already holds the snippet or the snippet is not found.
+    """
+    first = next((ln.strip() for ln in str(snippet or "").splitlines() if ln.strip()), "")
+    if not first:
+        return line
+    path = file_path if os.path.isabs(file_path) else os.path.join(target, file_path)
+    try:
+        if os.path.getsize(path) > 2_000_000:
+            return line
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except (OSError, ValueError):
+        return line
+    if 0 < line <= len(lines) and first in lines[line - 1]:
+        return line
+    for idx, text in enumerate(lines, start=1):
+        if first in text:
+            return idx
+    return line

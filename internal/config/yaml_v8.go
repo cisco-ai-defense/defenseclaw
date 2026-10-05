@@ -73,6 +73,9 @@ type V8YAMLError struct {
 	Column  int
 	Summary string
 	Action  string
+	// FirstLine is the line of the first definition of a duplicate key, so
+	// the CLI can say "the first one is at line 3" (GAP-2188).
+	FirstLine int
 }
 
 func (e *V8YAMLError) Error() string {
@@ -88,6 +91,15 @@ func (e *V8YAMLError) Error() string {
 		if e.Column > 0 {
 			source += ":" + strconv.Itoa(e.Column)
 		}
+	}
+	if e.Code == V8YAMLErrorSyntax && e.Path == "$" {
+		// The whole file does not parse: the line and the parser's reason are
+		// the useful part, not the code or the root path (GAP-1767).
+		message := source + ": " + e.Summary
+		if e.Action != "" {
+			message += "; " + e.Action
+		}
+		return message
 	}
 	path := ""
 	if e.Path != "" {
@@ -226,9 +238,11 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 				return err
 			}
 			if first, exists := seen[key.Value]; exists {
-				return v8Error(w.source, V8YAMLErrorDuplicateKey, keyPath, key,
+				duplicate := v8Error(w.source, V8YAMLErrorDuplicateKey, keyPath, key,
 					fmt.Sprintf("duplicate mapping key; the first definition is at line %d, column %d", first.Line, first.Column),
 					"remove one definition so precedence is unambiguous")
+				duplicate.FirstLine = first.Line
+				return duplicate
 			}
 			seen[key.Value] = key
 			childDepth := depth
@@ -267,31 +281,32 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
 			"config_version is required by the v8 configuration entrypoint",
-			"run defenseclaw upgrade to create a config_version: 8 source")
+			"run `defenseclaw migrate` to create a current source")
 	}
 	if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8",
-			"set config_version: 8 only after completing the DefenseClaw upgrade")
+			"config_version must be an integer",
+			"run `defenseclaw migrate` instead of editing config_version by hand")
 	}
 	var version int64
 	if err := value.Decode(&version); err != nil {
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8", "run defenseclaw upgrade to create a valid v8 source")
+			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
 	switch {
-	case version == v8YAMLConfigVersion:
+	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
 		return nil
 	case version >= 0 && version < v8YAMLConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUpgrade, "$.config_version", value,
-			"this configuration requires the v7-to-v8 upgrade", "run defenseclaw upgrade before starting a v8 gateway")
-	case version > v8YAMLConfigVersion:
+			fmt.Sprintf("config_version %d is older than %d", version, v8YAMLConfigVersion),
+			"run `defenseclaw migrate`")
+	case version > MaxSupportedConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
-			"this configuration version is newer than the supported v8 contract",
-			"use a DefenseClaw build that supports the newer configuration")
+			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
+			"upgrade DefenseClaw or restore ~/.defenseclaw/previous")
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
-			"config_version must be the integer 8", "run defenseclaw upgrade to create a valid v8 source")
+			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
 	}
 }
 
@@ -487,15 +502,44 @@ func v8Error(source string, code V8YAMLErrorCode, path string, node *yaml.Node, 
 
 var v8YAMLSyntaxLine = regexp.MustCompile(`(?:^|[ :])line ([0-9]+)(?:[ :]|$)`)
 
+// yaml.v3 reports parser errors (unlike scanner errors) with the 0-based
+// line of their context mark, one line before the bad line that Python and
+// editors name (GAP-1430).
+var v8YAMLParserError = regexp.MustCompile(
+	`did not find expected (?:<document start>|node content|key|'-' indicator|',' or '\]'|',' or '\}')`)
+
+// v8YAMLSyntaxReasonPrefix strips the "yaml: line N: " lead from a yaml.v3
+// error so only the parser's reason is left.
+var v8YAMLSyntaxReasonPrefix = regexp.MustCompile(`^(?:yaml: )?(?:line [0-9]+: )?`)
+
+// v8YAMLSyntaxReason returns the parser's fixed-text reason, or "" when the
+// reason could quote the file (anchor or tag names) or is not a short phrase.
+func v8YAMLSyntaxReason(cause error) string {
+	reason := strings.TrimSpace(v8YAMLSyntaxReasonPrefix.ReplaceAllString(cause.Error(), ""))
+	lower := strings.ToLower(reason)
+	if reason == "" || len(reason) > 80 || strings.ContainsAny(reason, "\"`\n") ||
+		strings.Contains(lower, "anchor") || strings.Contains(lower, "tag") {
+		return ""
+	}
+	return reason
+}
+
 func v8SyntaxError(source string, cause error) error {
 	line := 0
+	summary := "invalid YAML"
 	if cause != nil {
 		if match := v8YAMLSyntaxLine.FindStringSubmatch(cause.Error()); len(match) == 2 {
 			line, _ = strconv.Atoi(match[1])
+			if line > 0 && v8YAMLParserError.MatchString(cause.Error()) {
+				line++
+			}
+		}
+		if reason := v8YAMLSyntaxReason(cause); reason != "" {
+			summary += " (" + reason + ")"
 		}
 	}
 	return &V8YAMLError{
 		Code: V8YAMLErrorSyntax, Source: source, Path: "$", Line: line,
-		Summary: "configuration source is not valid YAML", Action: "correct the YAML syntax and retry",
+		Summary: summary, Action: "fix that line",
 	}
 }

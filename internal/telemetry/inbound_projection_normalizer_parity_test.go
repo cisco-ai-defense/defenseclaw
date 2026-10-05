@@ -27,7 +27,7 @@ func TestGeneratedInboundMetricNormalizersPreservePR412Parity(t *testing.T) {
 		t.Fatal("generated model normalizer missing")
 	}
 	providerInputs := []string{
-		"", " ", "Anthropic", "claudecode", "codex", "gemini-cli", "openai-with-random-suffix",
+		"", " ", "Anthropic", "claudecode", "codex", "gemini-2.5-pro", "openai-with-random-suffix",
 		"attacker-provider-2026-05-18-uuid", "azure-openai", "aws-bedrock", "ollama-local", "local",
 		strings.Repeat("provider-", 20),
 	}

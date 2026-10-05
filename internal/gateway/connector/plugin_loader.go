@@ -143,10 +143,9 @@ func LoadPlugins(dir string) ([]Connector, error) {
 		return nil, fmt.Errorf("read plugin dir %s: %w", realDir, err)
 	}
 
-	cacheDir, err := ensurePluginCacheDir()
-	if err != nil {
-		return nil, fmt.Errorf("ensure plugin cache: %w", err)
-	}
+	// The cache folder is created on the first plugin that gets that far, so
+	// an empty or unusable plugin folder leaves nothing in TempDir.
+	cacheDir := ""
 
 	var connectors []Connector
 	for _, entry := range entries {
@@ -225,6 +224,12 @@ func LoadPlugins(dir string) ([]Connector, error) {
 			continue
 		}
 
+		if cacheDir == "" {
+			if cacheDir, err = ensurePluginCacheDir(); err != nil {
+				fd.Close()
+				return nil, fmt.Errorf("ensure plugin cache: %w", err)
+			}
+		}
 		cachePath, err := cachePluginCopy(fd, cacheDir, manifest.Name, manifest.SHA256)
 		fd.Close()
 		if err != nil {

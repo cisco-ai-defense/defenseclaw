@@ -66,10 +66,10 @@ func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
 		t.Fatalf("copilot PreToolUse confirm = (%q,%v), want (confirm,false)", action, wouldBlock)
 	}
 
-	windsurf := connector.NewWindsurfConnector().HookCapabilities(connector.SetupOpts{})
-	action, wouldBlock = mapHookAction("confirm", "action", "pre_run_command", windsurf)
+	devin := connector.NewDevinConnector().HookCapabilities(connector.SetupOpts{})
+	action, wouldBlock = mapHookAction("confirm", "action", "PreToolUse", devin)
 	if action != "alert" || wouldBlock {
-		t.Fatalf("windsurf confirm = (%q,%v), want explicit alert downgrade", action, wouldBlock)
+		t.Fatalf("devin confirm = (%q,%v), want explicit alert downgrade", action, wouldBlock)
 	}
 
 	cursor := connector.NewCursorConnector().HookCapabilities(connector.SetupOpts{})
@@ -298,7 +298,7 @@ func TestNormalizeAgentHookRequest_HermesRejectsExtraEnvelope(t *testing.T) {
 //
 //   - which key the script reads ("permission" for cursor,
 //     "permissionDecision" for copilot's PreToolUse, "decision"
-//     for hermes/geminicli, "message" for windsurf, etc.)
+//     for hermes, etc.)
 //   - the value for each (connector, action) cell so a regression
 //     that, say, swaps "deny" -> "block" on the cursor permission
 //     field is caught in CI before it ships.
@@ -330,12 +330,6 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 		{connector: "cursor", event: "preToolUse", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
-
-		// windsurf -- minimal shape; only block surfaces a message.
-		{connector: "windsurf", event: "pre_run_command", action: "block", rawAction: "block", expectedKey: "message", expectedValue: ""},
-
-		// geminicli -- decision="deny" + reason on block.
-		{connector: "geminicli", event: "BeforeTool", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
 
 		// openhands -- decision="deny" + exit 2 in the shell hook on block.
 		{connector: "openhands", event: "pre_tool_use", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
@@ -513,10 +507,6 @@ func capsForConnector(name string) connector.HookCapability {
 		return connector.NewHermesConnector().HookCapabilities(connector.SetupOpts{})
 	case "cursor":
 		return connector.NewCursorConnector().HookCapabilities(connector.SetupOpts{})
-	case "windsurf":
-		return connector.NewWindsurfConnector().HookCapabilities(connector.SetupOpts{})
-	case "geminicli":
-		return connector.NewGeminiCLIConnector().HookCapabilities(connector.SetupOpts{})
 	case "copilot":
 		return connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
 	case "openhands":
@@ -563,17 +553,17 @@ func TestConnectorReason_DefaultStrings(t *testing.T) {
 		},
 		{
 			name:      "alert_with_tool",
-			connector: "geminicli",
+			connector: "openhands",
 			action:    "alert",
 			tool:      "Read",
 			want:      "DefenseClaw flagged Read with a warning.",
 		},
 		{
 			name:      "allow_falls_back_to_connector_named_default",
-			connector: "windsurf",
+			connector: "devin",
 			action:    "allow",
 			tool:      "any",
-			want:      "Allowed by DefenseClaw windsurf policy.",
+			want:      "Allowed by DefenseClaw devin policy.",
 		},
 	}
 	for _, tc := range cases {
@@ -624,7 +614,7 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	api.SetNotifier(d)
 
 	api.dispatchAgentHookNotification(
-		agentHookRequest{ConnectorName: "geminicli", HookEventName: "BeforeTool", ToolName: "Read"},
+		agentHookRequest{ConnectorName: "openhands", HookEventName: "pre_tool_use", ToolName: "Read"},
 		"allow", "block", "MEDIUM", "observe-mode", true,
 		hookEvaluationContext{},
 	)
@@ -906,6 +896,24 @@ func TestScanCorrelationFromContextPropagatesConnector(t *testing.T) {
 	if got.RunID != "run-1" || got.SessionID != "session-1" {
 		t.Fatalf("correlation fields not preserved: RunID=%q SessionID=%q", got.RunID, got.SessionID)
 	}
+
+	// Scan rows carry the verified caller on a standalone gateway and
+	// nothing a request only claims.
+	claimed := withServiceAccountGateway(ContextWithAgentIdentity(ctx, AgentIdentity{UserID: "1001", UserName: "claimed"}))
+	if got := ScanCorrelationFromContext(claimed); got.UserID != "" || got.UserName != "" {
+		t.Fatalf("claimed caller reached the scan correlation: %+v", got)
+	}
+	peer := withManagedHookPeer(claimed, managedHookPeer{UID: 1002, Name: "bob"})
+	if got := ScanCorrelationFromContext(peer); got.UserID != "1002" || got.UserIDKind != "posix_uid" || got.UserName != "bob" {
+		t.Fatalf("verified caller missing from the scan correlation: %+v", got)
+	}
+
+	// The Secure Client profile's finding and scan rows are unchanged.
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(false) })
+	if got := ScanCorrelationFromContext(peer); got.UserID != "" || got.UserIDKind != "" || got.UserName != "" {
+		t.Fatalf("Secure Client scan correlation gained caller fields: %+v", got)
+	}
 }
 
 // TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity guards the
@@ -1042,9 +1050,9 @@ func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 		"pre_tool_call",
 		// Cursor
 		"preToolUse", "beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
-		// Windsurf
+		// Snake-case pre-execution events
 		"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use",
-		// Gemini CLI
+		// BeforeTool-style events
 		"BeforeTool",
 		// Copilot
 		"permissionRequest",
@@ -1070,7 +1078,7 @@ func TestToolJudgeIntentEventsCoverConnectorTurnStarts(t *testing.T) {
 	intentEvents := []string{
 		// Codex, Claude Code, Devin, and OmniGent.
 		"UserPromptSubmit",
-		// Cursor, Windsurf, Copilot, OpenHands, Gemini CLI, Hermes, and Amp.
+		// Cursor, Copilot, OpenHands, Hermes, and Amp.
 		"beforeSubmitPrompt", "pre_user_prompt", "userPromptSubmitted",
 		"user_prompt_submit", "BeforeAgent", "pre_llm_call", "agent.start",
 	}
@@ -1197,7 +1205,7 @@ func TestAgentHookEnabled_MultiConnectorSetMembership(t *testing.T) {
 	if !a.agentHookEnabled("cursor") {
 		t.Errorf("secondary connector cursor (in guardrail.connectors) should be enabled, got allow-without-scan")
 	}
-	if a.agentHookEnabled("windsurf") {
+	if a.agentHookEnabled("devin") {
 		t.Errorf("connector not in the active set must not be enabled")
 	}
 }

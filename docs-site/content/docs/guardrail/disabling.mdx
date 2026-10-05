@@ -1,0 +1,75 @@
+---
+title: Disabling guardrail
+description: defenseclaw setup guardrail --disable is the global rollback. Connector hooks are removed or restored from the hash-checked backup, and agents run without DefenseClaw until you turn the guardrail back on.
+keywords:
+  - disable DefenseClaw guardrail
+  - DefenseClaw uninstall connector
+  - DefenseClaw teardown
+---
+
+```bash
+defenseclaw setup guardrail --disable
+```
+
+This is the safe rollback. It sets `guardrail.enabled: false` in `~/.defenseclaw/config.yaml` and restarts the gateway, which then runs teardown for the configured connectors: it removes the DefenseClaw-owned hook entries or restores agent files from the hash-checked backup. For the proxy connectors it also stops the guardrail proxy. The connectors stay configured, so `defenseclaw setup guardrail` turns protection back on for all of them.
+
+<Callout>
+`--disable` always restarts the gateway, even with `--no-restart`: the restart is what runs the connector teardown.
+</Callout>
+
+On a multi-connector install, `setup guardrail --disable` is intentionally broad: it unwires the active connector roster, stops the gateway path, and clears the global guardrail enable flag. To retire only one connector while keeping the rest protected, use the scoped kill switch instead:
+
+```bash
+defenseclaw guardrail disable --connector codex
+defenseclaw guardrail enable  --connector codex
+```
+
+## What it touches
+
+| Connector | Restored from backup | Surgically removed if file drifted |
+| --- | --- | --- |
+| Claude Code | `~/.claude/settings.json` (hooks + `OTEL_*` env) | DefenseClaw hook entries only |
+| Codex | `~/.codex/config.toml` (hooks, otel, notify) | DefenseClaw blocks only |
+| Cursor | `~/.cursor/hooks.json` | DefenseClaw hook entries only |
+| Devin | `~/.config/devin/config.json` or `<workspace>/.devin/hooks.v1.json` | DefenseClaw hook groups only; foreign JSONC content is preserved |
+| GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` or pinned `<workspace>/.github/hooks/defenseclaw.json` | DefenseClaw hook entries |
+| OpenHands | `~/.openhands/hooks.json` or pinned `<workspace>/.openhands/hooks.json` | DefenseClaw hook entries |
+| Antigravity | `~/.gemini/config/hooks.json` | DefenseClaw `defenseclaw-antigravity-*` entries |
+| Hermes | `~/.hermes/config.yaml` | DefenseClaw hook entries |
+| OpenCode | `~/.config/opencode/plugins/defenseclaw.js` | Managed bridge plugin (file removed) |
+| Amp | `~/.config/amp/plugins/defenseclaw.ts` or native Windows equivalent | Unchanged managed system plugin is removed; a prior file is restored |
+| Kiro | `~/.kiro/hooks/defenseclaw.json` (or the workspace `.kiro/hooks/defenseclaw.json`), `~/.kiro/agents/defenseclaw.json`, `~/.kiro/settings/cli.json` | DefenseClaw hook and agent entries; the prior default agent in `cli.json` is restored |
+| OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; managed policy module; Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
+| OpenClaw | `~/.openclaw/openclaw.json` | Plugin allow/load entries |
+| ZeptoClaw | `~/.zeptoclaw/config.json` (api_base, safety) | DefenseClaw rewrites |
+
+The audit DB and `~/.defenseclaw/` config are **not** removed. Use `defenseclaw uninstall` for the full reset.
+
+## Verify the rollback
+
+```bash
+defenseclaw doctor
+```
+
+`doctor` shows the guardrail as disabled. Because the connectors stay
+configured, it still checks their hooks and reports them as missing; after a
+disable that is the expected result. This excerpt is from a real run after
+disabling a Claude Code and Codex install:
+
+```text title="defenseclaw doctor (excerpt)"
+  -- Services --
+  [PASS] Sidecar API  -  127.0.0.1:18970
+  [SKIP]   \- guardrail  -  disabled (reported by sidecar)
+  [FAIL] Claude Code hooks [claudecode]  -  ~/.claude/settings.json not found
+      -> Next step: re-register the hooks: defenseclaw setup claude-code --yes, then restart Claude Code
+  [FAIL] Codex hooks [codex]  -  connector torn down: ~/.defenseclaw/hooks/codex-hook.sh is the disabled placeholder teardown leaves
+      -> Next step: re-register the hooks: defenseclaw setup codex --yes
+  [SKIP] Guardrail proxy  -  disabled
+  -- Credentials --
+  [SKIP] LLM API key  -  guardrail disabled
+```
+
+Here `~/.claude/settings.json` is gone because DefenseClaw created it and
+teardown removed it again; a file you had before is restored instead. To check
+one agent's files directly, open them: no DefenseClaw hook entries should
+remain.

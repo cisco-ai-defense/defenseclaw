@@ -59,15 +59,23 @@ func (a *APIServer) emitHookDecisionLogV8(
 	if !severity.Valid || !severity.Present {
 		return
 	}
-	logLevel := severity.LogLevel
-	if logLevel == "" {
-		logLevel = observability.LogLevelInfo
+	// A clean or INFO decision logs at INFO. A finding severity (LOW..CRITICAL)
+	// has no log level, so the record's severity_text follows the security
+	// severity, as scan findings do; forcing INFO hid MEDIUM alerts and
+	// CRITICAL blocks behind severity_text INFO in Loki (GAP-1774).
+	var logLevel observability.Optional[observability.LogLevel]
+	switch {
+	case severity.LogLevel != "":
+		logLevel = observability.Present(severity.LogLevel)
+	case severity.Severity == observability.SeverityInfo:
+		logLevel = observability.Present(observability.LogLevelInfo)
 	}
 	result := "ok"
 	if panicked || env.Result == "panic" {
 		result = "panic"
 	}
 	effectiveAction := normalizeHookActionLabel(resp.Action)
+	sandboxID, sandboxName := hookDecisionV8Sandbox(audit.EnvelopeFromContext(ctx))
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -118,7 +126,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		}
 		return builder.BuildLogCompatHookDecision(observability.LogCompatHookDecisionInput{
 			Envelope: envelope, Severity: observability.Present(severity.Severity),
-			LogLevel: observability.Present(logLevel), Outcome: hookDecisionV8Outcome(effectiveAction, result),
+			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
 			DefenseClawTurnID:                   hookV8OptionalIdentifier(meta.TurnID),
 			DefenseClawOperationID:              hookV8OptionalIdentifier(meta.OperationID),
@@ -162,6 +170,8 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), 65536),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
+			DefenseClawSandboxID:                sandboxID,
+			DefenseClawSandboxName:              sandboxName,
 		})
 	})
 }
@@ -401,6 +411,24 @@ func hookDecisionMetricMeta(ctx context.Context, connectorName string) llmEventM
 		AgentType: identity.AgentType, PolicyID: envelope.PolicyID,
 		DestinationApp: envelope.DestinationApp, ToolName: envelope.ToolName, ToolID: envelope.ToolID,
 	}
+}
+
+// maxHookDecisionV8SandboxName is the registered max_utf8_bytes override of
+// defenseclaw.sandbox.name.
+const maxHookDecisionV8SandboxName = 128
+
+// hookDecisionV8Sandbox projects the sandbox binding that authenticated the
+// hook, stamped on the audit envelope, onto the decision's correlation.sandbox
+// attributes. A value that does not fit the registered identifier shape is
+// omitted rather than rewritten, so the decision itself is never lost. The
+// hook decision metrics never read these: sandbox identities are not labels.
+func hookDecisionV8Sandbox(envelope audit.CorrelationEnvelope) (observability.Optional[string], observability.Optional[string]) {
+	id := hookV8OptionalIdentifier(envelope.SandboxID)
+	name := hookV8OptionalIdentifier(envelope.SandboxName)
+	if value, ok := name.Get(); ok && len(value) > maxHookDecisionV8SandboxName {
+		name = observability.Absent[string]()
+	}
+	return id, name
 }
 
 func hookDecisionV8Outcome(action, result string) observability.Outcome {

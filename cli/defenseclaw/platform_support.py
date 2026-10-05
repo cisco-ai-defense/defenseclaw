@@ -47,18 +47,6 @@ PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 # Kept as an empty set so taxonomy tests can still subtract ACP-only names.
 # Kiro is a regular connector with native ACP support, not an ACP-only agent.
 ACP_ONLY_CONNECTORS: frozenset[str] = frozenset()
-DEPRECATED_CONNECTORS: frozenset[str] = frozenset({"geminicli", "windsurf"})
-
-_DEPRECATED_REASONS: dict[str, str] = {
-    "geminicli": (
-        "Gemini CLI integration is deprecated; use the Antigravity connector. "
-        "Existing managed Gemini CLI state remains removable through teardown and uninstall."
-    ),
-    "windsurf": (
-        "Windsurf/Cascade is retired; use Devin. Existing authenticated "
-        "Windsurf state remains recognizable only for upgrade and uninstall cleanup."
-    ),
-}
 
 LOCAL_OBSERVABILITY_UNSUPPORTED_REASON = "Bundled local observability is unavailable on this operating system."
 LOCAL_SPLUNK_UNSUPPORTED_REASON = "Bundled Local Splunk is unavailable on this operating system."
@@ -85,49 +73,41 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     "kiro": ConnectorPlatformSupport(
         SUPPORTED,
         "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on "
-        "native Windows x64 when kiro-cli is present. Release certification "
-        "requires official-client live evidence.",
+        "native Windows x64 when kiro-cli is present.",
     ),
     "codex": ConnectorPlatformSupport(
         SUPPORTED,
         "Codex CLI and the DefenseClaw hook entrypoint are supported on native "
-        "Windows x64; authentic packaged plus official-client validation metadata "
-        "is not recorded and live evidence remains false.",
+        "Windows x64.",
     ),
     "claudecode": ConnectorPlatformSupport(
         SUPPORTED,
         "Claude Code and the DefenseClaw native executable hook entrypoint are "
-        "supported on native Windows x64; immutable packaged plus official-client "
-        "validation metadata is not recorded and live evidence remains false.",
+        "supported on native Windows x64.",
     ),
     "cursor": ConnectorPlatformSupport(
         SUPPORTED,
-        "Cursor Agent and the DefenseClaw PowerShell hook adapter are available "
-        "on native Windows x64; official-client validation metadata is not recorded "
-        "and live evidence remains false.",
+        "Cursor Agent and the DefenseClaw PowerShell hook adapter are supported on "
+        "native Windows x64.",
     ),
     "devin": ConnectorPlatformSupport(
         SUPPORTED,
         "Native Devin CLI lifecycle hooks are supported on Windows x64 using the "
-        "pinned 3000.4.25 CLI; generic ACP mediation is cataloged but official-client "
-        "live certification, cloud Devin, proxy, native OTLP, and managed higher-layer "
-        "enforcement are not covered.",
+        "pinned 3000.4.25 CLI; cloud Devin, proxy, native OTLP, and managed "
+        "higher-layer enforcement are not covered.",
     ),
-    "geminicli": ConnectorPlatformSupport(UNSUPPORTED, _DEPRECATED_REASONS["geminicli"]),
     "copilot": ConnectorPlatformSupport(
         SUPPORTED,
-        "The DefenseClaw GitHub Copilot CLI integration is supported on native Windows x64; "
-        "authentication, HITL, and official-client live evidence remain unverified and unclaimed.",
+        "The DefenseClaw GitHub Copilot CLI integration is supported on native "
+        "Windows x64.",
     ),
     "antigravity": ConnectorPlatformSupport(
         SUPPORTED,
-        "The Antigravity integration is supported on native Windows x64; authentication, HITL, "
-        "and official-client live evidence remain unverified and unclaimed.",
+        "The Antigravity integration is supported on native Windows x64.",
     ),
     "opencode": ConnectorPlatformSupport(
         SUPPORTED,
-        "OpenCode native Windows setup is supported; official-client validation "
-        "metadata is not recorded and live evidence remains false. OpenCode recommends WSL but does "
+        "OpenCode native Windows setup is supported; OpenCode recommends WSL but does "
         "not require it.",
     ),
     "amp": ConnectorPlatformSupport(
@@ -136,9 +116,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "hermes": ConnectorPlatformSupport(
         SUPPORTED,
-        "Hermes native shell hooks use a direct DefenseClaw executable; "
-        "packaged and official-client Windows x64 validation metadata is not recorded, "
-        "running-client state remains pending reload, and live evidence remains false.",
+        "Hermes native shell hooks use a direct DefenseClaw executable on native "
+        "Windows x64; restart any open Hermes session after setup so it loads them.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -146,7 +125,7 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "omnigent": ConnectorPlatformSupport(
         SUPPORTED,
-        "OmniGent 0.7.0 is supported on native Windows in degraded mode; "
+        "OmniGent is supported on native Windows in degraded mode; "
         "DefenseClaw uses its awaited in-process policy API "
         "without terminal wrapping or filesystem/network sandbox parity.",
     ),
@@ -215,11 +194,8 @@ def connector_platform_support(
     """Return the status and reason for *name* on *os_name*.
 
     Unknown/plugin connectors require separate native Windows certification.
-    Deprecated built-ins are unavailable on every operating system.
     """
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
-    if name in DEPRECATED_CONNECTORS:
-        return ConnectorPlatformSupport(UNSUPPORTED, _DEPRECATED_REASONS[name])
     if resolved_os == "windows":
         return WINDOWS_CONNECTOR_SUPPORT.get(
             name,
@@ -256,6 +232,17 @@ def connector_supported_on_os(name: str, os_name: str | None = None) -> bool:
 def connector_preview_on_os(name: str, os_name: str | None = None) -> bool:
     """Report whether *name* is available as a preview on *os_name*."""
     return connector_support_status(name, os_name) == PREVIEW
+
+
+def openshell_sandboxes_supported(os_name: str | None = None) -> bool:
+    """Whether OpenShell sandboxes (``defenseclaw sandbox``) run on this host.
+
+    Mirrors ``openshell.CheckPlatform``: Linux and macOS only. WSL2 reports
+    ``linux`` here; the gateway refuses it with a clear message.
+    """
+
+    resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
+    return resolved_os in {"darwin", "linux"}
 
 
 def local_observability_stack_supported(os_name: str | None = None) -> bool:

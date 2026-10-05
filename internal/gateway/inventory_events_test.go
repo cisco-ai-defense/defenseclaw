@@ -1540,7 +1540,6 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
 		Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
 			"copilot":   {},
-			"geminicli": {},
 			"openclaw":  {},
 			"openhands": {},
 			"zeptoclaw": {},

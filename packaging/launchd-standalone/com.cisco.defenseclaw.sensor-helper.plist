@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DEFENSECLAW_DEPLOYMENT_MODE</key>
+		<string>managed_enterprise</string>
+		<key>DEFENSECLAW_ENTERPRISE_PROFILE</key>
+		<string>standalone</string>
+		<key>DEFENSECLAW_UNIX_SERVICE_ACCOUNT</key>
+		<string>_defenseclaw</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.cisco.defenseclaw.sensor-helper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/cisco/defenseclaw/bin/defenseclaw-sensor-helper</string>
+		<string>--managed-enterprise</string>
+		<string>--service-account</string>
+		<string>_defenseclaw</string>
+		<string>--home-dirs-from-manifest</string>
+		<string>/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/Cisco/DefenseClaw/sensor-helper.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/Library/Logs/Cisco/DefenseClaw/sensor-helper.out.log</string>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>Umask</key>
+	<integer>7</integer>
+	<key>WorkingDirectory</key>
+	<string>/</string>
+</dict>
+</plist>

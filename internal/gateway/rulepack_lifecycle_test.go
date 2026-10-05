@@ -30,7 +30,7 @@ func TestNewSidecarRejectsInvalidGlobalRulePackBeforeClientConstruction(t *testi
 	// deliberately nonexistent key path will obscure the policy error.
 	cfg.Gateway.DeviceKeyFile = t.TempDir() + "/missing-device-key"
 
-	sidecar, err := NewSidecar(cfg, nil, nil, nil)
+	sidecar, err := NewSidecar(cfg, nil, nil)
 	if err == nil || sidecar != nil {
 		t.Fatalf("NewSidecar = (%p, %v), want invalid global rule-pack failure", sidecar, err)
 	}
@@ -49,7 +49,7 @@ func TestNewSidecarRejectsInvalidEffectiveSingleConnectorRulePack(t *testing.T) 
 	}
 	cfg.Gateway.DeviceKeyFile = t.TempDir() + "/missing-device-key"
 
-	sidecar, err := NewSidecar(cfg, nil, nil, nil)
+	sidecar, err := NewSidecar(cfg, nil, nil)
 	if err == nil || sidecar != nil {
 		t.Fatalf("NewSidecar = (%p, %v), want invalid connector rule-pack failure", sidecar, err)
 	}
@@ -159,7 +159,7 @@ exfiltration: [candidate-exfiltration]
 	cfg.Guardrail.RetainJudgeBodies = true
 	cfg.JudgeBodiesDB = filepath.Join(blockedParent, "judge_bodies.db")
 
-	sidecar, err := NewSidecar(cfg, store, nil, nil)
+	sidecar, err := NewSidecar(cfg, store, nil)
 	if err == nil || sidecar != nil {
 		t.Fatalf("late-failing constructor = sidecar:%v error:%v", sidecar, err)
 	}

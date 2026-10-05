@@ -48,55 +48,41 @@ var proxyConnectors = map[string]struct{}{
 	"zeptoclaw": {},
 }
 
-// deprecatedConnectorSupport keeps retired built-ins resolvable only for
-// teardown and migration. Setup and presentation surfaces must not offer them
-// on any operating system.
-var deprecatedConnectorSupport = map[string]PlatformSupport{
-	"geminicli": {
-		Status: PlatformUnsupported,
-		Reason: "Gemini CLI integration is deprecated; use the Antigravity connector. Existing managed Gemini CLI state remains removable through teardown and uninstall.",
-	},
-}
-
 // windowsConnectorSupport is the Go source of truth for native Windows
 // connector availability. Keep it in exact parity with the Python
 // cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT mapping.
 var windowsConnectorSupport = map[string]PlatformSupport{
 	"codex": {
 		Status: PlatformSupported,
-		Reason: "Codex CLI and the DefenseClaw hook entrypoint are supported on native Windows x64; authentic packaged plus official-client validation metadata is not recorded and live evidence remains false.",
+		Reason: "Codex CLI and the DefenseClaw hook entrypoint are supported on native Windows x64.",
 	},
 	"kiro": {
 		Status: PlatformSupported,
-		Reason: "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on native Windows x64 when kiro-cli is present. Release certification requires official-client live evidence.",
+		Reason: "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on native Windows x64 when kiro-cli is present.",
 	},
 	"claudecode": {
 		Status: PlatformSupported,
-		Reason: "Claude Code and the DefenseClaw native executable hook entrypoint are supported on native Windows x64; immutable packaged plus official-client validation metadata is not recorded and live evidence remains false.",
+		Reason: "Claude Code and the DefenseClaw native executable hook entrypoint are supported on native Windows x64.",
 	},
 	"cursor": {
 		Status: PlatformSupported,
-		Reason: "Cursor Agent and the DefenseClaw PowerShell hook adapter are available on native Windows x64; official-client validation metadata is not recorded and live evidence remains false.",
+		Reason: "Cursor Agent and the DefenseClaw PowerShell hook adapter are supported on native Windows x64.",
 	},
 	"devin": {
 		Status: PlatformSupported,
-		Reason: "Native Devin CLI lifecycle hooks are supported on Windows x64 using the pinned 3000.4.25 CLI; generic ACP mediation is cataloged but official-client live certification, cloud Devin, proxy, native OTLP, and managed higher-layer enforcement are not covered.",
-	},
-	"geminicli": {
-		Status: PlatformUnsupported,
-		Reason: "Gemini CLI integration is deprecated; use the Antigravity connector. Existing managed Gemini CLI state remains removable through teardown and uninstall.",
+		Reason: "Native Devin CLI lifecycle hooks are supported on Windows x64 using the pinned 3000.4.25 CLI; cloud Devin, proxy, native OTLP, and managed higher-layer enforcement are not covered.",
 	},
 	"copilot": {
 		Status: PlatformSupported,
-		Reason: "The DefenseClaw GitHub Copilot CLI integration is supported on native Windows x64; authentication, HITL, and official-client live evidence remain unverified and unclaimed.",
+		Reason: "The DefenseClaw GitHub Copilot CLI integration is supported on native Windows x64.",
 	},
 	"antigravity": {
 		Status: PlatformSupported,
-		Reason: "The Antigravity integration is supported on native Windows x64; authentication, HITL, and official-client live evidence remain unverified and unclaimed.",
+		Reason: "The Antigravity integration is supported on native Windows x64.",
 	},
 	"opencode": {
 		Status: PlatformSupported,
-		Reason: "OpenCode native Windows setup is supported; official-client validation metadata is not recorded and live evidence remains false. OpenCode recommends WSL but does not require it.",
+		Reason: "OpenCode native Windows setup is supported; OpenCode recommends WSL but does not require it.",
 	},
 	"amp": {
 		Status: PlatformSupported,
@@ -104,7 +90,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"hermes": {
 		Status: PlatformSupported,
-		Reason: "Hermes native shell hooks use a direct DefenseClaw executable; packaged and official-client Windows x64 validation metadata is not recorded, running-client state remains pending reload, and live evidence remains false.",
+		Reason: "Hermes native shell hooks use a direct DefenseClaw executable on native Windows x64; restart any open Hermes session after setup so it loads them.",
 	},
 	"openhands": {
 		Status: PlatformUnsupported,
@@ -112,7 +98,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"omnigent": {
 		Status: PlatformSupported,
-		Reason: "OmniGent 0.7.0 is supported on native Windows in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
+		Reason: "OmniGent is supported on native Windows in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
 	},
 	"openclaw": {
 		Status: PlatformUnsupported,
@@ -135,9 +121,6 @@ func IsProxyConnector(name string) bool {
 // classification with a human-readable reason. Unknown plugin connectors fail
 // closed on Windows pending separate certification.
 func ConnectorSupportOnOS(name, goos string) PlatformSupport {
-	if support, ok := deprecatedConnectorSupport[name]; ok {
-		return support
-	}
 	if goos == "windows" {
 		if support, ok := windowsConnectorSupport[name]; ok {
 			return support

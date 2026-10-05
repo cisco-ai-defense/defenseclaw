@@ -1,0 +1,504 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+func TestRefusePerUserGatewayOnManagedHost(t *testing.T) {
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
+	managedHostDescriptorPath = func() string { return descriptor }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	managedHostRecordTrusted = func(string) error { return nil }
+	defer func() {
+		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+	}()
+	t.Setenv(managed.DeploymentModeEnv, "")
+
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("unmanaged host refused: %v", err)
+	}
+	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := refusePerUserGatewayOnManagedHost()
+	if err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("managed host allowed a per-user gateway: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("managed service refused: %v", err)
+	}
+}
+
+func TestRefusePerUserGatewayOnWindowsStandaloneHost(t *testing.T) {
+	restore, restoreWindows := managedHostDescriptorPath, managedHostWindowsStandalone
+	managedHostDescriptorPath = func() string { return "" }
+	defer func() { managedHostDescriptorPath, managedHostWindowsStandalone = restore, restoreWindows }()
+	t.Setenv(managed.DeploymentModeEnv, "")
+
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("a host without a standalone deployment refused: %v", err)
+	}
+	managedHostWindowsStandalone = func() (string, bool) {
+		return `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`, true
+	}
+	err := refusePerUserGatewayOnManagedHost()
+	if err == nil || !strings.Contains(err.Error(), "enterprise windows status") {
+		t.Fatalf("a Windows standalone host allowed a per-user gateway: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("the managed gateway service refused: %v", err)
+	}
+}
+
+// On a Windows standalone computer `defenseclaw setup rotate-token` was an
+// unknown command; other hosts get no setup command.
+func TestManagedWindowsSetupAnswer(t *testing.T) {
+	restore := managedHostWindowsStandalone
+	defer func() { managedHostWindowsStandalone = restore }()
+	// The real root pre-run: the answer must not need a per-user config.
+	root := &cobra.Command{Use: "defenseclaw", PersistentPreRunE: rootPersistentPreRunE}
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	addManagedWindowsSetupAnswer(root)
+	if len(root.Commands()) != 0 {
+		t.Fatalf("a host without a standalone deployment got %v", root.Commands())
+	}
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	addManagedWindowsSetupAnswer(root)
+	root.SetArgs([]string{"setup", "rotate-token", "--yes"})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("setup rotate-token on a managed Windows computer: %v", err)
+	}
+	root.SetArgs([]string{"setup", "kiro"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+		!strings.Contains(err.Error(), "guardrail.connectors.kiro") {
+		t.Fatalf("setup kiro on a managed Windows computer: %v", err)
+	}
+	// `doctor` was an unknown command and `status` printed the raw missing
+	// per-user config error (WIN-R1-23).
+	root.SetArgs([]string{"doctor"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+		t.Fatalf("doctor on a managed Windows computer: %v", err)
+	}
+	// GAP-1719: `upgrade` was a bare unknown command.
+	root.SetArgs([]string{"upgrade"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "upgrades are installed by your organization") {
+		t.Fatalf("upgrade on a managed Windows computer: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	missing := fmt.Errorf("read v8 config C:\\Users\\u\\.defenseclaw\\config.yaml: %w", fs.ErrNotExist)
+	status := &cobra.Command{Use: "status"}
+	root.AddCommand(status)
+	if err := managedWindowsConfigLoadError(status, missing); err == missing ||
+		!strings.Contains(err.Error(), "`status` has no per-user deployment") {
+		t.Fatalf("status on a managed Windows computer: %v", err)
+	}
+}
+
+// GAP-1317: status on a managed Linux/macOS host without a per-user config
+// gave the raw "read v8 config ... no such file" error.
+func TestManagedUnixConfigLoadErrorNamesTheManagedDeployment(t *testing.T) {
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
+	managedHostDescriptorPath = func() string { return descriptor }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	managedHostRecordTrusted = func(string) error { return nil }
+	defer func() {
+		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+	}()
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	root := &cobra.Command{Use: "defenseclaw-gateway"}
+	status := &cobra.Command{Use: "status"}
+	root.AddCommand(status)
+	missing := fmt.Errorf("read v8 config /home/u/.defenseclaw/config.yaml: %w", fs.ErrNotExist)
+
+	if err := managedWindowsConfigLoadError(status, missing); err != missing {
+		t.Fatalf("an unmanaged host changed the error: %v", err)
+	}
+	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := managedWindowsConfigLoadError(status, missing)
+	if err == missing || !strings.Contains(err.Error(), "managed by your organization ("+descriptor+")") ||
+		!strings.Contains(err.Error(), "`status` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "enterprise ") {
+		t.Fatalf("status on a managed unix host: %v", err)
+	}
+	// GAP-1196: audit export names its administrator form.
+	audit := &cobra.Command{Use: "audit"}
+	export := &cobra.Command{Use: "export"}
+	root.AddCommand(audit)
+	audit.AddCommand(export)
+	err = managedWindowsConfigLoadError(export, missing)
+	if err == missing || !strings.Contains(err.Error(), "`audit export` has no per-user gateway") ||
+		!strings.Contains(err.Error(), "defenseclaw-gateway audit export`") {
+		t.Fatalf("audit export on a managed unix host: %v", err)
+	}
+}
+
+func TestRefusePerUserGatewayIgnoresAnUntrustedDescriptor(t *testing.T) {
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	if err := os.WriteFile(descriptor, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	restore, restoreWindows, restoreTrust := managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted
+	managedHostDescriptorPath = func() string { return descriptor }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	var checked string
+	managedHostRecordTrusted = func(path string) error {
+		checked = path
+		return errors.New("owner is a standard user")
+	}
+	defer func() {
+		managedHostDescriptorPath, managedHostWindowsStandalone, managedHostRecordTrusted = restore, restoreWindows, restoreTrust
+	}()
+	t.Setenv(managed.DeploymentModeEnv, "")
+
+	// A descriptor any user could have planted must not disable every other
+	// user's per-user gateway.
+	if err := refusePerUserGatewayOnManagedHost(); err != nil {
+		t.Fatalf("an untrusted descriptor refused the per-user gateway: %v", err)
+	}
+	if checked != descriptor {
+		t.Fatalf("trust check saw %q, want the descriptor %q", checked, descriptor)
+	}
+}
+
+func TestManagedRecordTrustedNeedsAnAdministratorOnlyDirectory(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "pd")
+	record := filepath.Join(root, "Cisco", "DefenseClaw", "install", "deployment.json")
+	install := filepath.Dir(record)
+	product := filepath.Dir(install)
+	vendor := filepath.Dir(product)
+	denied := &fs.PathError{Op: "inspect", Path: "x", Err: fs.ErrPermission}
+	untrusted := errors.New("owner is a standard user")
+	userWritable := errors.New("untrusted principal has write-like access")
+
+	for _, test := range []struct {
+		name    string
+		file    error
+		dirs    map[string]error // missing entry = denied
+		trusted bool
+	}{
+		{name: "inspectable administrator record", file: nil, trusted: true},
+		{name: "user-owned record", file: untrusted},
+		{
+			name: "standard user below an administrator-only product directory",
+			file: denied, dirs: map[string]error{product: nil}, trusted: true,
+		},
+		{
+			name: "standard user below an administrator-only vendor directory",
+			file: denied, dirs: map[string]error{vendor: nil}, trusted: true,
+		},
+		{
+			name: "locked record in a user-writable directory",
+			file: denied, dirs: map[string]error{product: userWritable, vendor: nil},
+		},
+		{
+			name: "locked record in a user-created directory",
+			file: denied, dirs: map[string]error{install: untrusted, vendor: nil},
+		},
+		{name: "nothing inspectable below the data root", file: denied, dirs: map[string]error{root: nil}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var visited []string
+			err := managedRecordTrusted(record, root,
+				func(path string) error {
+					if path != record {
+						t.Fatalf("file validator got %q", path)
+					}
+					return test.file
+				},
+				func(dir string) error {
+					visited = append(visited, dir)
+					if dir == root || !strings.HasPrefix(dir, root) {
+						t.Fatalf("directory validator reached %q, at or above the data root", dir)
+					}
+					if result, ok := test.dirs[dir]; ok {
+						return result
+					}
+					return fmt.Errorf("inspect %s: %w", dir, denied)
+				},
+			)
+			if (err == nil) != test.trusted {
+				t.Fatalf("managedRecordTrusted = %v (visited %v), want trusted=%t", err, visited, test.trusted)
+			}
+		})
+	}
+}
+
+// standaloneGuardFixture models a Windows standalone host for the guard's
+// decision: the deployment record, its ancestors below %ProgramData% and the
+// gateway service the Service Control Manager reports.
+type standaloneGuardFixture struct {
+	root, record, vendor, gatewayPath string
+}
+
+func newStandaloneGuardFixture() standaloneGuardFixture {
+	root := filepath.Join(string(filepath.Separator), "pd")
+	return standaloneGuardFixture{
+		root:        root,
+		record:      filepath.Join(root, "Cisco", "DefenseClaw", "install", "deployment.json"),
+		vendor:      filepath.Join(root, "Cisco"),
+		gatewayPath: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`,
+	}
+}
+
+// standardUserTrust is the walk a standard user makes on a real standalone
+// host: the record and the administrator-only product directories hide their
+// security settings, and the vendor directory decides with vendorErr.
+func (f standaloneGuardFixture) standardUserTrust(vendorErr error) func(string) error {
+	denied := &fs.PathError{Op: "inspect", Path: f.record, Err: fs.ErrPermission}
+	return func(path string) error {
+		return managedRecordTrusted(path, f.root,
+			func(string) error { return denied },
+			func(dir string) error {
+				if dir == f.vendor {
+					return vendorErr
+				}
+				return fmt.Errorf("inspect %s: %w", dir, denied)
+			})
+	}
+}
+
+// service reports the gateway service registered with image, or registerErr.
+func (f standaloneGuardFixture) service(image string, registerErr error) func() (string, error) {
+	return func() (string, error) {
+		if registerErr != nil {
+			return "", registerErr
+		}
+		if err := standaloneGatewayServiceImageMatches(image, f.gatewayPath); err != nil {
+			return "", err
+		}
+		return "service DefenseClawGateway runs " + f.gatewayPath, nil
+	}
+}
+
+var (
+	// userWritableVendorDirectory is what the strict check reports for a
+	// vendor directory that keeps the ProgramData Users create-child grant,
+	// as one created by Secure Client or another Cisco product does.
+	userWritableVendorDirectory = errors.New(`C:\ProgramData\Cisco: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x116`)
+	gatewayServiceNotRegistered = errors.New("open service DefenseClawGateway: The specified service does not exist as an installed service.")
+	standaloneGatewayImage      = `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe"`
+	secureClientGatewayImage    = `"C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe"`
+)
+
+func TestManagedStandaloneRecordCountsFallsBackToTheGatewayService(t *testing.T) {
+	f := newStandaloneGuardFixture()
+	planted := func(string) error { return errors.New("owner is a standard user") }
+	for _, test := range []struct {
+		name    string
+		trust   func(string) error
+		service func() (string, error)
+		counts  bool
+		where   string
+	}{
+		{
+			name:  "administrator reads the record",
+			trust: func(string) error { return nil }, service: f.service("", gatewayServiceNotRegistered),
+			counts: true, where: f.record,
+		},
+		{
+			name:  "standard user below an administrator-only vendor directory",
+			trust: f.standardUserTrust(nil), service: f.service("", gatewayServiceNotRegistered),
+			counts: true, where: f.record,
+		},
+		{
+			name:  "standard user below a user-writable vendor directory on a standalone host",
+			trust: f.standardUserTrust(userWritableVendorDirectory), service: f.service(standaloneGatewayImage, nil),
+			counts: true, where: "service DefenseClawGateway runs " + f.gatewayPath,
+		},
+		{
+			name:  "standard user below a user-writable vendor directory without the gateway service",
+			trust: f.standardUserTrust(userWritableVendorDirectory), service: f.service("", gatewayServiceNotRegistered),
+		},
+		{
+			name:  "standard user below a user-writable vendor directory with the Secure Client gateway",
+			trust: f.standardUserTrust(userWritableVendorDirectory), service: f.service(secureClientGatewayImage, nil),
+		},
+		{
+			name:  "planted record without the gateway service",
+			trust: planted, service: f.service("", gatewayServiceNotRegistered),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			where, err := managedStandaloneRecordCounts(f.record, test.trust, test.service)
+			if (err == nil) != test.counts {
+				t.Fatalf("managedStandaloneRecordCounts = %q, %v; want counts=%t", where, err, test.counts)
+			}
+			if where != test.where {
+				t.Fatalf("where = %q, want %q", where, test.where)
+			}
+		})
+	}
+}
+
+func TestStandaloneGatewayServiceImageMatches(t *testing.T) {
+	gateway := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`
+	for image, want := range map[string]bool{
+		standaloneGatewayImage: true,
+		`"c:\program files\cisco\defenseclaw\bin\DEFENSECLAW-GATEWAY.EXE"`:          true,
+		`  "C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe" --flag`: true,
+		`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`:            false,
+		`"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`:           false,
+		`"C:\Program Files\Cisco\DefenseClaw-Cert\lab\bin\defenseclaw-gateway.exe"`: false,
+		`"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe.bak"`:      false,
+		secureClientGatewayImage: false,
+		``:                       false,
+	} {
+		if got := standaloneGatewayServiceImageMatches(image, gateway) == nil; got != want {
+			t.Errorf("standaloneGatewayServiceImageMatches(%q) matched=%t, want %t", image, got, want)
+		}
+	}
+	if standaloneGatewayServiceImageMatches(standaloneGatewayImage, "") == nil {
+		t.Error("an empty gateway path must never match")
+	}
+}
+
+// status and enterprise hooks status load the config without the root pre-run,
+// and the managed Windows answer said "`this command`" instead of naming them.
+func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
+	restore, restoreAccount := managedHostWindowsStandalone, managedHostCurrentAccount
+	t.Cleanup(func() { managedHostWindowsStandalone, managedHostCurrentAccount = restore, restoreAccount })
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	managedHostCurrentAccount = func() string { return `HOST\std1` }
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "absent"))
+	err := loadGatewayCommandConfigFor(statusCmd)
+	if err == nil || !strings.Contains(err.Error(), "`status` has no per-user deployment") ||
+		!strings.Contains(err.Error(), "enterprise policy show --user std1`") {
+		t.Fatalf("status on a managed Windows computer: %v", err)
+	}
+	// GAP-1183: the hints run as typed (the installed CLI, not a bare
+	// defenseclaw-gateway that is not on PATH) and are an administrator's.
+	for _, want := range []string{"your administrator can check", "elevated PowerShell prompt",
+		"& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("status answer lacks %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "`defenseclaw-gateway ") {
+		t.Fatalf("status answer names a command that is not on PATH: %v", err)
+	}
+}
+
+// GAP-1182, GAP-1192: --help on a managed computer describes the managed
+// gateway and hides the per-user daemon commands it refuses.
+func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
+	restore := managedHostWindowsStandalone
+	t.Cleanup(func() { managedHostWindowsStandalone = restore })
+	t.Setenv(managed.DeploymentModeEnv, "")
+	newRoot := func() *cobra.Command {
+		root := &cobra.Command{Use: "defenseclaw-gateway", Long: "per-user sidecar"}
+		for _, name := range []string{"start", "stop", "restart", "watchdog", "sandbox", "status", "enterprise", "audit", "connector"} {
+			root.AddCommand(&cobra.Command{Use: name, Run: func(*cobra.Command, []string) {}})
+		}
+		for _, command := range root.Commands() {
+			switch command.Name() {
+			case "connector":
+				command.PersistentFlags().String("connector", "", "resolved from guardrail.connector / openclaw")
+			case "enterprise":
+				for _, platform := range []string{"linux", "macos", "windows", "policy"} {
+					command.AddCommand(&cobra.Command{Use: platform, Run: func(*cobra.Command, []string) {}})
+				}
+			}
+		}
+		return root
+	}
+
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	restoreDescriptor := managedHostDescriptorPath
+	t.Cleanup(func() { managedHostDescriptorPath = restoreDescriptor })
+	managedHostDescriptorPath = func() string { return filepath.Join(t.TempDir(), "absent.json") }
+	plain := newRoot()
+	if applyManagedHostHelp(plain) || plain.Long != "per-user sidecar" {
+		t.Fatalf("an unmanaged host changed the help: %q", plain.Long)
+	}
+
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	root := newRoot()
+	if !applyManagedHostHelp(root) {
+		t.Fatal("a managed host kept the per-user help")
+	}
+	for _, want := range []string{"managed gateway", "not available here", "enterprise windows status --profile standalone"} {
+		if !strings.Contains(root.Long, want) {
+			t.Fatalf("managed help lacks %q:\n%s", want, root.Long)
+		}
+	}
+	if strings.Contains(root.Long, "Run without arguments") || strings.Contains(root.Long, "Python CLI") {
+		t.Fatalf("managed help still describes the per-user daemon:\n%s", root.Long)
+	}
+	for _, command := range root.Commands() {
+		if command.Hidden != managedHostPerUserDaemonCommands[command.Name()] {
+			t.Fatalf("command %s hidden=%t", command.Name(), command.Hidden)
+		}
+		if command.Name() == "status" && command.Short != managedHostStatusShort {
+			t.Fatalf("managed status row = %q", command.Short)
+		}
+	}
+	// GAP-1719: the subcommand help describes the managed deployment too.
+	sub := map[string]*cobra.Command{}
+	for _, command := range root.Commands() {
+		sub[command.Name()] = command
+	}
+	for _, name := range []string{"status", "enterprise"} {
+		if !strings.Contains(sub[name].Long, "enterprise windows status --profile standalone") ||
+			strings.Contains(sub[name].Long, "sidecar") || strings.Contains(sub[name].Long, "root/MDM/systemd") {
+			t.Fatalf("managed %s help:\n%s", name, sub[name].Long)
+		}
+	}
+	for _, unwanted := range []string{"defenseclaw setup", "defenseclaw.yaml", "openclaw", "S7"} {
+		if strings.Contains(sub["connector"].Long, unwanted) {
+			t.Fatalf("managed connector help mentions %q:\n%s", unwanted, sub["connector"].Long)
+		}
+	}
+	if flag := sub["connector"].PersistentFlags().Lookup("connector"); strings.Contains(flag.Usage, "openclaw") {
+		t.Fatalf("managed --connector usage = %q", flag.Usage)
+	}
+	for _, platform := range sub["enterprise"].Commands() {
+		if platform.Hidden != managedHostOtherPlatforms()[platform.Name()] {
+			t.Fatalf("enterprise %s hidden=%t on %s", platform.Name(), platform.Hidden, runtime.GOOS)
+		}
+	}
+	// GAP-1359: the record path is on a line of its own, and the prose
+	// wraps at the usual width.
+	if !strings.Contains(root.Long, "\n  HKLM\\SOFTWARE\\Cisco\\DefenseClaw\\Enterprise\n") {
+		t.Fatalf("record path is not on its own line:\n%s", root.Long)
+	}
+	for _, line := range strings.Split(root.Long, "\n") {
+		if !strings.HasPrefix(line, "  ") && len(line) > 80 {
+			t.Fatalf("description line is %d columns: %q", len(line), line)
+		}
+	}
+}

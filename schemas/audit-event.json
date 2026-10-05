@@ -10,8 +10,8 @@
     "timestamp": { "type": "string", "format": "date-time" },
     "action": {
       "type": "string",
-      "description": "Curated action — see internal/audit/actions.go (Go) and cli/defenseclaw/audit_actions.py (Python). Extending this enum is a minor schema bump. The `codex.notify.<sanitized-type>` family is dynamic: the gateway derives the suffix from the codex notify payload after sanitization ([a-z0-9._-]{1,64}). Validators MUST accept either the static enum OR the prefixed pattern.",
-      "oneOf": [
+      "description": "Curated action — see internal/audit/actions.go (Go) and cli/defenseclaw/audit_actions.py (Python). Extending this enum is a minor schema bump. The `codex.notify.<sanitized-type>` family is dynamic: the gateway derives the suffix from the codex notify payload after sanitization ([a-z0-9._-]{1,64}). Validators MUST accept the static enum, the prefixed pattern, or the v8 record action: rows written by the v8 runtime (event_name set, not legacy.audit.*) keep the action of their telemetry family, for example telemetry-destination, circuit_breaker_open or config.change.applied.",
+      "anyOf": [
         {
           "enum": [
             "init",
@@ -63,6 +63,13 @@
             "codex.notify",
             "codex.notify.agent-turn-complete",
             "codex.notify.malformed",
+            "sandbox-lifecycle",
+            "sandbox-workspace",
+            "sandbox-egress",
+            "sandbox-approval",
+            "sandbox-policy",
+            "sandbox-health",
+            "sandbox-finding",
             "sidecar-start",
             "sidecar-stop",
             "sidecar-connected",
@@ -134,6 +141,18 @@
             "inspect-tool-block",
             "inspect-tool-alert",
             "inspect-tool-allow",
+            "inspect-request-confirm",
+            "inspect-request-block",
+            "inspect-request-alert",
+            "inspect-request-allow",
+            "inspect-response-confirm",
+            "inspect-response-block",
+            "inspect-response-alert",
+            "inspect-response-allow",
+            "inspect-tool-response-confirm",
+            "inspect-tool-response-block",
+            "inspect-tool-response-alert",
+            "inspect-tool-response-allow",
             "inspect-reveal",
             "api-auth-failure",
             "api-config-patch",
@@ -169,7 +188,6 @@
             "init-gateway",
             "init-guardrail",
             "init-notifications-toggle",
-            "init-sandbox",
             "init-sidecar",
             "policy-create",
             "policy-activate",
@@ -177,6 +195,10 @@
             "registry-add",
             "registry-edit",
             "registry-remove",
+            "registry-sync",
+            "registry-require",
+            "registry-approve",
+            "registry-reject",
             "scan-enforced",
             "scan-finding",
             "dismiss-alert",
@@ -195,6 +217,7 @@
             "plugin-enable",
             "plugin-quarantine",
             "plugin-restore",
+            "plugin-unblock",
             "block-mcp",
             "allow-mcp",
             "mcp-unblock",
@@ -210,6 +233,11 @@
           "type": "string",
           "pattern": "^codex\\.notify\\.[a-z0-9._-]{1,64}$",
           "description": "Dynamic codex notify suffix family. Suffix is derived from the inbound payload's `type` field via sanitizeNotifyType."
+        },
+        {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "description": "v8 record action: the action of a v8 runtime telemetry family (internal/cli/audit_export.go isV8RecordAction)."
         }
       ]
     },
@@ -287,6 +315,14 @@
     "rule_pack_dir": {
       "type": ["string", "null"],
       "description": "Effective rule-pack directory the verdict was evaluated against (per-connector override or global). Null when no rule pack applies."
+    },
+    "sandbox_id": {
+      "type": ["string", "null"],
+      "description": "OpenShell sandbox id of the sandbox whose request produced the event, taken only from its authenticated binding. Null for host traffic."
+    },
+    "sandbox_name": {
+      "type": ["string", "null"],
+      "description": "OpenShell sandbox name of the sandbox whose request produced the event, taken only from its authenticated binding. Null for host traffic."
     }
   },
   "additionalProperties": false

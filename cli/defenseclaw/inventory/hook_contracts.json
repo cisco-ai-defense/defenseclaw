@@ -2,7 +2,7 @@
   "schema_version": 2,
   "defenseclaw_version": "0.5.0",
   "runtime_lock_file": "hook_contract_lock.json",
-  "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to.",
+  "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to. A version newer than every tested range uses the newest contract (untested newer version) unless known_broken_versions lists it; each entry has exact or min_inclusive/max_exclusive, reason and issue.",
   "connectors": {
     "kiro": {
       "kind": "acp-with-native-hook-defense-in-depth",
@@ -28,7 +28,7 @@
         "block_events is resolved per request from the hook config that invoked the hook, not from the release. Setup marks the .kiro/hooks command with `--hook-surface v3`; that surface blocks on PreToolUse and UserPromptSubmit (kiro.dev/docs/hooks/actions). The CLI 2.x agent-hook config stays unmarked and blocks on PreToolUse only -- 2.x shows a non-zero exit on any other trigger as a warning (kiro.dev/docs/cli/2x-reference). Version probing cannot decide this: v3 is the `--v3` flag on the 2.x binary, so `kiro-cli --version` reports 2.x for both surfaces. An unmarked request resolves to the 2.x set.",
         "The ACP guard is an optional second enforcement path and is versioned independently from Kiro native hooks.",
         "Kiro IDE and Kiro CLI share .kiro/hooks; DefenseClaw exposes one Kiro connector for either install.",
-        "Native hooks are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root (kiro.dev/docs/hooks documents no user-level location), so <workspace>/.kiro/hooks/defenseclaw.json is what enforces. The ~/.kiro/hooks/defenseclaw.json copy is written and tracked for teardown but Kiro never reads it, so a global-only install enforces nothing and doctor fails it. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
+        "Kiro IDE 1.0.182 and later and kiro-cli --v3 merge the global ~/.kiro/hooks/*.json with the project .kiro/hooks/*.json (kiro.dev/docs/hooks, all scopes merged), so the global ~/.kiro/hooks/defenseclaw.json enforces; doctor passes it and notes that Kiro IDE builds before 1.0.182 read only the project copy under claw.workspace_dir. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
         "Hook stdout must remain empty because Kiro adds stdout to agent context."
       ]
     },
@@ -53,6 +53,7 @@
     "codex": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "codex --version",
       "contracts": [
         {
@@ -621,6 +622,7 @@
     "claudecode": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "claude --version",
       "contracts": [
         {
@@ -924,6 +926,7 @@
     "hermes": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "hermes --version",
       "contracts": [
         {
@@ -1177,6 +1180,7 @@
     "cursor": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "agent --version",
       "contracts": [
         {
@@ -1320,13 +1324,15 @@
     "devin": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "devin --version",
       "contracts": [
         {
           "contract_id": "devin-hooks-v1",
           "agent_version": {
             "exact": [
-              "3000.4.25"
+              "3000.4.25",
+              "3000.11.3"
             ]
           },
           "default_for_unversioned": true,
@@ -1424,128 +1430,34 @@
             "scope": "user,workspace"
           },
           "notes": [
-            "The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
+            "The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
+            "Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config. Devin Desktop 3.9.19 removed the legacy Cascade agent; builds before it run Cascade under a separate contract that is not registered.",
             "Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
-            "Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded."
-          ]
-        }
-      ]
-    },
-    "geminicli": {
-      "kind": "hook",
-      "compatibility_gate": "hook-contract",
-      "version_probe": "gemini --version",
-      "contracts": [
-        {
-          "contract_id": "geminicli-hooks-v1",
-          "agent_version": {
-            "min_inclusive": "0.26.0",
-            "max_exclusive": ""
-          },
-          "default_for_unversioned": true,
-          "hook_script_version": "v6",
-          "hook_script": "geminicli-hook.sh",
-          "hook_config_path_templates": [
-            "~/.gemini/settings.json"
+            "Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, and native OTLP are excluded. DefenseClaw registers no plugin hooks; under the standalone enterprise profile the foreign-hook guard checks the hooks of installed Devin plugins."
           ],
-          "response_field": "hook_output",
-          "events": [
-            "SessionStart",
-            "BeforeAgent",
-            "BeforeModel",
-            "BeforeToolSelection",
-            "BeforeTool",
-            "AfterTool",
-            "AfterModel",
-            "AfterAgent",
-            "PreCompress",
-            "Notification",
-            "SessionEnd"
-          ],
-          "aid_surfaces": [
-            "prompt",
-            "tool_call",
-            "tool_result"
-          ],
-          "supports_traceparent": true,
-          "native_otlp": true,
-          "tool_call_lifecycle": {
-            "version": 1,
-            "pre_proposal_events": [
-              "BeforeTool"
-            ],
-            "authoritative_success_events": [
-              "AfterTool"
-            ],
-            "authoritative_failure_events": [
-              "AfterTool"
-            ],
-            "authoritative_denial_events": [],
-            "authoritative_pending_discard_events": [
-              "AfterAgent"
-            ],
-            "authoritative_terminal_events": [
-              "SessionEnd"
-            ],
-            "invocation_id_authority": "none",
-            "outcome_authority": "result-payload",
-            "stateful_enforcement_level": "detection-only",
-            "routing": {
-              "structured_action_events": [
-                "BeforeTool"
-              ],
-              "result_content_events": [
-                "AfterTool"
-              ],
-              "state_transition_events": [],
-              "audit_only_events": [
-                "SessionStart",
-                "AfterAgent",
-                "SessionEnd"
-              ]
+          "platform_overrides": {
+            "darwin": {
+              "agent_version": {
+                "exact": [
+                  "3000.4.25"
+                ]
+              }
             },
-            "covered_tool_surfaces": [
-              "generic",
-              "shell",
-              "file-read",
-              "file-write",
-              "file-edit",
-              "mcp",
-              "skills"
-            ],
-            "official_source_urls": [
-              "https://geminicli.com/docs/hooks/reference/",
-              "https://geminicli.com/docs/reference/tools/"
-            ],
-            "limitations": [
-              "Hook payloads provide a session identifier but no stable tool invocation identifier, so AfterTool cannot authorize a paired state transition.",
-              "AfterTool is shared by success and failure; consumers must inspect tool_response.error instead of treating the event name as success."
-            ]
-          },
-          "capabilities": {
-            "can_block": true,
-            "can_ask_native": false,
-            "ask_events": [],
-            "block_events": [
-              "BeforeAgent",
-              "BeforeModel",
-              "BeforeTool",
-              "AfterTool",
-              "AfterModel",
-              "AfterAgent"
-            ],
-            "supports_fail_closed": true,
-            "scope": "user"
-          },
-          "notes": [
-            "Gemini CLI 0.26.0 enabled hooks by default."
-          ]
+            "windows": {
+              "agent_version": {
+                "exact": [
+                  "3000.4.25"
+                ]
+              }
+            }
+          }
         }
       ]
     },
     "copilot": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "copilot --version",
       "contracts": [
         {
@@ -1786,6 +1698,7 @@
     "antigravity": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "agy --version",
       "contracts": [
         {
@@ -1879,7 +1792,7 @@
             "Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
             "Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
             "PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
-            "Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json. Gemini CLI shares the global config namespace, but its connector registration, lifecycle schema, gateway route, token, and teardown ownership remain separate."
+            "Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json."
           ]
         }
       ]
@@ -1887,6 +1800,7 @@
     "openhands": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "openhands --version",
       "docs_url": "https://docs.openhands.dev/openhands/usage/customization/hooks",
       "contracts": [
@@ -2013,6 +1927,7 @@
     "opencode": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "opencode --version",
       "contracts": [
         {
@@ -2110,8 +2025,8 @@
           },
           "notes": [
             "opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws on a block decision, aborting the tool.",
-            "DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.31 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-            "Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.31. The v1.18.31 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args."
+            "DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+            "Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args."
           ]
         }
       ]
@@ -2119,6 +2034,7 @@
     "amp": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "amp --version",
       "docs_url": "https://ampcode.com/manual/plugin-api",
       "contracts": [
@@ -2231,6 +2147,7 @@
     "omnigent": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
+      "known_broken_versions": [],
       "version_probe": "omnigent --version",
       "docs_url": "https://github.com/omnigent-ai/omnigent/blob/v0.13.0/docs/POLICIES.md",
       "contracts": [

@@ -1,0 +1,131 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package enterprisehooks
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"unsafe"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
+)
+
+// RevokeGatewayInventoryReadForManifest removes the gateway service ACEs
+// that GrantGatewayInventoryReadForManifest added to each enrolled account's
+// inventory folders. The uninstall runs it before it removes the per-user
+// registrations: some of those folders are also on a managed hook path
+// (~\.config for Amp and OpenCode, ~\.gemini for Antigravity), and the
+// removal trust check there expects the exact protected DACL, so the extra
+// ACEs made it refuse to remove the registrations (GAP-1765). The service
+// SIDs are derived from the names, so this works after the services are
+// deleted. A missing folder is skipped; per-folder failures are returned.
+func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
+	names := []string{productionGatewayServiceName}
+	if discovered, err := discoverGatewayServiceName(); err == nil && discovered != productionGatewayServiceName {
+		names = append(names, discovered)
+	}
+	sids := make([]*windows.SID, 0, len(names))
+	for _, name := range names {
+		sid, err := windows.StringToSid(windowsServiceSIDString(name))
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: gateway service SID for %s: %w", name, err)
+		}
+		sids = append(sids, sid)
+	}
+	dirs := append(append([]string(nil), inventoryDACLDotdirs...), inventoryDACLListOnlyDirs...)
+	seen := map[string]struct{}{}
+	var failures []error
+	for _, target := range manifest.Targets {
+		home := filepath.Clean(strings.TrimSpace(target.UserHome))
+		if home == "." || home == "" {
+			continue
+		}
+		key := strings.ToLower(home)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		for _, dir := range dirs {
+			if err := revokeInventoryACEs(filepath.Join(home, dir), sids); err != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", filepath.Join(home, dir), err))
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// revokeInventoryACEs removes every ACE for sids from path's DACL and keeps
+// the rest, including the DACL's protection.
+func revokeInventoryACEs(path string, sids []*windows.SID) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("get DACL: %w", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return nil
+	}
+	if !daclHasACEFor(dacl, sids) {
+		return nil
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, len(sids))
+	for _, sid := range sids {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessMode: windows.REVOKE_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		})
+	}
+	revoked, err := windows.ACLFromEntries(entries, dacl)
+	if err != nil {
+		return fmt.Errorf("revoke ACE: %w", err)
+	}
+	information := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION)
+	if control, _, err := sd.Control(); err == nil && control&windows.SE_DACL_PROTECTED != 0 {
+		information |= windows.PROTECTED_DACL_SECURITY_INFORMATION
+	}
+	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, information, nil, nil, revoked, nil); err != nil {
+		return fmt.Errorf("set DACL: %w", err)
+	}
+	return nil
+}
+
+func daclHasACEFor(dacl *windows.ACL, sids []*windows.SID) bool {
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil || ace == nil {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		for _, sid := range sids {
+			if windows.EqualSid(aceSID, sid) {
+				return true
+			}
+		}
+	}
+	return false
+}

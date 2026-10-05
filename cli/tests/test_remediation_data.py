@@ -61,8 +61,6 @@ O11Y = DATA / "splunk_o11y_dashboards"
 DETECTORS = O11Y / "terraform" / "detectors.tf"
 O11Y_README = O11Y / "README.md"
 
-INSTALLER = DATA / "scripts" / "install-openshell-sandbox.sh"
-
 _SECURE_HOST_BIND_PORT = re.compile(
     r"^\$\{(?P<variable>HOST_BIND):-(?P<default>127\.0\.0\.1)\}:"
     r"(?P<host_port>[1-9]\d{0,4}):(?P<container_port>[1-9]\d{0,4})(?:/tcp)?$"
@@ -258,6 +256,9 @@ def test_f0561_local_grafana_is_loopback_bound_and_authenticated() -> None:
             expected_ports=((3000, 3000),),
         )
     assert "network_mode" not in overlay["services"]["grafana"]
+    # The collector's debug exporter logs every payload; unrotated logs filled a disk.
+    for service in base["services"].values():
+        assert service["logging"]["options"]["max-size"] == "10m"
 
 
 # --------------------------------------------------------------------------- #
@@ -402,21 +403,6 @@ def test_f0623_readme_uses_env_var_not_cli_token() -> None:
     assert "never put the API token on the command line" in text
     # no example passes a literal token placeholder on the CLI
     assert "--o11y-api-token <api-access-token>" not in text
-
-
-# --------------------------------------------------------------------------- #
-# F-0548 — installer verifies an independent pinned checksum before install
-# --------------------------------------------------------------------------- #
-def test_f0548_installer_verifies_pinned_checksum() -> None:
-    text = _read(INSTALLER)
-    assert "_sha256()" in text
-    assert "EXPECTED_SHA256" in text
-    assert "OPENSHELL_SANDBOX_SHA256" in text
-    assert "Integrity check failed" in text
-    assert "without an independent integrity anchor" in text
-    # fail-closed before any blob download, and verify before install
-    assert text.index("Refusing to install") < text.index("blobs/${LAYER_DIGEST}")
-    assert text.index("ACTUAL_SHA256=") < text.index("install -m 755")
 
 
 # --------------------------------------------------------------------------- #

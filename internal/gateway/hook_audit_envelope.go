@@ -116,6 +116,15 @@ type HookAuditEnvelope struct {
 	AgentExecutionID   string `json:"agent_execution_id,omitempty"`
 	AgentOperationID   string `json:"agent_operation_id,omitempty"`
 
+	// Caller identity, under the keys the hook_decision rows use, so an
+	// administrator who filters the audit by user also finds the connector
+	// hook rows (accepted and rejected) of that user's calls. See
+	// auditCallerIdentity; logConnectorHookAuditEnvelope fills them from the
+	// request context when the caller leaves them empty.
+	UserID     string `json:"user.id,omitempty"`
+	UserIDKind string `json:"defenseclaw.user.id_kind,omitempty"`
+	UserName   string `json:"defenseclaw.user.name,omitempty"`
+
 	// AuditActionOverride steers the audit ROW action (not the
 	// envelope JSON). When non-empty, the audit.Logger writes the
 	// row under this action constant instead of
@@ -171,6 +180,9 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	env.AgentExecutionID = stripLogInjectionRunes(env.AgentExecutionID)
 	env.AgentOperationID = stripLogInjectionRunes(env.AgentOperationID)
 	env.RawOrigin = stripLogInjectionRunes(env.RawOrigin)
+	env.UserID = stripLogInjectionRunes(env.UserID)
+	env.UserIDKind = stripLogInjectionRunes(env.UserIDKind)
+	env.UserName = stripLogInjectionRunes(env.UserName)
 	for i, id := range env.RawEventIDs {
 		env.RawEventIDs[i] = stripLogInjectionRunes(id)
 	}

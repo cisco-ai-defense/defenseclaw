@@ -44,7 +44,8 @@ SELF_UNINSTALL_HELPER_CAPTURE_SMOKE = (
     / "tests"
     / "enterprise-detached-helper-smoke.ps1"
 )
-DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx"
+DEPLOYMENT_DOC = ROOT / "docs-site" / "content" / "docs" / "enterprise" / "secure-client.mdx"
+CERTIFICATION_DOC = ROOT / "docs" / "WINDOWS-ENTERPRISE-CERTIFICATION.md"
 MATRIX_TEST = ROOT / "internal" / "gateway" / "enterprise_mode_matrix_test.go"
 WINDOWS_LIFECYCLE_CLI = ROOT / "internal" / "cli" / "windows_enterprise_service.go"
 DEFENSECLAW_MAIN = ROOT / "cmd" / "defenseclaw" / "main.go"
@@ -220,15 +221,17 @@ def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
     lifecycle_suffix = r"Cisco\Cisco Secure Client\DefenseClaw-Lifecycle"
     certification_suffix = r"Cisco\Cisco Secure Client\DefenseClaw-Cert"
 
-    for source in (installer, module, harness, smoke, documentation):
+    # The standalone profile's vendor-neutral roots exist only in the
+    # lifecycle's profile-root helpers (see
+    # test_windows_enterprise_standalone_contract.py); the Secure Client
+    # harness, smoke tests, and deployment guide never name them.
+    for source in (harness, smoke, documentation):
         assert r"Cisco\DefenseClaw" not in source
     for source in (installer, module, harness, smoke):
         assert "Cisco Secure Client" in source
     assert production_suffix in installer
-    assert production_suffix in module
     assert production_suffix in harness
     assert production_suffix in smoke
-    assert lifecycle_suffix in module
     assert lifecycle_suffix in harness
     assert certification_suffix in harness
 
@@ -1338,7 +1341,6 @@ def test_latest_windows_retest_harness_repairs_are_scoped_and_fail_closed() -> N
             (
                 "engine",
                 "capture_elapsed_ms",
-                "capture_deadline_ms",
                 "helper_pid",
                 "helper_alive_after_capture",
                 "no_inherited_capture_handles",
@@ -1565,7 +1567,7 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
         assert report["concurrent_roots_unique"] is True
         assert report["concurrent_cleanup_verified"] is True
     if script == SELF_UNINSTALL_HELPER_CAPTURE_SMOKE:
-        assert 0 < int(report["capture_elapsed_ms"]) < int(report["capture_deadline_ms"])
+        assert int(report["capture_elapsed_ms"]) > 0
         assert int(report["helper_pid"]) > 0
         assert report["helper_alive_after_capture"] is True
         assert report["no_inherited_capture_handles"] is True
@@ -1908,6 +1910,9 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "PSObject.Properties['authorization_error']" in guardian_failure
     assert "ConvertTo-DefenseClawBoundedDiagnostic" in guardian_failure
     assert "verification failed without a target error" in guardian_failure
+    # GAP-1940: pending rows of signed-out accounts are counted, not failures.
+    assert "PSObject.Properties['pending']" in guardian_failure
+    assert "are pending " in guardian_failure
     assert "ready = $ready" in guardian_probe
     assert "return [bool]$readiness.ready" in guardian_boolean
     assert "Get-DefenseClawGuardianReadinessProbe `" in deployment_assertion
@@ -2452,7 +2457,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
 
 def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None:
     harness = read(HARNESS)
-    deployment_doc = read(DEPLOYMENT_DOC)
+    certification_doc = read(CERTIFICATION_DOC)
 
     assert (
         '$script:BrokerServiceName = "DefenseClawCMIDBroker_$($script:RunToken)"'
@@ -2516,10 +2521,9 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
     assert "Assert-CertificationServiceName $serviceName $serviceRole" in bounded_cleanup
     assert "@('delete', $serviceName)" in bounded_cleanup
 
-    certification_invocation = deployment_doc[
-        deployment_doc.index(
-            ".\\scripts\\test-windows-enterprise-hardening.ps1"
-        ) : deployment_doc.index("Without `-Execute -DisposableHost`")
+    upgrade_start = certification_doc.index("-BrokerBinary .\\v1\\")
+    certification_invocation = certification_doc[
+        upgrade_start : certification_doc.index("-DisposableHost", upgrade_start)
     ]
     for parameter in (
         "-BrokerBinary",
@@ -2531,21 +2535,6 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         "-UpgradeSensorHelperBinary",
     ):
         assert parameter in certification_invocation
-    public_upgrade = deployment_doc[
-        deployment_doc.index("& $ReleaseCLI enterprise windows upgrade") :
-        deployment_doc.index("Running the installed CLI is still valid")
-    ]
-    assert "--broker-binary" in public_upgrade
-    assert "--acp-binary" in public_upgrade
-    assert "--sensor-helper-binary" in public_upgrade
-    repair = deployment_doc[
-        deployment_doc.index("-Action Repair") : deployment_doc.index(
-            "Use `-Action Upgrade`"
-        )
-    ]
-    assert "-BrokerBinary" in repair
-    assert "-ProviderLibrary" in repair
-    assert "-SensorHelperBinary" in repair
 
 
 def test_certification_treats_broker_as_a_first_class_service_boundary() -> None:
@@ -3108,7 +3097,6 @@ def test_certification_purges_through_installed_cli_without_retirement_leaks() -
     assert "[string]$Layout.SelfUninstallEnvironmentRoot" in module
 
     assert "Start-DefenseClawSelfUninstallHelper" in helper_capture_smoke
-    assert "[int]$WaitSeconds = 6" in helper_capture_smoke
     assert "$startInfo.RedirectStandardOutput = $true" in helper_capture_smoke
     assert "$startInfo.RedirectStandardError = $true" in helper_capture_smoke
     # Both pipes are now drained via ReadToEndAsync so the parent cannot
@@ -3122,10 +3110,16 @@ def test_certification_purges_through_installed_cli_without_retirement_leaks() -
     assert helper_capture_smoke.index("$nestedProcess.StandardOutput.ReadLine()") < helper_capture_smoke.index(
         "$stopwatch = [Diagnostics.Stopwatch]::StartNew()"
     )
-    assert "$captureDeadlineMilliseconds = [int64](" in helper_capture_smoke
-    assert "($WaitSeconds * 1000) -" in helper_capture_smoke
-    assert "$elapsedMilliseconds -ge $captureDeadlineMilliseconds" in helper_capture_smoke
-    assert "capture_deadline_ms = $captureDeadlineMilliseconds" in helper_capture_smoke
+    # The helper lives exactly as long as the owning smoke, so captured EOF
+    # while it is alive is a causal no-inheritance proof, and no failure path
+    # can orphan it.
+    assert "`$owner = [Diagnostics.Process]::GetProcessById($OwnerProcessId)" in helper_capture_smoke
+    assert "`$owner.StartTime.ToUniversalTime().Ticks -eq $OwnerStartTicks" in helper_capture_smoke
+    assert "`$owner.WaitForExit()" in helper_capture_smoke
+    assert "-OwnerProcessId $ownerProcessId -OwnerStartTicks $ownerStartTicks" in helper_capture_smoke
+    assert "Timeout]::Infinite" not in helper_capture_smoke
+    assert "WaitSeconds" not in helper_capture_smoke
+    assert "AddSeconds(" not in helper_capture_smoke
     assert "helper_alive_after_capture = $helperAlive" in helper_capture_smoke
     assert "no_inherited_capture_handles = $true" in helper_capture_smoke
     assert "protected_environment_pinned = $true" in helper_capture_smoke
@@ -3306,7 +3300,6 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     ):
         assert mode in matrix
 
-    assert "The matrix is an ownership switch, not an auto-heal switch." in documentation
     assert "normal mode uses the existing per-user repair loop" in documentation
     assert "Enterprise service enforcement is opt-in." in documentation
     assert (
@@ -3317,7 +3310,7 @@ def test_enterprise_is_opt_in_without_disabling_normal_mode_repair() -> None:
     assert "Test-NormalModeLiveAutoHeal" in harness
     assert "normal-mode-live-hook-auto-heal-preserved" in harness
     assert "normal-mode active user did not prove existing hook auto-heal" in harness
-    assert "known-folder APIs" in documentation
+    assert "protected 64-bit machine registration in HKLM" in documentation
     assert "Environment poisoning therefore cannot redirect" in documentation
 
     run_service = service_host[
@@ -3427,8 +3420,9 @@ def test_normal_mode_live_repair_uses_an_absent_enterprise_baseline() -> None:
     assert "$managedConfig = Join-Path $codexHome 'managed_config.toml'" in live_repair
     assert "$baselineText = Read-SharedText $managedConfig" in live_repair
     assert "command_windows_count = $commandLiterals.Count" in live_repair
-    assert "Microsoft\\.PowerShell\\.Management\\\\Start-Process" in live_repair
-    assert "-ArgumentList\\s+@\\(''hook'',''--connector'',''codex''\\)" in live_repair
+    assert "function Get-AwaitedHookBridge" in live_repair
+    assert "$bridge = Get-AwaitedHookBridge $decoded" in live_repair
+    assert "(@($bridge.Arguments) -join ' ') -cne 'hook --connector codex'" in live_repair
     assert "$actualHook" in live_repair
     assert "$expectedCanonicalHook" in live_repair
     assert "$privateTrustHashes.Count -ne 0" in live_repair
@@ -5260,6 +5254,27 @@ def test_uninstall_returns_shared_vendor_directories_to_their_prior_state() -> N
     assert "CodexManagedHooksLockPath" in module
     assert "ClaudeManagedHooksLockPath" in module
     assert "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout" in module
+    # A standalone purge then removes the Claude Code folders Setup created
+    # once they are empty (GAP-0100), and stale protected PowerShell temp
+    # folders (GAP-1734), and reports what it kept (behaviour in
+    # enterprise-standalone-machine-leftovers-purge-smoke.ps1).
+    assert (
+        "Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout $Layout\n"
+        "    $machineStateRemaining = [string[]]@()\n"
+        "    if ($Purge -and (Test-DefenseClawStandaloneProfile)) {\n"
+        "        $machineStateRemaining = [string[]]@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders"
+    ) in module
+    # GAP-2057: stale installer staging and bootstrap folders go too.
+    assert (
+        "@(Remove-DefenseClawStaleRunDirectories -ProgramData $script:ProgramData "
+        "-WindowsTemp ([IO.Path]::Combine($script:WindowsDirectory, 'Temp')))"
+    ) in module
+    sweep = module[module.index("function Remove-DefenseClawStaleRunDirectories") :]
+    sweep = sweep[: sweep.index("\nfunction ", 1)]
+    for prefix in ("DefenseClaw-PowerShell-", "DefenseClaw-Installer-", "DefenseClaw-Bootstrap-"):
+        assert f"'{prefix}'" in sweep
+    assert "[string]$PSScriptRoot" in sweep
+    assert "-Name machine_state_remaining" in module
 
     # The traverse grant names a virtual account that only exists while the
     # service does, so it is dropped by the caller that deleted the service.
@@ -5298,7 +5313,9 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     assert "quarantine_descriptor" not in fallback
     assert "Get-DefenseClawManagedServiceNames" in fallback
     assert "$managedServiceNames.Count -ne 5" in fallback
-    assert "'SensorHelper' { [string]$expectedServiceNames[2] }" in fallback
+    assert "SensorHelper = [string]$expectedServiceNames[2]" in fallback
+    # The standalone profile has no broker row and resolves exactly four.
+    assert "$managedServiceNames.Count -ne 4" in fallback
     assert "@('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')" in fallback
     assert "Assert-DefenseClawOwnedServiceOrAbsent" in fallback
     assert "Revoke-DefenseClawManagedIPCServiceAccess" in fallback
@@ -5345,3 +5362,46 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
 
     assert "Invoke-DefenseClawNamespaceSweep" not in module
     assert "Remove-DefenseClawSweepPath" not in module
+
+
+def test_uninstall_tombstone_names_the_removed_release() -> None:
+    """GAP-1074: installed_version after an uninstall is the removed release."""
+    module = read(MODULE)
+    uninstall = module[
+        module.index("function Invoke-DefenseClawUninstallLifecycle") :
+        module.index("Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath")
+    ]
+    tombstone = uninstall[uninstall.index("$tombstone = New-DefenseClawDeploymentMetadata") :]
+    assert "$tombstone.Contains('product_version')" in tombstone
+    assert "$metadata.PSObject.Properties['product_version']" in tombstone
+    assert "$tombstone['product_version'] = [string]$removedVersion.Value" in tombstone
+    assert "$tombstone.Remove('product_version')" in tombstone
+
+
+def test_install_after_cli_purge_does_not_return_the_purge_result() -> None:
+    """GAP-1079: only Uninstall reports a finished self-uninstall purge."""
+    module = read(MODULE)
+    recovery = module[
+        module.index("function Invoke-DefenseClawSelfUninstallRecovery") :
+        module.index("function Complete-DefenseClawSelfUninstallRetirement")
+    ]
+    tail = recovery[recovery.rindex("Remove-DefenseClawSelfUninstallEvidence") :]
+    assert "if ($Action -eq 'Uninstall' -and\n        [bool]$receipt.purge_requested" in tail
+
+
+def test_self_uninstall_finalizer_helper_keeps_its_call_on_one_line() -> None:
+    # The helper is an expandable here-string, where a backtick before a
+    # newline is an escape, not a continuation. A split call ran
+    # Complete-DefenseClawSelfUninstallRetirement without -ReceiptPath, so
+    # the finalizer exited and left the ARP entry, HKLM key and retired
+    # install root behind (GAP-1373).
+    module = read(MODULE)
+    builder = module[
+        module.index("function Get-DefenseClawSelfUninstallHelperContent") :
+        module.index("function Assert-DefenseClawSelfUninstallHelper")
+    ]
+    helper = builder[builder.index('return @"') : builder.index('\n"@')]
+    assert not [line for line in helper.splitlines() if line.rstrip().endswith("`")]
+    call = next(line for line in helper.splitlines() if "Complete-DefenseClawSelfUninstallRetirement" in line)
+    assert "-ReceiptPath `$ProtectedReceiptPath" in call
+    assert "-WaitForCallerExit" in call

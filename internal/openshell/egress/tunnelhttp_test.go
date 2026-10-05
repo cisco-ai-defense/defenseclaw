@@ -1,0 +1,404 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package egress
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// readTunnelRefusal reads the JSON refusal written into a tunnel and checks
+// that the tunnel closes after it.
+func readTunnelRefusal(t *testing.T, br *bufio.Reader) BlockResponse {
+	t.Helper()
+	resp, body := readResponse(t, br)
+	b := decodeBlock(t, body)
+	if resp.StatusCode != http.StatusBadRequest || !resp.Close || b.Category != CategoryInvalidDestination || b.Source != SourceGuard ||
+		b.Unblockable || b.Host != "example.com" {
+		t.Errorf("refusal %d close=%v body %+v", resp.StatusCode, resp.Close, b)
+	}
+	if _, err := br.ReadByte(); !errors.Is(err, io.EOF) {
+		t.Errorf("tunnel left open after the refusal (%v)", err)
+	}
+	return b
+}
+
+// hostRecorder is an upstream that records the Host of every request it
+// serves and describes each request in its response.
+type hostRecorder struct {
+	mu    sync.Mutex
+	hosts []string
+}
+
+func (rec *hostRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	rec.mu.Lock()
+	rec.hosts = append(rec.hosts, r.Host)
+	rec.mu.Unlock()
+	fmt.Fprintf(w, "%s %s %s body=%q te=%v ua=%q", r.Method, r.Host, r.URL.RequestURI(), body, r.TransferEncoding, r.UserAgent())
+}
+
+func (rec *hostRecorder) seen() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return append([]string(nil), rec.hosts...)
+}
+
+// Plain HTTP through CONNECT, as undici sends http:// URLs, works when every
+// request is for the tunnel's host: pipelined requests, chunked bodies and
+// absolute-form request targets are forwarded and answered in order.
+func TestTunnelHTTPForwardsRequestsForItsHost(t *testing.T) {
+	h := newHarness(t, nil)
+	h.serve(80, (&hostRecorder{}).ServeHTTP)
+	requests := "GET /one HTTP/1.1\r\nHost: EXAMPLE.com:80\r\n\r\n" +
+		"POST /two HTTP/1.1\r\nHost: example.com.\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n" +
+		"GET http://example.com/three?q=1 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: agent/1\r\n\r\n"
+	conn, br := h.tunnel("example.com:80", []byte(requests))
+	for _, want := range []string{
+		`GET EXAMPLE.com:80 /one body="" te=[] ua=""`,
+		`POST example.com. /two body="hello" te=[chunked] ua=""`,
+		`GET example.com /three?q=1 body="" te=[] ua="agent/1"`,
+	} {
+		if resp, body := readResponse(t, br); resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("response = %d %q, want %q", resp.StatusCode, body, want)
+		}
+	}
+	_ = conn.Close()
+	if closed := h.sink.wait(t, EventClosed, 1)[0]; closed.Terminated || closed.BytesUp < int64(len("GET /one HTTP/1.1\r\n")) || closed.BytesDown == 0 {
+		t.Errorf("closed event = %+v", closed)
+	}
+	if n := len(h.sink.ofKind(EventBlocked)); n != 0 {
+		t.Errorf("%d blocked events", n)
+	}
+}
+
+// A request in a tunnel for any other host, or another port, is refused
+// before it reaches the upstream: its Host header could otherwise select any
+// site served from the tunnel's address.
+func TestTunnelHTTPRefusesOtherHosts(t *testing.T) {
+	rec := &hostRecorder{}
+	h := newHarness(t, func(c *harnessConfig) { c.opts.MaxHeaderBytes = 2048 })
+	h.serve(80, rec.ServeHTTP)
+	tests := []struct {
+		name, request, reason string
+	}{
+		{"Host header", "GET /raw HTTP/1.1\r\nHost: pastebin.com\r\n\r\n", "asked for pastebin.com"},
+		{"absolute-form target", "GET http://pastebin.com/raw HTTP/1.1\r\nHost: example.com\r\n\r\n", "asked for pastebin.com"},
+		{"other port", "GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n", "asked for example.com:8080"},
+		{"leading empty lines", "\r\n\r\nPOST /hook HTTP/1.1\r\nHost: webhook.site\r\nContent-Length: 2\r\n\r\nhi", "asked for webhook.site"},
+		{"lower-case version", "GET / http/1.1\r\nHost: example.com\r\n\r\n", "malformed"},
+		{"HTTP/2 request line", "GET / HTTP/2.0\r\nHost: example.com\r\n\r\n", "not HTTP/1.x"},
+		{"header too large", "GET / HTTP/1.1\r\nHost: example.com\r\nX-Big: " + strings.Repeat("a", 8<<10) + "\r\n\r\n", "too large"},
+	}
+	for i, tt := range tests {
+		_, br := h.tunnel("example.com:80", []byte(tt.request))
+		if b := readTunnelRefusal(t, br); !strings.Contains(b.Reason, tt.reason) {
+			t.Errorf("%s: reason %q does not mention %q", tt.name, b.Reason, tt.reason)
+		}
+		if e := h.sink.wait(t, EventBlocked, i+1)[i]; e.TunnelID == "" || e.Category != CategoryInvalidDestination ||
+			e.Method != http.MethodConnect || e.Status != http.StatusBadRequest {
+			t.Errorf("%s: blocked event = %+v", tt.name, e)
+		}
+	}
+
+	// A refused request after an accepted one ends the tunnel too.
+	conn, br := h.tunnel("example.com:80", []byte("GET /ok HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+	if resp, _ := readResponse(t, br); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first request = %d", resp.StatusCode)
+	}
+	fmt.Fprint(conn, "GET /raw HTTP/1.1\r\nHost: pastebin.com\r\n\r\n")
+	readTunnelRefusal(t, br)
+
+	if got := rec.seen(); len(got) != 1 || got[0] != "example.com" {
+		t.Errorf("the upstream served hosts %q; only the one allowed request may reach it", got)
+	}
+	eventually(t, "every tunnel to close", func() bool { return len(h.sink.ofKind(EventClosed)) == len(tests)+1 })
+	for _, e := range h.sink.ofKind(EventClosed) {
+		if !e.Terminated {
+			t.Errorf("closed event of a refused tunnel = %+v", e)
+		}
+	}
+}
+
+// Protocols other than TLS and HTTP/1.x are relayed only on a port the
+// operator added: the CONNECT target decided the destination, and nothing
+// inside them can name another host. The web ports refuse them, HTTP/2
+// prior knowledge included.
+func TestTunnelOpaqueProtocols(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) { c.decider.Ports = []int{80, 443, 5432} })
+	sinkAddr, received := startSink(t)
+	h.dialer.route(80, sinkAddr)
+	h.dialer.route(443, sinkAddr)
+	h.dialer.route(5432, startEcho(t))
+
+	ssh, binary, h2Preface := []byte("SSH-2.0-OpenSSH_9.6\r\n"), []byte{0, 0, 0, 8, 4, 0xd2, 0x16, 0x2f}, []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	for _, data := range [][]byte{ssh, binary, h2Preface} {
+		conn, br := h.tunnel("example.com:5432", data)
+		got := make([]byte, len(data))
+		if _, err := io.ReadFull(br, got); err != nil || !bytes.Equal(got, data) {
+			t.Errorf("extra port relay of %q = %q, %v", data, got, err)
+		}
+		_ = conn.Close()
+	}
+	for _, tt := range []struct {
+		target string
+		data   []byte
+	}{
+		{"example.com:443", ssh},
+		{"example.com:80", binary},
+		{"example.com:80", h2Preface},
+		{"example.com:443", h2Preface},
+		{"example.com:80", []byte("get foo\r\n")},
+	} {
+		_, br := h.tunnel(tt.target, tt.data)
+		if b := readTunnelRefusal(t, br); !strings.Contains(b.Reason, "neither TLS nor an HTTP/1.x request") {
+			t.Errorf("%s %q: reason %q", tt.target, tt.data, b.Reason)
+		}
+	}
+	eventually(t, "the refused tunnels to close", func() bool { return len(h.sink.ofKind(EventClosed)) == 8 })
+	if n := received(); n != 0 {
+		t.Errorf("the web-port upstream received %d bytes", n)
+	}
+}
+
+// A first flight split across small writes is buffered until it can be
+// classified; one that never completes its first line is refused after
+// HeaderTimeout rather than guessed at.
+func TestTunnelFirstFlightSplit(t *testing.T) {
+	h := newHarness(t, func(c *harnessConfig) {
+		c.opts.HeaderTimeout = 300 * time.Millisecond
+		c.decider.Ports = []int{80, 443, 2222}
+	})
+	h.serve(80, (&hostRecorder{}).ServeHTTP)
+	h.dialer.route(2222, startEcho(t))
+	writeSlowly := func(conn net.Conn, parts ...string) {
+		t.Helper()
+		for _, part := range parts {
+			_, err := io.WriteString(conn, part)
+			must(t, err)
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	conn, br := h.tunnel("example.com:80", nil)
+	writeSlowly(conn, "\r\n", "GE", "T /split HT", "TP/1.1\r\nHo", "st: example.com\r\n\r\n")
+	if _, body := readResponse(t, br); !strings.HasPrefix(string(body), "GET example.com /split") {
+		t.Errorf("split request = %q", body)
+	}
+	// A stray empty line before an idle pause is not the start of a slow
+	// request head.
+	writeSlowly(conn, "\r\n")
+	time.Sleep(450 * time.Millisecond)
+	fmt.Fprint(conn, "GET /later HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if resp, _ := readResponse(t, br); resp.StatusCode != http.StatusOK {
+		t.Fatalf("request after a pause = %d", resp.StatusCode)
+	}
+	_ = conn.Close()
+
+	conn, br = h.tunnel("example.com:2222", nil)
+	writeSlowly(conn, "SSH-2.0", "-client\r\n")
+	got := make([]byte, len("SSH-2.0-client\r\n"))
+	if _, err := io.ReadFull(br, got); err != nil || string(got) != "SSH-2.0-client\r\n" {
+		t.Errorf("split opaque flight = %q, %v", got, err)
+	}
+	_ = conn.Close()
+
+	// An unfinished request line would otherwise let the rest of a request
+	// through unread, on any port.
+	for _, target := range []string{"example.com:80", "example.com:2222"} {
+		start := time.Now()
+		_, br = h.tunnel(target, []byte("GET / HTTP/1.1"))
+		if b := readTunnelRefusal(t, br); !strings.Contains(b.Reason, "did not arrive in full") || time.Since(start) > 3*time.Second {
+			t.Errorf("%s: stalled request line refused after %v: %q", target, time.Since(start), b.Reason)
+		}
+	}
+}
+
+// After 101 Switching Protocols to an Upgrade request the tunnel relays the
+// new protocol as is. An Upgrade the upstream declines leaves the tunnel
+// inspected.
+func TestTunnelHTTPUpgrade(t *testing.T) {
+	h := newHarness(t, nil)
+	h.serve(80, wsHandler)
+	upgrade := func(path string) []byte {
+		return []byte("GET " + path + " HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: keep-alive, Upgrade\r\n\r\n")
+	}
+	conn, br := h.tunnel("example.com:80", upgrade("/ws"))
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade = %v, %v", resp, err)
+	}
+	frames := "frame-data GET / HTTP/1.1\r\nHost: pastebin.com\r\n\r\n"
+	fmt.Fprint(conn, frames)
+	got := make([]byte, len(frames))
+	if _, err := io.ReadFull(br, got); err != nil || string(got) != frames {
+		t.Fatalf("frames after the upgrade = %q, %v", got, err)
+	}
+	_ = conn.Close()
+
+	conn, br = h.tunnel("example.com:80", upgrade("/plain"))
+	if resp, _ := readResponse(t, br); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("declined upgrade = %d", resp.StatusCode)
+	}
+	fmt.Fprint(conn, "GET /raw HTTP/1.1\r\nHost: pastebin.com\r\n\r\n")
+	readTunnelRefusal(t, br)
+}
+
+// A refused request pipelined behind allowed ones is answered only after
+// their responses, so the client never takes the refusal for the answer to
+// an earlier request; when the upstream's responses cannot be followed, the
+// tunnel closes without a refusal rather than splice one into them.
+func TestTunnelHTTPRefusalWaitsForPipelinedResponses(t *testing.T) {
+	h := newHarness(t, nil)
+	h.serve(80, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, "slow "+r.URL.Path)
+	})
+	refused := "GET /raw HTTP/1.1\r\nHost: other-host.example\r\n\r\n"
+	_, br := h.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\nGET /two HTTP/1.1\r\nHost: example.com\r\n\r\n"+refused))
+	for _, path := range []string{"/one", "/two"} {
+		if resp, body := readResponse(t, br); resp.StatusCode != http.StatusOK || string(body) != "slow "+path {
+			t.Fatalf("the response read for %s is %d %q", path, resp.StatusCode, body)
+		}
+	}
+	readTunnelRefusal(t, br)
+
+	// Responses the proxy cannot follow: the tunnel just closes.
+	h2 := newHarness(t, nil)
+	h2.dialer.route(80, startTCP(t, func(c net.Conn) {
+		if _, err := http.ReadRequest(bufio.NewReader(c)); err == nil {
+			fmt.Fprint(c, "not a response\r\n")
+			time.Sleep(2 * time.Second)
+		}
+	}))
+	_, br = h2.tunnel("example.com:80", []byte("GET /one HTTP/1.1\r\nHost: example.com\r\n\r\n"+refused))
+	if rest, _ := io.ReadAll(br); string(rest) != "not a response\r\n" {
+		t.Errorf("the client read %q; want the upstream's bytes and no refusal spliced in", rest)
+	}
+	if e := h2.sink.wait(t, EventBlocked, 1)[0]; e.TunnelID == "" || e.Category != CategoryInvalidDestination {
+		t.Errorf("blocked event = %+v", e)
+	}
+}
+
+// switchingUpstream answers every request with 101 Switching Protocols
+// whatever it asked for, then records everything else it receives.
+type switchingUpstream struct {
+	mu       sync.Mutex
+	upgrades []string
+	after    bytes.Buffer
+}
+
+func (s *switchingUpstream) start(t *testing.T) string {
+	return startTCP(t, func(c net.Conn) {
+		br := bufio.NewReader(c)
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		s.mu.Lock()
+		s.upgrades = append(s.upgrades, req.Header.Get("Upgrade")+"|"+req.Header.Get("Http2-Settings"))
+		s.mu.Unlock()
+		fmt.Fprint(c, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n")
+		buf := make([]byte, 4096)
+		for {
+			n, err := br.Read(buf)
+			s.mu.Lock()
+			s.after.Write(buf[:n])
+			s.mu.Unlock()
+			if err != nil {
+				return
+			}
+		}
+	})
+}
+
+func (s *switchingUpstream) seen() ([]string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.upgrades...), s.after.String()
+}
+
+// Only WebSocket upgrades are honored. Any other offer (h2c, RFC 2817
+// TLS/1.0) is stripped, HTTP2-Settings with it, so the request goes out as
+// plain HTTP/1.1; an upstream that switches protocols anyway gets nothing
+// the proxy has not inspected, since HTTP/2 streams or a ClientHello after
+// the switch could name any other site on the server.
+func TestTunnelHTTPOnlyWebSocketUpgrades(t *testing.T) {
+	h := newHarness(t, nil)
+	h.serve(80, func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "upgrade=%q settings=%q connection=%q", r.Header.Get("Upgrade"), r.Header.Get("Http2-Settings"), r.Header.Get("Connection"))
+	})
+	for _, offer := range []string{
+		"Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n",
+		"Connection: keep-alive, upgrade\r\nUpgrade: TLS/1.0\r\n",
+		"Connection: Upgrade\r\nUpgrade: websocket, h2c\r\n",
+	} {
+		conn, br := h.tunnel("example.com:80", []byte("GET /h HTTP/1.1\r\nHost: example.com\r\n"+offer+"\r\n"))
+		if resp, body := readResponse(t, br); resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `upgrade="" settings=""`) ||
+			strings.Contains(strings.ToLower(string(body)), "connection=\"upgrade") {
+			t.Errorf("%q reached the upstream as %d %q", offer, resp.StatusCode, body)
+		}
+		// Still inspected: a request for another host is refused.
+		fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: pastebin.com\r\n\r\n")
+		readTunnelRefusal(t, br)
+	}
+
+	// An upstream that switches without being offered a switch.
+	sw := &switchingUpstream{}
+	h2 := newHarness(t, nil)
+	h2.dialer.route(80, sw.start(t))
+	conn, br := h2.tunnel("example.com:80", []byte("GET / HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade, HTTP2-Settings\r\n"+
+		"Upgrade: h2c\r\nHTTP2-Settings: AAMAAABkAAQAoAAAAAIAAAAA\r\n\r\n"))
+	if resp, err := http.ReadResponse(br, nil); err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("switching upstream = %v, %v", resp, err)
+	}
+	fmt.Fprint(conn, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+	readTunnelRefusal(t, br)
+	eventually(t, "the tunnel to close", func() bool { return len(h2.sink.ofKind(EventClosed)) == 1 })
+	if upgrades, after := sw.seen(); len(upgrades) != 1 || upgrades[0] != "|" || strings.Contains(after, "PRI") {
+		t.Errorf("the upstream saw upgrade offers %q and then %q", upgrades, after)
+	}
+}
+
+func TestClassifyFlight(t *testing.T) {
+	for want, flights := range map[flightKind][]string{
+		// Not enough to tell yet.
+		flightUnknown: {"", "\r\n", "\n", "GET", "GET / HT", "GET / HTTP/1.1\r", "GET / HTTP/1.1\rHost: example.com", "SSH-2.0-OpenSSH"},
+		flightHTTP: {"GET / HTTP/1.1\r\n", "\r\nget /x HTTP/1.0\n", "GET\t/\thttp/1.1\r\n", "GET / HTTP/1.1 junk\r\n",
+			"GET / HTTP/2.0\r\n", "GET /caf\xc3\xa9 HTTP/1.1\r\n", "CONNECT host:443 HTTP/1.1\r\n\r\n", "OPTIONS * HTTP/1.1\r\nHost: x\r\n",
+			" GET / HTTP/1.1\r\n", "M-SEARCH * HTTP/1.1\r\n", "\r\n\r\n\r\nPOST / HTTP/1.1\r\n", "hello world HTTP/1.1 there\r\n",
+			"GET /x HTTP/\r\n", "GET /\tHTTP/1.1\r\n", "GET / HTTP/1.1\r\nHost: example.co"},
+		flightOpaque: {"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", "PRI * HTTP/2.0\r\n", "SSH-2.0-OpenSSH_9.6\r\n", "get foo\r\n",
+			"\x00\x00\x00\x08", "{\"jsonrpc\":\"2.0\"}", "GET /\x01 HTTP/1.1\r\n", "G\x80T / HTTP/1.1\r\n", "*1\r\n$4\r\nPING\r\n",
+			"QUIT\r\n", "GET / HTTP/1.1\x7f\r\n", "STARTTLS\r\n", "EHLO client.example.com\r\n", "GET /x HTTPS/1.1\r\n", "A B C D E F\r\n"},
+	} {
+		for _, in := range flights {
+			if got := classifyFlight([]byte(in)); got != want {
+				t.Errorf("classifyFlight(%q) = %d, want %d", in, got, want)
+			}
+		}
+	}
+}

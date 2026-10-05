@@ -22,20 +22,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
@@ -50,8 +51,6 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}{
 		{NewHermesConnector(), true, false, false, "user", "config.yaml"},
 		{NewCursorConnector(), true, false, true, "user", "hooks.json"},
-		{NewWindsurfConnector(), true, false, true, "user", "hooks.json"},
-		{NewGeminiCLIConnector(), true, false, true, "user", "settings.json"},
 		{NewCopilotConnector(), true, true, false, "user,workspace", "defenseclaw.json"},
 		{NewOpenHandsConnector(), true, false, true, "user,workspace", "hooks.json"},
 		{NewAntigravityConnector(), true, true, false, "user", "hooks.json"},
@@ -872,8 +871,6 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	}{
 		{NewHermesConnector(), []string{"skill"}, false, true, true},
 		{NewCursorConnector(), []string{"skill", "rule"}, false, true, true},
-		{NewWindsurfConnector(), []string{"rule"}, false, false, true},
-		{NewGeminiCLIConnector(), []string{"skill"}, true, true, true},
 		{NewCopilotConnector(), []string{"skill", "rule"}, false, true, true},
 		{NewOpenHandsConnector(), []string{"skill"}, runtime.GOOS == "darwin", false, true},
 		{NewAntigravityConnector(), nil, false, true, true},
@@ -898,158 +895,6 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 			}
 			if caps.Plugins.Supported != tc.pluginsSupported {
 				t.Fatalf("Plugins.Supported = %v, want %v", caps.Plugins.Supported, tc.pluginsSupported)
-			}
-		})
-	}
-}
-
-func TestWindsurfConnector_CascadeOnlyInventorySurfaces(t *testing.T) {
-	t.Setenv("WINDSURF_USER_HOME", "")
-	t.Setenv("WINDSURF_HOOK_CONFIG_PATH", "")
-	home := filepath.Join(t.TempDir(), "bound-profile")
-	workspace := filepath.Join(t.TempDir(), "repo")
-	err := WithUserHomeDir(home, func() error {
-		caps := NewWindsurfConnector().Capabilities(SetupOpts{WorkspaceDir: workspace})
-		wantMCP := []string{filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")}
-		if !caps.MCP.Supported || !caps.MCP.DiscoveryOnly || !sameStrings(caps.MCP.ReadPaths, wantMCP) {
-			return fmt.Errorf("Windsurf MCP capability = %+v, want bound legacy Cascade path %v", caps.MCP, wantMCP)
-		}
-		for _, path := range caps.MCP.ReadPaths {
-			if filepath.Base(path) == "mcp.json" {
-				return fmt.Errorf("undocumented guessed MCP path remains: %q", path)
-			}
-		}
-		wantSkills := []string{
-			filepath.Join(home, ".codeium", "windsurf", "skills"),
-			filepath.Join(home, ".agents", "skills"),
-			filepath.Join(workspace, ".windsurf", "skills"),
-			filepath.Join(workspace, ".agents", "skills"),
-		}
-		if !caps.Skills.Supported || !caps.Skills.DiscoveryOnly || !sameStrings(caps.Skills.ReadPaths, wantSkills) {
-			return fmt.Errorf("Windsurf skills capability = %+v, want %v", caps.Skills, wantSkills)
-		}
-		rulePaths := strings.Join(caps.Rules.ReadPaths, "\n")
-		for _, want := range []string{"global_rules.md", ".devin", ".windsurf", ".windsurfrules", "AGENTS.md"} {
-			if !strings.Contains(rulePaths, want) {
-				return fmt.Errorf("Windsurf rule paths %v missing %q", caps.Rules.ReadPaths, want)
-			}
-		}
-		notes := strings.Join(append(append([]string{}, caps.MCP.Notes...), caps.Rules.Notes...), " ")
-		for _, want := range []string{"Devin Local", "ProgramData", "unverified"} {
-			if !strings.Contains(notes, want) {
-				return fmt.Errorf("Windsurf capability notes %q missing %q", notes, want)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestWindsurfConnector_UsesOnePersistedProfileForHooksAndInventory(t *testing.T) {
-	previousOverride := WindsurfHooksPathOverride
-	WindsurfHooksPathOverride = ""
-	t.Cleanup(func() { WindsurfHooksPathOverride = previousOverride })
-
-	bound := filepath.Join(t.TempDir(), "windsurf-profile")
-	hooks := filepath.Join(bound, ".codeium", "windsurf", "hooks.json")
-	t.Setenv("WINDSURF_USER_HOME", bound)
-	t.Setenv("WINDSURF_HOOK_CONFIG_PATH", hooks)
-	conn := NewWindsurfConnector()
-	opts := SetupOpts{WorkspaceDir: filepath.Join(t.TempDir(), "workspace")}
-
-	if got := windsurfHooksPath(opts); got != hooks {
-		t.Fatalf("hooks path = %q, want persisted binding %q", got, hooks)
-	}
-	caps := conn.Capabilities(opts)
-	profilePaths := append([]string{}, caps.MCP.ReadPaths...)
-	profilePaths = append(profilePaths, caps.Skills.ReadPaths[:2]...)
-	profilePaths = append(profilePaths, caps.Rules.ReadPaths[0])
-	for _, path := range profilePaths {
-		if !strings.HasPrefix(filepath.Clean(path), filepath.Clean(bound)+string(filepath.Separator)) {
-			t.Fatalf("inventory path escaped persisted profile: %q", path)
-		}
-	}
-
-	t.Setenv("WINDSURF_HOOK_CONFIG_PATH", filepath.Join(t.TempDir(), "other", "hooks.json"))
-	if got := windsurfHooksPath(opts); got != "" {
-		t.Fatalf("mismatched hook binding resolved to %q, want fail-closed empty path", got)
-	}
-	if err := conn.Setup(context.Background(), SetupOpts{DataDir: t.TempDir()}); err == nil ||
-		!strings.Contains(err.Error(), "WINDSURF_HOOK_CONFIG_PATH does not match") {
-		t.Fatalf("Setup path mismatch error = %v", err)
-	}
-}
-
-func TestWindsurfOwnedHooksPresent_RequiresExactTwelveEventContract(t *testing.T) {
-	for _, goos := range []string{"windows", "linux"} {
-		t.Run(goos, func(t *testing.T) {
-			previousOverride := WindsurfHooksPathOverride
-			path := filepath.Join(t.TempDir(), "hooks.json")
-			WindsurfHooksPathOverride = path
-			t.Cleanup(func() { WindsurfHooksPathOverride = previousOverride })
-
-			conn := NewWindsurfConnector()
-			opts := SetupOpts{DataDir: t.TempDir()}
-			command := conn.hookCommandForOS(goos, opts)
-			entry := map[string]interface{}{"show_output": true}
-			if goos == "windows" {
-				entry["powershell"] = command
-			} else {
-				entry["command"] = shellWord(command)
-			}
-			hooks := make(map[string]interface{}, len(windsurfCascadeHookEvents))
-			for _, event := range windsurfCascadeHookEvents {
-				hooks[event] = []interface{}{
-					map[string]interface{}{"command": "operator-hook"},
-					maps.Clone(entry),
-				}
-			}
-			cfg := map[string]interface{}{"hooks": hooks}
-			writeFixture := func() {
-				t.Helper()
-				body, err := json.MarshalIndent(cfg, "", "  ")
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			writeFixture()
-			present, err := windsurfOwnedHooksPresentForOS(conn, opts, goos)
-			if err != nil || !present {
-				t.Fatalf("complete Cascade contract = %v, %v; want true", present, err)
-			}
-
-			delete(hooks, windsurfCascadeHookEvents[len(windsurfCascadeHookEvents)-1])
-			writeFixture()
-			present, err = windsurfOwnedHooksPresentForOS(conn, opts, goos)
-			if err != nil || present {
-				t.Fatalf("eleven-event Cascade contract = %v, %v; want false", present, err)
-			}
-
-			if goos == "windows" {
-				hooks[windsurfCascadeHookEvents[len(windsurfCascadeHookEvents)-1]] = []interface{}{maps.Clone(entry)}
-				managed := hooks[windsurfCascadeHookEvents[0]].([]interface{})[1].(map[string]interface{})
-				managed["command"] = command
-				writeFixture()
-				present, err = windsurfOwnedHooksPresentForOS(conn, opts, goos)
-				if err != nil || present {
-					t.Fatalf("Windows fallback-bearing contract = %v, %v; want false", present, err)
-				}
-
-				delete(managed, "command")
-				hooks[windsurfCascadeHookEvents[0]] = append(
-					hooks[windsurfCascadeHookEvents[0]].([]interface{}),
-					map[string]interface{}{"command": command, "show_output": true},
-				)
-				writeFixture()
-				present, err = windsurfOwnedHooksPresentForOS(conn, opts, goos)
-				if err != nil || present {
-					t.Fatalf("separate Windows fallback contract = %v, %v; want false", present, err)
-				}
 			}
 		})
 	}
@@ -1187,7 +1032,6 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	workspace := filepath.Join(dir, "repo")
 	testenv.SetHome(t, home)
 	t.Setenv("ANTIGRAVITY_CONFIG_DIR", filepath.Join(dir, "vendor-looking-decoy"))
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(dir, "gemini-decoy"))
 
 	conn := NewAntigravityConnector()
 	opts := SetupOpts{
@@ -1373,6 +1217,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: t.TempDir()}
 			if conn.Name() == "hermes" {
 				opts = prepareHermesSetupAdmissionFixture(t, opts)
+			}
+			if conn.Name() == "openhands" {
+				opts = prepareOpenHandsSetupAdmissionFixture(t, opts)
 			}
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
@@ -2138,6 +1985,55 @@ func TestHermesAllowlistSurgicalCleanupPreservesForeignEntries(t *testing.T) {
 			t.Fatalf("managed approval survived surgical cleanup: %#v", entry)
 		}
 	}
+
+	// Files put back from an enrolled state (a commented config.yaml with
+	// DefenseClaw's hooks, the allowlist with its approvals) are what the
+	// next Setup captures. Teardown still takes out only DefenseClaw's
+	// entries, and every other config.yaml byte stays.
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	enrolledConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrolledAllowlist, err := os.ReadFile(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("second Teardown: %v", err)
+	}
+	if err := os.WriteFile(configPath, append([]byte("# Hermes settings\n"), enrolledConfig...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(allowlistPath, enrolledAllowlist, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over put-back files: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown over put-back files: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean over put-back files: %v", err)
+	}
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(config, []byte("# Hermes settings\nhooks_auto_accept: false\n")) || bytes.Contains(config, []byte(conn.hookCommand(opts))) {
+		t.Fatalf("config.yaml after teardown over put-back files:\n%s", config)
+	}
+	if cleaned, err = readHermesAllowlist(allowlistPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range cleaned["approvals"].([]interface{}) {
+		if entry := raw.(map[string]interface{}); entry[hermesAllowlistOwnerField] == true {
+			t.Fatalf("managed approval survived teardown over put-back files: %#v", entry)
+		}
+	}
 }
 
 func TestHermesAllowlistTamperedOwnershipRefusesAmbiguousCleanup(t *testing.T) {
@@ -2227,17 +2123,6 @@ func TestHermesSetupRejectsNamedAndMultiplexProfilesBeforeMutation(t *testing.T)
 			}
 			return filepath.Join(root, "config.yaml")
 		}},
-		{"multiplex config", func(t *testing.T, root string) string {
-			path := filepath.Join(root, "config.yaml")
-			if err := os.WriteFile(path, []byte("gateway:\n  multiplex_profiles: true\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return path
-		}},
-		{"multiplex environment", func(t *testing.T, root string) string {
-			t.Setenv("GATEWAY_MULTIPLEX_PROFILES", "yes")
-			return filepath.Join(root, "config.yaml")
-		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := testenv.PrivateTempDir(t)
@@ -2250,10 +2135,43 @@ func TestHermesSetupRejectsNamedAndMultiplexProfilesBeforeMutation(t *testing.T)
 			if err == nil || !strings.Contains(err.Error(), "unsupported by the single-HERMES_HOME connector") {
 				t.Fatalf("Setup error = %v, want unsupported profile topology", err)
 			}
+			// The gateway keeps an earlier setup's hooks after this refusal
+			// instead of rolling them back (GAP-1851).
+			if !errors.Is(err, ErrSetupRefusedUnchanged) {
+				t.Fatalf("Setup error = %v, want ErrSetupRefusedUnchanged", err)
+			}
+			if !strings.Contains(err.Error(), "hermes profile") {
+				t.Fatalf("Setup error = %v, want a hint naming the Hermes command that fixes it", err)
+			}
 			if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
 				t.Fatalf("Setup mutated data dir before rejecting profile topology: %v", statErr)
 			}
 		})
+	}
+}
+
+// Hermes writes its default gateway.multiplex_profiles: true into config.yaml
+// by itself (hermes mcp add, for one). With no named profile under profiles/
+// a multiplexing gateway serves only the default HERMES_HOME, so the
+// single-profile connector admits it (GAP-1844).
+func TestHermesSingleProfileAdmitsDefaultMultiplexWithoutNamedProfiles(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("gateway:\n  multiplex_profiles: true\n  auto_multiplex_migration: true\n  profile_routes: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GATEWAY_MULTIPLEX_PROFILES", "true")
+	if err := validateHermesSingleProfile(configPath); err != nil {
+		t.Fatalf("validateHermesSingleProfile = %v, want nil for a default-only multiplex config", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "coder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHermesSingleProfile(configPath); err == nil || !strings.Contains(err.Error(), "hermes profile delete coder") {
+		t.Fatalf("validateHermesSingleProfile = %v, want a named-profile refusal with its fix", err)
 	}
 }
 
@@ -2413,7 +2331,7 @@ func TestAntigravitySetup_WritesOfficialMixedSchema(t *testing.T) {
 		}
 		if runtime.GOOS == "windows" {
 			decoded := decodePowerShellEncodedCommandForTest(t, eventCommand)
-			if !strings.Contains(decoded, "'--event','"+event+"'") ||
+			if !strings.Contains(decoded, "'--event' '"+event+"'") ||
 				!strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
 				t.Errorf("%s encoded command is not event-bound:\n%s", event, decoded)
 			}
@@ -2625,6 +2543,9 @@ func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
 		APIAddr:      "127.0.0.1:18970",
 		APIToken:     "tok-test",
 	}
+	if runtime.GOOS == "darwin" {
+		opts.AgentExecutable, opts.AgentVersion = seedOpenHandsDarwinSelection(t, opts.DataDir, filepath.Join(dir, "bin"))
+	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
@@ -2680,50 +2601,58 @@ func newOpenHandsTokenLifecycleFixture(t *testing.T) (*hookOnlyConnector, SetupO
 		APIAddr:      "127.0.0.1:18970",
 		APIToken:     "gateway-token-must-not-be-published",
 	}
-	if runtime.GOOS == "darwin" {
-		trustedDir := filepath.Join(root, "trusted")
-		if err := os.MkdirAll(trustedDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		executable := filepath.Join(trustedDir, "openhands")
-		if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
-		if !ok {
-			t.Fatal("capture OpenHands setup-selected executable evidence")
-		}
-		now := time.Now().UTC().Truncate(time.Second)
-		receipt := agentSelectionReceipt{
-			SchemaVersion: agentSelectionSchemaVersion,
-			UpdatedAt:     now.Format(time.RFC3339),
-			Selections: map[string]agentSelectionEvidence{
-				"openhands": {
-					Connector:         "openhands",
-					Source:            "setup-selected",
-					Executable:        stablePath,
-					RawVersion:        "OpenHands CLI 1.16.0",
-					NormalizedVersion: "1.16.0",
-					SHA256:            digest,
-					SelectedAt:        now.Format(time.RFC3339),
-					ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
-				},
-			},
-		}
-		body, err := json.Marshal(receipt)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(opts.DataDir, agentSelectionFile), body, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		opts.AgentVersion = "OpenHands CLI 1.16.0"
-		opts.AgentExecutable = stablePath
+	return NewOpenHandsConnector(), prepareOpenHandsSetupAdmissionFixture(t, opts), configPath
+}
+
+// prepareOpenHandsSetupAdmissionFixture gives opts the protected
+// setup-selected executable receipt that OpenHands Setup requires on macOS.
+func prepareOpenHandsSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return opts
 	}
-	return NewOpenHandsConnector(), opts, configPath
+	trustedDir := filepath.Join(testenv.PrivateTempDir(t), "trusted")
+	if err := os.MkdirAll(trustedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(trustedDir, "openhands")
+	if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("capture OpenHands setup-selected executable evidence")
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"openhands": {
+				Connector:         "openhands",
+				Source:            "setup-selected",
+				Executable:        stablePath,
+				RawVersion:        "OpenHands CLI 1.16.0",
+				NormalizedVersion: "1.16.0",
+				SHA256:            digest,
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts.DataDir, agentSelectionFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts.AgentVersion = "OpenHands CLI 1.16.0"
+	opts.AgentExecutable = stablePath
+	return opts
 }
 
 func TestOpenHandsDarwinExporterTokenLifecycle(t *testing.T) {
@@ -2815,789 +2744,6 @@ func TestOpenHandsConcurrentFailedSetupCannotRevokeSuccessfulToken(t *testing.T)
 	}
 	if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeOpenHands); err != nil || token == "" {
 		t.Fatalf("successful concurrent setup token = %q, %v; want live token", token, err)
-	}
-}
-
-func TestGeminiSettingsPathHonorsLifecycleConfigHome(t *testing.T) {
-	previous := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = ""
-	t.Cleanup(func() { GeminiSettingsPathOverride = previous })
-
-	profileRoot := filepath.Join(t.TempDir(), ".gemini")
-	want := filepath.Join(profileRoot, "settings.json")
-	if got := geminiSettingsPath(SetupOpts{ConfigHome: profileRoot}); got != want {
-		t.Fatalf("bound Gemini settings path = %q, want %q", got, want)
-	}
-}
-
-func TestGeminiPathsUsePrivateBindingAndRejectInvalidExplicitHome(t *testing.T) {
-	previous := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = ""
-	t.Cleanup(func() { GeminiSettingsPathOverride = previous })
-
-	root := t.TempDir()
-	bound := filepath.Join(root, "official", ".gemini")
-	workspace := filepath.Join(root, "workspace")
-	t.Setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", bound)
-	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(root, "hostile-vendor-home"))
-	t.Setenv("GEMINI_CLI_HOME", filepath.Join(root, "hostile-official-root"))
-
-	opts := SetupOpts{WorkspaceDir: workspace}
-	if got := geminiSettingsPath(opts); got != filepath.Join(bound, "settings.json") {
-		t.Fatalf("Gemini settings path = %q, want authenticated binding", got)
-	}
-	caps := NewGeminiCLIConnector().Capabilities(opts)
-	for _, want := range []string{
-		filepath.Join(bound, "skills"),
-		filepath.Join(bound, "extensions"),
-		filepath.Join(bound, "agents"),
-	} {
-		found := stringInSlice(caps.Skills.ReadPaths, want) ||
-			stringInSlice(caps.Plugins.ReadPaths, want) ||
-			stringInSlice(caps.Agents.ReadPaths, want)
-		if !found {
-			t.Fatalf("Gemini capabilities did not use bound path %q: %+v", want, caps)
-		}
-	}
-	if !caps.Plugins.Supported || !caps.Plugins.DiscoveryOnly || len(caps.Plugins.WritePaths) != 0 {
-		t.Fatalf("Gemini extension capability is not truthful discovery-only inventory: %+v", caps.Plugins)
-	}
-	workspaceSettings := filepath.Join(workspace, ".gemini", "settings.json")
-	if !stringInSlice(caps.MCP.ConfigPaths, workspaceSettings) ||
-		!stringInSlice(caps.MCP.ConfigPaths, filepath.Join(bound, "settings.json")) {
-		t.Fatalf("Gemini MCP capability did not expose project-first and user settings: %+v", caps.MCP)
-	}
-	if stringInSlice(caps.Plugins.ReadPaths, filepath.Join(workspace, ".gemini", "extensions")) {
-		t.Fatalf("Gemini capability invented a workspace extension root: %+v", caps.Plugins)
-	}
-	targets := NewGeminiCLIConnector().ComponentTargets(workspace)
-	for kind, want := range map[string]string{
-		"mcp":    filepath.Join(bound, "settings.json"),
-		"skill":  filepath.Join(bound, "skills"),
-		"plugin": filepath.Join(bound, "extensions"),
-		"agent":  filepath.Join(bound, "agents"),
-	} {
-		if !stringInSlice(targets[kind], want) {
-			t.Fatalf("Gemini %s targets = %v, missing %q", kind, targets[kind], want)
-		}
-	}
-	if !stringInSlice(targets["mcp"], workspaceSettings) {
-		t.Fatalf("Gemini MCP targets = %v, missing project settings %q", targets["mcp"], workspaceSettings)
-	}
-	if stringInSlice(targets["plugin"], filepath.Join(workspace, ".gemini", "extensions")) {
-		t.Fatalf("Gemini plugin targets invented a workspace extension root: %v", targets["plugin"])
-	}
-
-	separator := string(os.PathSeparator)
-	invalid := SetupOpts{ConfigHome: root + separator + "child" + separator + ".." + separator + ".gemini"}
-	if got := geminiSettingsPath(invalid); got != "" {
-		t.Fatalf("invalid explicit Gemini ConfigHome resolved to %q", got)
-	}
-}
-
-func TestGeminiPathsUseOfficialCLIHomeForSourceInstalls(t *testing.T) {
-	previousOverride := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = ""
-	t.Cleanup(func() { GeminiSettingsPathOverride = previousOverride })
-	previousPrivate, existed := os.LookupEnv("DEFENSECLAW_GEMINI_CONFIG_HOME")
-	if err := os.Unsetenv("DEFENSECLAW_GEMINI_CONFIG_HOME"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if existed {
-			_ = os.Setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", previousPrivate)
-		} else {
-			_ = os.Unsetenv("DEFENSECLAW_GEMINI_CONFIG_HOME")
-		}
-	})
-
-	root := filepath.Join(t.TempDir(), "gemini-home-root")
-	t.Setenv("GEMINI_CLI_HOME", root)
-	wantHome := filepath.Join(root, ".gemini")
-	if got := geminiConfigHome(SetupOpts{}); got != wantHome {
-		t.Fatalf("Gemini config home = %q, want official root child %q", got, wantHome)
-	}
-	if got := geminiSettingsPath(SetupOpts{}); got != filepath.Join(wantHome, "settings.json") {
-		t.Fatalf("Gemini settings path = %q", got)
-	}
-
-	t.Setenv("GEMINI_CLI_HOME", "relative")
-	if got := geminiConfigHome(SetupOpts{}); got != "" {
-		t.Fatalf("invalid GEMINI_CLI_HOME resolved config home %q", got)
-	}
-}
-
-func TestGeminiHookReconciliationMigratesExactWindowsCommandsAndPreservesForeignGroup(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	setHookBinaryOverride(t, hookBinary)
-
-	root := t.TempDir()
-	profileRoot := filepath.Join(root, ".gemini")
-	opts := SetupOpts{DataDir: filepath.Join(root, "defenseclaw"), ConfigHome: profileRoot}
-	settingsPath := filepath.Join(profileRoot, "settings.json")
-	antigravityPath := filepath.Join(profileRoot, "config", "hooks.json")
-	if err := os.MkdirAll(filepath.Dir(antigravityPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	antigravityBefore := []byte(`{"operator-antigravity":{"PreToolUse":[]}}`)
-	if err := os.WriteFile(antigravityPath, antigravityBefore, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	desired := hookInvocationCommandFor("windows", "geminicli", filepath.Join(opts.DataDir, "hooks", "geminicli-hook.sh"))
-	legacyCallOperator := legacyWindowsGeminiCallOperatorHookCommandForBinary(hookBinary)
-	legacyNonWaiting := legacyWindowsNativePowerShellHookCommandForBinary("geminicli", hookBinary)
-	foreign := `C:\Operator\audit-hook.exe --gemini`
-	fixture := map[string]interface{}{
-		"operatorSetting": "keep",
-		"hooks": map[string]interface{}{
-			"BeforeTool": []interface{}{
-				map[string]interface{}{
-					"matcher":       "*",
-					"sequential":    true,
-					"operatorField": "keep",
-					"hooks": []interface{}{
-						map[string]interface{}{"name": "defenseclaw", "type": "command", "command": legacyCallOperator},
-						map[string]interface{}{"name": "operator", "type": "command", "command": foreign},
-					},
-				},
-				map[string]interface{}{
-					"matcher": "*",
-					"hooks": []interface{}{
-						map[string]interface{}{"name": "defenseclaw", "type": "command", "command": legacyNonWaiting},
-					},
-				},
-			},
-		},
-	}
-	body, err := json.MarshalIndent(fixture, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(settingsPath, append(body, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	owned := geminiOwnedHookCommandsForOS("windows", opts, desired)
-	if err := patchGeminiHooks(settingsPath, desired, owned...); err != nil {
-		t.Fatalf("patchGeminiHooks: %v", err)
-	}
-	patched, err := readJSONObject(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range geminiCLIHookEvents {
-		commands := geminiHookCommandsForTest(t, patched, event)
-		currentCount := 0
-		for _, command := range commands {
-			if command == desired {
-				currentCount++
-			}
-			if command != desired && stringInSlice(owned, command) {
-				t.Errorf("event %s retained legacy managed command %q", event, command)
-			}
-		}
-		if currentCount != 1 {
-			t.Errorf("event %s has %d current Gemini handlers, want exactly 1: %v", event, currentCount, commands)
-		}
-	}
-	if !geminiForeignGroupPreservedForTest(t, patched, "BeforeTool", foreign) {
-		t.Fatal("mixed Gemini group did not preserve its foreign hook and operator fields")
-	}
-	conn := NewGeminiCLIConnector()
-	if err := conn.verifyGeminiSettingsCleanForOS("windows", opts, settingsPath, desired, patched); err == nil {
-		t.Fatal("Windows VerifyClean did not recognize the JSON-escaped encoded Gemini command")
-	}
-
-	if err := removeGeminiConfigEntries(settingsPath, desired, owned...); err != nil {
-		t.Fatalf("removeGeminiConfigEntries: %v", err)
-	}
-	removed, err := readJSONObject(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range geminiCLIHookEvents {
-		for _, command := range geminiHookCommandsForTest(t, removed, event) {
-			if stringInSlice(owned, command) {
-				t.Errorf("event %s retained exact managed command %q after teardown", event, command)
-			}
-		}
-	}
-	if !geminiForeignGroupPreservedForTest(t, removed, "BeforeTool", foreign) {
-		t.Fatal("Gemini teardown removed or rewrote a foreign hook in a mixed group")
-	}
-	if removed["operatorSetting"] != "keep" {
-		t.Fatalf("Gemini teardown changed unrelated settings: %#v", removed)
-	}
-	if err := conn.VerifyClean(opts); err != nil {
-		t.Fatalf("VerifyClean rejected foreign-only Gemini settings after managed removal: %v", err)
-	}
-	afterAntigravity, err := os.ReadFile(antigravityPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(afterAntigravity, antigravityBefore) {
-		t.Fatalf("Gemini settings reconciliation changed Antigravity's shared .gemini subtree:\n%s", afterAntigravity)
-	}
-}
-
-func TestGeminiSetupTeardownDoesNotRestoreRecognizedLegacyHooks(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	setHookBinaryOverride(t, hookBinary)
-
-	root := testenv.PrivateTempDir(t)
-	profileRoot := filepath.Join(root, ".gemini")
-	settingsPath := filepath.Join(profileRoot, "settings.json")
-	previous := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = settingsPath
-	t.Cleanup(func() { GeminiSettingsPathOverride = previous })
-
-	opts := SetupOpts{
-		DataDir:    filepath.Join(root, "defenseclaw"),
-		ConfigHome: profileRoot,
-		APIAddr:    "127.0.0.1:18970",
-		APIToken:   "gateway-token-must-not-be-published",
-	}
-	legacyCommand := filepath.Join(opts.DataDir, "hooks", "geminicli-hook.sh")
-	if runtime.GOOS == "windows" {
-		legacyCommand = legacyWindowsGeminiCallOperatorHookCommandForBinary(hookBinary)
-	}
-	foreignCommand := "operator-audit-hook --gemini"
-	fixture := map[string]interface{}{
-		"operatorSetting": "keep",
-		"hooks": map[string]interface{}{
-			"BeforeTool": []interface{}{
-				map[string]interface{}{
-					"matcher":       "*",
-					"sequential":    true,
-					"operatorField": "keep",
-					"hooks": []interface{}{
-						map[string]interface{}{"name": "defenseclaw", "type": "command", "command": legacyCommand},
-						map[string]interface{}{"name": "operator", "type": "command", "command": foreignCommand},
-					},
-				},
-				map[string]interface{}{
-					"matcher": "*",
-					"hooks": []interface{}{
-						map[string]interface{}{"name": "defenseclaw", "type": "command", "command": legacyCommand},
-					},
-				},
-			},
-		},
-		"telemetry": map[string]interface{}{
-			"enabled":      true,
-			"target":       "otlp",
-			"otlpEndpoint": "http://127.0.0.1:18790/otlp/geminicli/legacy-token",
-			"protocol":     "http/json",
-			"managedBy":    "defenseclaw",
-		},
-	}
-	body, err := json.MarshalIndent(fixture, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(profileRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(settingsPath, append(body, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	conn := NewGeminiCLIConnector()
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup over legacy Gemini hook: %v", err)
-	}
-	if err := conn.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown after legacy Gemini migration: %v", err)
-	}
-
-	restored, err := readJSONObject(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if restored["operatorSetting"] != "keep" {
-		t.Fatalf("Gemini teardown changed unrelated settings: %#v", restored)
-	}
-	if _, ok := restored["telemetry"]; ok {
-		t.Fatalf("Gemini teardown revived managed legacy telemetry: %#v", restored["telemetry"])
-	}
-	if !geminiForeignGroupPreservedForTest(t, restored, "BeforeTool", foreignCommand) {
-		t.Fatal("Gemini teardown did not restore the foreign portion of the mixed hook group")
-	}
-	hooks, _ := restored["hooks"].(map[string]interface{})
-	if len(hooks) != 1 {
-		t.Fatalf("Gemini teardown restored unexpected managed hook events: %#v", hooks)
-	}
-	commands := geminiHookCommandsForTest(t, restored, "BeforeTool")
-	if len(commands) != 1 || commands[0] != foreignCommand {
-		t.Fatalf("Gemini teardown restored managed legacy hooks; commands=%v", commands)
-	}
-	if err := conn.VerifyClean(opts); err != nil {
-		t.Fatalf("VerifyClean rejected the foreign-only restored Gemini settings: %v", err)
-	}
-	backupPath := managedFileBackupPath(opts.DataDir, "geminicli", conn.managedBackupLogicalName())
-	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
-		t.Fatalf("Gemini teardown retained managed backup receipt %s: %v", backupPath, err)
-	}
-}
-
-func TestGeminiSetupTeardownMigratesExistingReceiptWithoutRestoringLegacyHooks(t *testing.T) {
-	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
-	setHookBinaryOverride(t, hookBinary)
-
-	root := testenv.PrivateTempDir(t)
-	profileRoot := filepath.Join(root, ".gemini")
-	settingsPath := filepath.Join(profileRoot, "settings.json")
-	previous := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = settingsPath
-	t.Cleanup(func() { GeminiSettingsPathOverride = previous })
-	opts := SetupOpts{
-		DataDir:    filepath.Join(root, "defenseclaw"),
-		ConfigHome: profileRoot,
-		APIAddr:    "127.0.0.1:18970",
-		APIToken:   "gateway-token-must-not-be-published",
-	}
-	legacyCommand := filepath.Join(opts.DataDir, "hooks", "geminicli-hook.sh")
-	if runtime.GOOS == "windows" {
-		legacyCommand = legacyWindowsGeminiCallOperatorHookCommandForBinary(hookBinary)
-	}
-	foreignCommand := "operator-audit-hook --gemini"
-	fixture := map[string]interface{}{
-		"operatorSetting": "keep",
-		"hooks": map[string]interface{}{
-			"BeforeTool": []interface{}{
-				map[string]interface{}{
-					"matcher":       "*",
-					"sequential":    true,
-					"operatorField": "keep",
-					"hooks": []interface{}{
-						map[string]interface{}{"name": "defenseclaw", "type": "command", "command": legacyCommand},
-						map[string]interface{}{"name": "operator", "type": "command", "command": foreignCommand},
-					},
-				},
-			},
-		},
-		"telemetry": map[string]interface{}{
-			"enabled":      true,
-			"otlpEndpoint": "http://127.0.0.1:18790/otlp/geminicli/legacy-token",
-			"managedBy":    "defenseclaw",
-		},
-	}
-	body, err := json.MarshalIndent(fixture, "", "  ")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(profileRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(settingsPath, append(body, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	conn := NewGeminiCLIConnector()
-	logicalName := conn.managedBackupLogicalName()
-	if err := captureManagedFileBackup(opts.DataDir, "geminicli", logicalName, settingsPath); err != nil {
-		t.Fatalf("capture legacy generic receipt: %v", err)
-	}
-	currentCommand := conn.hookCommand(opts)
-	owned := geminiOwnedHookCommands(opts, currentCommand)
-	if err := patchGeminiHooks(settingsPath, currentCommand, owned...); err != nil {
-		t.Fatalf("seed prior managed hooks: %v", err)
-	}
-	if err := patchGeminiTelemetry(settingsPath, opts); err != nil {
-		t.Fatalf("seed prior managed telemetry: %v", err)
-	}
-	if err := updateManagedFileBackupPostHash(
-		opts.DataDir,
-		"geminicli",
-		logicalName,
-		settingsPath,
-	); err != nil {
-		t.Fatalf("finalize prior receipt: %v", err)
-	}
-
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup over existing Gemini receipt: %v", err)
-	}
-	if err := conn.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown after existing receipt migration: %v", err)
-	}
-	restored, err := readJSONObject(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if restored["operatorSetting"] != "keep" ||
-		!geminiForeignGroupPreservedForTest(t, restored, "BeforeTool", foreignCommand) {
-		t.Fatalf("existing receipt migration did not preserve foreign Gemini state: %#v", restored)
-	}
-	if _, ok := restored["telemetry"]; ok {
-		t.Fatalf("existing receipt migration restored managed telemetry: %#v", restored["telemetry"])
-	}
-	commands := geminiHookCommandsForTest(t, restored, "BeforeTool")
-	if len(commands) != 1 || commands[0] != foreignCommand {
-		t.Fatalf("existing receipt migration restored managed hooks: %v", commands)
-	}
-	if err := conn.VerifyClean(opts); err != nil {
-		t.Fatalf("VerifyClean rejected migrated foreign-only Gemini state: %v", err)
-	}
-}
-
-func geminiHookCommandsForTest(t *testing.T, cfg map[string]interface{}, event string) []string {
-	t.Helper()
-	hooks, _ := cfg["hooks"].(map[string]interface{})
-	groups, _ := hooks[event].([]interface{})
-	var commands []string
-	for _, rawGroup := range groups {
-		group, ok := rawGroup.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		handlers, _ := group["hooks"].([]interface{})
-		for _, rawHandler := range handlers {
-			handler, ok := rawHandler.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			if command, ok := handler["command"].(string); ok {
-				commands = append(commands, command)
-			}
-		}
-	}
-	return commands
-}
-
-func geminiForeignGroupPreservedForTest(t *testing.T, cfg map[string]interface{}, event, foreign string) bool {
-	t.Helper()
-	hooks, _ := cfg["hooks"].(map[string]interface{})
-	groups, _ := hooks[event].([]interface{})
-	for _, rawGroup := range groups {
-		group, ok := rawGroup.(map[string]interface{})
-		if !ok || group["operatorField"] != "keep" || group["sequential"] != true {
-			continue
-		}
-		handlers, _ := group["hooks"].([]interface{})
-		for _, rawHandler := range handlers {
-			handler, _ := rawHandler.(map[string]interface{})
-			if handler["command"] == foreign {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func newGeminiTokenLifecycleFixture(t *testing.T) (*hookOnlyConnector, SetupOpts, string) {
-	t.Helper()
-	root := testenv.PrivateTempDir(t)
-	configHome := filepath.Join(root, ".gemini")
-	opts := SetupOpts{
-		DataDir:    filepath.Join(root, "defenseclaw"),
-		ConfigHome: configHome,
-		APIAddr:    "127.0.0.1:18970",
-		APIToken:   "gateway-token-must-not-be-published",
-	}
-	// Keep the effective-layer validation hermetic instead of consulting an
-	// operator's real machine-wide Gemini policy during this lifecycle test.
-	t.Setenv("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", filepath.Join(root, "system", "defaults.json"))
-	t.Setenv("GEMINI_CLI_SYSTEM_SETTINGS_PATH", filepath.Join(root, "system", "settings.json"))
-	return NewGeminiCLIConnector(), opts, filepath.Join(configHome, "settings.json")
-}
-
-func TestGeminiTeardownRevokesScopedOTLPTokenAfterCleanRestore(t *testing.T) {
-	conn, opts, _ := newGeminiTokenLifecycleFixture(t)
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-	if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err != nil || token == "" {
-		t.Fatalf("LoadOTLPPathToken after setup = %q, %v; want a provisioned token", token, err)
-	}
-
-	if err := conn.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-	if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err != nil || token != "" {
-		t.Fatalf("LoadOTLPPathToken after teardown = %q, %v; want revoked token", token, err)
-	}
-}
-
-func TestGeminiTeardownRetainsScopedOTLPTokenWhenConfigCleanupFails(t *testing.T) {
-	conn, opts, settingsPath := newGeminiTokenLifecycleFixture(t)
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-	before, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI)
-	if err != nil || before == "" {
-		t.Fatalf("LoadOTLPPathToken after setup = %q, %v; want a provisioned token", before, err)
-	}
-	// Force the surgical cleanup path to fail parsing. The changed digest
-	// prevents pristine restore, and teardown must keep the still-referenced
-	// token valid rather than revoke it underneath the broken settings file.
-	if err := os.WriteFile(settingsPath, []byte("{\n  \"hooks\": [\n"), 0o600); err != nil {
-		t.Fatalf("write malformed drifted settings: %v", err)
-	}
-
-	if err := conn.Teardown(context.Background(), opts); err == nil {
-		t.Fatal("Teardown succeeded despite malformed drifted Gemini settings")
-	}
-	after, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI)
-	if err != nil {
-		t.Fatalf("LoadOTLPPathToken after failed teardown: %v", err)
-	}
-	if after != before {
-		t.Fatalf("failed teardown changed scoped token: before=%q after=%q", before, after)
-	}
-}
-
-func TestGeminiFailedSetupScopedOTLPTokenLifecycle(t *testing.T) {
-	t.Run("fresh token is revoked", func(t *testing.T) {
-		conn, opts, settingsPath := newGeminiTokenLifecycleFixture(t)
-		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(settingsPath, []byte("{\n  \"telemetry\": [\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := conn.Setup(context.Background(), opts); err == nil {
-			t.Fatal("Setup succeeded despite malformed Gemini settings")
-		}
-		if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err != nil || token != "" {
-			t.Fatalf("LoadOTLPPathToken after failed setup = %q, %v; want fresh token revoked", token, err)
-		}
-	})
-
-	t.Run("preexisting token is preserved", func(t *testing.T) {
-		conn, opts, settingsPath := newGeminiTokenLifecycleFixture(t)
-		before, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI)
-		if err != nil {
-			t.Fatalf("EnsureOTLPPathToken: %v", err)
-		}
-		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(settingsPath, []byte("{\n  \"telemetry\": [\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := conn.Setup(context.Background(), opts); err == nil {
-			t.Fatal("Setup succeeded despite malformed Gemini settings")
-		}
-		after, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI)
-		if err != nil {
-			t.Fatalf("LoadOTLPPathToken after failed setup: %v", err)
-		}
-		if after != before {
-			t.Fatalf("failed setup changed preexisting scoped token: before=%q after=%q", before, after)
-		}
-	})
-}
-
-func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
-	dir := testenv.PrivateTempDir(t)
-	cfgPath := filepath.Join(dir, "settings.json")
-	prev := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = cfgPath
-	t.Cleanup(func() { GeminiSettingsPathOverride = prev })
-	if err := os.WriteFile(cfgPath, []byte(`{
-  "telemetry": {
-    "outfile": "operator-telemetry.jsonl",
-    "useCliAuth": true
-  }
-}`), 0o600); err != nil {
-		t.Fatalf("seed conflicting Gemini telemetry: %v", err)
-	}
-
-	conn := NewGeminiCLIConnector()
-	opts := SetupOpts{
-		DataDir:  filepath.Join(dir, "dc"),
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-	}
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read gemini settings: %v", err)
-	}
-	text := string(data)
-	// Gemini CLI's settings.json schema only accepts target ∈
-	// {"local","gcp"}. To forward telemetry to a custom (loopback)
-	// OTLP collector we must set target=local + useCollector=true.
-	// See https://geminicli.com/docs/reference/configuration/.
-	if !strings.Contains(text, `"target": "local"`) {
-		t.Fatalf("gemini settings missing managed telemetry target=local:\n%s", text)
-	}
-	if !strings.Contains(text, `"useCollector": true`) {
-		t.Fatalf("gemini settings missing useCollector=true (required for external OTLP):\n%s", text)
-	}
-	if !strings.Contains(text, `"otlpProtocol": "http"`) {
-		t.Fatalf("gemini settings missing otlpProtocol=http:\n%s", text)
-	}
-	if !strings.Contains(text, `"useCliAuth": false`) {
-		t.Fatalf("gemini settings did not disable incompatible CLI telemetry auth:\n%s", text)
-	}
-	if !strings.Contains(text, `"outfile": ""`) {
-		t.Fatalf("gemini settings did not neutralize outfile redirection:\n%s", text)
-	}
-	// Gemini's schema rejects unknown keys at load time, so we MUST
-	// NOT write the legacy "managedBy" / "protocol" fields anymore —
-	// otherwise `gemini` aborts with "Unrecognized key(s) in object".
-	for _, banned := range []string{`"managedBy"`, `"protocol":`} {
-		if strings.Contains(text, banned) {
-			t.Fatalf("gemini settings contain key rejected by schema (%s):\n%s", banned, text)
-		}
-	}
-	// H-4: settings.json must NOT contain the master gateway bearer
-	// (opts.APIToken). The OTLP exporter authenticates via a scoped
-	// per-source path-token instead — see EnsureOTLPPathToken /
-	// patchGeminiTelemetry.
-	if strings.Contains(text, "tok-test") {
-		t.Fatalf("gemini settings leaked master gateway token (H4 regression):\n%s", text)
-	}
-	scoped, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI)
-	if err != nil {
-		t.Fatalf("LoadOTLPPathToken: %v", err)
-	}
-	if scoped == "" {
-		t.Fatalf("setup did not mint a scoped OTLP token under %s", opts.DataDir)
-	}
-	if !strings.Contains(text, "/otlp/geminicli/"+scoped) {
-		t.Fatalf("gemini settings missing scoped path-token config:\n%s", text)
-	}
-}
-
-func TestGeminiSetup_MigratesLegacySchemaInPlace(t *testing.T) {
-	// Regression: defenseclaw < 0.x wrote `target: "otlp"`,
-	// `protocol: "http/json"`, and `managedBy: "defenseclaw"` —
-	// all three are rejected by the current Gemini CLI schema, so
-	// `gemini` refuses to start until the file is repaired. Running
-	// `defenseclaw setup` against a stale settings.json must
-	// migrate the keys (not just append).
-	dir := testenv.PrivateTempDir(t)
-	cfgPath := filepath.Join(dir, "settings.json")
-	prev := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = cfgPath
-	t.Cleanup(func() { GeminiSettingsPathOverride = prev })
-
-	legacy := map[string]interface{}{
-		"telemetry": map[string]interface{}{
-			"enabled":      true,
-			"target":       "otlp",
-			"otlpEndpoint": "http://127.0.0.1:18790/otlp/geminicli/legacy-token",
-			"protocol":     "http/json",
-			"logPrompts":   true,
-			"managedBy":    "defenseclaw",
-		},
-		"userSetting": "keep",
-	}
-	body, err := json.MarshalIndent(legacy, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal legacy config: %v", err)
-	}
-	if err := os.WriteFile(cfgPath, append(body, '\n'), 0o600); err != nil {
-		t.Fatalf("write legacy config: %v", err)
-	}
-
-	conn := NewGeminiCLIConnector()
-	opts := SetupOpts{
-		DataDir:  filepath.Join(dir, "dc"),
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-	}
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup over legacy config: %v", err)
-	}
-
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read migrated config: %v", err)
-	}
-	text := string(data)
-	for _, banned := range []string{`"target": "otlp"`, `"protocol": "http/json"`, `"managedBy": "defenseclaw"`} {
-		if strings.Contains(text, banned) {
-			t.Fatalf("legacy schema key %q survived migration:\n%s", banned, text)
-		}
-	}
-	for _, want := range []string{`"target": "local"`, `"otlpProtocol": "http"`, `"useCollector": true`, `"userSetting": "keep"`} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("migrated config missing %q:\n%s", want, text)
-		}
-	}
-}
-
-func TestGeminiTeardown_DriftedConfigRemovesManagedTelemetry(t *testing.T) {
-	dir := testenv.PrivateTempDir(t)
-	cfgPath := filepath.Join(dir, "settings.json")
-	prev := GeminiSettingsPathOverride
-	GeminiSettingsPathOverride = cfgPath
-	t.Cleanup(func() { GeminiSettingsPathOverride = prev })
-
-	conn := NewGeminiCLIConnector()
-	opts := SetupOpts{
-		DataDir:  filepath.Join(dir, "dc"),
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
-	}
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read setup config: %v", err)
-	}
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("parse setup config: %v", err)
-	}
-	cfg["userSetting"] = "keep"
-	telemetry, _ := cfg["telemetry"].(map[string]interface{})
-	if telemetry == nil {
-		t.Fatal("setup did not create telemetry object")
-	}
-	telemetry["userTelemetrySetting"] = "keep"
-	drifted, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal drifted config: %v", err)
-	}
-	if err := os.WriteFile(cfgPath, append(drifted, '\n'), 0o600); err != nil {
-		t.Fatalf("write drifted config: %v", err)
-	}
-
-	if err := conn.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-	if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err != nil || token != "" {
-		t.Fatalf("LoadOTLPPathToken after drifted teardown = %q, %v; want revoked token", token, err)
-	}
-	restored, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read config after teardown: %v", err)
-	}
-	text := string(restored)
-	for _, forbidden := range []string{"geminicli-hook.sh", "/otlp/geminicli/", `"managedBy": "defenseclaw"`} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("teardown left managed Gemini residue %q:\n%s", forbidden, text)
-		}
-	}
-	for _, want := range []string{`"userSetting": "keep"`, `"userTelemetrySetting": "keep"`} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("teardown did not preserve user edit %q:\n%s", want, text)
-		}
-	}
-	var cleaned map[string]interface{}
-	if err := json.Unmarshal(restored, &cleaned); err != nil {
-		t.Fatalf("parse config after teardown: %v", err)
-	}
-	cleanedTelemetry, _ := cleaned["telemetry"].(map[string]interface{})
-	for _, managedKey := range []string{"enabled", "traces", "target", "otlpEndpoint", "otlpProtocol", "useCollector", "useCliAuth", "outfile", "logPrompts"} {
-		if _, present := cleanedTelemetry[managedKey]; present {
-			t.Fatalf("teardown left managed Gemini telemetry key %q: %#v", managedKey, cleanedTelemetry)
-		}
-	}
-	if cleanedTelemetry["userTelemetrySetting"] != "keep" {
-		t.Fatalf("teardown did not preserve foreign Gemini telemetry: %#v", cleanedTelemetry)
 	}
 }
 
@@ -3922,11 +3068,21 @@ func TestCopilotLifecycleHomeRejectsNonExactBinding(t *testing.T) {
 }
 
 func TestCopilotShellBootstrapFailuresAlwaysOpen(t *testing.T) {
-	script, err := hookFS.ReadFile("hooks/copilot-hook.sh")
-	if err != nil {
-		t.Fatal(err)
+	// The host render; the OpenShell sandbox variant of the same template
+	// fails closed instead (TestCopilotSandboxPolicyShape).
+	for _, managed := range []bool{false, true} {
+		script, err := renderHookTemplate("copilot-hook.sh", templateData{
+			APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: managed, TokenFile: ".hook-copilot.token", ScopedToken: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCopilotShellBootstrapFailsOpen(t, string(script))
 	}
-	body := string(script)
+}
+
+func assertCopilotShellBootstrapFailsOpen(t *testing.T, body string) {
+	t.Helper()
 	if strings.Contains(body, "exit 2") {
 		t.Fatalf("Copilot shell bootstrap contains a fail-closed exit: %s", body)
 	}
@@ -4464,7 +3620,9 @@ func TestCursorHooksHighCardinalityForeignRegistrationsStayWithinLifecycleBudget
 	}
 	elapsed := time.Since(started)
 	t.Logf("%d Cursor 21x23 patch plus two exact ownership-scan cycles completed in %s (average %s)", iterations, elapsed, elapsed/iterations)
-	if elapsed > 15*time.Second {
+	// Under the race detector on a shared runner wall-clock time says nothing
+	// about the budget; the uninstrumented macOS lifecycle job enforces it.
+	if elapsed > 15*time.Second && !raceInstrumentedBuild() {
 		t.Fatalf("Cursor patch plus repeated ownership verification took %s, want <=15s within the fixed 2m lifecycle budget", elapsed)
 	}
 
@@ -4569,4 +3727,33 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 	if !strings.Contains(string(out), `"decision":"deny"`) {
 		t.Fatalf("OpenHands deny hook did not print decision JSON; output=%s", string(out))
 	}
+}
+
+// Hermes writes its direct-native state only on Windows; elsewhere the
+// file must not be declared as patched, or the enterprise installer
+// refuses every install for a file that never exists.
+func TestHermesAgentPathsDeclareNativeStateOnlyOnWindows(t *testing.T) {
+	dataDir := t.TempDir()
+	opts := SetupOpts{DataDir: dataDir}
+	paths := NewHermesConnector().AgentPaths(opts)
+	state := filepath.Join(dataDir, "hooks", hermesDirectNativeStateFileName)
+	declared := false
+	for _, path := range paths.PatchedFiles {
+		declared = declared || path == state
+	}
+	if declared != (runtime.GOOS == "windows") {
+		t.Fatalf("native state declared=%v on %s: %v", declared, runtime.GOOS, paths.PatchedFiles)
+	}
+}
+
+// raceInstrumentedBuild reports whether this test binary was built with -race.
+func raceInstrumentedBuild() bool {
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "-race" {
+				return setting.Value == "true"
+			}
+		}
+	}
+	return false
 }

@@ -106,3 +106,36 @@ def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
             expand_connector_choices(child)
 
     expand_connector_choices(cmd_setup.setup)
+
+
+@pytest.fixture(autouse=True)
+def _private_api_port_claims(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Keep first-run port claims (GAP-1462) out of the shared /var/tmp."""
+    from defenseclaw import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_API_PORT_CLAIM_DIR", str(tmp_path_factory.mktemp("port-claims")))
+
+
+@pytest.fixture(autouse=True)
+def _no_shared_hook_temp_dirs(monkeypatch: pytest.MonkeyPatch):
+    """Keep uninstall from sweeping the host's real temp folders (GAP-1411)."""
+    from defenseclaw.commands import cmd_uninstall
+
+    monkeypatch.setattr(cmd_uninstall, "_hook_temp_roots", lambda: ())
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
+    """Keep ``policy activate`` (reload on by default) off any real gateway.
+
+    Tests share a Mac with developer gateways on the default API port; a
+    stray POST /policy/reload must never reach one. Tests that exercise the
+    reload path monkeypatch ``OrchestratorClient.reload_policy`` themselves.
+    """
+    import requests
+    from defenseclaw import gateway
+
+    def _unreachable(self):
+        raise requests.ConnectionError("test isolation: no gateway")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _unreachable)

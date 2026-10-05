@@ -1,0 +1,9 @@
+# actionlint configuration for the Workflow Lint job in ci.yml.
+self-hosted-runner:
+  # Labels of the repository's self-hosted runners.
+  labels:
+    - antigravity-authenticated
+    - connector-lab
+    - copilot-authenticated
+    - defenseclaw-macos
+    - e2e

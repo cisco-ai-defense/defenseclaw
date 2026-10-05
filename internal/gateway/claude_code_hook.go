@@ -30,6 +30,7 @@ import (
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -77,6 +78,10 @@ type claudeCodeHookRequest struct {
 	ScanComponents       bool                   `json:"scan_components,omitempty"`
 	Bridge               map[string]interface{} `json:"bridge,omitempty"`
 	Payload              map[string]interface{} `json:"-"`
+	// sandboxView is the binding's filesystem view for a sandbox request and
+	// nil for host traffic. Path-reading helpers go through it instead of the
+	// host filesystem (see sandbox_hook_scope.go).
+	sandboxView *sandboxauth.FSView
 }
 
 type claudeCodeHookResponse struct {
@@ -103,6 +108,9 @@ type claudeCodeHookResponse struct {
 	// audit row. Never serialized on the hook response wire.
 	RedactionEnabled *bool  `json:"-"`
 	SourceReason     string `json:"-"`
+	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
+	// took part in the verdict. Never serialized.
+	laneVerdict bool
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -119,8 +127,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
-	mode := a.claudeCodeMode()
-	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
+	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode())
+	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
+	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
 	t0 := time.Now()
@@ -153,6 +162,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "claudecode", toolName, toolName,
 		)
+		actionTool = claudeCodeTrustedActionTool(toolName, actionTool)
 		toolRequest := &ToolInspectRequest{
 			Tool:          toolName,
 			Args:          toolArgs,
@@ -160,12 +170,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:     "claudecode",
 			MCPServerName: req.MCPServerName,
 		}
-		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
+		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
 				Tool:                                     actionTool,
 				Args:                                     toolArgs,
 				CWD:                                      req.CWD,
-				ActiveHome:                               trustedSameHostHome(),
+				ActiveHome:                               hookActiveHome(ctx),
 				ToolResourceIdentity:                     resourceIdentity,
 				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 				ActiveAgentFiles:                         activeAgentContext.files,
@@ -177,7 +188,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:          "claudecode",
 			EnforcementCapable: true,
 			record:             toolChainRecorderFromContext(ctx),
-		})
+		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
@@ -259,8 +270,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Done before dispatchClaudeCodeHookNotification so the OS toast
 	// can carry the same evaluation_id + rule_ids that the audit
 	// row + HTTP response will surface.
-	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
-		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
+	evalCtx := a.emitClaudeCodeHookRuleFindings(ctx, req, verdict, time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
@@ -274,8 +284,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.laneVerdict = verdict.laneVerdict
 	return resp
 }
 
@@ -303,6 +314,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
 func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+	if action == "block" {
+		a.dispatchHookBlockWebhook("claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+	}
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -408,6 +422,8 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 		rawAction = action
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	// wouldBlock remains a shadow-telemetry signal for post-result events, but
 	// the connector cannot enforce those events. Do not describe an advisory
 	// result as something Claude would block in action mode.
@@ -500,7 +516,7 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 	if event == "SessionStart" {
 		output := map[string]interface{}{
 			"hookEventName": "SessionStart",
-			"watchPaths":    gatewayconnector.ClaudeCodeWatchPaths(watchRoot),
+			"watchPaths":    claudeCodeWatchPathsForRequest(req, watchRoot),
 		}
 		if additional != "" {
 			output["additionalContext"] = additional
@@ -508,7 +524,7 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return map[string]interface{}{"hookSpecificOutput": output}
 	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": gatewayconnector.ClaudeCodeWatchPaths(watchRoot)}
+		out := map[string]interface{}{"watchPaths": claudeCodeWatchPathsForRequest(req, watchRoot)}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -555,6 +571,24 @@ func reasonOrDefaultClaudeCode(reason string) string {
 	return reason
 }
 
+// claudeCodeOmniGentShellTool is OmniGent's shell tool as Claude Code names
+// it when OmniGent's claude harness runs Claude Code: the MCP tool
+// sys_os_shell of the "omnigent" server, {"command": "..."}.
+const claudeCodeOmniGentShellTool = "mcp__omnigent__sys_os_shell"
+
+// claudeCodeTrustedActionTool names the tool the trusted-action parser sees.
+// OmniGent's MCP shell tool is the same shell shape under another name;
+// unmapped, its commands parsed to no command facts, so a CRITICAL command
+// rule stayed an unproven candidate and the nested Claude Code PreToolUse
+// allowed the call (GAP-1055; only OmniGent's own hook blocked it). This is a
+// name alias like agentHookTrustedActionTool's, not a capability grant.
+func claudeCodeTrustedActionTool(toolName, actionTool string) string {
+	if strings.TrimSpace(toolName) == claudeCodeOmniGentShellTool {
+		return "shell"
+	}
+	return actionTool
+}
+
 func claudeCodeToolName(req claudeCodeHookRequest) string {
 	if strings.TrimSpace(req.ToolName) != "" {
 		return req.ToolName
@@ -562,11 +596,91 @@ func claudeCodeToolName(req claudeCodeHookRequest) string {
 	return "ClaudeCodeTool"
 }
 
+// claudeCodeAgentTool is the name of Claude Code's subagent tool (Task in
+// releases before the 2.1.154 contract floor).
+const claudeCodeAgentTool = "Agent"
+
+// claudeCodeSpawnedAgentID is the subagent a finished Agent call ran. Claude
+// Code's PostToolUse for its Agent tool reports it as tool_response.agentId,
+// the agent_id every hook of that subagent carries; a backgrounded call
+// reports it at launch, with status async_launched (measured on 2.1.156,
+// #957). Any other tool's response is that tool's output and names no agent.
+func claudeCodeSpawnedAgentID(req claudeCodeHookRequest) string {
+	if req.HookEventName != "PostToolUse" || req.ToolName != claudeCodeAgentTool ||
+		strings.TrimSpace(req.MCPServerName) != "" {
+		return ""
+	}
+	response, _ := req.ToolResponse.(map[string]interface{})
+	return firstHookIdentityString(response, "agentId")
+}
+
+// claudeCodeBatchCall is one call of a PostToolBatch.
+type claudeCodeBatchCall struct {
+	ToolName  string `json:"tool_name"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+}
+
+// maxClaudeCodeBatchCalls bounds the calls read from one PostToolBatch.
+const maxClaudeCodeBatchCalls = 64
+
+// claudeCodeToolBatch names a PostToolBatch's tool record. Claude Code sends
+// it once every call of one model turn is resolved, after each call's own
+// PostToolUse or PostToolUseFailure, and lists the calls in tool_calls by the
+// tool_name and tool_use_id their PreToolUse carried; a call the user refused
+// at Claude's permission prompt appears only here (measured on 2.1.156,
+// #957). The event names no tool of its own and is no call's result: it is
+// recorded as a tool_batch whose input lists its calls by name and ID, under
+// an ID derived from theirs. A call's own name and ID would count the call
+// twice, and give a failed call a second outcome, "completed", next to its
+// PostToolUseFailure.
+func claudeCodeToolBatch(req claudeCodeHookRequest) (calls []claudeCodeBatchCall, toolName, toolID string) {
+	items, _ := req.ToolCalls.([]interface{})
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if len(calls) == maxClaudeCodeBatchCalls {
+			break
+		}
+		entry, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		call := claudeCodeBatchCall{
+			ToolName:  firstHookIdentityString(entry, "tool_name"),
+			ToolUseID: firstHookIdentityString(entry, "tool_use_id"),
+		}
+		if call.ToolName == "" {
+			continue
+		}
+		calls = append(calls, call)
+		ids = append(ids, call.ToolUseID)
+	}
+	if len(calls) == 0 {
+		return nil, claudeCodeToolBatchName, ""
+	}
+	return calls, claudeCodeToolBatchName, stableLLMEventID("tool", append([]string{"claudecode", req.SessionID, "batch"}, ids...)...)
+}
+
+// claudeCodeToolBatchName labels a PostToolBatch's tool record.
+const claudeCodeToolBatchName = "tool_batch"
+
+// claudeCodeToolBatchArguments is the input a PostToolBatch's tool record
+// carries: the batch's calls by name and ID.
+func claudeCodeToolBatchArguments(calls []claudeCodeBatchCall) string {
+	if len(calls) == 0 {
+		return "{}"
+	}
+	body, err := json.Marshal(map[string]interface{}{"tool_calls": calls})
+	if err != nil {
+		return "{}"
+	}
+	return string(body)
+}
+
 func claudeCodeToolArgs(req claudeCodeHookRequest) json.RawMessage {
 	if req.ToolInput == nil {
 		return json.RawMessage(`{}`)
 	}
-	b, err := json.Marshal(req.ToolInput)
+	b, err := gatewayconnector.MarshalToolArgs(req.ToolInput)
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}
@@ -606,7 +720,7 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 	mode string,
 ) *ToolInspectVerdict {
 	content := claudeCodeToolOutput(req)
-	if req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
+	if sandboxToolResultUntrusted(ctx) || req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
 		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
 		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {
 		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
@@ -622,7 +736,7 @@ func (a *APIServer) inspectClaudeCodeToolResult(
 		ToolResponse:  req.ToolResponse,
 		MCPServerName: req.MCPServerName,
 		Payload:       req.Payload,
-	}
+	}.withTrustedActiveHome(ctx)
 	strictScope := codexToolResultContentScope(provenanceReq)
 	if mode == "action" || strictScope == ruleContentScopeSource {
 		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
@@ -748,24 +862,35 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	if !filepath.IsAbs(target) && req.CWD != "" {
 		target = filepath.Join(req.CWD, target)
 	}
-	resolved, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return nil
-	}
-	target = resolved
-	info, err := os.Stat(target)
-	if err != nil || info.IsDir() {
-		return nil
-	}
-
 	rulesDir := ""
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
-	result, err := cg.Scan(ctx, target)
-	if err != nil {
-		return nil
+	var result *scanner.ScanResult
+	if req.sandboxView != nil {
+		// The payload names a sandbox path (or a path under the mapped
+		// working directory); read it only inside the mounted project.
+		results := sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, []string{target})
+		if len(results) == 0 {
+			noteSandboxCoverageGap(ctx, sandboxGapEventFileUnreadable)
+			return nil
+		}
+		result = results[0]
+	} else {
+		resolved, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			return nil
+		}
+		target = resolved
+		info, err := os.Stat(target)
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		cg := scanner.NewCodeGuardScanner(rulesDir)
+		result, err = cg.Scan(ctx, target)
+		if err != nil {
+			return nil
+		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
@@ -788,7 +913,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code %s file", len(findings), req.HookEventName),
+		Reason:   codeGuardHookReason(claudeCodeCodeGuardEventPlace(req.HookEventName), findings),
 		Findings: findings,
 	}
 }
@@ -803,14 +928,22 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	if a.scannerCfg != nil {
 		rulesDir = a.scannerCfg.Scanners.CodeGuard
 	}
-	cg := scanner.NewCodeGuardScanner(rulesDir)
+	var results []*scanner.ScanResult
+	if req.sandboxView != nil {
+		results = sandboxCodeGuardScan(ctx, req.sandboxView, rulesDir, targets)
+	} else {
+		cg := scanner.NewCodeGuardScanner(rulesDir)
+		for _, target := range targets {
+			result, err := cg.Scan(ctx, target)
+			if err != nil {
+				continue
+			}
+			results = append(results, result)
+		}
+	}
 	maxSeverity := scanner.SeverityInfo
 	findings := []string{}
-	for _, target := range targets {
-		result, err := cg.Scan(ctx, target)
-		if err != nil {
-			continue
-		}
+	for _, result := range results {
 		if a.logger != nil {
 			_ = a.logger.LogScanWithCorrelation(ctx, result, "", ScanCorrelationFromContext(ctx))
 		}
@@ -834,12 +967,19 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Claude Code changed files", len(findings)),
+		Reason:   codeGuardHookReason(codeGuardPlaceClaudeChanged, findings),
 		Findings: findings,
 	}
 }
 
 func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHookRequest) []string {
+	if req.sandboxView != nil {
+		var scanPaths []string
+		if a.scannerCfg != nil {
+			scanPaths = a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths
+		}
+		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
+	}
 	seen := map[string]bool{}
 	var out []string
 	add := func(p string) {
@@ -878,6 +1018,14 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 
 func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCodeHookRequest) int {
 	if a.scannerCfg == nil {
+		return 0
+	}
+	if req.sandboxView != nil {
+		// Component targets are the host user's Claude home plus workspace
+		// trees found by walking up with git. Neither applies to a sandbox,
+		// and the skill/plugin/MCP scanners are subprocesses that must not be
+		// pointed at an agent-writable tree on the host.
+		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
 	if !req.ScanComponents && !a.claudeCodeComponentScanDue() {

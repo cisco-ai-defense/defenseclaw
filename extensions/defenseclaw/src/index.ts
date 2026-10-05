@@ -264,7 +264,6 @@ export default function (api: DefenseClawPluginHost) {
 
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
-  const SIDECAR_TOKEN = sidecarConfig.token;
   const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
     ? Math.max(2_000, (sidecarConfig.approvalTimeoutS + 5) * 1_000)
     : 2_000;
@@ -292,9 +291,10 @@ export default function (api: DefenseClawPluginHost) {
     );
   };
 
+  // No token here: the client reads the current sidecar token per request,
+  // so a token that `setup openclaw` rewrites is picked up live (GAP-2286).
   const daemonClient = new DaemonClient({
     baseUrl: sidecarConfig.baseUrl,
-    token: sidecarConfig.token,
     identityReady,
     getCorrelation: () => ({
       agentId: identityCache?.agentId ?? "unknown",
@@ -315,7 +315,7 @@ export default function (api: DefenseClawPluginHost) {
   // Polls the sidecar /status endpoint and warns when protection is down.
   const healthMonitor = new HealthMonitor({
     statusUrl: `${SIDECAR_API}/status`,
-    token: SIDECAR_TOKEN,
+    // Authorization comes from daemonClient.buildOutboundHeaders().
     buildSidecarHeaders: () => daemonClient.buildOutboundHeaders(),
     onFetchResponse: (res) => daemonClient.applyStickyFromHttpResponse(res),
     logOutboundRequest,
@@ -580,7 +580,7 @@ export default function (api: DefenseClawPluginHost) {
         return handleCodeScan(
           target,
           SIDECAR_API,
-          SIDECAR_TOKEN,
+          loadSidecarConfig().token,
           daemonClient,
           logOutboundRequest,
           () => identityCache?.agentId ?? "unknown",

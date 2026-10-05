@@ -170,6 +170,7 @@ const scenarios: ScenarioDefinition[] = [
       {
         id: 'guardrail', label: 'guardrail.yaml', language: 'yaml',
         source: `mode: action
+block_at: HIGH
 human_approval: true
 hitl_min_severity: high
 critical_behavior: always_block
@@ -203,17 +204,17 @@ connector:
     evidence: [
       { id: 'mode-event', label: 'Finding', value: 'system.path-change · HIGH', detail: 'The same pending action is used for every mode.', tone: 'warning' },
       { id: 'mode-observe', label: 'Observe', value: 'Allow + log', detail: 'Observe mode records evidence but cannot block.', tone: 'info' },
-      { id: 'mode-action', label: 'Action', value: 'Block', detail: 'Action mode enforces the HIGH finding.', tone: 'danger' },
+      { id: 'mode-action', label: 'Action', value: 'Block', detail: 'Blocks because the demo sets block_at to HIGH. The shipped default blocks CRITICAL and alerts on HIGH.', tone: 'danger' },
       { id: 'mode-hitl', label: 'Action + HITL', value: 'Native pause', detail: 'Claude Code supports ask on PreToolUse.', tone: 'warning' },
     ],
     outcomes: [
       { id: 'observe-result', kind: 'observe', label: 'Allow and observe', reason: 'Observe mode never blocks', action: 'Emit evidence' },
-      { id: 'action-result', kind: 'block', label: 'Block action', reason: 'HIGH meets the action threshold', action: 'Return denial' },
+      { id: 'action-result', kind: 'block', label: 'Block action', reason: 'HIGH meets block_at: HIGH', action: 'Return denial' },
       { id: 'hitl-result', kind: 'pause', label: 'Pause for approval', reason: 'Action mode + HITL + native ask support', action: 'Wait for operator' },
     ],
     steps: [
       step('mode-input', 'Inspect action', 'Claude Code sends a HIGH-risk action through PreToolUse.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-      step('mode-pause', 'Resolve mode', 'Action mode with HITL maps this HIGH finding to native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 7, tone: 'warning' }]),
+      step('mode-pause', 'Resolve mode', 'Action mode with HITL maps this HIGH finding to native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 8, tone: 'warning' }]),
       step('mode-record', 'Return verdict', 'Claude Code pauses before execution and receives the operator outcome.', 'decision', ['mode-hitl'], [{ tabId: 'decision', start: 2, end: 7, tone: 'success' }], 'hitl-result'),
     ],
     variants: [
@@ -225,17 +226,17 @@ connector:
         ],
       },
       {
-        id: 'action', label: 'Action', description: 'Enforce the HIGH threshold immediately.',
+        id: 'action', label: 'Action', description: 'Block at the HIGH level set with guardrail block-at.',
         steps: [
           step('action-input', 'Inspect action', 'The HIGH-risk action reaches the guardrail.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-          step('action-decision', 'Block', 'Action mode enforces the HIGH finding.', 'guardrail', ['mode-event', 'mode-action'], [{ tabId: 'guardrail', start: 1, end: 4, tone: 'danger' }], 'action-result'),
+          step('action-decision', 'Block', 'With block_at set to HIGH, action mode blocks the finding.', 'guardrail', ['mode-event', 'mode-action'], [{ tabId: 'guardrail', start: 1, end: 2, tone: 'danger' }], 'action-result'),
         ],
       },
       {
         id: 'hitl', label: 'Action + HITL', description: 'Pause through Claude Code native ask.',
         steps: [
           step('hitl-input', 'Inspect action', 'The HIGH-risk action reaches the guardrail.', 'pretool', ['mode-event'], [{ tabId: 'pretool', start: 2, end: 7, tone: 'warning' }]),
-          step('hitl-decision', 'Pause', 'HITL is enabled and Claude Code supports native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 7, tone: 'warning' }], 'hitl-result'),
+          step('hitl-decision', 'Pause', 'HITL is enabled and Claude Code supports native ask.', 'guardrail', ['mode-event', 'mode-hitl'], [{ tabId: 'guardrail', start: 1, end: 8, tone: 'warning' }], 'hitl-result'),
         ],
       },
     ],
@@ -247,7 +248,7 @@ connector:
   {
     id: 'policy-decision-trace',
     title: 'Trace a runtime verdict from event to action',
-    summary: 'Follow normalization, deterministic matching, suppressions, severity, and the active action mapping.',
+    summary: 'Follow normalization, a bundled rule match, suppressions, severity, and the default pack mapping.',
     syntheticDataNotice: 'Guided example · Synthetic runtime event',
     connectorIds: ['claudecode'],
     tabs: [
@@ -255,43 +256,50 @@ connector:
   "connector": "claudecode",
   "kind": "tool_call",
   "tool": "Bash",
-  "command": "send [sensitive-artifact] to collector.example.invalid"
+  "command": "ls ~/.gnupg/"
 }` },
-      { id: 'rule-pack', label: 'rule-pack.yaml', language: 'yaml', source: `rules:
-  - id: shell.data-egress
-    match: sensitive_source_and_external_destination
-    severity: high
-judge:
-  enabled: false
-suppressions:
-  trusted_destinations: []
-actions:
-  high: block` },
+      { id: 'rule-pack', label: 'rules/sensitive-paths.yaml', language: 'yaml', source: `# policies/guardrail/default/rules/sensitive-paths.yaml (excerpt)
+version: 1
+category: sensitive-path
+rules:
+  - id: PATH-GNUPG
+    pattern: '(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.gnupg/'
+    title: "GPG keyring access"
+    severity: HIGH
+    confidence: 0.95
+    tags: [credential, file-sensitive]` },
+      { id: 'policy-config', label: 'config.yaml', language: 'yaml', source: `# ~/.defenseclaw/config.yaml (excerpt)
+guardrail:
+  mode: action           # observe mode never blocks
+  judge:
+    enabled: false       # the optional LLM judge is off by default
+  # No block_at is set, so the default pack decides:
+  # CRITICAL blocks, HIGH and MEDIUM alert, LOW allows.` },
       { id: 'policy-log', label: 'decision.log', language: 'json', source: `{
   "normalized": true,
-  "matched_rule": "shell.data-egress",
+  "matched_rule": "PATH-GNUPG",
   "suppressed": false,
   "judge": "skipped",
-  "severity": "high",
-  "action": "block"
+  "severity": "HIGH",
+  "action": "alert"
 }` },
     ],
     evidence: [
       { id: 'normalized', label: 'Stage 1', value: 'Event normalized', detail: 'Connector-specific input becomes a common tool event.', tone: 'info' },
-      { id: 'matched', label: 'Stage 2', value: 'shell.data-egress', detail: 'A bundled deterministic rule matches.', tone: 'warning' },
-      { id: 'not-suppressed', label: 'Stage 3', value: 'No suppression', detail: 'The destination is not trusted.', tone: 'neutral' },
+      { id: 'matched', label: 'Stage 2', value: 'PATH-GNUPG', detail: 'A bundled rule from the default pack matches the keyring path.', tone: 'warning' },
+      { id: 'not-suppressed', label: 'Stage 3', value: 'No suppression', detail: 'Suppressions filter only LLM-judge findings, never a rule finding.', tone: 'neutral' },
       { id: 'judge-skipped', label: 'Optional stage', value: 'Judge skipped', detail: 'The optional judge runs only when enabled.', tone: 'info' },
       { id: 'severity-high', label: 'Stage 5', value: 'Severity · HIGH', detail: 'The rule contributes a HIGH finding.', tone: 'warning' },
-      { id: 'runtime-action', label: 'Runtime mapping', value: 'high → block', detail: 'This is a guardrail mapping, not a skill or MCP admission action.', tone: 'danger' },
+      { id: 'runtime-action', label: 'Runtime mapping', value: 'HIGH → alert', detail: 'The default pack alerts on HIGH. The strict pack, or guardrail block-at HIGH, would block it.', tone: 'warning' },
     ],
-    outcomes: [{ id: 'policy-block', kind: 'block', label: 'Block runtime action', reason: 'HIGH runtime finding maps to block', action: 'Emit decision record' }],
+    outcomes: [{ id: 'policy-alert', kind: 'audit', label: 'Alert and allow the call', reason: 'HIGH maps to alert under the default pack', action: 'Emit decision record' }],
     steps: [
       step('normalize', 'Normalize', 'Convert the connector hook into a common event.', 'policy-event', ['normalized'], [{ tabId: 'policy-event', start: 2, end: 5, tone: 'info' }]),
-      step('match', 'Match rule', 'A deterministic exfiltration rule matches the event.', 'rule-pack', ['normalized', 'matched'], [{ tabId: 'rule-pack', start: 1, end: 4, tone: 'warning' }]),
-      step('suppress', 'Check suppressions', 'No trusted-destination suppression applies.', 'rule-pack', ['matched', 'not-suppressed'], [{ tabId: 'rule-pack', start: 7, end: 8, tone: 'info' }]),
-      step('judge', 'Optional judge', 'The LLM judge is disabled, so the deterministic result continues.', 'rule-pack', ['not-suppressed', 'judge-skipped'], [{ tabId: 'rule-pack', start: 5, end: 6, tone: 'info' }]),
+      step('match', 'Match rule', 'The bundled PATH-GNUPG rule matches the GPG keyring path.', 'rule-pack', ['normalized', 'matched'], [{ tabId: 'rule-pack', start: 5, end: 8, tone: 'warning' }]),
+      step('suppress', 'Check suppressions', 'Suppressions only filter LLM-judge findings, so this rule finding stays.', 'policy-log', ['matched', 'not-suppressed'], [{ tabId: 'policy-log', start: 4, end: 4, tone: 'info' }]),
+      step('judge', 'Optional judge', 'The LLM judge is disabled, so the rule result continues.', 'policy-config', ['not-suppressed', 'judge-skipped'], [{ tabId: 'policy-config', start: 4, end: 5, tone: 'info' }]),
       step('severity', 'Assign severity', 'The matching rule contributes HIGH severity.', 'policy-log', ['judge-skipped', 'severity-high'], [{ tabId: 'policy-log', start: 3, end: 7, tone: 'warning' }]),
-      step('mapping', 'Resolve action', 'The runtime HIGH mapping resolves to block.', 'rule-pack', ['severity-high', 'runtime-action'], [{ tabId: 'rule-pack', start: 9, end: 10, tone: 'danger' }], 'policy-block'),
+      step('mapping', 'Resolve action', 'Under the default pack, HIGH resolves to alert.', 'policy-config', ['severity-high', 'runtime-action'], [{ tabId: 'policy-config', start: 6, end: 7, tone: 'warning' }], 'policy-alert'),
     ],
     boundaries: {
       did: ['Show the ordered stages that assemble a runtime verdict', 'Distinguish the optional judge from deterministic rules'],
@@ -519,7 +527,7 @@ scanner:
     evidence: [
       { id: 'mcp-discovered', label: 'Discovery', value: 'Claude Code MCP config', detail: 'The server is discovered from connector configuration.', tone: 'info' },
       { id: 'mcp-held', label: 'Admission', value: 'Held pending scan', detail: 'Admission waits while the local server is inspected.', tone: 'warning' },
-      { id: 'mcp-sandbox', label: 'Scanner', value: 'Local stdio sandbox', detail: 'The local stdio process starts inside the scanner sandbox.', tone: 'info' },
+      { id: 'mcp-sandbox', label: 'Scanner', value: 'Local stdio subprocess', detail: 'The local stdio server starts as a short-lived scan subprocess with a scrubbed environment.', tone: 'info' },
       { id: 'mcp-effects', label: 'Capability mismatch', value: 'Filesystem + outbound network', detail: 'The descriptor implies more than a read-only lookup.', tone: 'danger' },
       { id: 'mcp-high', label: 'Consolidated severity', value: 'HIGH', detail: 'Findings consolidate before action mapping.', tone: 'warning' },
       { id: 'mcp-map', label: 'mcp_actions.high', value: 'Disable + block install', detail: 'The policy mapping acts on the whole server.', tone: 'danger' },
@@ -529,21 +537,21 @@ scanner:
     steps: [
       step('mcp-discover', 'Discover', 'Read the server entry from Claude Code configuration.', 'mcp-config', ['mcp-discovered'], [{ tabId: 'mcp-config', start: 2, end: 7, tone: 'info' }]),
       step('mcp-hold', 'Hold admission', 'Keep the server unavailable while the scan runs.', 'mcp-config', ['mcp-discovered', 'mcp-held'], [{ tabId: 'mcp-config', start: 3, end: 7, tone: 'warning' }]),
-      step('mcp-start', 'Start sandbox', 'Start the local stdio server inside the scanner sandbox.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 4, end: 6, tone: 'info' }]),
+      step('mcp-start', 'Start server', 'Start the local stdio server as a short-lived scan subprocess.', 'mcp-config', ['mcp-held', 'mcp-sandbox'], [{ tabId: 'mcp-config', start: 4, end: 6, tone: 'info' }]),
       step('mcp-enumerate', 'Enumerate', 'Read tool descriptions and schemas, plus prompts/resources when enabled.', 'tools', ['mcp-sandbox', 'mcp-effects'], [{ tabId: 'tools', start: 2, end: 6, tone: 'danger' }]),
       step('mcp-severity', 'Consolidate', 'The claimed-intent mismatch resolves to HIGH.', 'mcp-result', ['mcp-effects', 'mcp-high'], [{ tabId: 'mcp-result', start: 3, end: 5, tone: 'warning' }]),
       step('mcp-resolve', 'Resolve policy', 'mcp_actions.high disables runtime and blocks installation.', 'mcp-actions', ['mcp-high', 'mcp-map'], [{ tabId: 'mcp-actions', start: 1, end: 4, tone: 'danger' }]),
       step('mcp-record', 'Record', 'The admission action is written to the audit history.', 'mcp-result', ['mcp-map', 'mcp-audit'], [{ tabId: 'mcp-result', start: 5, end: 7, tone: 'success' }], 'mcp-disabled'),
     ],
     boundaries: {
-      did: ['Inspect a local stdio server in the scanner sandbox', 'Compare claimed intent with descriptor side effects', 'Apply policy to the whole server'],
+      did: ['Inspect a local stdio server in a short-lived scan subprocess', 'Compare claimed intent with descriptor side effects', 'Apply policy to the whole server'],
       didNot: ['Add a remote URL to any connector', 'Claim a clean scan proves harmless implementation', 'Require optional LLM intent analysis'],
     },
   },
   {
     id: 'skill-quarantine',
-    title: 'Stop a malicious skill before an agent can load it',
-    summary: 'The watcher quarantines first, then static and optional intent checks feed the skill admission policy.',
+    title: 'Catch a malicious skill and quarantine it',
+    summary: 'The watcher scans a new skill where it landed; static and optional intent checks feed the skill admission policy, which quarantines it.',
     syntheticDataNotice: 'Guided example · Synthetic skill bundle',
     connectorIds: ['claudecode'],
     tabs: [
@@ -561,41 +569,41 @@ tools:
 install_state: quarantined` },
       { id: 'skill-actions', label: 'skill-actions.yaml', language: 'yaml', source: `skill_actions:
   critical:
-    quarantine: retain
+    file: quarantine
     runtime: disable
     install: block
-llm_intent_analysis: optional` },
+# LLM intent analysis is optional` },
       { id: 'skill-result', label: 'scan-result.json', language: 'json', source: `{
   "skill": "workspace-helper",
   "severity": "critical",
   "findings": ["path_escape", "external_exfiltration_intent"],
-  "quarantine": "retained",
+  "file": "quarantined",
   "runtime": "disabled",
   "install": "blocked"
 }` },
     ],
     evidence: [
       { id: 'skill-detected', label: 'Watcher', value: 'New skill detected', detail: 'A configured connector directory changed.', tone: 'info' },
-      { id: 'skill-first', label: 'Ordering guarantee', value: 'Quarantine before scan', detail: 'The bundle leaves the agent-visible path before inspection.', tone: 'warning' },
+      { id: 'skill-first', label: 'Ordering', value: 'Scan in place', detail: 'The skill stays in its folder while it is scanned; the watcher acts on the verdict.', tone: 'warning' },
       { id: 'skill-static', label: 'Static checks', value: 'Manifest · tools · paths', detail: 'Deterministic checks run without an LLM key.', tone: 'danger' },
       { id: 'skill-intent', label: 'Optional analysis', value: 'Instruction intent', detail: 'LLM-assisted analysis is optional and not the only scanner.', tone: 'info' },
       { id: 'skill-critical', label: 'Consolidated severity', value: 'CRITICAL', detail: 'The findings reach the highest severity.', tone: 'danger' },
-      { id: 'skill-map', label: 'skill_actions', value: 'Retain + disable + block', detail: 'OPA maps the result through admission policy.', tone: 'danger' },
+      { id: 'skill-map', label: 'skill_actions', value: 'Quarantine + disable + block', detail: 'OPA maps the result through admission policy.', tone: 'danger' },
       { id: 'skill-audit', label: 'Evidence', value: 'Action + reason audited', detail: 'Manual restore or allow would also create an audit trail.', tone: 'success' },
     ],
-    outcomes: [{ id: 'skill-retained', kind: 'quarantine', label: 'Retain quarantine', reason: 'CRITICAL skill findings', action: 'Disable runtime, block install, write audit event' }],
+    outcomes: [{ id: 'skill-retained', kind: 'quarantine', label: 'Quarantine', reason: 'CRITICAL skill findings', action: 'Move to quarantine, disable runtime, block install, write audit event' }],
     steps: [
       step('skill-appears', 'Detect', 'A new skill appears in a configured connector directory.', 'skill-manifest', ['skill-detected'], [{ tabId: 'skill-manifest', start: 1, end: 5, tone: 'info' }]),
-      step('skill-quarantine', 'Quarantine', 'The watcher moves it out of the agent-visible path first.', 'skill-manifest', ['skill-detected', 'skill-first'], [{ tabId: 'skill-manifest', start: 6, end: 6, tone: 'warning' }]),
-      step('skill-scan', 'Scan statically', 'Inspect manifest, tool declarations, paths, and instructions.', 'skill-file', ['skill-first', 'skill-static'], [{ tabId: 'skill-file', start: 3, end: 6, tone: 'danger' }]),
+      step('skill-scan', 'Scan statically', 'Not on a block or allow list, so the watcher scans it in place: manifest, tool declarations, paths, and instructions.', 'skill-file', ['skill-detected', 'skill-first', 'skill-static'], [{ tabId: 'skill-file', start: 3, end: 6, tone: 'danger' }]),
       step('skill-llm', 'Optional intent check', 'Optional LLM analysis evaluates instruction intent.', 'skill-actions', ['skill-static', 'skill-intent'], [{ tabId: 'skill-actions', start: 6, end: 6, tone: 'info' }]),
       step('skill-score', 'Consolidate', 'Static and optional findings consolidate to CRITICAL.', 'skill-result', ['skill-intent', 'skill-critical'], [{ tabId: 'skill-result', start: 2, end: 4, tone: 'danger' }]),
-      step('skill-policy', 'Resolve policy', 'skill_actions retains quarantine, disables runtime, and blocks install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 1, end: 5, tone: 'danger' }]),
+      step('skill-policy', 'Resolve policy', 'skill_actions for CRITICAL: quarantine the files, disable runtime, block install.', 'skill-actions', ['skill-critical', 'skill-map'], [{ tabId: 'skill-actions', start: 1, end: 5, tone: 'danger' }]),
+      step('skill-quarantine', 'Quarantine', 'The watcher moves the skill out of the agent\'s skill folder into quarantine.', 'skill-manifest', ['skill-map'], [{ tabId: 'skill-manifest', start: 6, end: 6, tone: 'warning' }]),
       step('skill-record', 'Record', 'The final action and reason enter the audit trail.', 'skill-result', ['skill-map', 'skill-audit'], [{ tabId: 'skill-result', start: 4, end: 7, tone: 'success' }], 'skill-retained'),
     ],
     boundaries: {
-      did: ['Quarantine before scanning', 'Combine deterministic checks with optional LLM analysis', 'Map severity through skill_actions'],
-      didNot: ['Expose the unscanned skill to the agent', 'Treat LLM analysis as mandatory or sufficient alone', 'Skip the audit trail for a manual allow'],
+      did: ['Scan the skill where it was installed', 'Combine deterministic checks with optional LLM analysis', 'Quarantine on the skill_actions verdict'],
+      didNot: ['Hide the skill from the agent while the scan runs', 'Treat LLM analysis as mandatory or sufficient alone', 'Skip the audit trail for a manual allow'],
     },
   },
   {

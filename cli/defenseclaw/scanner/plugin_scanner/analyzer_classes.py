@@ -126,6 +126,7 @@ class SourceAnalyzer:
             ctx.profile,
             source_files_out=ctx.source_files,
             force_include=force_include,
+            python_host=ctx.manifest is not None and ctx.manifest.source in ("plugin.yaml", "plugin.yml"),
         )
         ctx.metadata["file_count"] = file_count
         ctx.metadata["total_size_bytes"] = total_bytes

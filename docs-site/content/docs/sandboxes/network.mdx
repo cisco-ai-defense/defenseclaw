@@ -1,0 +1,276 @@
+---
+title: Network and egress
+description: How DefenseClaw's egress proxy decides every site a sandboxed agent contacts, the open, balanced and strict network profiles, the blocklist, unblocks, asks, large-upload alerts and what the agent is told when it is blocked.
+keywords:
+  - DefenseClaw egress proxy
+  - sandbox network profile
+  - sandbox blocklist
+  - sandbox unblock
+  - large upload alert
+  - OpenShell egress
+  - balanced profile
+  - strict profile
+---
+
+A sandbox has no network of its own. It has three ways out, and DefenseClaw
+watches all three:
+
+- **Web traffic** goes through DefenseClaw's **egress proxy**, which the
+  sandbox reaches at `host.openshell.internal` through `HTTPS_PROXY` and
+  `HTTP_PROXY`. The proxy decides and logs every site.
+- **Model calls** go to the harness's model provider directly through
+  OpenShell, which adds the real credential outside the sandbox. The sandbox
+  only ever holds a placeholder.
+- **Anything else**, such as a client that ignores the proxy settings, is
+  refused by OpenShell, which files a connection request. DefenseClaw
+  decides most of those on its own and asks you about the rest.
+
+## How a site is decided
+
+The proxy checks each request in a fixed order, and the first match decides.
+Every sandbox is decided by its own policy: another sandbox's pack, block
+list or unblocks never apply to it.
+
+<Flow direction="TB" caption="The egress proxy's checks, in order: the first that matches decides. When your organization turns unblocking off, unblocks do not count and the feed is checked before your allow list.">
+  <Node id="guard" kind="policy">{`Safety checks\nthis machine, private networks, ports\nblocked; no unblock opens these`}</Node>
+  <Node id="org" kind="policy">{`Your organization's lists\nlisted, or off its allow-only list: blocked`}</Node>
+  <Node id="block" kind="policy">{`Your block list\nblocked; remove the entry to open it`}</Node>
+  <Node id="allow" kind="generic">{`Your unblocks and allow list\nallowed`}</Node>
+  <Node id="feed" kind="policy">{`The blocklist feed\nblocked; you can unblock it`}</Node>
+  <Node id="dflt" kind="decision">{`The network profile\ndecides the rest (next diagram)`}</Node>
+  <Edge from="guard" to="org" />
+  <Edge from="org" to="block" />
+  <Edge from="block" to="allow" />
+  <Edge from="allow" to="feed" />
+  <Edge from="feed" to="dflt" />
+</Flow>
+
+<Flow direction="TB" caption="What the profile does with a site no check matched. A site on your organization's allow-only list is allowed just before this. The strict profile has no egress proxy, so its sandboxes never get here.">
+  <Node id="p" kind="decision">{`Network profile?\nnothing else matched`}</Node>
+  <Node id="b" kind="policy">{`Only the curated allowlist\nthe rest blocked; you can unblock`}</Node>
+  <Node id="o" kind="generic">{`Any site name allowed\nIP addresses blocked, can unblock`}</Node>
+  <Edge from="p" to="b" label="balanced" />
+  <Edge from="p" to="o" label="open" />
+</Flow>
+
+In words:
+
+1. **This machine, link-local and cloud metadata addresses** are always
+   blocked. Nothing opens them. To let the sandbox use one service on your
+   machine, start it with `--host-port PORT`, which you then approve.
+2. **Private networks** such as `10.x`, `192.168.x` and intranet names are
+   blocked unless an allow entry names them. An unblock never opens them.
+3. **Ports** other than those on the proxy port list are blocked. The default
+   list is 80 and 443.
+4. **Your organization's block list**, then its allow-only list, if it has
+   one. Nothing you do unblocks these.
+5. **Your block list**, the pack's entries plus `openshell.egress.block`.
+   An unblock does not lift it; remove the entry instead.
+6. **Your unblocks** allow the site.
+7. **The allow list** allows the site, and exempts it from the blocklist
+   feed.
+8. **The blocklist feed** blocks paste sites, anonymous file drops, webhook
+   catchers, tunnels and anonymizers. You can unblock these.
+9. **The profile's default** decides everything else. `open` allows any host
+   name but blocks a bare IP address until you unblock it, because an IP
+   address would get around the name-based blocklist. `balanced` blocks
+   anything outside its curated allowlist, and you can unblock it.
+
+[How a destination is decided](/docs/sandboxes/policy-packs#how-a-destination-is-decided)
+lists every step in full, including your organization's settings.
+
+## Network profiles
+
+Every sandbox runs one policy pack. The built-in packs set the network
+profile and more:
+
+| Setting | Open (default) | Balanced | Strict |
+| --- | --- | --- | --- |
+| Web access | Any site by name, except the blocklist, private networks and this machine | Only a curated developer allowlist: package registries, source hosting, toolchains and documentation | None: only the harness's model provider |
+| Banner | `network: open + blocklist` | `network: allowlist (balanced)` | `network: provider hosts only (strict)` |
+| Connection requests | Decided automatically | Triaged, the unclear ones asked | Every one asked |
+| Large-upload alert | 25 MiB | 10 MiB | 5 MiB |
+| Your project | Mounted live | Mounted live | Copied |
+| Skip-permissions mode | On | On | Off: the harness keeps its prompts |
+
+Pick one for a run:
+
+```bash
+defenseclaw sandbox run claude --profile balanced
+defenseclaw sandbox run claude --profile strict
+```
+
+Or set it for every run with `openshell.profile` in
+`~/.defenseclaw/config.yaml`. On a Mac every run works on a copy, whichever
+pack it uses.
+
+<Callout type="warn" title="The open profile is a deliberate trade-off">
+With `open`, an agent tricked by a prompt injection could send your code to
+any site that is not on the blocklist. DefenseClaw's tool-call checks, the
+blocklist, large-upload alerts, hidden secrets and endpoint-bound
+credentials limit the damage. The proxy sees HTTPS only as encrypted
+tunnels, so it cannot tell a download from an upload. For sensitive code,
+use `balanced` or `strict`.
+</Callout>
+
+See [policy packs and admin controls](/docs/sandboxes/policy-packs) to write
+your own pack or set limits for your organization.
+
+## Allow and block your own sites
+
+To let every sandbox reach an intranet host, such as a package mirror, add
+its exact name or address to the allow list. To keep sandboxes away from a
+site, add it to the block list:
+
+```yaml
+openshell:
+  egress:
+    allow:
+      - npm.mirror.corp.example
+    block:
+      - files.example.net
+```
+
+A change reaches running sandboxes on the next config reload.
+
+## Unblock a site
+
+When a block is a false positive, lift it for one sandbox or for all of
+them:
+
+```bash
+defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a
+defenseclaw sandbox unblock webhook.site --always
+```
+
+`--always` adds the host to `openshell.egress.unblocked` in `config.yaml`.
+You can also unblock from the TUI (`u` in the Sandboxes panel) or from the
+macOS app's notification, menu bar or Sandboxes view.
+
+An unblock lifts blocklist-feed blocks, IP-address blocks and, with
+`balanced`, sites outside the allowlist. It never opens this machine,
+private networks or metadata addresses, and never overrides your block list
+or your organization's. If your organization turns unblocking off
+(`openshell.admin.allow_unblock: false`), the command says so:
+
+```text
+blocked by your organization's DefenseClaw policy: egress.unblock
+```
+
+`strict` has no web proxy, so there is nothing to unblock there; its direct
+connection requests wait as asks instead.
+
+## Asks
+
+A connection that does not go through the proxy is refused by OpenShell,
+which files a request to open it. DefenseClaw decides most of those itself.
+It asks you only about doors into your machine or network (a port on this
+machine, a private address, an intranet name) and about requests OpenShell's
+policy advisor flags. `balanced` also asks about sites outside its
+allowlist, and `strict` about every request.
+
+```bash
+defenseclaw sandbox approvals --watch
+defenseclaw sandbox approve myapp-7f3a ap_5f2c9a1e7b3d4c60
+defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60
+```
+
+`approve --always` keeps the decision for future sandboxes, except for your
+own machine and private networks, which open only for one sandbox at a time.
+An approval takes effect at the sandbox's next quiet moment, because every
+OpenShell policy change closes its open connections.
+
+## Large uploads
+
+The proxy counts what each sandbox sends. When a sandbox sends more than the
+threshold to a site it had not contacted before, DefenseClaw reports it in
+the feed and as a finding. The upload itself goes on.
+
+To cut such uploads off, turn the block on:
+
+```yaml
+openshell:
+  egress:
+    large_upload_mb: 10
+    block_large_uploads: true
+```
+
+With the block on, the upload stops before the chunk that would take it
+past the threshold, and later connections to that site are refused. The
+feed shows:
+
+```text
+✗ files.example.net (large upload blocked: this sandbox tried to send more than 10 MiB to a destination it had not contacted before)  → unblock: defenseclaw sandbox unblock files.example.net --sandbox myapp-7f3a
+```
+
+Sites you unblocked or put on an allow list are exempt: uploads there are
+only reported. The balanced allowlist does not exempt a site, so a first
+large push to `github.com` is cut too. Add such hosts to
+`openshell.egress.allow` before you turn the block on. An organization can
+turn the block on for every sandbox with `openshell.admin.block_large_uploads`.
+
+See [large-upload alert threshold](/docs/sandboxes/policy-packs#large-upload-alert-threshold).
+
+## What the agent is told
+
+A blocked agent should stop and tell you, not look for another way out.
+DefenseClaw tells it so in two ways.
+
+**A plain HTTP request** gets a `403` with a JSON body written for the
+agent (shortened here):
+
+```json
+{
+  "error": "egress_blocked",
+  "message": "DefenseClaw blocked sandbox egress to webhook.site:80 (webhook_catcher): Webhook catchers record every request sent to them for whoever holds the URL, a common exfiltration sink.",
+  "host": "webhook.site",
+  "port": 80,
+  "category": "webhook_catcher",
+  "source": "feed",
+  "mode": "open",
+  "sandbox": "myapp-7f3a",
+  "unblockable": true,
+  "how_to_unblock": "Tell the user DefenseClaw blocked this destination. They can allow it for this sandbox with `defenseclaw sandbox unblock webhook.site --sandbox myapp-7f3a`, for every sandbox with `defenseclaw sandbox unblock webhook.site --always`, or from the DefenseClaw activity feed. Do not try to reach it another way."
+}
+```
+
+**An HTTPS request** fails at the tunnel, so tools show only a connection
+error such as `curl: (56) CONNECT tunnel failed, response 403`. After the
+shell or web-fetch tool call, DefenseClaw's hooks add a note to the
+harness's context that names the blocked site, why it was blocked and the
+unblock command, and tells the agent not to try another way. A cut large
+upload is reported the same way.
+
+| Harness | Gets the note from the hooks |
+| --- | --- |
+| Claude Code, Codex, GitHub Copilot CLI | Yes |
+| Other harnesses | No: the activity feed and your terminal report the block |
+
+Cursor Agent and Devin CLI hooks read the note too, but neither harness can
+run in a sandbox until it is verified (see
+[which harnesses can run](/docs/sandboxes/guide#which-harnesses-can-run)).
+
+Each block is told once, and only to the sandbox that hit it.
+
+<Callout type="info" title="The proxy credential in verbose output">
+The proxy address the sandbox gets holds a user name and password of its
+own, so `curl -v` prints a `Proxy-Authorization: Basic …` header, and the
+agent may warn you that a credential leaked. It is not one of your secrets.
+DefenseClaw makes one for each sandbox; it works only on the egress proxy on
+this machine's loopback address, lets the sandbox reach only what its policy
+allows, and stops working when the sandbox is deleted.
+</Callout>
+
+## See what happened
+
+```bash
+defenseclaw sandbox activity -f
+defenseclaw sandbox status myapp-7f3a
+defenseclaw sandbox policy explain
+```
+
+`activity` is the live feed of sites, blocks, asks and findings. The
+`Egress` row of `status` counts the sites contacted and blocked and the
+bytes sent and received. `policy explain` shows each effective setting and
+the layer it came from: the pack, your config, a run option or your
+organization.

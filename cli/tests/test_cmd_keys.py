@@ -32,6 +32,7 @@ from defenseclaw import credential_provenance
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
+    ClawConfig,
     Config,
     GatewayConfig,
     GuardrailConfig,
@@ -41,8 +42,23 @@ from defenseclaw.context import AppContext
 from defenseclaw.main import cli
 
 
+def _configured_openclaw(data_dir: str) -> ClawConfig:
+    """claw.mode's openclaw default with an openclaw.json, i.e. OpenClaw set up.
+
+    Without one the OpenClaw gateway token is not required (#958), which
+    these tests would otherwise inherit from the host.
+    """
+    home = os.path.join(data_dir, "openclaw-home")
+    os.makedirs(home, exist_ok=True)
+    config_file = os.path.join(home, "openclaw.json")
+    with open(config_file, "w", encoding="utf-8") as fh:
+        fh.write("{}")
+    return ClawConfig(mode="openclaw", home_dir=home, config_file=config_file)
+
+
 def _make_app_context(data_dir: str, **overrides) -> AppContext:
     cfg = Config(
+        claw=overrides.get("claw") or _configured_openclaw(data_dir),
         data_dir=data_dir,
         audit_db=os.path.join(data_dir, "audit.db"),
         quarantine_dir=os.path.join(data_dir, "quarantine"),
@@ -70,6 +86,32 @@ class KeysListTests(unittest.TestCase):
             for item in payload:
                 self.assertIn("env_name", item)
                 self.assertIn("requirement", item)
+
+    def test_list_header_lines_up_with_the_columns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            result = CliRunner().invoke(keys_cmd, ["list"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            lines = result.output.splitlines()
+            header = next(line for line in lines if "ENV NAME" in line)
+            rule = lines[lines.index(header) + 1]
+            row = lines[lines.index(header) + 2]
+            col = header.index("ENV NAME")
+            self.assertEqual(rule[col - 2:col], "  ")
+            self.assertEqual(rule[col], "─")
+            self.assertNotEqual(row[col], " ")
+            self.assertEqual(row[col - 1], " ")
+
+    def test_redirected_list_rows_use_the_ascii_legend_glyphs(self):
+        # GAP-2597: rows kept U+25CB/U+00B7 while the legend was ASCII.
+        from defenseclaw import ux
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(ux, "_configured_unicode_output", False):
+            app = _make_app_context(tmp)
+            result = CliRunner().invoke(keys_cmd, ["list"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(result.output.isascii(), msg=result.output)
+        self.assertRegex(result.output, r"(?m)^  [o*-]  [A-Z0-9_]+ ")
 
     def test_list_missing_only_filters_to_required_unset(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -152,7 +194,7 @@ class KeysProvenanceCliTests(unittest.TestCase):
                 self.assertEqual(listed.exit_code, 0, msg=listed.output)
                 entry = self._entry(listed.output)
                 self.assertEqual(entry["source"], "env")
-                self.assertEqual(entry["value_masked"], "expo…only")
+                self.assertEqual(entry["value_masked"], "…only")
                 self.assertNotIn(dotenv_secret, listed.output)
                 self.assertNotIn(exported_secret, listed.output)
 
@@ -184,10 +226,24 @@ class KeysSetTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             dotenv_path = os.path.join(tmp, ".env")
             self.assertTrue(os.path.isfile(dotenv_path))
+            # GAP-1297: the same path keys remove prints (no mixed separators).
+            self.assertIn(f"to {dotenv_path}", result.output)
             with open(dotenv_path, encoding="utf-8") as fh:
                 body = fh.read()
             self.assertIn("DEFENSECLAW_TEST_KEY", body)
             self.assertIn("s3cret", body)
+
+    def test_set_confirmation_shows_only_the_last_four_characters(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            result = CliRunner().invoke(
+                keys_cmd,
+                ["set", "DEFENSECLAW_TEST_KEY", "--value", "abcd-secret-wxyz"],
+                obj=app,
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("DEFENSECLAW_TEST_KEY = …wxyz", result.output)
+            self.assertNotIn("abcd", result.output)
 
     def test_set_rejects_empty_value(self):
         with tempfile.TemporaryDirectory() as tmp:

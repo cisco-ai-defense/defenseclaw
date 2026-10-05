@@ -274,7 +274,7 @@ def test_security_and_policy_log_queries_preserve_connector_scope() -> None:
     policy = _panel(_dashboard("defenseclaw-policy-decisions.json"), "Recent OPA + egress events")
     policy_targets = {target["refId"]: target["expr"] for target in policy["targets"]}
     assert set(policy_targets) == {"A", "B", "C"}
-    assert 'event_name=~"guardrail[.]evaluation[.](completed|failed)"' in policy_targets["B"]
+    assert 'event_name=~"guardrail[.]evaluation[.](completed|failed)|hook_decision"' in policy_targets["B"]
     assert '| connector=~"$connector"' in policy_targets["B"]
     assert 'event_name=~"policy[.](updated|reload[.]rejected)"' in policy_targets["C"]
     assert "connector=" not in policy_targets["C"]
@@ -3192,7 +3192,11 @@ def test_dashboard_queries_preserve_v8_identity_across_other_dashboards() -> Non
         "Signals by detector (selected range)",
     ):
         expression = _panel(discovery, title)["targets"][0]["expr"]
-        assert "increase(defenseclaw_ai_discovery_signals_total" in expression
+        # GAP-2646: each signal series is sparse (one sample per change), and
+        # increase() needs two samples, so a fresh discovery showed No data.
+        assert "last_over_time(defenseclaw_ai_discovery_signals_total" in expression
+        assert "[1d] offset $__range" in expression
+        assert "increase(" not in expression
         assert "max_over_time" not in expression
 
     findings_stream = _panel(_dashboard("defenseclaw-findings.json"), "Finding event stream")
@@ -3373,6 +3377,6 @@ def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
         "Top rule (1h)",
         "Top 20 rules with sparklines (1h)",
         "Findings rate for $rule_id by severity",
-        "Heatmap — rule_id (rows) × time (cols)",
+        "Rule activity — rule_id (rows) × time (cols)",
     ):
         assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")

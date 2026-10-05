@@ -213,7 +213,14 @@ func resolveWindowsCodexRequirementsLayout(
 	if err := connector.ValidateWindowsManagedGatewayServiceName(gatewayServiceName); err != nil {
 		return opts, err
 	}
-	protectedConfig, err := config.LoadFromFile(configPath)
+	loadConfig := config.LoadFromFile
+	if action == "lifecycle" || action == "remove" {
+		// Only the API port is read here, also while a rollback restores
+		// the previous deployment under a new config the services could
+		// not load (GAP-1291).
+		loadConfig = config.LoadManagedFileForLifecycleRecovery
+	}
+	protectedConfig, err := loadConfig(configPath)
 	if err != nil {
 		return opts, fmt.Errorf("load protected Windows enterprise config: %w", err)
 	}
@@ -247,6 +254,9 @@ func resolveWindowsCodexRequirementsLayout(
 		ClaudeEffectivePolicyVerified:   claudeEffectivePolicy,
 		CodexTargetEnabled:              applicability.Codex,
 		CursorTargetEnabled:             applicability.Cursor,
+		HookContractID: connector.WindowsCodexStandaloneHookContract(
+			filepath.Join(installRoot, "bin", "defenseclaw-hook.exe"),
+		),
 	}
 
 	metadataPath := filepath.Join(stateRoot, "install", "deployment.json")

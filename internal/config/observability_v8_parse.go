@@ -23,6 +23,11 @@ type ObservabilityV8CompileOptions struct {
 	DefaultDataDir      string
 	ConfiguredFilePaths []string
 	Secrets             ObservabilityV8SecretResolver
+	// CredentialsDir is where the default resolver reads protected
+	// credential references. When empty, a standalone enterprise source
+	// uses the secrets directory next to it and any other source resolves
+	// none.
+	CredentialsDir string
 }
 
 type ObservabilityV8CompiledConfig struct {
@@ -56,6 +61,11 @@ func ParseCompileObservabilityV8(
 	dataDir := strings.TrimSpace(envelope.DataDir)
 	if dataDir == "" {
 		dataDir = strings.TrimSpace(options.DefaultDataDir)
+		// The runtime loader defaults the same way (standaloneLayoutDataDir),
+		// so the compiled local store paths match the runtime data_dir.
+		if layoutDataDir, ok := standaloneLayoutDataDir(sourceName, document.Document); ok {
+			dataDir = layoutDataDir
+		}
 	}
 	if dataDir == "" {
 		return nil, annotateObservabilityV8SemanticError(document, fmt.Errorf("config: v8 compilation requires a data_dir or explicit DefaultDataDir option"))
@@ -68,6 +78,10 @@ func ParseCompileObservabilityV8(
 	if envelope.Observability != nil {
 		source = *envelope.Observability
 	}
+	// The same retired-connector rename the config loader applies
+	// (migrateLegacyConnectorIDs), so a route selector or connector block
+	// written for the retired ID keeps applying to its replacement.
+	migrateObservabilityV8LegacyConnectors(&source)
 	if source.Local.Path == "" {
 		source.Local.Path = filepath.Join(dataDir, DefaultAuditDBName)
 		source.localPathDefaulted = true
@@ -86,7 +100,15 @@ func ParseCompileObservabilityV8(
 	if err := normalizeObservabilityV8EffectiveFilePaths(&source); err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
-	if err := validateObservabilityV8Secrets(&source, options.Secrets); err != nil {
+	secrets := options.Secrets
+	if secrets == nil {
+		credentialsDir := options.CredentialsDir
+		if credentialsDir == "" {
+			credentialsDir = standaloneCredentialsDir(sourceName, document.Document)
+		}
+		secrets = observabilityV8RuntimeSecretResolver{credentialsDir: credentialsDir}
+	}
+	if err := validateObservabilityV8Secrets(&source, secrets); err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
 	plan, err := CompileObservabilityV8(&source)

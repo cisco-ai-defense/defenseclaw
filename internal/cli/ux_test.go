@@ -10,6 +10,23 @@ import (
 	"testing"
 )
 
+func TestRedirectedWindowsOutputUsesASCIIGlyphs(t *testing.T) {
+	prev := asciiGlyphs
+	t.Cleanup(func() { asciiGlyphs = prev })
+	asciiGlyphs = func() bool { return true }
+	if got := styledConnectorStateVerb("running"); strings.ContainsRune(got, '—') || !strings.HasPrefix(got, " - ") {
+		t.Fatalf("styledConnectorStateVerb = %q, want an ASCII dash", got)
+	}
+	// Gateway status details come from the server (WIN2-U2-04).
+	if got := asciiText("process-global — fleet uplink"); got != "process-global - fleet uplink" {
+		t.Fatalf("asciiText = %q, want an ASCII dash", got)
+	}
+	asciiGlyphs = func() bool { return false }
+	if got := glyph("⚠", "!"); got != "⚠" {
+		t.Fatalf("glyph = %q, want the Unicode marker on a terminal", got)
+	}
+}
+
 func TestColorEnabled_forceOverridesTTYAndNO_COLOR(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	t.Setenv("FORCE_COLOR", "1")

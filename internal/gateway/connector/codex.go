@@ -179,6 +179,14 @@ func snapshotCodexSetupRuntime(opts SetupOpts, connector *CodexConnector) (codex
 	} {
 		paths[path] = 0o600
 	}
+	if codexDotEnvSupported() {
+		// A symlinked .env (dotfile managers) is edited through the link by
+		// the atomic transform and is not snapshotted here.
+		dotEnvPath := codexDotEnvPath()
+		if info, err := os.Lstat(dotEnvPath); os.IsNotExist(err) || (err == nil && info.Mode().IsRegular()) {
+			paths[dotEnvPath] = codexDotEnvPerm(dotEnvPath)
+		}
+	}
 
 	for path, perm := range paths {
 		fileSnapshot := codexSetupRuntimeFileSnapshot{path: path, perm: perm}
@@ -370,16 +378,27 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	}
 
 	hookScript := filepath.Join(hookDir, "codex-hook.sh")
-	if runtime.GOOS == "windows" {
-		// Native Windows installs use Codex's documented legacy managed
-		// configuration layer. Codex treats hooks discovered from this source as
-		// administrator-managed, so setup never needs to synthesize private
-		// hooks.state trust records or ask the operator to approve /hooks.
+	if codexUsesManagedHookLayer(opts) {
+		// Managed enterprise installs keep the matrix in Codex's legacy
+		// managed configuration layer, where hooks are source-trusted.
 		if err := c.patchCodexManagedHooks(opts, hookScript); err != nil {
 			return c.rollbackSetupAfterSnapshot(
 				opts,
 				runtimeSnapshot,
 				fmt.Errorf("codex managed_config.toml hook patch: %w", err),
+				false,
+				false,
+			)
+		}
+	} else if runtime.GOOS == "windows" {
+		// Current Codex ignores CODEX_HOME/managed_config.toml on Windows, so a
+		// per-user install registers its matrix in config.toml (below) and
+		// removes the one an earlier release left in the ignored layer.
+		if err := c.migrateCodexManagedHooks(opts); err != nil {
+			return c.rollbackSetupAfterSnapshot(
+				opts,
+				runtimeSnapshot,
+				fmt.Errorf("codex managed_config.toml hook migration: %w", err),
 				false,
 				false,
 			)
@@ -391,7 +410,18 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			runtimeSnapshot,
 			fmt.Errorf("codex config.toml patch: %w", err),
 			false,
-			runtime.GOOS == "windows",
+			codexUsesManagedHookLayer(opts),
+		)
+	}
+	// GAP-1550: keep Codex's native OTLP exports to the loopback gateway
+	// (and their bearer) off HTTP(S)_PROXY; see codex_dotenv.go.
+	if err := ensureCodexDotEnvProxyBypass(opts); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex .env loopback NO_PROXY: %w", err),
+			true,
+			codexUsesManagedHookLayer(opts),
 		)
 	}
 
@@ -402,7 +432,7 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 				runtimeSnapshot,
 				fmt.Errorf("codex CodeGuard skill install: %w", err),
 				true,
-				runtime.GOOS == "windows",
+				codexUsesManagedHookLayer(opts),
 			)
 		}
 	}
@@ -422,6 +452,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 		// reference it. Revoking first would strand a partially restored Codex
 		// config on a permanently unauthorized endpoint.
 		return fmt.Errorf("codex teardown: config restore: %w", err)
+	}
+	if err := removeCodexDotEnvProxyBypass(opts); err != nil {
+		return fmt.Errorf("codex teardown: .env loopback NO_PROXY: %w", err)
 	}
 	if runtime.GOOS == "windows" {
 		if err := c.restoreCodexManagedHooks(opts); err != nil {
@@ -488,6 +521,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("read codex config while verifying cleanup: %w", err)
 	}
+	residual = append(residual, codexDotEnvResidue()...)
 	if runtime.GOOS == "windows" {
 		managedPath := codexManagedConfigPath()
 		if data, err := os.ReadFile(managedPath); err == nil {
@@ -742,7 +776,7 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 		},
 		SupportsFailClosed: true,
 		Scope:              "user",
-		ConfigPath:         codexHookConfigPath(),
+		ConfigPath:         codexHookConfigPathForOptions(opts),
 	}
 }
 
@@ -915,7 +949,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// connectors) applies to env-block-style connectors like
 	// claudecode where the agent's natural service.name would
 	// otherwise be useless to operators. For native TOML exporters
-	// native exporters that already self-identify (codex, geminicli),
+	// native exporters that already self-identify (codex),
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
 	profile := HookProfile{
@@ -1215,8 +1249,18 @@ func codexManagedConfigPath() string {
 	return filepath.Join(filepath.Dir(codexConfigPath()), codexManagedConfigLogicalName)
 }
 
-func codexHookConfigPath() string {
-	if runtime.GOOS == "windows" {
+// codexUsesManagedHookLayer reports whether Setup registers the hook matrix in
+// CODEX_HOME/managed_config.toml. Only managed enterprise Windows installs do:
+// current Codex releases ignore that file on Windows for per-user installs and
+// warn "CODEX_HOME/managed_config.toml is no longer supported on Windows", so a
+// per-user registration there would never run. Per-user installs on every
+// platform use config.toml with position-aware trust state.
+func codexUsesManagedHookLayer(opts SetupOpts) bool {
+	return runtime.GOOS == "windows" && opts.ManagedEnterprise
+}
+
+func codexHookConfigPathForOptions(opts SetupOpts) string {
+	if codexUsesManagedHookLayer(opts) {
 		return codexManagedConfigPath()
 	}
 	return codexConfigPath()
@@ -1224,9 +1268,9 @@ func codexHookConfigPath() string {
 
 // ownedHookContractPresent performs the Codex-specific runtime guardian check.
 // A command substring is insufficient: Codex only executes a handler when its
-// complete event shape is valid and its source is trusted. On Windows that
-// source is managed_config.toml; legacy user-scoped registrations additionally
-// require position-aware trust state. Reuse Setup's authoritative verifier so
+// complete event shape is valid and its source is trusted. In the managed
+// enterprise layer that source is managed_config.toml; user-scoped
+// registrations additionally require position-aware trust state. Reuse Setup's authoritative verifier so
 // guardian repair cannot mistake a partial, moved, disabled, asynchronous, or
 // untrusted matrix for active protection.
 func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
@@ -1261,7 +1305,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		}
 	}
 
-	configPath := codexHookConfigPath()
+	configPath := codexHookConfigPathForOptions(opts)
 	data, err = os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1292,7 +1336,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		return false, nil
 	}
 	var verifyErr error
-	if runtime.GOOS == "windows" {
+	if codexUsesManagedHookLayer(opts) {
 		verifyErr = verifyManagedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
 	} else {
 		verifyErr = verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
@@ -1555,10 +1599,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if _, exists := cfg["hooks"]; exists && !hooksExist {
 			return fmt.Errorf("Codex hooks configuration has unsupported type %T; refusing to replace it", cfg["hooks"])
 		}
-		if runtime.GOOS == "windows" {
-			// Upgrade away from the old user-scoped registration. Remove only
-			// provably owned handlers and trust records; the effective hook matrix
-			// now lives in managed_config.toml and is trusted by source.
+		if codexUsesManagedHookLayer(opts) {
+			// Remove only provably owned user-scoped handlers and trust records;
+			// the managed enterprise matrix lives in managed_config.toml and is
+			// trusted by source.
 			if hooksExist {
 				if _, err := removeOwnedCodexHooksAndState(hooks, configPath, hooksDir); err != nil {
 					return fmt.Errorf("remove legacy DefenseClaw Codex hooks: %w", err)
@@ -1639,7 +1683,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := toml.Unmarshal(out, &rendered); err != nil {
 			return fmt.Errorf("verify rendered codex config: %w", err)
 		}
-		if runtime.GOOS != "windows" {
+		if !codexUsesManagedHookLayer(opts) {
 			renderedHooks, ok := rendered["hooks"].(map[string]interface{})
 			if !ok {
 				return fmt.Errorf("verify rendered codex config: hooks has unsupported type %T", rendered["hooks"])
@@ -1683,7 +1727,16 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		exactBackupSafe := true
 		if err := atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, raw, exists) {
-				exactBackupSafe = false
+				// Codex writes its own entries (folder trust, model choice) to
+				// config.toml, so the record drifts in normal use. Re-record the
+				// current bytes instead of dropping the record: teardown filters
+				// DefenseClaw's fields out of an exact restore, so the outside
+				// edit survives either way, and doctor keeps drift detection
+				// after a plain gateway restart (GAP-2300).
+				managedBackup = recaptureManagedFileBackup(
+					opts.DataDir, c.Name(), "config.toml", configPath, raw, exists,
+				)
+				exactBackupSafe = managedBackup != nil
 			}
 			if err := render(raw); err != nil {
 				return atomicTransformResult{}, err
@@ -1719,7 +1772,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := toml.Unmarshal(persisted, &persistedConfig); err != nil {
 			return fmt.Errorf("parse persisted codex config for trust verification: %w", err)
 		}
-		if runtime.GOOS != "windows" {
+		if !codexUsesManagedHookLayer(opts) {
 			persistedHooks, ok := persistedConfig["hooks"].(map[string]interface{})
 			if !ok {
 				return fmt.Errorf("verify persisted codex config: hooks has unsupported type %T", persistedConfig["hooks"])
@@ -2320,12 +2373,53 @@ func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, op
 // take effect without rewriting this script. Authentication and the
 // JSON payload travel to curl over inherited descriptors so neither
 // value appears in curl's argv or environment.
+//
+// A standalone enterprise install with a unix hook socket (see
+// managedPluginHookSocket) sends the turn through that socket instead,
+// like the connector shell hooks: another local user can hold the TCP port
+// while the gateway restarts, and the codex bearer is shared by every user.
+// That bridge reads no token, sends no bearer (the gateway identifies the
+// caller by its kernel-verified uid), and drops the event without sending
+// anything when the socket or its directory is not owned by root or the
+// gateway account.
 func writeCodexNotifyBridge(opts SetupOpts) error {
 	scriptPath := filepath.Join(opts.DataDir, "notify-bridge.sh")
 	endpoint := "http://" + opts.APIAddr + "/api/v1/codex/notify"
 	tokenPath, err := HookAPITokenFilePath(opts.DataDir, "codex")
 	if err != nil {
 		return fmt.Errorf("resolve codex notify token file: %w", err)
+	}
+	// credential reads the connector-scoped token for the TCP transport;
+	// the socket transport replaces it with the socket check.
+	credential := "TOKEN_FILE=" + shellSingleQuote(tokenPath) + "\n" +
+		"API_TOKEN=\n" +
+		"if [ -f \"${TOKEN_FILE}\" ]; then\n" +
+		"  IFS= read -r API_TOKEN < \"${TOKEN_FILE}\" || true\n" +
+		"fi\n" +
+		"if [ -z \"${API_TOKEN}\" ]; then\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"case \"${API_TOKEN}\" in *$'\\n'*|*$'\\r'*) exit 0 ;; esac\n"
+	// curl supported descriptor-backed config files before it added
+	// --header @file in 7.55.0. Keep compatibility without exposing the
+	// connector credential in argv or the child environment. Escape quoted
+	// config metacharacters after rejecting invalid HTTP field line breaks.
+	credentialDescriptor := `CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"` + "\n" +
+		`CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"` + "\n" +
+		"exec 8< <(printf '%s\\n' \"header = \\\"Authorization: Bearer ${CURL_CONFIG_TOKEN}\\\"\")\n"
+	// Authorization: Bearer is the canonical credential the gateway's
+	// tokenAuth middleware checks first. curl reads it from an inherited
+	// descriptor rather than receiving the credential as an argv value.
+	transport := "  --config '/dev/fd/8' \\\n"
+	closeCredential := "exec 8<&-\n"
+	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
+		credential = shellHookSocketTrust(socket, serviceUID) +
+			"if ! defenseclaw_hook_socket_trusted; then\n" +
+			"  exit 0\n" +
+			"fi\n"
+		credentialDescriptor = ""
+		transport = "  --unix-socket \"${DEFENSECLAW_HOOK_SOCKET}\" \\\n"
+		closeCredential = ""
 	}
 	body := "#!/usr/bin/env bash\n" +
 		"# Auto-generated by defenseclaw setup guardrail. DO NOT EDIT.\n" +
@@ -2340,15 +2434,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"if [ -z \"${JSON}\" ]; then\n" +
 		"  exit 0\n" +
 		"fi\n" +
-		"TOKEN_FILE=" + shellSingleQuote(tokenPath) + "\n" +
-		"API_TOKEN=\n" +
-		"if [ -f \"${TOKEN_FILE}\" ]; then\n" +
-		"  IFS= read -r API_TOKEN < \"${TOKEN_FILE}\" || true\n" +
-		"fi\n" +
-		"if [ -z \"${API_TOKEN}\" ]; then\n" +
-		"  exit 0\n" +
-		"fi\n" +
-		"case \"${API_TOKEN}\" in *$'\\n'*|*$'\\r'*) exit 0 ;; esac\n" +
+		credential +
 		"TRACE_HEADERS=()\n" +
 		"TP=\"${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-}}\"\n" +
 		"TS=\"${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-}}\"\n" +
@@ -2368,13 +2454,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"  USER_NAME=$(/usr/bin/id -un 2>/dev/null || true)\n" +
 		"  case \"${USER_NAME}\" in ''|*[!A-Za-z0-9._-]*) ;; *) IDENTITY_HEADERS+=(--header \"X-DefenseClaw-User-Name: ${USER_NAME}\") ;; esac\n" +
 		"fi\n" +
-		// curl supported descriptor-backed config files before it added
-		// --header @file in 7.55.0. Keep compatibility without exposing the
-		// connector credential in argv or the child environment. Escape quoted
-		// config metacharacters after rejecting invalid HTTP field line breaks.
-		`CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"` + "\n" +
-		`CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"` + "\n" +
-		"exec 8< <(printf '%s\\n' \"header = \\\"Authorization: Bearer ${CURL_CONFIG_TOKEN}\\\"\")\n" +
+		credentialDescriptor +
 		"exec 9< <(printf '%s' \"${JSON}\")\n" +
 		// Clear every private shell value before curl is spawned. The descriptor
 		// producers retain only their fork-local copies long enough to write them.
@@ -2382,12 +2462,11 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"JSON=\n" +
 		"CURL_CONFIG_TOKEN=\n" +
 		"unset API_TOKEN JSON CURL_CONFIG_TOKEN USER_ID USER_NAME DEFENSECLAW_GATEWAY_TOKEN\n" +
-		"curl --silent --show-error --max-time 5 \\\n" +
+		// --noproxy keeps the loopback POST (bearer and turn payload) away from
+		// an inherited HTTP(S)_PROXY, like the connector hook scripts.
+		"curl --silent --show-error --noproxy '*' --max-time 5 \\\n" +
 		"  --header 'Content-Type: application/json' \\\n" +
-		// Authorization: Bearer is the canonical credential the gateway's
-		// tokenAuth middleware checks first. curl reads it from an inherited
-		// descriptor rather than receiving the credential as an argv value.
-		"  --config '/dev/fd/8' \\\n" +
+		transport +
 		// X-DefenseClaw-Client is required by the gateway's CSRF gate;
 		// without it apiCSRFProtect 403s the POST. inspect-tool-response
 		// and the python CLI set the same header; the value is purely
@@ -2398,7 +2477,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"  \"${TRACE_HEADERS[@]+\"${TRACE_HEADERS[@]}\"}\" \\\n" +
 		"  --data-binary '@/dev/fd/9' \\\n" +
 		"  " + shellSingleQuote(endpoint) + " >/dev/null 2>&1 || true\n" +
-		"exec 8<&-\n" +
+		closeCredential +
 		"exec 9<&-\n" +
 		"exit 0\n"
 	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
@@ -2941,8 +3020,10 @@ func inferTrustedCodexManagedHookCommands(
 ) (map[string]struct{}, error) {
 	managed := map[string]struct{}{}
 	if runtime.GOOS == "windows" {
-		// Windows installs the active matrix in managed_config.toml, where source
-		// provenance replaces user-scoped positional trust state.
+		// No earlier Windows release shipped a trusted user-scoped matrix to
+		// infer: they registered in managed_config.toml, where source
+		// provenance replaces positional trust state. Owned Windows handlers
+		// are still recognized by their marker-bearing hook command.
 		return managed, nil
 	}
 	state, exists := hooks["state"].(map[string]interface{})

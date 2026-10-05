@@ -13,9 +13,13 @@ import hashlib
 import json
 import ntpath
 import os
+import re
+import shlex
+import signal
 import stat
 import struct
 import sys
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -30,6 +34,20 @@ BasicIdentity = tuple[int, int]
 StrongIdentity = tuple[int, int, int, int]
 ObjectIdentity = tuple[int, ...]
 MAX_CUSTODY_ENTRIES = 128
+# Completed binary retirements kept per published name after a publish commits.
+# Nothing reads a completed retirement back: recovery treats an intent whose
+# exact retired object is present as done, rollback tokens retire the live
+# names, and release upgrades keep their own previous/ slot. One copy is kept
+# as the build a still-running gateway or ACP process was started from, and as
+# a manual fallback. Older copies only use disk space.
+RETIRED_KEEP_PER_TARGET = 1
+_PUBLISH_STAGE_MARKERS = (".source-install-", ".source-symlink-", ".managed-console-")
+_HEX_DIGITS = frozenset("0123456789abcdef")
+# Private stage files a source install writes beside its targets. A stage
+# outlives its install only when the process was killed outright, or it was
+# written by an older installer, so the next install prunes ones a day old.
+_SOURCE_INSTALL_STAGE = re.compile(r"\.\.?defenseclaw[A-Za-z0-9._-]*\.source-install-[0-9a-f]{32}")
+STALE_STAGE_SECONDS = 24 * 60 * 60
 CUSTODY_MARKER = b"DefenseClaw deterministic retirement custody v1\n"
 
 
@@ -674,12 +692,14 @@ def _windows_publish_regular(
     *,
     expected_source: str | None,
 ) -> None:
-    """Publish a create-new Windows copy while every path claim is leased.
+    """Publish a Windows copy while every path claim is leased.
 
     Existing matching files are idempotent.  A differing existing file is
-    deliberately preserved: source installs are developer tooling, and the
-    release-owned PowerShell installer owns authenticated Windows replacement
-    and rollback transactions.
+    preserved unless the caller bound it with ``expected_current`` (the
+    preflight proved this checkout owns it): then it is renamed aside, the
+    copy takes its name, and the old file is deleted, so a same-checkout
+    ``make all`` rebuild works as it does on POSIX (GAP-1784).  Builds stamp
+    their date, so a rebuild never matches the installed bytes.
     """
 
     source = Path(ntpath.abspath(str(source)))
@@ -716,10 +736,11 @@ def _windows_publish_regular(
                     raise PublishError(f"source-install destination changed before publication: {destination}")
                 if current_digest == source_digest:
                     return
-                raise PublishError(
-                    f"Windows source-install destination already exists with different bytes and was preserved: "
-                    f"{destination}; use an isolated fresh developer install"
-                )
+                if expected_current is None:
+                    raise PublishError(
+                        f"Windows source-install destination already exists with different bytes and was preserved: "
+                        f"{destination}; use an isolated fresh developer install"
+                    )
 
             stage = destination.parent / f".{destination.name}.source-install-{uuid.uuid4().hex}"
             _validate_windows_directory_chain(destination_chain)
@@ -753,16 +774,34 @@ def _windows_publish_regular(
                         raise PublishError(f"source-install staging changed before publication: {destination}")
                     _validate_windows_directory_chain(source_chain)
                     _validate_windows_directory_chain(destination_chain)
+                    retired = -1
+                    if current_handle is not None:
+                        retired = _windows_retire_current(api, destination_chain[-1][0], destination, expected_current)
                     try:
                         api.rename_no_replace(
                             publication_handle,
                             destination_chain[-1][0],
                             destination.name,
                         )
-                    except FileExistsError:
-                        raise PublishError(
-                            f"source-install destination appeared concurrently and was preserved: {destination}"
-                        ) from None
+                    except BaseException as exc:
+                        if retired >= 0:
+                            try:
+                                api.rename_no_replace(retired, destination_chain[-1][0], destination.name)
+                            finally:
+                                api.close(retired)
+                        if isinstance(exc, FileExistsError):
+                            raise PublishError(
+                                f"source-install destination appeared concurrently and was preserved: {destination}"
+                            ) from None
+                        raise
+                    if retired >= 0:
+                        try:
+                            api.delete_on_close(retired)
+                        except OSError:
+                            pass  # A running process still maps it; the next rebuild removes it.
+                        finally:
+                            api.close(retired)
+                        _windows_prune_retired(destination)
                     _validate_windows_directory_chain(destination_chain)
                 except BaseException:
                     if publication_owned:
@@ -776,6 +815,47 @@ def _windows_publish_regular(
                     api.close(stage_handle)
         finally:
             api.close(source_handle)
+
+
+def _windows_retire_current(
+    api: _WindowsPublicationAPI,
+    parent_handle: int,
+    destination: Path,
+    expected_current: str | None,
+) -> int:
+    """Rename the owned destination aside; return its claimed handle (GAP-1784)."""
+
+    try:
+        handle = api.open_publication_claim_at(parent_handle, destination.name)
+    except OSError as exc:
+        stop = "defenseclaw-gateway stop" if destination.name.lower().startswith("defenseclaw-gateway") else "stop it"
+        raise PublishError(
+            f"{destination} is in use and cannot be replaced; {stop}, then build again"
+        ) from exc
+    try:
+        if expected_current is None or api.digest(handle) != expected_current:
+            raise PublishError(f"source-install destination changed before publication: {destination}")
+        api.rename_no_replace(handle, parent_handle, f".{destination.name}.source-install-old-{uuid.uuid4().hex}")
+        return handle
+    except BaseException:
+        api.close(handle)
+        raise
+
+
+def _windows_prune_retired(destination: Path) -> None:
+    """Best effort: remove copies an earlier rebuild renamed aside while they ran."""
+
+    prefix = f".{destination.name}.source-install-old-"
+    try:
+        entries = list(os.scandir(destination.parent))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith(prefix) and entry.is_file(follow_symlinks=False):
+            try:
+                os.unlink(entry.path)
+            except OSError:
+                pass
 
 
 def _identity(fd: int) -> tuple[int, int]:
@@ -960,11 +1040,22 @@ def _entry_claim_matches(parent_fd: int, leaf: str, expected: ObjectIdentity) ->
     another hardlink to the object for the whole operation.  That retained
     claim makes inode recycling impossible.  All serialized/public identities
     use the four-field birth identity.
+
+    A device number is a per-boot handle: macOS renumbers APFS volumes on
+    every boot, so a claim recorded before a reboot names its volume by a
+    number that no longer exists. Inode and nanosecond birth time still name
+    the object, so they are accepted with the directory's current device,
+    never for an entry on another mount.
     """
 
     if len(expected) == 2:
         return _entry_identity(parent_fd, leaf) == expected
-    return _entry_strong_identity(parent_fd, leaf) == expected
+    current = _entry_strong_identity(parent_fd, leaf)
+    if current is None:
+        return False
+    if current == tuple(expected):
+        return True
+    return current[1:] == tuple(expected[1:]) and current[0] == os.fstat(parent_fd).st_dev
 
 
 def path_identity(path: Path) -> StrongIdentity:
@@ -1301,10 +1392,12 @@ def _ensure_retirement_intent(
         return False
     if not allow_create:
         return False
+    # A completed claim owns one durable intent and one retired name. Reserve
+    # both slots before creating either so the advertised bound is never
+    # exceeded by the normal second (rename) phase, freeing completed
+    # retirements first so a long-lived checkout never fills its custody.
+    _reclaim_completed_entry_slots(custody_fd, needed=2)
     with os.scandir(custody_fd) as entries:
-        # A completed claim owns one durable intent and one retired name.
-        # Reserve both slots before creating either so the advertised bound is
-        # never exceeded by the normal second (rename) phase.
         if sum(1 for _entry in entries) + 2 > MAX_CUSTODY_ENTRIES:
             raise PublishError("retirement custody reached its bounded entry limit")
     try:
@@ -1334,7 +1427,7 @@ def _ensure_retirement_intent(
 def _parse_completed_entry_retirement(
     custody_fd: int,
     name: str,
-) -> tuple[str, ObjectIdentity] | None:
+) -> tuple[str, ObjectIdentity, str] | None:
     if not name.startswith("intent-") or not name.endswith(".json"):
         return None
     raw = _read_regular_at(custody_fd, name, missing_ok=True)
@@ -1366,16 +1459,123 @@ def _parse_completed_entry_retirement(
         return None
     if not _entry_claim_matches(custody_fd, retired, identity):
         return None
-    return retired, identity
+    return retired, identity, canonical
+
+
+def _discard_completed_retirement(custody_fd: int, intent: str, retired: str) -> None:
+    """Remove one completed intent/retired pair, intent first.
+
+    A crash between the two unlinks leaves only an inert retired name, which
+    recovery ignores. The reverse order would leave an intent whose object is
+    gone, and recovery would then refuse that intent on every later run.
+    """
+
+    try:
+        os.unlink(intent, dir_fd=custody_fd)
+    except FileNotFoundError:
+        pass
+    if _entry_stat(custody_fd, intent) is not None:
+        raise PublishError("retirement custody changed during reclaim")
+    os.fsync(custody_fd)
+    os.unlink(retired, dir_fd=custody_fd)
+    if _entry_stat(custody_fd, retired) is not None:
+        raise PublishError("retirement custody changed during reclaim")
+    os.fsync(custody_fd)
+
+
+def _retirement_target(canonical: str) -> str:
+    """Name the published path a retirement displaced.
+
+    Publication retires the old object under its private stage name
+    (.NAME.source-install-HEX and similar); every other retirement is grouped
+    by its own canonical path.
+    """
+
+    parent, leaf = os.path.split(canonical)
+    if leaf.startswith("."):
+        for marker in _PUBLISH_STAGE_MARKERS:
+            name, found, suffix = leaf[1:].rpartition(marker)
+            if found and name and suffix and set(suffix) <= _HEX_DIGITS:
+                return os.path.join(parent, name)
+    return canonical
+
+
+def _prune_completed_entry_retirements(custody_fd: int, *, keep_per_target: int) -> list[str]:
+    """Keep only the newest completed regular-file retirements per target.
+
+    Only intents whose exact retired object is present in this directory are
+    considered, so an interrupted retirement that recovery still needs is never
+    touched. Symlinks, directories, trees, foreign names, entries owned by
+    another account and the custody marker stay. Returns per-entry failures;
+    one failure (for example a file still in use) does not stop the others.
+    """
+
+    with os.scandir(custody_fd) as entries:
+        names = sorted(entry.name for entry in entries if entry.name.startswith("intent-"))
+    groups: dict[str, list[tuple[int, str, str, ObjectIdentity]]] = {}
+    failures: list[str] = []
+    for name in names:
+        try:
+            parsed = _parse_completed_entry_retirement(custody_fd, name)
+            if parsed is None:
+                continue
+            retired, identity, canonical = parsed
+            retired_info = _entry_stat(custody_fd, retired)
+            intent_info = _entry_stat(custody_fd, name)
+        except (OSError, PublishError) as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        if (
+            retired_info is None
+            or intent_info is None
+            or not stat.S_ISREG(retired_info.st_mode)
+            or retired_info.st_uid != os.geteuid()
+        ):
+            continue
+        groups.setdefault(_retirement_target(canonical), []).append(
+            (intent_info.st_mtime_ns, name, retired, identity)
+        )
+    for members in groups.values():
+        members.sort(key=lambda item: item[0:2], reverse=True)
+        for _mtime, intent, retired, identity in members[keep_per_target:]:
+            try:
+                if not _entry_claim_matches(custody_fd, retired, identity):
+                    continue
+                _discard_completed_retirement(custody_fd, intent, retired)
+            except (OSError, PublishError) as exc:
+                failures.append(f"{retired}: {exc}")
+    return failures
+
+
+def prune_retired_custody(custody_root: Path) -> None:
+    """Apply bounded retention after a committed publish. Never raises."""
+
+    try:
+        custody_fd = _open_custody_root(custody_root, create=False)
+    except (OSError, PublishError) as exc:
+        if "managed directory is missing" not in str(exc):
+            print(f"source-install: kept retired install copies: {exc}", file=sys.stderr)
+        return
+    try:
+        failures = _prune_completed_entry_retirements(custody_fd, keep_per_target=RETIRED_KEEP_PER_TARGET)
+    except (OSError, PublishError) as exc:
+        failures = [str(exc)]
+    finally:
+        os.close(custody_fd)
+    if failures:
+        print(
+            f"source-install: kept {len(failures)} retired install copies: {failures[0]}",
+            file=sys.stderr,
+        )
 
 
 def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
-    """Free completed regular-file retirements so a later exact unlink can proceed.
+    """Free the oldest completed entry retirements until ``needed`` slots fit.
 
     Incomplete journal entries, foreign names, and the custody marker stay
     untouched. Source-install rebuilds share one bounded bin custody across
-    gateway and ACP publication; without reclaim, a long-lived checkout cannot
-    replace either binary once the bound is reached.
+    every published name; without reclaim, a long-lived checkout cannot
+    retire anything once the bound is reached.
     """
 
     if needed <= 0:
@@ -1390,7 +1590,7 @@ def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
             parsed = _parse_completed_entry_retirement(custody_fd, name)
             if parsed is None:
                 continue
-            retired, identity = parsed
+            retired, identity, _canonical = parsed
             intent_info = _entry_stat(custody_fd, name)
             mtime = 0 if intent_info is None else intent_info.st_mtime_ns
             candidates.append((mtime, name, retired, identity))
@@ -1399,16 +1599,7 @@ def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
         _mtime, intent, retired, identity = min(candidates, key=lambda item: item[0:2])
         if not _entry_claim_matches(custody_fd, retired, identity):
             return
-        os.unlink(retired, dir_fd=custody_fd)
-        if _entry_stat(custody_fd, retired) is not None:
-            raise PublishError("retirement custody changed during reclaim")
-        if _read_regular_at(custody_fd, intent, missing_ok=True) is None:
-            os.fsync(custody_fd)
-            continue
-        os.unlink(intent, dir_fd=custody_fd)
-        if _entry_stat(custody_fd, intent) is not None:
-            raise PublishError("retirement custody changed during reclaim")
-        os.fsync(custody_fd)
+        _discard_completed_retirement(custody_fd, intent, retired)
 
 
 def _bind_custody_fd(descriptor: int, *, create: bool, label: str) -> None:
@@ -1753,7 +1944,9 @@ def _tree_has_safe_mounts_at(
         budget = {"nodes": 1, "bytes": 0}
         _validate_tree_mounts_fd(
             descriptor,
-            root_device=expected[0],
+            # The claim matched, so the tree root's current device is the
+            # recorded one, possibly renumbered since a reboot.
+            root_device=os.fstat(descriptor).st_dev,
             root_mount=root_mount,
             depth=1,
             budget=budget,
@@ -2219,15 +2412,12 @@ def unlink_exact(
     expected: ObjectIdentity,
     *,
     custody_root: Path | None = None,
-    reclaim_completed: bool = False,
 ) -> bool:
     """Durably retire only the exact claimed object and preserve replacements."""
 
     parent_fd = _open_directory(destination.parent, create=False)
     custody_fd = _open_custody_root(custody_root or _default_custody_root(destination), create=True)
     try:
-        if reclaim_completed:
-            _reclaim_completed_entry_slots(custody_fd, needed=2)
         return _unlink_exact_at(
             parent_fd,
             destination.name,
@@ -2238,6 +2428,68 @@ def unlink_exact(
     finally:
         os.close(custody_fd)
         os.close(parent_fd)
+
+
+def _prune_stale_stages(
+    parent_fd: int,
+    directory: Path,
+    custody_root: Path,
+    *,
+    destination_name: str | None = None,
+    uid: int | None = None,
+    now: float | None = None,
+) -> list[str]:
+    """Remove this account's day-old source-install stage files in directory.
+
+    Only regular files owned by this account are removed, through exact
+    custody retirement. Any other leftover is reported on one line with the
+    command that removes it; with ``destination_name`` only that name's stages
+    are reported, so each publication of one install reports a file once.
+    Never raises; returns the reported paths.
+    """
+
+    owner = os.geteuid() if uid is None else uid
+    cutoff = (time.time() if now is None else now) - STALE_STAGE_SECONDS
+    own_prefix = None if destination_name is None else f".{destination_name}.source-install-"
+    reported: list[str] = []
+    try:
+        with os.scandir(parent_fd) as entries:
+            names = sorted(entry.name for entry in entries if _SOURCE_INSTALL_STAGE.fullmatch(entry.name))
+    except OSError:
+        return reported
+    for name in names:
+        path = directory / name
+        foreign = False
+        remove = "rm -f"
+        try:
+            metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if metadata.st_mtime > cutoff:
+                continue
+            if metadata.st_uid != owner:
+                foreign, reason = True, "another account owns it"
+            elif not stat.S_ISREG(metadata.st_mode):
+                reason = "it is not a regular file"
+                if stat.S_ISDIR(metadata.st_mode):
+                    remove = "rm -rf"
+            else:
+                identity = _entry_strong_identity(parent_fd, name)
+                if identity is None or unlink_exact(path, identity, custody_root=custody_root):
+                    continue
+                reason = "it changed while it was removed"
+        except FileNotFoundError:
+            continue
+        except (OSError, PublishError) as exc:
+            reason = str(exc)
+        if own_prefix is not None and not name.startswith(own_prefix):
+            continue
+        prefix = "sudo " if foreign else ""
+        print(
+            f"source-install: kept a temporary file from an earlier install because {reason}; "
+            f"remove it with: {prefix}{remove} {shlex.quote(str(path))}",
+            file=sys.stderr,
+        )
+        reported.append(str(path))
+    return reported
 
 
 def publish_regular(
@@ -2267,6 +2519,7 @@ def publish_regular(
         source_stat = os.fstat(source_fd)
         parent_fd = _open_directory(destination.parent, create=False)
         try:
+            _prune_stale_stages(parent_fd, destination.parent, retirement_root, destination_name=destination.name)
             stage = f".{destination.name}.source-install-{uuid.uuid4().hex}"
             stage_fd = os.open(
                 stage,
@@ -2366,12 +2619,7 @@ def publish_regular(
                     os.close(stage_fd)
                 if not succeeded and linked_fresh:
                     try:
-                        unlink_exact(
-                            destination,
-                            stage_claim,
-                            custody_root=retirement_root,
-                            reclaim_completed=True,
-                        )
+                        unlink_exact(destination, stage_claim, custody_root=retirement_root)
                     except (OSError, PublishError):
                         pass
                 if not retain_stage:
@@ -2379,13 +2627,10 @@ def publish_regular(
                     if current_stage is not None:
                         if current_stage not in safe_stage_identities:
                             raise PublishError(f"source-install staging changed and was preserved: {destination}")
-                        if not unlink_exact(
-                            destination.parent / stage,
-                            current_stage,
-                            custody_root=retirement_root,
-                            reclaim_completed=True,
-                        ):
+                        if not unlink_exact(destination.parent / stage, current_stage, custody_root=retirement_root):
                             raise PublishError(f"source-install staging changed and was preserved: {destination}")
+                    if succeeded:
+                        prune_retired_custody(retirement_root)
         finally:
             os.close(parent_fd)
     finally:
@@ -2557,6 +2802,11 @@ def main() -> int:
     compare_regular.add_argument("second", type=Path)
     compare_regular.add_argument("--require-executable", action="store_true")
     args = parser.parse_args()
+    if os.name != "nt":
+        # A terminated install unwinds like an interrupted one, so every
+        # publication's finally block removes its stage file.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, _interrupt)
     try:
         if args.command in {"ensure-directory", "ensure-real-directory"}:
             ensure_directory(args.path)
@@ -2650,7 +2900,14 @@ def main() -> int:
     except (OSError, PublishError) as exc:
         print(f"source-install publication refused: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("source-install publication interrupted", file=sys.stderr)
+        return 130
     return 0
+
+
+def _interrupt(_signum: int, _frame: object) -> None:
+    raise KeyboardInterrupt
 
 
 if __name__ == "__main__":

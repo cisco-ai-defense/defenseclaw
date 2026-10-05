@@ -22,6 +22,7 @@ struct CatalogActionSafetyTests {
     static func main() async {
         CLIProcessGroupLauncher.execIfRequested()
         scanActionsRemainOneClickButAreMutations()
+        bundledResourcesRemainInformational()
         informationalActionsRemainNonMutating()
         auditCorruptionClassifierIsExact()
         await malformedAuditUsesPrivateReadOnlyCatalog()
@@ -88,6 +89,21 @@ struct CatalogActionSafetyTests {
         expect(!invocation.changesState, "info invocation bypasses only the mutation gate")
     }
 
+    private static func bundledResourcesRemainInformational() {
+        let skill = SkillItem(
+            key: "codex/openai", name: "openai", version: "1", source: "bundled",
+            enabled: true, connector: "codex", bundled: true
+        )
+        let mcp = MCPItem(
+            name: "openaiDeveloperDocs", transport: "http", endpoint: "https://developers.openai.com/mcp",
+            version: "1", enabled: true, connector: "codex", bundled: true
+        )
+        for actions in [CatalogActions.skills(skill), CatalogActions.mcps(mcp)] {
+            expect(actions.map(\.verb) == ["info"], "bundled resources expose info only")
+            expect(actions[0].readOnly && !actions[0].changesState, "bundled info is non-mutating")
+        }
+    }
+
     private static func auditCorruptionClassifierIsExact() {
         expect(
             CLIRunner.isAuditStoreCorruption(
@@ -118,6 +134,16 @@ struct CatalogActionSafetyTests {
         defer { fixture.cleanup() }
         setenv("CATALOG_TEST_FAILURE", "corrupt", 1)
         defer { unsetenv("CATALOG_TEST_FAILURE") }
+        let defaults = UserDefaults.standard
+        let previousOverride = defaults.string(forKey: CLIRunner.pathOverrideKey)
+        defaults.set(fixture.binaryURL.path, forKey: CLIRunner.pathOverrideKey)
+        defer {
+            if let previousOverride {
+                defaults.set(previousOverride, forKey: CLIRunner.pathOverrideKey)
+            } else {
+                defaults.removeObject(forKey: CLIRunner.pathOverrideKey)
+            }
+        }
 
         let before = isolatedCatalogDirectories()
         do {
@@ -138,6 +164,16 @@ struct CatalogActionSafetyTests {
         defer { fixture.cleanup() }
         setenv("CATALOG_TEST_FAILURE", "generic", 1)
         defer { unsetenv("CATALOG_TEST_FAILURE") }
+        let defaults = UserDefaults.standard
+        let previousOverride = defaults.string(forKey: CLIRunner.pathOverrideKey)
+        defaults.set(fixture.binaryURL.path, forKey: CLIRunner.pathOverrideKey)
+        defer {
+            if let previousOverride {
+                defaults.set(previousOverride, forKey: CLIRunner.pathOverrideKey)
+            } else {
+                defaults.removeObject(forKey: CLIRunner.pathOverrideKey)
+            }
+        }
 
         let before = isolatedCatalogDirectories()
         do {
@@ -165,6 +201,16 @@ struct CatalogActionSafetyTests {
         }
         setenv("CATALOG_TEST_FAILURE", "rebind", 1)
         defer { unsetenv("CATALOG_TEST_FAILURE") }
+        let defaults = UserDefaults.standard
+        let previousOverride = defaults.string(forKey: CLIRunner.pathOverrideKey)
+        defaults.set(first.binaryURL.path, forKey: CLIRunner.pathOverrideKey)
+        defer {
+            if let previousOverride {
+                defaults.set(previousOverride, forKey: CLIRunner.pathOverrideKey)
+            } else {
+                defaults.removeObject(forKey: CLIRunner.pathOverrideKey)
+            }
+        }
         let runner = CLIRunner(context: first.context)
 
         let load = Task { try await CatalogCLI.plugins(using: runner) }
@@ -310,11 +356,26 @@ struct CatalogActionSafetyTests {
               "$DEFENSECLAW_HOME"/*) ;;
               *) printf '%s\\n' 'config escaped isolated home' >&2; exit 65 ;;
             esac
-            [ "$DEFENSECLAW_VENV" = "\(venv.path)" ]
-            [ "$(stat -f '%Lp' "$DEFENSECLAW_HOME")" = "700" ]
-            [ "$(stat -f '%Lp' "$DEFENSECLAW_CONFIG")" = "600" ]
-            ! grep -q 'SENTINEL_SECRET' "$DEFENSECLAW_CONFIG"
-            ! grep -q '"audit_db"' "$DEFENSECLAW_CONFIG"
+            if [ "$DEFENSECLAW_VENV" != "\(venv.path)" ]; then
+              printf '%s\\n' 'venv identity escaped isolated catalog' >&2
+              exit 66
+            fi
+            if [ "$(stat -f '%Lp' "$DEFENSECLAW_HOME")" != "700" ]; then
+              printf '%s\\n' 'isolated home permissions changed' >&2
+              exit 67
+            fi
+            if [ "$(stat -f '%Lp' "$DEFENSECLAW_CONFIG")" != "600" ]; then
+              printf '%s\\n' 'isolated config permissions changed' >&2
+              exit 68
+            fi
+            if grep -q 'SENTINEL_SECRET' "$DEFENSECLAW_CONFIG"; then
+              printf '%s\\n' 'inline secret crossed isolated catalog boundary' >&2
+              exit 69
+            fi
+            if grep -q '"audit_db"' "$DEFENSECLAW_CONFIG"; then
+              printf '%s\\n' 'audit database path crossed isolated catalog boundary' >&2
+              exit 70
+            fi
             printf '%s\\n' '[{"connector":"codex","plugins":[{"id":"example","name":"example","enabled":true}]}]'
             """
             try Data(script.utf8).write(to: executable)

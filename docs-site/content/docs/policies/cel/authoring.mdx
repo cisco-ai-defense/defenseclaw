@@ -156,6 +156,8 @@ for example, write `f.active_home`, not `f.activeHome`.
 | `f.paths` | `list<PathFact>` | `command_id`, access, flavor, raw `value`, lexical `normalized`, `absolute`, and context-resolved `resolved`. |
 | `f.network` | `list<NetworkFact>` | `command_id`, action, scheme, host, port, normalized host, scope, target kind, and prefix length. |
 | `f.data_flows` | `list<DataFlowFact>` | Source and destination command IDs plus typed `from` and `to` data kinds. An endpoint ID of `0` represents a non-command file or network boundary. |
+| `f.artifacts` | `list<ArtifactFact>` | Statically named archive files a command produces or consumes: `command_id`, `role` (`PRODUCE`, `CONSUME`), `kind` (`ARCHIVE`), raw `value`, `normalized`, `absolute`, `resolved`, and `identity`, a SHA-256 digest of the normalized path. The file is never opened. |
+| `f.archive_lineages` | `list<ArchiveArtifactLineage>` | Exact produce-then-consume joins on the same archive `identity`: `produced_by` and `consumed_by` command IDs, `normalized` path, and `authoritative`, which is `false` when either side is unproved. |
 
 ### Command facts
 
@@ -187,6 +189,8 @@ different enum families are rejected.
 | `DataKind` | `STDIN`, `STDOUT`, `FILE`, `NETWORK`, `PROCESS` |
 | `CommandEffect` | `EXECUTE`, `PREVIEW`, `UNCERTAIN` |
 | `ParseStatus` | `COMPLETE`, `PARTIAL`, `UNSUPPORTED`, `INVALID`, `LIMIT_EXCEEDED`, `AMBIGUOUS`, `NOT_APPLICABLE` |
+| `ArtifactRole` | `PRODUCE`, `CONSUME` |
+| `ArtifactKind` | `ARCHIVE` |
 
 Prefix each value with its generated enum name, for example:
 
@@ -242,13 +246,19 @@ before enabling action mode.
 
 </Steps>
 
-<Callout type="info" title="Validation is not a CEL fixture runner">
 There is no public CLI that injects synthetic `ActionFacts` into one CEL
-expression. Repository contributors should add focused Go fixtures and run
+expression. Validate the complete pack, then test real calls in observe mode.
+
+<Accordions>
+<Accordion title="For repository contributors">
+
+Add focused Go fixtures and run
 `go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`.
 When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
 `make check-guardrail-catalog`.
-</Callout>
+
+</Accordion>
+</Accordions>
 
 ## Authoring checklist
 

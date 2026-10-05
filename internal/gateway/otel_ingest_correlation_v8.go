@@ -13,6 +13,7 @@ import (
 	"hash"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -76,7 +77,7 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 	if ctx == nil || receiptTime.IsZero() {
 		return result, errNativeOTLPCorrelationV8
 	}
-	spec, err := a.correlationSpecForConnectorV8(authenticatedSource)
+	spec, err := a.correlationSpecForRequestV8(ctx, authenticatedSource)
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
 	}
@@ -116,7 +117,7 @@ func (a *APIServer) correlateNativeOTLPLeafV8(
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
 	}
-	instance, err := repo.ResolveConnectorInstance(ctx, authenticatedSource,
+	instance, err := resolveConnectorInstanceForRequest(ctx, repo, authenticatedSource,
 		string(spec.ProfileVersion), audit.ConnectorCustodyExternal)
 	if err != nil {
 		return result, fmt.Errorf("%w: %v", errNativeOTLPCorrelationV8, err)
@@ -426,7 +427,7 @@ func (a *APIServer) finalizeNativeOTLPCustodyV8(ctx context.Context, result nati
 	if result.instance.ExportCustody == audit.ConnectorCustodyDefenseClaw {
 		return nil
 	}
-	promoted, err := repo.ResolveConnectorInstance(ctx, result.connector,
+	promoted, err := resolveConnectorInstanceForRequest(ctx, repo, result.connector,
 		result.profileVersion, audit.ConnectorCustodyDefenseClaw)
 	if err != nil {
 		return err
@@ -1023,6 +1024,25 @@ func nativeOTLPCorrelationValuesFromContext(
 		return nil, false
 	}
 	return append([]connector.CorrelationValue(nil), stored.values...), true
+}
+
+// nativeOTLPCursorDerivedTargetsV8 lists the targets whose value the native
+// occurrence transaction inferred from the durable prompt cursor
+// (appendNativeOTLPActiveCursorValuesV8) instead of reading it from the
+// sender, so a live hook snapshot may supersede them.
+func nativeOTLPCursorDerivedTargetsV8(ctx context.Context, connectorName string) map[connector.CorrelationTarget]bool {
+	values, ok := nativeOTLPCorrelationValuesFromContext(ctx, connectorName)
+	if !ok {
+		return nil
+	}
+	derived := make(map[connector.CorrelationTarget]bool)
+	for _, value := range values {
+		if value.Value != "" && value.Origin == connector.CorrelationOriginDerived &&
+			strings.HasPrefix(value.Path, "correlation_cursor.") {
+			derived[value.Target] = true
+		}
+	}
+	return derived
 }
 
 func nativeOTLPTraceSpan(leaf otlpDecodedLeaf) (string, string) {

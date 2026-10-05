@@ -8,698 +8,718 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Contracts for the native-Setup compatibility bootstrap on Windows."""
+"""Contracts of scripts/install.ps1, the Windows installer and upgrader.
+
+The installer's behavior is tested end to end on Windows by
+scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
+"""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from defenseclaw import upgrade_shim
+from defenseclaw.commands import cmd_uninstall, windows_uninstall_helper
+from defenseclaw.platform_support import ACP_ONLY_CONNECTORS, UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_PS1 = ROOT / "scripts" / "install.ps1"
-RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+LIFECYCLE_PS1 = ROOT / "scripts" / "test-install-lifecycle.ps1"
+TOKEN = "__DEFENSECLAW_VERSION__"
+POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 
 
-def _ps_quote(value: str | Path) -> str:
-    return str(value).replace("'", "''")
+def _text() -> str:
+    return INSTALL_PS1.read_text(encoding="utf-8")
 
 
-def _run_powershell(script: str, *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    if not POWERSHELL:
-        pytest.skip("PowerShell is not installed")
-    env = os.environ.copy()
-    env.pop("DEFENSECLAW_HOME", None)
-    return subprocess.run(
-        [
-            POWERSHELL,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ],
+def _list(name: str) -> list[str]:
+    match = re.search(rf"\${name} = @\((.*?)\)", _text(), re.S)
+    assert match is not None, name
+    return re.findall(r'"([^"]+)"', match.group(1))
+
+
+def test_version_token_is_only_on_the_stamp_line() -> None:
+    # `make dist-installers` replaces every occurrence, so a second one (say, to
+    # detect an unstamped copy) would be stamped too and turn that check around.
+    text = _text()
+    assert text.count(TOKEN) == 1
+    assert f'$DcVersion = "{TOKEN}"' in text
+    assert "if (-not (Test-Version $Ver))" in text
+
+
+def test_upgrade_shim_reads_the_stamped_version(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "install.ps1").write_text(_text().replace(TOKEN, "1.2.3"), encoding="utf-8")
+    monkeypatch.setattr(upgrade_shim, "_installer_name", lambda: "install.ps1")
+    assert upgrade_shim._local_version(str(tmp_path)) == "1.2.3"
+
+
+def test_scripts_are_ascii() -> None:
+    # Windows PowerShell 5.1 reads a script without a BOM, and an `irm | iex`
+    # download, in the ANSI code page.
+    INSTALL_PS1.read_text(encoding="utf-8").encode("ascii")
+    LIFECYCLE_PS1.read_text(encoding="utf-8").encode("ascii")
+
+
+def test_only_a_file_run_exits() -> None:
+    # `exit` from a script block run by `irm | iex` closes the user's window.
+    assert re.findall(r"(?:^|[{;]\s*)exit\b[^\n]*", _text(), re.M) == ["{ exit $code }"]
+    assert "if ($RunAsFile) { exit $code }" in _text()
+
+
+def test_permanent_parameters_and_unknown_arguments() -> None:
+    parameters = _text().split("param(", 1)[1].split("\n)\n", 1)[0]
+    for name in ("Yes", "Version", "Local", "Rollback", "Connector", "NoOpenclaw", "Quickstart",
+                 "QuickstartMode", "NoPersistPath", "CosignPath", "Help"):
+        assert re.search(rf"\]\${name}\b", parameters), name
+    assert "[Parameter(ValueFromRemainingArguments = $true)]" in parameters
+    assert "[CmdletBinding(PositionalBinding = $false)]" in _text()
+
+
+def test_enterprise_policy_stops_it_before_any_change() -> None:
+    # The policy 0.8.x `defenseclaw upgrade` honored; install.ps1 would otherwise
+    # replace a per-user Setup an enterprise pushed through Intune or SCCM.
+    text = _text()
+    check = text.index('GetValue("DisableSelfUpdate")')
+    assert 'OpenSubKey("SOFTWARE\\Policies\\Cisco\\DefenseClaw")' in text
+    assert "[Microsoft.Win32.RegistryView]::Registry64" in text
+    assert "DefenseClaw self-update is disabled by enterprise policy; use the managed deployment channel." in text
+    assert "Could not read the enterprise update policy" in text
+    # Before -Version and unstamped hand-offs, the lock, and -Rollback.
+    assert check < text.index("return Invoke-ReleaseInstaller") < text.index("# Lock and log.")
+    assert check < text.index("if ($Rollback) { return Invoke-Rollback }")
+
+
+def test_connector_choices_are_the_windows_supported_connectors() -> None:
+    choices = _list("ConnectorChoices")
+    supported = {
+        name
+        for name, support in WINDOWS_CONNECTOR_SUPPORT.items()
+        if support.status != UNSUPPORTED and name not in ACP_ONLY_CONNECTORS
+    }
+    assert choices[-1] == "none"
+    assert len(choices) == len(set(choices))
+    assert set(choices[:-1]) == supported
+
+
+def test_uninstall_owns_every_file_the_installer_writes_to_local_bin() -> None:
+    hook_state = re.search(r'\$HookState = "([^"]+)"', _text())
+    posix_shim = re.search(r'\$PosixShim = "([^"]+)"', _text())
+    cli_launcher = re.search(r'\$CliLauncher = "([^"]+)"', _text())
+    assert hook_state is not None and posix_shim is not None and cli_launcher is not None
+    written = (
+        set(_list("ManagedBinaries"))
+        | {f"{shim}.cmd" for shim in _list("ManagedShims")}
+        | {hook_state.group(1), posix_shim.group(1), cli_launcher.group(1)}
+    )
+    _root, targets = cmd_uninstall._owned_binary_targets("win32")
+    assert written == {re.split(r"[\\/]", target)[-1] for target in targets}
+    # Install-Uv adds uv and the digest record uninstall checks it against.
+    uv = re.search(r"foreach \(\$name in @\(([^)]*)\)\)", _text()[_text().index("function Install-Uv") :])
+    assert uv is not None
+    uv_written = set(re.findall(r'"([^"]+)"', uv.group(1))) | {cmd_uninstall._UV_RECORD}
+    assert uv_written == set(cmd_uninstall._UV_NAMES["win32"]) | {cmd_uninstall._UV_RECORD}
+    assert written | uv_written == windows_uninstall_helper._ALLOWED_BINARIES
+
+
+def test_a_release_install_removes_the_developer_install_files() -> None:
+    # GAP-1493: defenseclaw.exe from `make all` shadows the release
+    # defenseclaw.cmd (PATHEXT), so the release install removes what make all
+    # published beyond the managed binaries, once the swap is done.
+    # Its defenseclaw.exe is replaced by the installer's launcher (GAP-2237).
+    developer = set(cmd_uninstall._WINDOWS_DEVELOPER_FILES) - set(_list("ManagedBinaries")) - {"defenseclaw.exe"}
+    assert set(_list("DeveloperFiles")) == developer
+    text = _text()
+    assert '(Join-Path $BinDir ".defenseclaw-source-root") -PathType Leaf' in text
+    assert "    Complete-Swap\n    Remove-DeveloperFiles\n" in text
+
+
+def test_powershell_runs_a_native_cli_launcher() -> None:
+    # GAP-2237: through defenseclaw.cmd, cmd.exe asked "Terminate batch job
+    # (Y/N)?" after Ctrl+C. PATHEXT runs .exe before .cmd, so the installer
+    # puts the venv's own launcher beside the shim, and rollback keeps it.
+    text = _text()
+    assert '$CliLauncher = "defenseclaw.exe"' in text
+    assert "@($PosixShim, $CliLauncher, $HookState)" in text
+    assert "Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher)" in text
+    assert "defenseclaw.exe" not in _list("DeveloperFiles")
+
+
+def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
+    match = re.search(r'\$text = "(@echo off[^\n]*)"\n', _text())
+    assert match is not None
+    venv = "C:\\Users\\Zoe\\.defenseclaw\\.venv"
+    target = f"{venv}\\Scripts\\defenseclaw.exe"
+    shim = match.group(1).replace("`r", "\r").replace("`n", "\n").replace('`"', '"').replace("$Target", target)
+    assert shim == f'@echo off\r\n"{target}" %*\r\n'
+    # cmd_uninstall._validate_windows_binary_ownership and the deferred helper
+    # look for exactly this command line.
+    assert f'"{target}" %*'.lower() in shim.lower()
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_powershell_parses_the_scripts_and_help_runs(tmp_path: Path) -> None:
+    script = rf"""
+foreach ($path in '{INSTALL_PS1}', '{LIFECYCLE_PS1}') {{
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
+    if (@($errors).Count) {{ throw "${{path}}: $($errors -join '; ')" }}
+}}
+& '{POWERSHELL}' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{INSTALL_PS1}' -Help
+exit $LASTEXITCODE
+"""
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        # pwsh on Linux and macOS has no profile folders; the script computes its paths up front.
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=timeout,
+        timeout=120,
         env=env,
         check=False,
     )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "-Rollback" in completed.stdout
+    assert not (tmp_path / "home").exists()
 
 
-def _dot_source(arguments: str = "") -> str:
-    suffix = f" {arguments}" if arguments else ""
-    return f". '{_ps_quote(INSTALL_PS1)}'{suffix}"
+def test_hook_state_matches_what_the_hook_reads() -> None:
+    # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
+    # state only with these values; anything else makes the hook fall back to
+    # the profile's .defenseclaw and ignore a custom DEFENSECLAW_HOME.
+    body = re.search(r"function Write-HookState \{(.*?)\n\}", _text(), re.S)
+    assert body is not None
+    for field in ('schema_version = 1', 'install_kind = "powershell-windows"', 'install_scope = "user"'):
+        assert field in body.group(1)
+    for field in ("install_root = $root", "command_dir = $root", "data_root = "):
+        assert field in body.group(1)
+    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
+    assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
+    assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
 
 
-def _manifest(version: str = "1.2.3") -> dict[str, object]:
-    gateways = {
-        os_name: {arch: f"defenseclaw_{version}_protocol2_{os_name}_{arch}.dcgateway" for arch in ("amd64", "arm64")}
-        for os_name in ("darwin", "linux", "windows")
-    }
-    return {
-        "schema_version": 2,
-        "release_version": version,
-        "min_upgrade_protocol": 1,
-        "migration_failure_policy": "fail",
-        "required_cli_migrations": [],
-        "release_artifacts": {
-            "wheel": f"defenseclaw-{version}-2-py3-none-any.dcwheel",
-            "gateways": gateways,
-        },
-        "windows_installer": {
-            "asset": "DefenseClawSetup-x64.exe",
-            "architectures": ["amd64"],
-            "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
-            "authenticode": {
-                "required": False,
-                "publisher": "Cisco Systems, Inc.",
-            },
-            "managed_policy": "respect",
-        },
-    }
-
-
-def _provenance(
-    setup_sha256: str,
-    version: str = "1.2.3",
-    *,
-    unsigned: bool = False,
-) -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "artifact": "DefenseClawSetup-x64.exe",
-        "artifact_sha256": setup_sha256,
-        "version": version,
-        "source_commit": "a" * 40,
-        "distribution_flavor": "oss",
-        "built_at_utc": "2026-07-14T00:00:00Z",
-        "unsigned": unsigned,
-        "inputs": {},
-        "toolchain": {},
-    }
-
-
-def test_bootstrap_contains_no_legacy_dependency_install_path() -> None:
-    text = INSTALL_PS1.read_text(encoding="utf-8")
-    forbidden = (
-        "Invoke-Uv",
-        "Install-Uv",
-        "Ensure-Python",
-        "Install-ManagedWheel",
-        "uv pip",
-        "uv venv",
-        "astral.sh/uv",
-        "py3-none-any.whl",
-        "defenseclaw_*_windows_",
-        "Invoke-Expression",
+def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4() -> None:
+    text = _text()
+    extras = text[text.index("function Invoke-FirstInstallExtras") : text.index("function Show-Usage")]
+    assert "$quickstartRc = Invoke-Native" in extras
+    assert '$Run.QuickstartRerun = "defenseclaw " + ($quickstartArgs -join " ")' in extras
+    summary = text[text.index('Write-Host "  DefenseClaw $Ver is installed."') : text.index("$savedEnv = @{}")]
+    assert summary.index("if ($Run.QuickstartRerun)") < summary.index("return 4") < summary.index("return $startRc")
+    # `irm | iex` cannot exit; it reports the installed-but-not-set-up outcome instead.
+    tail = text[text.index("Wait-BeforeClose $code\nif ($RunAsFile) { exit $code }") :]
+    assert tail.index("if ($code -eq 4) { & ([scriptblock]::Create('throw") < tail.index(
+        "if ($code -ne 0 -and $code -ne 3) { & ([scriptblock]::Create('throw"
     )
-    for token in forbidden:
-        assert token not in text
-    assert "DefenseClawSetup-x64.exe" in text
-    assert '$ProvenanceAsset = "$SetupAsset.provenance.json"' in text
-    assert "Assert-SetupProvenance" in text
-    assert "artifact_sha256" in text
-    assert "Invoke-NativeSetup" in text
-    assert "Get-AuthenticodeSignature" in text
-    assert "0.8.6" not in text
-    assert '$Version = "X.Y.Z"' in text
 
 
-def test_remote_verification_is_fail_closed_and_release_identity_is_exact() -> None:
-    text = INSTALL_PS1.read_text(encoding="utf-8")
-    assert "checksums.txt.sig" in text
-    assert "checksums.txt.pem" in text
-    assert "checksums.txt.bundle" in text
-    assert "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07BE" in text
-    # Cosign 2.6.2's immutable Windows amd64 asset is 188,345,985 bytes.
-    # Keep one shared bound above that exact published size for both remote
-    # downloads and local release-candidate custody.
-    assert "$CosignMaximumBytes = 268435456" in text
-    assert text.count("-MaximumBytes $CosignMaximumBytes") == 2
-    assert "104857600" not in text
-    assert "--certificate-identity-regexp" in text
-    assert '"--offline"' in text
-    assert (
-        "^https://github\\.com/cisco-ai-defense/defenseclaw/\\.github/workflows/release\\.yaml@refs/heads/main$" in text
+def test_the_upgrade_window_keeps_the_outcome_on_screen_with_yes() -> None:
+    # `defenseclaw upgrade --yes` runs install.ps1 in its own console: -Yes must
+    # not close it at once, but it must not wait forever either.
+    text = _text()
+    body = text[text.index("function Wait-BeforeClose") : text.index("# -- Existing install")]
+    assert "if ($Yes -or" not in body
+    assert "[Console]::KeyAvailable" in body and "$Run.Log" in body
+    # Windows PowerShell 5.1 runs this installer and has no [uint] accelerator.
+    assert '"uint[]"' not in body
+    # GAP-1570: `& install.ps1` typed into the user's own shell returns at once;
+    # only a console started for the script waits before closing.
+    started_for_script = (
+        "[Environment]::CommandLine.IndexOf($scriptName, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return }"
     )
-    assert "tags/$escapedVersion" not in text
-    assert "Release checksum signature verification failed" in text
-    assert 'Status -ne "Valid"' in text
-    assert '$ExpectedPublisher = "Cisco Systems, Inc."' in text
-    assert "warning-and-continue" not in text.lower()
+    assert body.index("$Run.Log") < body.index(started_for_script) < body.index("if (-not $Yes)")
 
 
-def test_authenticated_schema_two_manifest_contract_is_exact_in_source() -> None:
-    text = INSTALL_PS1.read_text(encoding="utf-8")
-
-    assert '$expectedSchema = if ([version]$ReleaseVersion -ge [version]"0.8.4") { 2 } else { 1 }' in text
-    assert '"defenseclaw-$ReleaseVersion-2-py3-none-any.dcwheel"' in text
-    assert '"defenseclaw_${ReleaseVersion}_protocol2_${platform}_${architecture}.dcgateway"' in text
-    assert "$releaseArtifactNames.Count -ne 2" in text
-    assert "$gatewayPlatformNames.Count -ne 3" in text
-    assert "$gatewayArchitectureNames.Count -ne 2" in text
-    assert "$installerNames.Count -ne 5" in text
-    assert '$expectedHandoffArgs = @("/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user")' in text
-
-
-def test_release_publishes_offline_material_after_bounded_sigstore_authentication() -> None:
-    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    bundle = "--bundle=release-candidate/dist/checksums.txt.bundle"
-    assert "cosign sign-blob" in workflow
-    assert workflow.count(bundle) == 1
-    assert "scripts/verify-sigstore-blob.py" in workflow
-    assert "scripts/release_candidate.py list-assets" in workflow
+def test_the_suggested_cleanup_removes_the_read_only_key_copy() -> None:
+    # GAP-1645: Remove-Item -Force first resets each file's attributes, which the
+    # read-only redaction key copy refuses; rd /s /q deletes it through the folder.
+    text = _text()
+    assert "Remove-Item -Recurse -Force '" not in text
+    assert text.count('cmd /c rd /s /q `"') == 3
+    # The installer's own cleanup deletes through .NET first, which is also much
+    # faster than Remove-Item in Windows PowerShell 5.1 (GAP-1600).
+    body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
+    assert body.index("[IO.Directory]::Delete(") < body.index("-Recurse -Force -ErrorAction SilentlyContinue")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_powershell_parser_and_help_are_network_free() -> None:
-    completed = _run_powershell(
-        rf"""
-$tokens = $null
-$errors = $null
-[Management.Automation.Language.Parser]::ParseFile(
-  '{_ps_quote(INSTALL_PS1)}', [ref]$tokens, [ref]$errors
-) | Out-Null
-if (@($errors).Count -ne 0) {{ throw ($errors -join '; ') }}
-& '{_ps_quote(POWERSHELL or "")}' -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-  -File '{_ps_quote(INSTALL_PS1)}' -Help
-if ($LASTEXITCODE -ne 0) {{ throw "help exited $LASTEXITCODE" }}
-"""
+def test_remove_tree_retries_without_logging_a_terminating_error() -> None:
+    # WIN2-U3-13 item 10: a caught Remove-Item -ErrorAction Stop still wrote
+    # "TerminatingError(Remove-Item)" into the upgrade transcript.
+    text = _text()
+    body = text[text.index("function Remove-Tree") : text.index("function New-InstallDirectory")]
+    retry = body[: body.index("if ($attempt -ge 30)")] + body[body.index("Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue") :]
+    assert "-ErrorAction Stop" not in retry
+    assert "if ($attempt -ge 30) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop; return }" in body
+
+
+def test_architecture_check_avoids_the_psreadline_polyfill() -> None:
+    # GAP-1054: in an interactive Windows PowerShell 5.1 console (`irm | iex`)
+    # [Runtime.InteropServices.RuntimeInformation] is PSReadLine's polyfill.
+    text = _text()
+    assert "[Runtime.InteropServices.RuntimeInformation]::OSArchitecture" not in text
+    assert "switch (Get-OSArchitectureName) {" in text
+    body = text[text.index("function Get-OSArchitectureName {") :][:900]
+    assert '[object].Assembly.GetType("System.Runtime.InteropServices.RuntimeInformation")' in body
+    assert "$env:PROCESSOR_ARCHITEW6432" in body and "$env:PROCESSOR_ARCHITECTURE" in body
+
+
+def test_a_uv_in_the_bin_folder_is_used_not_replaced() -> None:
+    # GAP-1125: a uv.exe in %USERPROFILE%\\.local\\bin that is not on PATH yet is
+    # the user's; the installer must not overwrite and record it.
+    text = _text()
+    lookup = text[text.index("$Uv = [string](Get-Command uv.exe") :][:600]
+    assert '(Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }' in lookup
+    assert lookup.index("Join-Path $BinDir") < lookup.index("$Uv = Install-Uv")
+
+
+def test_the_locked_package_install_is_retried_with_backoff() -> None:
+    # GAP-1315: a sharing violation (os error 32) on uv's cache rename failed
+    # the whole Windows install.
+    # The DefenseClaw wheel install hit the same hold, so both uv pip steps
+    # go through the retry helper.
+    start = _text().index("function New-Venv")
+    body = _text()[start : _text().index("function Invoke-UvPipInstall")]
+    assert body.count("Invoke-UvPipInstall") == 2
+    assert "Invoke-Native $Uv @(\"pip\"" not in body
+    # GAP-1941: on a busy host one retry hit the same hold on the next
+    # package, so it backs off several times, checks for a full disk before
+    # each attempt, and the last failure says to run the command again.
+    helper = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    assert "$waits = @(5, 15, 30)" in helper
+    assert helper.index("Test-DiskFull") > helper.index("for ($i = 0")
+    assert "Start-Sleep -Seconds $waits[$i]" in helper
+    assert "run the same command again" in helper
+
+
+def _ps1_function(name: str) -> str:
+    text = _text()
+    start = text.index(f"function {name} ")
+    return text[start : text.index("\n}\n", start) + 3]
+
+
+_GUARDRAIL_CONFIGS = {
+    # What 'uninstall --binaries' and 'setup guardrail --disable' save.
+    "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
+    "on": ("guardrail:\n  enabled: true\n  judge:\n    enabled: false\n", False),
+    "other-section": ("guardrail:\n  mode: action\nwebhook:\n  enabled: false\n", False),
+    "no-guardrail": ("gateway:\n  enabled: false\n", False),
+}
+
+
+def test_reinstall_over_a_disabled_guardrail_names_setup_guardrail() -> None:
+    # GAP-2481: after 'uninstall --binaries' (guardrail off, hooks torn down)
+    # the reinstall said only "Start it with: defenseclaw-gateway start".
+    install = _ps1_function("Invoke-Install")
+    branch = install[install.index("if (Test-GuardrailOff) {") :]
+    assert branch.index("Turn it back on with: defenseclaw setup guardrail") < branch.index(
+        "Start it with: defenseclaw-gateway start"
     )
-    assert completed.returncode == 0, completed.stderr
-    assert "DefenseClaw native Windows bootstrap" in completed.stdout
 
 
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-@pytest.mark.parametrize(
-    ("parameters", "expected"),
-    [
-        (
-            "-Connector codex -Yes -Quickstart -QuickstartMode action",
-            [
-                "/quiet",
-                "/norestart",
-                "INSTALLSCOPE=user",
-                "CONNECTOR=codex",
-                "MODE=action",
-                "STARTGATEWAY=1",
-            ],
-        ),
-        (
-            "-Connector claudecode -Yes -Quickstart",
-            [
-                "/quiet",
-                "/norestart",
-                "INSTALLSCOPE=user",
-                "CONNECTOR=claudecode",
-                "MODE=observe",
-                "STARTGATEWAY=1",
-            ],
-        ),
-        (
-            "-NoOpenclaw -Yes -Quickstart",
-            [
-                "/quiet",
-                "/norestart",
-                "INSTALLSCOPE=user",
-                "CONNECTOR=none",
-                "STARTGATEWAY=0",
-            ],
-        ),
-        ("", ["/norestart", "INSTALLSCOPE=user"]),
-    ],
-)
-def test_compatibility_flags_map_to_native_setup_properties(
-    parameters: str,
-    expected: list[str],
-) -> None:
-    completed = _run_powershell(
-        rf"""
-{_dot_source(parameters)}
-$selected = Resolve-SelectedConnector
-@((New-SetupArgumentList -SelectedConnector $selected)) | ConvertTo-Json -Compress
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout.strip().splitlines()[-1]) == expected
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_no_persist_path_fails_before_release_resolution() -> None:
-    completed = _run_powershell(
-        rf"""
-{_dot_source("-NoPersistPath -Yes -Version 1.2.3")}
-function Resolve-RemoteVersion {{ throw 'NETWORK_OR_RELEASE_RESOLUTION_CALLED' }}
-try {{ $null = Main; throw 'expected failure' }} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "no safe native Setup equivalent" in completed.stdout
-    assert "NETWORK_OR_RELEASE_RESOLUTION_CALLED" not in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_checksum_manifest_requires_one_exact_entry(tmp_path: Path) -> None:
-    checksums = tmp_path / "checksums.txt"
-    checksums.write_text(
-        "a" * 64 + "  ./DefenseClawSetup-x64.exe\n" + "b" * 64 + "  nested/DefenseClawSetup-x64.exe\n",
-        encoding="ascii",
-    )
-    completed = _run_powershell(
-        rf"""
-{_dot_source()}
-Get-AuthenticatedChecksum -ChecksumsPath '{_ps_quote(checksums)}' `
-  -FileName 'DefenseClawSetup-x64.exe'
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == "a" * 64
-
-    checksums.write_text(
-        "a" * 64 + "  DefenseClawSetup-x64.exe\n" + "b" * 64 + " *DefenseClawSetup-x64.exe\n",
-        encoding="ascii",
-    )
-    completed = _run_powershell(
-        rf"""
-{_dot_source()}
-try {{
-  $null = Get-AuthenticatedChecksum -ChecksumsPath '{_ps_quote(checksums)}' `
-    -FileName 'DefenseClawSetup-x64.exe'
-  throw 'expected duplicate rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "contains 2 entries" in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_cosign_verification_freezes_authenticated_checksum_content(tmp_path: Path) -> None:
-    checksums = tmp_path / "checksums.txt"
-    checksums.write_text("a" * 64 + "  DefenseClawSetup-x64.exe\n", encoding="ascii")
-    signature = tmp_path / "checksums.txt.sig"
-    certificate = tmp_path / "checksums.txt.pem"
-    bundle = tmp_path / "checksums.txt.bundle"
-    for item in (signature, certificate, bundle):
-        item.write_bytes(b"fixture")
-    # A real PE avoids cmd.exe reinterpreting the Sigstore identity regex pipe.
-    # doskey accepts and ignores this argument shape with a successful exit.
-    verifier_source = shutil.which("doskey.exe")
-    if not verifier_source:
-        pytest.skip("Windows doskey executable is unavailable")
-    verifier = tmp_path / "cosign.exe"
-    shutil.copyfile(verifier_source, verifier)
-    verifier_sha = hashlib.sha256(verifier.read_bytes()).hexdigest()
-
-    completed = _run_powershell(
-        rf"""
-{_dot_source()}
-$script:CosignSha256 = '{verifier_sha}'
-$frozen = Invoke-CosignVerification -Verifier '{_ps_quote(verifier)}' `
-  -ChecksumsPath '{_ps_quote(checksums)}' -SignaturePath '{_ps_quote(signature)}' `
-  -CertificatePath '{_ps_quote(certificate)}' -BundlePath '{_ps_quote(bundle)}' `
-  -ReleaseVersion '1.2.3'
-[IO.File]::WriteAllText('{_ps_quote(checksums)}', ('b' * 64) + "  DefenseClawSetup-x64.exe`n")
-Get-AuthenticatedChecksum -ChecksumsContent $frozen -FileName 'DefenseClawSetup-x64.exe'
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip().splitlines()[-1] == "a" * 64
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_authenticated_manifest_requires_exact_windows_policy(tmp_path: Path) -> None:
-    manifest = tmp_path / "upgrade-manifest.json"
-    manifest.write_text(json.dumps(_manifest("0.8.7")), encoding="utf-8")
-    valid = _run_powershell(
-        rf"""
-{_dot_source()}
-Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
-Write-Output 'VALID'
-"""
-    )
-    assert valid.returncode == 0, valid.stderr
-    assert "VALID" in valid.stdout
-
-    wrong_schema = _manifest("0.8.7")
-    wrong_schema["schema_version"] = 1
-    manifest.write_text(json.dumps(wrong_schema), encoding="utf-8")
-    invalid = _run_powershell(
-        rf"""
-{_dot_source()}
-try {{
-  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
-  throw 'expected schema rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert invalid.returncode == 0, invalid.stderr
-    assert "does not describe DefenseClaw 0.8.7" in invalid.stdout
-
-    altered = _manifest("0.8.7")
-    altered["release_artifacts"]["wheel"] = "lookalike.dcwheel"  # type: ignore[index]
-    manifest.write_text(json.dumps(altered), encoding="utf-8")
-    invalid = _run_powershell(
-        rf"""
-{_dot_source()}
-try {{
-  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
-  throw 'expected artifact rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert invalid.returncode == 0, invalid.stderr
-    assert "does not select the exact protected wheel" in invalid.stdout
-
-    altered = _manifest("0.8.7")
-    altered["windows_installer"]["authenticode"]["publisher"] = "Lookalike Publisher"  # type: ignore[index]
-    manifest.write_text(json.dumps(altered), encoding="utf-8")
-    invalid = _run_powershell(
-        rf"""
-{_dot_source()}
-try {{
-  Assert-UpgradeManifest -Path '{_ps_quote(manifest)}' -ReleaseVersion '0.8.7'
-  throw 'expected policy rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert invalid.returncode == 0, invalid.stderr
-    assert "does not declare the optional pinned DefenseClaw publisher" in invalid.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_authenticated_provenance_binds_setup_checksum_and_signing_state(tmp_path: Path) -> None:
-    setup_sha = "a" * 64
-    provenance = tmp_path / "DefenseClawSetup-x64.exe.provenance.json"
-    provenance.write_text(json.dumps(_provenance(setup_sha)), encoding="utf-8")
-    valid = _run_powershell(
-        rf"""
-{_dot_source()}
-$unsigned = Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
-  -ReleaseVersion '1.2.3' -SetupSha256 '{setup_sha}'
-Write-Output "VALID_UNSIGNED=$unsigned"
-"""
-    )
-    assert valid.returncode == 0, valid.stderr
-    assert "VALID_UNSIGNED=False" in valid.stdout
-
-    provenance.write_text(json.dumps(_provenance("b" * 64)), encoding="utf-8")
-    wrong_hash = _run_powershell(
-        rf"""
-{_dot_source()}
-try {{
-  Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
-    -ReleaseVersion '1.2.3' -SetupSha256 '{setup_sha}'
-  throw 'expected provenance rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert wrong_hash.returncode == 0, wrong_hash.stderr
-    assert "does not match the exact authenticated checksum" in wrong_hash.stdout
-
-    provenance.write_text(json.dumps(_provenance(setup_sha, unsigned=True)), encoding="utf-8")
-    unsigned = _run_powershell(
-        rf"""
-{_dot_source()}
-$unsigned = Assert-SetupProvenance -Path '{_ps_quote(provenance)}' `
-  -ReleaseVersion '1.2.3' -SetupSha256 '{setup_sha}'
-Write-Output "VALID_UNSIGNED=$unsigned"
-"""
-    )
-    assert unsigned.returncode == 0, unsigned.stderr
-    assert "VALID_UNSIGNED=True" in unsigned.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_untrusted_authenticode_is_rejected(tmp_path: Path) -> None:
-    setup = tmp_path / "DefenseClawSetup-x64.exe"
-    setup.write_bytes(b"unsigned fixture")
-    completed = _run_powershell(
-        rf"""
-{_dot_source()}
-function Get-AuthenticodeSignature {{
-  [pscustomobject]@{{ Status = 'NotSigned'; SignerCertificate = $null }}
-}}
-try {{
-  Assert-SetupAuthenticode -Path '{_ps_quote(setup)}' -Unsigned $false
-  throw 'expected Authenticode rejection'
-}} catch {{ "ERROR=$($_.Exception.Message)" }}
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "status='NotSigned'" in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_explicitly_unverified_setup_is_accepted_after_provenance_binding(tmp_path: Path) -> None:
-    setup = tmp_path / "DefenseClawSetup-x64.exe"
-    setup.write_bytes(b"unsigned fixture")
-    completed = _run_powershell(
-        rf"""
-{_dot_source(f"-Local '{_ps_quote(tmp_path)}'")}
-function Get-AuthenticodeSignature {{
-  [pscustomobject]@{{ Status = 'NotSigned'; SignerCertificate = $null }}
-}}
-function Invoke-BoundedNativeProcess {{ throw 'UNSIGNED_SETUP_VERIFY_CALLED' }}
-Assert-SetupAuthenticode -Path '{_ps_quote(setup)}' -Unsigned $true
-Write-Output 'VERIFIED'
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "UNSIGNED_SETUP_VERIFY_CALLED" not in completed.stdout + completed.stderr
-    assert "release Sigstore checksums authenticated its exact bytes" in completed.stdout
-    assert "VERIFIED" in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_local_authenticode_uses_setup_cache_only_verifier(tmp_path: Path) -> None:
-    setup = tmp_path / "DefenseClawSetup-x64.exe"
-    setup.write_bytes(b"authenticated setup fixture")
-    completed = _run_powershell(
-        rf"""
-{_dot_source(f"-Local '{_ps_quote(tmp_path)}'")}
-function Get-AuthenticodeSignature {{ throw 'NETWORK_CAPABLE_VERIFIER_CALLED' }}
-function Invoke-BoundedNativeProcess {{
-  param($FilePath, [string[]]$Arguments, $TimeoutSeconds, [switch]$Hidden)
-  if ($FilePath -ne '{_ps_quote(setup)}' -or ($Arguments -join '|') -ne '/verify') {{
-    throw 'wrong offline verifier invocation'
-  }}
-  return 0
-}}
-Assert-SetupAuthenticode -Path '{_ps_quote(setup)}' -Unsigned $false
-Write-Output 'VERIFIED'
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "NETWORK_CAPABLE_VERIFIER_CALLED" not in completed.stdout + completed.stderr
-    assert "VERIFIED" in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_local_bundle_delegates_without_any_network_or_dependency_tool(
-    tmp_path: Path,
-) -> None:
-    release = tmp_path / "offline release"
-    release.mkdir()
-    setup = release / "DefenseClawSetup-x64.exe"
-    setup.write_bytes(b"signed setup fixture bytes")
-    setup_sha = hashlib.sha256(setup.read_bytes()).hexdigest()
-    manifest = release / "upgrade-manifest.json"
-    manifest.write_text(json.dumps(_manifest()) + "\n", encoding="utf-8")
-    provenance = release / "DefenseClawSetup-x64.exe.provenance.json"
-    provenance.write_text(json.dumps(_provenance(setup_sha)) + "\n", encoding="utf-8")
-    checksums = release / "checksums.txt"
-    checksums.write_text(
-        f"{setup_sha}  {setup.name}\n"
-        f"{hashlib.sha256(manifest.read_bytes()).hexdigest()}  {manifest.name}\n"
-        f"{hashlib.sha256(provenance.read_bytes()).hexdigest()}  {provenance.name}\n",
-        encoding="ascii",
-    )
-    (release / "checksums.txt.sig").write_bytes(b"fixture signature")
-    (release / "checksums.txt.pem").write_bytes(b"fixture certificate")
-    (release / "checksums.txt.bundle").write_bytes(b"fixture Sigstore bundle")
-    cosign = release / "cosign-windows-amd64.exe"
-    cosign.write_bytes(b"pinned verifier fixture")
-    cosign_sha = hashlib.sha256(cosign.read_bytes()).hexdigest()
-    completed = _run_powershell(
-        rf"""
-{_dot_source(f"-Local '{_ps_quote(release)}' -CosignPath '{_ps_quote(cosign)}' -Connector codex -Yes -Quickstart -QuickstartMode action")}
-$script:CosignSha256 = '{cosign_sha}'
-function Invoke-WebRequest {{ throw 'NETWORK_CALLED' }}
-function Invoke-RestMethod {{ throw 'NETWORK_CALLED' }}
-function Invoke-DownloadFile {{ throw 'NETWORK_CALLED' }}
-function Invoke-CosignVerification {{
-  param($Verifier, $ChecksumsPath, $SignaturePath, $CertificatePath, $BundlePath, $ReleaseVersion)
-  if ($ReleaseVersion -ne '1.2.3') {{ throw "wrong version: $ReleaseVersion" }}
-  Write-Host 'COSIGN_VERIFIED'
-  return [IO.File]::ReadAllText($ChecksumsPath)
-}}
-function Assert-SetupAuthenticode {{ param($Path, $Unsigned) Write-Host 'AUTHENTICODE_VERIFIED' }}
-function Invoke-NativeSetup {{
-  param($SetupPath, $ExpectedSha256, $Unsigned, [string[]]$Arguments)
-  if ($ExpectedSha256 -ne '{setup_sha}') {{ throw 'wrong setup checksum' }}
-  if (-not (Test-Path -LiteralPath $SetupPath -PathType Leaf)) {{ throw 'missing staged setup' }}
-  Write-Host ('SETUP_ARGS=' + ($Arguments -join '|'))
-  return 0
-}}
-$result = Main
-Write-Output "RESULT=$result"
-""",
-        timeout=90,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "NETWORK_CALLED" not in completed.stdout + completed.stderr
-    assert "COSIGN_VERIFIED" in completed.stdout
-    # Authenticode is checked once after staged checksum verification and again
-    # immediately before the real handoff; the test seam observes both calls.
-    assert completed.stdout.count("AUTHENTICODE_VERIFIED") == 1
-    assert (
-        "SETUP_ARGS=/quiet|/norestart|INSTALLSCOPE=user|CONNECTOR=codex|MODE=action|STARTGATEWAY=1" in completed.stdout
-    )
-    assert "RESULT=0" in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
-def test_native_setup_exit_code_is_preserved_by_main() -> None:
-    completed = _run_powershell(
-        rf"""
-{_dot_source("-Version 1.2.3 -Yes")}
-function Assert-NativeWindowsX64 {{}}
-function Assert-CompatibleLayoutRequest {{}}
-function Stage-RemoteBundle {{
-  [pscustomobject]@{{ Root=''; Setup='fixture.exe'; SetupSha256=('a' * 64); Unsigned=$false; Version='1.2.3' }}
-}}
-function Invoke-NativeSetup {{ return 1603 }}
-$result = Main
-Write-Output "RESULT=$result"
-"""
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "RESULT=1603" in completed.stdout
-
-
-def test_setup_is_reauthenticated_immediately_before_handoff() -> None:
-    text = INSTALL_PS1.read_text(encoding="utf-8")
-    function = text.split("function Invoke-NativeSetup", 1)[1].split("\nfunction Main", 1)[0]
-    checksum = function.index("Assert-Sha256")
-    authenticode = function.index("Assert-SetupAuthenticode")
-    execution = function.index("Invoke-BoundedNativeProcess")
-    assert checksum < authenticode < execution
-    assert "& $SetupPath" not in function
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process semantics")
-def test_bounded_native_process_waits_for_windows_gui_exit_code(tmp_path: Path) -> None:
-    go = shutil.which("go")
-    if not go:
-        pytest.skip("Go toolchain is unavailable")
-    source = tmp_path / "gui_exit.go"
-    source.write_text(
-        'package main\nimport ("os"; "time")\nfunc main() { time.Sleep(200 * time.Millisecond); os.Exit(23) }\n',
-        encoding="utf-8",
-    )
-    executable = tmp_path / "gui-exit.exe"
-    build = subprocess.run(
-        [go, "build", "-ldflags=-H=windowsgui", "-o", executable, source],
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("name", sorted(_GUARDRAIL_CONFIGS))
+def test_test_guardrail_off_reads_the_kept_config(tmp_path: Path, name: str) -> None:
+    body, expected = _GUARDRAIL_CONFIGS[name]
+    (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+    script = f"$DataDir = '{tmp_path}'\n{_ps1_function('Test-GuardrailOff')}\nif (Test-GuardrailOff) {{ 'off' }} else {{ 'on' }}\n"
+    env = {k: v for k, v in os.environ.items() if k != "DEFENSECLAW_CONFIG"}
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
-        timeout=120,
-        check=False,
-    )
-    assert build.returncode == 0, build.stderr
-
-    completed = _run_powershell(
-        rf"""
-{_dot_source()}
-$code = Invoke-BoundedNativeProcess -FilePath '{_ps_quote(executable)}' `
-  -Arguments @() -TimeoutSeconds 30 -Hidden
-Write-Output "EXIT=$code"
-""",
         timeout=60,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert "EXIT=23" in completed.stdout
-
-
-@pytest.mark.skipif(os.name != "nt", reason="requires native Windows process-tree semantics")
-def test_bounded_native_process_timeout_cleans_gui_process_tree(tmp_path: Path) -> None:
-    go = shutil.which("go")
-    if not go:
-        pytest.skip("Go toolchain is unavailable")
-    source = tmp_path / "gui_tree.go"
-    source.write_text(
-        "package main\n"
-        'import ("os"; "os/exec"; "strconv"; "time")\n'
-        "func main() {\n"
-        ' marker := os.Getenv("DC_GUI_CHILD_PID")\n'
-        ' if len(os.Args) > 1 && os.Args[1] == "child" {\n'
-        "  _ = os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())), 0600)\n"
-        "  time.Sleep(30 * time.Second); return\n"
-        " }\n"
-        ' child := exec.Command(os.Args[0], "child")\n'
-        " _ = child.Start()\n"
-        " deadline := time.Now().Add(5 * time.Second)\n"
-        " for time.Now().Before(deadline) { if _, err := os.Stat(marker); err == nil { break }; time.Sleep(20 * time.Millisecond) }\n"
-        " time.Sleep(30 * time.Second)\n"
-        "}\n",
-        encoding="utf-8",
-    )
-    executable = tmp_path / "gui-tree.exe"
-    build = subprocess.run(
-        [go, "build", "-ldflags=-H=windowsgui", "-o", executable, source],
-        capture_output=True,
-        text=True,
-        timeout=120,
+        env=env,
         check=False,
     )
-    assert build.returncode == 0, build.stderr
-    marker = tmp_path / "child.pid"
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == ("off" if expected else "on")
 
-    completed = _run_powershell(
-        rf"""
-{_dot_source()}
-$env:DC_GUI_CHILD_PID = '{_ps_quote(marker)}'
-$message = ''
-try {{
-  Invoke-BoundedNativeProcess -FilePath '{_ps_quote(executable)}' `
-    -Arguments @() -TimeoutSeconds 1 -Hidden | Out-Null
-  throw 'expected timeout'
-}} catch {{
-  $message = $_.Exception.Message
-}}
-if (-not (Test-Path -LiteralPath '{_ps_quote(marker)}' -PathType Leaf)) {{
-  throw 'child PID marker was not created'
-}}
-$childPid = [int]([IO.File]::ReadAllText('{_ps_quote(marker)}'))
-Start-Sleep -Milliseconds 500
-$alive = Get-Process -Id $childPid -ErrorAction SilentlyContinue
-if ($null -ne $alive) {{
-  Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue
-  throw "timed-out GUI descendant remained alive: $childPid"
-}}
-Write-Output "TIMEOUT=$message"
-""",
-        timeout=30,
+
+def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
+    # GAP-1348: a 1.x gateway over a large audit database outlasted start's
+    # 60-second readiness wait, and the upgrade rolled back while it was
+    # still starting.
+    body = _ps1_function("Start-Gateway")
+    assert "if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }" in body
+    assert "$deadline = (Get-Date).AddMinutes(3)" in body
+    assert 'Invoke-Native $gateway @("status") -Quiet' in body
+    assert 'Write-Ok "The gateway finished starting"; return 0' in body
+
+
+def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
+    # GAP-1349: "Your previous install is back" while the gateway that ran
+    # before stayed down and fail-closed connectors blocked every tool call.
+    body = _ps1_function("Restart-Old")
+    assert "$Run.OldGatewayDown = $WasRunning -and -not (Get-GatewayProcess)" in body
+    assert "did not start again, so agent hooks are not guarded" in body
+    assert "but its gateway is not running" in _ps1_function("Get-RestoredNote")
+    text = _text()
+    assert text.count("$(Get-RestoredNote) Log: $($Run.Log)") == 2
+    assert "Your previous install is back. Log:" not in text
+
+
+def test_a_later_upgrade_keeps_the_0_x_audit_history() -> None:
+    # GAP-1360: previous\ held the only copy of the 0.x audit history, and the
+    # next upgrade replaced it.
+    body = _ps1_function("Save-RolledBackData")
+    assert '$label = "audit-history"' in body
+    assert '[version]$version -lt [version]"1.0.0"' in body
+    assert "backups\\$label-$version-" in body
+
+
+def test_the_rollback_copy_states_its_size_and_the_free_space() -> None:
+    # GAP-1519: an upgrade with a 1.3 GB audit.db never said how much it copied.
+    body = _text()[_text().index("function Save-Snapshot") :][:1400]
+    assert "Saving a rollback copy of the data folder ({0:N0} MB needed{1})" in body
+    assert body.index("Saving a rollback copy") < body.index("Not enough free disk space")
+
+
+def test_a_pending_uninstall_cleanup_is_waited_for_before_the_data_dir_is_touched() -> None:
+    # GAP-1647: an install started right after `uninstall --all` lost its
+    # .staging to the deferred cleanup, which runs after the CLI exits.
+    start = _text().index("function Wait-UninstallCleanup(")
+    body = _text()[start : _text().index("\n}\n", start)]
+    assert '-Filter "defenseclaw-uninstall-*"' in body and '"plan.json"' in body
+    assert '"interpreter_dirs"' in body
+    assert "AddMinutes(-10)" in body
+    assert "wait a minute, then run the installer again. Nothing was changed." in body
+    install = _ps1_function("Invoke-Install")
+    assert install.index("Wait-UninstallCleanup") < install.index('Join-Path $DataDir "logs"')
+    # The helper's folder names match what uninstall writes.
+    uninstall = (ROOT / "cli" / "defenseclaw" / "commands" / "cmd_uninstall.py").read_text(encoding="utf-8")
+    assert 'tempfile.mkdtemp(prefix=f"defenseclaw-uninstall-{token}-")' in uninstall
+    assert 'os.path.join(helper_dir, "plan.json")' in uninstall
+    assert '"interpreter_dirs"' in uninstall
+
+
+def test_uv_gets_load_tolerant_timeouts_and_they_are_restored() -> None:
+    # GAP-1776: uv's 60 s bytecode and 30 s HTTP limits failed installs on a
+    # busy Windows host.
+    install = _ps1_function("Invoke-Install")
+    assert 'if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }' in install
+    assert 'if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }' in install
+    restore = _text()[_text().index("$savedEnv = @{}") :][:400]
+    assert '"UV_COMPILE_BYTECODE_TIMEOUT", "UV_HTTP_TIMEOUT"' in restore
+
+
+def test_a_first_install_does_not_mention_a_previous_install() -> None:
+    # GAP-1827: a first install printed "Saving a rollback copy ... (0 MB needed)"
+    # and "Cleaning up the previous install's files".
+    assert "if ($PrevVersion -or $need -gt 0) {" in _ps1_function("Save-Snapshot")
+    swap = _ps1_function("Complete-Swap")
+    assert "if ($PrevVersion) { Write-Info \"Cleaning up the previous install's files" in swap
+    assert 'else { Write-Info "Removing the staging files" }' in swap
+
+
+def test_the_install_log_can_time_a_failed_gateway_start() -> None:
+    # GAP-1797: no line of the install log (a transcript) had a time.
+    text = _text()
+    assert '"--- $Message  [$(Get-UtcClock)]"' in text
+    assert 'Write-Info "Starting the gateway [$(Get-UtcClock)]"' in _ps1_function("Start-Gateway")
+    assert "did not become healthy within {0:N0} s [{1}]" in text
+
+
+def test_the_previous_watchdog_is_stopped_even_when_the_gateway_is_down() -> None:
+    # GAP-1833: with the gateway down the old watchdog kept running from the
+    # renamed binary and held its ownership lock against the new one.
+    body = _ps1_function("Stop-Watchdog")
+    assert '$image = Join-Path $BinDir "defenseclaw-gateway.exe"' in body
+    assert "Get-ProcessesUnder @($image)" in body  # a prefix: .old-* too
+    assert 'Invoke-Native $image @("watchdog", "stop") -Quiet' in body
+    assert "Stop-Process -Id $_.ProcessId -Force" in body
+    # Rollback and recovery stop the gateway through Stop-Gateway, running or not.
+    stop_gateway = _ps1_function("Stop-Gateway")
+    assert "if (-not $process) { Stop-Watchdog; return $true }" in stop_gateway
+    assert stop_gateway.count("Stop-Watchdog") == 2
+    install = _ps1_function("Invoke-Install")
+    stop = install.index("    Stop-Watchdog\n")
+    assert install.index('Write-Info "Stopping the gateway') < stop < install.index("Save-Snapshot")
+    assert not install[install.index("if ($WasRunning) {") : stop].count("Stop-Watchdog")
+
+
+def test_disk_room_is_checked_before_staging_and_before_the_gateway_stops() -> None:
+    # GAP-1841: only the rollback copy was checked, after staging and after
+    # the gateway was stopped. GAP-1839: the staging and environment sizes
+    # were never counted.
+    text = _text()
+    room = text[text.index("function Assert-InstallRoom(") :][:1400]
+    assert "$data = Get-DataSize" in room
+    assert "$free -ge $data + $Extra + 100MB" in room
+    assert "nothing was changed" in room
+    install = _ps1_function("Invoke-Install")
+    first = install.index('Assert-InstallRoom $InstallRoom "the new version"')
+    assert first < install.index("New-InstallDirectory $Staging")
+    second = install.index('Assert-InstallRoom $FinalEnvRoom "the final Python environment"')
+    assert install.index("is staged and checked") < second < install.index('Write-Info "Stopping the gateway')
+
+
+def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
+    # GAP-2614: "nothing was changed", but the refusal came after
+    # Protect-UvDirectory -Create had made an empty .uv in the data folder.
+    install = _ps1_function("Invoke-Install")
+    room = install.index('Assert-InstallRoom $InstallRoom "the new version"')
+    assert room < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
+
+
+def _bin_dir_functions() -> str:
+    text = _text()
+    out = []
+    for name in ("Copy-BinDir", "Restore-BinDir"):
+        start = text.index(f"function {name}(")
+        out.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(out)
+
+
+def test_a_restore_removes_the_bin_folder_only_when_the_run_created_it() -> None:
+    # GAP-2614: "Nothing was left installed." / "Your previous install is
+    # back." left an empty ~\.local\bin after a failed first install or a
+    # restored DefenseClaw Setup upgrade.
+    body = _bin_dir_functions()
+    copy = body[: body.index("function Restore-BinDir(")]
+    assert copy.index('(Join-Path $To "NO_BINDIR")') < copy.index("foreach ($name in $ManagedFiles)")
+    # A first install also made ~\.local; the restore takes that out too.
+    assert "$made += $parent" in copy
+    restore = body[body.index("function Restore-BinDir(") :]
+    marker = restore.index('$marker = Join-Path $From "NO_BINDIR"')
+    # With no bin folder before, the restore never recreates it.
+    assert marker < restore.index("New-Item -ItemType Directory -Path $BinDir")
+    assert "Remove-Item -LiteralPath $dir -Force" in restore
+    assert "-Recurse" not in restore
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("existed", ["none", "parent", "bin"])
+def test_restore_bin_dir_puts_the_bin_folder_back_as_it_was(tmp_path: Path, existed: str) -> None:
+    bin_dir, slot = tmp_path / "local" / "bin", tmp_path / "slot"
+    if existed != "none":
+        bin_dir.parent.mkdir()
+    if existed == "bin":
+        bin_dir.mkdir()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{bin_dir}'
+$ManagedFiles = @('defenseclaw-gateway.exe')
+function Install-File([string]$From, [string]$To) {{ Copy-Item -LiteralPath $From -Destination $To -Force }}
+function Remove-Aside([string]$Path) {{ Remove-Item -LiteralPath $Path -Force }}
+{_bin_dir_functions()}
+Copy-BinDir '{slot}'
+New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $BinDir 'defenseclaw-gateway.exe') -Value 'new'
+Restore-BinDir '{slot}'
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
-    assert completed.returncode == 0, completed.stderr
-    assert "TIMEOUT=Native process timed out" in completed.stdout
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert bin_dir.parent.is_dir() is (existed != "none")
+    assert bin_dir.is_dir() is (existed == "bin")
+    if existed == "bin":
+        assert list(bin_dir.iterdir()) == []
 
 
-def test_dot_source_is_the_only_no_run_seam() -> None:
-    text = INSTALL_PS1.read_text(encoding="utf-8")
-    assert "if ($MyInvocation.InvocationName -ne '.')" in text
-    assert "in-memory ScriptBlock" in text
-    assert "if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) { exit 0 }" in text
-    assert "DEFENSECLAW_" + "INSTALLER_TEST" not in text
-    assert "AllowUnsigned" not in text
+def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
+    # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
+    # for the old gateway's restart.
+    clear = _ps1_function("Clear-StagedRelease")
+    assert 'Where-Object { $_.Name -ne "hook-runtime-state.json" }' in clear
+    restore = _ps1_function("Restore-Snapshot")
+    assert restore.index("Clear-StagedRelease") < restore.index("Restore-Slot $Snap")
+    assert "run the installer again to finish restoring it" in restore
+    install = _ps1_function("Invoke-Install")
+    failed = install[install.index("if (-not $saved) {") :][:500]
+    assert failed.index("Clear-StagedRelease") < failed.index("Restart-Old")
+    assert "it was not changed, but its gateway is not running" in failed
+    final = _text()[_text().index("if ($Run.Lock) {") :][:200]
+    assert "Invoke-Quietly { Clear-StagedRelease }" in final
+
+
+def test_a_first_install_on_a_full_disk_says_so_and_keeps_no_failed_copy() -> None:
+    # GAP-1883: the uv retry blamed a busy host, and a failed first install
+    # kept about 2 GB (.failed-*, .venv) that held the disk full.
+    uv = _text()[_text().index("function Invoke-UvPipInstall(") :][:1200]
+    assert uv.index("if (Test-DiskFull) { return $false }") < uv.index("Retrying the Python package install")
+    full = _ps1_function("Test-DiskFull")
+    assert "$free -ge 300MB" in full and "then run the installer again" in full
+    restore = _ps1_function("Restore-Snapshot")
+    first = restore[restore.index("if (-not $PrevVersion) {") :]
+    assert first.index("Remove-Tree $failed") < first.index("return") < first.index("was kept in $failed")
+    assert 'if (-not $PrevVersion) { return "Nothing was left installed." }' in _ps1_function("Get-RestoredNote")
+
+
+def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
+    # GAP-1839: recovery ran ~\.local\bin\defenseclaw-gateway.exe, which a
+    # DefenseClaw Setup install never had ("is not recognized").
+    start = _ps1_function("Start-Gateway")
+    assert "if (-not (Test-Path -LiteralPath $gateway -PathType Leaf))" in start
+    assert start.index("Test-Path -LiteralPath $gateway") < start.index('Invoke-Native $gateway @("start")')
+    resume = _ps1_function("Resume-InterruptedRun")
+    assert "Start-SetupGateway $setupInstall.Root" in resume
+    assert "Start-SetupGateway $Setup.Root" in _ps1_function("Restore-SetupInstall")
+
+
+def test_a_restored_setup_install_keeps_no_failed_copy_or_uv_cache_in_its_data_dir() -> None:
+    # GAP-1839: the failed 1.0 copy and the uv cache stayed in Setup's data
+    # dir, and Setup's gateway, which walks it all before it starts, then
+    # timed out on every start.
+    clear = _text()[_text().index("function Clear-SetupDataDir(") :][:600]
+    assert "Remove-Tree $Failed" in clear
+    assert 'Remove-Tree (Join-Path $DataDir ".uv")' in clear
+    restore = _ps1_function("Restore-Snapshot")
+    assert restore.index("Restore-Slot $Snap") < restore.index("Clear-SetupDataDir $failed") < restore.index("Restart-Old")
+    resume = _ps1_function("Resume-InterruptedRun")
+    assert resume.index("Clear-SetupDataDir $failed") < resume.index("Start-SetupGateway $setupInstall.Root")
+    assert '} elseif (-not $setupBack) {\n                Write-Warn "The interrupted install was kept in $failed"' in resume
+
+
+def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_the_gateway() -> None:
+    # GAP-1988: the uv cache and Python in the data dir inherited its
+    # permissions, so the 1.0.0 gateway, which re-applies them on every private
+    # write, missed its 5-second start window after a rollback to 1.0.0.
+    protect = _ps1_function("Protect-UvDirectory")
+    assert protect.index("if (-not $Create) { return }") < protect.index("New-Item -ItemType Directory")
+    assert "if ($acl.AreAccessRulesProtected) { return }" in protect
+    assert "$acl.SetAccessRuleProtection($true, $true)" in protect
+    install = _ps1_function("Invoke-Install")
+    uv_env = install.index('$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"')
+    assert uv_env < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
+    rollback = _ps1_function("Invoke-Rollback")
+    assert (
+        rollback.index("Switch-WithPrevious")
+        < rollback.index("Protect-UvDirectory")
+        < rollback.index("if ($startAfter -and (Start-Gateway)")
+    )
+
+
+def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path: Path) -> None:
+    # GAP-1988: the 1.0.0 gateway refuses a WAL-mode audit.db whose 5-second
+    # startup check times out ("SQLite sidecar -wal changed before secure
+    # open"), so the installers put the store in rollback-journal mode before
+    # they start a gateway older than 1.0.1.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r'^\$AuditJournalPy = "([^"]+)"$', _text(), re.M)
+    sh_text = (Path(__file__).resolve().parents[2] / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r'^AUDIT_JOURNAL_PY="([^"]+)"$', sh_text, re.M)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    db = tmp_path / "audit.db"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        conn.execute("CREATE TABLE audit_events (id TEXT)")
+        conn.execute("INSERT INTO audit_events VALUES ('kept')")
+    conn.close()
+    for _ in range(2):  # a store already in rollback-journal mode is left as it is
+        subprocess.run([sys.executable, "-c", ps1.group(1), str(db)], check=True)
+        conn = sqlite3.connect(db)
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute("SELECT id FROM audit_events").fetchall() == [("kept",)]
+        conn.close()
+        assert not (tmp_path / "audit.db-wal").exists()
+    start = _ps1_function("Start-Gateway")
+    guard = 'if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }'
+    assert start.index(guard) < start.index('Invoke-Native $gateway @("start")')
+    sh_start = sh_text[sh_text.index("\nstart_gateway() {") :]
+    assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
+        '"${BIN_DIR}/defenseclaw-gateway" start'
+    )
+
+
+def test_install_folders_set_only_the_acl_part_that_changed() -> None:
+    # GAP-2004: Set-Acl writes every part of the security descriptor and was
+    # refused for a standard user on a second NTFS volume, so a
+    # DEFENSECLAW_HOME there died with a raw PowerShell error.
+    helper = _text()[_text().index("function Set-DirectoryAcl(") :][:600]
+    assert "$dir.SetAccessControl($Acl)" in helper
+    assert "[IO.FileSystemAclExtensions]::SetAccessControl($dir, $Acl)" in helper
+    new_dir = _text()[_text().index("function New-InstallDirectory(") :][:900]
+    assert "Set-Acl" not in new_dir
+    assert 'catch { Die "Could not set the permissions of ${Path}:' in new_dir
+    assert "Set-Acl" not in _ps1_function("Protect-UvDirectory")
+    assert "Set-DirectoryAcl $DataDir $acl" in _ps1_function("Invoke-Install")
+
+
+def test_the_last_uv_hint_names_both_lock_errors() -> None:
+    # GAP-2025: a held uv cache file fails with os error 5 as well as 32.
+    assert "file in use or access denied (os error 32 or 5)" in _text()[_text().index("function Invoke-UvPipInstall(") :][:1300]
+
+
+def test_tree_sizes_do_not_read_sum_from_measure_object() -> None:
+    # GAP-2616: under StrictMode, Measure-Object over no files has no .Sum, so
+    # the space refusal on a fresh first install (no or an empty .uv) crashed.
+    assert "Measure-Object -Property Length -Sum" not in _text()
+    assert "$bytes = Get-TreeSize $uvDir" in _ps1_function("Write-KeptUvCache")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("cache", ["missing", "empty", "one-file"])
+def test_write_kept_uv_cache_runs_under_strict_mode(tmp_path: Path, cache: str) -> None:
+    if cache != "missing":
+        (tmp_path / ".uv").mkdir()
+    if cache == "one-file":
+        (tmp_path / ".uv" / "wheel").write_bytes(b"x" * 2048)
+    tree = _text()[_text().index("function Get-TreeSize(") :]
+    tree = tree[: tree.index("\n}\n") + 3]
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{tmp_path}'\nfunction Write-Info([string]$m) {{ 'info: ' + $m }}\n"
+        f"{tree}\n{_ps1_function('Write-KeptUvCache')}\nWrite-KeptUvCache\n'done'\n"
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = completed.stdout.strip().splitlines()
+    assert lines[-1] == "done"
+    assert any("download cache" in line for line in lines) == (cache == "one-file")
+
+
+def test_a_failed_first_install_names_the_kept_uv_cache_and_a_full_disk() -> None:
+    # GAP-1883: the space refusal and a staging failure kept the uv cache
+    # silently, and a disk that filled at the binary copy showed only the
+    # raw .NET text.
+    assert "Write-KeptUvCache" in _ps1_function("Restore-Snapshot")
+    room = _text()[_text().index("function Assert-InstallRoom(") :][:1400]
+    assert room.index("if (-not $PrevVersion) { Write-KeptUvCache }") < room.index("Die (")
+    install = _ps1_function("Invoke-Install")
+    staging = install[install.index('(New-Venv (Join-Path $Staging "venv")') :][:300]
+    assert staging.index("Write-KeptUvCache") < staging.index("Die ")
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $installed = $false" in install
+    assert "Write-Err $_.Exception.Message; [void](Test-DiskFull); $saved = $false" in install
+
+
+def test_an_interrupted_first_install_leaves_no_new_files_or_failed_copy() -> None:
+    # GAP-2618: a first install killed mid-copy left ~\.local\bin\*.new (so
+    # ~\.local\bin and ~\.local stayed), a .failed-<time> copy of a venv that
+    # never was an install, and "restoring the install it replaced".
+    restore = _bin_dir_functions()
+    restore = restore[restore.index("function Restore-BinDir(") :]
+    no_bin = restore[: restore.index("New-Item -ItemType Directory -Path $BinDir")]
+    assert '(Join-Path $BinDir "$name.new")' in no_bin
+    resume = _ps1_function("Resume-InterruptedRun")
+    first = resume.index('$firstInstall = -not (Read-Text (Join-Path $slot "VERSION"))')
+    assert first < resume.index("$failed = Restore-Slot $slot")
+    assert "An earlier first install was interrupted; removing what it had copied" in resume
+    assert resume.index("$failed = Restore-Slot $slot") < resume.index(
+        "if ($firstInstall -and -not $setupBack) { Invoke-Quietly { Remove-Tree $failed } }"
+    )
+    assert 'Write-Info "Nothing was left installed"' in resume

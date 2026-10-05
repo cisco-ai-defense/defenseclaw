@@ -52,6 +52,9 @@ func (transport observedRoundTripper) RoundTrip(request *http.Request) (*http.Re
 		WroteRequest: func(httptrace.WroteRequestInfo) { wroteRequest.Store(true) },
 	}))
 	response, err := transport.inner.RoundTrip(traced)
+	if err == nil {
+		captureRejection(request.Context(), response)
+	}
 	if response != nil &&
 		(response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
 		transport.tracker.recordAuthentication()

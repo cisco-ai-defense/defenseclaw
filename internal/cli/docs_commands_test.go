@@ -56,6 +56,9 @@ func TestDocumentedGatewayCommandsParse(t *testing.T) {
 			if len(fields) < 1 || fields[0] != "defenseclaw-gateway" {
 				t.Fatalf("invalid extracted command %q", documented.command)
 			}
+			if runtime.GOOS == "windows" && strings.HasPrefix(strings.Join(fields[1:], " ")+" ", "enterprise hooks enumerate ") {
+				t.Skip("enterprise hooks enumerate is registered only on Linux and macOS")
+			}
 			if documented.inline {
 				validateDocumentedGatewayPath(t, fields[1:], documented.command)
 				return
@@ -93,6 +96,19 @@ func resetDocumentedGatewayCommandState(t *testing.T, command *cobra.Command) {
 	t.Helper()
 	resetFlags := func(flags *pflag.FlagSet) {
 		flags.VisitAll(func(flag *pflag.Flag) {
+			// Slice flags append on Set and print their default as
+			// "[a,b]", so they are replaced instead.
+			if slice, ok := flag.Value.(pflag.SliceValue); ok {
+				var values []string
+				if def := strings.Trim(flag.DefValue, "[]"); def != "" {
+					values = strings.Split(def, ",")
+				}
+				if err := slice.Replace(values); err != nil {
+					t.Fatalf("reset flag %s on %s: %v", flag.Name, command.CommandPath(), err)
+				}
+				flag.Changed = false
+				return
+			}
 			if err := flag.Value.Set(flag.DefValue); err != nil {
 				t.Fatalf("reset flag %s on %s: %v", flag.Name, command.CommandPath(), err)
 			}

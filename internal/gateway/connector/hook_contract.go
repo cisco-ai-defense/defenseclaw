@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -92,7 +93,60 @@ type HookContractResolution struct {
 	Status            string
 	Reason            string
 	Contract          HookContract
+	// UntestedVersion marks a Known resolution for an agent version newer
+	// than every tested range: no known-broken entry matches, so the newest
+	// contract applies. NewestTestedVersion names the bound it passed.
+	UntestedVersion     bool
+	NewestTestedVersion string
 }
+
+// UntestedNewerVersionReasonPrefix starts the Reason of an untested newer
+// agent version. Status and verify surfaces show it as "untested newer
+// version".
+const UntestedNewerVersionReasonPrefix = "untested newer version"
+
+// KnownBrokenAgentVersion is one agent version (Exact) or half-open range
+// [Min, Max) that DefenseClaw refuses even when it is newer than every
+// tested range. Reason and Issue are required so the refusal explains
+// itself.
+type KnownBrokenAgentVersion struct {
+	Exact  string
+	Min    string
+	Max    string
+	Reason string
+	Issue  string
+}
+
+// knownBrokenAgentVersions lists agent versions whose hook surface is known
+// not to work with DefenseClaw. It must match the known_broken_versions
+// lists in cli/defenseclaw/inventory/hook_contracts.json.
+var knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{}
+
+// strictHookContractResolution restores exact-range matching: a version
+// outside every tested range stays unknown. The Secure Client profile sets
+// it so its version gating does not change.
+var strictHookContractResolution atomic.Bool
+
+// SetStrictHookContractResolution turns exact-range hook contract matching
+// on for this process. The config loader sets it for the Secure Client
+// profile.
+func SetStrictHookContractResolution(enabled bool) {
+	strictHookContractResolution.Store(enabled)
+}
+
+// StrictHookContractResolution reports whether this process refuses agent
+// versions newer than every tested range.
+func StrictHookContractResolution() bool {
+	return strictHookContractResolution.Load()
+}
+
+// gitBuildVersionRE matches source-build version strings such as Hermes
+// "Hermes Agent vgit.5bba024 (2026.9.24)".
+var gitBuildVersionRE = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])v?git[.+-]?[0-9a-f]{7,40}(?:[^a-z0-9]|$)`)
+
+// gitBuildCompareVersion stands in for a git build when it is compared
+// with release-style (non-date) tested bounds.
+const gitBuildCompareVersion = "999.999.999"
 
 var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
 
@@ -692,7 +746,7 @@ var builtinHookContracts = map[string][]HookContract{
 	"devin": {{
 		Connector:               "devin",
 		ContractID:              "devin-hooks-v1",
-		ExactAgentVersions:      []string{"3000.4.25"},
+		ExactAgentVersions:      []string{"3000.4.25", "3000.11.3"},
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"%APPDATA%/devin/config.json", "~/.config/devin/config.json", "<workspace>/.devin/hooks.v1.json"},
@@ -709,45 +763,10 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		ToolCallLifecycle:   devinToolCallLifecycle(),
 		Notes: []string{
-			"The reviewed native contract is pinned to Devin CLI 3000.4.25 and uses user config.json or the recommended project .devin/hooks.v1.json.",
+			"The reviewed native contract is pinned to Devin CLI 3000.4.25, and on Linux also to 3000.11.3, which delivers SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop and SessionEnd under these event names and honors exit-code-2 blocks on UserPromptSubmit and PreToolUse (PermissionRequest and PostCompaction are not verified). It uses user config.json or the recommended project .devin/hooks.v1.json.",
+			"Devin Desktop's default Devin Local agent shares the Devin CLI harness and hook config. Devin Desktop 3.9.19 removed the legacy Cascade agent; builds before it run Cascade under a separate contract that is not registered.",
 			"Exit code 2 blocks; every other hook error is logged by Devin and fails open. Responses use top-level decision/reason and event-tagged hookSpecificOutput only where documented.",
-			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, native OTLP, and closed-beta plugins are excluded.",
-		},
-	}},
-	"geminicli": {{
-		Connector:               "geminicli",
-		ContractID:              "geminicli-hooks-v1",
-		MinAgentVersion:         "0.26.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.gemini/settings.json"},
-		ResponseFieldName:       "hook_output",
-		Events: []string{
-			"SessionStart",
-			"BeforeAgent",
-			"BeforeModel",
-			"BeforeToolSelection",
-			"BeforeTool",
-			"AfterTool",
-			"AfterModel",
-			"AfterAgent",
-			"PreCompress",
-			"Notification",
-			"SessionEnd",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
-		Capabilities: HookCapability{
-			CanBlock:           true,
-			CanAskNative:       false,
-			BlockEvents:        append([]string(nil), geminiCLIBlockEvents...),
-			SupportsFailClosed: true,
-			Scope:              "user",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          true,
-		ToolCallLifecycle:   geminiCLIToolCallLifecycle(),
-		Notes: []string{
-			"Gemini CLI 0.26.0 enabled hooks by default.",
+			"Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP integrations, and native OTLP are excluded. DefenseClaw registers no plugin hooks; under the standalone enterprise profile the foreign-hook guard checks the hooks of installed Devin plugins.",
 		},
 	}},
 	"copilot": {
@@ -853,7 +872,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
 			"Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
 			"PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
-			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json. Gemini CLI shares the global config namespace, but its connector registration, lifecycle schema, gateway route, token, and teardown ownership remain separate.",
+			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json.",
 		},
 	}},
 	"openhands": {{
@@ -905,7 +924,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ResponseFieldName:       "hook_output",
 		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
 		// bridge plugin wires tool.execute.before (block) and
-		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.31 also exposes
+		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.33 also exposes
 		// permission.ask and chat/context mutation hooks; this focused bridge
 		// intentionally does not implement those surfaces.
 		Events: []string{
@@ -931,8 +950,8 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
-			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.31 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.31. The v1.18.31 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
+			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.33 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.33. The v1.18.33 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
 		},
 	}},
 	"amp": {{
@@ -1033,6 +1052,11 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
 		// through its protected connector launch boundary and does not persist
 		// the launch environment.
+		// Windows and macOS stay on the Devin build they were reviewed
+		// against; the extra pin covers Linux only.
+		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {
+			contract.ExactAgentVersions = []string{"3000.4.25"}
+		}
 		if contract.Connector == "openhands" && contract.ContractID == "openhands-hooks-v1" {
 			switch goos {
 			case "darwin":
@@ -1050,13 +1074,35 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 }
 
 func hookContractByID(connectorName, contractID string) (HookContract, bool) {
+	return hookContractByIDForOS(connectorName, contractID, runtime.GOOS)
+}
+
+func hookContractByIDForOS(connectorName, contractID, goos string) (HookContract, bool) {
 	contractID = strings.TrimSpace(contractID)
 	if contractID == "" {
 		return HookContract{}, false
 	}
-	for _, contract := range KnownHookContracts(connectorName) {
+	for _, contract := range hookContractsForOS(connectorName, goos) {
 		if contract.ContractID == contractID {
 			return contract, true
+		}
+	}
+	// A managed Windows Kiro footprint pins its reviewed managed contract;
+	// the gateway serving it resolves the pin without the managed flag.
+	if managedKiroOnOS(connectorName, goos) {
+		for _, contract := range kiroWindowsManagedHookContracts() {
+			if contract.ContractID == contractID {
+				return contract, true
+			}
+		}
+	}
+	// A sandbox binding pins the sandbox-only contract its image was built
+	// for; every OpenShell sandbox runs Linux.
+	if goos == "linux" {
+		for _, contract := range sandboxOnlyHookContracts(connectorName) {
+			if contract.ContractID == contractID {
+				return contract, true
+			}
 		}
 	}
 	return HookContract{}, false
@@ -1066,7 +1112,18 @@ func ResolveHookContract(connectorName, rawVersion string) HookContractResolutio
 	return resolveHookContractForOS(connectorName, rawVersion, runtime.GOOS)
 }
 
+// ResolveHookContractStrict resolves like ResolveHookContract with
+// exact-range matching, whatever this process's mode: an agent version
+// outside every tested range is unknown.
+func ResolveHookContractStrict(connectorName, rawVersion string) HookContractResolution {
+	return resolveHookContractForOSMode(connectorName, rawVersion, runtime.GOOS, true)
+}
+
 func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContractResolution {
+	return resolveHookContractForOSMode(connectorName, rawVersion, goos, StrictHookContractResolution())
+}
+
+func resolveHookContractForOSMode(connectorName, rawVersion, goos string, strict bool) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if proxyConnectorsWithoutHookGate[name] {
 		raw := strings.TrimSpace(rawVersion)
@@ -1088,7 +1145,34 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			Reason:            "connector has no hook contract gate",
 		}
 	}
-	contracts := hookContractsForOS(name, goos)
+	resolution := resolveHookContractAgainst(name, rawVersion, hookContractsForOS(name, goos))
+	if strict {
+		return strictHookContractResolutionOf(resolution)
+	}
+	return resolution
+}
+
+// strictHookContractResolutionOf turns an untested newer version back into
+// the exact-range answer: unknown, no contract.
+func strictHookContractResolutionOf(resolution HookContractResolution) HookContractResolution {
+	if !resolution.UntestedVersion {
+		return resolution
+	}
+	resolution.Status = HookCompatibilityUnknown
+	resolution.Reason = "no hook contract matches normalized agent version"
+	resolution.Contract = HookContract{}
+	resolution.UntestedVersion = false
+	resolution.NewestTestedVersion = ""
+	return resolution
+}
+
+// resolveHookContractAgainst matches rawVersion against contracts, the
+// registered contracts of connector name. A version on the known-broken
+// list is unknown. A version newer than every tested range resolves to the
+// newest contract with UntestedVersion set, and so does one between two
+// exact pins of one contract; versions below a floor, between ranges or next
+// to an exact pin of the same build stay unknown.
+func resolveHookContractAgainst(name, rawVersion string, contracts []HookContract) HookContractResolution {
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,
@@ -1109,6 +1193,22 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			Contract:          defaultHookContract(contracts),
 		}
 	}
+	if gitBuildVersionRE.MatchString(raw) {
+		// A source build (Hermes "vgit.5bba024 (2026.9.24)") has no release
+		// version: its digits are a commit hash or a date. Treat it as newer
+		// than every tested range instead of reading a version out of the hash.
+		if contract, newest, ok := newestContractBelow(contracts, gitBuildCompareVersion); ok {
+			return HookContractResolution{
+				Connector:           name,
+				RawVersion:          raw,
+				Status:              HookCompatibilityKnown,
+				Reason:              fmt.Sprintf("%s: git build with no release version, treated as newer than the tested versions (%s); no known problems; using hook contract %s", UntestedNewerVersionReasonPrefix, newest, contract.ContractID),
+				Contract:            contract,
+				UntestedVersion:     true,
+				NewestTestedVersion: newest,
+			}
+		}
+	}
 	if normalized == "" {
 		return HookContractResolution{
 			Connector:         name,
@@ -1116,6 +1216,15 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			NormalizedVersion: "",
 			Status:            HookCompatibilityUnknown,
 			Reason:            "could not normalize agent version",
+		}
+	}
+	if broken, ok := knownBrokenAgentVersion(name, raw, normalized); ok {
+		return HookContractResolution{
+			Connector:         name,
+			RawVersion:        raw,
+			NormalizedVersion: normalized,
+			Status:            HookCompatibilityUnknown,
+			Reason:            fmt.Sprintf("agent version %s is known broken: %s (%s)", normalized, broken.Reason, broken.Issue),
 		}
 	}
 	for _, contract := range contracts {
@@ -1130,6 +1239,18 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			}
 		}
 	}
+	if contract, newest, ok := newestContractBelow(contracts, normalized); ok {
+		return HookContractResolution{
+			Connector:           name,
+			RawVersion:          raw,
+			NormalizedVersion:   normalized,
+			Status:              HookCompatibilityKnown,
+			Reason:              fmt.Sprintf("%s: %s is newer than the tested versions (%s); no known problems; using hook contract %s", UntestedNewerVersionReasonPrefix, normalized, newest, contract.ContractID),
+			Contract:            contract,
+			UntestedVersion:     true,
+			NewestTestedVersion: newest,
+		}
+	}
 	return HookContractResolution{
 		Connector:         name,
 		RawVersion:        raw,
@@ -1137,6 +1258,92 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 		Status:            HookCompatibilityUnknown,
 		Reason:            "no hook contract matches normalized agent version",
 	}
+}
+
+// newestContractBelow returns the contract with the highest tested bound
+// when normalized is newer than every bound of its version scheme: at or
+// above each range's exclusive maximum and above an exact pin of each
+// pinned contract (between two pins of one contract counts). An
+// open-ended range means nothing is newer than it (a version at or above
+// its minimum already matches). Date-style builds (major >= 1000, such as
+// Cursor agent 2026.07.23 or Devin 3000.11.3) are compared only with bounds
+// of the same style so a desktop 4.x release is not measured against a
+// dated preview pin.
+func newestContractBelow(contracts []HookContract, normalized string) (HookContract, string, bool) {
+	dateStyle := func(v string) bool { return versionTuple(v)[0] >= 1000 }
+	scheme := dateStyle(normalized)
+	var best HookContract
+	newest, label := "", ""
+	for _, contract := range contracts {
+		bounds, pinsAbove := 0, 0
+		upper, upperLabel := "", ""
+		for _, pin := range contract.ExactAgentVersions {
+			pinNorm := NormalizeAgentVersion("", pin)
+			if pinNorm == "" || dateStyle(pinNorm) != scheme {
+				continue
+			}
+			switch cmp := compareVersion(normalized, pinNorm); {
+			case cmp == 0:
+				return HookContract{}, "", false
+			case cmp < 0:
+				pinsAbove++
+				continue
+			}
+			bounds++
+			if upper == "" || compareVersion(pinNorm, upper) > 0 {
+				upper, upperLabel = pinNorm, pin
+			}
+		}
+		// A version between two exact pins of one contract (Devin on Linux:
+		// 3000.4.25 and 3000.11.3) is an untested version of that contract;
+		// one below all of its pins is under its floor.
+		if pinsAbove > 0 && bounds == 0 {
+			return HookContract{}, "", false
+		}
+		if contract.MinAgentVersion != "" || contract.MaxAgentVersion != "" {
+			edge := contract.MaxAgentVersion
+			if edge == "" {
+				edge = contract.MinAgentVersion
+			}
+			if dateStyle(edge) == scheme {
+				if contract.MaxAgentVersion == "" || compareVersion(normalized, contract.MaxAgentVersion) < 0 {
+					return HookContract{}, "", false
+				}
+				bounds++
+				if upper == "" || compareVersion(contract.MaxAgentVersion, upper) > 0 {
+					upper, upperLabel = contract.MaxAgentVersion, "<"+contract.MaxAgentVersion
+				}
+			}
+		}
+		if bounds > 0 && (newest == "" || compareVersion(upper, newest) >= 0) {
+			best, newest, label = contract, upper, upperLabel
+		}
+	}
+	if newest == "" {
+		return HookContract{}, "", false
+	}
+	return best, label, true
+}
+
+func knownBrokenAgentVersion(name, raw, normalized string) (KnownBrokenAgentVersion, bool) {
+	for _, entry := range knownBrokenAgentVersions[name] {
+		if entry.Exact != "" {
+			if exactAgentVersionMatch(raw, []string{entry.Exact}) {
+				return entry, true
+			}
+			continue
+		}
+		if (entry.Min != "" || entry.Max != "") && versionInRange(normalized, entry.Min, entry.Max) {
+			return entry, true
+		}
+	}
+	return KnownBrokenAgentVersion{}, false
+}
+
+// KnownBrokenAgentVersions returns the known-broken agent versions of a
+// connector.
+func KnownBrokenAgentVersions(connectorName string) []KnownBrokenAgentVersion {
+	return append([]KnownBrokenAgentVersion(nil), knownBrokenAgentVersions[normalizeConnectorName(connectorName)]...)
 }
 
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {
@@ -1209,9 +1416,16 @@ func resolveHookContractForOptions(
 	connectorName string,
 	opts SetupOpts,
 ) HookContractResolution {
-	resolution := ResolveHookContract(connectorName, opts.AgentVersion)
-	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
-		pinned, ok := hookContractByID(connectorName, pinnedID)
+	goos := opts.profileGOOS()
+	pinnedID := strings.TrimSpace(opts.HookContractID)
+	var resolution HookContractResolution
+	if managedKiroOnOS(connectorName, goos) && (opts.ManagedEnterprise || kiroWindowsManagedHookContractID(pinnedID)) {
+		resolution = ResolveWindowsManagedKiroHookContract(opts.AgentVersion)
+	} else {
+		resolution = resolveHookContractForOS(connectorName, opts.AgentVersion, goos)
+	}
+	if pinnedID != "" {
+		pinned, ok := hookContractByIDForOS(connectorName, pinnedID, goos)
 		switch {
 		case !ok:
 			resolution.Status = HookCompatibilityUnknown
@@ -1226,6 +1440,15 @@ func resolveHookContractForOptions(
 		}
 	}
 	return resolution
+}
+
+// profileGOOS is the operating system a profile is resolved for: opts.GOOS
+// when the agent runs elsewhere (a sandbox), otherwise this host.
+func (opts SetupOpts) profileGOOS() string {
+	if goos := strings.ToLower(strings.TrimSpace(opts.GOOS)); goos != "" {
+		return goos
+	}
+	return runtime.GOOS
 }
 
 func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
@@ -1285,8 +1508,6 @@ func normalizeConnectorName(name string) string {
 	switch name {
 	case "claude", "claude-code", "claude_code":
 		return "claudecode"
-	case "gemini", "gemini-cli", "gemini_cli":
-		return "geminicli"
 	case "open-hands", "open_hands":
 		return "openhands"
 	default:

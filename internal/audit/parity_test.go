@@ -187,9 +187,10 @@ func TestMultiConnectorSinkParity(t *testing.T) {
 		}
 	}
 
-	// Structured-logs sink (hook audit envelope).
+	// Structured-logs sink (hook audit envelope). Standalone hook rows also
+	// carry the verified caller, and the envelope refuses undeclared keys.
 	hookProps := schemaProperties(t, filepath.Join(repoRoot, "schemas", "hook-audit-envelope.json"))
-	for _, f := range connectorFields {
+	for _, f := range append(connectorFields, "user.id", "defenseclaw.user.id_kind", "defenseclaw.user.name") {
 		if _, ok := hookProps[f]; !ok {
 			t.Errorf("hook-audit-envelope.json missing property %q", f)
 		}

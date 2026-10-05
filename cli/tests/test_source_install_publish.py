@@ -82,6 +82,32 @@ def test_windows_publication_pins_parent_and_creates_relative_to_handle(tmp_path
     assert not moved.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 relative opens")
+def test_windows_rebuild_replaces_only_the_bound_destination(tmp_path: Path) -> None:
+    # GAP-1784: builds stamp their date, so a same-checkout `make all` rebuild
+    # never matches the installed gateway and was always refused on Windows.
+    destination = tmp_path / "defenseclaw-gateway.exe"
+    old, new = tmp_path / "old.bin", tmp_path / "new.bin"
+    old.write_bytes(b"old build")
+    new.write_bytes(b"new build")
+    install_publish.publish_regular(old, destination, None)
+    with pytest.raises(install_publish.PublishError, match="preserved"):
+        install_publish.publish_regular(new, destination, None)
+    with pytest.raises(install_publish.PublishError, match="changed before publication"):
+        install_publish.publish_regular(new, destination, hashlib.sha256(b"other").hexdigest())
+    assert destination.read_bytes() == b"old build"
+
+    install_publish.publish_regular(new, destination, hashlib.sha256(b"old build").hexdigest())
+    assert destination.read_bytes() == b"new build"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["defenseclaw-gateway.exe", "new.bin", "old.bin"]
+    # A copy renamed aside while it ran is removed by the next rebuild.
+    leftover = tmp_path / ".defenseclaw-gateway.exe.source-install-old-0123"
+    leftover.write_bytes(b"older build")
+    install_publish.publish_regular(old, destination, hashlib.sha256(b"new build").hexdigest())
+    assert destination.read_bytes() == b"old build"
+    assert not leftover.exists()
+
+
 def test_source_preflight_publication_verbs_are_directly_executable(tmp_path: Path) -> None:
     install_dir = tmp_path / "home/.local/bin"
     reserved = _run("ensure-directory", install_dir)
@@ -1195,6 +1221,17 @@ def test_tree_retirement_recovery_converges_after_crash(
     retired = next(custody.glob("retired-*"))
     assert (retired / "state").read_bytes() == b"attempt-owned\n"
 
+    # A reboot that renumbers the volume leaves the retirement complete.
+    (intent,) = custody.glob("intent-*.json")
+    document = json.loads(intent.read_bytes())
+    recorded = (document["identity"][0] + 1, *document["identity"][1:])
+    moved_intent, moved_retired = install_publish._retirement_names(str(tree), recorded, "tree")
+    (custody / moved_intent).write_bytes(install_publish._retirement_document(str(tree), recorded, "tree"))
+    intent.unlink()
+    retired.rename(custody / moved_retired)
+    install_publish.recover_custody(custody)
+    assert (custody / moved_retired / "state").read_bytes() == b"attempt-owned\n"
+
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux") or os.environ.get("INSTALL_PUBLISH_BIND_TEST") != "1",
@@ -1301,30 +1338,89 @@ def test_exact_retirement_refuses_precreated_unbound_custody(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
-def test_exact_retirement_custody_entry_count_is_bounded(tmp_path: Path) -> None:
-    destination = tmp_path / "entry"
-    destination.write_bytes(b"preserve\n")
-    identity = install_publish.path_identity(destination)
+def test_exact_retirement_custody_reclaims_only_completed_retirements_at_its_bound(tmp_path: Path) -> None:
     custody = tmp_path / "custody"
-    custody_fd = install_publish._open_custody_root(custody, create=True)
-    os.close(custody_fd)
-    for index in range(install_publish.MAX_CUSTODY_ENTRIES - 3):
+    os.close(install_publish._open_custody_root(custody, create=True))
+    # An interrupted retirement (its intent without the object) and foreign
+    # names are never reclaimed.
+    pending = tmp_path / "pending"
+    pending.write_bytes(b"pending\n")
+    pending_claim = install_publish.path_identity(pending)
+    pending_intent, _ = install_publish._retirement_names(str(pending), pending_claim, "entry")
+    (custody / pending_intent).write_bytes(install_publish._retirement_document(str(pending), pending_claim, "entry"))
+    for index in range(install_publish.MAX_CUSTODY_ENTRIES - 4):
         (custody / f"retained-{index:03d}").write_bytes(b"retained\n")
+    preserved = {path.name for path in custody.iterdir()}
 
-    assert install_publish.unlink_exact(destination, identity, custody_root=custody)
-    assert not destination.exists()
-    assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
+    for name in ("first", "second"):
+        entry = tmp_path / name
+        entry.write_bytes(name.encode())
+        assert install_publish.unlink_exact(entry, install_publish.path_identity(entry), custody_root=custody)
+        assert not entry.exists()
+        assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
+    assert preserved <= {path.name for path in custody.iterdir()}
+    (retired,) = custody.glob("retired-*")
+    assert retired.read_bytes() == b"second"
 
-    second = tmp_path / "second-entry"
-    second.write_bytes(b"preserve\n")
-    second_identity = install_publish.path_identity(second)
+    # With nothing completed left to reclaim, the bound still refuses.
+    retired.unlink()
+    retired.write_bytes(b"substitute\n")
+    third = tmp_path / "third"
+    third.write_bytes(b"preserve\n")
     with pytest.raises(install_publish.PublishError, match="bounded entry limit"):
-        install_publish.unlink_exact(second, second_identity, custody_root=custody)
+        install_publish.unlink_exact(third, install_publish.path_identity(third), custody_root=custody)
 
-    assert second.read_bytes() == b"preserve\n"
+    assert third.read_bytes() == b"preserve\n"
+    assert retired.read_bytes() == b"substitute\n"
     assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
-    assert len(list(custody.glob("intent-*.json"))) == 1
-    assert len(list(custody.glob("retired-*"))) == 1
+    assert preserved <= {path.name for path in custody.iterdir()}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
+def test_regular_replace_reclaims_retirements_recorded_under_an_earlier_device_number(tmp_path: Path) -> None:
+    # macOS renumbers volumes on every boot, so a long-lived checkout's custody
+    # fills with completed retirements whose recorded device no longer exists.
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    os.close(install_publish._open_custody_root(custody, create=True))
+    for index in range((install_publish.MAX_CUSTODY_ENTRIES - 1) // 2):
+        stage = install_dir / f"..defenseclaw-source-root.source-install-{index:032x}"
+        stage.write_bytes(b"marker\n")
+        device, *rest = install_publish.path_identity(stage)
+        recorded = (device + 1, *rest)
+        intent, retired = install_publish._retirement_names(str(stage), recorded, "entry")
+        (custody / intent).write_bytes(install_publish._retirement_document(str(stage), recorded, "entry"))
+        stage.rename(custody / retired)
+    assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES - 1
+    # Day-old stages of this name and of another published name are removed.
+    for stale in (
+        install_dir / f".defenseclaw-gateway.source-install-{1:032x}",
+        install_dir / f"..defenseclaw-source-root.source-install-{2:032x}",
+    ):
+        stale.write_bytes(b"partial\n")
+        os.utime(stale, (1_000_000_000, 1_000_000_000))
+
+    destination = install_dir / "defenseclaw-gateway"
+    current, replacement = b"gateway-v1\n", b"gateway-v2\n"
+    destination.write_bytes(current)
+    destination.chmod(0o755)
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(replacement)
+    source.chmod(0o755)
+    install_publish.publish_regular(
+        source,
+        destination,
+        hashlib.sha256(current).hexdigest(),
+        expected_source=hashlib.sha256(replacement).hexdigest(),
+        custody_root=custody,
+    )
+
+    assert destination.read_bytes() == replacement
+    assert sorted(path.name for path in install_dir.iterdir()) == [custody.name, destination.name]
+    # One retired copy is kept per published name: the marker and the gateway.
+    assert len(list(custody.glob("intent-*.json"))) == 2
+    assert len(list(custody.glob("retired-*"))) == 2
 
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
@@ -1365,3 +1461,84 @@ def test_regular_replace_reclaims_completed_retirement_when_custody_is_full(
     assert destination.read_bytes() == replacement
     assert len(list(custody.iterdir())) <= install_publish.MAX_CUSTODY_ENTRIES
     assert len(list(custody.glob("intent-*.json"))) == len(list(custody.glob("retired-*")))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
+def test_regular_replace_prunes_old_retired_binaries(tmp_path: Path) -> None:
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    destination = install_dir / "defenseclaw-gateway"
+    for index in range(6):
+        prior = install_dir / f".defenseclaw-gateway.source-install-{index:032x}"
+        prior.write_bytes(f"gateway-old-{index}\n".encode())
+        assert install_publish.unlink_exact(prior, install_publish.path_identity(prior), custody_root=custody)
+
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside\n")
+    link = install_dir / f".defenseclaw-gateway.source-symlink-{0:032x}"
+    link.symlink_to(outside)
+    assert install_publish.unlink_exact(link, install_publish.path_identity(link), custody_root=custody)
+
+    # An intent whose retired name holds a different object is unfinished
+    # recovery work and must survive.
+    claimed = install_dir / f".defenseclaw-gateway.source-install-{99:032x}"
+    claimed.write_bytes(b"claimed\n")
+    claim = install_publish.path_identity(claimed)
+    intent, retired = install_publish._retirement_names(str(claimed), claim, "entry")
+    (custody / intent).write_bytes(install_publish._retirement_document(str(claimed), claim, "entry"))
+    (custody / retired).write_bytes(b"substitute\n")
+    for entry in custody.glob("intent-*.json"):
+        os.utime(entry, ns=(1_000_000_000, 1_000_000_000))
+
+    current, replacement = b"gateway-v1\n", b"gateway-v2\n"
+    destination.write_bytes(current)
+    destination.chmod(0o755)
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(replacement)
+    source.chmod(0o755)
+    install_publish.publish_regular(
+        source,
+        destination,
+        hashlib.sha256(current).hexdigest(),
+        expected_source=hashlib.sha256(replacement).hexdigest(),
+        custody_root=custody,
+    )
+
+    assert destination.read_bytes() == replacement
+    kept = sorted(p.read_bytes() for p in custody.glob("retired-*") if not p.is_symlink())
+    assert kept == [current, b"substitute\n"]
+    assert [p.readlink() for p in custody.glob("retired-*") if p.is_symlink()] == [outside]
+    assert outside.read_bytes() == b"outside\n"
+    assert len(list(custody.glob("intent-*.json"))) == 3
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and stage pruning")
+def test_regular_publish_prunes_day_old_own_stages_and_reports_others(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    old = install_dir / f".defenseclaw-gateway.source-install-{1:032x}"
+    fresh = install_dir / f".defenseclaw.source-install-{2:032x}"
+    for stray in (old, fresh):
+        stray.write_bytes(b"partial\n")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    destination = install_dir / "defenseclaw-gateway"
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(b"gateway\n")
+    source.chmod(0o755)
+    install_publish.publish_regular(source, destination, None, custody_root=custody)
+
+    assert not old.exists() and fresh.exists()
+    assert sorted(p.name for p in install_dir.iterdir()) == [custody.name, fresh.name, destination.name]
+
+    os.utime(fresh, (1_000_000_000, 1_000_000_000))
+    parent_fd = os.open(install_dir, os.O_RDONLY)
+    try:
+        reported = install_publish._prune_stale_stages(parent_fd, install_dir, custody, uid=os.geteuid() + 1)
+    finally:
+        os.close(parent_fd)
+    assert reported == [str(fresh)] and fresh.exists()
+    assert f"sudo rm -f {fresh}" in capsys.readouterr().err

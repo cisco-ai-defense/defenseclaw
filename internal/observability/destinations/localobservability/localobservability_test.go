@@ -418,7 +418,7 @@ func TestCanaryAcknowledgementRequiresExactTargetAndCompletePair(t *testing.T) {
 			traceID: traceID, spanID: "b1b2b3b4b5b6b7b8", parentSpanID: "a1a2a3a4a5a6a7a8",
 			agentID: "diagnostic", rootID: "diagnostic", agentType: "diagnostic",
 			lifecycle: "lifecycle-dddddddddddddddd", execution: "execution-eeeeeeeeeeeeeeee",
-			model: "gpt-4o-mini", canaryTarget: target,
+			model: "defenseclaw-diagnostic", canaryTarget: target,
 		})
 		return root, child
 	}

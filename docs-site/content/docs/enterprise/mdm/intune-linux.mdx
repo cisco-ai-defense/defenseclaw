@@ -1,0 +1,204 @@
+---
+title: Intune on Linux
+description: Deploy the standalone DefenseClaw enterprise profile to Intune-managed Ubuntu and Red Hat Enterprise Linux devices with a root platform script, report its health, deliver the AI Defense key and remove it.
+keywords:
+  - DefenseClaw Intune Linux
+  - Intune platform script
+  - Ubuntu RHEL Intune
+  - Linux Bash script Intune
+---
+
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+
+<Callout title="At a glance">
+- **You upload:** one platform script that runs as root: your copy of
+  `packaging/mdm/linux/defenseclaw-enterprise.sh` with its settings block and
+  config filled in.
+- **Install:** the script downloads the `.deb` (Ubuntu), the `.rpm` (RHEL) or
+  the payload archive from your HTTPS host, installs it when the version
+  differs, and runs `ensure`, every day.
+- **Detection:** the script's run status, and a second root platform script
+  with `detect.sh` and `DC_REQUIRE_HEALTHY=1` for health.
+- **Uninstall:** a root platform script with `packaging/mdm/linux/uninstall.sh`.
+</Callout>
+
+Intune manages Ubuntu and Red Hat Enterprise Linux devices that are enrolled
+with the Microsoft Intune app. It deploys Bash **platform scripts**, but no
+Linux app packages. So one root platform script downloads, verifies,
+installs and configures DefenseClaw. This recipe follows the
+[MDM contract](/docs/enterprise/mdm); read that first for the exit codes,
+detection and logs.
+
+## Before you start
+
+- **Devices**: a distribution and version on Microsoft's list of Intune-supported
+  Linux platforms, enrolled with the Microsoft Intune app, running systemd 239
+  or later. The package depends on systemd 239. On a host where systemd is not
+  running, the package installs but the deployment stays inactive.
+- **Release**: verify `checksums.txt` and read the pin of the artifact you
+  deploy, as in [What you deliver](/docs/enterprise/mdm#what-you-deliver).
+  Ubuntu needs the `.deb`, RHEL the `.rpm`. The payload archive
+  `defenseclaw-enterprise-<version>-linux-<arch>.tar.gz` works on both.
+- **Config**: write the config as described in
+  [Configuration](/docs/enterprise/configuration#settings-reference). Keep the
+  AI Defense key out of it.
+
+## 1. Host the artifact
+
+Put the package or payload archive on an HTTPS location the devices can reach,
+for example an Azure Blob Storage container or your artifact server. The
+wrapper downloads it with `curl` (or `wget`) and accepts only `https://` URLs.
+The URL must serve the file itself: with `curl` the wrapper does not follow
+redirects, so a GitHub release download link fails.
+If the download needs a proxy, set `DC_HTTPS_PROXY` in the next step; only
+the download uses it.
+
+## 2. Fill in the wrapper's settings block
+
+Copy `packaging/mdm/linux/defenseclaw-enterprise.sh` and edit the settings
+block at the top of your copy. Intune runs the script with no arguments, so
+every value goes here:
+
+```sh
+DC_ACTION=ensure
+DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-1.0.0-linux-amd64.deb"
+DC_SOURCE_SHA256="replace-with-the-64-hex-sha256-from-checksums.txt"
+DC_TRUST_MODE=hash_pinned
+DC_PRODUCT_VERSION="1.0.0"
+```
+
+For GPG trust, when the release ships signatures, set `DC_TRUST_MODE=signed`,
+`DC_GPG_KEYRING` to a root-owned keyring you deploy separately (convert
+`defenseclaw-enterprise-release-key.asc` with `gpg --dearmor`), and
+`DC_SIGNATURE_URL` to the artifact's `.asc`. The wrapper still checks
+`DC_SOURCE_SHA256` when you set it.
+
+Ubuntu and RHEL need different packages. Create one script per distribution
+and assign each to a device group that holds only that distribution, or use
+the payload archive in a single script.
+
+Then paste the config between the `DEFENSECLAW_CONFIG` markers in
+`dc_inline_config`. This minimal config protects Claude Code and Codex in
+observe mode; build yours from
+[Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect):
+
+```sh
+dc_inline_config() {
+    cat <<'DEFENSECLAW_CONFIG'
+config_version: 8
+deployment_mode: managed_enterprise
+data_dir: /var/lib/defenseclaw
+policy_dir: /etc/defenseclaw/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+DEFENSECLAW_CONFIG
+}
+```
+
+On Linux, `data_dir` must be exactly `/var/lib/defenseclaw`. Never put the AI
+Defense key in the script: Microsoft states that custom scripts must not carry
+sensitive information.
+
+## 3. Add the platform script
+
+Go to **Devices** > **Manage devices** > **Scripts and remediations** >
+**Platform scripts** > **Add** > **Linux**:
+
+| Setting | Value |
+| --- | --- |
+| Execution context | **Root**. The script then runs whether or not a user is signed in. The first run can ask the user for consent. |
+| Execution frequency | **Daily**. `ensure` changes nothing when the host already matches, but with `DC_SOURCE_URL` set every run downloads the artifact before it compares versions. Run more often only if that download is acceptable, or leave `DC_SOURCE_URL` empty once installed. |
+| Execution retries | **3**. Exit `75` means dpkg, rpm or another lifecycle run held a lock, and a later run succeeds. |
+| Execution script | Your edited copy of `defenseclaw-enterprise.sh` |
+
+Assign it to device groups. On each run the wrapper downloads the artifact,
+verifies it, installs the package only when its version differs from the
+installed one, runs `ensure` with the config, and exits with the lifecycle's
+code. A busy package manager, for example during unattended upgrades, exits
+`75` (`mdm_package_manager_busy`).
+
+## 4. Report health
+
+The platform script's own run status is the first signal: it fails whenever
+`ensure` fails. For a separate health signal, add a second root platform
+script: a copy of `packaging/mdm/linux/detect.sh` with
+`DC_REQUIRE_HEALTHY=1` and, optionally, `DC_MIN_VERSION="<version>"` in its
+settings block. In the default `exit` format it exits `0` when DefenseClaw is
+installed, new enough and passes `verify`, and `1` otherwise, so its run status
+reports health. Set its retries to **No retries**.
+
+Intune's custom compliance cannot run `detect.sh`: Microsoft runs Linux
+discovery scripts in the signed-in user's context, and DefenseClaw's status
+is readable only by root.
+
+On the device, the package database answers inventory for the deb and rpm
+channels:
+
+```bash
+dpkg-query -W -f='${Status} ${Version}\n' defenseclaw-enterprise
+rpm -q defenseclaw-enterprise
+```
+
+## Deliver the Cisco AI Defense key
+
+After DefenseClaw is installed, deliver the key once through an administrator
+channel, such as SSH, your configuration-management tool or a secrets agent
+that runs as root. First make sure the config turns the feature on; see
+[Cisco AI Defense key](/docs/enterprise/ai-defense-key).
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
+  --name ai-defense-api-key --from-file /root/ai-defense.key
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise secret status
+```
+
+Or, from tooling that can drop a root-only file, run the wrapper with
+`--secret-name ai-defense-api-key --secret-file /path/to/root-only-file`.
+Delete the source file afterwards. Storing the key re-runs `ensure`, which
+applies it.
+
+## Change the config, upgrade and roll back
+
+- **Change the config**: edit the config in the script and save it. The next
+  run validates and applies it. An invalid config fails the run with
+  `config_invalid` and leaves the installed config unchanged.
+- **Upgrade**: host the new artifact, then update `DC_SOURCE_URL`,
+  `DC_SOURCE_SHA256` and `DC_PRODUCT_VERSION`. Keep each host on one channel:
+  a host installed from the deb or rpm refuses a payload-archive upgrade.
+- **Roll back**: `rpm -U` refuses an older rpm. See
+  [Roll back](/docs/enterprise/lifecycle#roll-back).
+
+## Remove DefenseClaw
+
+First remove the devices from the install script's assignment. Then assign a
+root platform script with `packaging/mdm/linux/uninstall.sh`. It stops and
+removes the services, removes DefenseClaw's hooks and machine-policy entries
+(administrator entries stay), removes the machine state (config, policies,
+key, state and logs) and the `defenseclaw` service account, and removes the deb
+or rpm. Set `DC_PURGE=1` in its settings block to also remove each enrolled
+user's `~/.defenseclaw` and per-user binaries. On a host with nothing installed
+it exits `0`, so repeated runs are harmless. To keep the machine state for a
+reinstall, see [Uninstall](/docs/enterprise/lifecycle#uninstall).
+
+## Notes
+
+- **SELinux**: after installing files, the lifecycle runs `restorecon` on
+  `/opt/defenseclaw` and `/etc/defenseclaw`, so they get their default
+  contexts.
+- **Logs**: the wrapper writes `/var/log/defenseclaw-enterprise-mdm.log` (root,
+  `0600`). The package's own `ensure` result is in
+  `/var/lib/defenseclaw-enterprise/last-package-result.json`.
+- **Status on a device**:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+```

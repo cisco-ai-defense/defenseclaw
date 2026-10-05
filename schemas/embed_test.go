@@ -335,6 +335,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"acp",
 		"notifications",
 		"managed",
+		"enterprise",
 		"routing",
 	}
 	if len(properties) != len(allowedTopLevel) {
@@ -798,7 +799,44 @@ scanners:
   plugin_llm: {model: openai/gpt-4o-mini}
   codeguard: codeguard
 openshell:
+  enabled: true
   binary: openshell
+  gateway: {name: openshell, workspace: default}
+  ingress_port: 18971
+  egress_port: 18972
+  pack: balanced
+  pack_dir: /etc/defenseclaw/sandbox-packs
+  profile: balanced
+  yolo: true
+  llm: auto
+  keep_headless: false
+  workdir: {mode: mount, masks: ['.env*'], unmask: [.env.example], max_upload_mb: 500, git_depth: 200, on_exit: ask, undo_ignored: {enabled: true, max_mb: 500, dirs: [node_modules, .venv]}}
+  egress: {block: [webhook.site], allow: ['*.npmjs.org'], unblocked: [paste.example], ports: [80, 443], large_upload_mb: 25, block_large_uploads: false, feed: builtin}
+  image: {base: 'ghcr.io/nvidia/openshell-community/sandboxes/base@sha256:aeef1c63f00e2913ea002ccb3aaf925f338b5c5d70e63576f0d95c16a138044e', harness_versions: {codex: 0.146.0}}
+  approvals: {debounce_ms: 3000, agent_proposals: true}
+  resources: {cpu: '2', memory: 4Gi}
+  harnesses: [claudecode, codex]
+  wrappers: [claudecode]
+  mcp: {import: true, host_ports: [5432]}
+  upstream_telemetry: false
+  token_delivery: provider
+  middleware: {enabled: false}
+  admin:
+    required_pack: balanced
+    required_pack_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    min_profile: balanced
+    allow_yolo: true
+    allow_mount: false
+    allow_host_ports: false
+    allow_unblock: false
+    allow_learn_mode: null
+    allowed_harnesses: [claudecode, codex]
+    egress_block: ['*.ngrok.io']
+    egress_allow_only: ['*.corp.example.com']
+    block_large_uploads: true
+    require_copy_for: [/src/customer-*]
+    max_resources: {cpu: 500m, memory: 8Gi}
+    locked: [pack, profile, yolo]
   policy_dir: /etc/openshell/policies
   mode: standalone
   version: 0.6.2
@@ -992,10 +1030,108 @@ func TestDefenseClawConfigV8RejectsUnknownNestedCurrentFields(t *testing.T) {
 		{"registry", map[string]any{"config_version": 8, "registries": map[string]any{"sources": []any{map[string]any{"mystery": true}}}}},
 		{"application protection", map[string]any{"config_version": 8, "application_protection": map[string]any{"connectors": map[string]any{"codex": map[string]any{"mystery": true}}}}},
 		{"notifications", map[string]any{"config_version": 8, "notifications": map[string]any{"sources": map[string]any{"mystery": true}}}},
+		{"openshell", map[string]any{"config_version": 8, "openshell": map[string]any{"mystery": true}}},
+		{"openshell workdir", map[string]any{"config_version": 8, "openshell": map[string]any{"workdir": map[string]any{"mystery": true}}}},
+		{"openshell admin", map[string]any{"config_version": 8, "openshell": map[string]any{"admin": map[string]any{"mystery": true}}}},
+		{"openshell admin resources", map[string]any{"config_version": 8, "openshell": map[string]any{"admin": map[string]any{"max_resources": map[string]any{"gpu": "1"}}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := schema.Validate(tc.doc); err == nil {
 				t.Fatalf("unknown nested field unexpectedly passed: %#v", tc.doc)
+			}
+		})
+	}
+}
+
+func TestDefenseClawConfigV8OpenShellValues(t *testing.T) {
+	t.Parallel()
+	schema := compileConfigV8Schema(t)
+	openshell := func(section map[string]any) map[string]any {
+		return map[string]any{"config_version": 8, "openshell": section}
+	}
+	for _, tc := range []struct {
+		name string
+		doc  map[string]any
+	}{
+		{"unknown profile", openshell(map[string]any{"profile": "wide-open"})},
+		{"unknown admin min_profile", openshell(map[string]any{"admin": map[string]any{"min_profile": "none"}})},
+		{"unlockable key", openshell(map[string]any{"admin": map[string]any{"locked": []any{"enabled"}}})},
+		{"duplicate locked key", openshell(map[string]any{"admin": map[string]any{"locked": []any{"yolo", "yolo"}}})},
+		{"port out of range", openshell(map[string]any{"ingress_port": 70000})},
+		{"zero proxy port", openshell(map[string]any{"egress": map[string]any{"ports": []any{0}}})},
+		{"cpu words", openshell(map[string]any{"resources": map[string]any{"cpu": "two"}})},
+		{"memory unit", openshell(map[string]any{"admin": map[string]any{"max_resources": map[string]any{"memory": "4GB"}}})},
+		{"unknown feed", openshell(map[string]any{"egress": map[string]any{"feed": "custom"}})},
+		{"unknown token delivery", openshell(map[string]any{"token_delivery": "file"})},
+		{"unknown llm", openshell(map[string]any{"llm": "vertex"})},
+		{"keep_headless not a boolean", openshell(map[string]any{"keep_headless": "yes"})},
+		{"block_large_uploads not a boolean", openshell(map[string]any{"egress": map[string]any{"block_large_uploads": "yes"}})},
+		{"admin block_large_uploads not a boolean", openshell(map[string]any{"admin": map[string]any{"block_large_uploads": 1}})},
+		{"undo_ignored dir with a slash", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"dirs": []any{"a/node_modules"}}}})},
+		{"undo_ignored .git", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"dirs": []any{".git"}}}})},
+		{"undo_ignored negative cap", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"max_mb": -1}}})},
+		{"undo_ignored unknown key", openshell(map[string]any{"workdir": map[string]any{"undo_ignored": map[string]any{"size": 1}}})},
+		{"unknown workdir mode", openshell(map[string]any{"workdir": map[string]any{"mode": "overlay"}})},
+		{"host glob with scheme", openshell(map[string]any{"egress": map[string]any{"block": []any{"https://paste.example"}}})},
+		{"host glob with port", openshell(map[string]any{"egress": map[string]any{"block": []any{"paste.example:443"}}})},
+		{"host glob with inner wildcard", openshell(map[string]any{"egress": map[string]any{"allow": []any{"a.*.example"}}})},
+		{"host glob with double wildcard", openshell(map[string]any{"admin": map[string]any{"egress_allow_only": []any{"**.example"}}})},
+		{"host glob with space", openshell(map[string]any{"egress": map[string]any{"allow": []any{"a b.example"}}})},
+		{"host glob with two trailing dots", openshell(map[string]any{"egress": map[string]any{"block": []any{"example.com.."}}})},
+		{"host glob label too long", openshell(map[string]any{"egress": map[string]any{"block": []any{strings.Repeat("a", 64) + ".example"}}})},
+		{"catch-all pattern", openshell(map[string]any{"admin": map[string]any{"egress_block": []any{"*"}}})},
+		{"pack digest format", openshell(map[string]any{"admin": map[string]any{"required_pack_digest": "sha256:ABC"}})},
+		{"harness name with space", openshell(map[string]any{"harnesses": []any{"claude code"}})},
+		{"string yolo", openshell(map[string]any{"yolo": "yes"})},
+		{"relative pack dir", openshell(map[string]any{"pack_dir": "packs"})},
+		{"working directory pack dir", openshell(map[string]any{"pack_dir": "./.defenseclaw/packs"})},
+		{"other user's home pack dir", openshell(map[string]any{"pack_dir": "~alice/packs"})},
+		{"drive-relative pack dir", openshell(map[string]any{"pack_dir": "C:packs"})},
+		{"pack dir with trailing newline", openshell(map[string]any{"pack_dir": "/etc/packs\n"})},
+		{"dotted harness version key", openshell(map[string]any{
+			"image": map[string]any{"harness_versions": map[string]any{"claude.code": "1.0.0"}},
+		})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := schema.Validate(tc.doc); err == nil {
+				t.Fatalf("invalid openshell value unexpectedly passed: %#v", tc.doc)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		doc  map[string]any
+	}{
+		{"inherit markers", openshell(map[string]any{
+			"profile": "", "yolo": nil,
+			"workdir": map[string]any{"mode": ""},
+			"egress":  map[string]any{"feed": ""},
+			"mcp":     map[string]any{"import": nil},
+		})},
+		{"legacy keys only", openshell(map[string]any{
+			"binary": "openshell", "policy_dir": "/etc/openshell/policies", "mode": "standalone",
+			"version": "0.7.0", "sandbox_home": "/home/sandbox", "auto_pair": nil, "host_networking": false,
+		})},
+		{"millicores and binary memory", openshell(map[string]any{
+			"resources": map[string]any{"cpu": "1500m", "memory": "512Mi"},
+		})},
+		{"empty pack dir", openshell(map[string]any{"pack_dir": ""})},
+		{"home pack dir", openshell(map[string]any{"pack_dir": "~"})},
+		{"home subdirectory pack dir", openshell(map[string]any{"pack_dir": "~/packs"})},
+		{"posix pack dir", openshell(map[string]any{"pack_dir": "/etc/defenseclaw/packs"})},
+		{"drive pack dir", openshell(map[string]any{"pack_dir": `C:\ProgramData\DefenseClaw\packs`})},
+		{"unc pack dir", openshell(map[string]any{"pack_dir": `\\server\share\packs`})},
+		{"harness version keys", openshell(map[string]any{
+			"image": map[string]any{"harness_versions": map[string]any{"codex": "0.146.0", "claude_code-2": "1"}},
+		})},
+		{"ip literals, prefixes and wildcard patterns", openshell(map[string]any{
+			"admin": map[string]any{"egress_block": []any{"203.0.113.7", "198.51.100.0/24", "[2001:db8::1]", "2001:db8::2", "2001:db8::/32", "*.Ngrok.IO", "paste.example."}},
+		})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := schema.Validate(tc.doc); err != nil {
+				t.Fatalf("valid openshell section rejected: %v", err)
 			}
 		})
 	}

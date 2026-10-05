@@ -40,8 +40,6 @@ const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
-const windsurfAdapterHelperMode = "TEST_WINDSURF_ADAPTER_MODE"
-const windsurfAdapterExitCodeEnv = "TEST_WINDSURF_ADAPTER_EXIT_CODE"
 
 func TestMain(m *testing.M) {
 	switch os.Getenv(copilotAdapterHelperMode) {
@@ -58,10 +56,10 @@ func TestMain(m *testing.M) {
 		fmt.Print(`{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}`)
 		os.Exit(0)
 	case "timeout":
-		if pidFile := os.Getenv(copilotAdapterPIDFileEnv); pidFile != "" {
-			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
-		}
-		time.Sleep(30 * time.Second)
+		writeAdapterLauncherRecord(os.Getenv(copilotAdapterPIDFileEnv))
+		// Outlive the contract so a launcher the adapter failed to kill cannot
+		// end inside the deadline on its own.
+		time.Sleep(2 * time.Duration(copilotWindowsHookContractTimeoutMS) * time.Millisecond)
 		os.Exit(0)
 	}
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -82,33 +80,11 @@ func TestMain(m *testing.M) {
 		fmt.Print(`{"continue":false,"permission":"deny"}`)
 		os.Exit(2)
 	case "timeout":
-		if pidFile := os.Getenv(cursorAdapterPIDFileEnv); pidFile != "" {
-			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
-		}
-		time.Sleep(30 * time.Second)
+		writeAdapterLauncherRecord(os.Getenv(cursorAdapterPIDFileEnv))
+		// Outlive the contract, as the Copilot helper does.
+		time.Sleep(2 * time.Duration(cursorWindowsHookContractTimeoutMS) * time.Millisecond)
 		os.Exit(0)
 	default:
-		if os.Getenv(windsurfAdapterHelperMode) == "result" {
-			payload, err := io.ReadAll(os.Stdin)
-			if err != nil || string(payload) != `{"source":"windsurf-adapter-probe"}` {
-				fmt.Fprintln(os.Stderr, "Windsurf adapter helper received wrong stdin")
-				os.Exit(9)
-			}
-			if len(os.Args) != 4 || os.Args[1] != "hook" ||
-				os.Args[2] != "--connector" || os.Args[3] != "windsurf" {
-				fmt.Fprintln(os.Stderr, "Windsurf adapter helper received wrong arguments")
-				os.Exit(8)
-			}
-			exitCode, err := strconv.Atoi(os.Getenv(windsurfAdapterExitCodeEnv))
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "Windsurf adapter helper received invalid exit code")
-				os.Exit(7)
-			}
-			_, _ = os.Stdout.Write([]byte(`{"continue":true,"source":"windsurf"}`))
-			_, _ = os.Stderr.Write([]byte("windsurf helper stderr"))
-			time.Sleep(350 * time.Millisecond)
-			os.Exit(exitCode)
-		}
 		// Pre-existing connector fixtures exercise config, trust, CAS, and
 		// teardown behavior without provisioning a real Codex installation.
 		// Dedicated production-path tests explicitly restore the native policy
@@ -118,6 +94,42 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(m.Run())
 	}
+}
+
+// writeAdapterLauncherRecord records the helper launcher's PID and kernel
+// creation time. Adapter budgets are measured from the moment the launcher
+// exists: PowerShell's own startup is host-dependent and outside them.
+func writeAdapterLauncherRecord(pidFile string) {
+	if pidFile == "" {
+		return
+	}
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err != nil {
+		fmt.Fprintf(os.Stderr, "adapter helper could not read its creation time: %v\n", err)
+		os.Exit(7)
+	}
+	_ = os.WriteFile(pidFile, []byte(fmt.Sprintf("%d %d", os.Getpid(), creation.Nanoseconds())), 0o600)
+}
+
+func readAdapterLauncherRecord(t *testing.T, pidFile, stderr string) (uint32, time.Time) {
+	t.Helper()
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read helper PID: %v; stderr=%q", err, stderr)
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		t.Fatalf("helper record = %q, want PID and creation time", raw)
+	}
+	pid, err := strconv.ParseUint(fields[0], 10, 32)
+	if err != nil {
+		t.Fatalf("parse helper PID: %v", err)
+	}
+	launchedNS, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parse helper creation time: %v", err)
+	}
+	return uint32(pid), time.Unix(0, launchedNS)
 }
 
 func renderCopilotAdapterForTest(t *testing.T, hookPath string, timeoutMS int) string {
@@ -217,9 +229,16 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	stdout, stderr, code := runCopilotAdapterTest(
 		t, adapter, `{"source":"copilot-adapter-probe"}`,
 	)
-	if elapsed := time.Since(startedAt); elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
-		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s", elapsed)
+	finishedAt := time.Now()
+	pid, launchedAt := readAdapterLauncherRecord(t, pidFile, stderr)
+	// PowerShell 5.1 startup is host-dependent and deliberately outside the
+	// adapter's budget (it restarts the deadline once the launcher exists), so
+	// the timeout plus the kill/drain reserve must fit the contract from there.
+	elapsed := finishedAt.Sub(launchedAt)
+	if elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
+		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
 	}
+	t.Logf("adapter finished %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
 	if code != 0 {
 		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
 	}
@@ -229,15 +248,7 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	if !strings.Contains(stderr, fmt.Sprintf("timed out after %dms", copilotWindowsHookAdapterTimeoutMS)) {
 		t.Fatalf("stderr = %q, want production timeout diagnostic", stderr)
 	}
-	rawPID, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("read helper PID: %v", err)
-	}
-	pid, err := strconv.ParseUint(strings.TrimSpace(string(rawPID)), 10, 32)
-	if err != nil {
-		t.Fatalf("parse helper PID: %v", err)
-	}
-	if windowsProcessRunning(uint32(pid)) {
+	if windowsProcessRunning(pid) {
 		t.Fatalf("timed-out Copilot launcher process %d is still running", pid)
 	}
 }
@@ -294,15 +305,22 @@ func assertCursorAllowJSON(t *testing.T, stdout string) {
 	}
 }
 
+// windowsProcessRunning reports whether pid is still running after a short
+// grace period. Kill only starts termination and the adapter waits for it
+// with a bound, so the grace absorbs kernel teardown. Liveness comes from the
+// process handle's signalled state, not GetExitCodeProcess, because a process
+// may exit with STILL_ACTIVE (259). A PID that no longer exists counts as
+// exited; any other open or wait failure counts as running so the caller's
+// assertion fails safe.
 func windowsProcessRunning(pid uint32) bool {
-	const stillActive = 259
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	const grace = 5 * time.Second
+	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, pid)
 	if err != nil {
-		return false
+		return !errors.Is(err, windows.ERROR_INVALID_PARAMETER)
 	}
 	defer windows.CloseHandle(handle)
-	var code uint32
-	return windows.GetExitCodeProcess(handle, &code) == nil && code == stillActive
+	result, err := windows.WaitForSingleObject(handle, uint32(grace.Milliseconds()))
+	return err != nil || result != windows.WAIT_OBJECT_0
 }
 
 func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
@@ -332,35 +350,35 @@ func TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed(t *tes
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv(cursorAdapterHelperMode, "timeout")
 	t.Setenv(cursorAdapterPIDFileEnv, pidFile)
-	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 1_000)
+	// Use the production deadline. A shorter one can expire before a starved
+	// helper has recorded its PID, which leaves nothing to check.
+	adapter := renderCursorAdapterForTest(t, executable, "closed", true, cursorWindowsHookAdapterTimeoutMS)
 	// Exceed the typical anonymous-pipe buffer so a synchronous stdin write
-	// would remain stuck until the helper's 30-second sleep completed.
+	// would remain stuck until the helper's sleep completed.
 	payload := `{"source":"cursor-adapter-probe","padding":"` + strings.Repeat("x", 2<<20) + `"}`
-	startedAt := time.Now()
 	stdout, stderr, code := runCursorAdapterTest(
 		t, adapter, payload,
 	)
-	if elapsed := time.Since(startedAt); elapsed > 8*time.Second {
-		t.Fatalf("adapter exceeded bounded timeout: %s", elapsed)
+	finishedAt := time.Now()
+	pid, launchedAt := readAdapterLauncherRecord(t, pidFile, stderr)
+	// As for Copilot, the timeout plus the cleanup reserve must fit Cursor's
+	// contract from the moment the launcher exists; PowerShell startup is
+	// host-dependent and outside the adapter's budget.
+	elapsed := finishedAt.Sub(launchedAt)
+	if elapsed > time.Duration(cursorWindowsHookContractTimeoutMS)*time.Millisecond {
+		t.Fatalf("adapter exceeded the Cursor command-hook deadline: %s after the launcher started", elapsed)
 	}
+	t.Logf("adapter finished %s after the launcher started", elapsed)
 	if code != 2 {
 		t.Fatalf("exit code = %d, want fail-closed 2; stderr=%q", code, stderr)
 	}
 	if !strings.Contains(stdout, `"permission":"deny"`) {
 		t.Fatalf("stdout = %q, want explicit deny", stdout)
 	}
-	if !strings.Contains(stderr, "timed out after 1000ms") {
+	if !strings.Contains(stderr, fmt.Sprintf("timed out after %dms", cursorWindowsHookAdapterTimeoutMS)) {
 		t.Fatalf("stderr = %q, want timeout diagnostic", stderr)
 	}
-	rawPID, err := os.ReadFile(pidFile)
-	if err != nil {
-		t.Fatalf("read helper PID: %v", err)
-	}
-	pid, err := strconv.ParseUint(strings.TrimSpace(string(rawPID)), 10, 32)
-	if err != nil {
-		t.Fatalf("parse helper PID: %v", err)
-	}
-	if windowsProcessRunning(uint32(pid)) {
+	if windowsProcessRunning(pid) {
 		t.Fatalf("timed-out Cursor launcher process %d is still running", pid)
 	}
 }

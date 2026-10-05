@@ -158,6 +158,18 @@ def _log_bridge_error_json(status: str, message: str) -> None:
     sys.stderr.write(json.dumps(rec) + "\n")
 
 
+# Provider error texts that mean the credential itself was rejected.
+_AUTH_REJECTION_MARKERS = (
+    "bearer token has expired",
+    "invalid api key",
+    "incorrect api key",
+    "security token included in the request is invalid",
+    "security token included in the request is expired",
+    "expiredtokenexception",
+    "unrecognizedclientexception",
+)
+
+
 def _classify_llm_exception(exc: BaseException) -> str:
     name = type(exc).__name__
     mod = type(exc).__module__
@@ -189,6 +201,11 @@ def _classify_llm_exception(exc: BaseException) -> str:
     if "429" in low or "rate limit" in low:
         return "rate_limited"
     if "401" in low or "403" in low or "authentication" in low:
+        return "auth_failed"
+    # LiteLLM raises some provider key rejections (a Bedrock 403 for an
+    # expired or malformed bearer key) as APIConnectionError with no status
+    # in the text; without this they read as "could not be reached" (GAP-2108).
+    if any(marker in low for marker in _AUTH_REJECTION_MARKERS):
         return "auth_failed"
     if "timeout" in low:
         return "timeout"
@@ -455,6 +472,9 @@ def call_llm(request: dict) -> dict:
     kwargs["messages"] = messages
     kwargs["max_tokens"] = request.get("max_tokens", 8192)
     kwargs["temperature"] = request.get("temperature", 0.0)
+    # Some models accept only their default temperature (Claude Opus 4.8
+    # takes 1 only); let LiteLLM drop what the model refuses, not fail.
+    kwargs["drop_params"] = True
 
     t0 = time.perf_counter()
     try:
@@ -545,6 +565,114 @@ def call_llm(request: dict) -> dict:
 call_litellm = call_llm
 
 
+def _bedrock_config_region(llm_config: Any) -> str:
+    """The region configured for a Bedrock LLM block, or "" (env decides)."""
+    bedrock = getattr(llm_config, "bedrock", None)
+    for value in (getattr(bedrock, "region", ""), getattr(llm_config, "region", "")):
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def env_proxy(llm_config: Any) -> tuple[str, str] | None:
+    """The proxy this shell routes the LLM call through, as ``(url, source)``.
+
+    LiteLLM (httpx) honours HTTPS_PROXY/ALL_PROXY/NO_PROXY and, on macOS, the
+    system proxy settings. ``source`` names the variable ("HTTPS_PROXY") or
+    "the system proxy settings"; the URL has no user:password part. None when
+    the call goes direct (GAP-2421).
+    """
+    import urllib.parse  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    base_url = (getattr(llm_config, "base_url", "") or "").strip()
+    provider = (getattr(llm_config, "provider", "") or "").strip().lower()
+    model = (getattr(llm_config, "model", "") or "").strip()
+    host = ""
+    scheme = "https"
+    if base_url:
+        parsed = urllib.parse.urlsplit(base_url if "://" in base_url else f"https://{base_url}")
+        host, scheme = parsed.hostname or "", parsed.scheme or "https"
+    elif provider in ("bedrock", "amazon-bedrock") or model.startswith("bedrock/"):
+        region = _bedrock_config_region(llm_config) or os.environ.get("AWS_REGION", "") or "us-east-1"
+        host = f"bedrock-runtime.{region}.amazonaws.com"
+    try:
+        proxies = urllib.request.getproxies()
+        url = proxies.get(scheme) or proxies.get("all") or ""
+        if not url or (host and urllib.request.proxy_bypass(host)):
+            return None
+    except Exception:
+        return None
+    source = "the system proxy settings"
+    for name in (f"{scheme}_proxy", f"{scheme.upper()}_PROXY", "all_proxy", "ALL_PROXY"):
+        if os.environ.get(name, "").strip() == url.strip():
+            # POSIX env names are case-sensitive: name the one the shell set,
+            # so "unset <name>" clears it (GAP-2446). Windows ignores case.
+            source = name.upper() if os.name == "nt" else name
+            break
+    parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return (urllib.parse.urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", "")), source)
+
+
+def _plain_provider_error(exc: BaseException) -> str:
+    """The provider's own message without LiteLLM's class-name prefixes.
+
+    ``litellm.BadRequestError: BedrockException - {"message":"..."}`` becomes
+    the quoted message, so doctor rows read as the provider's words.
+    """
+    import re  # noqa: PLC0415
+
+    text = (str(exc).strip().splitlines() or [""])[0].strip()
+    text = re.sub(r"^(?:litellm\.)?\w+(?:Error|Exception):\s*", "", text)
+    text = re.sub(r"^(?:litellm\.)?\w+(?:Error|Exception):\s*", "", text)
+    text = re.sub(r"^\w+Exception\s*-\s*", "", text)
+    if text.startswith("{"):
+        try:
+            body = json.loads(text)
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            message = body.get("message") or body.get("Message")
+            if isinstance(message, str) and message.strip():
+                text = message.strip()
+    return text or type(exc).__name__
+
+
+# ping failure classes in user terms; "internal" (any other provider error)
+# reads as the provider rejecting the call (GAP-1673).
+_PING_FAILURE_WORDS = {
+    "auth_failed": "authentication failed",
+    "rate_limited": "rate limited the request",
+    "timeout": "timed out",
+    "network_error": "could not be reached",
+}
+
+_PROVIDER_LABELS = {
+    "bedrock": "Bedrock",
+    "amazon-bedrock": "Bedrock",
+    "openai": "OpenAI",
+    "azure": "Azure OpenAI",
+    "vertex_ai": "Vertex AI",
+    "vertex": "Vertex AI",
+    "openrouter": "OpenRouter",
+    "xai": "xAI",
+    "huggingface": "Hugging Face",
+    "vllm": "vLLM",
+    "lm_studio": "LM Studio",
+}
+
+
+def _provider_label(provider: str) -> str:
+    """The provider's name as users know it ("bedrock" -> "Bedrock")."""
+    name = (provider or "").strip()
+    if not name:
+        return "The LLM provider"
+    return _PROVIDER_LABELS.get(name.lower(), name[:1].upper() + name[1:])
+
+
 def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     """One-shot reachability probe for a resolved :class:`LLMConfig`.
 
@@ -593,6 +721,7 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         "messages": [{"role": "user", "content": "ping"}],
         "max_tokens": 1,
         "temperature": 0.0,
+        "drop_params": True,
         "timeout": max(1, int(timeout or 5)),
         "num_retries": 0,
     }
@@ -601,7 +730,17 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         kwargs["api_base"] = base_url
     if api_key:
         kwargs["api_key"] = api_key
+    if provider in ("bedrock", "amazon-bedrock") or model.startswith("bedrock/"):
+        # A Bedrock API key is bound to its region; without the configured
+        # region LiteLLM falls back to its own default and the key fails
+        # authentication although the gateway accepts it (GAP-1365).
+        region = _bedrock_config_region(llm_config)
+        if region:
+            kwargs["aws_region_name"] = region
 
+    # LiteLLM prints "Give Feedback / Get Help" and "LiteLLM.Info: ...
+    # _turn_on_debug()" lines on a failure; doctor shows its own row (GAP-1489).
+    litellm.suppress_debug_info = True
     try:
         resp = litellm.completion(**kwargs)
     except Exception as exc:
@@ -616,7 +755,21 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         if missing is not None:
             return (False, missing)
         st = _classify_llm_exception(exc)
-        return (False, f"{st}: {type(exc).__name__}: {exc}".strip().splitlines()[0][:240])
+        what = _PING_FAILURE_WORDS.get(st, "rejected the request")
+        label = _provider_label(provider or (model.split("/", 1)[0] if "/" in model else ""))
+        if st in ("network_error", "timeout"):
+            # A dead or wrong shell proxy reads like the provider being down;
+            # name the proxy the call went through (GAP-2421).
+            if st == "timeout":
+                # LiteLLM's text reads "litellm.Timeout: ... after None
+                # seconds"; state the real limit instead (GAP-2447).
+                what = f"{what} after {kwargs['timeout']} s"
+            proxy = env_proxy(llm_config)
+            if proxy is not None:
+                what = f"{what} through the proxy {proxy[0]} (from {proxy[1]})"
+            if st == "timeout":
+                return (False, f"{label} {what}"[:240])
+        return (False, f"{label} {what}: {_plain_provider_error(exc)}"[:240])
 
     try:
         choices = getattr(resp, "choices", None) or []

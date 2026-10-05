@@ -256,6 +256,45 @@ func managedFileBackupMatchesSnapshot(b *managedFileBackup, data []byte, exists 
 	return b != nil && managedFileBackupExpectedHash(b) == managedFileSnapshotHash(data, exists)
 }
 
+// managedRestoreError is a backup that could not be written back over its
+// target. Its message is the whole cause ("could not restore <path>: <why>"),
+// so callers report it as is instead of adding their own prefix.
+type managedRestoreError struct {
+	Path string
+	Err  error
+}
+
+func (e *managedRestoreError) Error() string {
+	return fmt.Sprintf("could not restore %s: %v", e.Path, e.Err)
+}
+func (e *managedRestoreError) Unwrap() error { return e.Err }
+
+// newManagedRestoreError keeps only the operating system's cause: the staged
+// temp file the write went through is gone, so naming it only confuses.
+func newManagedRestoreError(path string, err error) error {
+	var publish *atomicPublishError
+	var link *os.LinkError
+	var pathErr *os.PathError
+	switch {
+	case errors.As(err, &publish):
+		err = publish.Err
+	case errors.As(err, &link) && link.Err != nil:
+		err = link.Err
+	case errors.As(err, &pathErr) && pathErr.Err != nil:
+		err = pathErr.Err
+	}
+	return &managedRestoreError{Path: path, Err: err}
+}
+
+// restoreBackupFailure words a restore failure for a teardown report.
+func restoreBackupFailure(err error) string {
+	var restore *managedRestoreError
+	if errors.As(err, &restore) {
+		return err.Error()
+	}
+	return fmt.Sprintf("restore config backup: %v", err)
+}
+
 func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, targetPath string) (bool, error) {
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	b, err := loadManagedFileBackupPath(backupPath)
@@ -292,7 +331,7 @@ func restoreManagedFileBackupIfUnchanged(dataDir, connectorName, logicalName, ta
 			mode = 0o600
 		}
 		if err := atomicWriteFile(boundPath, b.PristineBytes, mode); err != nil {
-			return false, err
+			return false, newManagedRestoreError(boundPath, err)
 		}
 	} else if err := os.Remove(boundPath); err != nil && !os.IsNotExist(err) {
 		return false, err
@@ -341,6 +380,56 @@ func validateManagedFileBackupTarget(b managedFileBackup, connectorName, logical
 		return "", fmt.Errorf("managed backup target mismatch: captured %q, requested %q", captured, requested)
 	}
 	return captured, nil
+}
+
+// managedFileBackupDrifted reports whether a backup exists and its target no
+// longer holds the bytes the connector last committed: the user (or the agent)
+// edited the file since. A later Setup must not refresh the post hash over
+// that edit, or teardown would restore the pre-setup snapshot and silently
+// revert it (GAP-1463).
+func managedFileBackupDrifted(dataDir, connectorName, logicalName, targetPath string) (bool, error) {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if b.PostSHA256 == "" {
+		return false, nil
+	}
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
+		return false, err
+	}
+	data, info, err := readManagedTarget(boundPath)
+	if err != nil {
+		return false, err
+	}
+	return !managedFileBackupMatchesSnapshot(&b, data, info != nil), nil
+}
+
+// recaptureManagedFileBackup replaces a drifted record with one whose
+// snapshot is the target's current bytes (raw), so drift detection stays on
+// after the agent itself edits the file. Only connectors whose teardown
+// filters their own fields out of an exact restore may use it: the outside
+// edit then survives teardown just as it does with surgical cleanup. It
+// returns the new record, or nil (leaving none) when the target no longer
+// holds raw.
+func recaptureManagedFileBackup(
+	dataDir, connectorName, logicalName, targetPath string, raw []byte, exists bool,
+) *managedFileBackup {
+	discardManagedFileBackup(dataDir, connectorName, logicalName)
+	if err := captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath); err != nil {
+		discardManagedFileBackup(dataDir, connectorName, logicalName)
+		return nil
+	}
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err != nil || !managedFileBackupMatchesSnapshot(&b, raw, exists) {
+		discardManagedFileBackup(dataDir, connectorName, logicalName)
+		return nil
+	}
+	return &b
 }
 
 func discardManagedFileBackup(dataDir, connectorName, logicalName string) {
@@ -419,4 +508,95 @@ func readManagedTarget(path string) ([]byte, os.FileInfo, error) {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// RestoreManagedFileBackups puts every agent file that a connector setup
+// recorded in dataDir's connector_backups back the way setup found it: the
+// captured bytes, or no file when setup created it. A file that changed since
+// DefenseClaw last wrote it, or whose record names a path outside home, is
+// left in place and returned in kept. Each record it restores from is
+// removed. The rollback of a failed first Windows install runs it as the
+// account, before the data directory the install created is removed.
+func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, err error) {
+	err = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if !managedBackupTargetInside(home, b.Path) {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		ok, restoreErr := restoreManagedFileBackupIfUnchanged(dataDir, b.Connector, b.LogicalName, b.Path)
+		switch {
+		case restoreErr != nil:
+			return fmt.Errorf("restore %s: %w", b.Path, restoreErr)
+		case ok:
+			restored = append(restored, b.Path)
+		default:
+			kept = append(kept, b.Path)
+		}
+		return nil
+	})
+	return restored, kept, err
+}
+
+// ManagedFileBackupTargets lists the agent file each connector backup record
+// in dataDir names.
+func ManagedFileBackupTargets(dataDir string) ([]string, error) {
+	var targets []string
+	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		targets = append(targets, b.Path)
+		return nil
+	})
+	return targets, err
+}
+
+// forEachManagedFileBackup calls fn for each record in dataDir's
+// connector_backups that sits where its connector and logical name put it.
+func forEachManagedFileBackup(dataDir string, fn func(managedFileBackup) error) error {
+	root := filepath.Join(dataDir, "connector_backups")
+	connectors, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, dir := range connectors {
+		if !dir.IsDir() {
+			continue
+		}
+		entries, readErr := os.ReadDir(filepath.Join(root, dir.Name()))
+		if readErr != nil {
+			errs = append(errs, readErr)
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".json") {
+				continue
+			}
+			recordPath := filepath.Join(root, dir.Name(), entry.Name())
+			b, loadErr := loadManagedFileBackupPath(recordPath)
+			if loadErr != nil {
+				errs = append(errs, fmt.Errorf("load managed backup %s: %w", recordPath, loadErr))
+				continue
+			}
+			if b.Connector != dir.Name() ||
+				!sameManagedTargetPath(managedFileBackupPath(dataDir, b.Connector, b.LogicalName), recordPath) {
+				errs = append(errs, fmt.Errorf("managed backup %s does not match its location", recordPath))
+				continue
+			}
+			if err := fn(b); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func managedBackupTargetInside(home, path string) bool {
+	if strings.TrimSpace(home) == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(home), filepath.Clean(path))
+	return err == nil && rel != "." && !filepath.IsAbs(rel) &&
+		rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

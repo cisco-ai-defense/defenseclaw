@@ -13,6 +13,7 @@ package galileo
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/big"
 	"sort"
@@ -73,10 +74,13 @@ func Project(input redaction.Projection, configured Limits) Result {
 	projectedAttributes := projectAttributes(
 		attributes, contract.allowedAttributes, limits.MaxAttributeValueBytes,
 	)
-	missing = prepareRequiredProjection(contract, envelope, projectedAttributes, limits)
+	missing = prepareRequiredProjection(
+		contract, envelope, projectedAttributes, limits, input.Metadata().RemovedFields > 0,
+	)
 	if len(missing) > 0 {
 		return rejected(ReasonSchemaMissingRequired, missing...)
 	}
+	setSpanMetadata(projectedAttributes, envelope.Body["status"], envelope.Body["resource"])
 	correlationKeys, valid := mergeCanonicalCorrelationAttributes(projectedAttributes, envelope.Correlation)
 	if !valid {
 		return rejected(ReasonInvalidProjection)
@@ -322,6 +326,7 @@ func prepareRequiredProjection(
 	envelope projectedEnvelope,
 	attributes map[string]any,
 	limits Limits,
+	redactionRemoved bool,
 ) []string {
 	missing := make([]string, 0, 8)
 	kind, present := normalizedSpanKind(envelope.Body["kind"])
@@ -341,6 +346,18 @@ func prepareRequiredProjection(
 	if contract.family == "span.guardrail.judge" {
 		attributes["defenseclaw.guardrail.judge"] = true
 	}
+	if contract.shape == ShapeAgent {
+		// Galileo requires a provider on an agent span. Amp's built-in modes
+		// name no model, so its agent spans carry none, the span failed this
+		// projection, and those traces never appeared in Galileo. The
+		// connector stands in, as every other hook connector's spans already
+		// name it when no model says otherwise.
+		if provider, _ := attributes["gen_ai.provider.name"].(string); strings.TrimSpace(provider) == "" {
+			if connector := strings.TrimSpace(envelope.Connector); observability.IsStableToken(connector) {
+				attributes["gen_ai.provider.name"] = connector
+			}
+		}
+	}
 	for _, key := range contract.requiredAttributes {
 		requireNonEmptyString(attributes, key, &missing)
 	}
@@ -353,6 +370,8 @@ func prepareRequiredProjection(
 		ensureMessages(attributes, "input", "user", contentFallback(attributes, "input", limits), limits)
 		ensureMessages(attributes, "output", "assistant", contentFallback(attributes, "output", limits), limits)
 	case ShapeTool:
+		_, argumentsPresent := attributes["gen_ai.tool.call.arguments"]
+		_, resultPresent := attributes["gen_ai.tool.call.result"]
 		arguments, argumentsOK := boundedCanonicalString(
 			attributes["gen_ai.tool.call.arguments"], limits.MaxAttributeValueBytes,
 		)
@@ -367,14 +386,29 @@ func prepareRequiredProjection(
 		if !resultOK {
 			result, resultOK = contentScalar(attributes, "output", limits.MaxAttributeValueBytes)
 		}
-		if argumentsOK {
+		// A tool slot the canonical record says was never reported (for
+		// example the result of a Hermes or Antigravity call whose post-tool
+		// hook carries no output) is an honest empty placeholder, as on agent
+		// and model spans. Without it every such allowed call reached Galileo
+		// as a bare invoke_agent root (GAP-1164). A slot the redaction profile
+		// removed ("strict" removes all content) is the same honest empty
+		// placeholder: without it every strict tool span was dropped and the
+		// turn lost its tool step in Galileo (GAP-2565). Content that was
+		// reported but cannot be projected stays a schema miss.
+		switch {
+		case argumentsOK:
 			attributes["gen_ai.tool.call.arguments"] = arguments
-		} else {
+		case contentNotReported(attributes, "input"), redactionRemoved && !argumentsPresent:
+			attributes["gen_ai.tool.call.arguments"] = ""
+		default:
 			missing = append(missing, "gen_ai.tool.call.arguments")
 		}
-		if resultOK {
+		switch {
+		case resultOK:
 			attributes["gen_ai.tool.call.result"] = result
-		} else {
+		case contentNotReported(attributes, "output"), redactionRemoved && !resultPresent:
+			attributes["gen_ai.tool.call.result"] = ""
+		default:
 			missing = append(missing, "gen_ai.tool.call.result")
 		}
 		inputReported := ensureMessages(attributes, "input", "user", valueWhen(argumentsOK, arguments), limits)
@@ -402,6 +436,13 @@ func prepareRequiredProjection(
 	}
 	missing = uniqueSorted(missing)
 	return missing
+}
+
+// contentNotReported reports whether the canonical record explicitly marks
+// one content direction as not reported by its source.
+func contentNotReported(attributes map[string]any, direction string) bool {
+	reported, present := boolAttribute(attributes, "defenseclaw.telemetry."+direction+".reported")
+	return present && !reported
 }
 
 func validSpanName(contract shapeContract, name string, attributes map[string]any) bool {
@@ -740,7 +781,7 @@ func ensureMessages(attributes map[string]any, direction, role string, fallback 
 		value = []any{map[string]any{"role": role, "content": fallback}}
 		supplied = true
 	}
-	encoded, state, reported := normalizeMessages(value, supplied, limits)
+	encoded, state, reported := normalizeMessages(value, supplied, role, limits)
 	if hasReportedOverride && !reportedOverride {
 		encoded, state, reported = "[]", "not_reported", false
 	}
@@ -829,7 +870,7 @@ func openInferenceMessageValue(encoded string, reported bool) (string, string) {
 	return strings.Join(lines, "\n"), "text/plain"
 }
 
-func normalizeMessages(value any, supplied bool, limits Limits) (string, string, bool) {
+func normalizeMessages(value any, supplied bool, role string, limits Limits) (string, string, bool) {
 	if !supplied {
 		return "[]", "not_reported", false
 	}
@@ -851,6 +892,7 @@ func normalizeMessages(value any, supplied bool, limits Limits) (string, string,
 		messages = messages[:limits.MaxMessageItems]
 		state = "truncated"
 	}
+	restoreMessageShape(messages, role)
 	encoded, err := json.Marshal(messages)
 	if err != nil || len(encoded) > limits.MaxAttributeValueBytes {
 		return "[]", "failed_closed", true
@@ -859,6 +901,52 @@ func normalizeMessages(value any, supplied bool, limits Limits) (string, string,
 		state = redactionState(string(encoded))
 	}
 	return string(encoded), state, true
+}
+
+// galileoMessageRoles are the message roles Galileo's trace ingest accepts.
+var galileoMessageRoles = map[string]struct{}{
+	"agent": {}, "assistant": {}, "developer": {}, "function": {}, "system": {}, "tool": {}, "user": {},
+}
+
+// restoreMessageShape puts back the message structure a redaction profile
+// replaced. A structured message is content as a whole, so the "content"
+// profile turned its role and part types into redaction tokens too (and
+// "strict" removed them), and Galileo rejected every such span: its role is
+// an enum (GAP-2524). A role Galileo does not know becomes the direction's
+// role, a redacted part type becomes text and a removed part is dropped; the
+// content stays exactly as the redaction left it.
+func restoreMessageShape(messages []any, role string) {
+	for _, candidate := range messages {
+		message, ok := candidate.(map[string]any)
+		if !ok {
+			continue
+		}
+		if current, _ := message["role"].(string); !knownGalileoRole(current) {
+			message["role"] = role
+		}
+		parts, ok := message["parts"].([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, candidatePart := range parts {
+			if candidatePart == nil {
+				continue
+			}
+			if part, isPart := candidatePart.(map[string]any); isPart {
+				if partType, _ := part["type"].(string); strings.HasPrefix(partType, "<redacted") {
+					part["type"] = "text"
+				}
+			}
+			kept = append(kept, candidatePart)
+		}
+		message["parts"] = kept
+	}
+}
+
+func knownGalileoRole(role string) bool {
+	_, ok := galileoMessageRoles[role]
+	return ok
 }
 
 func redactionState(value string) string {
@@ -1100,6 +1188,81 @@ func projectStatus(value any, maximum int) map[string]any {
 		output["description"] = description
 	}
 	return output
+}
+
+// guardrailMetadataKeys are the decision fields a guardrail span carries that
+// Galileo shows as the span's metadata.
+var guardrailMetadataKeys = []string{
+	"defenseclaw.guardrail.action", "defenseclaw.guardrail.rule_id", "defenseclaw.guardrail.severity",
+}
+
+// userMetadataKeys name the user a span belongs to.
+var userMetadataKeys = []string{"user.id", "defenseclaw.user.name"}
+
+// resourceMetadataKeys are the resource attributes that tell gateways apart.
+// Galileo's OTLP ingest drops the resource, so a fleet whose hosts share a
+// computer name (a cloned VM) could not be split by deployment (GAP-1189).
+var resourceMetadataKeys = []string{"deployment.environment.name", "host.name", "defenseclaw.instance.id"}
+
+// setSpanMetadata writes the OpenInference metadata attribute, a JSON object
+// Galileo shows as the span's user_metadata: the gateway's deployment
+// environment, host and instance from the resource, the span's user, and a
+// guardrail decision. Galileo's OTLP ingest reads neither the resource, the
+// span status nor other attributes into its span record, so a blocked tool
+// call showed status_code 0 and no rule or user there, and no span said
+// which deployment sent it.
+func setSpanMetadata(attributes map[string]any, status any, resource any) {
+	metadata := make(map[string]string, len(resourceMetadataKeys)+len(userMetadataKeys)+len(guardrailMetadataKeys)+3)
+	if projected, ok := object(resource); ok {
+		if resourceAttributes, ok := object(projected["attributes"]); ok {
+			for _, key := range resourceMetadataKeys {
+				if value, ok := stringAttribute(resourceAttributes, key); ok && value != "" {
+					metadata[key] = value
+				}
+			}
+			if _, ok := metadata["deployment.environment.name"]; !ok {
+				if value, ok := stringAttribute(resourceAttributes, "deployment.environment"); ok && value != "" {
+					metadata["deployment.environment.name"] = value
+				}
+			}
+		}
+	}
+	for _, key := range userMetadataKeys {
+		if value, ok := stringAttribute(attributes, key); ok && value != "" {
+			metadata[key] = value
+		}
+	}
+	if _, decided := stringAttribute(attributes, "defenseclaw.guardrail.action"); decided {
+		for _, key := range guardrailMetadataKeys {
+			if value, ok := stringAttribute(attributes, key); ok {
+				metadata[key] = value
+			}
+		}
+		if projected := projectStatus(status, 256); projected != nil {
+			if code := strings.ToUpper(fmt.Sprint(projected["code"])); strings.Contains(code, "ERROR") || code == "2" {
+				metadata["status"] = "ERROR"
+			}
+		}
+	}
+	// A blocked or denied operation says so, with or without guardrail fields
+	// of its own (the agent span of an ACP decision, GAP-1836), so one filter
+	// on defenseclaw.outcome finds every blocked turn (GAP-2484).
+	if outcome, ok := stringAttribute(attributes, "defenseclaw.outcome"); ok &&
+		(outcome == string(observability.OutcomeBlocked) || outcome == string(observability.OutcomeDenied)) {
+		metadata["defenseclaw.outcome"] = outcome
+	}
+	// The runtime pipeline canary (doctor and "setup galileo test") says so,
+	// so one filter separates it from real agent traffic (GAP-2534).
+	if present, valid := generatedCanaryMetadata(attributes); present && valid {
+		metadata[canaryMarkerKey] = "true"
+		metadata[canaryOperationKey] = canaryOperationValue
+	}
+	if len(metadata) == 0 {
+		return
+	}
+	if encoded, err := json.Marshal(metadata); err == nil {
+		attributes["metadata"] = string(encoded)
+	}
 }
 
 func requireNonEmptyString(attributes map[string]any, key string, missing *[]string) {

@@ -1608,10 +1608,12 @@ function Stage-PackageData(
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\rego\*.rego') (Join-Path $data 'policies\rego') '*_test.rego'
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\rego\data.json') -Destination (Join-Path $data 'policies\rego') -Force
     Copy-MatchedFiles (Join-Path $WorkspaceRoot 'policies\*.yaml') (Join-Path $data 'policies')
-    Copy-Tree (Join-Path $WorkspaceRoot 'policies\openshell') (Join-Path $data 'policies\openshell')
     foreach ($name in @('default', 'strict', 'permissive')) {
         Copy-Tree (Join-Path $WorkspaceRoot "policies\guardrail\$name") (Join-Path $data "policies\guardrail\$name")
     }
+    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\guardrail\tool-chains.json') -Destination (Join-Path $data 'policies\guardrail') -Force
+    Copy-Tree (Join-Path $WorkspaceRoot 'policies\guardrail-use-cases') (Join-Path $data 'policies\guardrail-use-cases')
+    Copy-Tree (Join-Path $WorkspaceRoot 'policies\yara\mcp-tools') (Join-Path $data 'policies\yara\mcp-tools')
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
     $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
     $targetRegistry = Join-Path $data 'envvars\registry.json'
@@ -1621,8 +1623,6 @@ function Stage-PackageData(
     )) {
         Copy-Item -LiteralPath $generatedRegistry -Destination $targetRegistry -Force
     }
-    [IO.Directory]::CreateDirectory((Join-Path $data 'scripts')) | Out-Null
-    Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'scripts\install-openshell-sandbox.sh') -Destination (Join-Path $data 'scripts') -Force
     Copy-Tree (Join-Path $WorkspaceRoot 'skills\codeguard') (Join-Path $data 'skills\codeguard')
     [IO.Directory]::CreateDirectory((Join-Path $data 'llm')) | Out-Null
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'bundles\llm\model_catalog.json') -Destination (Join-Path $data 'llm') -Force
@@ -1703,7 +1703,7 @@ function Invoke-BuildArtifacts {
     try {
         $env:CGO_ENABLED = '0'
         foreach ($binary in @(
-            @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
+            @('defenseclaw-gateway.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
             @('defenseclaw-acp.exe', './cmd/defenseclaw-acp', "-s -w -buildid=defenseclaw-acp-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'acp-guard'),
             @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook')
         )) {
@@ -1743,7 +1743,7 @@ function Invoke-BuildArtifacts {
             Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) -Destination $targetRoot -Force
         }
     }
-    $gatewayArchive = Join-Path $dist "defenseclaw_${packageVersion}_windows_amd64.zip"
+    $gatewayArchive = Join-Path $dist "defenseclaw-$packageVersion-windows-amd64.zip"
     $gatewayArchiveVerification = Join-Path $root 'gateway-archive-verification.zip'
     Invoke-WindowsNativeProcess $uv @(
         'run', '--frozen', 'python', $artifactHelper, 'zip',
@@ -1849,6 +1849,14 @@ function Invoke-BuildArtifacts {
             'defenseclaw/_data/plugin/extension-runtime-fingerprint.json',
             'defenseclaw/_data/skills/codeguard/SKILL.md',
             'defenseclaw/_data/llm/model_catalog.json',
+            'defenseclaw/_data/policies/guardrail/tool-chains.json',
+            'defenseclaw/_data/policies/guardrail-use-cases/cloud-production-protection/rules/cloud-production.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/database-destruction-protection/rules/database-destruction.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/infrastructure-destruction-protection/rules/infrastructure-destruction.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/kubernetes-production-protection/rules/kubernetes-production.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/privacy-high-assurance/rules/enterprise-data.yaml',
+            'defenseclaw/_data/policies/guardrail-use-cases/ssh-authorized-keys-protection/README.md',
+            'defenseclaw/_data/policies/yara/mcp-tools/description_injection.yara',
             'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',
             'defenseclaw/_data/config/v8/observability.yaml',
             'defenseclaw/_data/config/v8/observability.md',
@@ -1882,11 +1890,13 @@ function Invoke-BuildInstaller {
         throw 'Could not resolve project version from pyproject.toml'
     }
     $version = $Matches[1]
-    $uv = Get-RequiredCommand 'uv.exe'
-    Invoke-WindowsNativeProcess $uv @(
-        'run', '--frozen', 'python', (Join-Path $WorkspaceRoot 'scripts\generate-upgrade-manifest.py'),
-        '--out', (Join-Path $artifacts 'upgrade-manifest.json')
-    ) -TimeoutSeconds 120 | Out-Null
+    # Releases no longer carry required-migration policy; keep the stub for
+    # lanes that still read the artifact manifest.
+    [IO.File]::WriteAllText(
+        (Join-Path $artifacts 'upgrade-manifest.json'),
+        '{"schema_version":2,"release_version":"' + $version + '","required_cli_migrations":[]}' + "`n",
+        [Text.UTF8Encoding]::new($false)
+    )
     & (Join-Path $WorkspaceRoot 'scripts\build-windows-installer.ps1') `
         -DistRoot $artifacts -OutRoot $artifacts -StateRoot (Join-Path $root 'installer-build') `
         -DistributionFlavor 'oss' `
@@ -2919,27 +2929,30 @@ $ErrorActionPreference = 'Stop'
 $utf8 = [Text.UTF8Encoding]::new($false)
 $pidPath = Join-Path $DataRoot 'gateway.pid'
 $jsonlPath = Join-Path $DataRoot 'gateway.jsonl'
-# Initialize the NetTCPIP command and its CIM provider before publishing sampler
-# readiness so their fresh-process cost cannot consume the sample deadline. A
-# newly started listener can briefly be absent from a cold CIM provider, so
-# retry that exact query within a small bound instead of terminating the sampler.
-$prewarmDeadline = [DateTime]::UtcNow.AddSeconds(20)
-do {
+$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
+try {
+    # The schema header is the started record, written before any CIM work.
+    $header = $utf8.GetBytes("schema=1`n")
+    $stream.Write($header, 0, $header.Length)
+    $stream.Flush($true)
+    # Initialize the NetTCPIP command and its CIM provider once, with no wall
+    # clock. A cold provider can briefly miss a live listener; that is reported
+    # as a non-terminal listener_prewarm stage, and the sampling loop below
+    # retries the exact listener query.
     $prewarmListeners = @()
     try {
         $prewarmListeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort $ApiPort -ErrorAction Stop)
     } catch { }
-    if ($prewarmListeners.Count -gt 0) { break }
-    if ([DateTime]::UtcNow -ge $prewarmDeadline) {
-        throw 'Setup health sampler listener prewarm timed out'
+    if ($prewarmListeners.Count -eq 0) {
+        $bytes = $utf8.GetBytes(([ordered]@{
+            observed_at = [DateTime]::UtcNow.ToString('o')
+            kind = 'sample_error'
+            stage = 'listener_prewarm'
+            category = 'unavailable_or_mismatch'
+        } | ConvertTo-Json -Compress) + "`n")
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
     }
-    Start-Sleep -Milliseconds 100
-} while ($true)
-$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
-try {
-    $header = $utf8.GetBytes("schema=1`n")
-    $stream.Write($header, 0, $header.Length)
-    $stream.Flush($true)
     $last = ''
     while ($true) {
         $stage = 'pid_file'
@@ -3121,14 +3134,12 @@ try {
     try {
         $started = $process.Start()
         if (-not $started) { throw 'failed to start Setup health sampler' }
-        # This is a polling watchdog, not a delay: healthy samplers return as
-        # soon as the readiness file appears. Leave headroom for a cold CIM
-        # provider on contended Windows runners while retaining a hard bound.
-        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        # The schema header is the sampler's started record, written before its
+        # CIM prewarm. Wait for it or for the sampler to exit, with no wall
+        # clock: a cold pwsh start on a loaded runner is slow, not failed.
         while (-not (Test-Path -LiteralPath $outcome -PathType Leaf)) {
             $process.Refresh()
             if ($process.HasExited) { throw "Setup health sampler exited with $($process.ExitCode)" }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'Setup health sampler readiness timed out' }
             Start-Sleep -Milliseconds 50
         }
         return [pscustomobject]@{ Process = $process }
@@ -3137,9 +3148,7 @@ try {
         try {
             if ($started -and -not $process.HasExited) {
                 $process.Kill($true)
-                if (-not $process.WaitForExit(5000)) {
-                    throw 'Setup health sampler readiness cleanup timed out'
-                }
+                $process.WaitForExit()
             }
         } finally {
             $process.Dispose()
@@ -3155,10 +3164,55 @@ function Stop-SetupAcceptanceHealthSampler([AllowNull()][object]$Sampler) {
         $process.Refresh()
         if (-not $process.HasExited) {
             $process.Kill($true)
-            if (-not $process.WaitForExit(5000)) { throw 'Setup health sampler cleanup timed out' }
+            $process.WaitForExit()
         }
     } finally {
         $process.Dispose()
+    }
+}
+
+function Wait-SetupAcceptanceHealthSamplerRecord(
+    [object]$Sampler,
+    [string]$OutcomePath,
+    [ValidateSet('sample', 'sample_error')][string]$Kind,
+    [string]$Failure
+) {
+    # Event-ordered: return the first record of $Kind, or fail once the sampler
+    # has exited without one. Exit is read before the ledger, so a record the
+    # sampler flushed before exiting is always seen. There is no wall clock; the
+    # caller's step timeout bounds a sampler that never reaches either event.
+    $process = [Diagnostics.Process]$Sampler.Process
+    $reported = 0
+    while ($true) {
+        $process.Refresh()
+        $exited = $process.HasExited
+        $diagnostics = 0
+        $lastDiagnostic = $null
+        foreach ($line in @(Get-Content -LiteralPath $OutcomePath -Encoding UTF8)) {
+            if ($line -eq 'schema=1') { continue }
+            try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            $kindProperty = $candidate.PSObject.Properties['kind']
+            $candidateKind = if ($null -eq $kindProperty) { 'sample' } else { [string]$kindProperty.Value }
+            # The one-shot provider prewarm is never the record a caller waits for.
+            $isPrewarm = $candidateKind -ceq 'sample_error' -and
+                [string]$candidate.stage -ceq 'listener_prewarm'
+            if ($candidateKind -ceq $Kind -and -not $isPrewarm) { return $candidate }
+            if ($candidateKind -ceq 'sample_error') {
+                $diagnostics++
+                $lastDiagnostic = $candidate
+                if ($diagnostics -gt $reported) {
+                    # Progress for the step log if the step timeout ends the wait.
+                    Write-Host "Setup health sampler diagnostic: stage=$($candidate.stage) category=$($candidate.category)"
+                    $reported = $diagnostics
+                }
+            }
+        }
+        if ($exited) {
+            $stage = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.stage }
+            $category = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.category }
+            throw "$Failure (sampler exited with $($process.ExitCode); stage=$stage category=$category)"
+        }
+        Start-Sleep -Milliseconds 50
     }
 }
 
@@ -3187,7 +3241,9 @@ $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
 try {
     $listener.Start()
     $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
-    [IO.File]::WriteAllText($ReadyPath, [string]$port, $utf8)
+    # Publish the port atomically so the parent never reads a partial marker.
+    [IO.File]::WriteAllText("$ReadyPath.tmp", [string]$port, $utf8)
+    [IO.File]::Move("$ReadyPath.tmp", $ReadyPath)
     $startedAt = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().ToString('o')
     while ($true) {
         $client = $listener.AcceptTcpClient()
@@ -3264,11 +3320,11 @@ try {
     try {
         $serverStarted = $server.Start()
         if (-not $serverStarted) { throw 'synthetic Setup health server did not start' }
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        # Every wait below is event-ordered: the child's marker or its exit. The
+        # step timeout is the only clock, so a cold pwsh start cannot fail it.
         while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
             $server.Refresh()
             if ($server.HasExited) { throw "synthetic Setup health server exited with $($server.ExitCode)" }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'synthetic Setup health server readiness timed out' }
             Start-Sleep -Milliseconds 50
         }
         $apiPort = [int][IO.File]::ReadAllText($readyPath)
@@ -3289,12 +3345,10 @@ try {
         } finally {
             $resetClient.Dispose()
         }
-        $resetDeadline = [DateTime]::UtcNow.AddSeconds(5)
         while (-not (Test-Path -LiteralPath $clientFailureObservedPath -PathType Leaf)) {
             $server.Refresh()
-            if ($server.HasExited) { throw 'synthetic Setup health server exited after reset client' }
-            if ([DateTime]::UtcNow -ge $resetDeadline) {
-                throw 'synthetic Setup health server did not isolate a reset client'
+            if ($server.HasExited) {
+                throw 'synthetic Setup health server did not isolate a reset client (it exited)'
             }
             Start-Sleep -Milliseconds 50
         }
@@ -3323,17 +3377,8 @@ try {
         # failure record is emitted instead of a schema-only ledger.
         $sampler = Start-SetupAcceptanceHealthSampler $pwsh $diagnosticOutcomePath $dataRoot $apiPort `
             ([pscustomobject]@{ ProcessId = $PID; StartIdentity = '1' }) $pwsh $installRoot
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
-        $diagnostic = $null
-        while ($null -eq $diagnostic) {
-            foreach ($line in @(Get-Content -LiteralPath $diagnosticOutcomePath -Encoding UTF8)) {
-                if ($line -eq 'schema=1') { continue }
-                try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-                if ([string]$candidate.kind -ceq 'sample_error') { $diagnostic = $candidate; break }
-            }
-            if ([DateTime]::UtcNow -ge $deadline) { throw 'Setup health sampler did not emit its bounded stage diagnostic' }
-            Start-Sleep -Milliseconds 50
-        }
+        $diagnostic = Wait-SetupAcceptanceHealthSamplerRecord $sampler $diagnosticOutcomePath 'sample_error' `
+            'Setup health sampler did not emit its bounded stage diagnostic'
         if ([string]$diagnostic.stage -cne 'pid_file' -or
             [string]$diagnostic.category -cne 'unavailable_or_invalid') {
             throw 'Setup health sampler emitted an unexpected initial diagnostic category'
@@ -3358,29 +3403,13 @@ try {
         )
         Move-Item -LiteralPath $pidTemporary -Destination (Join-Path $dataRoot 'gateway.pid')
 
-        $sample = $null
-        $lastDiagnostic = $null
         $sampleOutcomePath = Join-Path $fixtureRoot 'setup-health-sample.jsonl'
         $sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath $dataRoot $apiPort `
             ([pscustomobject]@{ ProcessId = $PID; StartIdentity = '1' }) $pwsh $installRoot
-        $sampleDeadline = [DateTime]::UtcNow.AddSeconds(15)
-        while ($null -eq $sample -and [DateTime]::UtcNow -lt $sampleDeadline) {
-            foreach ($line in @(Get-Content -LiteralPath $sampleOutcomePath -Encoding UTF8)) {
-                if ($line -eq 'schema=1') { continue }
-                try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
-                if ($null -eq $candidate.PSObject.Properties['kind']) {
-                    $sample = $candidate
-                    break
-                }
-                if ([string]$candidate.kind -ceq 'sample_error') { $lastDiagnostic = $candidate }
-            }
-            if ($null -eq $sample) { Start-Sleep -Milliseconds 50 }
-        }
-        if ($null -eq $sample) {
-            $stage = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.stage }
-            $category = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.category }
-            throw "Setup health sampler did not emit a correlated health sample (stage=$stage category=$category)"
-        }
+        # Transient stage diagnostics (a cold first health request) are not
+        # terminal; the persistent sampler retries until it emits the sample.
+        $sample = Wait-SetupAcceptanceHealthSamplerRecord $sampler $sampleOutcomePath 'sample' `
+            'Setup health sampler did not emit a correlated health sample'
         if ([int]$sample.gateway_pid -ne $server.Id -or
             [string]$sample.gateway_start_identity -cne $startIdentity -or
             [int]$sample.listener_pid -ne $server.Id -or
@@ -3397,7 +3426,7 @@ try {
             $server.Refresh()
             if (-not $server.HasExited) {
                 $server.Kill($true)
-                if (-not $server.WaitForExit(5000)) { throw 'synthetic Setup health server cleanup timed out' }
+                $server.WaitForExit()
             }
         }
         $server.Dispose()
@@ -3520,11 +3549,11 @@ function New-RollbackArtifactFixture([string]$Artifacts, [string]$Root) {
     }
     Copy-Tree -Source $Artifacts -Destination $fixtureRoot
     $zip = @(Get-ChildItem -LiteralPath $fixtureRoot `
-        -File -Filter 'defenseclaw_*_windows_amd64.zip')
+        -File -Filter 'defenseclaw-*-windows-amd64.zip')
     if ($zip.Count -ne 1) { throw "expected one Windows artifact zip; found $($zip.Count)" }
     $expanded = Join-Path $fixtureRoot 'expanded'
     Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $expanded
-    $gateway = Join-Path $expanded 'defenseclaw.exe'
+    $gateway = Join-Path $expanded 'defenseclaw-gateway.exe'
     $acp = Join-Path $expanded 'defenseclaw-acp.exe'
     $hook = Join-Path $expanded 'defenseclaw-hook.exe'
     $stream = [IO.File]::Open(
@@ -3830,13 +3859,57 @@ function Assert-PackagedAntigravitySupportedAvailability(
     }
 }
 
+function New-WizardFixtureExecutable([string]$AssemblyName, [string]$Source, [string]$OutputPath) {
+    # Fixture executables are test setup, not code under test. Compile them
+    # in-process with the Roslyn compiler that ships with PowerShell 7 instead
+    # of launching the legacy .NET Framework compiler executable: a cold start
+    # loads dozens of default references and, on a saturated hosted runner,
+    # repeatedly crossed a fatal per-process deadline. An in-process emit has
+    # no child process, pipes, or deadline to race. The fixtures reference only
+    # mscorlib, so the output is the same .NET Framework console executable.
+    # Like the compiler executable's default output, it carries a version
+    # resource and the default asInvoker application manifest, so Windows
+    # never applies legacy installer-detection elevation heuristics to it.
+    $frameworkCore = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll'
+    if (-not (Test-Path -LiteralPath $frameworkCore -PathType Leaf)) {
+        throw "Windows .NET Framework reference assembly is unavailable: $frameworkCore"
+    }
+    Add-Type -AssemblyName Microsoft.CodeAnalysis, Microsoft.CodeAnalysis.CSharp -ErrorAction Stop
+    $tree = [Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree]::ParseText($Source)
+    $options = [Microsoft.CodeAnalysis.CSharp.CSharpCompilationOptions]::new(
+        [Microsoft.CodeAnalysis.OutputKind]::ConsoleApplication
+    )
+    $compilation = [Microsoft.CodeAnalysis.CSharp.CSharpCompilation]::Create(
+        $AssemblyName,
+        [Microsoft.CodeAnalysis.SyntaxTree[]]@($tree),
+        [Microsoft.CodeAnalysis.MetadataReference[]]@(
+            [Microsoft.CodeAnalysis.MetadataReference]::CreateFromFile($frameworkCore)
+        ),
+        $options
+    )
+    $win32Resources = $compilation.CreateDefaultWin32Resources($true, $false, $null, $null)
+    try {
+        $stream = [IO.File]::Open($OutputPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $result = $compilation.Emit($stream, $null, $null, $win32Resources)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $win32Resources.Dispose()
+    }
+    if (-not $result.Success) {
+        Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
+        $errors = @($result.Diagnostics | Where-Object {
+                $_.Severity -eq [Microsoft.CodeAnalysis.DiagnosticSeverity]::Error
+            } | ForEach-Object { $_.ToString() })
+        throw "connector fixture $AssemblyName failed to compile:`n$($errors -join "`n")"
+    }
+}
+
 function New-WizardAgentFixtures([string]$Root) {
     $sourceBin = Join-Path $Root 'wizard-agent-fixture-sources'
     Protect-TestDirectory $sourceBin
-    $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
-        throw "Windows .NET Framework compiler is unavailable: $compiler"
-    }
     $useNativeOpenCodeFixture = $env:CONNECTOR -ceq 'opencode'
     $goCompiler = if ($useNativeOpenCodeFixture) { @(
             Get-Command go.exe -CommandType Application -ErrorAction SilentlyContinue |
@@ -3980,10 +4053,12 @@ public static class OpenCodeVersionFixture {
         )
         foreach ($fixture in $fixtures) {
             $isNativeGo = [bool]($fixture.PSObject.Properties['NativeGo'] -and $fixture.NativeGo)
-            $sourcePath = Join-Path $sourceBin ($fixture.ClassName + $(if ($isNativeGo) { '.go' } else { '.cs' }))
-            Write-BoundedText $sourcePath $fixture.Source
-            try {
-                if ($isNativeGo) {
+            if ($isNativeGo) {
+                # Only the Go toolchain reads a source file; the C# fixtures
+                # compile in memory and never touch the source directory.
+                $sourcePath = Join-Path $sourceBin ($fixture.ClassName + '.go')
+                Write-BoundedText $sourcePath $fixture.Source
+                try {
                     $previousCGO = $env:CGO_ENABLED
                     try {
                         $env:CGO_ENABLED = '0'
@@ -3995,13 +4070,11 @@ public static class OpenCodeVersionFixture {
                         if ($null -eq $previousCGO) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
                         else { $env:CGO_ENABLED = $previousCGO }
                     }
-                } else {
-                    Invoke-WindowsNativeProcess $compiler @(
-                        '/nologo', '/target:exe', "/out:$($fixture.Path)", $sourcePath
-                    ) -TimeoutSeconds 60 | Out-Null
+                } finally {
+                    Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
                 }
-            } finally {
-                Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
+            } else {
+                New-WizardFixtureExecutable $fixture.ClassName $fixture.Source $fixture.Path
             }
             if (-not (Test-Path -LiteralPath $fixture.Path -PathType Leaf)) {
                 throw "compatible connector fixture was not built: $($fixture.Path)"
@@ -4027,11 +4100,14 @@ public static class OpenCodeVersionFixture {
         if ($hermesVersion.StdOut.Trim() -ne 'Hermes Agent v0.20.0 (2026.8.3)') {
             throw "Hermes fixture returned an unexpected version: $($hermesVersion.StdOut)"
         }
-        foreach ($attempt in 1..3) {
-            $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 2
-            if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
-                throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
-            }
+        # Like its siblings, this only validates the fixture before setup uses
+        # it. Product OpenCode discovery owns its own version-probe budget
+        # (longer than the generic one, because the authentic packaged binary
+        # starts slowly under on-access scanning), so a tighter fixture-side
+        # deadline would assert a start-up speed the product never requires.
+        $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 30
+        if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+            throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
         }
         Assert-WizardCodexPolicyFixture $codexPath
         return [pscustomobject]@{
@@ -4174,7 +4250,7 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
     $definitions = [ordered]@{
         codex = @{
             HookScript = 'codex-hook.sh'
-            ConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
+            ConfigPath = Join-Path $UserProfile '.codex\config.toml'
             DoctorLabel = 'Codex hooks'
             DoctorRuntimePattern = 'healthy Windows-native executable registration'
         }
@@ -4262,11 +4338,6 @@ function Get-NativeConnectorBackupMarkers([string]$DataRoot, [string]$Connector)
                 'connector_backups\cursor\hooks.json.json'
             )
         }
-        # Retired Windsurf/Cascade is accepted only as an old backup namespace
-        # so uninstall can restore bytes owned by a pre-Devin installation.
-        'windsurf' {
-            @('connector_backups\windsurf\config.json')
-        }
         'antigravity' {
             @('connector_backups\antigravity\hooks.json.json')
         }
@@ -4303,11 +4374,6 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
         @(Get-NativeConnectorBackupMarkers $DataRoot 'cursor').Count -ne 0) {
         $required += 'cursor'
     }
-    # Preserve cleanup authority for a pre-Devin Cascade backup, but never
-    # treat the retired connector as configured or selectable.
-    if (@(Get-NativeConnectorBackupMarkers $DataRoot 'windsurf').Count -ne 0) {
-        $required += 'windsurf'
-    }
     foreach ($connector in $required) {
         # Setup intentionally classifies uninstall work from the configured
         # roster as well as active state and backup markers. Exact connector
@@ -4322,9 +4388,7 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
 
 function Assert-NativeConnectorBackupMarkersConsumed([string]$DataRoot) {
     $remaining = [Collections.Generic.List[string]]::new()
-    # The final legacy entry proves uninstall consumed old Cascade restoration
-    # custody without exposing Windsurf as a current connector.
-    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor', 'windsurf')) {
+    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor')) {
         foreach ($relativePath in @(Get-NativeConnectorBackupMarkers $DataRoot $connector)) {
             $remaining.Add("$connector/$relativePath")
         }
@@ -4618,6 +4682,36 @@ function Assert-NoGatewayAutoStart {
     }
 }
 
+# Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
+# started with Process.Start, which keeps the handle CreateProcess returned so
+# a launcher that exits at once still returns its status, and with the call
+# operator piped to Out-Host in Constrained Language mode. It returns the
+# launcher, its arguments and the call-operator invocation, or $null when the
+# script is not exactly that bridge with the same launcher and arguments in
+# both branches.
+function Get-AwaitedHookBridge([string]$Script) {
+    $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
+        'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
+        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
+        '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
+        '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
+        '\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); ' +
+        '\$hookProcess\.WaitForExit\(\); exit \$hookProcess\.ExitCode$'
+    $match = [regex]::Match($Script, $pattern)
+    if (-not $match.Success) { return $null }
+    $arguments = @($match.Groups['arguments'].Value.Split(' '))
+    if ((@($arguments | ForEach-Object { " '" + $_ + "'" }) -join '') -cne $match.Groups['quoted'].Value) {
+        return $null
+    }
+    $fileLiteral = $match.Groups['file'].Value
+    return [pscustomobject]@{
+        File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
+        Arguments = $arguments
+        Invocation = $match.Groups['invocation'].Value
+    }
+}
+
 function Assert-WizardHookRegistration(
     [object]$Specification,
     [string]$DataRoot,
@@ -4661,7 +4755,6 @@ function Assert-WizardHookRegistration(
         }
         $registeredEvents = [Collections.Generic.List[string]]::new()
         $registeredContract = ''
-        $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*'')\s+-ArgumentList\s+@\((?<arguments>''(?:''''|[^''])*''(?:\s*,\s*''(?:''''|[^''])*'')*)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
         foreach ($tomlString in $tomlStrings) {
             $literal = $tomlString.Groups['literal'].Value
             if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
@@ -4674,21 +4767,9 @@ function Assert-WizardHookRegistration(
             if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
             try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
             catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-            $startProcess = [regex]::Match($script, $startProcessPattern)
-            $argumentLiterals = if ($startProcess.Success) {
-                @([regex]::Matches($startProcess.Groups['arguments'].Value, "'(?:''|[^'])*'"))
-            } else {
-                @()
-            }
-            $arguments = @($argumentLiterals | ForEach-Object {
-                $_.Value.Substring(1, $_.Value.Length - 2).Replace("''", "'")
-            })
-            $file = if ($startProcess.Success) {
-                $fileLiteral = $startProcess.Groups['file'].Value
-                $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
-            } else {
-                ''
-            }
+            $bridge = Get-AwaitedHookBridge $script
+            $arguments = @(if ($null -ne $bridge) { $bridge.Arguments })
+            $file = if ($null -ne $bridge) { $bridge.File } else { '' }
             $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
             $boundContract = if ($arguments.Count -eq 7) { $arguments[6] } else { '' }
             if (-not $codexEventsByContract.ContainsKey($boundContract)) {
@@ -4700,17 +4781,14 @@ function Assert-WizardHookRegistration(
                 throw "wizard-selected Codex registration mixes hook contracts: $registeredContract, $boundContract"
             }
             $expectedEvents = @($codexEventsByContract[$boundContract])
-            if (-not $startProcess.Success -or
+            if ($null -eq $bridge -or
                 [IO.Path]::GetFileName($file) -cne 'defenseclaw-hook.exe' -or
                 $arguments.Count -ne 7 -or
                 ($arguments -join "`0") -cne (@(
                     'hook', '--connector', 'codex', '--event', $boundEvent,
                     '--hook-contract', $boundContract
                 ) -join "`0") -or
-                $boundEvent -cnotin $expectedEvents -or
-                $script -notmatch '(?i)^\$ErrorActionPreference=''Stop'';\s+\$env:NoDefaultCurrentDirectoryInExePath=''1'';' -or
-                $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-                $script -match '(?i)\$LASTEXITCODE') {
+                $boundEvent -cnotin $expectedEvents) {
                 throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
             }
             $registeredEvents.Add($boundEvent)
@@ -4766,9 +4844,9 @@ function Assert-WizardHookRegistration(
             } catch {
                 throw "wizard-selected Antigravity $event command is not valid UTF-16LE Base64"
             }
-            $eventArgs = "'hook','--connector','antigravity','--event','" + $event + "'"
-            if ($script -notmatch '(?i)Start-Process' -or
-                $script.IndexOf($eventArgs, [StringComparison]::Ordinal) -lt 0) {
+            $bridge = Get-AwaitedHookBridge $script
+            if ($null -eq $bridge -or
+                (@($bridge.Arguments) -join "`0") -cne (@('hook', '--connector', 'antigravity', '--event', $event) -join "`0")) {
                 throw "wizard-selected Antigravity $event command is not event-bound to the native hook launcher"
             }
         }
@@ -5033,22 +5111,15 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
     catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
 
-    $startPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\((?<arguments>''hook'',''--connector'',''codex''(?:,''--event'',''(?:''''|[^''])*'')?(?:,''--hook-contract'',''(?:''''|[^''])*'')?)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
-    $start = [regex]::Match($script, $startPattern)
-    if (-not $start.Success) {
+    $bridge = Get-AwaitedHookBridge $script
+    if ($null -eq $bridge -or
+        [IO.Path]::GetFileName($bridge.File) -cne 'defenseclaw-hook.exe' -or
+        @($bridge.Arguments).Count -lt 3 -or
+        (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
-    $argumentLiterals = @([regex]::Matches(
-        $start.Groups['arguments'].Value,
-        "'(?:''|[^'])*'"
-    ))
-    if (($argumentLiterals.Value -join ',') -cne $start.Groups['arguments'].Value) {
-        throw 'cannot stage legacy Codex hook: launcher arguments are not exact PowerShell literals'
-    }
-    $legacyScript = $script.Replace(
-        $start.Value,
-        ('& ' + $start.Groups['file'].Value + ' ' + ($argumentLiterals.Value -join ' '))
-    ).Replace('exit $hookProcess.ExitCode', 'exit $LASTEXITCODE')
+    $legacyScript = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
+        $bridge.Invocation + '; exit $LASTEXITCODE'
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
@@ -5241,8 +5312,6 @@ function Assert-WizardConnectorHealth(
     }
     $expectedHookTarget = if ($Specification.Connector -eq 'amp') {
         [string]$Specification.ConfigPath
-    } elseif ($Specification.Connector -eq 'geminicli') {
-        [string]$Specification.ConfigPath
     } elseif ($Specification.Connector -eq 'cursor') {
         Join-Path ([Environment]::GetEnvironmentVariable('DEFENSECLAW_HOME')) 'hooks\cursor-hook.ps1'
     } else {
@@ -5307,9 +5376,6 @@ function Invoke-WizardConfigureLaterAcceptance(
     Assert-SetupInstallState $InstallRoot 'none' 'observe'
     if (-not (Test-Path -LiteralPath (Join-Path $DataRoot 'config.yaml') -PathType Leaf)) {
         throw 'Configure later did not create the canonical DefenseClaw configuration'
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $DataRoot '.migration_state.json') -PathType Leaf)) {
-        throw 'Configure later did not create the release-bound migration cursor'
     }
     $hookDir = Join-Path $DataRoot 'hooks'
     if (Test-Path -LiteralPath $hookDir) {
@@ -5779,17 +5845,14 @@ otel:
     protocol: http
 "@.Replace("`r`n", "`n")
         [IO.File]::WriteAllText($configPath, $v7Fixture, [Text.UTF8Encoding]::new($false))
+        # The cursor 0.8.0 left behind: 1.x migrate() reads it to know which 0.x
+        # steps already ran.
         $seedCursor = @'
-import sys
-from defenseclaw import migration_state
+import json, os, sys
 from defenseclaw.migrations import MIGRATIONS
-state = migration_state.bootstrap(
-    None,
-    from_version="0.8.0",
-    package_version="0.8.0",
-    registry_versions=[version for version, _description, _migration in MIGRATIONS],
-)
-migration_state.save(sys.argv[1], state)
+applied = [v for v, _d, _m in MIGRATIONS if tuple(int(p) for p in v.split(".")) <= (0, 8, 0)]
+with open(os.path.join(sys.argv[1], ".migration_state.json"), "w", encoding="utf-8") as stream:
+    json.dump({"applied": applied}, stream)
 '@
         Invoke-Installed $python @('-I', '-c', $seedCursor, $dataRoot) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seed-080-migration-cursor.log') | Out-Null
@@ -5864,10 +5927,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
 '@
         Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
-        $migrationCursor = Get-Content -LiteralPath (Join-Path $dataRoot '.migration_state.json') `
-            -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ('0.8.5' -notin @($migrationCursor.applied)) {
-            throw 'seeded setup upgrade did not durably record observability-v8 activation'
+        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*8\s*$') {
+            throw 'seeded setup upgrade did not activate configuration schema v8'
         }
         $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot
@@ -6211,17 +6272,6 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
                         @(0, 1) 120 | Out-Null
                 } catch {
                     Write-Warning "setup acceptance $configuredConnector teardown cleanup failed: $($_.Exception.Message)"
-                }
-            }
-            # Retired Windsurf/Cascade is not a setup target. Invoke its
-            # compatibility teardown only when an old restoration marker proves
-            # that a pre-Devin installation still owns cleanup work.
-            if (@(Get-NativeConnectorBackupMarkers $dataRoot 'windsurf').Count -ne 0) {
-                try {
-                    Invoke-Installed $gateway @('connector', 'teardown', '--connector', 'windsurf') `
-                        @(0, 1) 120 | Out-Null
-                } catch {
-                    Write-Warning "legacy Cascade teardown cleanup failed: $($_.Exception.Message)"
                 }
             }
         }
@@ -6716,7 +6766,7 @@ function Assert-WindowsReleaseDoctorRows(
         },
         [pscustomobject]@{
             Label = 'OpenCode hooks'
-            Detail = 'managed plugin digest current'
+            Detail = 'digest current'
             Target = ''
         }
     )) {
@@ -7527,15 +7577,21 @@ function Get-PackagedRotationConnectorPosture([object]$Status) {
 
 function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
     foreach ($row in $Posture) {
+        # status is passive (GAP-1466): it does not start the Codex app-server
+        # to check the effective hook policy, so Codex reports exactly
+        # policy-unverified (and so not current) and nothing else.
+        $drift = @($row.fail_drift | ForEach-Object { [string]$_ })
+        $passiveCodex = [string]$row.name -ceq 'codex' -and
+            $drift.Count -eq 1 -and $drift[0] -ceq 'policy-unverified'
         if ([string]$row.mode -cne 'action' -or -not [bool]$row.enabled -or
             [string]$row.source -cne 'manual' -or
             [string]$row.fail_effective -cne 'closed' -or
             [string]$row.fail_configured -cne 'closed' -or
             [string]$row.fail_desired -cne 'closed' -or
             [string]$row.fail_runtime -cne 'closed' -or
-            -not [bool]$row.fail_current -or
-            @($row.fail_drift).Count -ne 0) {
-            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift"
+            (-not $passiveCodex -and (-not [bool]$row.fail_current -or $drift.Count -ne 0))) {
+            $postureDetail = ([pscustomobject]$row) | ConvertTo-Json -Compress -Depth 4
+            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift: $postureDetail"
         }
     }
 }
@@ -7876,20 +7932,15 @@ function Invoke-Contract {
     $devinConfig = Join-Path $devinHome 'config.json'
     $devinCLIHome = [IO.Path]::GetFullPath((Join-Path $localAppData 'devin\cli')).TrimEnd('\')
     $devinExecutable = Join-Path $devinCLIHome 'bin\devin.exe'
-    $geminiCLIHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'gemini-cli-home')).TrimEnd('\')
-    $geminiConfigHome = Join-Path $geminiCLIHome '.gemini'
-    $geminiSettings = Join-Path $geminiConfigHome 'settings.json'
     $openCodePluginDir = Join-Path $openCodeHome 'plugins'
     $null = Assert-WindowsNativePathsDisjoint @(
         $contractHome, $codexHome, $claudeHome, $copilotHome, $hermesHome,
-        $openCodeHome, $geminiCLIHome
+        $openCodeHome
     )
     $defaultCodexHome = Join-Path $contractHome '.codex'
     $defaultClaudeHome = Join-Path $contractHome '.claude'
-    $defaultGeminiSettings = Join-Path $contractHome '.gemini\settings.json'
     $defaultCursorHome = Join-Path $contractHome '.cursor'
     $defaultHermesHome = Join-Path $contractHome 'AppData\Local\hermes'
-    $profileGeminiSettings = Join-Path $realProfile '.gemini\settings.json'
     $defaultOpenCodeHome = Join-Path $contractHome '.config\opencode'
     try {
         if ($disposableGithubRunner) {
@@ -7906,8 +7957,7 @@ function Invoke-Contract {
             $ampHome,
             $cursorHome,
             $hermesHome,
-            $openCodeHome,
-            $geminiCLIHome
+            $openCodeHome
         )) {
             [IO.Directory]::CreateDirectory($path) | Out-Null
             Protect-TestDirectory $path
@@ -7956,12 +8006,6 @@ function Invoke-Contract {
         $env:DEFENSECLAW_CURSOR_CONFIG_HOME = $cursorHome
         $env:HERMES_HOME = $hermesHome
         $env:OPENCODE_CONFIG_DIR = $openCodeHome
-        # Gemini CLI treats GEMINI_CLI_HOME as a home root and appends .gemini.
-        # Setup must capture that official vendor root while ignoring hostile
-        # obsolete/private config-dir inputs.
-        $env:GEMINI_CLI_HOME = $geminiCLIHome
-        $env:GEMINI_CONFIG_DIR = Join-Path $contractProfileRoot 'hostile-obsolete-gemini-config'
-        $env:DEFENSECLAW_GEMINI_CONFIG_HOME = Join-Path $contractProfileRoot 'hostile-private-gemini-config'
         foreach ($name in @(
             'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
             'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
@@ -7998,33 +8042,16 @@ function Invoke-Contract {
         }
         $contractInstallState = Get-Content -LiteralPath $contractInstallStatePath `
             -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-        $installStatePropertyNames = @($contractInstallState.PSObject.Properties.Name)
-        foreach ($retiredProperty in @(
-            'gemini_cli_home', 'gemini_config_dir',
-            'windsurf_user_home', 'windsurf_hooks_path'
-        )) {
-            if ($installStatePropertyNames -contains $retiredProperty) {
-                throw "fresh native Setup install state retained deprecated connector custody: $retiredProperty"
-            }
-        }
         if ([string]$contractInstallState.devin_config_dir -cne $devinHome -or
             [string]$contractInstallState.devin_executable -cne $devinExecutable) {
             throw 'fresh native Setup install state did not bind Devin to its exact current-user fixed paths'
         }
-        # Retired connector variables are hostile ambient input, not fresh
-        # install custody. Remove them before the active connector contract.
-        Remove-Item Env:GEMINI_CLI_HOME -ErrorAction SilentlyContinue
-        Remove-Item Env:GEMINI_CONFIG_DIR -ErrorAction SilentlyContinue
-        Remove-Item Env:DEFENSECLAW_GEMINI_CONFIG_HOME -ErrorAction SilentlyContinue
 
         if ((Test-Path -LiteralPath $defaultCodexHome) -or
             (Test-Path -LiteralPath $defaultClaudeHome) -or
             (Test-Path -LiteralPath (Join-Path $defaultCursorHome 'hooks.json')) -or
             (Test-Path -LiteralPath $devinConfig) -or
             (Test-Path -LiteralPath $defaultHermesHome) -or
-            (Test-Path -LiteralPath $profileGeminiSettings) -or
-            (Test-Path -LiteralPath $geminiSettings) -or
-            (Test-Path -LiteralPath $defaultGeminiSettings) -or
             (Test-Path -LiteralPath $defaultOpenCodeHome)) {
             throw 'contract installation touched a default connector home before connector setup'
         }
@@ -8053,7 +8080,6 @@ function Invoke-Contract {
             (Join-Path $defaultCursorHome 'hooks.json'),
             $devinConfig,
             $defaultHermesHome,
-            $defaultGeminiSettings,
             $defaultOpenCodeHome
         )
         if ($Connector -eq 'cursor') {
@@ -8090,7 +8116,6 @@ function Invoke-Contract {
             devin = $devinConfig
             hermes = Join-Path $hermesHome 'config.yaml'
             antigravity = Join-Path $contractHome '.gemini\config\hooks.json'
-            geminicli = $geminiSettings
             opencode = Join-Path $openCodeHome 'plugins\defenseclaw.js'
         }
         $unrelatedConfigs = @(

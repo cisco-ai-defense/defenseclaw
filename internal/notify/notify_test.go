@@ -19,6 +19,7 @@ package notify
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -95,5 +96,29 @@ func TestSupportedPlatformFailureLabelsTerminalFallback(t *testing.T) {
 	if got := buf.String(); !strings.Contains(got, "[defenseclaw terminal fallback]") ||
 		!strings.Contains(got, "guardrail · HIGH") {
 		t.Fatalf("expected labelled fallback with subtitle, got %q", got)
+	}
+}
+
+// GAP-1696: the gateway and watchdog swap os.Stderr for the log time stamper
+// after init; the fallback line must go to the current os.Stderr.
+func TestTerminalFallbackFollowsReplacedStderr(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	old := os.Stderr
+	os.Stderr = f
+	defer func() { os.Stderr = old }()
+
+	_ = sendNotification(Notification{Title: "DefenseClaw", Body: "blocked"},
+		DesktopCapabilityForGOOS("plan9"), func(Notification) error { return nil })
+	os.Stderr = old
+	got, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "[defenseclaw terminal fallback] DefenseClaw: blocked") {
+		t.Fatalf("replaced stderr got %q", got)
 	}
 }

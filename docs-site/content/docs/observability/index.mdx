@@ -14,22 +14,25 @@ DefenseClaw v8 uses one pipeline for audit evidence, security findings,
 guardrail decisions, agent lifecycle, model/tool activity, platform health, and
 diagnostics:
 
-```text
-agent · guardrail · scan · policy · platform
-                     |
-                     v
-       bucket collection (logs/traces/metrics)
-                     |
-                     v
-              canonical record
-                     |
-       +-------------+--------------+----------------+
-       |             |              |                |
-       v             v              v                v
- local SQLite   select/redact   select/redact    select/redact
-  all logs          OTLP         Splunk HEC        Galileo
-                  L/T/M             logs            traces
-```
+<Flow
+  direction="TB"
+  compact
+  caption="Each event is collected once into a canonical record. Local SQLite keeps every collected log; each optional destination selects and redacts its own copy, limited to the signals its kind supports: OTLP takes logs, traces and metrics, Splunk HEC takes logs, and Galileo takes traces."
+>
+  <Node id="src" kind="agent">{`Event sources\nagent · guardrail · scan\npolicy · platform`}</Node>
+  <Node id="collect" kind="gateway">{`Bucket collection\nlogs · traces · metrics`}</Node>
+  <Node id="rec" kind="generic">Canonical record</Node>
+  <Node id="sqlite" kind="datastore">{`Local SQLite\nevery log`}</Node>
+  <Node id="otlp" kind="generic">{`OTLP\nall signals`}</Node>
+  <Node id="hec" kind="generic">{`Splunk HEC\nlogs`}</Node>
+  <Node id="gal" kind="generic">{`Galileo\ntraces`}</Node>
+  <Edge from="src" to="collect" label="emit" />
+  <Edge from="collect" to="rec" label="builds" />
+  <Edge from="rec" to="sqlite" />
+  <Edge from="rec" to="otlp" />
+  <Edge from="rec" to="hec" />
+  <Edge from="rec" to="gal" />
+</Flow>
 
 Collection happens once; every destination independently selects, redacts, and
 delivers its own projection.
@@ -188,9 +191,12 @@ fields are ANDed; values in one field are ORed. An unmatched record is not sent
 to that destination. Supported selectors are `buckets`, `sources`, `connectors`,
 `actions`, `event_names`, and `min_severity`.
 
-Collection is earlier and controls runtime cost. If a bucket has
-`collect.traces: false`, no destination route can recreate those traces. A small
-SQLite-only mandatory compliance floor survives normal log collection disablement.
+Collection happens before routing and controls runtime cost. If a bucket has
+`collect.traces: false`, no destination route can recreate those traces.
+
+A small set of compliance events, the *mandatory floor*, is always written to
+local SQLite even when log collection for its bucket is turned off. These
+events carry no prompt or tool content, and they are never exported.
 
 ## Tune bounded delivery
 
@@ -271,24 +277,28 @@ boundary, apply the profile only to that destination's `send` or matching route.
 
 ## Centralized redaction
 
-Use `defenseclaw setup redaction` for the guided policy editor. The first screen
-covers broad policy choices; **Show advanced settings?** opens bucket collection,
-custom profiles, destination policy, and ordered routes. For automation, start
-with `defenseclaw setup redaction status --json` and preview changes with
+DefenseClaw redacts each record once, before export, using the profile selected
+for that destination. Use `defenseclaw setup redaction` for the guided policy
+editor. The first screen covers broad policy choices; **Show advanced
+settings?** opens bucket collection, custom profiles, destination policy, and
+ordered routes. For automation, start with
+`defenseclaw setup redaction status --json` and preview changes with
 `--dry-run`.
 
-<Callout type="warn" title="Profile none permits governed content without redaction">
-`remove-all` can send governed prompts, responses, tool data, evidence, paths,
-and identifiers to configured destinations. Use it only when every affected
-destination has an approved trust boundary.
-</Callout>
+To turn redaction off everywhere, run:
 
 ```bash
 defenseclaw setup redaction remove-all --yes
 ```
 
-This selects `none` for every configurable log and trace projection while
-leaving the managed enterprise destination locked.
+This selects profile `none` for every configurable log and trace projection;
+the managed enterprise destination stays locked.
+
+<Callout type="warn" title="remove-all sends content unredacted">
+With profile `none`, prompts, responses, tool data, evidence, paths, and
+identifiers reach every configured destination as they are. Use `remove-all`
+only when every affected destination is approved to hold that data.
+</Callout>
 
 Profile resolution is route, then bucket, then global default, then catalog:
 
@@ -312,7 +322,7 @@ observability:
 
 `detect` replaces only sensitive substrings; `whole` redacts the full field;
 `hash` creates a nonreversible same-install correlation token; `remove` omits;
-and `preserve` retains. See [Redaction](/docs/reference/redaction) for built-ins,
+and `preserve` retains. See [Redaction](/docs/observability/redaction) for built-ins,
 field classes, examples, and migration behavior.
 
 A field-processing failure replaces the complete affected field with a safe
@@ -346,9 +356,27 @@ and produces a capacity warning.
 The reaper removes eligible event, evidence, judge-body, and correlation rows
 in dependency order. SQLite can reuse the freed pages, but the database file
 does not shrink automatically. Raw judge-body capture is
-controlled separately by `guardrail.retain_judge_bodies`; the OPA
+controlled separately by `guardrail.retain_judge_bodies`. Redaction profiles
+do not apply to it: while it is `true` (the default), `judge_bodies.db` keeps
+the raw LLM-judge request and response text, which can quote secrets from
+prompts, for the same retention period. Set it to `false` and restart the
+gateway to stop that capture. The OPA
 `audit.retention_days` input is a distinct policy and does not configure this
 SQLite reaper.
+
+The same window also bounds AI discovery scan history in
+`<data_dir>/inventory.db`. When continuous discovery is enabled, the gateway
+prunes scans older than `retention_days` shortly after startup and then about
+once an hour, always keeping the most recent scan so the last-known inventory
+survives a long shutdown. A large backlog is removed in small batches over
+several passes. Unlike `audit.db`, `inventory.db` returns freed space to the
+filesystem: new files use incremental auto-vacuum, and a file created by an
+earlier release is compacted once after its backlog is pruned when enough free
+disk space is available. `retention_days: 0` keeps inventory history
+indefinitely as well. While `ai_discovery.enabled` is `false` nothing
+maintains `inventory.db`; it only holds scan history, so it can be deleted with
+the gateway stopped. `defenseclaw doctor` warns
+(`doctor.state.inventory-storage-size`) when `inventory.db` reaches 1 GiB.
 
 ## Choose an operator view
 
@@ -361,7 +389,7 @@ SQLite reaper.
   <Card
     title="Agent360"
     href="/docs/observability/agent360"
-    description="Prompt-to-outcome lifecycle DAG with distinct session/prompt facts, recursive lineage provenance, per-agent grouped request work with raw terminal drill-down, real collaboration updates, approvals, outcomes, and Tempo traces."
+    description="Prompt-to-outcome lifecycle view of each agent turn, with subagents, approvals, outcomes, and Tempo traces."
   />
   <Card
     title="Galileo"
@@ -394,25 +422,10 @@ projection, including content when the producer supplies it.
 
 ## Upgrade from v7
 
-Run the normal command:
-
-```bash
-defenseclaw upgrade --yes
-```
-
-The upgrader backs up the source, converts and validates the complete v8 candidate,
-preserves narrower v7 collection/routing/redaction behavior, refreshes owned local
-dashboard assets without resetting data volumes, restarts, and checks health. No
-separate migration approval or apply command is required. The v8 gateway does not
-rewrite v7 configuration at startup or run both formats in parallel.
-
-Live v8 observability policy lives in YAML. Ambient `DEFENSECLAW_OTEL_*`, standard
-`OTEL_EXPORTER_OTLP_*`, and `DEFENSECLAW_DISABLE_REDACTION` values are upgrade-only
-inputs, not runtime routing/redaction controls. YAML names credential environment
-references with `token_env`, `bearer_env`, or `{env: NAME}`; secret values stay out
-of the source and rendered plan.
-
-See [Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
+Run `defenseclaw upgrade --yes`. It converts and validates the v7 settings into
+a v8 config; ambient `DEFENSECLAW_OTEL_*` and standard `OTEL_EXPORTER_OTLP_*`
+values are read only during that upgrade. See
+[Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
 
 ## Alert runbooks
 
@@ -431,7 +444,7 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
 3. Inspect correlated gateway or Collector logs without copying event content
    into the incident. A sustained nonzero count normally indicates that a
    producer and the generated telemetry registry disagree.
-4. For a source checkout, run `make telemetry-check`, `make check-schemas`, and
+4. Source checkout only: run `make telemetry-check`, `make check-schemas`, and
    the owning producer tests. Roll back an incompatible producer or regenerate
    and validate its registry change before redeploying.
 
@@ -456,7 +469,14 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
    remote destination, also verify DNS, TLS, credentials, and network reachability.
 3. Run `defenseclaw observability destination test <name>`. Add
    `--write-probe` only when a bounded delivery write is appropriate; the
-   probe is isolated and does not create normal dashboard traffic.
+   probe is isolated and does not create normal dashboard traffic. The test
+   connects directly from your shell, without a proxy, while the gateway
+   delivers through the proxy it was started with (`HTTPS_PROXY`/`NO_PROXY`
+   or the enterprise proxy). If the test passes but doctor still shows
+   `delivery_failed`, look for `[observability] <name> ... export failed`
+   lines in the gateway log. Each line names the endpoint and says whether
+   the gateway connected directly or through a proxy. When it went through a
+   proxy, restart the gateway from a shell with the right proxy settings.
 4. Inspect that destination's queue, retry, drop, and circuit telemetry. An open
    circuit suppresses only that route's adapter work while mandatory local
    SQLite and sibling destinations continue. Repair and reload the destination,
@@ -465,9 +485,9 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
 
 ### Runbook: audit sink
 
-For compatibility, this alert can still use the historical `audit.sink`
-metric name. In live config v8 the affected target is a named
-`observability.destinations` entry; there is no live `audit_sinks` section.
+This runbook covers destination delivery. The alert keeps the historical
+`audit.sink` metric name; the affected target is a named
+`observability.destinations` entry.
 
 1. Identify the `sink_kind` and destination name, then inspect its delivered,
    dropped, retry, and circuit-state telemetry.
@@ -483,15 +503,15 @@ metric name. In live config v8 the affected target is a named
 
 <Accordions>
   <Accordion title="If I configure multiple destinations, does every bucket go to all of them?">
-    By default, yes, within each kind's signal capability. Each enabled destination with omitted policy gets all reviewed buckets and every signal it supports. `send` or `routes` can narrow one destination without affecting another.
+    By default, yes, within each kind's signal capability. Each enabled destination without `send` or `routes` gets every bucket and every signal it supports. `send` or `routes` can narrow one destination without affecting another.
   </Accordion>
   <Accordion title="Does one export failure block agent traffic or another export?">
     No. Optional destinations have independent bounded queues and health. Mandatory SQLite durability is a startup/runtime requirement, but an optional backend outage degrades only that leg.
   </Accordion>
-  <Accordion title="Can I disable construction cost for noisy telemetry?">
-    Yes. Set `observability.buckets.<bucket>.collect.<signal>: false`. Collection runs before routing and sampling. Mandatory SQLite-only floor facts remain minimal and content-safe.
+  <Accordion title="Can I stop collecting noisy telemetry?">
+    Yes. Set `observability.buckets.<bucket>.collect.<signal>: false`. Collection runs before routing and sampling, so the gateway does not build those records at all. Only the content-free mandatory floor events are still written to local SQLite.
   </Accordion>
-  <Accordion title="How do I see what omissions actually mean?">
+  <Accordion title="How do I see the effective policy for fields I left out?">
     Run `defenseclaw observability plan` or `defenseclaw config show --effective --section observability`. The source remains concise; effective views show generated local policy, routes, profiles, capabilities, and warnings.
   </Accordion>
 </Accordions>

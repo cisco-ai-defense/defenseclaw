@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,7 +31,7 @@ const (
 // owns this occurrence. Ownership is deliberately independent of the eventual
 // build or persistence result: callers must never fall back to a second legacy
 // event after selecting a runtime generation.
-func (a *APIServer) emitAPIAuthenticationFailureV8(ctx context.Context, reason string) bool {
+func (a *APIServer) emitAPIAuthenticationFailureV8(ctx context.Context, reason string, facts apiAuthenticationFailureFacts) bool {
 	if a == nil {
 		return false
 	}
@@ -42,7 +43,86 @@ func (a *APIServer) emitAPIAuthenticationFailureV8(ctx context.Context, reason s
 		apiAuthenticationMetricV8Producer,
 		"sidecar-api",
 		reason,
+		facts,
 	)
+}
+
+// apiAuthenticationFailureFacts are what a refusal row may name beyond the
+// reason. Principal is set only for a caller the gateway has proven (the
+// hook-socket peer, or the account of a per-user credential that was
+// presented with another identity); nothing an unauthenticated caller sent
+// is recorded as its identity.
+type apiAuthenticationFailureFacts struct {
+	Principal string // "uid:1001", "sid:S-1-5-21-..."
+	// Caller is the verified caller, for the row's user fields.
+	Caller      auditCaller
+	AuthnMethod string
+	Connector   string
+	Route       string
+}
+
+// apiAuthenticationFailureFactsFor collects the verified facts of a refused
+// request.
+func apiAuthenticationFailureFactsFor(ctx context.Context, route, connectorName string) apiAuthenticationFailureFacts {
+	facts := apiAuthenticationFailureFacts{Route: route, Connector: connectorName}
+	if caller, ok := verifiedAuditCaller(ctx); ok {
+		facts.Principal = caller.principalRef()
+		// Like the scan rows, Secure Client rows keep their existing shape.
+		if !ManagedEnterpriseActive() {
+			facts.Caller = caller
+		}
+		if _, peer := managedHookPeerFromContext(ctx); peer {
+			facts.AuthnMethod = "hook_socket_peer"
+		} else {
+			facts.AuthnMethod = "user_scoped_credential"
+		}
+	}
+	if facts.Connector == "" && ctx != nil {
+		facts.Connector = authenticatedHookConnector(ctx)
+		if facts.Connector == "" {
+			facts.Connector = authenticatedInspectConnector(ctx)
+		}
+	}
+	return facts
+}
+
+// authFailureRefPattern is the shape the family's *_ref fields accept.
+var authFailureRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+
+func (f apiAuthenticationFailureFacts) principalRef() observability.Optional[string] {
+	if f.Principal == "" || len(f.Principal) > 256 || !authFailureRefPattern.MatchString(f.Principal) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(f.Principal)
+}
+
+// targetRef is "route:<route>", with characters the field does not accept
+// (a pattern's braces or spaces) replaced.
+func (f apiAuthenticationFailureFacts) targetRef() observability.Optional[string] {
+	route := strings.TrimSpace(f.Route)
+	if route == "" {
+		return observability.Absent[string]()
+	}
+	cleaned := strings.Map(func(c rune) rune {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == ':', c == '/', c == '-':
+			return c
+		}
+		return '_'
+	}, route)
+	ref := "route:" + cleaned
+	if len(ref) > 1024 {
+		ref = ref[:1024]
+	}
+	return observability.Present(ref)
+}
+
+func (f apiAuthenticationFailureFacts) connector() string {
+	if observability.IsStableToken(f.Connector) {
+		return f.Connector
+	}
+	return ""
 }
 
 func emitProtectedBoundaryAuthenticationFailureV8(
@@ -53,6 +133,7 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 	metricProducer string,
 	route string,
 	reason string,
+	facts apiAuthenticationFailureFacts,
 ) bool {
 	if emitter == nil {
 		return false
@@ -74,7 +155,7 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 		producerKey,
 		classification,
 		source,
-		"",
+		facts.connector(),
 		producerKey,
 	)
 	if err != nil {
@@ -131,12 +212,18 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 			return observability.Record{}, &apiAuthenticationV8Error{}
 		}
 		reasonValue := observability.Absent[string]()
-		if canonicalReason != "" {
-			reasonValue = observability.Present(canonicalReason)
+		if logReason := apiAuthenticationFailureLogReason(reason); logReason != "" {
+			reasonValue = observability.Present(logReason)
+		}
+		principal := facts.principalRef()
+		authnMethod := observability.Absent[string]()
+		if principal.IsPresent() && facts.AuthnMethod != "" {
+			authnMethod = observability.Present(facts.AuthnMethod)
 		}
 		return builder.BuildLogAuthenticationFailed(observability.LogAuthenticationFailedInput{
 			Envelope: observability.FamilyEnvelopeInput{
 				Source:      source,
+				Connector:   facts.connector(),
 				Action:      string(audit.ActionAPIAuthFailure),
 				Phase:       "authentication",
 				Correlation: correlation,
@@ -152,7 +239,13 @@ func emitProtectedBoundaryAuthenticationFailureV8(
 			Outcome:                               observability.OutcomeRejected,
 			DefenseClawAdminOperation:             string(audit.ActionAPIAuthFailure),
 			DefenseClawAdminReason:                reasonValue,
-			ConditionAdminPrincipalKnown:          false,
+			DefenseClawAdminPrincipalRef:          principal,
+			DefenseClawAdminAuthnMethod:           authnMethod,
+			DefenseClawAdminTargetRef:             facts.targetRef(),
+			UserID:                                proxyV8OptionalID(facts.Caller.ID),
+			DefenseClawUserIDKind:                 v8UserIDKind(facts.Caller.IDKind),
+			DefenseClawUserName:                   proxyV8OptionalID(facts.Caller.Name),
+			ConditionAdminPrincipalKnown:          principal.IsPresent(),
 			MandatoryProtectedBoundaryAuthFailure: true,
 		})
 	})
@@ -253,6 +346,34 @@ func apiAuthenticationFailureReason(reason string) string {
 	default:
 		return ""
 	}
+}
+
+// apiAuthenticationFailureLogReason is the reason a refusal row names: the
+// canonical token reasons plus the fixed standalone refusal reasons (hook
+// socket authorization, per-user credential identity and listener proof).
+// Like apiAuthenticationFailureReason it is an allowlist of constants, never
+// caller input.
+func apiAuthenticationFailureLogReason(reason string) string {
+	if canonical := apiAuthenticationFailureReason(reason); canonical != "" {
+		return canonical
+	}
+	switch reason {
+	case managedHookReasonPeerUnverified,
+		managedHookReasonUIDUnregistered,
+		managedHookReasonRootDenied,
+		managedHookReasonLedgerUnavailable,
+		managedHookReasonConnectorUnknown,
+		userScopedIdentityMismatchReason,
+		userScopedListenerProofRefusedReason,
+		"invalid_scoped_header_token",
+		"scoped_otlp_rejects_header_token",
+		"invalid_scoped_path_token",
+		"invalid_acp_signed_request",
+		"missing_acp_authenticated_transport",
+		"invalid_acp_scoped_token":
+		return reason
+	}
+	return ""
 }
 
 func httpAuthenticationMetricReason(reason string) string {

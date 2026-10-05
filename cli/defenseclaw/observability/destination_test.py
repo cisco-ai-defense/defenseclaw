@@ -127,6 +127,24 @@ _METADATA_HOSTS: Final = frozenset(
 )
 
 
+# The test dials the destination itself, without a proxy; the gateway
+# delivers through the proxy it was started with. Say so next to every
+# verdict, so a passing test is not read as "the gateway can deliver"
+# (GAP-2299).
+NETWORK_PATH_NOTE: Final = (
+    "network path: this test connects directly from this shell, without a proxy; the gateway "
+    "delivers through the proxy it was started with (HTTPS_PROXY/NO_PROXY or the enterprise "
+    "proxy). If doctor shows delivery_failed while this test passes, restart the gateway from a "
+    "shell with the right proxy settings ('defenseclaw-gateway restart') and check gateway.log"
+)
+
+
+# Failure classes where the direct-vs-gateway network path matters.
+NETWORK_FAILURE_CLASSES: Final = frozenset(
+    {"connection_failed", "dns_failed", "timeout", "tls_failed", "protocol_failed"}
+)
+
+
 class DestinationTestError(RuntimeError):
     """A bounded, display-safe destination-test failure."""
 
@@ -204,7 +222,7 @@ class GatewayLocalComplianceRecorder:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise _audit_unavailable() from exc
         if completed.returncode != 0:
-            raise _audit_unavailable()
+            raise _audit_unavailable(_foreign_listener_detail(completed.stderr))
         try:
             response = json.loads(completed.stdout)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -213,11 +231,41 @@ class GatewayLocalComplianceRecorder:
             raise _audit_unavailable()
 
 
-def _audit_unavailable() -> DestinationTestError:
+_FOREIGN_LISTENER_PREFIX: Final = "destination-test compliance recorder is unavailable: "
+_FOREIGN_LISTENER_MARK: Final = "the gateway token was not sent"
+
+
+def _foreign_listener_detail(stderr: object) -> str | None:
+    """Return the helper's "port held by another process" text, if that is the cause.
+
+    Only that one line is shown: it names the API port holder and the fix
+    and carries no destination data (GAP-1670). Any other helper output
+    stays hidden.
+    """
+    if not isinstance(stderr, str):
+        return None
+    for raw in stderr.splitlines():
+        line = raw.strip().removeprefix("Error:").strip()
+        if (
+            line.startswith(_FOREIGN_LISTENER_PREFIX)
+            and _FOREIGN_LISTENER_MARK in line
+            and len(line) <= 1024
+            and line.isprintable()
+        ):
+            return line[len(_FOREIGN_LISTENER_PREFIX) :]
+    return None
+
+
+def _audit_unavailable(detail: str | None = None) -> DestinationTestError:
+    if detail:
+        return DestinationTestError(
+            "audit_unavailable",
+            "the destination-test activity could not be recorded: " + detail,
+        )
     return DestinationTestError(
         "audit_unavailable",
-        "the gateway local-only destination-test compliance recorder is unavailable; "
-        "ensure the v8 gateway is running and retry",
+        "the destination-test activity could not be recorded by this account's gateway; "
+        "start it with defenseclaw-gateway start (check it with defenseclaw-gateway status) and retry",
     )
 
 
@@ -292,6 +340,9 @@ class ProbeTransport(Protocol):
     ) -> None:
         """Write exactly one marked, content-free synthetic probe."""
 
+    # Optional: check_credentials(destination, target, *, probe_id, timeout)
+    # sends an empty OTLP export with the configured credentials.
+
 
 class SocketProbeTransport:
     """No-proxy, redirect-free transport with dial-time address pinning."""
@@ -301,12 +352,13 @@ class SocketProbeTransport:
         self._dialer = dialer or _system_dialer
 
     def handshake(self, target: _Target, *, timeout: float) -> None:
-        if target.protocol == "grpc" and target.scheme != "https":
-            raise DestinationTestError(
-                "unsupported",
-                "a non-mutating plaintext gRPC protocol handshake requires the gateway runtime adapter",
-            )
         sock = self._open_resolved_socket(target, timeout)
+        if target.protocol == "grpc" and target.scheme != "https":
+            try:
+                _h2c_settings_handshake(sock)
+            finally:
+                sock.close()
+            return
         if target.protocol == "grpc":
             try:
                 negotiated = getattr(sock, "selected_alpn_protocol", lambda: None)()
@@ -323,6 +375,43 @@ class SocketProbeTransport:
                 body=b"",
                 headers={"Content-Length": "0", "Connection": "close"},
                 inspect_hec=False,
+            )
+        finally:
+            sock.close()
+
+    def check_credentials(
+        self,
+        destination: _Destination,
+        target: _Target,
+        *,
+        probe_id: str,
+        timeout: float,
+    ) -> None:
+        """Send one empty OTLP/HTTP export with the configured credentials.
+
+        An empty ExportServiceRequest holds no logs, spans or metrics, so the
+        collector stores nothing; a 401 or 403 says the key or token is not
+        accepted at this endpoint (GAP-2289). Any other answer leaves the
+        result to the handshake.
+        """
+        headers = dict(destination.headers)
+        _drop_case_insensitive(headers, _PROBE_MARKER_HEADER)
+        _drop_case_insensitive(headers, _PROBE_ID_HEADER)
+        headers[_PROBE_MARKER_HEADER] = "destination-test"
+        headers[_PROBE_ID_HEADER] = probe_id
+        headers["Content-Type"] = "application/x-protobuf"
+        headers["Content-Length"] = "0"
+        headers["Connection"] = "close"
+        sock = self._open_resolved_socket(target, timeout)
+        try:
+            _request_over_socket(
+                sock,
+                target,
+                method="POST",
+                body=b"",
+                headers=headers,
+                inspect_hec=False,
+                authentication_only=True,
             )
         finally:
             sock.close()
@@ -484,11 +573,22 @@ def run_destination_test(
                 message = "this local or pull destination has no isolated write-probe semantics"
             raise DestinationTestError("unsupported", message)
         active_transport = transport or SocketProbeTransport()
+        credentials_checked = False
         if write_probe:
             active_transport.write_probe(destination, probe_id=probe_id, timeout=timeout)
         else:
             for target in destination.targets:
                 active_transport.handshake(target, timeout=timeout)
+            check_credentials = getattr(active_transport, "check_credentials", None)
+            if (
+                check_credentials is not None
+                and destination.kind == "otlp"
+                and _destination_has_credentials(destination)
+            ):
+                for target in destination.targets:
+                    if target.protocol == "http":
+                        check_credentials(destination, target, probe_id=probe_id, timeout=timeout)
+                        credentials_checked = True
     except DestinationTestError as exc:
         _record_outcome(compliance, name, probe_id, mode, "failed", exc.failure_class)
         raise
@@ -505,7 +605,7 @@ def run_destination_test(
         probe_id=probe_id,
         endpoint_count=len(destination.targets),
         protocol=destination.protocol,
-        authentication_verified=write_probe and _destination_has_credentials(destination),
+        authentication_verified=(write_probe and _destination_has_credentials(destination)) or credentials_checked,
         compliance_recorded=True,
     )
 
@@ -901,6 +1001,7 @@ def _request_over_socket(
     body: bytes,
     headers: Mapping[str, str],
     inspect_hec: bool,
+    authentication_only: bool = False,
 ) -> None:
     connection = http.client.HTTPConnection(target.host, target.port, timeout=sock.gettimeout())
     connection.sock = sock
@@ -911,7 +1012,15 @@ def _request_over_socket(
         if 300 <= status < 400:
             raise DestinationTestError("unsafe_endpoint", "the destination attempted a redirect")
         if method != "OPTIONS" and status in {401, 403}:
+            if authentication_only:
+                raise DestinationTestError(
+                    "authentication_failed",
+                    f"the destination rejected the configured credentials (HTTP {status}): check the API key "
+                    "or token, and that the endpoint belongs to the same account or cluster as the key",
+                )
             raise DestinationTestError("authentication_failed", "the destination rejected authentication")
+        if authentication_only:
+            return
         if inspect_hec:
             if not 200 <= status < 300:
                 raise DestinationTestError("remote_rejected", "the destination rejected the synthetic probe")
@@ -936,6 +1045,34 @@ def _request_over_socket(
         raise DestinationTestError("protocol_failed", "the destination protocol handshake failed") from exc
     finally:
         connection.close()
+
+
+_H2_PREFACE: Final = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+# An empty SETTINGS frame: length 0, type 0x4, no flags, stream 0.
+_H2_EMPTY_SETTINGS: Final = b"\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+
+
+def _h2c_settings_handshake(sock: socket.socket) -> None:
+    """Open plaintext HTTP/2 with prior knowledge and wait for the server's SETTINGS.
+
+    This is the start of every gRPC connection. It sends no request, so the
+    collector records nothing.
+    """
+    try:
+        sock.sendall(_H2_PREFACE + _H2_EMPTY_SETTINGS)
+        header = b""
+        while len(header) < 9:
+            chunk = sock.recv(9 - len(header))
+            if not chunk:
+                break
+            header += chunk
+    except TimeoutError as exc:
+        raise DestinationTestError("timeout", "the destination did not answer the HTTP/2 handshake") from exc
+    except OSError as exc:
+        raise DestinationTestError("connection_failed", "the destination connection failed") from exc
+    # The server's first frame must be SETTINGS (type 0x4) on stream 0.
+    if len(header) < 9 or header[3] != 0x4 or int.from_bytes(header[5:9], "big") & 0x7FFFFFFF:
+        raise DestinationTestError("protocol_failed", "the destination did not speak plaintext HTTP/2 (gRPC)")
 
 
 def _drop_case_insensitive(headers: dict[str, str], name: str) -> None:

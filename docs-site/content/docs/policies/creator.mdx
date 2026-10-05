@@ -25,23 +25,22 @@ inputs you test against are never uploaded. Saved progress lives in `localStorag
 does not execute ActionFacts parsers, CEL, regex, YARA, or bounded tool-call chains.
 </Callout>
 
+## Build a policy
+
 <PolicyCreator />
 
 ## Current creator coverage
 
-The creator loads its editable rule catalog from the same generated assets as the repository
-profiles. In this snapshot, Balanced/default exposes 241 declared rules (237 enabled), Permissive
-241 (233 enabled), and Strict 253 (all enabled). Balanced/default and permissive
-each carry 133 CEL declarations and 120 `tool_call_only` rules; strict carries
-146 CEL declarations and 138 `tool_call_only` rules. The recipe picker exposes every generated rule family, and Quick Start rule
-and correlator IDs are checked against all three profiles in the Policy Creator test suite.
+The creator loads its editable rule catalog from the bundled profiles. Balanced/default exposes 243 declared rules (239 enabled), Permissive
+243 (235 enabled), and Strict 255 (all enabled). The recipe picker exposes every rule family. For
+CEL and tool-call-only counts, see the
+[current rule inventory](/docs/policies/deterministic-detection#current-rule-inventory).
 
 The **Deterministic coverage** Playground section is intentionally an inventory rather than an
 editor. It shows six ActionFacts capability groups, 26 fixed bounded chains (four
 enforcement-capable and 22 alert-only), ten alert-only MCP-description YARA signatures, five
 selectable high-assurance packs, and the staged SSH integrity contract. Selectable packs can be
-layered directly into the custom rule pack; the generated asset is checked against the canonical
-repository YAML. For the proof model and the complete rule inventory, see
+layered directly into the custom rule pack. For the proof model and the complete rule inventory, see
 [Deterministic detection reference](/docs/policies/deterministic-detection).
 
 ## Power features
@@ -66,12 +65,12 @@ yellow banner explaining which check failed instead of clobbering your draft.
 <Cards>
   <Card
     title="Quick Start (default)"
-    href="#"
+    href="#how-the-quick-start-works"
     description="Six-step wizard: Posture → Block → Allow → Response → Sinks → Review. One question per screen, Back/Next at the bottom, breadcrumb at the top. Final Review step renders the live policy summary and runs canned scenarios through OPA in your browser."
   />
   <Card
     title="Playground"
-    href="#"
+    href="#what-lives-behind-each-playground-section"
     description="Collapsible editors for the policy surfaces the creator can safely emit, plus repository-backed visibility into fixed deterministic detectors. Use this for fine-tuning Quick Start output, authoring rule packs, or writing custom Rego snippets."
   />
 </Cards>
@@ -97,26 +96,26 @@ findings block installs); Strict is for regulated workloads where false-positive
 
 **Step 2 — What to block.** Ten cards grouped under five headers (Data leaks, Network exfiltration,
 Code execution, LLM-layer attacks, Multi-step attack patterns). Multi-select. Each card lists the
-bundled rule IDs, firewall destinations, guardrail patterns, or editable session-correlator patterns
-it enables — deep-link to the
-[regex cookbook](/docs/policies/regex-cookbook) to see the patterns it ships.
+bundled rule IDs, firewall destinations, or guardrail patterns it enables, with a link to the
+[regex cookbook](/docs/policies/regex-cookbook). The multi-step card describes the two session
+correlator patterns, which are compiled in and always run, so it adds nothing to the export.
 
 </Step>
 
 <Step>
 
-**Step 3 — What to allow.** Multi-select cards for the most common alert-volume reducers: cosmetic
-shell commands (git status, ls, pwd), first-party plugins, internal domains, known dev tools.
-Free-form text inputs let you add your own globs and domains. Deep-links to the
-[suppression cookbook](/docs/policies/suppression-cookbook) explain when each layer is right.
+**Step 3 — What to allow.** Two cards: first-party plugins, which skip admission scans through
+`first_party_allow_list`, and internal domains, which the firewall allows. Free-form text inputs
+let you add your own globs and domains. To tune LLM-judge noise, use the Suppressions section in
+the Playground and the [suppression cookbook](/docs/policies/suppression-cookbook).
 
 </Step>
 
 <Step>
 
 **Step 4 — Response.** Pick how aggressive enforcement should be: log silently, alert on HIGH+, ask
-first (HILT) on MEDIUM+, or hard block on MEDIUM+. Drives the guardrail thresholds, the HILT
-configuration, and the skill\_actions matrix.
+first (human approval, HITL) on MEDIUM+, or hard block on MEDIUM+. Drives the guardrail thresholds,
+the HITL configuration (the `guardrail.hilt` key), and the skill\_actions matrix.
 
 </Step>
 
@@ -134,11 +133,24 @@ CRITICAL secret in a skill, an MCP install with a sketchy domain, a quarantined 
 verdict (`blocked` / `allowed` / `quarantined`), and tweak earlier steps until it matches intent.
 Then **Open in Playground →** hands you off to the full editor with everything pre-filled. The
 Review section there renders every YAML file plus `data.json`; copy them into
-`~/.defenseclaw/policies/` (or run the bundled install script) and activate with:
+`~/.defenseclaw/policies/` (or run the bundled install script) and activate the policy:
 
 ```bash
 defenseclaw policy activate my-policy
 ```
+
+`policy activate` switches the OPA policy only. The rule pack the creator wrote to
+`~/.defenseclaw/policies/guardrail/my-policy/` (rules, suppressions, sensitive tools and judges)
+isn't enforced until you validate it and switch to it. `use-pack` restarts a running gateway so
+it loads the pack:
+
+```bash
+defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-policy
+defenseclaw guardrail use-pack my-policy
+```
+
+The install script prints these two commands when it finishes. Try the whole flow in a
+throwaway home first with [Verify a policy locally](/docs/policies/verify-locally).
 
 </Step>
 
@@ -156,7 +168,7 @@ defenseclaw policy activate my-policy
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
 | LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
-| Session correlator (Layer 5) | The two editable post-event correlator patterns bundled in `correlation-patterns.yaml`. These are distinct from the 26 fixed ActionFacts chains. |
+| Session correlator (Layer 5) | Read-only view of the two post-event correlator patterns compiled into the gateway. They always run and aren't exported. These are distinct from the 26 fixed ActionFacts chains. |
 | Deterministic coverage | Read-only inventory of code-owned ActionFacts capabilities, the 26 bounded tool-call chains, and the ten MCP-description YARA signatures; also applies selectable high-assurance rule packs to the custom pack. |
 | Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
 | Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
@@ -177,7 +189,8 @@ defenseclaw policy activate my-policy
 - **Fixed deterministic detectors are read-only.** The 26 bounded chains and ten YARA signatures
   shown by the creator are repository-owned runtime/scanner capabilities, not arbitrary policy
   programs. The creator can display their coverage and the active posture, but it does not rewrite
-  their implementations. The two Layer-5 session correlator patterns remain separately editable.
+  their implementations. The two Layer-5 session correlator patterns are compiled in as well:
+  the creator shows them but can't change them, and a rule pack can't carry its own.
 - **CEL does not grant block authority.** A custom CEL expression is a bounded detection selector
   evaluated at an authenticated tool-call boundary. A match cannot make itself enforcement-safe.
   Blocking still requires an eligible synchronous connector, the active profile's disposition, and

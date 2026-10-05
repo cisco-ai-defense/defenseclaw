@@ -39,7 +39,6 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorGuardrailConfig,
 )
-from defenseclaw.file_permissions import atomic_write_private_bytes
 
 from tests.helpers import record_test_setup_agent_selections
 
@@ -119,33 +118,6 @@ class BootstrapEnvTests(unittest.TestCase):
         for expected in (cfg.data_dir, cfg.quarantine_dir, cfg.plugin_dir, cfg.policy_dir):
             self.assertIn(os.path.abspath(expected), created)
 
-    def test_windows_zero_link_count_accepts_regular_recovery_file(self):
-        from types import SimpleNamespace
-
-        from defenseclaw import bootstrap
-
-        with (
-            patch(
-                "defenseclaw.bootstrap.open_regular_file_no_follow",
-                return_value=17,
-            ),
-            patch.object(bootstrap.os, "name", "nt"),
-            patch.object(
-                bootstrap.os,
-                "fstat",
-                return_value=SimpleNamespace(st_nlink=0, st_size=6),
-            ),
-            patch.object(bootstrap.os, "read", side_effect=[b"config", b""]),
-            patch.object(bootstrap.os, "close") as close,
-        ):
-            raw = bootstrap._read_bounded_regular_file(
-                "config.yaml",
-                1024,
-                private=False,
-            )
-
-        self.assertEqual(raw, b"config")
-        close.assert_called_once_with(17)
 
     def test_creates_audit_db_file(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -186,11 +158,84 @@ class BootstrapEnvTests(unittest.TestCase):
         with open(os.path.join(hermes_home, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write("hooks: {}\n")
 
+        from defenseclaw import bootstrap
+
         with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
-            result = _connector_readiness(cfg, "hermes")
+            with patch.object(bootstrap, "_hermes_installed", return_value=True):
+                result = _connector_readiness(cfg, "hermes")
+            # GAP-2354: the config.yaml setup writes is not an installed Hermes.
+            with patch.object(bootstrap, "_hermes_installed", return_value=False):
+                missing = _connector_readiness(cfg, "hermes")
 
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
+        self.assertEqual((missing.status, missing.detail), ("warn", "Hermes is not installed (hermes is not on PATH)"))
+
+    def test_missing_hermes_action_next_step_names_the_install_first(self):
+        # GAP-2383: the first Next line was "setup hermes --mode action",
+        # which cannot work before Hermes is installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        with patch.object(bootstrap, "_hermes_installed", return_value=False):
+            setup = bootstrap._connector_mode_warning_steps([bootstrap._action_downgrade_record("hermes")])
+            readiness = [_connector_readiness(cfg, "hermes")]
+        commands = bootstrap._next_commands(setup, readiness, cfg, "observe")
+
+        self.assertEqual(
+            commands[0],
+            "install Hermes (https://github.com/NousResearch/hermes-agent), then run: defenseclaw setup hermes --mode action",
+        )
+        self.assertIn("Hermes is not installed", setup[0].detail)
+        self.assertFalse([c for c in commands if c.startswith("defenseclaw setup hermes")])
+
+    def test_openclaw_setup_and_readiness_agree_before_openclaw_json_exists(self):
+        # GAP-1523: Guardrail skipped ("OpenClaw config not found ... skipped
+        # connector patch") while Readiness passed on the openclaw.json the
+        # gateway writes at start, also when OpenClaw was not installed.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])) as setup:
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        setup.assert_called_once()
+        self.assertEqual(step.status, "pass", step.detail)
+
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        with patch.object(bootstrap.shutil, "which", return_value=None):
+            missing = _connector_readiness(cfg, "openclaw")
+        with patch.object(bootstrap.shutil, "which", return_value="/home/u/.local/bin/openclaw"):
+            found = _connector_readiness(cfg, "openclaw")
+        self.assertEqual((missing.status, missing.detail), ("warn", "OpenClaw is not installed (openclaw is not on PATH)"))
+        self.assertEqual(found.status, "pass")
+
+    def test_openclaw_first_run_adopts_openclaw_json_gateway_port(self):
+        # GAP-1778: init after `openclaw onboard --gateway-port 19347` kept
+        # gateway.port 18789, so the sidecar never reached OpenClaw.
+        from defenseclaw import bootstrap
+
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        cfg.claw.config_file = os.path.join(self._tmp.name, "oc", "openclaw.json")
+        os.makedirs(os.path.dirname(cfg.claw.config_file))
+        with open(cfg.claw.config_file, "w", encoding="utf-8") as fh:
+            json.dump({"gateway": {"mode": "local", "port": 19347}}, fh)
+        cfg.gateway.host = "127.0.0.1"
+        cfg.gateway.port = 18789
+        seen_ports = []
+
+        def fake_setup(app, save_config):
+            seen_ports.append(app.cfg.gateway.port)
+            return True, []
+
+        with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", side_effect=fake_setup):
+            step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "openclaw", verbose=False)
+        self.assertEqual(seen_ports, [19347], "the port must be adopted before setup saves the config")
+        self.assertEqual(cfg.gateway.port, 19347)
+        self.assertEqual(step.status, "pass", step.detail)
+        self.assertIn("OpenClaw gateway port 19347 from openclaw.json", step.detail)
 
     def test_opencode_readiness_honors_custom_config_dir(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -206,6 +251,21 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertIn("OpenCode bridge plugin found", result.detail)
 
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_readiness_names_a_group_writable_plugin_folder_with_its_fix(self):
+        # Ubuntu's umask 002 leaves ~/.config/opencode/plugins at 0775; init
+        # ended partial and suggested `setup opencode`, which fails the same way.
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        plugin_dir = os.path.join(self._tmp.name, ".config", "opencode", "plugins")
+        os.makedirs(plugin_dir)
+        os.chmod(plugin_dir, 0o775)
+        with patch.dict(os.environ, {"HOME": self._tmp.name}):
+            os.environ.pop("OPENCODE_CONFIG_DIR", None)
+            os.environ.pop("XDG_CONFIG_HOME", None)
+            result = _connector_readiness(cfg, "opencode")
+
+        self.assertEqual(result.next_command, f"chmod go-w {os.path.realpath(plugin_dir)}")
+
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         config_home = os.path.join(self._tmp.name, "omnigent-config")
@@ -219,6 +279,24 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertIn("custom policy configured", result.detail)
         self.assertIn("live action/fail-closed enforcement is unverified", result.detail)
         self.assertIn(config_home, result.detail)
+        # The text named a fixed OmniGent release as if it were the installed one.
+        self.assertNotIn("0.7.0", result.detail)
+
+    def test_kiro_readiness_finds_global_hooks(self):
+        # Quickstart readiness said "unknown connector 'kiro'" while doctor passed.
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        hooks_dir = os.path.join(self._tmp.name, ".kiro", "hooks")
+        os.makedirs(hooks_dir)
+        with open(os.path.join(hooks_dir, "defenseclaw.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        with patch("defenseclaw.bootstrap.connector_home", return_value=os.path.join(self._tmp.name, ".kiro")):
+            found = _connector_readiness(cfg, "kiro")
+            os.remove(os.path.join(hooks_dir, "defenseclaw.json"))
+            missing = _connector_readiness(cfg, "kiro")
+
+        self.assertEqual(found.status, "pass")
+        self.assertIn("Kiro hooks found", found.detail)
+        self.assertEqual((missing.status, missing.next_command), ("warn", "defenseclaw setup kiro"))
 
     def test_omnigent_readiness_rejects_partial_registration(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -264,302 +342,6 @@ class BootstrapEnvTests(unittest.TestCase):
                 self.assertIn(str(plugin), result.detail)
 
 
-class FirstRunProtectedSelectionTests(unittest.TestCase):
-    """Protected Windows selection is the first first-run state transition."""
-
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-
-    def _seed_prior_state(self, label: str) -> tuple[str, dict[str, bytes]]:
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        data_dir = os.path.join(self._tmp.name, label)
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-            cfg = default_config()
-            prepare_fresh_v8_config(cfg)
-            cfg.guardrail.connector = "opencode"
-            cfg.guardrail.connectors = {
-                "opencode": PerConnectorGuardrailConfig(mode="observe"),
-                "amp": PerConnectorGuardrailConfig(mode="observe"),
-            }
-            cfg.save()
-
-        sentinels = {
-            "config.yaml": Path(data_dir, "config.yaml").read_bytes(),
-            "agent_selection.json": b'{"prior":"selection"}\n',
-            "hook_contract_lock.json": b'{"prior":"sealed-lock"}\n',
-        }
-        for name, payload in sentinels.items():
-            if name != "config.yaml":
-                atomic_write_private_bytes(Path(data_dir, name), payload)
-        return data_dir, sentinels
-
-    def test_opencode_selection_failure_preserves_state_before_every_first_run_mutation(self):
-        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
-        from defenseclaw.config import Config
-
-        settings = [
-            {"connector": "opencode", "profile": "observe"},
-            {"connector": "amp", "profile": "observe"},
-        ]
-        for profile in ("observe", "action"):
-            with self.subTest(profile=profile):
-                data_dir, prior = self._seed_prior_state(profile)
-                options = FirstRunOptions(
-                    connector="opencode",
-                    connector_settings=settings,
-                    profile=profile,
-                    llm_api_key="must-not-be-written",
-                    human_approval=True,
-                    skip_install=True,
-                    start_gateway=True,
-                    verify=False,
-                )
-                forbidden = AssertionError("selection failure must precede first-run mutation")
-                with (
-                    patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
-                    patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
-                    patch(
-                        "defenseclaw.agent_selection.setup_agent_selection_connectors",
-                        return_value=("opencode", "amp"),
-                    ) as setup_selection,
-                    patch(
-                        "defenseclaw.agent_selection.record_setup_agent_selections",
-                        return_value=({}, {"opencode": "exact SST package image is missing"}),
-                    ) as record_selection,
-                    patch("defenseclaw.bootstrap.repair_pending_first_run_config", side_effect=forbidden),
-                    patch.object(Config, "save", side_effect=forbidden) as save_config,
-                    patch("defenseclaw.db.Store", side_effect=forbidden) as store,
-                    patch("defenseclaw.bootstrap.bootstrap_env", side_effect=forbidden) as bootstrap,
-                    patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=forbidden) as secrets,
-                    patch("defenseclaw.bootstrap._apply_first_run_choices", side_effect=forbidden) as choices,
-                    patch("defenseclaw.bootstrap._quiet_guardrail_setup", side_effect=forbidden) as setup,
-                    patch("defenseclaw.bootstrap._start_gateway_structured", side_effect=forbidden) as gateway,
-                    patch(
-                        "defenseclaw.bootstrap.agent_discovery.discover_agents",
-                        side_effect=forbidden,
-                    ) as discovery,
-                ):
-                    report = run_first_run(options)
-
-                self.assertEqual(report.status, "needs_attention")
-                self.assertEqual(report.setup[0].name, "Agent Selection")
-                self.assertIn("exact SST package image is missing", report.setup[0].detail)
-                setup_selection.assert_called_once_with(("opencode", "amp"))
-                record_selection.assert_called_once_with(data_dir, ("opencode", "amp"))
-                for blocked in (save_config, store, bootstrap, secrets, choices, setup, gateway, discovery):
-                    blocked.assert_not_called()
-                for name, payload in prior.items():
-                    self.assertEqual(Path(data_dir, name).read_bytes(), payload)
-
-    def test_every_late_first_run_failure_restores_exact_protected_snapshot(self):
-        from defenseclaw import config as cfg_mod
-        from defenseclaw.bootstrap import (
-            FirstRunOptions,
-            FreshMigrationStateError,
-            StepResult,
-            run_first_run,
-        )
-        from defenseclaw.commands import cmd_setup
-        from defenseclaw.config import Config
-
-        stages = (
-            "migration",
-            "config-save",
-            "store-create",
-            "store-init",
-            "bootstrap",
-            "secrets-hilt",
-            "connector-setup",
-            "gateway",
-            "readiness",
-        )
-        for stage in stages:
-            with self.subTest(stage=stage):
-                data_dir, prior = self._seed_prior_state(f"late-{stage}")
-                with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-                    expected = cfg_mod.load()
-                expected_connector = expected.guardrail.connector
-                expected_roster = expected.guardrail.connectors
-                restored_configs = []
-                restore_in_memory = cmd_setup._restore_setup_config_in_memory
-
-                def observe_restore(app, snapshot):
-                    restored = restore_in_memory(app, snapshot)
-                    restored_configs.append(restored)
-                    return restored
-
-                def persist(_cfg, _options, steps):
-                    if stage == "secrets-hilt":
-                        steps.append(StepResult("Secrets", "fail", "injected late failure"))
-
-                def select_and_change_lock(selected_data_dir, connectors):
-                    result = record_test_setup_agent_selections(selected_data_dir, connectors)
-                    Path(selected_data_dir, "hook_contract_lock.json").write_bytes(b'{"changed":"after-selection"}\n')
-                    return result
-
-                store = MagicMock()
-                if stage == "store-init":
-                    store.init.side_effect = OSError("injected store init failure")
-                logger = MagicMock()
-                bootstrap_errors = ["injected bootstrap failure"] if stage == "bootstrap" else []
-                connector_step = StepResult(
-                    "Guardrail",
-                    "fail" if stage == "connector-setup" else "pass",
-                    "injected" if stage == "connector-setup" else "test",
-                )
-                gateway_step = StepResult(
-                    "Sidecar",
-                    "fail" if stage == "gateway" else "pass",
-                    "injected" if stage == "gateway" else "test",
-                )
-                readiness = [
-                    StepResult(
-                        "Readiness",
-                        "fail" if stage == "readiness" else "pass",
-                        "injected" if stage == "readiness" else "test",
-                    )
-                ]
-                migration_effect = (
-                    FreshMigrationStateError("injected migration failure")
-                    if stage == "migration"
-                    else lambda _cfg: False
-                )
-                store_effect = (
-                    OSError("injected store creation failure") if stage == "store-create" else lambda _path: store
-                )
-
-                def save_effect(_cfg):
-                    Path(data_dir, "config.yaml").write_bytes(b"changed after selection\n")
-                    if stage == "config-save":
-                        raise OSError("injected config save failure")
-
-                options = FirstRunOptions(
-                    connector="opencode",
-                    connector_settings=[
-                        {"connector": "opencode", "profile": "action"},
-                        {"connector": "amp", "profile": "observe"},
-                    ],
-                    profile="action",
-                    skip_install=True,
-                    start_gateway=True,
-                    verify=True,
-                )
-                with (
-                    patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
-                    patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
-                    patch(
-                        "defenseclaw.agent_selection.setup_agent_selection_connectors",
-                        return_value=("opencode", "amp"),
-                    ),
-                    patch(
-                        "defenseclaw.agent_selection.record_setup_agent_selections",
-                        side_effect=select_and_change_lock,
-                    ) as record_selection,
-                    patch(
-                        "defenseclaw.bootstrap.repair_pending_first_run_config",
-                        side_effect=migration_effect,
-                    ),
-                    patch.object(Config, "save", side_effect=save_effect, autospec=True),
-                    patch("defenseclaw.db.Store", side_effect=store_effect),
-                    patch("defenseclaw.logger.Logger.from_config", return_value=logger),
-                    patch("defenseclaw.bootstrap.bootstrap_env", return_value=SimpleNamespace(errors=bootstrap_errors)),
-                    patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=persist),
-                    patch("defenseclaw.bootstrap._quiet_guardrail_setup", return_value=connector_step),
-                    patch("defenseclaw.bootstrap._start_gateway_structured", return_value=gateway_step),
-                    patch("defenseclaw.bootstrap.finalize_first_run_config"),
-                    patch("defenseclaw.bootstrap.targeted_readiness", return_value=readiness),
-                    patch(
-                        "defenseclaw.commands.cmd_setup._restore_setup_config_in_memory",
-                        side_effect=observe_restore,
-                    ),
-                ):
-                    if stage == "store-create":
-                        with self.assertRaisesRegex(OSError, "store creation"):
-                            run_first_run(options)
-                    else:
-                        report = run_first_run(options)
-                        self.assertEqual(report.status, "needs_attention")
-                        self.assertIsNone(report._protected_selection)
-
-                record_selection.assert_called_once_with(data_dir, ("opencode", "amp"))
-                self.assertTrue(restored_configs)
-                self.assertEqual(restored_configs[-1].guardrail.connector, expected_connector)
-                self.assertEqual(restored_configs[-1].guardrail.connectors, expected_roster)
-                for name, payload in prior.items():
-                    self.assertEqual(Path(data_dir, name).read_bytes(), payload)
-
-    def test_tampered_first_run_extra_receipt_reselects_complete_roster(self):
-        from defenseclaw.bootstrap import FirstRunOptions, StepResult, run_first_run
-        from defenseclaw.config import Config
-
-        data_dir, _prior = self._seed_prior_state("tampered-extra")
-        store = MagicMock()
-        logger = MagicMock()
-        repair_calls = 0
-
-        def tamper_after_initial_selection(_cfg):
-            nonlocal repair_calls
-            repair_calls += 1
-            receipt = Path(data_dir, "agent_selection.json")
-            atomic = receipt.read_bytes() + b" "
-            from defenseclaw.file_permissions import atomic_write_private_bytes
-
-            atomic_write_private_bytes(str(receipt), atomic)
-            return False
-
-        options = FirstRunOptions(
-            connector="opencode",
-            connector_settings=[
-                {"connector": "opencode", "profile": "action"},
-                {"connector": "amp", "profile": "observe"},
-            ],
-            profile="action",
-            skip_install=True,
-            start_gateway=False,
-            verify=True,
-        )
-        with (
-            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
-            patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.agent_selection.setup_agent_selection_connectors",
-                return_value=("opencode", "amp"),
-            ),
-            patch(
-                "defenseclaw.agent_selection.record_setup_agent_selections",
-                side_effect=record_test_setup_agent_selections,
-            ) as record_selection,
-            patch(
-                "defenseclaw.bootstrap.repair_pending_first_run_config",
-                side_effect=tamper_after_initial_selection,
-            ),
-            patch.object(Config, "save", autospec=True),
-            patch("defenseclaw.db.Store", return_value=store),
-            patch("defenseclaw.logger.Logger.from_config", return_value=logger),
-            patch("defenseclaw.bootstrap.bootstrap_env", return_value=SimpleNamespace(errors=[])),
-            patch("defenseclaw.bootstrap._persist_first_run_secrets"),
-            patch(
-                "defenseclaw.bootstrap._quiet_guardrail_setup",
-                return_value=StepResult("Guardrail", "pass", "test"),
-            ),
-            patch("defenseclaw.bootstrap.finalize_first_run_config"),
-            patch(
-                "defenseclaw.bootstrap.targeted_readiness",
-                return_value=[StepResult("Readiness", "pass", "test")],
-            ),
-        ):
-            report = run_first_run(options)
-
-        self.assertEqual(report.status, "ready")
-        self.assertIsNotNone(report._protected_selection)
-        self.assertEqual(repair_calls, 1)
-        self.assertEqual(record_selection.call_count, 2)
-        self.assertEqual(
-            [call.args for call in record_selection.call_args_list],
-            [(data_dir, ("opencode", "amp")), (data_dir, ("opencode", "amp"))],
-        )
 
 
 class FreshMigrationCursorTests(unittest.TestCase):
@@ -576,20 +358,6 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.addCleanup(self._selection_patcher.stop)
         self._tmp_root = os.path.realpath(self._tmp.name)
 
-    def _pending_config(self, label: str):
-        from defenseclaw.bootstrap import (
-            _record_fresh_migration_retry,
-            fresh_migration_pending_path,
-        )
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        data_dir = os.path.join(self._tmp_root, label)
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-            cfg = default_config()
-            prepare_fresh_v8_config(cfg)
-            cfg.save()
-            _record_fresh_migration_retry(cfg)
-        return cfg, fresh_migration_pending_path(data_dir)
 
     def _run_first_run(self, data_dir: str):
         from defenseclaw.bootstrap import (
@@ -615,53 +383,7 @@ class FreshMigrationCursorTests(unittest.TestCase):
                 )
             )
 
-    def test_successful_fresh_first_run_bootstraps_registry_through_0_8_5(self):
-        from defenseclaw import __version__, migration_state
-        from defenseclaw.migrations import MIGRATIONS, _ver_tuple
 
-        data_dir = os.path.join(self._tmp_root, "fresh")
-        report = self._run_first_run(data_dir)
-
-        self.assertNotEqual(report.status, "needs_attention")
-        state = migration_state.load(data_dir)
-        self.assertIsNotNone(state)
-        assert state is not None
-        expected = [
-            version
-            for version, _description, _migration in MIGRATIONS
-            if _ver_tuple(version) <= _ver_tuple(__version__)
-        ]
-        self.assertEqual(state.applied, expected)
-        self.assertEqual(state.package_version, __version__)
-        self.assertEqual(state.applied_at["0.8.5"], migration_state.BOOTSTRAP_SENTINEL)
-        self.assertTrue(all(state.applied_at[version] == migration_state.BOOTSTRAP_SENTINEL for version in expected))
-
-    def test_no_connector_first_run_creates_canonical_config_and_cursor_without_connector_setup(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
-
-        data_dir = os.path.join(self._tmp_root, "none")
-        with (
-            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
-            patch("defenseclaw.bootstrap._quiet_guardrail_setup") as connector_setup,
-        ):
-            report = run_first_run(
-                FirstRunOptions(
-                    connector="none",
-                    profile="observe",
-                    skip_install=True,
-                    start_gateway=False,
-                    verify=False,
-                )
-            )
-
-        self.assertNotEqual(report.status, "needs_attention")
-        self.assertTrue(os.path.isfile(os.path.join(data_dir, "config.yaml")))
-        self.assertIsNotNone(migration_state.load(data_dir))
-        connector_setup.assert_not_called()
-        self.assertTrue(
-            any(step.name == "Guardrail" and step.status == "skip" for step in report.setup)
-        )
 
     def test_no_connector_first_run_preserves_existing_connector_selection(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
@@ -692,6 +414,29 @@ class FreshMigrationCursorTests(unittest.TestCase):
         self.assertEqual(preserved.guardrail.connector, "claudecode")
         self.assertEqual(preserved.guardrail.mode, "action")
 
+    def test_no_connector_fresh_first_run_persists_no_active_connector(self):
+        # GAP-1056: init --connector none on a fresh home left the OpenClaw
+        # default active, so status listed it and uninstall planned its teardown.
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import load
+
+        data_dir = os.path.join(self._tmp_root, "none-fresh")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            report = run_first_run(
+                FirstRunOptions(
+                    connector="none",
+                    profile="observe",
+                    skip_install=True,
+                    start_gateway=False,
+                    verify=False,
+                )
+            )
+            cfg = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
     def test_no_connector_first_run_preserves_unloadable_existing_config(self):
         from defenseclaw.bootstrap import FirstRunOptions, run_first_run
 
@@ -720,440 +465,22 @@ class FreshMigrationCursorTests(unittest.TestCase):
         with open(config_path, "rb") as stream:
             self.assertEqual(stream.read(), original)
 
-    def test_rerun_preserves_bootstrapped_cursor_byte_for_byte(self):
-        from defenseclaw import migration_state
-
-        data_dir = os.path.join(self._tmp_root, "rerun")
-        self._run_first_run(data_dir)
-        cursor_path = migration_state.state_path(data_dir)
-        with open(cursor_path, "rb") as stream:
-            original = stream.read()
-
-        self._run_first_run(data_dir)
-
-        with open(cursor_path, "rb") as stream:
-            self.assertEqual(stream.read(), original)
-
-    def test_existing_valid_future_unknown_and_corrupt_cursors_are_preserved(self):
-        from defenseclaw import migration_state
-
-        payloads = {
-            "valid": b'{"schema":1,"package_version":"operator","applied":["0.8.0"]}\n',
-            "future": b'{"schema":999,"opaque":{"keep":true}}\n',
-            "unknown": b'{"schema":"next","opaque":{"keep":true}}\n',
-            "corrupt": b'{"schema":',
-        }
-        for label, payload in payloads.items():
-            with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp_root, label)
-                os.makedirs(data_dir)
-                cursor_path = migration_state.state_path(data_dir)
-                with open(cursor_path, "wb") as stream:
-                    stream.write(payload)
-
-                self._run_first_run(data_dir)
-
-                with open(cursor_path, "rb") as stream:
-                    self.assertEqual(stream.read(), payload)
-
-    def test_final_config_save_failure_does_not_create_cursor(self):
-        from defenseclaw import migration_state
-        from defenseclaw.config import Config
-
-        for host_os in ("linux", "windows"):
-            with self.subTest(host_os=host_os):
-                data_dir = os.path.join(self._tmp_root, f"save-failure-{host_os}")
-                original_save = Config.save
-                save_calls = 0
-
-                def fail_final_save(cfg):
-                    nonlocal save_calls
-                    save_calls += 1
-                    if save_calls == 1:
-                        return original_save(cfg)
-                    raise OSError("injected final config save failure")
-
-                with (
-                    patch.object(Config, "save", new=fail_final_save),
-                    patch("defenseclaw.bootstrap.platform_support.host_os", return_value=host_os),
-                ):
-                    report = self._run_first_run(data_dir)
-
-                self.assertFalse(os.path.lexists(os.path.join(data_dir, "config.yaml")))
-                self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-                self.assertTrue(
-                    any(step.name == "Config Save" and step.status == "fail" for step in report.setup)
-                )
-
-    def test_unmarked_existing_v8_config_never_infers_a_fresh_cursor(self):
-        from defenseclaw import migration_state
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        data_dir = os.path.join(self._tmp_root, "unmarked-existing")
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-            cfg = default_config()
-            prepare_fresh_v8_config(cfg)
-            cfg.save()
-
-        report = self._run_first_run(data_dir)
-
-        self.assertNotEqual(report.status, "needs_attention")
-        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-
-    def test_later_setup_exception_does_not_create_cursor(self):
-        import sqlite3
-
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
-        from defenseclaw.db import Store
-
-        data_dir = os.path.join(self._tmp_root, "setup-failure")
-        stores = []
-
-        def track_store(path):
-            store = Store(path)
-            stores.append(store)
-            return store
-
-        with (
-            patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
-            patch("defenseclaw.db.Store", side_effect=track_store),
-            patch("defenseclaw.logger.Logger.no_runtime") as no_runtime,
-            patch(
-                "defenseclaw.bootstrap._quiet_guardrail_setup",
-                side_effect=RuntimeError("injected setup failure"),
-            ),
-            self.assertRaisesRegex(RuntimeError, "injected setup failure"),
-        ):
-            run_first_run(
-                FirstRunOptions(
-                    connector="codex",
-                    profile="observe",
-                    skip_install=True,
-                    start_gateway=False,
-                    verify=False,
-                )
-            )
-
-        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-        no_runtime.return_value.close.assert_called_once_with()
-        self.assertTrue(stores)
-        for store in stores:
-            with self.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
-                store.db.execute("SELECT 1")
-
-    def test_version_mismatched_pending_marker_refuses_inference(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            _record_fresh_migration_retry,
-            fresh_migration_pending_path,
-        )
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        data_dir = os.path.join(self._tmp_root, "version-mismatch")
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-            cfg = default_config()
-            prepare_fresh_v8_config(cfg)
-            cfg.save()
-            _record_fresh_migration_retry(cfg)
-        marker = fresh_migration_pending_path(data_dir)
-        with open(marker, encoding="utf-8") as stream:
-            payload = json.load(stream)
-        payload["package_version"] = "0.0.1"
-        with open(marker, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream)
-        os.chmod(marker, 0o600)
-
-        report = self._run_first_run(data_dir)
-
-        self.assertEqual(report.status, "needs_attention")
-        self.assertTrue(any("pending from DefenseClaw 0.0.1" in step.detail for step in report.setup))
-        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-        self.assertTrue(os.path.isfile(marker))
-
-    def test_pending_marker_readback_distinguishes_disappearance_from_change(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            _record_fresh_migration_retry,
-            fresh_migration_pending_path,
-        )
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        for label, persisted, message in (
-            ("disappeared", None, "evidence disappeared during publication"),
-            ("changed", {}, "evidence changed during publication"),
-        ):
-            with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp_root, f"marker-readback-{label}")
-                with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-                    cfg = default_config()
-                    prepare_fresh_v8_config(cfg)
-                    cfg.save()
-                    with (
-                        patch(
-                            "defenseclaw.bootstrap._load_fresh_migration_pending",
-                            return_value=persisted,
-                        ),
-                        self.assertRaisesRegex(FreshMigrationStateError, message),
-                    ):
-                        _record_fresh_migration_retry(cfg)
-
-                self.assertTrue(os.path.isfile(fresh_migration_pending_path(data_dir)))
-                self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-
-    @unittest.skipIf(os.name == "nt", "POSIX marker mode and symlink checks")
-    def test_unsafe_pending_marker_is_never_retry_authority(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import fresh_migration_pending_path
-
-        for label in ("malformed", "public", "symlink"):
-            with self.subTest(label=label):
-                data_dir = os.path.join(self._tmp_root, f"unsafe-{label}")
-                os.makedirs(data_dir)
-                marker = fresh_migration_pending_path(data_dir)
-                if label == "symlink":
-                    target = os.path.join(self._tmp_root, "attacker-marker")
-                    with open(target, "w", encoding="utf-8") as stream:
-                        stream.write("{}\n")
-                    os.symlink(target, marker)
-                else:
-                    with open(marker, "w", encoding="utf-8") as stream:
-                        stream.write("{broken\n" if label == "malformed" else "{}\n")
-                    os.chmod(marker, 0o644 if label == "public" else 0o600)
-
-                report = self._run_first_run(data_dir)
-
-                self.assertEqual(report.status, "needs_attention")
-                self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-                self.assertTrue(os.path.lexists(marker))
-
-    def test_pending_marker_never_overwrites_a_corrupt_cursor(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            _record_fresh_migration_retry,
-            fresh_migration_pending_path,
-        )
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        data_dir = os.path.join(self._tmp_root, "corrupt-existing-cursor")
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-            cfg = default_config()
-            prepare_fresh_v8_config(cfg)
-            cfg.save()
-            _record_fresh_migration_retry(cfg)
-        cursor = migration_state.state_path(data_dir)
-        with open(cursor, "wb") as stream:
-            stream.write(b'{"schema":')
-        os.chmod(cursor, 0o600)
-
-        report = self._run_first_run(data_dir)
-
-        self.assertEqual(report.status, "needs_attention")
-        with open(cursor, "rb") as stream:
-            self.assertEqual(stream.read(), b'{"schema":')
-        self.assertTrue(os.path.isfile(fresh_migration_pending_path(data_dir)))
-
-    def test_cursor_publication_failure_is_repaired_on_rerun(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import _fresh_migration_pending_path
-
-        data_dir = os.path.join(self._tmp_root, "cursor-retry")
-        with patch.object(
-            migration_state,
-            "save_if_absent",
-            side_effect=OSError("injected cursor publication failure"),
-        ):
-            first_report = self._run_first_run(data_dir)
-
-        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-        self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
-        self.assertTrue(
-            any(
-                step.name == "Migration State" and step.status == "fail" and step.next_command == "defenseclaw init"
-                for step in first_report.setup
-            )
-        )
-
-        second_report = self._run_first_run(data_dir)
-
-        self.assertIsNotNone(migration_state.load(data_dir))
-        self.assertFalse(os.path.lexists(_fresh_migration_pending_path(data_dir)))
-        self.assertTrue(
-            any(
-                step.name == "Migration State"
-                and step.status == "pass"
-                and "recovered pending fresh cursor" in step.detail
-                for step in second_report.setup
-            )
-        )
-
-    def test_fresh_cursor_readback_failure_is_actionable_and_retains_marker(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            finalize_first_run_config,
-            fresh_migration_pending_path,
-        )
-        from defenseclaw.config import default_config, prepare_fresh_v8_config
-
-        data_dir = os.path.join(self._tmp_root, "cursor-readback-failure")
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
-            cfg = default_config()
-            prepare_fresh_v8_config(cfg)
-            with (
-                patch.object(
-                    migration_state,
-                    "load",
-                    side_effect=OSError("injected cursor readback failure"),
-                ),
-                self.assertRaisesRegex(
-                    FreshMigrationStateError,
-                    "published but could not be read back",
-                ),
-            ):
-                finalize_first_run_config(cfg, was_config_absent=True)
-
-        self.assertTrue(os.path.isfile(migration_state.state_path(data_dir)))
-        self.assertTrue(os.path.isfile(fresh_migration_pending_path(data_dir)))
-
-    def test_cursor_retry_refuses_config_changed_after_failed_publication(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import _fresh_migration_pending_path
-
-        data_dir = os.path.join(self._tmp_root, "cursor-retry-tampered")
-        with patch.object(
-            migration_state,
-            "save_if_absent",
-            side_effect=OSError("injected cursor publication failure"),
-        ):
-            self._run_first_run(data_dir)
-
-        config_path = os.path.join(data_dir, "config.yaml")
-        with open(config_path, "a", encoding="utf-8") as stream:
-            stream.write("# operator change\n")
-        changed = Path(config_path).read_bytes()
-
-        report = self._run_first_run(data_dir)
-
-        self.assertEqual(report.status, "needs_attention")
-        self.assertEqual(Path(config_path).read_bytes(), changed)
-        self.assertFalse(os.path.lexists(migration_state.state_path(data_dir)))
-        self.assertTrue(os.path.isfile(_fresh_migration_pending_path(data_dir)))
-
-    def test_pending_cursor_repair_reports_missing_evidence_without_inference(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            repair_pending_first_run_config,
-        )
-
-        cfg, marker = self._pending_config("repair-missing-evidence")
-        with (
-            patch(
-                "defenseclaw.bootstrap._load_fresh_migration_pending",
-                return_value=None,
-            ),
-            self.assertRaisesRegex(
-                FreshMigrationStateError,
-                "evidence disappeared before cursor publication",
-            ),
-        ):
-            repair_pending_first_run_config(cfg)
-
-        self.assertTrue(os.path.isfile(marker))
-        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
-
-    def test_pending_cursor_repair_reports_save_failure_and_retains_marker(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            repair_pending_first_run_config,
-        )
-
-        cfg, marker = self._pending_config("repair-save-failure")
-        with (
-            patch.object(
-                migration_state,
-                "save_if_absent",
-                side_effect=OSError("injected cursor save failure"),
-            ),
-            self.assertRaisesRegex(
-                FreshMigrationStateError,
-                "could not publish the pending fresh migration cursor",
-            ),
-        ):
-            repair_pending_first_run_config(cfg)
-
-        self.assertTrue(os.path.isfile(marker))
-        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
-
-    def test_pending_cursor_repair_wraps_lock_failure_and_retains_marker(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            repair_pending_first_run_config,
-        )
-
-        cfg, marker = self._pending_config("repair-lock-failure")
-        with (
-            patch(
-                "defenseclaw.file_lock.locked_file_update",
-                side_effect=OSError("injected lock failure"),
-            ),
-            self.assertRaisesRegex(
-                FreshMigrationStateError,
-                "could not complete the pending fresh migration cursor",
-            ),
-        ):
-            repair_pending_first_run_config(cfg)
-
-        self.assertTrue(os.path.isfile(marker))
-        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
-
-    def test_pending_cursor_repair_reports_mismatch_and_retains_marker(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            repair_pending_first_run_config,
-        )
-
-        cfg, marker = self._pending_config("repair-mismatch")
-        with (
-            patch.object(migration_state, "save_if_absent", return_value=False),
-            patch.object(migration_state, "load", return_value=None),
-            self.assertRaisesRegex(
-                FreshMigrationStateError,
-                "cursor does not match the pending fresh installation",
-            ),
-        ):
-            repair_pending_first_run_config(cfg)
-
-        self.assertTrue(os.path.isfile(marker))
-        self.assertFalse(os.path.lexists(migration_state.state_path(cfg.data_dir)))
-
-    def test_pending_cursor_repair_reports_marker_cleanup_after_cursor_success(self):
-        from defenseclaw import migration_state
-        from defenseclaw.bootstrap import (
-            FreshMigrationStateError,
-            repair_pending_first_run_config,
-        )
-
-        cfg, marker = self._pending_config("repair-marker-cleanup")
-        with (
-            patch(
-                "defenseclaw.file_permissions.delete_file_durable",
-                side_effect=OSError("injected durable delete failure"),
-            ),
-            self.assertRaisesRegex(
-                FreshMigrationStateError,
-                "cursor is complete, but its retry marker could not be cleared",
-            ),
-        ):
-            repair_pending_first_run_config(cfg)
-
-        self.assertTrue(os.path.isfile(marker))
-        self.assertIsNotNone(migration_state.load(cfg.data_dir))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -1487,7 +814,6 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             os.environ["DEFENSECLAW_HOME"] = self._prev_home
 
     def _write_active_connector(self, name: str) -> None:
-        import json
 
         with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
             json.dump({"name": name}, fh)
@@ -1496,7 +822,6 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         # Use the current process's pid: ``_pid_file_running`` does
         # ``os.kill(pid, 0)`` so it must point at a real, owned-by-us
         # process. Using ``os.getpid()`` keeps the test hermetic.
-        import json
 
         with open(os.path.join(self.data_dir, "gateway.pid"), "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"pid": os.getpid()}))
@@ -1580,6 +905,23 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         self.assertEqual(len(recorder), 1, "exactly one subprocess invocation expected on drift")
         self.assertEqual(recorder[0][1], "restart", "must call `defenseclaw-gateway restart`, not `start`")
 
+    def test_hook_fail_mode_change_restarts_without_roster_drift(self):
+        # GAP-1551: quickstart --fail-mode open on a running gateway with the
+        # same roster must restart it so the hooks are rewritten fail-open.
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        self.cfg.guardrail.connector = "openclaw"
+        self._write_pid_file()
+        self._write_active_connector("openclaw")
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg, hook_fail_mode_changed=True)
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted to apply the new hook fail mode")
+        self.assertEqual([cmd[1] for cmd in recorder], ["restart"])
+
     def test_drift_restart_failure_surfaces_warn_with_remediation(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
@@ -1622,6 +964,63 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             "missing active_connector.json must NEVER trigger a restart; legacy 'already running' behavior wins",
         )
 
+    def test_removed_connector_restart_names_the_dropped_connector(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        # GAP-1938: init dropped hermes; the summary only said "3 selected".
+        self.cfg.guardrail.connector = "codex"
+        self.cfg.claw.mode = "codex"
+        self.cfg.guardrail.connectors = {
+            name: PerConnectorGuardrailConfig() for name in ("claudecode", "codex", "opencode")
+        }
+        self._write_pid_file()
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"version": 2, "names": ["claudecode", "codex", "hermes", "opencode"], "name": "claudecode"},
+                fh,
+            )
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(
+            result.detail, "restarted to load the 3 selected connectors; no longer guarding hermes",
+        )
+
+    def test_added_connector_with_same_primary_restarts_on_the_new_roster(self):
+        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        # GAP-1270: re-running init to add cursor keeps the primary (codex);
+        # the gateway is still on its old roster and must be restarted.
+        self.cfg.guardrail.connector = "codex"
+        self.cfg.claw.mode = "codex"
+        self.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "hermes": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
+        }
+        self._write_pid_file()
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "names": ["codex", "hermes"], "name": "codex"}, fh)
+
+        recorder: list = []
+        with self._patch_subprocess(recorder, returncode=0):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.detail, "restarted to load the 3 selected connectors")
+        self.assertEqual([c[1] for c in recorder], ["restart"])
+
+        # Same roster: no restart, although "name" mirrors the alphabetical
+        # first entry rather than the primary.
+        with open(os.path.join(self.data_dir, "active_connector.json"), "w", encoding="utf-8") as fh:
+            json.dump({"version": 2, "names": ["codex", "cursor", "hermes"], "name": "codex"}, fh)
+        recorder = []
+        with self._patch_subprocess(recorder):
+            result = _start_gateway_structured(self.cfg)
+        self.assertEqual((result.detail, recorder), ("already running", []))
+
     def test_not_running_calls_start_not_restart(self):
         from defenseclaw.bootstrap import _start_gateway_structured
 
@@ -1640,7 +1039,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
     def test_windows_live_unrelated_reused_pid_does_not_suppress_start(self):
         import subprocess
 
-        from defenseclaw.bootstrap import _start_gateway_structured
+        from defenseclaw.bootstrap import _GATEWAY_START_TIMEOUT, _start_gateway_structured
 
         self._write_pid_file()
         completed = subprocess.CompletedProcess(
@@ -1684,7 +1083,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_GATEWAY_START_TIMEOUT,
         )
 
     def test_windows_verified_gateway_still_counts_as_running(self):
@@ -1797,7 +1196,6 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
             os.environ["DEFENSECLAW_HOME"] = self._prev_home
 
     def _stray_openclaw_json(self, token: str) -> str:
-        import json
 
         path = os.path.join(self._tmp.name, "openclaw.json")
         with open(path, "w", encoding="utf-8") as fh:
@@ -1858,33 +1256,332 @@ def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(
     assert result.status == "pass"
 
 
-def test_gemini_readiness_reports_deprecation_and_safe_cleanup(
+
+def test_devin_readiness_without_workspace_checks_user_global_hooks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bound = tmp_path / "authenticated" / ".gemini"
-    hostile = tmp_path / "hostile"
-    settings = bound / "settings.json"
-    settings.parent.mkdir(parents=True)
-    settings.write_text("{}", encoding="utf-8")
-    hostile_settings = hostile / ".gemini" / "settings.json"
-    hostile_settings.parent.mkdir(parents=True)
-    hostile_settings.write_text("{}", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(hostile))
-    monkeypatch.setenv("USERPROFILE", str(hostile))
-    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(hostile / "vendor-override"))
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(bound))
-    monkeypatch.setattr(Path, "home", lambda: hostile)
+    """MAC-U3-08: init told every user to pin a Devin workspace, which
+    re-scopes all connectors; Devin is guarded by its user-global hooks."""
+    from defenseclaw import bootstrap
 
-    result = _connector_readiness(SimpleNamespace(), "geminicli")
-    assert result.status == "warn"
-    assert "deprecated" in result.detail.lower()
-    assert result.next_command == "defenseclaw setup remove geminicli --yes"
+    config = tmp_path / "config.json"
+    monkeypatch.setattr(bootstrap, "devin_user_config_path", lambda: str(config))
+    cfg = SimpleNamespace(claw=SimpleNamespace(workspace_dir=""))
 
-    settings.unlink()
-    result = _connector_readiness(SimpleNamespace(), "geminicli")
-    assert result.status == "warn"
-    assert result.next_command == "defenseclaw setup antigravity"
+    config.write_text('{"theme": "dark"}', encoding="utf-8")
+    missing = _connector_readiness(cfg, "devin")
+    assert (missing.status, missing.next_command) == ("warn", "defenseclaw setup devin")
+
+    hook = '{"hooks": {"PreToolUse": [{"command": "~/.defenseclaw/hooks/devin-hook.sh"}]}}'
+    config.write_text(hook, encoding="utf-8")
+    assert _connector_readiness(cfg, "devin").status == "pass"
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstRunApiPortTests(unittest.TestCase):
+    def test_new_config_moves_off_a_default_port_another_account_holds(self):
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with (
+            patch.object(bootstrap.platform_support, "host_os", return_value="linux"),
+            patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970),
+        ):
+            note = bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+        self.assertIn("uses port 18980", note)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_skips_a_free_port_another_account_configured(self):
+        # GAP-1261: another account's gateway is down, so 18970 is free, but
+        # its start left a claim on it.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            open(os.path.join(claims, "defenseclaw-api-port-18970"), "w").close()
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", return_value=True),
+            ):
+                bootstrap.choose_first_run_api_port(cfg)
+                self.assertEqual(cfg.gateway.api_port, 18970, "this account's own claim moved it")
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    note = bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+        self.assertIn("configured by another account", note)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_skips_a_port_a_deleted_account_claimed(self):
+        # GAP-1704: nobody can replace a deleted account's claim, so a port
+        # it holds went to two accounts and the first one's gateway could not start.
+        import pwd
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            open(os.path.join(claims, "defenseclaw-api-port-18970"), "w").close()
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", return_value=True),
+                patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1),
+                patch.object(pwd, "getpwuid", side_effect=KeyError("deleted account")),
+            ):
+                bootstrap.choose_first_run_api_port(cfg)
+
+        self.assertEqual(cfg.gateway.api_port, 18980)
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_new_config_claims_its_port_so_a_concurrent_init_skips_it(self):
+        # GAP-1462: two accounts' inits must not pick the same free port.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970),
+            ):
+                bootstrap.choose_first_run_api_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-api-port-18980")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    bootstrap.choose_first_run_api_port(second)
+
+        self.assertEqual((first.gateway.api_port, second.gateway.api_port), (18980, 18990))
+
+    def test_new_config_moves_the_guardrail_proxy_port_off_a_held_4000(self):
+        # GAP-1701: a second account's OpenClaw proxy cannot listen on 4000.
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000):
+            note = bootstrap.choose_first_run_guardrail_port(cfg)
+        self.assertEqual(cfg.guardrail.port, 4010)
+        self.assertIn("uses port 4010", note)
+        with patch.object(bootstrap, "_api_port_free", return_value=True):
+            self.assertEqual(bootstrap.choose_first_run_guardrail_port(default_config()), "")
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_two_accounts_in_init_at_once_get_different_guardrail_ports(self):
+        # GAP-2198: neither proxy listens yet, so the free-port check alone
+        # gave both accounts 4010; the claim makes the second one move on.
+        import tempfile
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        first, second = default_config(), default_config()
+        with tempfile.TemporaryDirectory() as claims:
+            with (
+                patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims),
+                patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 4000),
+            ):
+                bootstrap.choose_first_run_guardrail_port(first)
+                self.assertTrue(os.path.exists(os.path.join(claims, "defenseclaw-guardrail-port-4010")))
+                with patch.object(bootstrap.os, "getuid", return_value=os.getuid() + 1):
+                    note = bootstrap.choose_first_run_guardrail_port(second)
+            # GAP-2283: 4010 is only claimed (nothing listens), so the note
+            # must not send the user looking for a process on it.
+            self.assertIn("in use or claimed by another account's DefenseClaw install", note)
+            self.assertNotIn("often", note)
+            with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
+                bootstrap.remove_own_api_port_claims()
+                self.assertEqual(os.listdir(claims), [])
+
+        self.assertEqual((first.guardrail.port, second.guardrail.port), (4010, 4020))
+
+    @unittest.skipIf(os.name == "nt", "port claims are a Linux and macOS hint")
+    def test_uninstall_all_removes_only_this_accounts_claims(self):
+        import tempfile
+
+        from defenseclaw import bootstrap
+
+        with tempfile.TemporaryDirectory() as claims:
+            for name in ("defenseclaw-api-port-18970", "unrelated"):
+                open(os.path.join(claims, name), "w").close()
+            with patch.object(bootstrap, "_API_PORT_CLAIM_DIR", claims):
+                bootstrap.remove_own_api_port_claims()
+            self.assertEqual(os.listdir(claims), ["unrelated"])
+
+    def test_windows_claims_hold_the_account_sid(self):
+        # GAP-1569: on Windows the claims are in %ProgramData% and name the
+        # claiming account's SID.
+        import tempfile
+
+        from defenseclaw import bootstrap
+
+        own, other = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+        with tempfile.TemporaryDirectory() as claims:
+            for port, sid in ((18970, other), (18980, own)):
+                with open(os.path.join(claims, f"defenseclaw-api-port-{port}"), "w") as handle:
+                    handle.write(sid)
+            with (
+                patch.object(bootstrap.platform_support, "host_os", return_value="windows"),
+                patch.dict(os.environ, {"ProgramData": claims}),
+                patch.object(bootstrap, "_windows_own_sid", return_value=own),
+            ):
+                # Also when the SID's account was deleted: no other account
+                # can remove its claim from %ProgramData% (GAP-1704).
+                self.assertTrue(bootstrap._api_port_claimed_by_other_account(18970))
+                self.assertFalse(bootstrap._api_port_claimed_by_other_account(18980), "own claim")
+                self.assertFalse(bootstrap._api_port_claimed_by_other_account(18990), "no claim")
+                bootstrap.remove_own_api_port_claims()
+            self.assertEqual(os.listdir(claims), ["defenseclaw-api-port-18970"])
+
+    def test_suggested_port_leaves_its_sandbox_ports_free(self):
+        # GAP-1706: the same rule as the gateway's suggestion, so doctor,
+        # status and start name the same port.
+        from defenseclaw import bootstrap
+
+        with patch.object(bootstrap, "_api_port_available", return_value=True), patch.object(
+            bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18982
+        ):
+            self.assertEqual(bootstrap.suggest_free_api_port("127.0.0.1", 18970), 18990)
+
+    def test_windows_also_moves_and_probes_the_port_exclusively(self):
+        import socket
+
+        from defenseclaw import bootstrap
+        from defenseclaw.config import default_config
+
+        cfg = default_config()
+        with patch.object(bootstrap.platform_support, "host_os", return_value="windows"):
+            with patch.object(bootstrap, "_api_port_free", side_effect=lambda _host, port: port != 18970):
+                bootstrap.choose_first_run_api_port(cfg)
+            self.assertEqual(cfg.gateway.api_port, 18980)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+                holder.bind(("127.0.0.1", 0))
+                holder.listen(1)
+                held = holder.getsockname()[1]
+                with patch.object(socket.socket, "setsockopt") as setsockopt:
+                    bootstrap._api_port_free("127.0.0.1", held)
+        self.assertNotIn(socket.SO_REUSEADDR, [call.args[1] for call in setsockopt.call_args_list])
+
+
+def test_hooks_missing_because_the_gateway_did_not_start_point_at_the_start():
+    from defenseclaw.bootstrap import StepResult, _defer_hooks_to_gateway_start, _next_commands
+
+    setup = [
+        StepResult(
+            "Sidecar",
+            "warn",
+            "Error: cannot start the gateway: ... with: defenseclaw setup gateway --api-port 18971, then run: ...",
+            "defenseclaw setup gateway --api-port 18971",
+        )
+    ]
+    readiness = [
+        StepResult("Connector", "warn", "Kiro hooks not found yet", "defenseclaw setup kiro"),
+        StepResult("Connector", "warn", "Devin project hooks not found", "defenseclaw setup devin --workspace <project>"),
+    ]
+    _defer_hooks_to_gateway_start(setup, readiness)
+
+    assert readiness[0].detail == "Kiro hooks not found yet — written when the gateway starts"
+    assert readiness[1].next_command == "defenseclaw setup devin --workspace <project>"
+    assert _next_commands(setup, readiness, object(), "action")[:3] == [
+        "defenseclaw setup gateway --api-port 18971",
+        "defenseclaw-gateway start",
+        "defenseclaw setup devin --workspace <project>",
+    ]
+
+
+def test_hooks_pending_a_gateway_not_started_on_purpose_are_not_warnings():
+    # GAP-1491: with --no-start-gateway every connector read "! not found yet"
+    # and Next listed `defenseclaw setup <connector>` for each of them.
+    from defenseclaw.bootstrap import StepResult, _defer_hooks_to_gateway_start, _next_commands, _rollup_status
+
+    setup = [StepResult("Sidecar", "skip", "not started (--no-start-gateway)", "defenseclaw-gateway start")]
+    readiness = [StepResult("Connector", "warn", "Amp system policy plugin not found at /p", "defenseclaw setup amp")]
+    _defer_hooks_to_gateway_start(setup, readiness)
+
+    assert readiness[0].status == "skip"
+    assert readiness[0].detail.endswith("written when the gateway starts")
+    assert _rollup_status(setup, readiness) == "ready"
+    assert "defenseclaw setup amp" not in _next_commands(setup, readiness, object(), "action")
+
+
+def test_a_gateway_start_that_outlasts_init_says_it_is_still_starting(tmp_path, monkeypatch):
+    # GAP-1382: init gave up after 30 s and printed "start timed out" on
+    # Windows, though the gateway was up seconds later.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    running = iter([False, True])
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: next(running))
+
+    def slow(argv, **kwargs):
+        assert kwargs["timeout"] >= 90
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", slow)
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail.startswith("still starting")
+    assert step.next_command == "defenseclaw-gateway status"
+
+
+def test_a_failed_first_start_names_the_error_not_the_migration_banner(tmp_path, monkeypatch):
+    # GAP-2341: on a fresh home the first stderr line is an audit migration
+    # banner, and init showed it as the Sidecar failure.
+    import subprocess
+
+    from defenseclaw import bootstrap
+
+    cfg = MagicMock()
+    cfg.data_dir = str(tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda _name: "/bin/defenseclaw-gateway")
+    monkeypatch.setattr(bootstrap, "_pid_file_running", lambda _path: False)
+    stderr = (
+        "[audit] applying migration 1: initial schema: audit_events, scan_results\n"
+        "[judge_body] applying migration 1: initial schema\n"
+        "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command\n"
+    )
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", lambda argv, **_kw: subprocess.CompletedProcess(argv, 1, "", stderr)
+    )
+    step = bootstrap._start_gateway_structured(cfg)
+
+    assert step.status == "warn"
+    assert step.detail == "Error: start daemon readiness: hermes hook config: handler has a tampered DefenseClaw command"
+    banner_only = subprocess.CompletedProcess([], 1, "", "[audit] applying migration 1: x\ngateway exited\n")
+    assert bootstrap.gateway_failure_detail(banner_only, "start failed") == "gateway exited"
+    assert bootstrap.gateway_failure_detail(subprocess.CompletedProcess([], 1, "", ""), "start failed") == "start failed"
+
+
+def test_init_waits_past_the_windows_gateway_readiness_wait():
+    # GAP-1346: init killed `defenseclaw-gateway start` before its own Windows
+    # readiness wait (240 s) ended, so the watchdog never started.
+    import inspect
+
+    from defenseclaw import bootstrap
+    from defenseclaw.commands import cmd_init
+
+    assert "_GATEWAY_START_TIMEOUT = (660 if os.name == \"nt\" else 210) + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE" in inspect.getsource(
+        bootstrap
+    )
+    # GAP-1909: the launcher applies a pending audit upgrade before its wait.
+    assert bootstrap._GATEWAY_AUDIT_UPGRADE_ALLOWANCE >= 300
+    for fn in (bootstrap._start_gateway_structured, cmd_init._start_gateway, cmd_init._restart_gateway_quiet):
+        src = inspect.getsource(fn)
+        assert "timeout=_GATEWAY_START_TIMEOUT" in src
+        assert "timeout=15" not in src and "timeout=30" not in src

@@ -24,7 +24,7 @@ import (
 )
 
 type hookProfileRuntime struct {
-	RememberRawEvents func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string
+	RememberRawEvents func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string
 	EmitLLMEvent      func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}, rawEventIDs []string)
 	Evaluate          func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse
 	EnrichSpan        func(ctx context.Context, rawBody []byte, payload map[string]interface{})
@@ -59,7 +59,7 @@ func hookRuntimeForProfile(profile connector.HookProfile) hookProfileRuntime {
 
 func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
-		RememberRawEvents: func(a *APIServer, req agentHookRequest, _ []byte, _ map[string]interface{}) []string {
+		RememberRawEvents: func(a *APIServer, _ context.Context, req agentHookRequest, _ []byte, _ map[string]interface{}) []string {
 			return a.rememberHookRawEvents(req)
 		},
 		EmitLLMEvent: func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, _ map[string]interface{}, _ []string) {
@@ -73,14 +73,14 @@ func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 
 func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
-		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
-			return a.rememberCodexRawHookEvents(decodeCodexRequestFromBytes(rawBody, payload), req.SemanticEventID)
+		RememberRawEvents: func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
+			return a.rememberCodexRawHookEvents(decodeCodexRequestForContext(ctx, rawBody, payload), req.SemanticEventID)
 		},
 		EmitLLMEvent: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}, rawEventIDs []string) {
-			a.emitCodexHookLLMEvent(ctx, decodeCodexRequestFromBytes(rawBody, payload), rawEventIDs, rawBody)
+			a.emitCodexHookLLMEvent(ctx, decodeCodexRequestForContext(ctx, rawBody, payload), rawEventIDs, rawBody)
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
-			cxReq := decodeCodexRequestFromBytes(rawBody, payload)
+			cxReq := decodeCodexRequestForContext(ctx, rawBody, payload)
 			enrichCodexHookSpan(ctx, cxReq)
 			return codexResponseToAgentHookResponse(a.evaluateCodexHookForProfile(ctx, cxReq, profile))
 		},
@@ -89,19 +89,26 @@ func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
 
 func claudeCodeHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
-		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
-			return a.rememberClaudeCodeRawHookEvents(decodeClaudeCodeRequestFromBytes(rawBody, payload), req.SemanticEventID)
+		RememberRawEvents: func(a *APIServer, ctx context.Context, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
+			return a.rememberClaudeCodeRawHookEvents(decodeClaudeCodeRequestForContext(ctx, rawBody, payload), req.SemanticEventID)
 		},
 		EmitLLMEvent: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}, rawEventIDs []string) {
-			a.emitClaudeCodeHookLLMEvent(ctx, decodeClaudeCodeRequestFromBytes(rawBody, payload), rawEventIDs, rawBody)
+			a.emitClaudeCodeHookLLMEvent(ctx, decodeClaudeCodeRequestForContext(ctx, rawBody, payload), rawEventIDs, rawBody)
 		},
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
-			return claudeCodeResponseToAgentHookResponse(a.evaluateClaudeCodeHook(ctx, decodeClaudeCodeRequestFromBytes(rawBody, payload)))
+			return claudeCodeResponseToAgentHookResponse(a.evaluateClaudeCodeHook(ctx, decodeClaudeCodeRequestForContext(ctx, rawBody, payload)))
 		},
 	}
 }
 
 func decodeClaudeCodeRequestFromBytes(rawBody []byte, payload map[string]interface{}) claudeCodeHookRequest {
+	return decodeClaudeCodeRequestForContext(context.Background(), rawBody, payload)
+}
+
+// decodeClaudeCodeRequestForContext decodes a Claude Code hook body and
+// resolves its working directories for the request: host sanitisation for
+// host traffic, FSView translation for a sandbox.
+func decodeClaudeCodeRequestForContext(ctx context.Context, rawBody []byte, payload map[string]interface{}) claudeCodeHookRequest {
 	var req claudeCodeHookRequest
 	_ = json.Unmarshal(rawBody, &req)
 	req.Payload = payload
@@ -111,17 +118,25 @@ func decodeClaudeCodeRequestFromBytes(rawBody []byte, payload map[string]interfa
 		req.Payload["agent_name"] = agentName
 	}
 	req.AgentType = firstNonEmpty(req.AgentType, agentType)
-	req.CWD = sanitizeHookCWD(req.CWD)
-	req.NewCWD = sanitizeHookCWD(req.NewCWD)
-	req.OldCWD = sanitizeHookCWD(req.OldCWD)
+	req.CWD = hookCWDForContext(ctx, req.CWD)
+	req.NewCWD = hookCWDForContext(ctx, req.NewCWD)
+	req.OldCWD = hookCWDForContext(ctx, req.OldCWD)
+	req.sandboxView, _ = sandboxHookView(ctx)
 	return req
 }
 
 func decodeCodexRequestFromBytes(rawBody []byte, payload map[string]interface{}) codexHookRequest {
+	return decodeCodexRequestForContext(context.Background(), rawBody, payload)
+}
+
+// decodeCodexRequestForContext is decodeClaudeCodeRequestForContext for
+// Codex.
+func decodeCodexRequestForContext(ctx context.Context, rawBody []byte, payload map[string]interface{}) codexHookRequest {
 	var req codexHookRequest
 	_ = json.Unmarshal(rawBody, &req)
 	req.Payload = payload
-	req.CWD = sanitizeHookCWD(req.CWD)
+	req.CWD = hookCWDForContext(ctx, req.CWD)
+	req.sandboxView, _ = sandboxHookView(ctx)
 	return req
 }
 
@@ -140,6 +155,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
 		SourceReason:      resp.SourceReason,
+		laneVerdict:       resp.laneVerdict,
 	}
 }
 
@@ -158,5 +174,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
 		SourceReason:      resp.SourceReason,
+		laneVerdict:       resp.laneVerdict,
 	}
 }

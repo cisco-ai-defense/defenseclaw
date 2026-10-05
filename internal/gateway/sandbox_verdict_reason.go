@@ -1,0 +1,418 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
+)
+
+// Plain reasons for sandbox hook verdicts.
+//
+// DefenseClaw explains a sandbox block to the agent so it can adapt, and the
+// same text becomes the sandbox's last_blocked and its activity-feed entry.
+// The verdict reason cannot serve: it quotes rule titles next to matched
+// content, so the agent display path redacts it into "<redacted len=… sha=…>"
+// placeholders that explain nothing. A sandbox verdict instead carries a
+// reason built only from the static metadata of the rules that decided it,
+// looked up by rule ID in the active catalogs: the rule ID and its title, in
+// the wording a host hook uses. It never contains matched content or
+// free-form verdict text, whatever the redaction policy.
+
+const (
+	// sandboxReasonMaxRules is how many deciding rules a reason names.
+	sandboxReasonMaxRules = 3
+	// sandboxReasonMaxTitle bounds a rule title in a reason.
+	sandboxReasonMaxTitle = 120
+)
+
+// sandboxRuleIDPattern is the shape of a rule ID a reason may name.
+var sandboxRuleIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$`)
+
+// sandboxFlaggedNote closes the reason of a verdict that let the action run
+// (an alert, or a block the hook event cannot enforce): telling the agent
+// to try another approach would have it abandon or redo work that went
+// through.
+const sandboxFlaggedNote = "The action was allowed; DefenseClaw recorded the finding for the user's review."
+
+// sandboxRule is the static metadata of one deciding rule.
+type sandboxRule struct {
+	id, title, severity string
+}
+
+// sandboxVerdictReason is the plain reason of a sandbox verdict with the
+// given enforced action, deciding rule IDs and finding labels
+// ("RULE-ID:Title"). A block or a confirmation reads as it does from a host
+// hook (agentBlockSentence, agentConfirmSentence): the same rule used to
+// read "Blocked by DefenseClaw rule SEC-AWS-KEY: AWS access key. Do not
+// read, print or send credentials ..." in a sandbox and "DefenseClaw policy
+// blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in
+// another form." on the host (GAP-1885).
+func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []string) string {
+	rules := sandboxVerdictRules(connectorName, ruleIDs, findings)
+	switch action {
+	case "block":
+		return agentBlockSentence(sandboxRulesSubject(rules))
+	case "confirm":
+		return agentConfirmSentence(sandboxRulesSubject(rules))
+	}
+	if len(rules) == 0 {
+		return "Allowed but flagged by DefenseClaw policy. " + sandboxFlaggedNote
+	}
+	first := rules[0]
+	var b strings.Builder
+	b.WriteString("Allowed but flagged by DefenseClaw rule " + first.id)
+	if first.title != "" {
+		b.WriteString(": " + strings.TrimRight(first.title, "."))
+	}
+	if len(rules) > 1 {
+		others := make([]string, 0, len(rules)-1)
+		for _, r := range rules[1:] {
+			others = append(others, r.id)
+		}
+		b.WriteString(" (also " + strings.Join(others, ", ") + ")")
+	}
+	b.WriteString(". " + sandboxFlaggedNote)
+	return b.String()
+}
+
+// sandboxRulesSubject names the deciding rules the way agentMatchedRules
+// does: "rule ID: Title", or "rules ID1: Title, ID2" (a rule whose title
+// is left out by its ID alone); "" for none.
+func sandboxRulesSubject(rules []sandboxRule) string {
+	items := make([]string, 0, len(rules))
+	for _, r := range rules {
+		item := r.id
+		if title := strings.TrimRight(r.title, "."); title != "" {
+			item += ": " + title
+		}
+		items = append(items, item)
+	}
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return "rule " + items[0]
+	}
+	return "rules " + strings.Join(items, ", ")
+}
+
+// sandboxVerdictRules resolves a verdict's rule IDs, in decision order and
+// then from its finding labels, against the connector's guardrail catalog
+// and the built-in CodeGuard rules. IDs no catalog knows are left out: they
+// cannot be told apart from content. The most severe rule leads.
+func sandboxVerdictRules(connectorName string, ruleIDs, findings []string) []sandboxRule {
+	candidates := make([]string, 0, len(ruleIDs)+len(findings))
+	candidates = append(candidates, ruleIDs...)
+	for _, label := range findings {
+		label = strings.TrimPrefix(strings.TrimSpace(label), "codeguard:")
+		if id, _, ok := strings.Cut(label, ":"); ok {
+			candidates = append(candidates, id)
+		}
+	}
+	var (
+		out  []sandboxRule
+		seen = map[string]bool{}
+		gen  = snapshotRulePackGeneration(connectorName)
+	)
+	for _, id := range candidates {
+		id = strings.TrimSpace(id)
+		key := strings.ToUpper(id)
+		if seen[key] || !sandboxRuleIDPattern.MatchString(id) {
+			continue
+		}
+		seen[key] = true
+		if r, ok := lookupSandboxGuardrailRule(gen, key); ok {
+			out = append(out, r)
+		} else if r, ok := lookupSandboxCodeGuardRule(key); ok {
+			out = append(out, r)
+		}
+	}
+	// Most severe first, keeping decision order among equals.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && severityRank[out[j].severity] > severityRank[out[j-1].severity]; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	if len(out) > sandboxReasonMaxRules {
+		out = out[:sandboxReasonMaxRules]
+	}
+	return out
+}
+
+func lookupSandboxGuardrailRule(gen *compiledRulePackCategories, key string) (sandboxRule, bool) {
+	if gen == nil {
+		return sandboxRule{}, false
+	}
+	for _, category := range gen.categories {
+		for _, rule := range category.Rules {
+			if strings.ToUpper(strings.TrimSpace(rule.ID)) != key {
+				continue
+			}
+			r := sandboxRule{id: strings.TrimSpace(rule.ID), severity: strings.ToUpper(rule.Severity)}
+			if title := strings.TrimSpace(rule.Title); trustedBuiltInFindingLabel(rule.ID+":"+rule.Title) ||
+				sandboxTitleSafe(title, rule, gen) {
+				r.title = title
+			}
+			return r, true
+		}
+	}
+	return sandboxRule{}, false
+}
+
+func lookupSandboxCodeGuardRule(key string) (sandboxRule, bool) {
+	for _, rule := range scanner.BuiltinRulesMeta() {
+		if strings.ToUpper(rule.ID) == key {
+			return sandboxRule{
+				id: rule.ID, title: strings.TrimSpace(rule.Title), severity: strings.ToUpper(string(rule.Severity)),
+			}, true
+		}
+	}
+	return sandboxRule{}, false
+}
+
+// sandboxTitleSafe vets a rule-pack title the compiled-in catalog does not
+// vouch for. A pack author can put a literal in a title; a title that the
+// rule itself, or any other rule in the catalog, would match is left out.
+func sandboxTitleSafe(title string, rule PatternRule, gen *compiledRulePackCategories) bool {
+	if title == "" || len(title) > sandboxReasonMaxTitle || !utf8.ValidString(title) {
+		return false
+	}
+	for _, r := range title {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	if rule.Pattern != nil && rule.Pattern.MatchString(title) {
+		return false
+	}
+	for _, category := range gen.categories {
+		for _, otherRule := range category.Rules {
+			if otherRule.Pattern != nil && otherRule.Pattern.MatchString(title) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sentence(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.HasSuffix(s, ".") {
+		return s
+	}
+	return s + "."
+}
+
+// safeApplySandboxVerdictReason is applySandboxVerdictReason with a
+// recover: a panic keeps the verdict as it was.
+func (a *APIServer) safeApplySandboxVerdictReason(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) (out agentHookResponse) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = resp
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox verdict reason panic: %v", r))
+		}
+	}()
+	return a.applySandboxVerdictReason(ctx, profile, connectorName, req, rawBody, payload, resp)
+}
+
+// applySandboxVerdictReason gives a sandbox hook verdict its plain reason
+// and re-renders the harness output around it. Host verdicts are returned
+// unchanged, and allowed verdicts only lose their finding labels. The source
+// reason stays on the response for the audit sinks, which apply their own
+// redaction.
+func (a *APIServer) applySandboxVerdictReason(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) agentHookResponse {
+	if !sandboxHookForConnector(ctx, connectorName) {
+		return resp
+	}
+	resp = a.sandboxVerdictWithReason(ctx, profile, connectorName, req, rawBody, payload, resp)
+	// The destinations the sandbox's egress proxy just refused, which the
+	// tool could not see the reason for (#954).
+	return a.addSandboxEgressRefusals(ctx, profile, connectorName, req, rawBody, payload, resp)
+}
+
+// sandboxVerdictWithReason is applySandboxVerdictReason for a sandbox
+// request, before the egress refusals.
+func (a *APIServer) sandboxVerdictWithReason(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) agentHookResponse {
+	// A verdict of destination rules alone, for destinations the user
+	// unblocked for this sandbox, is an allow: the proxy lets the sandbox
+	// reach them (#954).
+	if lifted, ok := a.liftUnblockedDestinations(ctx, req, resp); ok {
+		return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, lifted, "")
+	}
+	// Finding labels quote titles the catalogs do not vouch for; the rule
+	// IDs travel on rule_ids.
+	findings := resp.Findings
+	resp.Findings = nil
+	action := strings.ToLower(strings.TrimSpace(resp.Action))
+	raw := strings.ToLower(strings.TrimSpace(resp.RawAction))
+	if (action == "" || action == "allow") && (raw == "" || raw == "allow") {
+		// An allowed verdict that carries a finding (a profile that
+		// answers a HIGH rule with allow) is flagged: the activity feed
+		// and last reason read the plain text, while the harness output
+		// stays that of an allow.
+		if severityRank[strings.ToUpper(strings.TrimSpace(resp.Severity))] >= severityRank["LOW"] &&
+			(len(resp.RuleIDs) > 0 || len(findings) > 0) {
+			resp.SourceReason = hookSourceReason(resp)
+			resp.Reason = sandboxVerdictReason(connectorName, "alert", resp.RuleIDs, findings)
+		}
+		return resp
+	}
+	// The verb follows what the harness does: a block DefenseClaw cannot
+	// enforce on this event (a tool result) is flagged, not blocked.
+	plain := sandboxVerdictReason(connectorName, action, resp.RuleIDs, findings)
+	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
+}
+
+// sandboxInternalErrorReason is the plain reason of a sandbox hook that
+// failed closed: DefenseClaw failed while judging the call (a recovered
+// panic), so it blocked the call without a verdict. Read as a policy
+// block, the agent would look for another way to do the same thing, and
+// the user would look for a rule that is not there.
+const sandboxInternalErrorReason = "DefenseClaw hit an internal error while checking this call and blocked it. " +
+	"Retry the call; if this keeps happening, ask the user to run defenseclaw sandbox doctor."
+
+// failSandboxHookClosed turns the response of a sandbox hook whose
+// evaluation or finalization panicked into a block with
+// sandboxInternalErrorReason, and marks the request so the ingress reports
+// it as a hook failure (OnHookFailure). The host's fail-open posture for a
+// crashed evaluator keeps workflows running outside a sandbox, but inside
+// one the hook is the only gate on the tool call. Host responses are
+// returned unchanged.
+func (a *APIServer) failSandboxHookClosed(
+	ctx context.Context,
+	profile connector.HookProfile,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+) (out agentHookResponse) {
+	if !sandboxHookForConnector(ctx, connectorName) {
+		return resp
+	}
+	markSandboxHookFailedClosed(ctx)
+	resp.Action, resp.RawAction = "block", "block"
+	resp.WouldBlock = true
+	resp.Mode = "action"
+	resp.Findings = nil
+	defer func() {
+		if r := recover(); r != nil {
+			out = resp
+			out.Reason = sandboxInternalErrorReason
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("sandbox fail-closed render panic: %v", r))
+		}
+	}()
+	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, sandboxInternalErrorReason)
+}
+
+// renderSandboxVerdict gives a sandbox verdict its plain reason and
+// re-renders the harness output around it. The source reason stays on the
+// response for the audit sinks.
+func (a *APIServer) renderSandboxVerdict(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	resp agentHookResponse,
+	plain string,
+) agentHookResponse {
+	resp.SourceReason = hookSourceReason(resp)
+	resp.Reason = plain
+	var cc *claudeCodeHookRequest
+	switch profile.Name {
+	case "claudecode":
+		decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+		cc = &decoded
+		resp.AdditionalContext = claudeCodeAdditionalContext(
+			resp.RawAction, resp.Severity, plain, resp.WouldBlock && claudeCodeCanEnforce(decoded),
+		)
+	case "codex":
+		resp.AdditionalContext = codexAdditionalContext(resp.RawAction, resp.Severity, plain, resp.Mode, resp.WouldBlock)
+	default:
+		resp.AdditionalContext = genericHookAdditionalContext(req.ConnectorName, req.HookEventName, resp.Mode, resp.RawAction, resp.Severity, plain, resp.WouldBlock)
+	}
+	resp.HookOutput = sandboxHookOutput(ctx, profile, req, rawBody, payload, cc, resp)
+	return resp
+}
+
+// sandboxHookOutput renders the harness output of a sandbox verdict from
+// its action, reason and additional context. cc is the Claude Code request
+// when the caller decoded it already.
+func sandboxHookOutput(
+	ctx context.Context,
+	profile connector.HookProfile,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+	cc *claudeCodeHookRequest,
+	resp agentHookResponse,
+) map[string]interface{} {
+	switch profile.Name {
+	case "claudecode":
+		if cc == nil {
+			decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+			cc = &decoded
+		}
+		return claudeCodeOutput(*cc, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+	case "codex":
+		outputRawAction := resp.RawAction
+		if resp.Mode != "action" && resp.AdditionalContext == "" {
+			outputRawAction = resp.Action
+		}
+		return codexOutput(req.HookEventName, resp.Action, outputRawAction, resp.Reason, resp.AdditionalContext)
+	}
+	if profile.Respond != nil {
+		return profile.Respond(connector.HookRespondInput{
+			Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,
+			Reason: resp.Reason, AdditionalContext: resp.AdditionalContext, Caps: profile.Capabilities,
+		}).Output
+	}
+	return hookOutputFor(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext, profile.Capabilities)
+}

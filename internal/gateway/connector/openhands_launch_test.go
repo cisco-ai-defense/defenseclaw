@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -161,6 +163,13 @@ func newProtectedOpenHandsLaunchFixture(t *testing.T) (SetupOpts, string, string
 	conn := NewOpenHandsConnector()
 	if err := conn.setup(context.Background(), opts, ""); err != nil {
 		t.Fatalf("seed OpenHands hook registration: %v", err)
+	}
+	if runtime.GOOS == "darwin" {
+		// macOS contract publication binds to the protected setup selection;
+		// write it before the lock so the lock stays the newer record.
+		if err := WriteManagedSetupAgentSelection(dataDir, "openhands", stablePath, opts.AgentVersion); err != nil {
+			t.Fatalf("seed OpenHands setup selection: %v", err)
+		}
 	}
 	entry := NewHookContractLockEntry(opts, conn, "test")
 	entry.AgentExecutable = stablePath
@@ -327,5 +336,49 @@ func TestOpenHandsProtectedLaunchRejectsNonDarwinAndNonLoopback(t *testing.T) {
 				t.Fatalf("launch error leaked scoped token: %v", err)
 			}
 		})
+	}
+}
+
+// seedOpenHandsDarwinSelection writes an OpenHands image and the protected
+// setup selection that macOS setup admission and contract publication
+// require, and returns the executable and version to set up with.
+func seedOpenHandsDarwinSelection(t *testing.T, dataDir, binDir string) (string, string) {
+	t.Helper()
+	const version = "1.16.0"
+	for _, dir := range []string{binDir, dataDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	executable := filepath.Join(binDir, "openhands")
+	if err := os.WriteFile(executable, []byte("OpenHands executable fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteManagedSetupAgentSelection(dataDir, "openhands", executable, version); err != nil {
+		t.Fatalf("seed OpenHands setup selection: %v", err)
+	}
+	return executable, version
+}
+
+// GAP-2621: an OpenHands that 0.8.10 enrolled has no recorded executable. The
+// macOS setup refusal must be an executable admission, which a gateway start
+// skips for OpenHands alone instead of rolling every connector back, and it
+// names the fix.
+func TestOpenHandsDarwinSetupAdmissionWithoutRecordedExecutableIsSkippable(t *testing.T) {
+	err := openHandsDarwinSetupAdmission(SetupOpts{
+		DataDir:      testenv.PrivateTempDir(t),
+		AgentVersion: "OpenHands CLI 1.16.0",
+	})
+	if !errors.Is(err, ErrExecutableAdmission) {
+		t.Fatalf("admission error = %v, want ErrExecutableAdmission", err)
+	}
+	for _, want := range []string{
+		"no verified OpenHands executable is recorded",
+		"defenseclaw setup openhands",
+		"defenseclaw setup trusted-paths add",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("admission error %q does not mention %q", err, want)
+		}
 	}
 }

@@ -102,6 +102,26 @@ def test_skill_list_to_row_status_precedence_matches_go_oracle() -> None:
         ({"name": "a", "source": "enforcement"}, "removed"),
         ({"name": "a"}, "inactive"),
         ({"name": "a", "status": "blocked"}, "blocked"),
+        # The CLI's policy verdict wins over the severity heuristic, so a
+        # first-party skill the policy allows does not read "warning".
+        (
+            {
+                "name": "a",
+                "eligible": True,
+                "verdict": "allowed",
+                "scan": {"clean": False, "max_severity": "MEDIUM", "total_findings": 3},
+            },
+            "active",
+        ),
+        (
+            {
+                "name": "a",
+                "eligible": True,
+                "verdict": "rejected",
+                "scan": {"clean": False, "max_severity": "CRITICAL", "total_findings": 3},
+            },
+            "rejected",
+        ),
     ]
 
     for raw, want in cases:
@@ -266,12 +286,10 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
     claude_config = tmp_path / "claude-home" / "settings.json"
     codex_config = tmp_path / "codex-home" / "config.toml"
     devin_config = tmp_path / "devin-config"
-    gemini_home = tmp_path / "gemini-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config.parent))
     monkeypatch.setenv("CODEX_HOME", str(codex_config.parent))
     monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
     cases = {
         "openclaw": "OpenClaw config",
         "claudecode": str(claude_config),
@@ -280,15 +298,11 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
         "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
         "devin": str(devin_config / "mcp_config.json"),
-        "geminicli": connector_paths.cleanup_only_guidance("geminicli"),
         "copilot": "./.github/mcp.json",
         "antigravity": "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json",
     }
     for connector, want in cases.items():
         assert mcp_unset_target_for_connector(connector) == want
-        if connector == "geminicli":
-            assert mcp_actions("blocked", connector) == ()
-            continue
         unset = next(action for action in mcp_actions("blocked", connector) if action.key == "x")
         assert want in unset.description
 
@@ -340,38 +354,6 @@ def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contrac
     )
 
 
-def test_catalog_gemini_labels_are_cleanup_only_and_route_to_antigravity(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    gemini_home = tmp_path / "authenticated" / ".gemini"
-    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
-
-    guidance = connector_paths.cleanup_only_guidance("geminicli")
-    for category in ("skills", "plugins", "mcps", "config"):
-        assert connector_source_label("geminicli", category) == guidance
-    assert "Antigravity" in guidance
-    assert "setup remove geminicli --yes" in guidance
-
-
-def test_catalog_gemini_panels_expose_no_active_actions() -> None:
-    skills = SkillsPanelModel(connector="geminicli")
-    skills.apply_json(json.dumps([{"name": "legacy-skill"}]))
-    mcps = MCPsPanelModel(connector="geminicli")
-    mcps.apply_json(json.dumps([{"name": "legacy-mcp"}]))
-    plugins = PluginsPanelModel(connector="geminicli")
-    plugins.apply_json(json.dumps([{"id": "legacy-plugin", "name": "legacy-plugin"}]))
-
-    for panel in (skills, mcps, plugins):
-        assert panel.menu_actions() == ()
-        assert panel.action_intent("b") is None
-        refresh = panel.handle_key("r")
-        assert refresh.intent is None
-        assert "Antigravity" in refresh.hint
-
-    assert mcps.handle_key("+").open_mcp_set_form is False
-
-
 def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:
     skills = connector_source_label("codex", "skills")
     mcps = connector_source_label("codex", "mcps")
@@ -418,10 +400,10 @@ def test_plugin_parse_connector_gate_actions_and_intents() -> None:
     # F-0521: action-menu intents must target the stable plugin id, not the
     # spoofable display name (which previously let actions hit the wrong row).
     assert panel.action_intent("s").args == ("plugin", "scan", "plug_tutor")
-    assert panel.action_intent("u").args == ("plugin", "allow", "plug_tutor")
+    assert panel.action_intent("u").args == ("plugin", "unblock", "plug_tutor")
 
     panel.apply_loaded([PluginRow(id="plug_tutor", name="tutor", verdict="blocked", status="installed")])
-    assert panel.handle_key("u").intent.args == ("plugin", "allow", "plug_tutor")
+    assert panel.handle_key("u").intent.args == ("plugin", "unblock", "plug_tutor")
 
 
 def test_plugin_actions_state_matrix_matches_go() -> None:
@@ -869,7 +851,8 @@ def test_skill_detail_pane_renders_decisions_scan_and_action_legend() -> None:
     # The legend should surface the actual shortcut keys, not a vague
     # "press o for menu" hint. Blocked status exposes Unblock so the
     # operator can recover without spelunking through the action menu.
-    assert "[s] Scan" in out and "[i] Info" in out
+    # s/b/a/u are row shortcuts; the rest are listed as the o menu.
+    assert "[s] Scan" in out and "[o] more: Info" in out
     assert "[u] Unblock" in out
 
 
@@ -911,7 +894,8 @@ def test_mcp_detail_pane_renders_transport_url_and_command() -> None:
     assert "Command    uvx mcp-server-context7" in out
     # MCP legend should expose the unset-target hint via mcp_actions
     # under the action key list.
-    assert "[s] Scan" in out and "[i] Info" in out
+    # s/b/a/u are row shortcuts; the rest are listed as the o menu.
+    assert "[s] Scan" in out and "[o] more: Info" in out
 
 
 def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
@@ -937,28 +921,24 @@ def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
     assert "Version    1.2.0" in out
     assert "Origin     builtin" in out
     assert "Scan       [#FBBF24]MEDIUM[/] · 2 findings" in out
-    # Enabled plugin should expose the Disable action shortcut.
-    assert "[d] Disable" in out
+    # Enabled plugin offers Disable (from the o menu, not a row key).
+    assert "Disable" in out.split("[o] more:")[1]
 
 
-def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
-    """The header now groups navigation and action keys on separate
-    lines so operators see the action set (including the previously
-    hidden ``o open menu``) without scanning a single dense line.
+def test_catalog_summary_text_is_one_header_line() -> None:
+    """The header is the title and the row count; keys live in the hint
+    bar, the ``?`` sheet and the detail pane's action legend so the table
+    stays on screen at 80x24.
     """
 
     panel = SkillsPanelModel()
     panel.apply_loaded([SkillRow(name="alpha", status="active")])
 
     text = panel.summary_text("Skills")
-    # Action set is on its own line so it can't be missed.
-    assert "[dim]Actions:[/]" in text
-    assert "o open menu" in text
-    assert "u unblock" in text
-    # Navigation primer is on the row above, not jammed in with actions.
-    assert "[dim]Navigate:[/]" in text
-    # Filter / detail metadata still on line 2.
-    assert "1 of 1 rows" in text
+    assert "\n" not in text
+    assert "1 of 1" in text
+    panel.set_filter("al")
+    assert "filter:" in panel.summary_text("Skills")
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +1010,7 @@ def test_mcp_and_plugin_mutation_intents_thread_focus() -> None:
     assert plugin.action_intent("i").args == ("plugin", "info", "pg", "--connector", "codex")
     assert plugin.action_intent("b").args == ("plugin", "block", "pg", "--connector", "codex")
     assert plugin.action_intent("a").args == ("plugin", "allow", "pg", "--connector", "codex")
-    assert plugin.action_intent("u").args == ("plugin", "allow", "pg", "--connector", "codex")
+    assert plugin.action_intent("u").args == ("plugin", "unblock", "pg", "--connector", "codex")
     # Direct-scan ('s' in handle_key) also follows focus.
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg", "--connector", "codex")
 
@@ -1088,7 +1068,7 @@ def test_action_intents_target_selected_row_owner_under_all() -> None:
     plugin.select_row(1)
     assert plugin.action_intent("s").args == ("plugin", "scan", "pg-b", "--connector", "codex")
     assert plugin.action_intent("b").args == ("plugin", "block", "pg-b", "--connector", "codex")
-    assert plugin.action_intent("u").args == ("plugin", "allow", "pg-b", "--connector", "codex")
+    assert plugin.action_intent("u").args == ("plugin", "unblock", "pg-b", "--connector", "codex")
     # Direct-scan ('s' in handle_key) follows the row owner too.
     assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg-b", "--connector", "codex")
 

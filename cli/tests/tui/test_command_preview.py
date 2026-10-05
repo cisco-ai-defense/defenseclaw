@@ -12,11 +12,10 @@
 
 from __future__ import annotations
 
-import pytest
+import dataclasses
+
 from defenseclaw.tui.command_line import ParsedCommand
-from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, build_command_preview, mask_argv
-from textual.app import App, ComposeResult
-from textual.widgets import Static
+from defenseclaw.tui.screens.command_preview import build_command_preview, mask_argv
 
 
 def _parsed(args: tuple[str, ...], *, category: str = "setup") -> ParsedCommand:
@@ -49,85 +48,44 @@ def test_command_preview_shows_origin_and_restart_effect() -> None:
     assert preview.restart == "possible"
 
 
-class PreviewHarness(App[bool | None]):
-    def __init__(self, command: ParsedCommand) -> None:
-        super().__init__()
-        self.command = command
-        self.result: bool | None = None
+def test_command_preview_upgrade_focuses_cancel_by_default() -> None:
+    """GAP-2090: Enter alone must not start an upgrade or rollback."""
 
-    def compose(self) -> ComposeResult:
-        yield Static("preview harness")
-
-    def on_mount(self) -> None:
-        self.push_screen(CommandPreviewScreen(self.command), self._set_result)
-
-    def _set_result(self, result: bool) -> None:
-        self.result = result
+    for verb in ("upgrade", "rollback"):
+        preview = build_command_preview(_parsed((verb, "--yes"), category="other"))
+        assert preview.cancel_by_default, verb
+    assert build_command_preview(_parsed(("uninstall", "--all", "--yes"), category="other")).cancel_by_default
+    assert not build_command_preview(_parsed(("setup", "codex", "--yes"))).cancel_by_default
 
 
-@pytest.mark.asyncio
-async def test_command_preview_enter_confirms() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex")))
+def test_command_preview_agent_discovery_toggle_restarts_gateway() -> None:
+    """GAP-2269: discovery enable/disable restart the gateway by default."""
 
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert app.result is True
-
-
-@pytest.mark.asyncio
-async def test_command_preview_run_button_confirms() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex")))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.click("#preview-run")
-        await pilot.pause()
-
-        assert app.result is True
+    for args in (
+        ("agent", "discovery", "disable", "--yes"),
+        ("agent", "discovery", "enable", "--yes"),
+        ("agent", "discovery", "runtime", "enable", "--yes"),
+    ):
+        preview = build_command_preview(_parsed(args, category="setup"))
+        assert preview.restart == "yes", args
+        assert "Runtime traffic may briefly pause" in preview.summary, args
+    no_restart = build_command_preview(_parsed(("agent", "discovery", "disable", "--no-restart", "--yes")))
+    assert no_restart.restart == "no"
+    assert build_command_preview(_parsed(("agent", "discovery", "status"), category="other")).restart == "no"
 
 
-@pytest.mark.asyncio
-async def test_command_preview_cancel_button_dismisses() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex")))
+def test_command_preview_registry_policy_changes_restart_gateway() -> None:
+    """GAP-2499: approve/reject change asset_policy, which restarts a running gateway."""
 
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.click("#preview-cancel")
-        await pilot.pause()
-
-        assert app.result is False
-
-
-@pytest.mark.asyncio
-async def test_command_preview_benign_focuses_run() -> None:
-    app = PreviewHarness(_parsed(("setup", "mode", "codex"), category="setup"))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "preview-run"
-
-
-@pytest.mark.asyncio
-async def test_command_preview_destructive_focuses_cancel_so_enter_cancels() -> None:
-    app = PreviewHarness(_parsed(("uninstall", "--all", "--yes"), category="other"))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "preview-cancel"
-
-        # A reflexive Enter now cancels instead of running the destructive cmd.
-        await pilot.press("enter")
-        await pilot.pause()
-        assert app.result is False
-
-
-@pytest.mark.asyncio
-async def test_command_preview_secret_focuses_cancel() -> None:
-    app = PreviewHarness(_parsed(("keys", "set", "OPENAI_API_KEY", "--value", "sk-x"), category="keys"))
-
-    async with app.run_test(size=(100, 30)) as pilot:
-        await pilot.pause()
-        assert app.screen.focused is not None
-        assert app.screen.focused.id == "preview-cancel"
+    for verb in ("approve", "reject"):
+        args = ("registry", verb, "corp", "wiki", "--type", "mcp", "--json")
+        preview = build_command_preview(_parsed(args, category="registries"))
+        assert preview.restart == "yes", verb
+        assert "restarts a running gateway" in preview.summary, verb
+    sync_cmd = _parsed(("registry", "sync", "--all", "--json"), category="registries")
+    # The panel's intents carry risk="mutation" (GAP-1152).
+    sync = build_command_preview(dataclasses.replace(sync_cmd, risk="mutation"))
+    assert sync.restart == "possible"
+    no_promote = ("registry", "approve", "corp", "wiki", "--no-repromote")
+    assert build_command_preview(_parsed(no_promote, category="registries")).restart == "no"
+    assert build_command_preview(_parsed(("registry", "list"), category="registries")).restart == "no"

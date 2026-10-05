@@ -33,6 +33,9 @@ const (
 var (
 	hookAPITokenMu      sync.Mutex
 	hookAPITokenScopeRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+	// errHookAPITokenMalformed marks a trusted token file (location, owner and
+	// permissions checked) whose content is not a token.
+	errHookAPITokenMalformed = errors.New("malformed hook API token")
 )
 
 // HookAPITokenFilePath returns the managed-data-dir token path for a
@@ -72,19 +75,30 @@ func EnsureHookAPIToken(dataDir, connectorName string) (string, error) {
 	if dataDir == "" {
 		return "", fmt.Errorf("EnsureHookAPIToken: empty dataDir; refusing to mint transient token")
 	}
-	hookAPITokenMu.Lock()
-	defer hookAPITokenMu.Unlock()
-
 	tokenPath, err := HookAPITokenFilePath(dataDir, connectorName)
 	if err != nil {
 		return "", err
 	}
+	hookAPITokenMu.Lock()
+	defer hookAPITokenMu.Unlock()
+	return ensureHookAPITokenFileLocked(dataDir, tokenPath)
+}
+
+// ensureHookAPITokenFileLocked returns the 64-character hex secret stored at
+// tokenPath (a file directly under dataDir/hooks), minting it when absent.
+// The caller holds hookAPITokenMu.
+func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 	if _, err := os.Lstat(tokenPath); err == nil {
 		existing, readErr := readSecureHookAPITokenFile(dataDir, tokenPath)
-		if readErr != nil {
+		if readErr == nil {
+			return existing, nil
+		}
+		// A damaged credential in a trusted file is replaced with a fresh one,
+		// as if it were absent (GAP-1244): keeping it disabled the connector's
+		// scoped credential and left the hook with no token at all.
+		if !errors.Is(readErr, errHookAPITokenMalformed) {
 			return "", fmt.Errorf("read hook API token %s: %w", tokenPath, readErr)
 		}
-		return existing, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("inspect hook API token %s: %w", tokenPath, err)
 	}
@@ -626,11 +640,11 @@ func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
 		return "", err
 	}
 	if len(data) > hookAPITokenMaxReadBytes {
-		return "", fmt.Errorf("hook API token %s exceeds %d bytes", path, hookAPITokenMaxReadBytes)
+		return "", fmt.Errorf("hook API token %s exceeds %d bytes: %w", path, hookAPITokenMaxReadBytes, errHookAPITokenMalformed)
 	}
 	tok := strings.TrimSpace(string(data))
 	if !otlpTokenHexRE.MatchString(tok) {
-		return "", fmt.Errorf("hook API token %s is not a 64-character lowercase hex token", path)
+		return "", fmt.Errorf("hook API token %s is not a 64-character lowercase hex token: %w", path, errHookAPITokenMalformed)
 	}
 	return tok, nil
 }

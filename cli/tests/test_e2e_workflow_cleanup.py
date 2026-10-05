@@ -139,6 +139,92 @@ def test_persistent_e2e_checkouts_do_not_persist_job_credentials() -> None:
         assert options.get("persist-credentials") is False
 
 
+REPAIR_STEP = "Repair runner workspace ownership"
+CI_SPLUNK_COMPOSE = ROOT / "bundles" / "splunk_local_bridge" / "compose" / "docker-compose.ci.yml"
+
+
+def test_persistent_e2e_jobs_repair_workspace_ownership_before_checkout() -> None:
+    # The repo's repair helpers are only reachable after checkout, so the
+    # ownership repair has to be inline and run first.
+    scripts = []
+    for job in ("core", "full-live"):
+        steps = WORKFLOW["jobs"][job]["steps"]
+        checkout = next(
+            index
+            for index, step in enumerate(steps)
+            if isinstance(step.get("uses"), str) and step["uses"].startswith("actions/checkout@")
+        )
+        assert steps[checkout - 1].get("name") == REPAIR_STEP
+        scripts.append(_step_script(job, REPAIR_STEP))
+    assert scripts[0] == scripts[1]
+    assert 'sudo -n chown -hR "${uid}:${gid}" -- "$ws"' in scripts[0]
+
+
+@POSIX_SHELL_ONLY
+def test_workspace_repair_is_a_noop_when_owned_and_refuses_odd_layouts(tmp_path: Path) -> None:
+    script = tmp_path / "repair.sh"
+    script.write_text(_step_script("core", REPAIR_STEP), encoding="utf-8")
+    runner_workspace = tmp_path / "_work" / "defenseclaw"
+    workspace = runner_workspace / "defenseclaw"
+    (workspace / "bundles").mkdir(parents=True)
+
+    def run(base: Path, path: str | None = None) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment.update({"RUNNER_WORKSPACE": os.fspath(base), "GITHUB_WORKSPACE": os.fspath(workspace)})
+        if path is not None:
+            environment["PATH"] = path
+        return subprocess.run(
+            ["bash", os.fspath(script)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=120,
+            check=False,
+        )
+
+    healthy = run(runner_workspace)
+    assert (healthy.returncode, healthy.stdout, healthy.stderr) == (0, "", "")
+    odd = run(tmp_path)
+    assert odd.returncode == 1
+    assert "Unexpected runner workspace layout" in odd.stdout
+
+    if os.geteuid() == 0:
+        return
+    # A runner-owned directory without search permission can hide root-owned
+    # entries, so the failed scan itself must trigger the repair. The stub
+    # sudo skips chown (everything is already owned) and runs the rest.
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "sudo").write_text('#!/bin/sh\n[ "$1" = -n ] && shift\n[ "$1" = chown ] && exit 0\nexec "$@"\n')
+    (fake_bin / "sudo").chmod(0o755)
+    hidden = workspace / "bundles" / "hidden"
+    hidden.mkdir()
+    hidden.chmod(0)
+    try:
+        repaired = run(runner_workspace, f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    finally:
+        hidden.chmod(0o700)
+    assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+    assert "repairing before checkout" in repaired.stdout
+    assert f"{workspace} (scan failed)" in repaired.stdout
+
+
+def test_ci_splunk_compose_never_creates_missing_bind_sources() -> None:
+    # A short-form bind lets the Docker daemon recreate a vanished workspace
+    # path as root-owned directories that later checkouts cannot delete.
+    compose = yaml.safe_load(CI_SPLUNK_COMPOSE.read_text(encoding="utf-8"))
+    binds = []
+    for service in compose["services"].values():
+        for volume in service.get("volumes", []):
+            if isinstance(volume, str):
+                assert ":" not in volume, f"short-form bind mount {volume!r}"
+                continue
+            if volume.get("type") == "bind":
+                binds.append(volume)
+                assert volume.get("bind", {}).get("create_host_path") is False, volume
+    assert binds
+
+
 def test_persistent_e2e_jobs_use_the_source_install_helper_once() -> None:
     prepare = 'python3 scripts/e2e-source-install.py prepare "${E2E_INSTALL_HOME}"'
     cleanup = 'python3 scripts/e2e-source-install.py cleanup "${E2E_INSTALL_HOME}"'

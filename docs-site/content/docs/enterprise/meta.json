@@ -1,0 +1,26 @@
+{
+  "title": "Enterprise",
+  "pages": [
+    "get-started",
+    "rollout",
+    "concepts",
+    "threat-model",
+    "---Standalone profile---",
+    "windows",
+    "linux",
+    "macos",
+    "mdm",
+    "configuration",
+    "---Secure Client profile---",
+    "secure-client",
+    "---Configure---",
+    "enrollment",
+    "machine-policy",
+    "foreign-hook-guard",
+    "ai-defense-key",
+    "---Operate---",
+    "operations",
+    "lifecycle",
+    "troubleshooting"
+  ]
+}

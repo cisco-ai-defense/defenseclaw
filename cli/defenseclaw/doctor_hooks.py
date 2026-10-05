@@ -153,6 +153,16 @@ _CODEX_TRUSTED_CONTRACTS = frozenset(
     {"codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4"}
 )
 _CODEX_POLICY_TIMEOUT_SECONDS = 20.0
+# A Codex app-server that does not answer in time is slow, not a policy block
+# (GAP-2190): doctor retries it once and then reports a WARN.
+CODEX_PROBE_TIMEOUT_STATE = "probe-timeout"
+
+
+def _codex_probe_timeout_detail(response_id: int) -> str:
+    return (
+        f"Codex app-server did not answer the policy probe within {_CODEX_POLICY_TIMEOUT_SECONDS:g} s "
+        f"(timed out waiting for Codex policy response {response_id}); the host or Codex is slow"
+    )
 _CODEX_POLICY_MESSAGE_LIMIT = 2 * 1024 * 1024
 _CLAUDE_FILE_CHANGED_MATCHER = ".+"
 _REPAIR = {
@@ -163,23 +173,6 @@ _REPAIR = {
     "devin": "defenseclaw setup devin --yes --restart",
     "hermes": "defenseclaw setup hermes --yes --restart",
 }
-_WINDSURF_EVENTS = frozenset(
-    {
-        "pre_read_code",
-        "post_read_code",
-        "pre_write_code",
-        "post_write_code",
-        "pre_run_command",
-        "post_run_command",
-        "pre_mcp_tool_use",
-        "post_mcp_tool_use",
-        "pre_user_prompt",
-        "post_cascade_response",
-        "post_cascade_response_with_transcript",
-        "post_setup_worktree",
-    }
-)
-
 _DEVIN_EVENTS = (
     "PreToolUse",
     "PostToolUse",
@@ -333,9 +326,9 @@ class WindowsHookCheck:
         showing the operator the exact registration that needs repair.
         """
         if self.target:
-            runtime = f"runtime_path={self.target}" if self.healthy else f"runtime_path={self.target!r}"
+            runtime = f"runtime_path={_display_path(self.target, trusted=self.healthy)}"
         elif self.raw_target:
-            runtime = f"runtime_path={self.raw_target!r}"
+            runtime = f"runtime_path={_display_path(self.raw_target)}"
         elif self.command:
             runtime = f"runtime_command={self.command!r}"
         else:
@@ -806,6 +799,11 @@ def _stable_regular_file(path: str, root: str, *, read_limit: int = 0) -> bytes:
     return body
 
 
+def _display_path(path: str, *, trusted: bool = False) -> str:
+    """Render a path as-is unless it holds characters that need escaping."""
+    return path if trusted or path.isprintable() else repr(path)
+
+
 def _windows_hook_runtime_root(path: str) -> str | None:
     """Return the exact installer-managed stable hook root for ``path``."""
     # FOLDERID_LocalAppData = {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
@@ -1231,15 +1229,15 @@ def _inspect_codex_effective_hook_policy(data_dir: str, config_path: str) -> tup
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _InspectionError(
-                    "policy-blocked",
-                    diagnostic(f"timed out waiting for Codex policy response {response_id}"),
+                    CODEX_PROBE_TIMEOUT_STATE,
+                    diagnostic(_codex_probe_timeout_detail(response_id)),
                 )
             try:
                 kind, payload = responses.get(timeout=remaining)
             except queue.Empty as exc:
                 raise _InspectionError(
-                    "policy-blocked",
-                    diagnostic(f"timed out waiting for Codex policy response {response_id}"),
+                    CODEX_PROBE_TIMEOUT_STATE,
+                    diagnostic(_codex_probe_timeout_detail(response_id)),
                 ) from exc
             if kind == "error":
                 raise _InspectionError("policy-blocked", diagnostic(str(payload)))
@@ -1358,7 +1356,13 @@ def _validate_codex_effective_hook_policy(data_dir: str, config_path: str) -> st
     """Fail closed when current effective policy ignores this hook source."""
 
     try:
-        managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
+        try:
+            managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
+        except _InspectionError as exc:
+            if exc.state != CODEX_PROBE_TIMEOUT_STATE:
+                raise
+            # One retry, like the gateway's slow agent probe (GAP-2190).
+            managed_only, source = _codex_effective_policy_inspector(data_dir, config_path)
     except _InspectionError:
         raise
     except Exception as exc:
@@ -1794,7 +1798,6 @@ def _managed_hook_command(command: str, connector: str) -> bool:
     legacy_script = {
         "codex": "codex-hook.sh",
         "claudecode": "claude-code-hook.sh",
-        "windsurf": "windsurf-hook.ps1",
         "hermes": "hermes-hook.sh",
     }.get(connector, "")
     return ntpath.basename(target).casefold() in {
@@ -1809,65 +1812,6 @@ def _managed_hook_command(command: str, connector: str) -> bool:
         "defenseclaw-gateway.ps1",
         legacy_script,
     }
-
-
-def _validate_windsurf_hook_matrix(
-    document: dict[str, Any],
-    *,
-    expected_command: str | None = None,
-) -> tuple[str, int]:
-    hooks = document.get("hooks")
-    if not isinstance(hooks, dict):
-        raise _InspectionError("missing", "Windsurf hook registration has no hooks table")
-    managed_commands: set[str] = set()
-    count = 0
-    for event in _WINDSURF_EVENTS:
-        entries = hooks.get(event)
-        if not isinstance(entries, list):
-            raise _InspectionError("stale", f"Windsurf hook contract is missing {event}")
-        owned: list[dict[str, Any]] = []
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            command = entry.get("powershell")
-            if (
-                isinstance(command, str)
-                and (
-                    command.strip() == expected_command
-                    if expected_command is not None
-                    else _managed_hook_command(command, "windsurf")
-                )
-            ):
-                owned.append(entry)
-                managed_commands.add(command.strip())
-        if len(owned) != 1:
-            raise _InspectionError(
-                "stale",
-                f"Windsurf hook contract has {len(owned)} DefenseClaw handlers for {event}; expected exactly one",
-            )
-        entry = owned[0]
-        if "command" in entry:
-            raise _InspectionError(
-                "stale",
-                f"Windsurf {event} handler contains a command fallback; native Windows requires powershell only",
-            )
-        if entry.get("show_output") is not True:
-            raise _InspectionError("stale", f"Windsurf {event} handler does not enable show_output")
-        count += 1
-
-    for event, entries in hooks.items():
-        if event in _WINDSURF_EVENTS or not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            for key in ("powershell", "command"):
-                command = entry.get(key)
-                if isinstance(command, str) and _managed_hook_command(command, "windsurf"):
-                    raise _InspectionError("stale", f"unexpected Windsurf event {event} contains a DefenseClaw handler")
-    if len(managed_commands) != 1:
-        raise _InspectionError("stale", "DefenseClaw Windsurf hook entries use inconsistent commands")
-    return next(iter(managed_commands)), count
 
 
 def _malformed_owned_hook_target(command: str, connector: str) -> str:
@@ -1920,7 +1864,8 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                         match = re.fullmatch(
                             r"\$ErrorActionPreference='Stop'; "
                             r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                            r"\$hookProcess=Start-Process -FilePath '((?:[^']|'')+)' "
+                            r"\$hookProcess=(?:Microsoft\.PowerShell\.Management\\)?Start-Process "
+                            r"-FilePath '((?:[^']|'')+)' "
                             r"-ArgumentList @\('hook','--connector','"
                             + re.escape(connector)
                             + r"'"
@@ -2181,18 +2126,11 @@ def _commands_from_hooks(
     connector: str,
     *,
     claude_managed_settings_paths: tuple[str, ...] | None = None,
-    windsurf_expected_command: str | None = None,
 ) -> list[str]:
     """Extract managed commands after validating connector-specific policy."""
     _ = claude_managed_settings_paths  # retained for call-site compatibility
     if connector == "devin":
         command, _count = _validate_devin_hook_matrix(document)
-        return [command]
-    if connector == "windsurf":
-        command, _count = _validate_windsurf_hook_matrix(
-            document,
-            expected_command=windsurf_expected_command,
-        )
         return [command]
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
@@ -2918,7 +2856,15 @@ def _validate_hermes_allowlist(config_path: str, command: str) -> int:
                     f"unexpected Hermes event {event} contains a DefenseClaw approval",
                 )
             if event in _HERMES_REQUIRED_HOOKS and approved_command != command:
-                target, args, kind = _command_target(approved_command, "hermes")
+                try:
+                    target, args, kind = _command_target(approved_command, "hermes")
+                except _InspectionError:
+                    # Not a direct native DefenseClaw approval: a foreign
+                    # command or one an older release approved (a PowerShell
+                    # launcher) cannot conflict with ours. Failing here kept
+                    # Hermes unenrollable after an upgrade (GAP-1304).
+                    pairs.add((event, approved_command))
+                    continue
                 if (
                     kind == "direct"
                     and ntpath.basename(target).casefold() == "defenseclaw-hook.exe"
@@ -3040,9 +2986,14 @@ def _command_target(
             except (binascii.Error, UnicodeError, ValueError) as exc:
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
             event_suffix = ""
+            awaited_suffix = ""
             if connector == "antigravity":
                 event_suffix = (
                     r"(?:,'--event','(?P<event>PreInvocation|PreToolUse|"
+                    r"PostToolUse|PostInvocation|Stop)')?"
+                )
+                awaited_suffix = (
+                    r"(?: '--event' '(?P<event>PreInvocation|PreToolUse|"
                     r"PostToolUse|PostInvocation|Stop)')?"
                 )
             elif connector == "codex":
@@ -3062,18 +3013,54 @@ def _command_target(
                     + contract_pattern
                     + r")')?)?"
                 )
+                awaited_suffix = (
+                    r"(?: '--event' '(?P<event>"
+                    + event_pattern
+                    + r")'(?: '--hook-contract' '(?P<contract>"
+                    + contract_pattern
+                    + r")')?)?"
+                )
+            # The current bridge starts the launcher with Process.Start and
+            # repeats the arguments in its Constrained Language branch; both
+            # copies must name the same launcher and arguments.
             match = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
                 r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process "
-                r"-FilePath '(?P<target>(?:[^']|'')+)' "
-                r"-ArgumentList @\('hook','--connector','"
+                r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
+                r"\$ErrorActionPreference='Continue'; "
+                r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '"
                 + re.escape(connector)
                 + r"'"
-                + event_suffix
-                + r"\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
+                + awaited_suffix
+                + r" \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; "
+                r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
+                r"\$hookStart\.UseShellExecute=\$false; "
+                r"\$hookStart\.RedirectStandardError=\$true; "
+                r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
+                r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
+                r"\$hookProcess\.WaitForExit\(\); "
+                r"exit \$hookProcess\.ExitCode",
                 script,
             )
+            if not match:
+                match = re.fullmatch(
+                    r"\$ErrorActionPreference='Stop'; "
+                    r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+                    r"\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process "
+                    r"-FilePath '(?P<target>(?:[^']|'')+)' "
+                    r"-ArgumentList @\('hook','--connector','"
+                    + re.escape(connector)
+                    + r"'"
+                    + event_suffix
+                    + r"\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",
+                    script,
+                )
+                if match and connector in {"antigravity", "codex"}:
+                    raise _InspectionError(
+                        "stale",
+                        "PowerShell EncodedCommand hook uses the Start-Process launcher, "
+                        "which loses the status of a hook that exits at once",
+                    )
             if match:
                 target = match.group("target").replace("''", "'")
                 args = ["hook", "--connector", connector]
@@ -3088,6 +3075,12 @@ def _command_target(
                             "Codex hook command contains an unsupported event/contract pair",
                         )
                     args.extend(["--hook-contract", contract_id])
+                arguments = match.groupdict().get("arguments")
+                if arguments is not None and arguments != " ".join(args):
+                    raise _InspectionError(
+                        "malformed",
+                        "PowerShell EncodedCommand hook starts different arguments in its two launch paths",
+                    )
                 return target, args, "direct"
             unqualified = re.fullmatch(
                 r"\$ErrorActionPreference='Stop'; "
@@ -3161,13 +3154,7 @@ def _command_target(
         and args[4] in _ANTIGRAVITY_REQUIRED_HOOKS
     )
     enterprise_expected = [*expected, "--enterprise-managed"]
-    windsurf_adapter = (
-        connector == "windsurf"
-        and kind == "powershell"
-        and ntpath.basename(target).casefold() == "windsurf-hook.ps1"
-        and not args
-    )
-    if not windsurf_adapter and args != expected and not codex_expected and not antigravity_event_expected and not (
+    if args != expected and not codex_expected and not antigravity_event_expected and not (
         connector == "claudecode" and allow_enterprise_managed and args == enterprise_expected
     ):
         if len(args) == 3 and args[:2] == ["hook", "--connector"]:
@@ -3511,8 +3498,12 @@ def validate_windows_hook_registration(
     claude_cli_settings: str | None = None,
     claude_remote_settings_path: str | None = None,
     managed_enterprise: bool = False,
+    codex_per_user: bool = False,
 ) -> WindowsHookCheck:
     """Return a classified Windows registration and effective-policy result.
+
+    ``codex_per_user`` marks a per-user install, where current Codex ignores
+    CODEX_HOME/managed_config.toml, so a registration there is reported stale.
 
     Registered hook commands are never executed. Codex validation may start the
     independently trusted Codex app-server for the bounded policy RPC described
@@ -3537,10 +3528,6 @@ def validate_windows_hook_registration(
                 remote_settings_path=claude_remote_settings_path,
                 managed_enterprise=managed_enterprise,
             )
-        windsurf_expected_command = None
-        if connector == "windsurf":
-            adapter = os.path.join(data_dir, "hooks", "windsurf-hook.ps1")
-            windsurf_expected_command = "& '" + adapter.replace("'", "''") + "'"
         if connector == "antigravity":
             commands = _validate_antigravity_hook_matrix(document)
             matrix_entries = len(commands)
@@ -3549,19 +3536,19 @@ def validate_windows_hook_registration(
                 document,
                 connector,
                 claude_managed_settings_paths=claude_managed_settings_paths,
-                windsurf_expected_command=windsurf_expected_command,
             )
         command = commands[0]
+        if connector == "codex" and codex_per_user and _is_codex_managed_hook_config(config_path):
+            raise _InspectionError(
+                "stale",
+                "Codex ignores CODEX_HOME\\managed_config.toml on Windows, so these hooks never run; "
+                "run 'defenseclaw setup codex' to register them in config.toml",
+            )
         if connector == "codex":
             if inspect_effective_policy:
                 policy_detail = _validate_codex_effective_hook_policy(data_dir, config_path)
         elif connector == "devin":
             _command, matrix_entries = _validate_devin_hook_matrix(document)
-        elif connector == "windsurf":
-            _command, matrix_entries = _validate_windsurf_hook_matrix(
-                document,
-                expected_command=windsurf_expected_command,
-            )
         elif connector == "claudecode":
             evidence, expected_runtime_version, contract_id = _contract_evidence(
                 data_dir,
@@ -3604,18 +3591,18 @@ def validate_windows_hook_registration(
                     "foreign",
                     f"Antigravity requires the protected native defenseclaw-hook.exe PE target: {resolved}",
                 )
+            # The per-user installer registers the packaged launcher in its
+            # bin directory, which the generic PE check below keeps contained
+            # in the install root. Only the stable launcher that the earlier
+            # native Setup published carries runtime state to validate.
             stable_runtime_root = _windows_hook_runtime_root(resolved)
-            if not stable_runtime_root:
-                raise _InspectionError(
-                    "foreign",
-                    "Antigravity registration does not target the canonical protected stable hook launcher",
+            if stable_runtime_root:
+                antigravity_runtime_evidence = _validate_antigravity_hook_runtime_state(
+                    resolved,
+                    runtime_root=stable_runtime_root,
+                    install_root=install_root,
+                    data_dir=data_dir,
                 )
-            antigravity_runtime_evidence = _validate_antigravity_hook_runtime_state(
-                resolved,
-                runtime_root=stable_runtime_root,
-                install_root=install_root,
-                data_dir=data_dir,
-            )
         if basename in {"defenseclaw-gateway.exe", "defenseclaw-gateway.cmd"}:
             _stable_regular_file(resolved, install_root, read_limit=64 * 1024)
             raise _InspectionError("stale", f"registered hook uses the obsolete gateway launcher: {resolved}")
@@ -3625,9 +3612,6 @@ def validate_windows_hook_registration(
         if kind == "powershell":
             allowed_scripts = {"defenseclaw-hook.ps1", "defenseclaw-gateway.ps1"}
             runtime_root = install_root
-            if connector == "windsurf":
-                allowed_scripts.add("windsurf-hook.ps1")
-                runtime_root = data_dir
             if not basename.endswith(".ps1") or basename not in allowed_scripts:
                 raise _InspectionError("foreign", f"PowerShell hook target is not DefenseClaw-owned: {resolved}")
             body = _stable_regular_file(resolved, runtime_root, read_limit=64 * 1024)
@@ -3673,12 +3657,6 @@ def validate_windows_hook_registration(
                 "other hook errors fail open; Restricted Mode disables hooks and agents; "
                 "native OTLP, proxy, ACP, cloud, and plugins are unclaimed"
             )
-        elif connector == "windsurf":
-            limitations = (
-                "; limitations=exit 2 blocks only five documented pre-hooks; "
-                "non-2 hook errors fail open; post hooks are non-blocking "
-                "(Cascade response post-hooks are asynchronous); Restricted Mode disables hooks"
-            )
         if connector == "hermes":
             return WindowsHookCheck(
                 "pending-reload",
@@ -3703,7 +3681,9 @@ def validate_windows_hook_registration(
     except _InspectionError as exc:
         return WindowsHookCheck(
             exc.state,
-            exc.detail if exc.state == "policy-blocked" else _repair_detail(connector, exc.detail),
+            exc.detail
+            if exc.state in {"policy-blocked", CODEX_PROBE_TIMEOUT_STATE}
+            else _repair_detail(connector, exc.detail),
             command,
             target,
             raw_target,

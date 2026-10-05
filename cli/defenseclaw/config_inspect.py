@@ -32,10 +32,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
+from defenseclaw.gateway import resolve_trusted_gateway_binary
+from defenseclaw.pinned_exec import run_pinned_executable
 
 CONFIG_V8_WIRE_VERSION: Final = 2
-CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 15
+# A loaded Windows host took more than 15 s (GAP-1621).
+CONFIG_V8_HELPER_TIMEOUT_SECONDS: Final = 60
 _OPERATIONS: Final = frozenset({"validate", "effective"})
 _REFERENCE_FORMATS: Final = frozenset({"yaml", "markdown"})
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -64,6 +67,10 @@ class ConfigInspectError(RuntimeError):
         self.field_path = field_path
         self.reason = reason
         super().__init__(message)
+
+
+class ConfigInspectTimeoutError(ConfigInspectError):
+    """The helper did not finish in time; the configuration was not judged."""
 
 
 @dataclass(frozen=True)
@@ -145,7 +152,7 @@ def config_v8_reference(fmt: str, *, section: str = "observability") -> str:
     completed = _run(argv)
     if completed.returncode != 0:
         raise ConfigInspectError(_helper_failure(completed.stderr, "reference"))
-    if not completed.stdout.strip():
+    if not (completed.stdout or "").strip():
         raise ConfigInspectError("configuration helper returned an empty reference; run defenseclaw upgrade")
     return completed.stdout
 
@@ -158,7 +165,10 @@ def _helper_argv(
     gateway_binary: str | None = None,
     extra: tuple[str, ...] = (),
 ) -> list[str]:
-    binary = gateway_binary if gateway_binary is not None else resolve_gateway_binary()
+    try:
+        binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     if not binary:
         raise ConfigInspectError(
             "defenseclaw-gateway is required for canonical v8 configuration inspection; run defenseclaw upgrade"
@@ -180,25 +190,39 @@ def _run(
     environment = None
     if environment_overrides is not None:
         environment = _validation_environment(environment_overrides)
+    # Run the checked gateway file itself, as the lifecycle does: running it
+    # by path let a swap after the custody check run another file. The helper
+    # always writes UTF-8 (the YAML reference has box-drawing characters); the
+    # locale code page on Windows can't decode them and left stdout as None
+    # (GAP-1414).
     try:
         if environment is None:
-            return subprocess.run(
+            return run_pinned_executable(
                 argv,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
                 check=False,
             )
-        return subprocess.run(
+        return run_pinned_executable(
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=CONFIG_V8_HELPER_TIMEOUT_SECONDS,
             check=False,
             env=environment,
         )
     except subprocess.TimeoutExpired as exc:
-        raise ConfigInspectError("configuration helper timed out without producing a result") from exc
+        raise ConfigInspectTimeoutError(
+            f"the configuration check did not finish within {CONFIG_V8_HELPER_TIMEOUT_SECONDS} s "
+            "(the host may be busy), so config.yaml was not judged valid or invalid"
+        ) from exc
+    except UnsafePathError as exc:
+        raise ConfigInspectError(unsafe_gateway_remedy(exc)) from exc
     except OSError as exc:
         raise ConfigInspectError("configuration helper could not be started; run defenseclaw upgrade") from exc
 

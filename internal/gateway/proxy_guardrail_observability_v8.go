@@ -42,6 +42,9 @@ type proxyGuardrailV8Runtime interface {
 type proxyGuardrailV8Overlay struct {
 	agentEvents []observability.TraceEventInput
 	modelEvents []observability.TraceEventInput
+	// guardrail is the enforced block or alert, stamped on the span the
+	// events go to (GAP-2332).
+	guardrail hookGuardrailOutcome
 }
 
 type proxyGuardrailV8Facts struct {
@@ -557,6 +560,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 	severity := observability.Present(string(facts.severity))
 	wouldBlock := observability.Present(facts.wouldBlock)
 	enforced := observability.Present(facts.enforced)
+	ruleIDs, _ := facts.ruleIDs.Get()
+	guardrail, _ := hookGuardrailOutcomeFor(facts.effective, string(facts.severity), "", ruleIDs)
 	switch facts.targetType {
 	case "prompt":
 		event, err := observability.NewSpanAgentInvokeGuardrailDecisionEvent(
@@ -568,7 +573,7 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 			},
 		)
 		if err == nil {
-			return proxyGuardrailV8Overlay{agentEvents: []observability.TraceEventInput{event}}
+			return proxyGuardrailV8Overlay{agentEvents: []observability.TraceEventInput{event}, guardrail: guardrail}
 		}
 	case "completion", "tool_call":
 		event, err := observability.NewSpanModelChatGuardrailDecisionEvent(
@@ -580,7 +585,7 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 			},
 		)
 		if err == nil {
-			return proxyGuardrailV8Overlay{modelEvents: []observability.TraceEventInput{event}}
+			return proxyGuardrailV8Overlay{modelEvents: []observability.TraceEventInput{event}, guardrail: guardrail}
 		}
 	}
 	return proxyGuardrailV8Overlay{}

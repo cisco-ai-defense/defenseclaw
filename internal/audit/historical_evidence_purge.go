@@ -3,7 +3,11 @@
 
 package audit
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"os"
+)
 
 const historicalEvidencePurgeMigrationDescription = "privacy: purge pre-cutover audit evidence"
 
@@ -48,4 +52,35 @@ func purgeHistoricalEvidence(ex dbExecer) error {
 		}
 	}
 	return nil
+}
+
+// reclaimPurgedHistory gives back the disk space the one-time purge freed. A
+// 0.x audit.db has no auto_vacuum, so the purge left the file at full size
+// (1.1 GB holding a few rows) next to the upgrade's rollback copy of it, and
+// doctor then asked for a manual stop, sqlite3 VACUUM and start (GAP-1522).
+// VACUUM rewrites only the rows that are left, and it switches the file to
+// the incremental auto_vacuum a new database gets, so retention reclaims
+// later deletes too. The checkpoint shrinks the file now: this store never
+// checkpoints automatically. Best effort: on failure the database stays
+// correct, only larger.
+func (s *Store) reclaimPurgedHistory() {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[audit] could not reclaim the space of the purged history: %v\n", err)
+		return
+	}
+	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
+	fmt.Fprintln(os.Stderr, "[audit] reclaiming the disk space of the purged pre-1.0 history")
+	// auto_vacuum is per connection until VACUUM applies it, so both run on conn.
+	for _, statement := range []string{`PRAGMA auto_vacuum=INCREMENTAL`, `VACUUM`} {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			fmt.Fprintf(os.Stderr, "[audit] could not reclaim the space of the purged history (%s): %v\n", statement, err)
+			return
+		}
+	}
+	var busy, frames, checkpointed int
+	if err := conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed); err != nil || busy != 0 {
+		fmt.Fprintf(os.Stderr, "[audit] the purged history's space is reclaimed at the next checkpoint (busy=%d err=%v)\n", busy, err)
+	}
 }

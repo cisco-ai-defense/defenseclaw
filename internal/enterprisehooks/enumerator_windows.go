@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -92,6 +93,45 @@ type EnumerateOptions struct {
 	// Logger receives one line per filter-drop / warn event. Nil
 	// silences all diagnostics.
 	Logger EnumerationLogger
+
+	// IncludeUsers, ExcludeUsers and ExemptUsers carry
+	// enterprise.enrollment for the standalone profile. Entries match a
+	// profile by SID, profile directory name, or account name (user or
+	// DOMAIN\user), case-insensitively; exclusion wins.
+	//
+	// IncludeUsers is additive, as on Linux and macOS: it never excludes
+	// anyone. Every interactive profile in ProfileList is already a
+	// candidate on Windows, so it adds no filtering here.
+	//
+	// ExcludeUsers drops the profile's rows. ExemptUsers keeps the rows of
+	// the machine-policy connectors (claudecode, codex, cursor, copilot),
+	// whose hooks fail closed for an unregistered SID, so an exempt user is
+	// still inspected and logged there; the per-user connectors that write
+	// into the user's own agent configs get no new rows, and rows already
+	// enrolled are kept so their registration is not left to fail closed.
+	//
+	// A name-form entry needs the account name. When LookupAccountSid fails
+	// (for example a domain controller outage), the profile's existing rows
+	// are kept unchanged and no new rows are added; a lookup failure never
+	// revokes a user.
+	IncludeUsers []string
+	ExcludeUsers []string
+	ExemptUsers  []string
+
+	// IncludeGroups and ExcludeGroups carry enterprise.enrollment's group
+	// filters for the standalone profile (enrollment_groups_windows.go):
+	// exclusion wins, include_groups admits only members, and a profile
+	// whose membership is unknown (a directory user who has not signed in
+	// since DefenseClaw was installed) is left undecided, like a failed
+	// account-name lookup: pending, never revoked.
+	IncludeGroups []string
+	ExcludeGroups []string
+	// GroupCache is the membership cache the caller keeps between cycles;
+	// the standalone enumerator updates it in place. Nil starts empty.
+	GroupCache *WindowsEnrollmentGroupCache
+	// ReportUnprotected receives each agent the standalone enumerator found
+	// installed for an eligible profile but could not enroll.
+	ReportUnprotected func(UnprotectedAgent)
 }
 
 // EnumerateWindows walks the local user profile registry, filters per
@@ -109,7 +149,10 @@ type EnumerateOptions struct {
 //     Anonymous S-1-5-7, SYSTEM S-1-5-18, Authenticated Users
 //     S-1-5-11, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by
 //     construction. Belt-and-braces on top of the CLI-input filter
-//     at spec 005 REQ-15.
+//     at spec 005 REQ-15. The standalone profile applies
+//     winpath.IsInteractiveUserSID, which also admits Microsoft Entra
+//     ID users (`S-1-12-1-a-b-c-d`); the Secure Client profile keeps
+//     the S-1-5-21 filter exactly.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -135,6 +178,10 @@ type EnumerateOptions struct {
 // targets.yaml with a real AgentVersion. This preserves the security
 // posture: a new user profile is DISCOVERED by the enumerator but
 // only receives hooks when the admin explicitly promotes it.
+//
+// The standalone profile uses applyStandaloneRowState instead: new rows
+// are written deferred, and discovery also covers the native Claude
+// installer and machine-scope WinGet packages.
 //
 // Rows sorted by (SID, Connector) for deterministic YAML output —
 // the byte-identical-no-op-no-write invariant in
@@ -175,7 +222,11 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 
 	previous := loadPreviousManifestForEnumeration(opts.ExistingManifestPath, opts.Logger)
 
-	profiles, err := listWindowsUserProfiles(ctx, opts.Logger)
+	// The standalone profile admits Microsoft Entra ID accounts and writes
+	// newly discovered rows as deferred; the Secure Client profile keeps its
+	// historical filter and row state exactly.
+	standalone := cfg.StandaloneEnterprise()
+	profiles, err := listWindowsUserProfiles(ctx, opts.Logger, standalone)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -183,6 +234,26 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		return Manifest{}, err
 	}
 
+	lookupAccount := newWindowsEnrollmentAccountLookup()
+	// The standalone profile reads each active session's token once per
+	// cycle: it tells which users can have a changed agent version followed
+	// now, and carries their group membership.
+	var sessions map[string][]string
+	var groups *windowsEnrollmentGroups
+	if standalone {
+		var sessionErr error
+		sessions, sessionErr = windowsActiveSessionGroups()
+		if sessionErr != nil {
+			logfSafely(opts.Logger, "sessions", fmt.Sprintf("active sessions are unreadable; known rows keep their agent versions and group membership comes from the cache this cycle: %v", sessionErr))
+			sessions = map[string][]string{}
+		}
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, opts.GroupCache, opts.Logger)
+		listed := make(map[string]struct{}, len(profiles))
+		for _, profile := range profiles {
+			listed[canonicalManifestTargetSID(profile.SID)] = struct{}{}
+		}
+		groups.pruneCache(listed)
+	}
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
 	for _, profile := range profiles {
 		// Fast-fail per row so a wedged cycle never runs to
@@ -197,7 +268,34 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
 			continue
 		}
+		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
+		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
+			if groupDecision, groupReason := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
+				decision, reason = groupDecision, groupReason
+			}
+		}
+		if decision == windowsEnrollmentExcluded {
+			logfSafely(opts.Logger, profile.SID, reason)
+			continue
+		}
+		if decision != windowsEnrollmentEnrolled {
+			logfSafely(opts.Logger, profile.SID, reason)
+		}
+		_, sessionActive := sessions[canonicalManifestTargetSID(profile.SID)]
+		rowContext := windowsStandaloneRowContext{
+			sessionActive: sessionActive,
+			user:          filepath.Base(filepath.Clean(profile.Home)),
+			report:        opts.ReportUnprotected,
+		}
 		for _, conn := range connectors {
+			_, known := previous[previousManifestKey(profile.SID, conn)]
+			// An exempt user gets no new per-user connector rows, but keeps the
+			// ones already enrolled: dropping them would revoke the SID while
+			// its hook registration stays in the user's own agent config and
+			// fails closed as unregistered.
+			if decision == windowsEnrollmentExempt && !windowsStandaloneMachinePolicyConnector(conn) && !known {
+				continue
+			}
 			dataDir := filepath.Join(filepath.Clean(profile.Home), ".defenseclaw")
 			row := ManifestTarget{
 				SID:       profile.SID,
@@ -205,7 +303,21 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				Connector: conn,
 				DataDir:   dataDir,
 			}
-			if !applyPreviousRowState(&row, previous, opts.Logger) {
+			if decision == windowsEnrollmentUndecided && !known {
+				// Pending: no new row. A signed-in user can run an agent
+				// already installed, so it is reported, never a silent gap.
+				if standalone {
+					rowContext.pending(&row, reason)
+				}
+				continue
+			}
+			emit := false
+			if standalone {
+				emit = applyStandaloneRowStateFor(&row, previous, opts.Logger, rowContext)
+			} else {
+				emit = applyPreviousRowState(&row, previous, opts.Logger)
+			}
+			if !emit {
 				// New (SID, Connector) row with no discoverable per-user
 				// agent-version — dropped for macOS parity. The
 				// enumerator's audit-complete summary reflects the
@@ -477,6 +589,164 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	return true
 }
 
+// windowsEnrollmentDecision is enterprise.enrollment's verdict for one
+// profile.
+type windowsEnrollmentDecision int
+
+const (
+	windowsEnrollmentEnrolled windowsEnrollmentDecision = iota
+	windowsEnrollmentExcluded
+	windowsEnrollmentExempt
+	// windowsEnrollmentUndecided means a name-form entry could not be
+	// evaluated because the account name did not resolve: keep the
+	// profile's existing rows, add none.
+	windowsEnrollmentUndecided
+)
+
+// windowsStandaloneMachinePolicyConnector reports whether a connector's hook
+// is machine policy on Windows, where an unregistered SID fails closed. An
+// exempt user keeps these rows so they are inspected rather than blocked.
+func windowsStandaloneMachinePolicyConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claudecode", "codex", "cursor", "copilot":
+		return true
+	case "opencode":
+		// The managed plugin runs for every user once OpenCode's machine
+		// policy is in force.
+		return windowsOpenCodeMachinePolicyInForce()
+	default:
+		return false
+	}
+}
+
+// windowsEnrollmentAccountLookup resolves a profile SID to its account and
+// domain names.
+type windowsEnrollmentAccountLookup func(sid string) (account, domain string, err error)
+
+var (
+	// windowsEnrollmentLookupAccountSID is the LookupAccountSid seam.
+	windowsEnrollmentLookupAccountSID = func(sid string) (string, string, error) {
+		parsed, err := windows.StringToSid(sid)
+		if err != nil {
+			return "", "", err
+		}
+		account, domain, _, err := parsed.LookupAccount("")
+		return account, domain, err
+	}
+	// windowsEnrollmentLookupTimeout bounds one lookup, and
+	// windowsEnrollmentLookupBudget all lookups of one cycle, so an
+	// unreachable domain controller cannot stall the enumerator cycle.
+	windowsEnrollmentLookupTimeout = 3 * time.Second
+	windowsEnrollmentLookupBudget  = 15 * time.Second
+)
+
+// newWindowsEnrollmentAccountLookup returns one cycle's bounded lookup. The
+// budget counts only time spent waiting on lookups, not the profile probing
+// between them, so a slow host does not starve later profiles of a lookup a
+// healthy domain controller would answer. Once the budget is spent, further
+// lookups fail at once and their profiles keep their existing rows.
+func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
+	var spent time.Duration
+	return func(sid string) (string, string, error) {
+		remaining := windowsEnrollmentLookupBudget - spent
+		if remaining <= 0 {
+			return "", "", errors.New("account name lookup budget for this cycle is exhausted")
+		}
+		if remaining > windowsEnrollmentLookupTimeout {
+			remaining = windowsEnrollmentLookupTimeout
+		}
+		started := time.Now()
+		defer func() { spent += time.Since(started) }()
+		type result struct {
+			account, domain string
+			err             error
+		}
+		done := make(chan result, 1)
+		lookup := windowsEnrollmentLookupAccountSID
+		go func() {
+			account, domain, err := lookup(sid)
+			done <- result{account, domain, err}
+		}()
+		timer := time.NewTimer(remaining)
+		defer timer.Stop()
+		select {
+		case r := <-done:
+			if r.err == nil && strings.TrimSpace(r.account) == "" {
+				r.err = errors.New("account name lookup returned no name")
+			}
+			return r.account, r.domain, r.err
+		case <-timer.C:
+			return "", "", errors.New("account name lookup timed out")
+		}
+	}
+}
+
+// windowsProfileEnrollmentDecision applies enterprise.enrollment to one
+// profile. Exclusion wins over exemption. SID and profile-directory entries
+// are decided without a lookup; a name-form entry that did not already match
+// needs the account name, and a failed lookup leaves the profile undecided
+// instead of treating it as a non-match.
+func windowsProfileEnrollmentDecision(
+	profile windowsUserProfile,
+	exclude, exempt []string,
+	lookup windowsEnrollmentAccountLookup,
+) (windowsEnrollmentDecision, string) {
+	names := []string{profile.SID, filepath.Base(filepath.Clean(profile.Home))}
+	if windowsEnrollmentListMatches(exclude, names) {
+		return windowsEnrollmentExcluded, "excluded by enterprise.enrollment.exclude_users"
+	}
+	if windowsEnrollmentListNeedsAccountName(exclude, names) || windowsEnrollmentListNeedsAccountName(exempt, names) {
+		account, domain, err := lookup(profile.SID)
+		if err != nil {
+			return windowsEnrollmentUndecided, fmt.Sprintf(
+				"account name lookup failed (%v); enterprise.enrollment names cannot be evaluated, keeping the existing rows unchanged",
+				err,
+			)
+		}
+		names = append(names, account)
+		if domain = strings.TrimSpace(domain); domain != "" {
+			names = append(names, domain+`\`+account)
+		}
+		if windowsEnrollmentListMatches(exclude, names) {
+			return windowsEnrollmentExcluded, "excluded by enterprise.enrollment.exclude_users"
+		}
+	}
+	if windowsEnrollmentListMatches(exempt, names) {
+		return windowsEnrollmentExempt, "exempt by enterprise.enrollment.exempt_users: machine-policy connectors only"
+	}
+	return windowsEnrollmentEnrolled, ""
+}
+
+func windowsEnrollmentListMatches(list, names []string) bool {
+	for _, entry := range list {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		for _, name := range names {
+			if strings.EqualFold(entry, strings.TrimSpace(name)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// windowsEnrollmentListNeedsAccountName reports whether an entry that is not
+// a SID string matched none of the names known without a lookup.
+func windowsEnrollmentListNeedsAccountName(list, names []string) bool {
+	for _, entry := range list {
+		entry = strings.TrimSpace(entry)
+		if entry == "" || strings.HasPrefix(strings.ToUpper(entry), "S-1-") {
+			continue
+		}
+		if !windowsEnrollmentListMatches([]string{entry}, names) {
+			return true
+		}
+	}
+	return false
+}
+
 func previousManifestKey(sid, connector string) string {
 	sid = canonicalManifestTargetSID(sid)
 	connector = strings.ToLower(strings.TrimSpace(connector))
@@ -500,6 +770,69 @@ type windowsUserProfile struct {
 	HomeMtime int64
 }
 
+// WindowsStandaloneEligibleProfiles lists the interactive user profiles the
+// standalone profile's enrollment admits, for guardian work that needs no
+// per-user manifest row: a user whose connectors are all machine policy
+// still gets foreign hooks removed from their user-level config. It applies
+// the same decision EnumerateWindows does (windowsProfileEnrollmentDecision):
+// include_users is additive and filters nothing, excluded profiles are
+// skipped, and exempt profiles are kept because their machine-policy hooks
+// still run the foreign-hook guard. A profile whose name-form entries cannot
+// be evaluated (the account lookup failed) is skipped this pass, so a
+// directory outage never touches a user who may be excluded.
+func WindowsStandaloneEligibleProfiles(ctx context.Context, exclude, exempt []string) ([]TargetCredentials, error) {
+	return WindowsStandaloneEligibleProfilesFor(ctx, EnumerateOptions{ExcludeUsers: exclude, ExemptUsers: exempt})
+}
+
+// WindowsStandaloneEligibleProfilesFor is WindowsStandaloneEligibleProfiles
+// with opts' user lists and group filters, decided as EnumerateWindows
+// decides them. opts.GroupCache is read, never changed: the enumerator is
+// its only writer.
+func WindowsStandaloneEligibleProfilesFor(ctx context.Context, opts EnumerateOptions) ([]TargetCredentials, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	profiles, err := listWindowsUserProfiles(ctx, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	var groups *windowsEnrollmentGroups
+	if len(opts.IncludeGroups)+len(opts.ExcludeGroups) > 0 {
+		sessions, sessionErr := windowsActiveSessionGroups()
+		if sessionErr != nil {
+			sessions = map[string][]string{}
+		}
+		cache := NewWindowsEnrollmentGroupCache()
+		if opts.GroupCache != nil {
+			for sid, members := range opts.GroupCache.Users {
+				cache.Users[sid] = append([]string(nil), members...)
+			}
+			for name, sid := range opts.GroupCache.Names {
+				cache.Names[name] = sid
+			}
+		}
+		groups = newWindowsEnrollmentGroups(opts.IncludeGroups, opts.ExcludeGroups, sessions, cache, nil)
+	}
+	lookupAccount := newWindowsEnrollmentAccountLookup()
+	out := make([]TargetCredentials, 0, len(profiles))
+	for _, profile := range profiles {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		decision, _ := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
+		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() {
+			if groupDecision, _ := groups.decide(canonicalManifestTargetSID(profile.SID)); groupDecision != windowsEnrollmentEnrolled {
+				decision = groupDecision
+			}
+		}
+		if decision != windowsEnrollmentEnrolled && decision != windowsEnrollmentExempt {
+			continue
+		}
+		out = append(out, TargetCredentials{UserHome: filepath.Clean(profile.Home), UID: -1, GID: -1, SID: profile.SID})
+	}
+	return out, nil
+}
+
 // listWindowsUserProfiles walks the ProfileList registry key and
 // returns one row per surviving profile. Profiles that fail any step
 // of the filter chain (parse, well-known-SID, path-not-absolute,
@@ -511,20 +844,10 @@ type windowsUserProfile struct {
 // ctx bounds the walk: a per-subkey ctx.Err() check ensures a
 // wedged os.Stat on one profile cannot starve the interval-loop's
 // cycle timeout (spec 005 REQ-19).
-func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]windowsUserProfile, error) {
-	rootKey, err := registry.OpenKey(
-		registry.LOCAL_MACHINE,
-		profileListRegistryKey,
-		registry.ENUMERATE_SUB_KEYS,
-	)
+func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger, standalone bool) ([]windowsUserProfile, error) {
+	subkeyNames, err := windowsProfileListSubkeyReader()
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open ProfileList registry: %w", err)
-	}
-	defer rootKey.Close()
-
-	subkeyNames, err := rootKey.ReadSubKeyNames(-1)
-	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: enumerate ProfileList subkeys: %w", err)
+		return nil, err
 	}
 
 	byCanonSID := make(map[string]windowsUserProfile, len(subkeyNames))
@@ -537,11 +860,16 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]win
 			logfSafely(logf, name, fmt.Sprintf("not a syntactically-valid SID: %v", err))
 			continue
 		}
-		if !sidIsInteractiveUser(sid) {
+		if standalone {
+			if !winpath.IsInteractiveUserSID(sid.String(), winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
+				logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-... or Entra ID S-1-12-1-...); refusing well-known / machine-scoped principals")
+				continue
+			}
+		} else if !sidIsInteractiveUser(sid) {
 			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
 			continue
 		}
-		home, err := readAndExpandProfileImagePath(name)
+		home, err := windowsProfileImagePathReader(name)
 		if err != nil {
 			logfSafely(logf, name, fmt.Sprintf("ProfileImagePath unresolvable: %v", err))
 			continue
@@ -602,6 +930,32 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]win
 // (the caller already did) and does NOT enforce interactive-user
 // filtering (the caller applies that separately for consistent error
 // reporting).
+// windowsProfileListSubkeyReader and windowsProfileImagePathReader are the
+// registry seams of the ProfileList walk, so tests can inject rows (for
+// example Entra ID SIDs) without editing HKLM.
+var (
+	windowsProfileListSubkeyReader = readProfileListSubkeyNames
+	windowsProfileImagePathReader  = readAndExpandProfileImagePath
+)
+
+func readProfileListSubkeyNames() ([]string, error) {
+	rootKey, err := registry.OpenKey(
+		registry.LOCAL_MACHINE,
+		profileListRegistryKey,
+		registry.ENUMERATE_SUB_KEYS,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: open ProfileList registry: %w", err)
+	}
+	defer rootKey.Close()
+
+	subkeyNames, err := rootKey.ReadSubKeyNames(-1)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: enumerate ProfileList subkeys: %w", err)
+	}
+	return subkeyNames, nil
+}
+
 func readAndExpandProfileImagePath(sidString string) (string, error) {
 	key, err := registry.OpenKey(
 		registry.LOCAL_MACHINE,
@@ -735,7 +1089,7 @@ func effectiveWindowsHookConnectors(cfg *config.Config) []string {
 		if trimmed == "" {
 			return
 		}
-		if _, ok := windowsHookConnectors[trimmed]; !ok {
+		if !windowsEnumeratorHookConnector(trimmed) {
 			return
 		}
 		if explicitlyDisabled {

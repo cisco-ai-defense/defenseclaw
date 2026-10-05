@@ -21,10 +21,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -423,6 +425,21 @@ func TestDetectModelFilesRejectsMalformedOllamaManifest(t *testing.T) {
 	}
 	if files != 0 || len(signals) != 0 {
 		t.Fatalf("malformed manifest was inventoried: files=%d signals=%+v", files, signals)
+	}
+}
+
+// A Library folder macOS privacy protection keeps from the scan answers
+// EPERM; it is skipped, not counted as a filesystem error, so a Mac without
+// a PPPC profile no longer reports every scan partial. Ordinary permission
+// errors, and EPERM on other systems, still count.
+func TestModelScanSkipsMacOSPrivacyProtectedEntries(t *testing.T) {
+	protected := &fs.PathError{Op: "open", Path: "/Users/alice/Library/Containers/com.example.app", Err: syscall.EPERM}
+	if !macOSPrivacyDenied("darwin", protected) {
+		t.Fatal("a TCC-protected folder on macOS is not skipped")
+	}
+	unreadable := &fs.PathError{Op: "open", Path: "/Users/alice/models", Err: syscall.EACCES}
+	if macOSPrivacyDenied("darwin", unreadable) || macOSPrivacyDenied("linux", protected) {
+		t.Fatal("an ordinary permission error is skipped as macOS privacy protection")
 	}
 }
 
@@ -1385,4 +1402,28 @@ func findUniqueLocalModelSignal(t *testing.T, signals []AISignal, id string) AIS
 func quoteJSON(value string) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
+}
+
+// GAP-2318: DefenseClaw's own data dir (~/.defenseclaw with its .venv,
+// uv cache and the bundled magika model) is not a user model store.
+func TestModelScanSkipsDefenseClawOwnDataDirs(t *testing.T) {
+	home := t.TempDir()
+	writeModelTestFile(t, filepath.Join(home, ".defenseclaw", ".uv", "cache", "archive-v0", "abc",
+		"magika", "models", "standard_v3_3", "model.onnx"), "own")
+	customData := filepath.Join(home, "dc-data")
+	writeModelTestFile(t, filepath.Join(customData, "models", "own-data-model", "model.onnx"), "own")
+	writeModelTestFile(t, filepath.Join(home, "work", "models", "speech-recognizer", "model.onnx"), "user")
+
+	svc := newModelFileTestService(t, home, home, 100, false)
+	svc.opts.DataDir = customData
+	signals, _, err := svc.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("detectModelFiles: %v", err)
+	}
+	findLocalModelSignal(t, signals, "speech-recognizer")
+	for _, signal := range signals {
+		if signal.Model != nil && (signal.Model.ID == "standard_v3_3" || signal.Model.ID == "own-data-model") {
+			t.Fatalf("scan reported a DefenseClaw-owned model: %+v", signal.Model)
+		}
+	}
 }

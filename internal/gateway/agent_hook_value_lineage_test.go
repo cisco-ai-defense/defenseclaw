@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestToolValueLineageRuntimeProjectionMatchesSuccessfulSensitiveRead(t *test
 		},
 	}
 	pathDigest, sourceValues := toolValueLineageSuccessfulReadResult(
-		request, connector.ToolLifecycleOutcomeSuccess,
+		context.Background(), request, connector.ToolLifecycleOutcomeSuccess,
 	)
 	if pathDigest == "" || sourceValues == (guardrail.ToolChainValueJoinDigests{}) {
 		t.Fatal("successful exact sensitive read did not produce bounded lineage")
@@ -100,7 +101,7 @@ func TestToolValueLineageRuntimeProjectionFailsClosed(t *testing.T) {
 		},
 	}
 	if path, values := toolValueLineageSuccessfulReadResult(
-		request, connector.ToolLifecycleOutcomeSuccess,
+		context.Background(), request, connector.ToolLifecycleOutcomeSuccess,
 	); path != "" || values != (guardrail.ToolChainValueJoinDigests{}) {
 		t.Fatal("ambiguous structured result was accepted")
 	}

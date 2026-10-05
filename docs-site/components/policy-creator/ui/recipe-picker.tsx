@@ -47,7 +47,7 @@ export function RecipePicker({
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         placeholder={placeholder}
-        className="w-full rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60 focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]"
+        className="w-full rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]"
       />
       <div
         className="space-y-1 overflow-y-auto rounded-md border border-fd-border bg-fd-background"
@@ -75,7 +75,7 @@ export function RecipePicker({
                 {r.why}
               </span>
               {r.tags.length > 0 && (
-                <span className="text-[9px] text-fd-muted-foreground/70">
+                <span className="text-[9px] text-fd-muted-foreground">
                   {r.tags.slice(0, 5).join(' · ')}
                 </span>
               )}

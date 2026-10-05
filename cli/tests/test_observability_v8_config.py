@@ -36,6 +36,7 @@ from defenseclaw.observability.v8_config import (
     QUEUE_BOUNDS,
     QUEUE_DEFAULTS,
     V8ConfigError,
+    _go_schema_pattern,
     _parse_source,
     _shape,
     load_validate_v8,
@@ -108,7 +109,7 @@ def test_reference_source_validates_against_canonical_schema(tmp_path: Path) -> 
     validated = load_validate_v8(source, source_name=str(reference))
 
     assert validated.source["config_version"] == 8
-    assert len(validated.source["observability"]["destinations"]) == 7
+    assert len(validated.source["observability"]["destinations"]) == 9
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -391,6 +392,55 @@ def test_timestamp_and_binary_scalars_project_as_source_text_like_go() -> None:
     assert binary.source["environment"] == "Zm9v"
 
 
+@pytest.mark.parametrize("spelling", ["yes", "No", "ON", "off"])
+def test_yaml11_boolean_words_are_strings_like_go(spelling: str) -> None:
+    # Go's yaml.v3 follows the YAML 1.2 core schema: these words are strings,
+    # so the gateway's schema refuses them for a boolean key.
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(f"config_version: 8\nopenshell:\n  yolo: {spelling}\n")
+    assert captured.value.keyword == "type"
+    assert load_validate_v8(f"config_version: 8\nenvironment: {spelling}\n").source["environment"] == spelling
+    keyed = load_validate_v8(f"config_version: 8\nopenshell:\n  image: {{harness_versions: {{{spelling}: '1'}}}}\n")
+    assert keyed.source["openshell"]["image"]["harness_versions"] == {spelling: "1"}
+
+
+@pytest.mark.parametrize("spelling", ["true", "True", "TRUE", "false", "False", "FALSE"])
+def test_yaml_core_booleans_stay_booleans(spelling: str) -> None:
+    source = load_validate_v8(f"config_version: 8\nopenshell:\n  yolo: {spelling}\n").source
+    assert source["openshell"]["yolo"] is (spelling.lower() == "true")
+
+
+def test_schema_patterns_anchor_at_the_end_of_text_like_go() -> None:
+    # Python's "$" also matches before a final newline; RE2's does not.
+    for source in (
+        'config_version: 8\nopenshell:\n  harnesses: ["codex\\n"]\n',
+        'config_version: 8\nopenshell:\n  resources: {cpu: "2\\n"}\n',
+    ):
+        with pytest.raises(V8ConfigError) as captured:
+            load_validate_v8(source)
+        assert captured.value.keyword == "pattern"
+    load_validate_v8("config_version: 8\nopenshell:\n  harnesses: [codex]\n  resources: {cpu: '2'}\n")
+
+
+@pytest.mark.parametrize(
+    ("pattern", "value", "matches"),
+    [
+        ("^a$", "a", True),
+        ("^a$", "a\n", False),
+        ("^(a|b)$", "b\n", False),
+        ("^[$]$", "$", True),
+        (r"^\$$", "$", True),
+        (r"^\$$", "$\n", False),
+        ("^[]$]x$", "$x", True),
+        ("^[^]$]$", "a", True),
+        ("^[^]$]$", "$", False),
+        ("^a", "ab\n", True),
+    ],
+)
+def test_go_schema_pattern_rewrites_only_end_anchors(pattern: str, value: str, matches: bool) -> None:
+    assert (_go_schema_pattern(pattern).search(value) is not None) is matches
+
+
 def test_yaml_node_depth_and_mapping_boundaries_match_go_preflight() -> None:
     at_node_limit = {"config_version": 8, "unknown": [0] * (MAX_YAML_NODES - 5)}
     over_node_limit = {"config_version": 8, "unknown": [0] * (MAX_YAML_NODES - 4)}
@@ -611,6 +661,35 @@ observability:
     assert "query-secret" not in rendered
     assert "fragment-secret" not in rendered
     assert "path-secret-canary" not in rendered
+
+
+def test_masked_source_keeps_asset_policy_rule_urls_readable() -> None:
+    source = """config_version: 8
+asset_policy:
+  mcp:
+    registry:
+      - name: deepwiki
+        reason: registry:t2r4-local
+        url: https://mcp.deepwiki.com/mcp
+      - name: keyed
+        url: https://mcp.example.test/s/k3yS3cretValue0123456789abcd/mcp?api_key=query-secret
+      - name: userinfo
+        url: https://user:pass-secret@mcp.example.test/mcp
+    allowed:
+      - url: https://mcp.example.test/v1/sse
+observability: {}
+"""
+    validated = load_validate_v8(source)
+    mcp = validated.masked["asset_policy"]["mcp"]["registry"]
+
+    assert mcp[0]["url"] == "https://mcp.deepwiki.com/mcp"
+    assert mcp[1]["url"] == "https://mcp.example.test/s/[REDACTED]/mcp?[REDACTED]"
+    assert mcp[2]["url"] == "[REDACTED_URL]"
+    assert validated.masked["asset_policy"]["mcp"]["allowed"][0]["url"] == "https://mcp.example.test/v1/sse"
+    rendered = validated.masked_json()
+    assert "k3yS3cretValue0123456789abcd" not in rendered
+    assert "query-secret" not in rendered
+    assert "pass-secret" not in rendered
 
 
 def test_returned_source_and_masked_views_are_detached() -> None:

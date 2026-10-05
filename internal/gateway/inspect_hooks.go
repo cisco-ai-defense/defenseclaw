@@ -200,7 +200,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogActionCtx(r.Context(), auditAction, "pre-request", auditDetails)
+	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/request", auditAction, "pre-request", auditDetails))
 
 	reveal := wantsReveal(r)
 	if managedAIDOnly {
@@ -281,7 +281,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogActionCtx(r.Context(), auditAction, "post-response", auditDetails)
+	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/response", auditAction, "post-response", auditDetails))
 
 	reveal := wantsReveal(r)
 	if managedAIDOnly {
@@ -347,11 +347,13 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		// Tool output is completion-shaped (matches the proxy lane's
 		// inspectToolResult). This is the J3-3c timeout split: the regex
 		// scan above keeps the 200ms inspectScanTimeout cap, while the judge
-		// runs on a deadline-free context.Background() bounded only by its
-		// own HookTimeout. The shipped default (regex_only) ⇒ no judge call.
+		// runs on a deadline-free context bounded only by its own
+		// HookTimeout. WithoutCancel keeps the request's caller identity and
+		// correlation so the judge span stays attributable (GAP-2641). The
+		// shipped default (regex_only) ⇒ no judge call.
 		// ToolResponseInspectRequest carries no connector field, so the gate
 		// resolves the process connector via connectorName().
-		if jv := a.runHookJudge(context.Background(), "completion", "completion",
+		if jv := a.runHookJudge(context.WithoutCancel(r.Context()), "completion", "completion",
 			a.connectorName(), outputStr, req.Tool, verdict); jv != nil {
 			verdict = mergeWithJudgeVerdict(verdict, jv)
 		}
@@ -392,7 +394,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
+	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/tool-response", auditAction, req.Tool, auditDetails))
 
 	reveal := wantsReveal(r)
 	if managedAIDOnly {

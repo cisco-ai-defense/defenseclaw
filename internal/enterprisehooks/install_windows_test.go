@@ -42,9 +42,10 @@ type windowsGenericCodexFixture struct {
 }
 
 type windowsGenericCodexTestConnector struct {
-	configPath string
-	setupCalls *int
-	name       string
+	configPath   string
+	setupCalls   *int
+	name         string
+	teardownOpts *[]connector.SetupOpts
 }
 
 const windowsGenericTestConnectorName = "codex"
@@ -247,7 +248,10 @@ func (c *windowsGenericCodexTestConnector) Setup(_ context.Context, opts connect
 	}
 	return os.WriteFile(c.configPath, append(body, '\n'), 0o600)
 }
-func (c *windowsGenericCodexTestConnector) Teardown(_ context.Context, _ connector.SetupOpts) error {
+func (c *windowsGenericCodexTestConnector) Teardown(_ context.Context, opts connector.SetupOpts) error {
+	if c.teardownOpts != nil {
+		*c.teardownOpts = append(*c.teardownOpts, opts)
+	}
 	return os.WriteFile(c.configPath, []byte("{\"model\":\"gpt-5\"}\n"), 0o600)
 }
 func (c *windowsGenericCodexTestConnector) Authenticate(*http.Request) bool { return false }
@@ -302,9 +306,11 @@ func newWindowsTrustedHookExecutableFixture(t *testing.T, targetSID *windows.SID
 	if err := os.WriteFile(path, []byte("MZ test native hook"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, dir, targetSID)
 	if err := setWindowsUserPathProtection(dir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, path, targetSID)
 	if err := setWindowsUserPathProtection(path, targetSID, false); err != nil {
 		t.Fatal(err)
 	}
@@ -351,6 +357,7 @@ func newWindowsGenericCodexFixtureBeforeProtection(
 		path string
 		dir  bool
 	}{{home, true}, {configDir, true}, {configPath, false}} {
+		setWindowsTestPathExactOwner(t, path.path, targetSID)
 		if err := setWindowsUserPathProtection(path.path, targetSID, path.dir); err != nil {
 			t.Fatalf("protect generic Codex fixture %s: %v", path.path, err)
 		}
@@ -515,10 +522,14 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 			t.Fatal(err)
 		}
 	}
+	// Elevated runners assign BUILTIN\Administrators as the default owner;
+	// establish the target-owned precondition like the home above.
+	setWindowsTestPathExactOwner(t, trustedDir, targetSID)
 	if err := setWindowsUserPathProtection(trustedDir, targetSID, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{hookExe, gatewayExe} {
+		setWindowsTestPathExactOwner(t, path, targetSID)
 		if err := setWindowsUserPathProtection(path, targetSID, false); err != nil {
 			t.Fatal(err)
 		}
@@ -2965,5 +2976,17 @@ func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// GAP-1940: an account deleted with its profile during Setup is named as
+// such, not as the raw Win32 lookup error, and still reads as not-exist.
+func TestValidateWindowsEnterpriseHomeNamesAVanishedProfile(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "dcw-gone")
+	_, _, err := validateWindowsEnterpriseHome(home, "")
+	if err == nil || !errors.Is(err, os.ErrNotExist) ||
+		!strings.Contains(err.Error(), "no longer exists: the account was deleted or its profile folder removed") ||
+		strings.Contains(err.Error(), "GetFileAttributesEx") {
+		t.Fatalf("vanished profile error = %v", err)
 	}
 }

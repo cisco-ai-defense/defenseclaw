@@ -70,8 +70,8 @@ t_is_supported() {
   assert_status "${rc}" 0 "cursor supported"
   is_supported_connector "opencode"; rc=$?
   assert_status "${rc}" 0 "opencode supported"
-  is_supported_connector "geminicli"; rc=$?
-  assert_status "${rc}" 1 "geminicli not auto-wired"
+  is_supported_connector "retired-example"; rc=$?
+  assert_status "${rc}" 1 "retired-example not auto-wired"
 }
 
 t_classify_zero_target_none_installed() {
@@ -88,7 +88,7 @@ t_classify_zero_target_none_installed() {
   assert_eq "${got}" "none-installed" "single-supported (codex) list -> none-installed"
   got="$(classify_zero_target_reason "opencode")"
   assert_eq "${got}" "none-installed" "single-supported (opencode) list -> none-installed"
-  got="$(classify_zero_target_reason "codex,geminicli")"
+  got="$(classify_zero_target_reason "codex,retired-example")"
   assert_eq "${got}" "none-installed" "mixed supported+unsupported -> none-installed (supported wins)"
 }
 
@@ -98,9 +98,9 @@ t_classify_zero_target_all_unsupported() {
   # rerun with --connector picking a supported entry. install.sh keys
   # its warn text off this to point the operator at the right action.
   local got
-  got="$(classify_zero_target_reason "geminicli")"
+  got="$(classify_zero_target_reason "retired-example")"
   assert_eq "${got}" "all-unsupported" "unknown single connector -> all-unsupported"
-  got="$(classify_zero_target_reason "geminicli,copilot")"
+  got="$(classify_zero_target_reason "retired-example,copilot")"
   assert_eq "${got}" "all-unsupported" "unknown multi-connector -> all-unsupported"
 }
 

@@ -181,7 +181,7 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 		dialect = windowsDialectCMD
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		dialect = windowsDialectPowerShell
-	case "bash", "shell", "shell_command", "terminal", "run_command", "run_shell_command", "runshellcommand", "run_terminal_cmd", "execute", "execute_command", "exec", "command":
+	case "bash", "shell", "shell_command", "async_shell_command", "terminal", "run_command", "run_shell_command", "runshellcommand", "run_terminal_cmd", "execute", "execute_command", "exec", "command":
 	default:
 		return "", dialect, false
 	}

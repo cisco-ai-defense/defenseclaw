@@ -26,7 +26,6 @@ BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
 PACKAGED_V8_VALIDATOR = ROOT / "scripts" / "validate_packaged_v8_resources.py"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
-RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yaml"
 WINDOWS_NATIVE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-native.yml"
 WINDOWS_NATIVE_CI = ROOT / "scripts" / "windows-native-ci.ps1"
 SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HELPER_PATH)
@@ -864,11 +863,6 @@ def test_signed_release_stages_offline_resource_verifier_before_lifecycle() -> N
     assert "Build-VerifiedGoBinary $verifier './internal/tools/windowsresources'" in publish.group(0)
     assert "Publish-SetupAcceptanceResourceInputs $out" in build
 
-    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    builder = "./scripts/build-windows-installer.ps1"
-    lifecycle = "./scripts/invoke-windows-setup-standard-user-ci.ps1"
-    assert release.index(builder) < release.index(lifecycle)
-
 
 def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
     authenticode = AUTHENTICODE_PS1.read_text(encoding="utf-8")
@@ -1178,6 +1172,110 @@ def test_sbom_rejects_case_colliding_authenticode_inventory_path(tmp_path: Path)
     artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
     with pytest.raises(artifacts.ArtifactError, match="Case-colliding Authenticode installed paths"):
         artifacts.build_sbom(args)
+
+
+def test_go_inventory_records_a_source_directory_replacement_apart_from_the_upstream_module(tmp_path: Path) -> None:
+    upstream_sum = "h1:" + base64.b64encode(b"\x02" * 32).decode()
+    ours = artifacts._parse_go_build_info(
+        "defenseclaw.exe: go1.26.4\n"
+        "\tpath\tgithub.com/defenseclaw/defenseclaw/cmd/defenseclaw\n"
+        "\tmod\tgithub.com/defenseclaw/defenseclaw\t(devel)\t\n"
+        "\tdep\tgithub.com/fsnotify/fsnotify\tv1.9.0\n"
+        "\t=>\t./third_party/fsnotify\t(devel)\t\n"
+    )
+    assert ours["dependencies"] == [
+        {
+            "path": "github.com/fsnotify/fsnotify",
+            "version": "v1.9.0",
+            "sum": None,
+            "replace": {"path": "./third_party/fsnotify", "version": "(devel)", "sum": None},
+        }
+    ]
+    theirs = {"path": "github.com/fsnotify/fsnotify", "version": "v1.9.0", "sum": upstream_sum}
+
+    document = artifacts.SpdxDocument("DefenseClaw Windows Setup", "https://example.invalid/sbom", "2026-01-01T00:00:00Z", "0" * 40)
+    components = {}
+    inventory = {"schema_version": 1, "components": {}}
+    for label, dependency in (("gateway", ours["dependencies"][0]), ("cosign", theirs)):
+        digest = hashlib.sha256(label.encode()).hexdigest()
+        components[label] = document.add_package(f"payload:{label}", label, "1.0.0", "APPLICATION", checksum=digest)
+        inventory["components"][label] = {"sha256": digest, "runtime": "go1.26.4", "dependencies": [dependency]}
+
+    inventory_path = tmp_path / "go-components.json"
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    assert artifacts._add_go_inventory(document, inventory_path, components) == 3
+
+    modules = [
+        package for package in document.packages.values() if package["name"] == "github.com/fsnotify/fsnotify"
+    ]
+    assert len(modules) == 2
+    patched = next(package for package in modules if "sourceInfo" in package)
+    upstream = next(package for package in modules if "sourceInfo" not in package)
+    assert patched["versionInfo"] == upstream["versionInfo"] == "v1.9.0"
+    assert "checksums" not in patched
+    assert patched["sourceInfo"] == "github.com/fsnotify/fsnotify@v1.9.0 replaced by the source directory ./third_party/fsnotify"
+    assert upstream["checksums"] == [{"algorithm": "SHA256", "checksumValue": "02" * 32}]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".",
+        "..",
+        "./x",
+        "../x",
+        ".\\x",
+        "..\\x",
+        "/abs/x",
+        "\\rooted\\x",
+        "\\\\server\\share\\x",
+        "C:\\x",
+        "c:/x",
+        "D:x",
+    ],
+)
+def test_go_local_replacement_matches_go_directory_paths(path: str) -> None:
+    assert artifacts._is_local_go_replacement(path)
+
+
+@pytest.mark.parametrize("path", ["github.com/example/fork", "example.com/x", ".x", "..x", "1:x"])
+def test_go_local_replacement_rejects_module_paths(path: str) -> None:
+    assert not artifacts._is_local_go_replacement(path)
+
+
+def test_go_inventory_keeps_a_versioned_replacement_apart_from_a_direct_dependency_on_the_target(
+    tmp_path: Path,
+) -> None:
+    target_sum = "h1:" + base64.b64encode(b"\x03" * 32).decode()
+    direct = {"path": "github.com/example/fork", "version": "v1.2.0", "sum": target_sum}
+    replaced = {
+        "path": "github.com/example/upstream",
+        "version": "v1.0.0",
+        "sum": None,
+        "replace": {"path": "github.com/example/fork", "version": "v1.2.0", "sum": target_sum},
+    }
+
+    document = artifacts.SpdxDocument(
+        "DefenseClaw Windows Setup", "https://example.invalid/sbom", "2026-01-01T00:00:00Z", "0" * 40
+    )
+    components = {}
+    inventory = {"schema_version": 1, "components": {}}
+    for label, dependency in (("gateway", replaced), ("cosign", direct)):
+        digest = hashlib.sha256(label.encode()).hexdigest()
+        components[label] = document.add_package(f"payload:{label}", label, "1.0.0", "APPLICATION", checksum=digest)
+        inventory["components"][label] = {"sha256": digest, "runtime": "go1.26.4", "dependencies": [dependency]}
+
+    inventory_path = tmp_path / "go-components.json"
+    inventory_path.write_text(json.dumps(inventory), encoding="utf-8")
+    assert artifacts._add_go_inventory(document, inventory_path, components) == 3
+
+    modules = [package for package in document.packages.values() if package["name"] == "github.com/example/fork"]
+    assert len(modules) == 2
+    via_replace = next(package for package in modules if "sourceInfo" in package)
+    plain = next(package for package in modules if "sourceInfo" not in package)
+    assert via_replace["sourceInfo"] == "replaces github.com/example/upstream@v1.0.0"
+    assert via_replace["versionInfo"] == plain["versionInfo"] == "v1.2.0"
+    assert via_replace["checksums"] == plain["checksums"] == [{"algorithm": "SHA256", "checksumValue": "03" * 32}]
 
 
 def test_sbom_fails_closed_when_go_inventory_is_not_for_exact_binary(tmp_path: Path) -> None:

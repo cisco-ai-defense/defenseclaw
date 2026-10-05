@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import stat
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from enum import IntEnum
@@ -45,8 +47,10 @@ from defenseclaw.observability.v8_redaction_policy import (
 from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.platform_support import (
     LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
+    host_os,
     local_observability_stack_supported,
     local_splunk_stack_supported,
+    openshell_sandboxes_supported,
 )
 from defenseclaw.tui.services.catalog_state import friendly_connector_name
 from defenseclaw.tui.services.cli_choices import (
@@ -78,7 +82,9 @@ from defenseclaw.tui.services.cli_choices import (
 from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
+from defenseclaw.tui.services.sandbox_state import DEFAULT_SANDBOX_HARNESSES, SANDBOX_HARNESS_SPECS, compute_driver
 from defenseclaw.tui.services.setup_state import (
+    OPENSHELL_INHERIT_CHOICE,
     ConfigDiffEntry,
     ConfigField,
     ConfigSection,
@@ -89,19 +95,24 @@ from defenseclaw.tui.services.setup_state import (
     SetupPreviewRisk,
     ValidationResult,
     apply_config_field,
+    blocking_validation_errors,
     build_readiness_checks,
     config_diff,
+    failing_exports,
     get_config_value,
+    guardrail_mode_label,
+    is_python_modeled,
     looks_like_secret_value,
     mask_secret,
     split_csv,
+    telemetry_readiness_detail,
     validate_config_field,
     validation_errors,
 )
 
 SetupMode = Literal["wizards", "config"]
 WizardFieldKind = Literal["bool", "string", "choice", "int", "password", "section", "preset", "whtype", "regid"]
-UninstallOption = Literal["dry-run", "keep-data", "wipe-data"]
+UninstallOption = Literal["dry-run", "keep-data", "wipe-data", "wipe-all"]
 
 # These re-exports keep existing callers (panels, tests) importing from
 # ``defenseclaw.tui.panels.setup`` working unchanged while routing the
@@ -182,6 +193,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.SPLUNK: ("setup", "splunk"),
     SetupWizard.OBSERVABILITY: ("setup", "observability", "add"),
     SetupWizard.WEBHOOKS: ("setup", "webhook", "add"),
+    # OpenShell 0.1 sandboxes (slot 13 held the removed legacy wizard).
     SetupWizard.SANDBOX: ("sandbox", "setup"),
     SetupWizard.REGISTRIES: ("registry", "add"),
     # NOTIFICATIONS_ROUTING fan-outs to multiple
@@ -203,6 +215,36 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
 
+# First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
+# …): a finished or failed command of one of these clears a task's
+# "running" badge (``mark_wizard_complete``).
+WIZARD_COMMAND_FAMILIES: frozenset[str] = frozenset(command[0] for command in WIZARD_COMMANDS.values() if command)
+
+
+def _wizard_action_family(wizard: SetupWizard) -> tuple[str, ...]:
+    """The argv prefix a wizard's sibling actions share (``()``: no fallback).
+
+    Its WIZARD_COMMANDS entry without the action word: ``agent discovery``
+    for ``agent discovery enable``, ``guardrail`` for ``guardrail status``.
+    A bare ``setup`` family is shared by most tasks, so it never matches, and
+    the Sandbox task finishes only on its own setup and doctor runs.
+    """
+
+    command = WIZARD_COMMANDS.get(wizard, ())
+    family = command[:-1] if len(command) >= 2 else command
+    if wizard == SetupWizard.SANDBOX or family in {(), ("setup",)}:
+        return ()
+    return family
+
+# The sentence every openshell.admin refusal starts with (sandboxapi.AdminMessage).
+ADMIN_POLICY_MESSAGE = "blocked by your organization's DefenseClaw policy"
+# Choice value for pack-governed openshell keys left unset.
+OPENSHELL_INHERIT = OPENSHELL_INHERIT_CHOICE
+
+SANDBOX_WIZARD_UNSUPPORTED_REASON = (
+    "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported."
+)
+
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
     # (slot id, label, default state)
     ("block_enforced", "Block (enforced)", "yes"),
@@ -213,34 +255,49 @@ NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
     ("sources.asset_policy", "Source: Asset Policy", "yes"),
 )
 
+# The hints only repeated the label ("Toggle hitl approval.", GAP-2386).
+_NOTIFICATION_SLOT_HINTS: dict[str, str] = {
+    "block_enforced": "Show a desktop notification when a call is blocked.",
+    "block_would_block": "Show a desktop notification when observe mode would have blocked a call.",
+    "hitl_approval": "Show a desktop notification when an action waits for your approval.",
+    "sources.hook": "Notify about verdicts from agent hooks (Claude Code, Codex, ...).",
+    "sources.guardrail": "Notify about verdicts from the LLM guardrail.",
+    "sources.asset_policy": "Notify when a skill or MCP server is blocked by the allow list.",
+}
+_RESTART_GATEWAY_HINT = "Restart the gateway so the change takes effect now."
+
+_MISSING_FIELDS_PREFIX = "Missing required field(s): "
+
 WIZARD_DESCRIPTIONS: tuple[str, ...] = (
-    "Run first-class setup for any connector.",
-    "List, check, fill, or set env-backed credentials.",
-    "Configure the unified LLM block non-interactively.",
-    "Inspect and manage the bundled local observability stack.",
-    "Transactionally rotate the gateway and connector-scoped hook credentials.",
-    "Manage the custom provider overlay.",
-    "Configure skill scanner analyzers and policy.",
-    "Configure MCP scanner analyzers and scan targets.",
-    "Configure gateway host, ports, TLS, and auth.",
-    "Configure the LLM guardrail proxy and judge.",
-    "Configure Splunk HEC or local Splunk integration.",
-    "Add and manage canonical v8 observability destinations.",
-    "Add chat or incident notifier webhooks.",
-    "Initialize and configure OpenShell sandbox policy.",
-    "Register an external skill or MCP catalog source.",
-    "Toggle notification categories and event sources.",
-    "Enable or tune the sidecar AI Discovery service.",
-    "Apply or destroy Splunk O11y dashboards.",
-    "Manage trusted connector-binary discovery prefixes.",
-    "Run connector-scoped guardrail status and policy quick actions.",
-    "Inspect or change canonical v8 bucket, profile, destination, and route redaction.",
-    "Configure a guarded ACP agent for Zed or JetBrains.",
+    "Add, switch or remove the agents DefenseClaw protects.",
+    "See which API keys are missing and set them.",
+    "Pick the model and API key the scanners and judge use.",
+    "Start, stop or reset the bundled local dashboards (Docker).",
+    "Replace the gateway and hook tokens in one step.",
+    "Add or remove LLM providers the guardrail should recognize.",
+    "Choose how skills are scanned and which analyzers run.",
+    "Choose how MCP servers are scanned and what gets checked.",
+    "Set the gateway host, ports, TLS and token.",
+    "Turn on the LLM guardrail and choose observe or action (block).",
+    "Send events to Splunk HEC or a local Splunk.",
+    "Send logs, traces and metrics to an observability vendor.",
+    "Post alerts to Slack, PagerDuty, Webex or any URL.",
+    "Run coding agents in OpenShell sandboxes.",
+    "Add a skill or MCP catalog you trust.",
+    "Choose which events send you notifications.",
+    "Find the AI tools in use on this machine.",
+    "Create or remove the Splunk Observability dashboards.",
+    "List the folders where agent binaries are trusted.",
+    "Turn the guardrail on or off, set fail mode and approvals.",
+    "Choose what is hidden from logs and exports.",
+    "Protect an ACP agent in Zed or JetBrains.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
-    "Runs: defenseclaw setup <connector> --yes. Need connector, restart preference, guardrail mode, and scanner mode.",
-    "Runs: defenseclaw keys list --json / check / set / fill-missing. Need env var name and secret only for set.",
+    "Runs: defenseclaw setup <connector> --yes. Need connector, guardrail mode, and restart preference "
+    "(scanner mode for proxy connectors).",
+    "Runs: defenseclaw keys list / check / set / remove / fill-missing. "
+    "Need env var name for set and remove, and the secret only for set.",
     "Runs: defenseclaw setup llm --non-interactive. Need provider, model, optional base URL, and API key env or value.",
     "Runs: defenseclaw setup local-observability <action>. "
     "Need Docker for up/reset; status/url require no credentials.",
@@ -254,7 +311,8 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup observability add <preset>. Choose Galileo or another vendor, then provide "
     "endpoint/project, credentials, and signals.",
     "Runs: defenseclaw setup webhook add <type>. Need webhook URL, secret env where required, and event filters.",
-    "Runs: defenseclaw sandbox setup. Need OpenShell policy choices and optional sandbox home/network settings.",
+    "Runs: defenseclaw sandbox setup --non-interactive in this terminal (sudo prompts and image builds show), "
+    "or defenseclaw sandbox doctor. Needs Docker; installs OpenShell only when you tick it.",
     "Runs: defenseclaw registry add <id> --non-interactive. Need source id, kind, content type, and manifest URL.",
     "Runs one defenseclaw setup notifications-set <slot> on|off per changed toggle. No credentials required.",
     "Runs: defenseclaw agent discovery enable --yes (or disable). Mirrors cadence, scope, and privacy toggles.",
@@ -391,6 +449,15 @@ class SetupPanelAction:
     refresh_credentials: bool = False
     clear_restart_queue: bool = False
     open_model_picker: bool = False
+    # Open the text editor modal for the focused row: "form" (wizard form
+    # field) or "config" (config editor field). ``field_editor_value`` seeds
+    # it (the current value plus the key that was pressed); None means the
+    # current value.
+    open_field_editor: str = ""
+    field_editor_value: str | None = None
+    # Setup navigation pickers: "detail" (readiness + task detail),
+    # "sections" (grouped config sections) or "fields" (config field finder).
+    open_picker: str = ""
 
 
 @dataclass(frozen=True)
@@ -460,6 +527,12 @@ class SetupSaveRestartHints:
     restart_hint: str = ""
     saved_hint: str = ""
     action_bar: tuple[str, ...] = ()
+    # ``issues`` counts every validation error in the draft (untouched rows
+    # included, for display); ``blocking`` counts only errors on changed
+    # fields, which are the ones that stop a save.
+    issues: int = 0
+    blocking: int = 0
+    blocking_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -487,6 +560,9 @@ UNINSTALL_CHOICES: tuple[UninstallChoice, ...] = (
     UninstallChoice("dry-run", "p", "Preview plan", "Runs uninstall --dry-run and changes nothing."),
     UninstallChoice("keep-data", "u", "Uninstall, keep data", "Reverts hooks/plugin integration and keeps data.", True),
     UninstallChoice("wipe-data", "a", "Uninstall and wipe data", "Also deletes audit DB, config, and secrets.", True),
+    UninstallChoice(
+        "wipe-all", "e", "Uninstall everything", "Also deletes the data and the defenseclaw binaries.", True
+    ),
 )
 
 
@@ -552,6 +628,12 @@ class SetupPanelModel:
         )
         self.wizard_status: dict[SetupWizard, str] = {}
         self._wizard_run_started: dict[SetupWizard, datetime] = {}
+        # A check-only run (the Sandbox wizard's doctor) puts back the status it found.
+        self._status_before_check: dict[SetupWizard, str] = {}
+        # The last gateway health, so a new export plan can name the failing
+        # exports (GAP-2394).
+        self._readiness_health: Any = None
+        self.failing_exports: tuple[str, ...] = ()
         self.form_fields: list[WizardFormField] = []
         self.form_cursor = 0
         self.form_active = False
@@ -568,6 +650,11 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals: tuple[WizardGoal, ...] = ()
         self.active_goal: WizardGoal | None = None
+        # The open form came from the goal menu, so Esc goes back to it.
+        self.form_from_goal_menu = False
+        # What ``sandbox doctor --json`` found (the app runs it when the
+        # Sandbox wizard opens); None until it answers.
+        self.sandbox_machine: SandboxMachineCheck | None = None
 
     def set_config(
         self,
@@ -576,6 +663,8 @@ class SetupPanelModel:
         external: bool = False,
     ) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
+        active_field = self.current_field()
+        active_key = active_field.key if active_field is not None else ""
         preserve_config_draft = external and self.mode == "config" and self.has_changes()
         preserve_wizard_draft = external and self.form_active
         self.config = cfg
@@ -589,7 +678,9 @@ class SetupPanelModel:
                         self.active_section = index
                         break
             self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
-            self.active_line = self.first_editable_line()
+            # Keep the cursor on the field just saved rather than jumping to
+            # the top of the section.
+            self.active_line = self._line_for_key(active_key)
             self.config_scroll = 0
         self.disk_change_pending = preserve_config_draft or preserve_wizard_draft
         # Readiness rows depend on cfg.gateway / cfg.guardrail / cfg.audit /
@@ -608,6 +699,15 @@ class SetupPanelModel:
 
         self.observability_status = status
         self.observability_status_error = error.strip()
+        # The readiness Telemetry row names the configured exports (GAP-2351)
+        # and the failing ones (GAP-2394).
+        self.failing_exports = failing_exports(status, self._readiness_health)
+        detail = telemetry_readiness_detail(status, self.failing_exports)
+        state = "warn" if self.failing_exports else "pass"
+        self.readiness_checks = tuple(
+            replace(check, detail=detail, status=state) if check.title == "Telemetry" else check
+            for check in self.readiness_checks
+        )
         active_name = self.sections[self.active_section].name if self.sections else ""
         rebuilt = build_setup_sections(
             self.config,
@@ -649,6 +749,8 @@ class SetupPanelModel:
         if rows is None:
             snapshot = self.credential_snapshot
             rows = tuple(getattr(snapshot, "rows", ()) or ())
+        self._readiness_health = health
+        self.failing_exports = failing_exports(self.observability_status, health)
         self.readiness_checks = build_readiness_checks(
             self.config,
             health,
@@ -656,6 +758,7 @@ class SetupPanelModel:
             rows,
             self.restart_queue,
             gateway_status,
+            observability=self.observability_status,
         )
 
     def wizard_infos(self, *, now: datetime | None = None) -> tuple[SetupWizardInfo, ...]:
@@ -721,13 +824,17 @@ class SetupPanelModel:
         )
 
     def wizard_available(self, wizard: SetupWizard | int) -> bool:
-        return not (
-            SetupWizard(wizard) == SetupWizard.LOCAL_OBSERVABILITY
-            and not local_observability_stack_supported(self.os_name)
-        )
+        wizard = SetupWizard(wizard)
+        if wizard == SetupWizard.SANDBOX:
+            return openshell_sandboxes_supported(self.os_name)
+        return not (wizard == SetupWizard.LOCAL_OBSERVABILITY and not local_observability_stack_supported(self.os_name))
 
     def wizard_unavailable_reason(self, wizard: SetupWizard | int) -> str:
-        return "" if self.wizard_available(wizard) else LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+        if self.wizard_available(wizard):
+            return ""
+        if SetupWizard(wizard) == SetupWizard.SANDBOX:
+            return SANDBOX_WIZARD_UNSUPPORTED_REASON
+        return LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
 
     def section_labels(self) -> tuple[SetupSectionLabel, ...]:
         return tuple(
@@ -827,7 +934,11 @@ class SetupPanelModel:
 
     def credential_action(self, action: str) -> SetupPanelAction:
         if action == "s":
-            self.open_wizard_form(SetupWizard.CREDENTIALS)
+            # Open the "set" goal: the header named the whole wizard ("See
+            # which API keys are missing and set them.") and Action still
+            # cycled through list/check/remove (GAP-2256).
+            goal = next((g for g in wizard_goals(SetupWizard.CREDENTIALS, self.config) if g.id == "set"), None)
+            self.open_wizard_form(SetupWizard.CREDENTIALS, goal=goal)
             for index, field in enumerate(self.form_fields):
                 if field.label == "Action":
                     self.form_fields[index] = field.with_value("set")
@@ -887,11 +998,14 @@ class SetupPanelModel:
     def validation_errors(self) -> tuple[str, ...]:
         return validation_errors(self.sections)
 
+    def blocking_validation_errors(self) -> tuple[str, ...]:
+        return blocking_validation_errors(self.sections)
+
     def has_changes(self) -> bool:
         return bool(self.config_diff())
 
     def review_save_action(self) -> SetupPanelAction:
-        errors = self.validation_errors()
+        errors = self.blocking_validation_errors()
         if errors:
             return SetupPanelAction(True, hint="Fix config validation: " + errors[0])
         changes = len(self.config_diff())
@@ -905,17 +1019,18 @@ class SetupPanelModel:
 
     def save_restart_hints(self) -> SetupSaveRestartHints:
         errors = self.validation_errors()
+        blocking = self.blocking_validation_errors()
         changes = len(self.config_diff())
         field = self.current_field()
         save_hint = "No config changes to save."
-        if errors:
-            save_hint = "Fix config validation before saving: " + errors[0]
+        if blocking:
+            save_hint = "Fix config validation before saving: " + blocking[0]
         elif changes:
             save_hint = "Review and save applies changed fields, then queues a gateway restart when needed."
         restart_hint = ""
         actions = ["[`] Wizards", "[Arrows] Navigate", "[Enter/Click] Edit/Toggle"]
         if changes:
-            actions.extend(("[S] Review & Save", "[R] Revert"))
+            actions.extend(("[S] Review & Save", "\\[r] Revert"))
         if self.restart_queue.pending:
             restart_hint = "Restart pending: " + self.restart_queue.reason + "  [G] restart now  [C] clear"
             actions.extend(("[G] Restart Now", "[C] Clear Restart"))
@@ -923,7 +1038,8 @@ class SetupPanelModel:
             restart_hint = "Restart: queued on save when runtime settings change"
         saved_hint = ""
         if self.last_saved_at is not None:
-            saved_hint = "Saved at " + self.last_saved_at.astimezone(timezone.utc).isoformat()
+            # "Saved 12:08 UTC", not a microsecond ISO stamp (GAP-1554).
+            saved_hint = "Saved " + self.last_saved_at.astimezone(timezone.utc).strftime("%H:%M UTC")
             actions.append(saved_hint)
         return SetupSaveRestartHints(
             changes=changes,
@@ -934,6 +1050,9 @@ class SetupPanelModel:
             restart_hint=restart_hint,
             saved_hint=saved_hint,
             action_bar=tuple(actions),
+            issues=len(errors),
+            blocking=len(blocking),
+            blocking_errors=blocking,
         )
 
     def focused_row_action(self) -> SetupFocusedRowAction:
@@ -948,7 +1067,7 @@ class SetupPanelModel:
                 return SetupFocusedRowAction("form", "toggle", "Enter/Space", "Toggle this setup option.")
             if field.options:
                 return SetupFocusedRowAction("form", "cycle", "Left/Right", "Cycle through available choices.")
-            return SetupFocusedRowAction("form", "edit", "Type", "Edit this setup value.")
+            return SetupFocusedRowAction("form", "edit", "Enter", "Edit this setup value.")
         if self.mode == "config":
             field = self.current_field()
             section = self.current_section()
@@ -959,7 +1078,7 @@ class SetupPanelModel:
                     "config",
                     "open_observability_editor",
                     "E",
-                    "Open the canonical destination editor.",
+                    "Open the destination editor.",
                 )
             if section is not None and section.name == "Webhooks":
                 return SetupFocusedRowAction(
@@ -969,12 +1088,12 @@ class SetupPanelModel:
                     "Open the interactive Webhooks editor for list entries.",
                 )
             if not field.interactive:
-                return SetupFocusedRowAction("config", "read_only", "", "This config row is read-only.")
+                return SetupFocusedRowAction("config", "read_only", "", field.hint or "This config row is read-only.")
             if field.kind == "bool":
                 return SetupFocusedRowAction("config", "toggle", "Enter/Space", "Toggle true or false.")
             if field.kind == "choice":
                 return SetupFocusedRowAction("config", "cycle", "Enter/Space", "Cycle through allowed choices.")
-            return SetupFocusedRowAction("config", "edit", "Type", "Edit this config value.")
+            return SetupFocusedRowAction("config", "edit", "Enter", "Edit this config value.")
         info = self.active_wizard_info()
         return SetupFocusedRowAction(
             "wizard",
@@ -1057,6 +1176,14 @@ class SetupPanelModel:
                 for section in self.sections
             )
 
+    def _line_for_key(self, key: str) -> int:
+        section = self.current_section()
+        if key and section is not None:
+            for index, field in enumerate(section.fields):
+                if field.kind != "header" and field.key == key:
+                    return index
+        return self.first_editable_line()
+
     def first_editable_line(self) -> int:
         if not self.sections:
             return 0
@@ -1134,7 +1261,7 @@ class SetupPanelModel:
         if not self.wizard_available(self.active_wizard):
             self.form_active = False
             self.goal_active = False
-            self.form_error = LOCAL_OBSERVABILITY_UNSUPPORTED_REASON
+            self.form_error = self.wizard_unavailable_reason(self.active_wizard)
             return False
         self.goals = wizard_goals(self.active_wizard, self.config)
         if len(self.goals) <= 1:
@@ -1160,6 +1287,22 @@ class SetupPanelModel:
             return
         goal = self.goals[_clamp(self.goal_cursor, 0, len(self.goals) - 1)]
         self.open_wizard_form(self.active_wizard, goal=goal)
+        self.form_from_goal_menu = True
+
+    def back_to_goal_menu(self) -> bool:
+        """Close a form opened from the goal menu and show that menu again.
+
+        Esc in "Add or configure a connector" went back to the Setup task
+        list, so the next Enter opened another task (GAP-2091). Returns
+        ``False`` when the form was not opened from the goal menu.
+        """
+
+        if not (self.form_active and self.form_from_goal_menu and self.goals):
+            return False
+        goals, cursor = self.goals, self.goal_cursor
+        self.close_wizard_form()
+        self.goals, self.goal_cursor, self.goal_active = goals, cursor, True
+        return True
 
     def open_wizard_form(
         self,
@@ -1169,6 +1312,7 @@ class SetupPanelModel:
     ) -> None:
         if wizard is not None:
             self.active_wizard = SetupWizard(wizard)
+        self.form_from_goal_menu = False
         # Advanced goals carry no presets/filter, so treat them like "no goal".
         self.active_goal = goal if (goal is not None and not goal.is_advanced) else None
         presets = dict(self.active_goal.presets) if self.active_goal else {}
@@ -1184,8 +1328,20 @@ class SetupPanelModel:
                 base = list(rebuild(merged, self.config))
             else:
                 base = list(_overlay_field_overrides(base, presets))
+        if self.active_wizard == SetupWizard.SANDBOX:
+            # Built with the machine check, when there is one.
+            base = list(self._sandbox_form_fields(presets))
         if self.active_goal is not None:
             base = list(_filter_fields_for_goal(base, self.active_goal))
+            base = list(_narrow_goal_connectors(base, self.active_goal, self.config, opening=True))
+            base = list(_narrow_manage_goal_fields(base, self.active_wizard, self.active_goal))
+            if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "remove":
+                base = [_stored_key_picker(field, self.config) if field.label == "Env Name" else field for field in base]
+            if self.active_wizard == SetupWizard.CREDENTIALS and self.active_goal.id == "set":
+                base = [
+                    replace(field, hint=_SECRET_VALUE_SET_HINT) if field.label == "Secret Value" else field
+                    for field in base
+                ]
         self.form_fields = base
         self.form_active = True
         self.goal_active = False
@@ -1204,6 +1360,10 @@ class SetupPanelModel:
                 return
 
     def close_wizard_form(self) -> None:
+        if self.active_wizard == SetupWizard.SANDBOX:
+            # Setup, or the operator, may change the machine before the
+            # wizard opens again: check it again then.
+            self.sandbox_machine = None
         self.form_fields = []
         self.form_cursor = 0
         self.form_active = False
@@ -1213,6 +1373,7 @@ class SetupPanelModel:
         self.goal_cursor = 0
         self.goals = ()
         self.active_goal = None
+        self.form_from_goal_menu = False
         self.disk_change_pending = False
 
     def recompute_dependent_fields(self) -> None:
@@ -1276,9 +1437,14 @@ class SetupPanelModel:
         if self.active_goal is not None:
             for key, value in self.active_goal.presets.items():
                 overrides.setdefault(key, value)
-        fields = list(rebuild(overrides, self.config))
+        if self.active_wizard == SetupWizard.SANDBOX:
+            fields = list(self._sandbox_form_fields(overrides))
+        else:
+            fields = list(rebuild(overrides, self.config))
         if self.active_goal is not None:
             fields = list(_filter_fields_for_goal(fields, self.active_goal))
+            fields = list(_narrow_goal_connectors(fields, self.active_goal, self.config))
+            fields = list(_narrow_manage_goal_fields(fields, self.active_wizard, self.active_goal))
         self.form_fields = fields
         if self.form_fields:
             self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
@@ -1291,6 +1457,34 @@ class SetupPanelModel:
         else:
             self.form_cursor = 0
 
+    def _sandbox_form_fields(self, overrides: Mapping[str, str]) -> tuple[WizardFormField, ...]:
+        return _apply_dynamic_fields(
+            sandbox_wizard_fields(self.config, machine=self.sandbox_machine, os_name=self.os_name),
+            overrides,
+            {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
+        )
+
+    def sandbox_machine_wanted(self) -> bool:
+        """Whether the open Sandbox wizard is waiting for the machine check."""
+        return self.form_active and self.active_wizard == SetupWizard.SANDBOX and self.sandbox_machine is None
+
+    def apply_sandbox_machine_check(self, check: SandboxMachineCheck) -> None:
+        """Take the machine check and refresh an open Sandbox form.
+
+        Install OpenShell follows the check unless the operator already
+        changed it; every other answer stays as entered.
+        """
+        before = next((f for f in self.form_fields if f.flag == "--install-openshell"), None)
+        self.sandbox_machine = check
+        if not (self.form_active and self.active_wizard == SetupWizard.SANDBOX):
+            return
+        overrides = _field_value_overrides(self.form_fields)
+        if before is not None and before.value == before.default:
+            overrides.pop("--install-openshell", None)
+        self.form_fields = list(self._sandbox_form_fields(overrides))
+        if self.form_fields:
+            self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
+
     def toggle_form_reveal(self) -> bool:
         if not any(field.kind == "password" for field in self.form_fields):
             return False
@@ -1299,6 +1493,20 @@ class SetupPanelModel:
 
     def missing_required_fields(self) -> tuple[str, ...]:
         return missing_required_fields(self.active_wizard, self.form_fields)
+
+    def current_form_error(self) -> str:
+        """``form_error``, minus a "Missing required field(s)" the user has since filled.
+
+        The message stayed on screen after Env Name was filled, until Run
+        (GAP-1395)."""
+
+        if self.form_error.startswith(_MISSING_FIELDS_PREFIX):
+            missing = self.missing_required_fields()
+            if not missing:
+                self.form_error = ""
+            else:
+                self.form_error = _MISSING_FIELDS_PREFIX + ", ".join(missing)
+        return self.form_error
 
     def wizard_command_preview(self) -> str:
         """Return the shell command the wizard will execute with current values.
@@ -1317,11 +1525,20 @@ class SetupPanelModel:
         except Exception:  # noqa: BLE001
             command = WIZARD_COMMANDS.get(self.active_wizard, ())
             return "defenseclaw " + " ".join(command) if command else "defenseclaw"
-        masked = mask_wizard_secret_values(self.form_fields, args)
-        return "defenseclaw " + " ".join(masked) if masked else "defenseclaw"
+        from defenseclaw.tui.command_line import display_argv  # the CLI tree; keep it off the model import
 
-    def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True) -> None:
+        args, secret_env = wizard_secrets_to_env(args)
+        masked = mask_wizard_secret_values(self.form_fields, args)
+        # The run passes these in the environment (GAP-1888); show them the
+        # way a shell would, values hidden.
+        env_prefix = "".join(f"{name}=<redacted> " for name, _value in secret_env)
+        return env_prefix + ("defenseclaw " + display_argv(masked) if masked else "defenseclaw")
+
+    def mark_wizard_complete(self, args: Sequence[str], *, success: bool = True, cancelled: bool = False) -> None:
         """Clear the per-wizard "running..." badge after a setup run.
+
+        ``cancelled`` (the preview or the run was cancelled) puts back the
+        status the row had before, rather than "failed".
 
         Maps the executed argv back to the matching wizard so the Setup
         panel reflects the real state instead of a permanently-spinning
@@ -1351,15 +1568,62 @@ class SetupPanelModel:
             if len(command) > best_len:
                 best = wizard
                 best_len = len(command)
+        if (
+            best is None
+            and tuple(args[:2]) == ("sandbox", "doctor")
+            and self.wizard_status.get(SetupWizard.SANDBOX) == "running..."
+        ):
+            # The Sandbox wizard's doctor action; other sandbox commands
+            # (enable, disable, ...) never mark the wizard.
+            best = SetupWizard.SANDBOX
+        # A wizard with several actions runs sibling commands its
+        # WIZARD_COMMANDS prefix doesn't cover (Guardrail actions runs
+        # guardrail block-message / hilt / fail-mode, AI discovery runs
+        # disable, Splunk dashboards runs destroy): the one running wizard
+        # whose action family matches more of the argv than any prefix did
+        # finishes, or its row spins forever.
+        running = [
+            (wizard, len(family))
+            for wizard, status in self.wizard_status.items()
+            if status == "running..."
+            and (family := _wizard_action_family(wizard))
+            and tuple(args[: len(family)]) == family
+        ]
+        if len(running) == 1 and running[0][1] > best_len:
+            best = running[0][0]
         if best is None:
             return
+        if cancelled:
+            if self.wizard_status.get(best) != "running...":
+                # Nothing of this task was running (a palette command was
+                # cancelled): keep the row as it is.
+                return
+            before = self._status_before_check.pop(best, "")
+            if before and before != "running...":
+                self.wizard_status[best] = before
+            else:
+                self.wizard_status.pop(best, None)
+            self._wizard_run_started.pop(best, None)
+            return
+        if best in self._status_before_check and tuple(args[:2]) == ("sandbox", "doctor"):
+            # Only a check: the wizard's setup status stays what it was.
+            before = self._status_before_check.pop(best)
+            if not success:
+                self.wizard_status[best] = "check failed"
+            elif before and before != "running...":
+                self.wizard_status[best] = before
+            else:
+                self.wizard_status[best] = "checked"
+            self._wizard_run_started.pop(best, None)
+            return
+        self._status_before_check.pop(best, None)
         self.wizard_status[best] = "done" if success else "failed"
         self._wizard_run_started.pop(best, None)
 
     def submit_wizard_form(self) -> SetupPanelAction:
         missing = self.missing_required_fields()
         if missing:
-            self.form_error = "Missing required field(s): " + ", ".join(missing)
+            self.form_error = _MISSING_FIELDS_PREFIX + ", ".join(missing)
             return SetupPanelAction(True)
         if self.active_wizard == SetupWizard.CREDENTIALS and wizard_field_value(self.form_fields, "Action") == "set":
             env_name = wizard_field_value(self.form_fields, "Env Name")
@@ -1383,11 +1647,28 @@ class SetupPanelModel:
                 )
                 return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
+        # Secret flag values go to the child's environment, not its argv,
+        # which every local account can read with ps (GAP-1888).
+        args, secret_env = wizard_secrets_to_env(args)
         name = WIZARD_NAMES[int(self.active_wizard)]
+        if self.active_wizard == SetupWizard.OBSERVABILITY:
+            # Named after the Setup task and the chosen destination: a Datadog
+            # run said "setup Observability / Galileo failed" (GAP-1891), and
+            # Setup has no "Observability" task (GAP-2351).
+            preset = wizard_field_value(self.form_fields, "Preset")
+            name = "Export telemetry" + (f" / {observability_preset_label(preset)}" if preset else "")
+        if self.active_wizard == SetupWizard.NOTIFICATIONS_ROUTING:
+            # "setup Notifications Routing" for the task "What notifies you"
+            # (GAP-2386).
+            name = "What notifies you"
+        if self.active_wizard == SetupWizard.CONNECTOR_SETUP and len(args) > 1 and not args[1].startswith("-"):
+            # "setup claude-code", not "setup Connector Setup" (GAP-1709).
+            name = args[1]
         if self.active_wizard == SetupWizard.GUARDRAIL:
             connector = wizard_field_value(self.form_fields, "Connector")
             if connector:
                 name += f" ({connector})"
+        keys_run = self.active_wizard == SetupWizard.CREDENTIALS and len(args) > 1
         # Credentials "set" feeds the secret over stdin (hidden prompt) so
         # it never lands in the child's argv. See F-0801.
         secret_stdin: str | None = None
@@ -1411,20 +1692,41 @@ class SetupPanelModel:
             if self.active_wizard == SetupWizard.REDACTION and redaction_action == "interactive"
             else "read-only"
         )
+        # Sandbox setup may call sudo (the OpenShell installer) and builds
+        # images for minutes: it runs in the real terminal (App.suspend).
+        terminal = self.active_wizard == SetupWizard.SANDBOX and tuple(args[:2]) == ("sandbox", "setup")
+        if terminal:
+            risk = "setup"
+        # The Sandbox wizard's doctor action only reads this machine: its
+        # toast says doctor, and it leaves the wizard's status as it was.
+        doctor = tuple(args[:2]) == ("sandbox", "doctor")
+        category = "info" if doctor else "setup"
+        # "keys remove", not "setup Credentials" (GAP-2061).
+        label = "sandbox doctor" if doctor else (" ".join(args[:2]) if keys_run else "setup " + name)
+        consequence = ""
+        if keys_run and tuple(args[:2]) == ("keys", "remove") and len(args) > 2:
+            from defenseclaw.commands.cmd_keys import required_removal_warning
+
+            consequence = required_removal_warning(self.config, args[2])
+        # A cancelled run (or a finished check) puts this status back.
+        self._status_before_check[self.active_wizard] = self.wizard_status.get(self.active_wizard, "")
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
         return SetupPanelAction(
             True,
             SetupCommandIntent(
-                label="setup " + name,
+                label=label,
                 args=args,
                 binary="defenseclaw",
-                category="setup",
+                category=category,
                 origin="setup-wizard",
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
+                env_overrides=secret_env,
                 risk=risk,
+                terminal=terminal,
+                consequence=consequence,
             ),
         )
 
@@ -1456,7 +1758,7 @@ def build_setup_sections(
                 _field(cfg, "Plugin Dir", "plugin_dir", hint="Directory DefenseClaw scans for installed plugins."),
                 _field(cfg, "Policy Dir", "policy_dir", hint="Root of policy packs."),
                 _field(cfg, "Environment", "environment", hint="Free-form deployment label."),
-                _header(".. Unified LLM (shared by scanners + guardrail) .."),
+                _header(".. Unified LLM (for scanners + guardrail) .."),
                 _field(cfg, "Provider", "llm.provider", "choice", LLM_PROVIDERS, "LLM provider family."),
                 _field(cfg, "Model", "llm.model", hint="Model identifier."),
                 _field(cfg, "API Key Env", "llm.api_key_env", hint="Env var NAME holding the unified key."),
@@ -1560,21 +1862,22 @@ def build_setup_sections(
                     "claw.mode",
                     "choice",
                     supported_connector_choices(os_name),
-                    "Active agent framework.",
+                    "Legacy single-agent setting; set up each connector in Setup tasks instead.",
                 ),
-                _field(cfg, "Home Dir", "claw.home_dir", hint="Override for connector home directory."),
-                _field(cfg, "Config File", "claw.config_file", hint="Connector primary config file."),
+                _openclaw_path_field(cfg, "Home Dir", "claw.home_dir", "Legacy: OpenClaw home directory."),
+                _openclaw_path_field(cfg, "Config File", "claw.config_file", "Legacy: OpenClaw main config file."),
             ),
-            "Which agent framework DefenseClaw defends.",
+            "Legacy single-agent setting (claw.mode). Connectors are set up one by one in "
+            "Setup tasks; these fields matter only to installs that still use one agent.",
         ),
         ConfigSection(
             "Agent Hooks",
-            (*_agent_hook_fields(cfg, "Claude Code", "claude_code"), *_agent_hook_fields(cfg, "Codex", "codex")),
+            _agent_hook_summary_fields(),
             "Dedicated agent hook policy: when scans run, fail behavior, and watched paths.",
         ),
         ConfigSection(
             "Connector Hooks",
-            tuple(_connector_hook_map_fields(cfg)),
+            _connector_hook_summary_fields(cfg),
             "Advanced connector_hooks map for configured and future agent connectors.",
         ),
         ConfigSection(
@@ -1627,7 +1930,7 @@ def build_setup_sections(
         ConfigSection(
             "Observability",
             _v8_observability_fields(observability_status, error=observability_status_error),
-            "Canonical v8 collection, retention, routing, and per-route redaction policy.",
+            "Telemetry collection, retention, routing, and per-route redaction policy.",
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
@@ -1643,12 +1946,12 @@ def build_setup_sections(
         ConfigSection(
             "Inspect LLM (legacy - read-only)",
             (
-                _header("Provider", value=_value(cfg, "inspect_llm.provider")),
-                _header("Model", value=_value(cfg, "inspect_llm.model")),
-                _header("API Key Env", value=_value(cfg, "inspect_llm.api_key_env")),
-                _header("Base URL", value=_value(cfg, "inspect_llm.base_url")),
-                _header("Timeout (s)", value=_value(cfg, "inspect_llm.timeout")),
-                _header("Max Retries", value=_value(cfg, "inspect_llm.max_retries")),
+                _header("Provider", value=_value(cfg, "inspect_llm.provider") or UNSET_VALUE),
+                _header("Model", value=_value(cfg, "inspect_llm.model") or UNSET_VALUE),
+                _header("API Key Env", value=_value(cfg, "inspect_llm.api_key_env") or UNSET_VALUE),
+                _header("Base URL", value=_value(cfg, "inspect_llm.base_url") or UNSET_VALUE),
+                _header("Timeout (s)", value=_value(cfg, "inspect_llm.timeout") or UNSET_VALUE),
+                _header("Max Retries", value=_value(cfg, "inspect_llm.max_retries") or UNSET_VALUE),
             ),
             "Deprecated v4 block. Edit the Unified LLM section instead.",
         ),
@@ -1663,19 +1966,75 @@ def build_setup_sections(
             "manage via 'defenseclaw setup trusted-paths'.",
         ),
     ]
-    return tuple(sections)
+    return tuple(_lock_unmodeled_fields(section) for section in sections)
+
+
+UNMODELED_CONFIG_HINT = "Read-only here; edit this in config.yaml"
+READ_ONLY_VALUE = "read-only"
+
+
+def _lock_unmodeled_fields(section: ConfigSection) -> ConfigSection:
+    """Turn rows ``Config.save()`` can't persist into read-only rows.
+
+    Editing such a row would look saved but be dropped on write, so it is
+    shown read-only with where to change it instead.
+    """
+
+    fields = tuple(
+        _read_only_row(field, UNMODELED_CONFIG_HINT)
+        if field.kind != "header" and field.key and not is_python_modeled(None, field.key)
+        else field
+        for field in section.fields
+    )
+    if fields == section.fields:
+        return section
+    return ConfigSection(section.name, fields, section.summary, section.help)
+
+
+# An unset read-only field: the Value read "read-only" as if that were the
+# value (GAP-2253); the Validation/Hint columns say it is read-only.
+UNSET_VALUE = "(unset)"
+
+
+def _read_only_row(field: ConfigField, hint: str) -> ConfigField:
+    shown = field.value or UNSET_VALUE
+    return ConfigField(label=field.label, key=field.key, kind="header", value=shown, original=shown, hint=hint)
+
+
+def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key: str, hint: str) -> ConfigField:
+    """claw.home_dir / claw.config_file: only the OpenClaw connector reads them.
+
+    With Mode codex (or amp) and no OpenClaw connector the default
+    ~/.openclaw paths looked like that agent's paths (GAP-2253), so they are
+    shown read-only as unused instead.
+    """
+
+    mode = _active_connector(cfg) or "openclaw"
+    if mode == "openclaw" or "openclaw" in _active_connector_names_for_setup(cfg):
+        return _field(cfg, label, key, hint=hint)
+    shown = f"(not used: Mode is {mode})"
+    return ConfigField(
+        label=label,
+        key=key,
+        kind="header",
+        value=shown,
+        original=shown,
+        hint="Only OpenClaw reads this path. To edit it, set Mode to openclaw, save, and reopen the editor.",
+    )
 
 
 def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     if prefix not in {"skill_actions", "mcp_actions", "plugin_actions"}:
         return (ConfigField("(unknown actions prefix)", prefix + ".error", "header"),)
+    # A short group header with no value, so it reads whole: the long one
+    # and its legend value were both cut with "…" at every width (GAP-2508).
+    # The legend is the header's hint; each row's own hint names its choices.
     out = [
         ConfigField(
-            label=".. " + prefix.replace("_", " ").upper() + " (severity -> file / runtime / install) ..",
+            label=".. " + prefix.replace("_", " ").upper() + " (per severity) ..",
             key=prefix + ".hint",
             kind="header",
-            value="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
-            original="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
+            hint="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
         ),
     ]
     for severity in ("critical", "high", "medium", "low", "info"):
@@ -1722,6 +2081,37 @@ def is_guardrail_supporting(connector: str) -> bool:
     return connector.strip().lower() in GUARDRAIL_CONNECTORS
 
 
+def _stored_key_picker(field: WizardFormField, cfg: object | Mapping[str, Any] | None) -> WizardFormField:
+    """The remove form's Env Name as a pick list of the names stored in .env (GAP-2061).
+
+    Only names are read, never values. The gateway's own token stays out of
+    the list (``keys list`` says not to remove it). With nothing stored the
+    field stays free text.
+    """
+
+    from defenseclaw.commands.cmd_keys import _dotenv_names, _gateway_token_names
+
+    data_dir = _llm_data_dir(cfg) or os.path.expanduser("~/.defenseclaw")
+    try:
+        reserved = _gateway_token_names(cfg)
+    except Exception:  # noqa: BLE001 - a partial config still lists the stored names.
+        reserved = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+    names = tuple(sorted(name for name in _dotenv_names(os.path.join(data_dir, ".env")) if name not in reserved))
+    if not names:
+        return replace(field, hint=f"Name of the entry to delete; nothing is stored in {data_dir}/.env yet.")
+    return replace(
+        field,
+        kind="choice",
+        value="",
+        default="",
+        options=("", *names),
+        hint="Pick the stored entry to delete (←/→ or Enter steps through them).",
+    )
+
+
+_SECRET_VALUE_SET_HINT = "Paste the key; it is sent on stdin and never shown."
+
+
 def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
     return (
         WizardFormField(
@@ -1729,11 +2119,12 @@ def _credentials_wizard_fields() -> tuple[WizardFormField, ...]:
             "choice",
             value="list",
             default="list",
-            options=("list", "check", "fill-missing", "set"),
-            hint="list uses keys list --json; set writes to env-backed storage.",
+            options=("list", "check", "fill-missing", "set", "remove"),
+            hint="list/check show which keys are set; fill-missing asks for unset ones; "
+            "set stores one key; remove deletes one.",
         ),
-        WizardFormField("Env Name", "string", hint="Credential environment variable name."),
-        WizardFormField("Secret Value", "password", hint="Only used by Action=set."),
+        WizardFormField("Env Name", "string", hint="The key's environment variable name, e.g. OPENAI_API_KEY."),
+        WizardFormField("Secret Value", "password", hint="For Action set: " + _SECRET_VALUE_SET_HINT),
     )
 
 
@@ -1787,7 +2178,14 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
 
     return (
         WizardFormField(
-            "Client", "choice", "--client", value="zed", default="zed", options=ACP_CLIENT_IDS, required=True
+            "Client",
+            "choice",
+            "--client",
+            value="zed",
+            default="zed",
+            options=ACP_CLIENT_IDS,
+            required=True,
+            hint="Editor that launches the agent over ACP.",
         ),
         WizardFormField(
             "Agent",
@@ -1797,8 +2195,17 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
             default="kiro",
             options=ACP_AGENT_IDS,
             required=True,
+            hint="ACP agent DefenseClaw sits in front of and guards.",
         ),
-        WizardFormField("Profile", "string", "--profile", value="default", default="default", required=True),
+        WizardFormField(
+            "Profile",
+            "string",
+            "--profile",
+            value="default",
+            default="default",
+            required=True,
+            hint="ACP policy profile (acp.profiles) the guard enforces.",
+        ),
         WizardFormField(
             "Action Mode",
             "bool",
@@ -2534,6 +2941,80 @@ def _build_redaction_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     return tuple(args)
 
 
+# What each scanner and LLM field means and what its choices do. The
+# generated hints only repeated the label or flag ("Select scan policy.",
+# "Sets --llm-model.", GAP-2522).
+_SCANNER_LLM_HINTS: dict[str, str] = {
+    "--llm-provider": "anthropic or openai; saved in the shared llm: block every scanner uses.",
+    "--llm-model": "Model id for the LLM review, e.g. claude-haiku-4-5; saved in the shared llm: block.",
+}
+_SKILL_SCANNER_HINTS: dict[str, str] = {
+    **_SCANNER_LLM_HINTS,
+    "--use-behavioral": "Follow data through the skill's scripts to catch behavior its description hides.",
+    "--use-llm": "Have an LLM review each skill's instructions, with the LLM Provider and Model below.",
+    "--llm-consensus-runs": "LLM reviews per skill; only findings most runs agree on are kept. 0 = one review.",
+    "--enable-meta": "A second LLM pass over all findings that drops false positives and ranks the rest.",
+    "--use-trigger": "Flag skill descriptions so broad that they would trigger on almost any request.",
+    "--use-virustotal": "Look up the skill's files on VirusTotal; needs VIRUSTOTAL_API_KEY.",
+    "--use-aidefense": "Send skill content to Cisco AI Defense for analysis; needs an AI Defense API key.",
+    "--policy": (
+        "strict: fewest exceptions, for untrusted skills; balanced: between the two; "
+        "permissive: fewest false positives, for trusted skills (the default); "
+        "none: the scanner's built-in policy."
+    ),
+    "--lenient": "yes (the default): scan skills with malformed front matter or missing fields; no: fail them.",
+}
+_MCP_SCANNER_HINTS: dict[str, str] = {
+    **_SCANNER_LLM_HINTS,
+    "--analyzers": (
+        "auto (the default, also what an empty field means) picks them for you, or a comma-separated "
+        "list: yara (local rules), "
+        "api (Cisco AI Defense), llm (LLM review), behavioral (code vs. description), "
+        "readiness (timeouts, retries)."
+    ),
+    "--api-endpoint": "Cisco AI Defense API URL for the api analyzer; empty keeps the current one.",
+    "--api-key-env": "Env var NAME holding the Cisco AI Defense API key, e.g. CISCO_AI_DEFENSE_API_KEY.",
+    "--api-timeout-ms": "How long the api analyzer waits for Cisco AI Defense, in milliseconds.",
+    "--scan-prompts": "Also check the prompt templates the server offers.",
+    "--scan-resources": "Also check the resources (files, data) the server exposes.",
+    "--scan-instructions": "Also check the instructions text the server sends to the agent.",
+}
+_LLM_FORM_HINTS: dict[str, str] = {
+    "--role": (
+        "unified: the shared LLM for scanners and judge; agent: the same, and the judge inherits it; "
+        "judge: only the guardrail judge's LLM."
+    ),
+    "--provider": "Where the model runs; Bedrock, Vertex AI and Azure show their own fields below.",
+    "--model": "Model id, e.g. claude-haiku-4-5; Enter opens the model picker.",
+    "--api-key-env": "Env var NAME holding the API key; defenseclaw keys set stores it.",
+    "--base-url": "Endpoint of a proxy or self-hosted model; empty uses the provider's.",
+    "--timeout": "Seconds to wait for one LLM request.",
+    "--max-retries": "How often a failed or timed-out LLM request is retried.",
+    "--bedrock-auth-mode": (
+        "api_key: a Bedrock API key; iam_credentials: access key env vars; "
+        "profile: an AWS profile; instance_role: the host's IAM role."
+    ),
+    "--bedrock-access-key-env": "Env var holding the AWS access key ID.",
+    "--bedrock-secret-key-env": "Env var holding the AWS secret access key.",
+    "--bedrock-session-token-env": "Env var holding the AWS session token (temporary credentials).",
+    "--bedrock-profile-name": "AWS profile name from ~/.aws/config.",
+    "--bedrock-inference-profile": "Inference-profile prefix for cross-region models, e.g. us.",
+    "--vertex-project-id": "GCP project that hosts Vertex AI.",
+    "--vertex-auth-mode": (
+        "service_account: a key file; adc: gcloud application-default credentials; "
+        "workload_identity: the workload's own identity."
+    ),
+    "--vertex-service-account-json-env": "Env var holding the path to the service-account JSON file.",
+    "--azure-auth-mode": "api_key: an Azure OpenAI key; managed_identity: the host's managed identity.",
+}
+
+
+def _hinted(fields: tuple[WizardFormField, ...], hints: Mapping[str, str]) -> tuple[WizardFormField, ...]:
+    """``fields`` with the hints in ``hints`` (by flag) in place of generated ones."""
+
+    return tuple(replace(field, hint=hints[field.flag]) if field.flag in hints else field for field in fields)
+
+
 def wizard_form_defs(
     wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
 ) -> tuple[WizardFormField, ...]:
@@ -2550,9 +3031,15 @@ def wizard_form_defs(
     if builder is not None:
         return builder(cfg)
     if wizard == SetupWizard.SKILL_SCANNER:
-        return (
-            WizardFormField("Behavioral Analyzer", "bool", "--use-behavioral", value="no", default="no"),
-            WizardFormField("LLM Analyzer", "bool", "--use-llm", value="no", default="no"),
+        # Policy and lenient open on the effective config, as the gateway
+        # form does: "balanced" / "no" showed on a permissive, lenient
+        # install, and Run kept the real values (GAP-2536). A field left at
+        # its current value emits no flag; a change always emits one.
+        policy, lenient = _skill_scanner_policy_values(cfg)
+        policies = ("strict", "balanced", "permissive", "none")
+        skill_fields = (
+            _cfg_bool_field("Behavioral Analyzer", "--use-behavioral", cfg, "scanners.skill_scanner.use_behavioral"),
+            _cfg_bool_field("LLM Analyzer", "--use-llm", cfg, "scanners.skill_scanner.use_llm"),
             WizardFormField(
                 "LLM Provider",
                 "choice",
@@ -2563,30 +3050,26 @@ def wizard_form_defs(
             ),
             WizardFormField("LLM Model", "string", "--llm-model"),
             WizardFormField("LLM Consensus Runs", "int", "--llm-consensus-runs", value="0", default="0"),
-            WizardFormField("Meta Analyzer", "bool", "--enable-meta", value="no", default="no"),
-            WizardFormField("Trigger Analyzer", "bool", "--use-trigger", value="no", default="no"),
-            WizardFormField("VirusTotal Scanner", "bool", "--use-virustotal", value="no", default="no"),
-            WizardFormField("AI Defense Analyzer", "bool", "--use-aidefense", value="no", default="no"),
+            _cfg_bool_field("Meta Analyzer", "--enable-meta", cfg, "scanners.skill_scanner.enable_meta"),
+            _cfg_bool_field("Trigger Analyzer", "--use-trigger", cfg, "scanners.skill_scanner.use_trigger"),
+            _cfg_bool_field("VirusTotal Scanner", "--use-virustotal", cfg, "scanners.skill_scanner.use_virustotal"),
+            _cfg_bool_field("AI Defense Analyzer", "--use-aidefense", cfg, "scanners.skill_scanner.use_aidefense"),
             WizardFormField(
                 "Scan Policy",
                 "choice",
                 "--policy",
-                value="balanced",
-                default="balanced",
-                options=("strict", "balanced", "permissive", "none"),
+                value=policy,
+                default=policy,
+                options=policies if policy in policies else (policy, *policies),
             ),
-            WizardFormField("Lenient Mode", "bool", "--lenient", value="no", default="no"),
+            WizardFormField("Lenient Mode", "bool", "--lenient", "--no-lenient", value=lenient, default=lenient),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
+        return _hinted(skill_fields, _SKILL_SCANNER_HINTS)
     if wizard == SetupWizard.MCP_SCANNER:
-        return (
-            WizardFormField(
-                "Analyzers",
-                "string",
-                "--analyzers",
-                value="yara,api,llm,behavioral,readiness",
-                default="yara,api,llm,behavioral,readiness",
-            ),
+        analyzers = _cfg_str(cfg, "scanners.mcp_scanner.analyzers", "auto")  # GAP-2536
+        mcp_fields = (
+            WizardFormField("Analyzers", "string", "--analyzers", value=analyzers, default=analyzers),
             WizardFormField(
                 "LLM Provider",
                 "choice",
@@ -2617,17 +3100,36 @@ def wizard_form_defs(
                 value="",
                 default="",
             ),
-            WizardFormField("Scan Prompts", "bool", "--scan-prompts", value="no", default="no"),
-            WizardFormField("Scan Resources", "bool", "--scan-resources", value="no", default="no"),
-            WizardFormField("Scan Instructions", "bool", "--scan-instructions", value="no", default="no"),
+            _cfg_bool_field("Scan Prompts", "--scan-prompts", cfg, "scanners.mcp_scanner.scan_prompts"),
+            _cfg_bool_field("Scan Resources", "--scan-resources", cfg, "scanners.mcp_scanner.scan_resources"),
+            _cfg_bool_field("Scan Instructions", "--scan-instructions", cfg, "scanners.mcp_scanner.scan_instructions"),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
+        return _hinted(mcp_fields, _MCP_SCANNER_HINTS)
     if wizard == SetupWizard.GATEWAY:
+        # Start from the configured gateway: the form showed localhost /
+        # 9090 / 9099 on a gateway at 127.0.0.1:19020, so an edit of one
+        # field looked like it would move the others (GAP-1473). A field
+        # left at its current value emits no flag.
+        host = _cfg_str(cfg, "gateway.host", "localhost")
+        port = _cfg_port(cfg, "gateway.port")
+        api_port = _cfg_port(cfg, "gateway.api_port")
         return (
             WizardFormField("Remote Mode", "bool", "--remote", value="no", default="no"),
-            WizardFormField("Host", "string", "--host", value="localhost", default="localhost"),
-            WizardFormField("Port", "int", "--port", value="9090", default="9090"),
-            WizardFormField("API Port", "int", "--api-port", value="9099", default="9099"),
+            WizardFormField(
+                "Host", "string", "--host", value=host, default=host, hint="Address of the gateway to connect to."
+            ),
+            WizardFormField(
+                "Port", "int", "--port", value=port, default=port, hint="The gateway's WebSocket port."
+            ),
+            WizardFormField(
+                "API Port",
+                "int",
+                "--api-port",
+                value=api_port,
+                default=api_port,
+                hint="The gateway's REST API port, which hooks and this TUI call.",
+            ),
             WizardFormField("Auth Token", "password", "--token"),
             WizardFormField("SSM Param", "string", "--ssm-param"),
             WizardFormField("SSM Region", "string", "--ssm-region"),
@@ -2642,26 +3144,6 @@ def wizard_form_defs(
         return observability_wizard_fields("splunk-o11y", cfg)
     if wizard == SetupWizard.WEBHOOKS:
         return webhook_wizard_fields("slack")
-    if wizard == SetupWizard.SANDBOX:
-        return (
-            WizardFormField("Sandbox IP", "string", "--sandbox-ip", value="10.200.0.2", default="10.200.0.2"),
-            WizardFormField("Host IP", "string", "--host-ip", value="10.200.0.1", default="10.200.0.1"),
-            WizardFormField("Sandbox Home", "string", "--sandbox-home", value="/home/sandbox", default="/home/sandbox"),
-            WizardFormField("OpenClaw Port", "int", "--openclaw-port", value="18789", default="18789"),
-            WizardFormField(
-                "Policy",
-                "choice",
-                "--policy",
-                value="permissive",
-                default="permissive",
-                options=("default", "strict", "permissive"),
-            ),
-            WizardFormField("DNS", "string", "--dns", value="8.8.8.8,1.1.1.1", default="8.8.8.8,1.1.1.1"),
-            WizardFormField("No Auto Pair", "bool", "--no-auto-pair", value="no", default="no"),
-            WizardFormField("No Host Networking", "bool", "--no-host-networking", value="no", default="no"),
-            WizardFormField("No Guardrail", "bool", "--no-guardrail", value="no", default="no"),
-            WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
-        )
     return ()
 
 
@@ -2688,6 +3170,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
     SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
+    SetupWizard.SANDBOX: lambda cfg=None: sandbox_wizard_fields(cfg),
 }
 
 
@@ -2710,6 +3193,11 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda overrides, cfg: _guardrail_actions_wizard_fields(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
     SetupWizard.REDACTION: lambda overrides, _cfg: _redaction_wizard_fields_for(overrides),
+    SetupWizard.SANDBOX: lambda overrides, cfg: _apply_dynamic_fields(
+        sandbox_wizard_fields(cfg),
+        overrides,
+        {"action": (overrides.get("@Action") or "setup").strip() or "setup"},
+    ),
 }
 
 
@@ -2743,6 +3231,44 @@ _GUARDRAIL_JUDGE_SECTIONS: tuple[str, ...] = (
 
 def _cfg_str(cfg: object | Mapping[str, Any] | None, path: str, default: str = "") -> str:
     return str(get_config_value(cfg, path, default) or default).strip()
+
+
+def _cfg_bool_field(label: str, flag: str, cfg: object | Mapping[str, Any] | None, path: str) -> WizardFormField:
+    """A yes/no field that opens on the configured value and can turn it off.
+
+    The scanner analyzer toggles showed a hard-coded "no" on an install
+    where the analyzer was on, and "no" emitted nothing, so the form could
+    enable an analyzer but never disable it (GAP-2571). An unchanged field
+    emits no flag; a change emits ``flag`` or ``--no-<flag>``.
+    """
+
+    value = get_config_value(cfg, path, False)
+    if not isinstance(value, bool):
+        value = str(value).strip().lower() in {"1", "true", "yes", "on"}
+    current = "yes" if value else "no"
+    return WizardFormField(label, "bool", flag, "--no-" + flag[2:], value=current, default=current)
+
+
+def _skill_scanner_policy_values(cfg: object | Mapping[str, Any] | None) -> tuple[str, str]:
+    """The effective skill-scanner policy and lenient mode as form values.
+
+    The defaults match ``SkillScannerConfig`` (permissive, lenient on);
+    an empty policy is what ``--policy none`` saves.
+    """
+
+    policy = get_config_value(cfg, "scanners.skill_scanner.policy", "permissive")
+    policy = str(policy).strip() or "none"
+    lenient = get_config_value(cfg, "scanners.skill_scanner.lenient", True)
+    if not isinstance(lenient, bool):
+        lenient = str(lenient).strip().lower() in {"1", "true", "yes", "on"}
+    return policy, "yes" if lenient else "no"
+
+
+def _cfg_port(cfg: object | Mapping[str, Any] | None, path: str) -> str:
+    """A configured port as text, or "" when unset (0 means unset)."""
+
+    value = _cfg_str(cfg, path)
+    return "" if value in {"", "0"} else value
 
 
 def _active_connector(cfg: object | Mapping[str, Any] | None) -> str:
@@ -2951,21 +3477,23 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "add",
             "Add or configure a connector",
-            summary="Add a connector peer, or replace the configured set when requested.",
+            summary="Protect one more agent next to the ones already set up (or replace them).",
             presets={"@Action": "setup"},
-            fields=("Connector", "Action", "Replace Existing", "Restart Gateway"),
+            # The task text promises the guardrail mode; without the field a
+            # connector added here always got the CLI default (GAP-1957).
+            fields=("Connector", "Action", "Guardrail Mode", "Replace Existing", "Restart Gateway"),
         ),
         WizardGoal(
             "proxy-stack",
-            "Set up a proxy connector with the local stack",
-            summary="Bring up the local guardrail/scanner stack for a proxy.",
+            "Set up a connector with local Grafana",
+            summary="Set up a hook connector and start the local Prometheus/Loki/Tempo/Grafana stack.",
             presets={"@Action": "setup", "@Local Stack": "yes"},
-            fields=("Connector", "Guardrail Mode", "Scanner Mode", "Local Stack"),
+            fields=("Connector", "Guardrail Mode", "Local Stack"),
         ),
         WizardGoal(
             "bulk",
-            "Set active connectors",
-            summary="Run bare setup to choose the active hook connector set.",
+            "Choose which agents DefenseClaw protects",
+            summary="Pick every agent to protect in one step; the others are turned off.",
             presets={"@Action": "batch"},
             fields=(
                 "Connectors (CSV)",
@@ -2979,7 +3507,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
         WizardGoal(
             "rerun",
             "Re-run setup for a connector",
-            summary="Re-apply guardrail/scanner settings and verify one connector.",
+            summary="Set up one connector again, for example to change its guardrail mode.",
             presets={"@Action": "setup"},
             fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode", "Verify After Setup"),
         ),
@@ -3019,10 +3547,17 @@ def _credentials_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGo
         ),
         WizardGoal(
             "set",
-            "Set a credential value",
-            summary="Write a single env-backed credential.",
+            "Set one API key",
+            summary="Store one key in ~/.defenseclaw/.env; it is sent on stdin and never shown.",
             presets={"@Action": "set"},
             fields=("Action", "Env Name", "Secret Value"),
+        ),
+        WizardGoal(
+            "remove",
+            "Remove a stored credential",
+            summary="Delete one entry from ~/.defenseclaw/.env (a rotated or mistyped key).",
+            presets={"@Action": "remove"},
+            fields=("Action", "Env Name"),
         ),
     )
 
@@ -3080,14 +3615,14 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
     return (
         WizardGoal(
             "auto",
-            "Rotate shared token for active connectors",
-            summary="Rotate gateway and distinct connector-scoped hook credentials with exact rollback.",
+            "Rotate the gateway token",
+            summary="Make a new gateway token and update every protected agent's hooks; nothing changes if a step fails.",
             fields=("Refresh Hooks",),
         ),
         WizardGoal(
             "specific",
-            "Rotate shared token with connector hint",
-            summary="Token storage is shared; connector only narrows the hook refresh path.",
+            "Rotate the gateway token, refresh one agent",
+            summary="Same new token for every agent; only the chosen agent's hooks are rewritten now.",
             fields=("Connector", "Refresh Hooks"),
         ),
     )
@@ -3196,7 +3731,7 @@ def _gateway_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, 
         WizardGoal(
             "ports",
             "Change host and ports",
-            summary="Set the gateway host, proxy port, and API port.",
+            summary="Set the gateway host, WebSocket port, and API port.",
             fields=("Host", "Port", "API Port"),
         ),
         WizardGoal(
@@ -3255,28 +3790,28 @@ def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizard
         WizardGoal(
             "list",
             "List destinations",
-            summary="List canonical process-wide destinations.",
+            summary="List the telemetry destinations.",
             presets={"@Action": "list"},
             fields=("Action", "JSON Output"),
         ),
         WizardGoal(
             "enable",
             "Enable a destination",
-            summary="Enable a canonical destination by name.",
+            summary="Enable a destination by name.",
             presets={"@Action": "enable"},
             fields=("Action", "Name"),
         ),
         WizardGoal(
             "disable",
             "Disable a destination",
-            summary="Disable a canonical destination by name.",
+            summary="Disable a destination by name.",
             presets={"@Action": "disable"},
             fields=("Action", "Name"),
         ),
         WizardGoal(
             "remove",
             "Remove a destination",
-            summary="Remove a canonical destination by name.",
+            summary="Remove a destination by name.",
             presets={"@Action": "remove"},
             fields=("Action", "Name"),
         ),
@@ -3383,37 +3918,6 @@ def _webhooks_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal,
     )
 
 
-def _sandbox_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
-    del cfg
-    return (
-        WizardGoal(
-            "init",
-            "Initialize the sandbox (defaults)",
-            summary="Set up the OpenShell sandbox with a policy.",
-            fields=("Policy",),
-        ),
-        WizardGoal(
-            "network",
-            "Set the sandbox network (IPs / DNS)",
-            summary="Configure sandbox/host IPs and DNS.",
-            fields=("Sandbox IP", "Host IP", "DNS", "No Host Networking"),
-        ),
-        WizardGoal(
-            "policy",
-            "Change the sandbox policy",
-            summary="Switch the sandbox enforcement policy.",
-            fields=("Policy",),
-        ),
-        WizardGoal(
-            "disable",
-            "Disable the sandbox",
-            summary="Turn the sandbox off.",
-            presets={"--disable": "yes"},
-            fields=("Disable",),
-        ),
-    )
-
-
 def _registries_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
     del cfg
     return (
@@ -3454,7 +3958,7 @@ def _notifications_routing_goals(cfg: object | Mapping[str, Any] | None) -> tupl
         WizardGoal(
             "verdicts",
             "Choose which verdicts notify me",
-            summary="Toggle block/observe/HITL verdict notifications.",
+            summary="Pick which verdicts show a desktop notification.",
             fields=(
                 "Block (enforced)",
                 "Block (would-block / observe)",
@@ -3465,7 +3969,7 @@ def _notifications_routing_goals(cfg: object | Mapping[str, Any] | None) -> tupl
         WizardGoal(
             "sources",
             "Choose which sources notify me",
-            summary="Toggle hook/guardrail/asset-policy sources.",
+            summary="Pick which parts of DefenseClaw can notify you.",
             fields=(
                 "Source: Hooks",
                 "Source: Guardrail",
@@ -3738,7 +4242,6 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.SPLUNK: _splunk_goals,
     SetupWizard.OBSERVABILITY: _observability_goals,
     SetupWizard.WEBHOOKS: _webhooks_goals,
-    SetupWizard.SANDBOX: _sandbox_goals,
     SetupWizard.REGISTRIES: _registries_goals,
     SetupWizard.NOTIFICATIONS_ROUTING: _notifications_routing_goals,
     SetupWizard.AI_DISCOVERY: _ai_discovery_goals,
@@ -3793,6 +4296,26 @@ def _seed_parametrized_fields(
     return None
 
 
+def _effective_strategy_text(cfg: object | Mapping[str, Any] | None, strategy: str) -> str:
+    """``strategy`` as the connectors run it.
+
+    A judge strategy with the judge off (or gated to no active connector)
+    scans regex only, as ``defenseclaw guardrail status`` says; the header
+    read "Strategy: regex_judge" there (GAP-2092).
+    """
+
+    if strategy not in {"regex_judge", "judge_first"}:
+        return strategy
+    if not bool(get_config_value(cfg, "guardrail.judge.enabled", False)):
+        return "regex_only (judge off)"
+    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None) or ()
+    gated = {str(name).strip().lower() for name in gate}
+    connectors = _active_connector_names_for_setup(cfg)
+    if "*" in gated or _any_active_connector_is_proxy(cfg) or not connectors or gated & set(connectors):
+        return strategy
+    return "regex_only (judge on for no active connector)"
+
+
 def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None) -> str:
     """One-line "here's what's configured today" string for the goal menu.
 
@@ -3805,19 +4328,20 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         provider = _cfg_str(cfg, "llm.provider")
         model = _cfg_str(cfg, "llm.model")
         main = f"{provider}/{model}" if (provider and model) else (model or provider or "not set")
-        judge = _cfg_str(cfg, "guardrail.judge.model") or "not set"
+        judge = _cfg_str(cfg, "guardrail.judge.llm.model") or _cfg_str(cfg, "guardrail.judge.model") or "not set"
         connectors = _active_connector_names_for_setup(cfg)
         connector_summary = ", ".join(connectors) if connectors else "none"
         role = "judge+agent available" if _any_active_connector_is_proxy(cfg) else "judge only"
         return f"Main: {main}  ·  Judge: {judge}  ·  Connectors: {connector_summary} ({role})"
     if wizard == SetupWizard.REDACTION:
         profile = _cfg_str(cfg, "observability.defaults.redaction_profile", "none") or "none"
-        return f"Default profile: {profile}  ·  Effective overrides come from the canonical v8 plan"
+        posture = "unredacted" if profile == "none" else "redacted"
+        return f"Default profile: {profile} ({posture})  ·  Each observability destination can set its own profile"
     if wizard == SetupWizard.GUARDRAIL:
-        mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
+        mode = guardrail_mode_label(cfg)
         enabled = "on" if _guardrail_enabled(cfg) else "off"
         strategy = _cfg_str(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only"
-        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {strategy}"
+        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
         connectors = _active_connector_names_for_setup(cfg)
         return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"
@@ -3826,9 +4350,9 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
         return f"AI discovery: {enabled}  ·  Mode: {mode}"
     if wizard == SetupWizard.GATEWAY:
-        host = _cfg_str(cfg, "gateway.host") or "localhost"
-        port = _cfg_str(cfg, "gateway.port") or "9090"
-        return f"Gateway: {host}:{port}"
+        host = _cfg_str(cfg, "gateway.api_bind") or "127.0.0.1"
+        port = _cfg_str(cfg, "gateway.api_port") or "?"
+        return f"Gateway API: {host}:{port}"
     return ""
 
 
@@ -4159,13 +4683,16 @@ def notifications_routing_wizard_fields(
         else:
             current = bool(get_config_value(cfg, f"notifications.{slot}", fallback == "yes"))
         value = "yes" if current else "no"
-        fields.append(WizardFormField(label, "bool", value=value, default=value))
+        fields.append(
+            WizardFormField(label, "bool", value=value, default=value, hint=_NOTIFICATION_SLOT_HINTS.get(slot, ""))
+        )
     fields.append(
         WizardFormField(
             "Restart Gateway After",
             "bool",
             value="yes",
             default="yes",
+            hint=_RESTART_GATEWAY_HINT,
         )
     )
     return tuple(fields)
@@ -4456,6 +4983,548 @@ def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tupl
     return WIZARD_COMMANDS[SetupWizard.NOTIFICATIONS_ROUTING]
 
 
+# --- Sandbox wizard (slot 13) ---------------------------------------------
+
+# (connector name, wizard label, command) for every harness the Go tree runs
+# (harness.Names()); with openshell.harnesses empty, setup's defaults are on.
+SANDBOX_WIZARD_HARNESSES: tuple[tuple[str, str, str], ...] = SANDBOX_HARNESS_SPECS
+
+
+# sandboxcli.consentGatewayRestart: a bind-mount or telemetry change restarts
+# the shared OpenShell gateway, and --non-interactive restarts it only while
+# no sandbox runs on it.
+_GATEWAY_RESTART_NOTE = (
+    "restarts the OpenShell gateway, which drops the connections of every running sandbox; "
+    "while sandboxes run, setup skips the restart (apply it later with: defenseclaw sandbox doctor --fix)."
+)
+# The gateway of an OpenShell installed another way than the one whose
+# service DefenseClaw restarts it through: setup writes the change, and its
+# user restarts it (DoctorReport.GatewayUnmanaged).
+_GATEWAY_MANUAL_RESTART_NOTE = (
+    "is written to the gateway's configuration; DefenseClaw cannot restart this gateway, "
+    "so you restart it yourself, the way you started it, to apply it."
+)
+
+# The largest auth.json sandboxcli.codexAuthKey reads.
+_CODEX_AUTH_MAX_BYTES = 1 << 20
+
+
+def _codex_auth_key_source(env: Mapping[str, str], home: str) -> str:
+    """Where ``codex login --with-api-key`` stored an API key, or "".
+
+    Mirrors ``sandboxcli.codexAuthKey``: $CODEX_HOME (when absolute, else
+    ~/.codex)/auth.json, a regular file of at most 1 MiB whose
+    ``OPENAI_API_KEY`` is a non-empty string. A ChatGPT login (tokens only)
+    is not shared.
+    """
+
+    codex_home = str(env.get("CODEX_HOME", "")).strip()
+    label = "$CODEX_HOME/auth.json"
+    if not codex_home or not os.path.isabs(codex_home):
+        codex_home, label = os.path.join(home, ".codex"), "~/.codex/auth.json"
+    path = os.path.join(codex_home, "auth.json")
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CODEX_AUTH_MAX_BYTES:
+            return ""
+        with open(path, encoding="utf-8") as handle:
+            auth = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    key = auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None
+    return label if isinstance(key, str) and key.strip() else ""
+
+
+def _sandbox_credential_summary(
+    env: Mapping[str, str] | None = None, home: str | None = None, llm: str = ""
+) -> str:
+    """Which model credential each harness would share (names only, never values).
+
+    Mirrors ``sandboxcli.runLLM`` and ``detectLLM`` for a run without
+    ``--llm``, which takes ``openshell.llm`` (*llm*): under ``auto`` (the
+    default) environment variables, and for Codex the API key in auth.json,
+    with an Amazon Bedrock key (``AWS_BEARER_TOKEN_BEDROCK``) last; ``none``
+    shares nothing; a provider shares only its own key, and a run without it
+    is refused. A provider the harness has no credential for gives way to
+    ``auto``.
+    """
+
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    choice = str(llm or "").strip().lower() or "auto"
+
+    def first(*names: str) -> str:
+        return next((name for name in names if str(env.get(name, "")).strip()), "")
+
+    bedrock = ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", lambda: first("AWS_BEARER_TOKEN_BEDROCK"))
+    # (openshell.llm choice, the variable a refusal names, the source found)
+    harnesses = (
+        (
+            "Claude Code",
+            (
+                ("anthropic", "ANTHROPIC_API_KEY", lambda: first("ANTHROPIC_API_KEY")),
+                ("claude-oauth", "CLAUDE_CODE_OAUTH_TOKEN", lambda: first("CLAUDE_CODE_OAUTH_TOKEN")),
+                bedrock,
+            ),
+        ),
+        (
+            "Codex",
+            (
+                (
+                    "openai",
+                    "OPENAI_API_KEY",
+                    lambda: first("OPENAI_API_KEY", "CODEX_API_KEY") or _codex_auth_key_source(env, home),
+                ),
+                bedrock,
+            ),
+        ),
+    )
+    parts = []
+    for label, candidates in harnesses:
+        if choice == "none":
+            parts.append(f"{label}: none shared (openshell.llm none; log in inside the sandbox)")
+            continue
+        chosen = [c for c in candidates if c[0] == choice]
+        found = ""
+        for _llm, _name, value in chosen or candidates:
+            found = value()
+            if found:
+                break
+        if found:
+            parts.append(f"{label}: {found} found")
+        elif chosen:
+            parts.append(
+                f"{label}: none found (openshell.llm {choice}: runs are refused until you set {chosen[0][1]})"
+            )
+        elif choice != "auto":
+            # A provider the harness has no credential for gives way to auto.
+            parts.append(
+                f"{label}: none found (openshell.llm {choice} does not apply to {label}, so auto; "
+                "log in inside the sandbox)"
+            )
+        else:
+            parts.append(f"{label}: none found (log in inside the sandbox)")
+    return " · ".join(parts)
+
+
+@dataclass(frozen=True)
+class SandboxMachineCheck:
+    """What ``defenseclaw sandbox doctor --json`` says about this machine, for the wizard."""
+
+    summary: str  # one line per check
+    openshell_needed: bool = False
+    openshell_detail: str = ""
+    error: str = ""
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux), whose gateway
+    # DefenseClaw cannot start or restart (DoctorReport.GatewayUnmanaged):
+    # setup uses it while it answers and writes a gateway change for the
+    # user to restart it on. Installing OpenShell would change nothing.
+    openshell_unmanaged: bool = False
+    # With OpenShell installed (a supported CLI, or one newer than
+    # supported), the failing check whose doctor's fix openshell_detail
+    # gives: installing OpenShell would change nothing. Setup stops on a
+    # CLI or gateway one before it installs anything; a "vm-driver" one it
+    # fixes with the install's consent (e2fsprogs) or stops on.
+    openshell_attention: str = ""
+
+
+_DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
+
+# The checks setup stops on, in its order, when it does not install
+# OpenShell (sandboxcli/setup.go, after step 3).
+_SETUP_STOPS = ("openshell-cli", "gateway-registration", "mtls-permissions", "gateway-version", "gateway-service")
+
+
+def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> SandboxMachineCheck:
+    """Summarize a ``sandbox doctor --json`` report (or why it did not run).
+
+    OpenShell counts as needed exactly when ``sandbox setup`` offers to
+    install it: where its install step runs NVIDIA's installer, for a CLI
+    missing or one it upgrades (the report's ``openshell_install``,
+    DoctorReport.OpenShellInstallNeeded). With OpenShell installed, any
+    other failing check is not the install's (it would install nothing):
+    the first one setup stops on, a gateway's before a MicroVM driver's,
+    is shown with the doctor's fix (``openshell_attention``). On a MicroVM
+    (vm) gateway, or a Mac whose docker driver has no Landlock (which setup
+    switches to MicroVMs), that includes a failed ``vm-driver`` check. A
+    MicroVM mounts no host folders, so the bind-mount check is left out
+    there. An OpenShell installed another way than the Homebrew formula
+    (macOS) or without the openshell-gateway user unit (Linux) is marked,
+    as setup marks it: setup uses its gateway while it answers (the user
+    restarts it after a gateway change) and stops, with the doctor's fix,
+    where that gateway does not answer. A gateway service that warns is
+    shown with its detail.
+    """
+
+    if not isinstance(report, Mapping):
+        why = error or "the sandbox doctor did not answer"
+        return SandboxMachineCheck(summary=f"not checked: {why}", error=why)
+    checks: dict[str, Mapping[str, Any]] = {}
+    for item in report.get("checks") or ():
+        if isinstance(item, Mapping) and item.get("id"):
+            checks[str(item["id"])] = item
+
+    def status(check_id: str) -> str:
+        return str((checks.get(check_id) or {}).get("status") or "").lower()
+
+    def detail(check_id: str) -> str:
+        return str((checks.get(check_id) or {}).get("detail") or "").strip()
+
+    def fix_of(check_id: str) -> str:
+        """The doctor's fix of a check, as setup prints it, else its detail."""
+        fix = (checks.get(check_id) or {}).get("fix")
+        fix = fix if isinstance(fix, Mapping) else {}
+        summary, command = str(fix.get("summary") or "").strip(), str(fix.get("command") or "").strip()
+        if not summary:
+            return detail(check_id)
+        return summary + (f" (`{command}`)" if command else "")
+
+    # The driver the gateway runs, else the one its files configure
+    # (DoctorReport.Driver, .ConfiguredDriver; the Go doctor always names
+    # one). On a Mac whose docker driver has no Landlock (Docker Desktop's
+    # VM) setup switches the gateway to MicroVMs, which is its default
+    # (sandboxcli/setup.go): the MicroVM driver's needs count then, and no
+    # bind mounts do.
+    driver = str(report.get("driver") or report.get("configured_driver") or "").strip()
+    on_microvm = not compute_driver(driver).host_mounts
+    mac = detail("platform").startswith("darwin/")
+    microvm = on_microvm or (mac and status("landlock") != "pass")
+    parts: list[str] = []
+    docker = status("docker")
+    if docker:
+        version = str(report.get("docker_version") or "").strip()
+        text = f"Docker {version}".strip() if docker == "pass" else f"Docker: {detail('docker') or docker}"
+        parts.append(f"{_DOCTOR_GLYPHS.get(docker, '·')} {text}")
+    landlock = status("landlock")
+    if landlock in _DOCTOR_GLYPHS and on_microvm:
+        # The MicroVM's own kernel enforces it (sandboxcli.machineLine).
+        parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock (MicroVM)")
+    elif landlock in _DOCTOR_GLYPHS:
+        parts.append(f"{_DOCTOR_GLYPHS[landlock]} Landlock" + (f" {detail('landlock')}" if landlock == "pass" else ""))
+    cli = status("openshell-cli")
+    service = report.get("service")
+    service = service if isinstance(service, Mapping) else {}
+    # An OpenShell installed another way than the Homebrew formula (macOS)
+    # or without the openshell-gateway user unit (Linux) whose service runs
+    # the gateway (DoctorReport.GatewayUnmanaged): setup uses its gateway
+    # while it answers, and stops on the doctor's fix where it does not.
+    # Its install step would find the CLI and install nothing.
+    without_service = cli not in {"", "fail"} and not service.get("installed")
+    manager = service.get("manager")
+    unmanaged = without_service and manager in {"systemd", "brew"}
+    # A doctor older than openshell_install: a failed CLI check.
+    install = report.get("openshell_install")
+    needed = not unmanaged and (install if isinstance(install, bool) else cli in {"", "fail"})
+    # Else the first failing check setup stops on, with the doctor's fix.
+    attention = "" if needed else next((i for i in _SETUP_STOPS if status(i) == "fail"), "")
+    version = str(report.get("cli_version") or "").strip()
+    name = f"OpenShell {version}" if version else "OpenShell"
+    if unmanaged:
+        # As setup's machine line marks it (sandboxcli/setup.go), and says
+        # what it does with its gateway, naming where that OpenShell is.
+        where = str(report.get("cli_path") or "").strip()
+        if manager == "systemd":
+            parts.append(f"⚠ {name} has no openshell-gateway user service")
+            how = ", without the openshell-gateway user service DefenseClaw starts and restarts the gateway through on Linux"
+        else:
+            parts.append(f"⚠ {name} is not from Homebrew's nvidia/openshell formula")
+            how = (
+                " than the nvidia/openshell/openshell Homebrew formula, whose service DefenseClaw starts "
+                "and restarts the gateway through"
+            )
+        openshell = (
+            f"{name}{f' at {where}' if where else ''} was installed another way{how}: setup uses its gateway "
+            "as it runs, but DefenseClaw cannot start or restart it; after a gateway change, restart it yourself, "
+            "the way you started it"
+        )
+    if attention == "openshell-cli":
+        # One newer than supported, which the install step does not downgrade.
+        openshell = f"OpenShell needs attention: {fix_of(attention) or 'not supported'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not supported"))
+    elif attention:
+        # A stopped gateway service is started, a gateway of another
+        # release than the CLI restarted through its service.
+        openshell = f"the OpenShell gateway needs attention: {fix_of(attention) or 'not answering'}"
+        gateway = str(report.get("gateway_version") or "").strip()
+        if attention == "gateway-version" and gateway and gateway != version:
+            parts.append(f"✗ {name}, but the gateway runs {gateway}")
+        elif status("gateway-service") == "fail":
+            # A gateway that answers while the service is stopped is run
+            # by something else.
+            parts.append("✗ OpenShell gateway service stopped" if gateway else "✗ OpenShell gateway not running")
+        else:
+            parts.append("✗ OpenShell gateway needs attention")
+    elif unmanaged:
+        pass
+    elif not needed:
+        openshell = f"{name} is installed"
+        if status("gateway-service") == "warn":
+            parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
+        else:
+            parts.append(f"✓ {name}")
+    elif "not on PATH" in detail("openshell-cli"):
+        openshell = "OpenShell is not installed"
+        parts.append("✗ OpenShell not installed")
+    else:
+        openshell = f"OpenShell needs attention: {detail('openshell-cli') or 'not found'}"
+        parts.append("✗ OpenShell " + (detail("openshell-cli") or "not found"))
+    vm_driver = status("vm-driver") if microvm else ""
+    if vm_driver == "pass":
+        parts.append("✓ MicroVM driver")
+    elif vm_driver in {"warn", "fail"}:
+        parts.append(f"{_DOCTOR_GLYPHS[vm_driver]} MicroVM driver: {detail('vm-driver') or vm_driver}")
+    # Setup gets to the MicroVM driver past the gateway checks only.
+    if vm_driver == "fail" and not needed and not attention:
+        attention = "vm-driver"
+        openshell = f"the MicroVM driver needs attention: {fix_of('vm-driver') or 'not ready'}"
+    mounts = "" if microvm else status("bind-mounts")
+    if mounts == "pass":
+        parts.append("✓ bind mounts")
+    elif mounts in {"warn", "fail"}:
+        off = detail("bind-mounts").startswith("disabled")
+        parts.append("✗ bind mounts off" if off else "✗ bind mounts: " + detail("bind-mounts"))
+    # One check per line: joined on one line, the checks after the first
+    # few were cut off at 80 columns.
+    return SandboxMachineCheck(
+        summary="\n".join(parts),
+        openshell_needed=needed,
+        openshell_detail=openshell,
+        openshell_unmanaged=unmanaged,
+        openshell_attention=attention,
+    )
+
+
+def _sandbox_allowed_harnesses(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """openshell.admin.allowed_harnesses (empty: any harness)."""
+    admin = _openshell_admin(cfg)
+    return tuple(str(h).strip() for h in (_admin_value(admin, "allowed_harnesses", ()) or ()) if str(h).strip())
+
+
+def sandbox_wizard_fields(
+    cfg: object | Mapping[str, Any] | None = None,
+    *,
+    machine: SandboxMachineCheck | None = None,
+    os_name: str | None = None,
+) -> tuple[WizardFormField, ...]:
+    """The OpenShell sandbox setup wizard (``defenseclaw sandbox setup``).
+
+    Every consent the interactive command asks for is a field here, so the
+    wizard runs the command with ``--non-interactive`` and explicit flags:
+    the answers are the consent. ``machine`` is the doctor's check of this
+    machine; until it answers, Install OpenShell stays off. On macOS there is
+    no telemetry question: the Homebrew gateway does not read gateway.env,
+    so setup cannot turn OpenShell's telemetry off there. Nor is there a
+    mounts question: setup runs macOS sandboxes in OpenShell MicroVMs, which
+    mount no host folders, so every run there works on a copy.
+    """
+
+    configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
+    allowed = _sandbox_allowed_harnesses(cfg)
+    harnesses = [entry for entry in SANDBOX_WIZARD_HARNESSES if not allowed or entry[0] in allowed]
+
+    def is_setup(values: Mapping[str, str]) -> bool:
+        return (values.get("action") or "setup") == "setup"
+
+    fields: list[WizardFormField] = [
+        WizardFormField(
+            "Action",
+            "choice",
+            value="setup",
+            default="setup",
+            options=("setup", "doctor"),
+            hint="setup: the one-time sandbox setup. doctor: only check this machine.",
+        ),
+        WizardFormField(
+            "Harnesses",
+            "section",
+            value="" if harnesses else f"none may run: {ADMIN_POLICY_MESSAGE}",
+            hint="The harnesses that run in sandboxes."
+            + (f" Your organization allows: {', '.join(allowed)}." if allowed else ""),
+            visible_when=is_setup,
+        ),
+    ]
+    # As setup does: the configured harnesses, else its defaults (the first
+    # the organization allows when it allows none of them).
+    defaults = {name for name, _label, _command in harnesses if name in DEFAULT_SANDBOX_HARNESSES} or {
+        name for name, _label, _command in harnesses[:1]
+    }
+    for name, label, command in harnesses:
+        on = "yes" if (name in configured if configured else name in defaults) else "no"
+        fields.append(
+            WizardFormField(
+                label,
+                "bool",
+                value=on,
+                default=on,
+                hint=f"Run `{command}` in a sandbox (--harness {name}).",
+                visible_when=is_setup,
+            )
+        )
+    macos = (host_os() if os_name is None else os_name).strip().lower() == "darwin"
+    # On macOS the installer installs a Homebrew formula, without sudo.
+    installer = "NVIDIA's pinned, sha256-verified installer " + (
+        "(it installs the nvidia/openshell Homebrew formula; no sudo)"
+        if macos
+        else "(uses sudo; the terminal asks for your password)"
+    )
+    # On macOS setup installs e2fsprogs, which the MicroVM driver formats
+    # its disks with, under the same consent as OpenShell (sandboxcli/setup.go).
+    e2fsprogs = " Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
+    if machine is None:
+        machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
+        install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
+    elif machine.error:
+        machine_line = machine.summary
+        install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_needed:
+        machine_line = machine.summary
+        install = "yes"
+        install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+    elif machine.openshell_attention == "vm-driver":
+        # Under the install's consent setup installs e2fsprogs and signs
+        # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
+        machine_line = machine.summary
+        install = "no"
+        install_hint = (
+            f"{machine.openshell_detail}; OpenShell is installed, and yes lets setup install e2fsprogs "
+            "(brew install e2fsprogs) or sign the MicroVM driver when that is what it needs."
+        )
+    elif machine.openshell_attention:
+        # The doctor's fix: installing OpenShell would change nothing.
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; installing OpenShell would change nothing."
+    else:
+        machine_line = machine.summary
+        install, install_hint = "no", f"{machine.openshell_detail}; nothing to install."
+    # Setup gets to e2fsprogs only past the OpenShell and gateway checks: not
+    # where it stops on a gateway fix.
+    stops = machine is not None and machine.openshell_attention != ""
+    if macos and not stops:
+        install_hint += e2fsprogs
+    # A gateway no gateway service runs is its user's to restart
+    # (DoctorReport.GatewayUnmanaged): setup writes the change.
+    unmanaged = machine is not None and machine.openshell_unmanaged
+    restart_note = _GATEWAY_MANUAL_RESTART_NOTE if unmanaged else _GATEWAY_RESTART_NOTE
+    microvm_restart = (
+        "; you restart the gateway yourself, the way you started it" if unmanaged else " and restarts it once"
+    )
+    fields += [
+        WizardFormField(
+            "Credentials",
+            "section",
+            hint=_sandbox_credential_summary(llm=str(get_config_value(cfg, "openshell.llm", "") or "")),
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "This machine",
+            "section",
+            value=machine_line,
+            hint="Your answers here are the consent: setup runs without asking again "
+            "(only sudo may ask for your password).",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Install OpenShell",
+            "bool",
+            "--install-openshell",
+            value=install,
+            default=install,
+            hint=install_hint,
+            visible_when=is_setup,
+        ),
+    ]
+    if macos:
+        # Setup on macOS asks no mounts question: it runs sandboxes in
+        # MicroVMs, which mount no host folders (--no-mounts would do nothing).
+        fields.append(
+            WizardFormField(
+                "MicroVMs",
+                "section",
+                value="every run works on a copy",
+                hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
+                'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
+                + microvm_restart
+                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
+                "and 5 GB).",
+                visible_when=is_setup,
+            )
+        )
+    else:
+        fields += [
+            WizardFormField(
+                "Mount Project Folder",
+                "bool",
+                no_flag="--no-mounts",
+                value="yes",
+                default="yes",
+                hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
+                "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
+                "Turning bind mounts on " + restart_note,
+                visible_when=is_setup,
+            ),
+            WizardFormField(
+                "Disable OpenShell Telemetry",
+                "bool",
+                no_flag="--upstream-telemetry",
+                value="yes",
+                default="yes",
+                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + restart_note,
+                visible_when=is_setup,
+            ),
+        ]
+    fields += [
+        WizardFormField(
+            "Shell Wrappers",
+            "bool",
+            "--wrappers",
+            "--no-wrappers",
+            value="no",
+            default="no",
+            hint="Make the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them "
+            "(a marked block in your shell rc; undo any time with defenseclaw sandbox disable <harness>).",
+            visible_when=is_setup,
+        ),
+        WizardFormField(
+            "Build Images Now",
+            "bool",
+            no_flag="--skip-images",
+            value="yes",
+            default="yes",
+            hint="Build the harness images now (the first build is about 3 GB). No: the first run builds them.",
+            visible_when=is_setup,
+        ),
+    ]
+    return tuple(fields)
+
+
+def _sandbox_selected_harnesses(fields: Sequence[WizardFormField]) -> list[str]:
+    return [
+        name
+        for name, label, _command in SANDBOX_WIZARD_HARNESSES
+        if wizard_bool_value(fields, label, "no") == "yes"
+    ]
+
+
+def _build_sandbox_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    if (wizard_field_value(fields, "Action") or "setup") == "doctor":
+        return ("sandbox", "doctor")
+    args = ["sandbox", "setup", "--non-interactive"]
+    for name in _sandbox_selected_harnesses(fields):
+        args.extend(("--harness", name))
+    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
+        args.append("--install-openshell")
+    if wizard_bool_value(fields, "Mount Project Folder", "yes") == "no":
+        args.append("--no-mounts")
+    if wizard_bool_value(fields, "Disable OpenShell Telemetry", "yes") == "no":
+        args.append("--upstream-telemetry")
+    args.append("--wrappers" if wizard_bool_value(fields, "Shell Wrappers", "no") == "yes" else "--no-wrappers")
+    if wizard_bool_value(fields, "Build Images Now", "yes") == "no":
+        args.append("--skip-images")
+    return tuple(args)
+
+
 def _build_acp_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     args = ["acp", "setup"]
     for label, flag in (("Client", "--client"), ("Agent", "--agent"), ("Profile", "--profile")):
@@ -4619,6 +5688,12 @@ def build_wizard_args(
                 base.append(field.no_flag)
             continue
         if field.kind in {"string", "int", "choice", "password"}:
+            if wizard == SetupWizard.MCP_SCANNER and field.flag == "--analyzers" and not field.value.strip():
+                # Clearing the list showed an empty field while Run kept the
+                # old list; empty now means auto, as the hint says (GAP-2572).
+                if field.default not in {"", "auto"}:
+                    base.extend((field.flag, "auto"))
+                continue
             if not field.value or not field.flag:
                 continue
             if not always_pass_defaults and field.value == field.default and not field.required:
@@ -4651,6 +5726,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CUSTOM_PROVIDERS: lambda fields: _build_custom_provider_args(fields),
     SetupWizard.OBSERVABILITY: lambda fields: _build_observability_args(fields),
     SetupWizard.WEBHOOKS: lambda fields: _build_webhook_args(fields),
+    SetupWizard.SANDBOX: lambda fields: _build_sandbox_args(fields),
     SetupWizard.NOTIFICATIONS_ROUTING: lambda fields: _build_notifications_routing_args(fields),
     SetupWizard.AI_DISCOVERY: lambda fields: _build_ai_discovery_args(fields),
     SetupWizard.SPLUNK_DASHBOARDS: lambda fields: _build_splunk_dashboards_args(fields),
@@ -4669,6 +5745,9 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             missing.append("Env Name")
         if not wizard_field_value(fields, "Secret Value", raw=True):
             missing.append("Secret Value")
+    if wizard == SetupWizard.CREDENTIALS and wizard_field_value(fields, "Action") == "remove":
+        if not wizard_field_value(fields, "Env Name"):
+            missing.append("Env Name")
     if wizard == SetupWizard.CUSTOM_PROVIDERS:
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Name"):
@@ -4681,6 +5760,16 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
             missing.append("Directory")
+    if wizard == SetupWizard.SANDBOX and (wizard_field_value(fields, "Action") or "setup") == "setup":
+        if not _sandbox_selected_harnesses(fields):
+            labels = {field.label for field in fields}
+            offered = [label for _name, label, _command in SANDBOX_WIZARD_HARNESSES if label in labels]
+            if not offered:
+                missing.append(f"a harness ({ADMIN_POLICY_MESSAGE})")
+            elif len(offered) <= 2:
+                missing.append(f"a harness ({' or '.join(offered)})")
+            else:
+                missing.append("a harness (turn one on under Harnesses)")
     if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
         for label in ("Runtime Data Dir", "Token File"):
             if not wizard_field_value(fields, label):
@@ -4739,6 +5828,51 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
     if reveal:
         return field.value or "(empty)"
     return mask_secret(field.value)
+
+
+# Secret flags the Setup wizards fill, with the variable that command reads
+# instead (Click envvar). argv is readable by every local account (ps, /proc),
+# the environment only by the same user (GAP-1888).
+WIZARD_SECRET_ENV: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("setup", "observability", "add"), "--token", "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN"),
+    (("setup", "llm"), "--api-key", "DEFENSECLAW_SETUP_LLM_API_KEY"),
+    (("setup", "gateway"), "--token", "DEFENSECLAW_SETUP_GATEWAY_TOKEN"),
+    (("setup", "splunk"), "--access-token", "DEFENSECLAW_SETUP_SPLUNK_ACCESS_TOKEN"),
+    (("setup", "splunk"), "--hec-token", "DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN"),
+    (("setup", "splunk", "dashboards"), "--o11y-api-token", "SFX_AUTH_TOKEN"),
+)
+
+
+def wizard_secrets_to_env(args: Sequence[str]) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    """Move secret ``--flag value`` pairs out of argv into env overrides."""
+
+    names = {
+        flag: env_name for prefix, flag, env_name in WIZARD_SECRET_ENV if tuple(args[: len(prefix)]) == prefix
+    }
+    out: list[str] = []
+    env: list[tuple[str, str]] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in names and index + 1 < len(args):
+            env.append((names[arg], args[index + 1]))
+            index += 2
+            continue
+        flag, equals, value = arg.partition("=")
+        if equals and flag in names:
+            env.append((names[flag], value))
+            index += 1
+            continue
+        out.append(arg)
+        index += 1
+    return tuple(out), tuple(env)
+
+
+def observability_preset_label(preset_id: str) -> str:
+    """Short destination name: 'Datadog', 'Galileo Cloud', 'Generic OTLP'."""
+
+    label = dict(OBSERVABILITY_PRESETS).get(preset_id, preset_id or "destination")
+    return label.split(" / ")[0]
 
 
 def mask_wizard_secret_values(fields: Sequence[WizardFormField], args: Sequence[str]) -> tuple[str, ...]:
@@ -4800,6 +5934,8 @@ def uninstall_args_for_option(option: UninstallOption) -> tuple[tuple[str, ...],
         return ("uninstall", "--yes"), "uninstall --yes"
     if option == "wipe-data":
         return ("uninstall", "--all", "--yes"), "uninstall --all --yes"
+    if option == "wipe-all":
+        return ("uninstall", "--all", "--binaries", "--yes"), "uninstall --all --binaries --yes"
     return ("uninstall", "--dry-run"), "uninstall dry-run"
 
 
@@ -4811,6 +5947,11 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
         category="destructive" if option != "dry-run" else "setup",
         origin="uninstall-modal",
     )
+
+
+# The connector install.sh offers first; the Setup form starts on it when no
+# connector is configured (GAP-2159).
+_DEFAULT_SETUP_CONNECTOR = "codex"
 
 
 def connector_setup_wizard_fields(
@@ -4826,8 +5967,10 @@ def connector_setup_wizard_fields(
     else:
         connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
         if not connector:
-            connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw").strip()
-    connector = connector or "openclaw"
+            connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
+    # No connector configured: start where install.sh does (codex), not on
+    # openclaw, so Ctrl+R can't set up an agent nobody picked (GAP-2159).
+    connector = connector or _DEFAULT_SETUP_CONNECTOR
     # A stored compatibility mirror can name a proxy connector that this OS
     # can't run (e.g. a config copied from macOS opened on Windows); fall back
     # to the first supported connector rather than offering an unusable default.
@@ -4848,7 +5991,14 @@ def connector_setup_wizard_fields(
     overrides.pop("@Guardrail Mode", None)
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     fields = (
-        WizardFormField("Connector", "choice", value=connector, default=connector, options=choices),
+        WizardFormField(
+            "Connector",
+            "choice",
+            value=connector,
+            default=connector,
+            options=choices,
+            hint="The agent to protect (←/→ to change).",
+        ),
         WizardFormField(
             "Connectors (CSV)",
             "string",
@@ -4862,23 +6012,41 @@ def connector_setup_wizard_fields(
             options=("setup", "batch", "remove"),
             hint="Set up/add one connector, choose the active connector set, or remove one.",
         ),
-        WizardFormField("Guardrail Mode", "choice", value=mode, default=mode, options=("observe", "action")),
         WizardFormField(
-            "Scanner Mode", "choice", value=scanner_mode, default=scanner_mode, options=("local", "remote", "both")
+            "Guardrail Mode",
+            "choice",
+            value=mode,
+            default=mode,
+            options=("observe", "action"),
+            hint="observe only logs what would be blocked; action blocks it.",
+        ),
+        WizardFormField(
+            "Scanner Mode",
+            "choice",
+            value=scanner_mode,
+            default=scanner_mode,
+            options=("local", "remote", "both"),
+            hint="Where scans run: on this machine, in the Cisco AI Defense cloud, or both.",
         ),
         WizardFormField(
             "Replace Existing",
             "bool",
             value="no",
             default="no",
-            hint="Replace the configured connector set instead of adding this connector as a peer.",
+            hint="yes turns off the agents set up now and protects only this one; no adds it next to them.",
         ),
         WizardFormField(
             "Workspace Dir",
             "string",
             hint="Optional workspace-scoped connector config directory.",
         ),
-        WizardFormField("Restart Gateway", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Restart Gateway",
+            "bool",
+            value="yes",
+            default="yes",
+            hint="Restart the gateway so the change takes effect now.",
+        ),
         WizardFormField(
             "Detected Connectors",
             "bool",
@@ -4893,8 +6061,20 @@ def connector_setup_wizard_fields(
             default="no",
             hint="Batch setup only: include every supported hook connector.",
         ),
-        WizardFormField("Local Stack", "bool", value="no", default="no"),
-        WizardFormField("Verify After Setup", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Local Stack",
+            "bool",
+            value="no",
+            default="no",
+            hint="Also start the local Prometheus/Loki/Tempo/Grafana stack.",
+        ),
+        WizardFormField(
+            "Verify After Setup",
+            "bool",
+            value="yes",
+            default="yes",
+            hint="Check that the connector reaches the guardrail once setup is done.",
+        ),
         WizardFormField(
             "Force Last Connector Removal",
             "bool",
@@ -4903,7 +6083,14 @@ def connector_setup_wizard_fields(
             hint="Allow removing the final connector and fully unconfiguring enforcement.",
         ),
     )
+    if not is_guardrail_supporting(connector):
+        # Only the proxy connectors take --scanner-mode / --verify; the form
+        # offered them for Claude Code too, where they did nothing (GAP-2059).
+        fields = tuple(field for field in fields if field.label not in _PROXY_ONLY_CONNECTOR_FIELDS)
     return _overlay_field_overrides(fields, overrides)
+
+
+_PROXY_ONLY_CONNECTOR_FIELDS = frozenset({"Scanner Mode", "Verify After Setup"})
 
 
 # ---------------------------------------------------------------------------
@@ -5080,6 +6267,135 @@ def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardForm
                 continue
         out.append(field)
     return tuple(out)
+
+
+# Goals that act on a connector that is already set up.
+_CONFIGURED_CONNECTOR_GOALS = frozenset({"rerun", "remove"})
+
+# "Choose which agents DefenseClaw protects" is the batch goal, so the
+# "Batch setup only:" hint prefixes said nothing (GAP-2386).
+_BULK_GOAL_HINTS: dict[str, str] = {
+    "Connectors (CSV)": "Agents to protect, comma-separated (e.g. codex,hermes); the others are turned off.",
+    "Detected Connectors": "Also protect every agent found on this machine.",
+    "All Supported Connectors": "Protect every agent DefenseClaw supports.",
+}
+_REMOVE_CONNECTOR_HINT = "The agent to stop protecting; its hooks are removed (←/→ to pick)."
+
+
+def _pin_goal_action(
+    fields: Sequence[WizardFormField], goal: WizardGoal | None
+) -> tuple[WizardFormField, ...]:
+    """Keep a goal's Action row on the goal's own action.
+
+    Each goal shows only the rows its action needs, so cycling Action in
+    "Add or configure a connector" to batch asked for Connectors (CSV) or
+    Detected/All rows the form never showed, and remove kept the ignored
+    Guardrail Mode and Replace Existing rows (GAP-2026). "See which
+    credentials are set" cycled to remove and then asked for an Env Name
+    row it never showed (GAP-2185). The other actions have their own goals.
+    """
+
+    action = (goal.presets.get("@Action") or "") if goal is not None else ""
+    if not action:
+        return tuple(fields)
+    return tuple(
+        replace(
+            field,
+            options=(action,),
+            value=action,
+            default=action,
+            hint="Fixed by this goal.",
+        )
+        if field.label == "Action" and field.kind == "choice" and action in field.options
+        else field
+        for field in fields
+    )
+
+
+def _narrow_goal_connectors(
+    fields: Sequence[WizardFormField],
+    goal: WizardGoal | None,
+    cfg: object | Mapping[str, Any] | None,
+    *,
+    opening: bool = False,
+) -> tuple[WizardFormField, ...]:
+    """Offer only configured connectors to "Re-run setup" and "Remove".
+
+    The Connector row cycled through every supported connector, so one Right
+    press picked an agent that was not installed (GAP-1547). Configured
+    connectors are listed alphabetically and the row starts on the first one
+    unless it already holds a configured connector.
+    """
+
+    fields = _pin_goal_action(fields, goal)
+    if goal is not None and goal.id == "bulk" and goal.presets.get("@Action") == "batch":
+        # The Connectors row started empty instead of on the agents
+        # protected now (GAP-2386).
+        current = ",".join(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))
+        return tuple(
+            replace(
+                field,
+                hint=_BULK_GOAL_HINTS[field.label],
+                **({"value": current, "default": current} if field.label == "Connectors (CSV)" and not field.value else {}),
+            )
+            if field.label in _BULK_GOAL_HINTS
+            else field
+            for field in fields
+        )
+    if goal is None or goal.id not in _CONFIGURED_CONNECTOR_GOALS:
+        return tuple(fields)
+    configured = tuple(sorted(dict.fromkeys(_active_connector_names_for_setup(cfg))))
+    if not configured:
+        return tuple(fields)
+    removing = goal.id == "remove"
+    narrowed: list[WizardFormField] = []
+    for field in fields:
+        if field.label == "Connector" and field.kind == "choice":
+            value = field.value if field.value in configured else configured[0]
+            default = field.default if field.default in configured else configured[0]
+            if removing and opening:
+                # A destructive goal opened on the first roster entry, so
+                # Ctrl+R removed claudecode before anything was picked
+                # (GAP-2387): it starts with no connector chosen.
+                value = default = ""
+            field = replace(field, options=configured, value=value, default=default)
+            if removing:
+                field = replace(field, hint=_REMOVE_CONNECTOR_HINT)
+        narrowed.append(field)
+    return tuple(narrowed)
+
+
+_MANAGE_GOAL_NOUNS: dict[SetupWizard, str] = {
+    SetupWizard.OBSERVABILITY: "destination",
+    SetupWizard.WEBHOOKS: "webhook",
+}
+
+
+def _narrow_manage_goal_fields(
+    fields: Sequence[WizardFormField],
+    wizard: SetupWizard | None,
+    goal: WizardGoal | None,
+) -> tuple[WizardFormField, ...]:
+    """List/enable/disable/remove goals show only the rows their command takes.
+
+    The preset's required rows (Splunk "Realm us1 - Sets --realm.") survived
+    the goal filter, but ``setup observability list|enable|remove`` never
+    passes them, and Name kept the generic add/enable/remove hint (GAP-2276).
+    """
+
+    noun = _MANAGE_GOAL_NOUNS.get(wizard) if wizard is not None else None
+    action = (goal.presets.get("@Action") or "") if goal is not None else ""
+    if noun is None or goal is None or action not in {"list", "enable", "disable", "remove"}:
+        return tuple(fields)
+    wanted = set(goal.fields)
+    narrowed: list[WizardFormField] = []
+    for field in fields:
+        if field.label not in wanted:
+            continue
+        if field.label == "Name":
+            field = replace(field, hint=f"Name of the {noun} to {action}.")
+        narrowed.append(field)
+    return tuple(narrowed)
 
 
 def _filter_fields_for_goal(fields: Sequence[WizardFormField], goal: WizardGoal | None) -> tuple[WizardFormField, ...]:
@@ -5266,7 +6582,7 @@ def _llm_wizard_fields_for(
         ),
     )
     driver = {"provider": provider, "role": role, "bedrock_auth_mode": bedrock_auth_mode}
-    return _apply_dynamic_fields(candidates, overrides, driver)
+    return _apply_dynamic_fields(_hinted(candidates, _LLM_FORM_HINTS), overrides, driver)
 
 
 def llm_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
@@ -5348,18 +6664,29 @@ def _guardrail_wizard_fields_for(
         if connector_policy and connector
         else str(get_config_value(cfg, "guardrail.rule_pack_dir", "") or "")
     )
-    rule_pack = os.path.basename(rule_pack_dir.rstrip("/\\")).strip().lower() if rule_pack_dir else "default"
-    if rule_pack not in {"default", "strict", "permissive"}:
-        rule_pack = "default"
+    rule_pack_options: tuple[str, ...] = ("default", "strict", "permissive")
+    pack_name = os.path.basename(rule_pack_dir.rstrip("/\\")).strip() if rule_pack_dir else ""
+    rule_pack = pack_name.lower() or "default"
+    if rule_pack not in rule_pack_options:
+        # A custom pack is active. Show it as the untouched value so the form
+        # never emits ``--rule-pack default`` over it; picking a preset still
+        # emits that preset.
+        rule_pack = f"custom ({pack_name})"
+        rule_pack_options = (rule_pack, *rule_pack_options)
     judge_provider = "bedrock"
     judge_model = ""
     judge_provider_default = "bedrock"
     judge_model_default = ""
-    if judge := str(get_config_value(cfg, "guardrail.judge.model", "") or ""):
+    if judge := str(
+        get_config_value(cfg, "guardrail.judge.llm.model", "")
+        or get_config_value(cfg, "guardrail.judge.model", "")
+        or ""
+    ):
         if "/" in judge:
             judge_provider, judge_model = judge.split("/", 1)
         else:
             judge_model = judge
+            judge_provider = str(get_config_value(cfg, "guardrail.judge.llm.provider", "") or "") or judge_provider
     elif model := str(get_config_value(cfg, "llm.model", "") or ""):
         judge_model = model
         judge_model_default = model
@@ -5373,18 +6700,35 @@ def _guardrail_wizard_fields_for(
     # matches what saving the form will write. Only a dedicated
     # ``guardrail.judge.model`` triggers this — a value merely inherited from
     # ``llm.model`` is not emitted as ``--judge-model`` and must not promote.
+    # A judge strategy with the judge off scans regex only (the goal menu's
+    # "Now: regex_only (judge off)"), so open the form on that (GAP-2349).
+    if not judge and strategy in ("regex_judge", "judge_first"):
+        if not bool(get_config_value(cfg, "guardrail.judge.enabled", False)):
+            strategy = "regex_only"
+    # The field default is the current strategy, so any other choice
+    # (regex_only included) is emitted as --detection-strategy; the CLI flag
+    # defaults to "keep current" (GAP-2349).
+    strategy_default = strategy
     if judge and strategy in ("", "regex_only"):
         strategy = "regex_judge"
     strategy = (overrides.get("--detection-strategy") or strategy).strip() or "regex_only"
     # A live provider change (driver) wins so the conditional Bedrock /
     # Vertex / Azure judge groups re-derive against the new selection.
     judge_provider = (overrides.get("@Provider") or judge_provider).strip().lower() or judge_provider
-    judge_key_env = str(get_config_value(cfg, "guardrail.judge.api_key_env", "") or "")
+    judge_key_env = str(
+        get_config_value(cfg, "guardrail.judge.llm.api_key_env", "")
+        or get_config_value(cfg, "guardrail.judge.api_key_env", "")
+        or ""
+    )
     judge_key_default = ""
     if not judge_key_env:
         judge_key_env = str(get_config_value(cfg, "llm.api_key_env", "") or "")
         judge_key_default = judge_key_env
-    judge_base = str(get_config_value(cfg, "guardrail.judge.api_base", "") or "")
+    judge_base = str(
+        get_config_value(cfg, "guardrail.judge.llm.base_url", "")
+        or get_config_value(cfg, "guardrail.judge.api_base", "")
+        or ""
+    )
     judge_base_default = ""
     if not judge_base:
         judge_base = str(get_config_value(cfg, "llm.base_url", "") or "")
@@ -5440,6 +6784,9 @@ def _guardrail_wizard_fields_for(
     j_vertex = j_provider_is("vertex_ai", "vertex")
     j_azure = j_provider_is("azure")
     j_region_opts = _llm_catalog_regions(judge_provider)
+    judge_bedrock_region = str(get_config_value(cfg, "guardrail.judge.llm.bedrock.region", "") or "").strip()
+    if j_region_opts and judge_bedrock_region and judge_bedrock_region not in j_region_opts:
+        j_region_opts = (judge_bedrock_region, *j_region_opts)
     candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Operation Scope", "section"),
         WizardFormField(
@@ -5448,13 +6795,10 @@ def _guardrail_wizard_fields_for(
             value=scope,
             default=_guardrail_default_scope(cfg),
             options=_GUARDRAIL_SCOPES,
-            hint=(
-                "selected-connector exposes only connector policy; "
-                "global-all-active exposes process-global settings affecting every active connector."
-            ),
+            hint="Change one connector's policy, or the settings shared by every protected agent.",
         ),
-        WizardFormField("Connector Policy (selected active member)", "section", visible_when=connector_scope),
-        WizardFormField("Global Settings (affects all active connectors)", "section", visible_when=global_scope),
+        WizardFormField("Connector policy (this connector only)", "section", visible_when=connector_scope),
+        WizardFormField("Global settings (all active connectors)", "section", visible_when=global_scope),
         WizardFormField(
             "Connector",
             "choice",
@@ -5463,12 +6807,18 @@ def _guardrail_wizard_fields_for(
             default=connector,
             options=_guardrail_connector_choices(cfg),
             required=True,
-            hint=(
-                "Choose an active connector policy target. On fresh/single setup this also selects the setup target."
-            ),
+            hint="The connector whose policy this changes (on a first setup, also the one set up).",
             visible_when=connector_or_bootstrap_target,
         ),
-        WizardFormField("Mode", "choice", "--mode", value=mode, default=mode, options=("observe", "action")),
+        WizardFormField(
+            "Mode",
+            "choice",
+            "--mode",
+            value=mode,
+            default=mode,
+            options=("observe", "action"),
+            hint="observe only logs what the policy would block; action blocks it.",
+        ),
         WizardFormField(
             "Scanner Mode",
             "choice",
@@ -5491,9 +6841,12 @@ def _guardrail_wizard_fields_for(
             "choice",
             "--detection-strategy",
             value=strategy,
-            default="regex_only",
+            default=strategy_default,
             options=("regex_only", "regex_judge", "judge_first"),
-            hint="Rule/regex scanning is the baseline; judge strategies add LLM review on top.",
+            hint=(
+                "Rule/regex scanning is the baseline; regex_judge and judge_first turn the LLM judge on "
+                "(set its model and key in 'Set up / change the LLM Judge')."
+            ),
             visible_when=global_scope,
         ),
         WizardFormField(
@@ -5502,7 +6855,7 @@ def _guardrail_wizard_fields_for(
             "--rule-pack",
             value=rule_pack,
             default=rule_pack,
-            options=("default", "strict", "permissive"),
+            options=rule_pack_options,
         ),
         WizardFormField(
             "Block Message",
@@ -5578,6 +6931,8 @@ def _guardrail_wizard_fields_for(
             "Region",
             "choice" if j_region_opts else "string",
             "--judge-bedrock-region",
+            value=judge_bedrock_region,
+            default=judge_bedrock_region,
             options=j_region_opts,
             hint="AWS region, e.g. us-east-1.",
             visible_when=j_bedrock,
@@ -6122,7 +7477,7 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
-    connector = wizard_field_value(fields, "Connector") or "openclaw"
+    connector = wizard_field_value(fields, "Connector") or _DEFAULT_SETUP_CONNECTOR
     action = wizard_field_value(fields, "Action") or "setup"
     if action == "batch":
         out = ["setup", "--yes"]
@@ -6138,7 +7493,9 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
             out.append("--no-restart")
         return tuple(out)
     if action == "remove":
-        out = ["setup", "remove", connector, "--yes"]
+        # No default here: the Remove goal starts unpicked (GAP-2387).
+        picked = wizard_field_value(fields, "Connector")
+        out = ["setup", "remove", *((picked,) if picked else ()), "--yes"]
         if wizard_bool_value(fields, "Restart Gateway", "yes") == "no":
             out.append("--no-restart")
         if wizard_bool_value(fields, "Force Last Connector Removal", "no") == "yes":
@@ -6188,12 +7545,22 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         args = ["keys", "set"]
         if env_name := wizard_field_value(fields, "Env Name"):
             args.append(env_name)
+        args.append("--value-stdin")
         # The secret value is intentionally NOT placed in argv (it would be
-        # visible in process listings). ``keys set`` reads it from a hidden
-        # stdin prompt instead; the value is carried on the intent's
-        # ``secret_stdin`` and written by the executor. See F-0801.
+        # visible in process listings). ``--value-stdin`` makes ``keys set``
+        # read one line from stdin instead of the terminal; the value is
+        # carried on the intent's ``secret_stdin`` and written (then stdin
+        # closed) by the executor. See F-0801.
         return tuple(args)
-    return ("keys", "list", "--json")
+    if action == "remove":
+        # The command preview is the confirmation; the CLI prompt can't be
+        # answered from the TUI subprocess.
+        # An empty name previews as <ENV_NAME> (the run waits for one), not
+        # as an empty quoted argument (GAP-2061).
+        return ("keys", "remove", wizard_field_value(fields, "Env Name") or "<ENV_NAME>", "--yes")
+    # The readable table, not --json: this output is read by a person in
+    # Activity (GAP-1162). The Setup panel loads its own JSON copy.
+    return ("keys", "list")
 
 
 def _build_local_observability_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
@@ -6704,6 +8071,22 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "Tool-call override; blank=inherit.",
         ),
         _field(cfg, "Rule Pack Dir", "guardrail.rule_pack_dir", hint="Path to active rule pack."),
+        _field(
+            cfg,
+            "Tool Calls Block At",
+            "guardrail.block_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity a tool call blocks at; blank=the rule pack's level.",
+        ),
+        _field(
+            cfg,
+            "Tool Calls Alert At",
+            "guardrail.alert_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity a tool call alerts at; blank=the rule pack's level.",
+        ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),
         _field(cfg, "Judge Enabled", "guardrail.judge.enabled", "bool", hint="Enable LLM-as-judge scanner."),
@@ -6746,7 +8129,7 @@ def _scanners_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             ("strict", "balanced", "permissive", "none"),
             "Skill scanner policy.",
         ),
-        _field(cfg, "Lenient", "scanners.skill_scanner.lenient", "bool", hint="Downgrade findings by one severity."),
+        _field(cfg, "Lenient", "scanners.skill_scanner.lenient", "bool", hint="Tolerate malformed skills (off: fail them)."),
         _field(cfg, "Use LLM", "scanners.skill_scanner.use_llm", "bool", hint="Enable LLM-assisted classification."),
         _field(
             cfg, "LLM Consensus Runs", "scanners.skill_scanner.llm_consensus_runs", "int", hint="Number of LLM votes."
@@ -6888,40 +8271,285 @@ def _watch_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     )
 
 
+def _openshell_admin(cfg: object | Mapping[str, Any] | None) -> Any:
+    return get_config_value(cfg, "openshell.admin", None)
+
+
+def _admin_value(admin: Any, name: str, default: Any = None) -> Any:
+    if admin is None:
+        return default
+    if isinstance(admin, Mapping):
+        return admin.get(name, default)
+    return getattr(admin, name, default)
+
+
+def openshell_managed(cfg: object | Mapping[str, Any] | None) -> bool:
+    """Whether config.yaml is administrator-owned (managed_enterprise)."""
+    mode = str(get_config_value(cfg, "deployment_mode", "") or "").strip().lower()
+    return mode in {"managed_enterprise", "managed"}
+
+
+# openshell.admin.locked entries and the config keys they pin.
+_OPENSHELL_LOCKED_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "pack": ("openshell.pack", "openshell.pack_dir"),
+    "profile": ("openshell.profile",),
+    "yolo": ("openshell.yolo",),
+    "workdir.mode": ("openshell.workdir.mode",),
+    "workdir.unmask": ("openshell.workdir.unmask",),
+    "mcp.import": ("openshell.mcp.import",),
+    "mcp.host_ports": ("openshell.mcp.host_ports",),
+    "resources": ("openshell.resources.cpu", "openshell.resources.memory"),
+}
+
+
+def openshell_admin_locks(cfg: object | Mapping[str, Any] | None) -> dict[str, str]:
+    """The ``openshell.*`` keys an administrator constrains, with the reason.
+
+    Mirrors the openshell.admin switches the Go resolver (internal/openshell/
+    packs) enforces; the config editor shows these keys read-only. In
+    managed_enterprise the whole file is administrator-owned, which
+    :func:`_openshell_section` handles separately.
+    """
+
+    admin = _openshell_admin(cfg)
+    locks: dict[str, str] = {}
+    if admin is None:
+        return locks
+
+    def lock(keys: Sequence[str], reason: str) -> None:
+        for key in keys:
+            locks.setdefault(key, reason)
+
+    required = str(_admin_value(admin, "required_pack", "") or "").strip()
+    if required:
+        lock(("openshell.pack", "openshell.pack_dir"), f"your organization requires the {required} pack")
+    if _admin_value(admin, "allow_yolo") is False:
+        lock(("openshell.yolo",), "skip-permissions mode is not allowed")
+    if _admin_value(admin, "allow_mount") is False:
+        lock(("openshell.workdir.mode",), "your organization requires copy mode")
+    if _admin_value(admin, "allow_host_ports") is False:
+        lock(("openshell.mcp.host_ports",), "opening host ports is not allowed")
+    if _admin_value(admin, "allow_unblock") is False:
+        reason = "unblocking and allow entries are not allowed"
+        lock(("openshell.egress.allow", "openshell.egress.unblocked", "openshell.egress.feed"), reason)
+    if _admin_value(admin, "block_large_uploads") is True:
+        lock(("openshell.egress.block_large_uploads",), "your organization blocks large uploads to first-seen hosts")
+    for entry in _admin_value(admin, "locked", ()) or ():
+        keys = _OPENSHELL_LOCKED_CONFIG_KEYS.get(str(entry).strip())
+        if keys:
+            lock(keys, f"locked by your organization (openshell.admin.locked: {str(entry).strip()})")
+    return locks
+
+
+def _openshell_inherit_value(cfg: object | Mapping[str, Any] | None, key: str) -> str:
+    raw = _openshell_raw(cfg, key)
+    if raw is None or raw == "":
+        return OPENSHELL_INHERIT
+    if isinstance(raw, bool):
+        return "true" if raw else "false"
+    return str(raw)
+
+
+def _openshell_raw(cfg: object | Mapping[str, Any] | None, key: str) -> Any:
+    if key == "openshell.mcp.import":
+        mcp = get_config_value(cfg, "openshell.mcp", None)
+        if isinstance(mcp, Mapping):
+            return mcp.get("import", mcp.get("import_"))
+        return getattr(mcp, "import_", None) if mcp is not None else None
+    return get_config_value(cfg, key, None)
+
+
+def _openshell_admin_summary(cfg: object | Mapping[str, Any] | None) -> str:
+    admin = _openshell_admin(cfg)
+    if admin is None:
+        return "none"
+    parts: list[str] = []
+    for name in ("required_pack", "required_pack_digest", "min_profile"):
+        value = str(_admin_value(admin, name, "") or "").strip()
+        if value:
+            parts.append(f"{name}={value}")
+    for name in ("allow_yolo", "allow_mount", "allow_host_ports", "allow_unblock", "allow_learn_mode"):
+        value = _admin_value(admin, name)
+        if isinstance(value, bool):
+            parts.append(f"{name}={'true' if value else 'false'}")
+    if _admin_value(admin, "block_large_uploads") is True:
+        parts.append("block_large_uploads=true")
+    for name in ("allowed_harnesses", "egress_block", "egress_allow_only", "require_copy_for", "locked"):
+        values = [str(item) for item in (_admin_value(admin, name, ()) or ()) if str(item).strip()]
+        if values:
+            parts.append(f"{name}={','.join(values)}")
+    resources = _admin_value(admin, "max_resources")
+    for name in ("cpu", "memory"):
+        value = str(_admin_value(resources, name, "") or "").strip()
+        if value:
+            parts.append(f"max_{name}={value}")
+    return "; ".join(parts) or "none"
+
+
+def _openshell_locked_value(cfg: object | Mapping[str, Any] | None, key: str, value: str) -> str:
+    """A locked key's value as it takes effect: the admin switches clamp these three."""
+    shown = value or "(unset)"
+    admin = _openshell_admin(cfg)
+    if key == "openshell.yolo" and _admin_value(admin, "allow_yolo") is False and value != "false":
+        return f"{shown} → off by policy"
+    if key == "openshell.workdir.mode" and _admin_value(admin, "allow_mount") is False and value != "copy":
+        return f"{shown} → copy by policy"
+    if key == "openshell.mcp.host_ports" and _admin_value(admin, "allow_host_ports") is False and value:
+        return f"{shown} → none by policy"
+    if (
+        key == "openshell.egress.block_large_uploads"
+        and _admin_value(admin, "block_large_uploads") is True
+        and value != "true"
+    ):
+        return f"{shown} → on by policy"
+    return f"{shown} (locked)"
+
+
 def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
-    return ConfigSection(
-        "OpenShell",
-        (
-            _field(cfg, "Binary", "openshell.binary", hint="Path to openshell executable."),
-            _field(cfg, "Policy Dir", "openshell.policy_dir", hint="OpenShell policy YAML directory."),
-            _field(
-                cfg,
-                "Mode",
-                "openshell.mode",
-                "choice",
-                ("", "docker", "standalone"),
-                "docker, standalone, or blank auto-detect.",
-            ),
-            _field(cfg, "Version", "openshell.version", hint="Pinned OpenShell version."),
-            _field(cfg, "Sandbox Home", "openshell.sandbox_home", hint="Root of per-sandbox state."),
-            _field(
-                cfg,
-                "Auto Pair (tristate)",
-                "openshell.auto_pair",
-                "choice",
-                ("", "true", "false"),
-                "Blank=default true.",
-            ),
-            _field(
-                cfg,
-                "Host Networking (tristate)",
-                "openshell.host_networking",
-                "choice",
-                ("", "true", "false"),
-                "Blank=default false.",
-            ),
+    """The ``openshell:`` keys (OpenShell 0.1 sandboxes).
+
+    Keys the selected sandbox policy pack governs stay "inherit" unless set.
+    Keys an administrator constrains (openshell.admin) are read-only with the
+    reason; in managed_enterprise every key is (the file is administrator-owned).
+    """
+
+    managed = openshell_managed(cfg)
+    locks = openshell_admin_locks(cfg)
+    min_profile = str(_admin_value(_openshell_admin(cfg), "min_profile", "") or "").strip()
+    profile_rank = {name: index for index, name in enumerate(dc_config.OPENSHELL_PROFILES)}
+    profiles = tuple(
+        name
+        for name in dc_config.OPENSHELL_PROFILES
+        if not min_profile or profile_rank.get(name, 0) >= profile_rank.get(min_profile, 0)
+    )
+
+    def field(label: str, key: str, kind: str = "string", options: Sequence[str] = (), hint: str = "") -> ConfigField:
+        inherit = kind == "choice" and OPENSHELL_INHERIT in options
+        value = _openshell_inherit_value(cfg, key) if inherit else _value(cfg, key)
+        reason = "config.yaml is administrator-owned (managed_enterprise)" if managed else locks.get(key, "")
+        if reason:
+            # A short value that fits the column; the sentence is the row's
+            # hint (the focused-field line, and the status on Enter).
+            shown = _openshell_locked_value(cfg, key, value)
+            return ConfigField(
+                label=label,
+                key=key,
+                kind="header",
+                value=shown,
+                original=shown,
+                hint=f"Read-only: {ADMIN_POLICY_MESSAGE}; {reason}.",
+            )
+        return ConfigField(
+            label=label, key=key, kind=kind, value=value, original=value, options=tuple(options), hint=hint
+        )
+
+    inherit_bool = (OPENSHELL_INHERIT, "true", "false")
+    fields: list[ConfigField] = [
+        field("Enabled", "openshell.enabled", "bool", hint="Sandbox listeners and API on the daemon (sandbox setup turns it on)."),
+        field("OpenShell Binary", "openshell.binary", hint="The upstream openshell CLI."),
+        field("Gateway Name", "openshell.gateway.name", hint="OpenShell gateway registration; empty uses the active one."),
+        field("Gateway Workspace", "openshell.gateway.workspace", hint="OpenShell workspace; empty is default."),
+        field("Ingress Port", "openshell.ingress_port", "int", hint="Sandbox hook ingress; 0 is api_port+1."),
+        field("Egress Port", "openshell.egress_port", "int", hint="DefenseClaw egress proxy; 0 is api_port+2."),
+        field("Pack", "openshell.pack", hint="Policy pack: open, balanced, strict, a custom pack, or a path."),
+        field("Pack Dir", "openshell.pack_dir", hint="Custom packs as <name>/pack.yaml."),
+        field(
+            "Profile",
+            "openshell.profile",
+            "choice",
+            (OPENSHELL_INHERIT, *profiles),
+            hint="Network profile; inherit takes the pack's."
+            + (f" Your organization requires at least {min_profile}." if min_profile else ""),
         ),
-        "NVIDIA OpenShell sandbox integration.",
+        field("Skip-permissions (yolo)", "openshell.yolo", "choice", inherit_bool, hint="--dangerously-skip-permissions by default."),
+        field(
+            "Model Credential",
+            "openshell.llm",
+            "choice",
+            dc_config.OPENSHELL_LLM_CHOICES,
+            hint="What a run shares (sandbox run --llm; the wrappers, TUI and app too). auto: the first key found, Bedrock last.",
+        ),
+        field(
+            "Keep Headless Sandboxes",
+            "openshell.keep_headless",
+            "bool",
+            hint="Keep a --prompt run's sandbox (sandbox run --keep); off deletes it when nothing is left to bring back or undo.",
+        ),
+        field("Workdir Mode", "openshell.workdir.mode", "choice", (OPENSHELL_INHERIT, "mount", "copy"), hint="mount: live folder (Docker driver); copy: untrusted repos, and every run on a MicroVM (vm) gateway."),
+        field("Secret Masks", "openshell.workdir.masks", hint="Extra secret-file globs, comma-separated."),
+        field("Unmask", "openshell.workdir.unmask", hint="Masked paths to share, comma-separated."),
+        field("Max Upload MB", "openshell.workdir.max_upload_mb", "int", hint="Copy-mode upload cap; 0 inherits."),
+        field("Git Depth", "openshell.workdir.git_depth", "int", hint="Copy-mode history depth."),
+        field("On Exit", "openshell.workdir.on_exit", "choice", ("ask", "keep", "undo"), hint="End-of-session default."),
+        field(
+            "Undo Restores Ignored Dirs",
+            "openshell.workdir.undo_ignored.enabled",
+            "bool",
+            hint="Keep a copy of node_modules/.venv with each undo point so undo restores them (Linux mount mode).",
+        ),
+        field(
+            "Undo Ignored Max MB",
+            "openshell.workdir.undo_ignored.max_mb",
+            "int",
+            hint="Cap on one undo point's copies; a directory past it is only reported. 0 is 500.",
+        ),
+        field(
+            "Undo Ignored Dirs",
+            "openshell.workdir.undo_ignored.dirs",
+            hint="Directory names kept at any depth, comma-separated; empty is node_modules, .venv, venv.",
+        ),
+        field("Egress Block", "openshell.egress.block", hint="Blocked hosts, comma-separated."),
+        field("Egress Allow", "openshell.egress.allow", hint="Allowlist for balanced/strict, comma-separated."),
+        field("Egress Unblocked", "openshell.egress.unblocked", hint="'Always' unblocks the daemon wrote, comma-separated."),
+        field("Egress Ports", "openshell.egress.ports", hint="Proxy ports, comma-separated; empty inherits."),
+        field("Large Upload MB", "openshell.egress.large_upload_mb", "int", hint="First-seen-host upload alert; 0 inherits."),
+        field(
+            "Block Large Uploads",
+            "openshell.egress.block_large_uploads",
+            "bool",
+            hint="Also cut that upload and refuse the host until it is unblocked; off follows the pack.",
+        ),
+        field("Blocklist Feed", "openshell.egress.feed", "choice", (OPENSHELL_INHERIT, "builtin", "none"), hint="The pack's feeds unless set."),
+        field("Base Image", "openshell.image.base", hint="Overlay base image; empty is the pinned NVIDIA base."),
+        field("Approval Debounce ms", "openshell.approvals.debounce_ms", "int", hint="Batch approvals until hooks are quiet."),
+        field("Agent Proposals", "openshell.approvals.agent_proposals", "choice", inherit_bool, hint="Let the agent propose rules (default on)."),
+        field("CPU", "openshell.resources.cpu", hint="Per-sandbox CPU, for example 2 or 500m."),
+        field("Memory", "openshell.resources.memory", hint="Per-sandbox memory, for example 4Gi."),
+        field("Harnesses", "openshell.harnesses", hint="claudecode, codex (feeds the policy connectors)."),
+        _header(
+            "Shell Wrappers",
+            "openshell.wrappers",
+            (_value(cfg, "openshell.wrappers") or "none")
+            + "  — change with: defenseclaw sandbox enable|disable <harness> (Sandboxes panel: w)",
+        ),
+        field("MCP Import", "openshell.mcp.import", "choice", inherit_bool, hint="Bring the harness's MCP servers along."),
+        field("MCP Host Ports", "openshell.mcp.host_ports", hint="Localhost ports opened for host MCP servers, comma-separated."),
+        field("Upstream Telemetry", "openshell.upstream_telemetry", "bool", hint="Keep OpenShell's anonymous usage telemetry."),
+        field("Token Delivery", "openshell.token_delivery", "choice", ("provider", "env"), hint="How the sandbox token reaches hooks."),
+        field("Middleware (experimental)", "openshell.middleware.enabled", "bool", hint="Supervisor middleware; Phase 3."),
+        _header(
+            "Organization Policy",
+            "openshell.admin",
+            _openshell_admin_summary(cfg)
+            + ("  — administrator-owned (managed_enterprise)" if managed else "  — edit config.yaml directly"),
+        ),
+    ]
+    legacy_mode = _value(cfg, "openshell.mode")
+    if legacy_mode:
+        fields.append(
+            _header("Legacy Mode", "openshell.mode", f"{legacy_mode}  — run: defenseclaw sandbox legacy-cleanup --dry-run")
+        )
+    summary = "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
+    if managed:
+        summary += " Administrator-owned (managed_enterprise): read-only."
+    elif locks:
+        summary += f" {len(locks)} key(s) are set by your organization's policy."
+    return ConfigSection(
+        "OpenShell Sandboxes",
+        tuple(fields),
+        summary,
+        "Pack-governed keys show 'inherit' until set. Run 'defenseclaw sandbox policy explain' to see every "
+        "resolved setting and where it comes from.",
     )
 
 
@@ -7092,43 +8720,36 @@ def _per_connector_asset_policy_fields(cfg: object | Mapping[str, Any] | None) -
     return rows
 
 
-def _agent_hook_fields(cfg: object | Mapping[str, Any] | None, label: str, prefix: str) -> tuple[ConfigField, ...]:
+def _hook_summary_row(label: str, key: str, connector: str) -> ConfigField:
+    alias = _connector_setup_alias(connector)
+    hint = f"Set by defenseclaw setup {alias}" if alias else UNMODELED_CONFIG_HINT
+    return ConfigField(label=label, key=key, kind="header", value=READ_ONLY_VALUE, original=READ_ONLY_VALUE, hint=hint)
+
+
+def _agent_hook_summary_fields() -> tuple[ConfigField, ...]:
+    """Read-only summary of the legacy ``claude_code`` / ``codex`` hook blocks.
+
+    The Python config doesn't model these blocks, so edits here could never
+    be saved; the connector setup commands own them.
+    """
+
     return (
-        _header(f".. {label} .."),
-        _field(cfg, "Enabled", prefix + ".enabled", "bool", hint=f"{label} hooks master switch."),
-        _field(
-            cfg, "Mode", prefix + ".mode", "choice", ("", "observe", "action"), "Blank inherits connector defaults."
-        ),
-        _field(cfg, "Fail Mode", prefix + ".fail_mode", "choice", ("", "open", "closed"), "Legacy policy-layer hint."),
-        _field(
-            cfg,
-            "Scan on Session Start",
-            prefix + ".scan_on_session_start",
-            "bool",
-            hint="Run checks when session begins.",
-        ),
-        _field(cfg, "Scan on Stop", prefix + ".scan_on_stop", "bool", hint="Run checks when session stops."),
-        _field(cfg, "Scan Paths", prefix + ".scan_paths", hint="CSV extra paths scanned by hooks."),
-        _field(
-            cfg,
-            "Component Scan Interval (min)",
-            prefix + ".component_scan_interval_minutes",
-            "int",
-            hint="Minimum minutes between repeated scans.",
-        ),
+        _hook_summary_row("Claude Code", "claude_code", "claudecode"),
+        _hook_summary_row("Codex", "codex", "codex"),
     )
 
 
-def _connector_hook_map_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+def _connector_hook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+    """One read-only row per connector for the ``connector_hooks`` map."""
+
     names = list(CONNECTORS)
     hooks = get_config_value(cfg, "connector_hooks", {}) or {}
     if isinstance(hooks, Mapping):
         names.extend(str(name) for name in hooks if str(name).strip())
-    unique = sorted(dict.fromkeys(names))
-    out: list[ConfigField] = []
-    for name in unique:
-        out.extend(_agent_hook_fields(cfg, _connector_hook_label(name), "connector_hooks." + name))
-    return tuple(out)
+    return tuple(
+        _hook_summary_row(_connector_hook_label(name), "connector_hooks." + name, name)
+        for name in sorted(dict.fromkeys(names))
+    )
 
 
 def _v8_observability_fields(
@@ -7145,7 +8766,7 @@ def _v8_observability_fields(
     )
     if status is None:
         return (
-            _header("Status", "observability.status", error.strip() or "loading canonical effective plan..."),
+            _header("Status", "observability.status", error.strip() or "loading telemetry destinations\u2026"),
             how_to,
         )
 
@@ -7368,6 +8989,11 @@ def _value(cfg: object | Mapping[str, Any] | None, key: str) -> str:
 def _fmt_config_version(cfg: object | Mapping[str, Any] | None) -> str:
     version = get_config_value(cfg, "config_version", "")
     if not version:
+        # ``Config`` keeps the on-disk version in ``_source_config_version``
+        # (there is no ``config_version`` attribute), so a v8 file showed
+        # "(unset)" (GAP-1161).
+        version = getattr(cfg, "_source_config_version", 0) or ""
+    if not version:
         return "(unset)"
     return str(version)
 
@@ -7389,6 +9015,7 @@ def _connector_setup_alias(wire: str) -> str:
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }:
         return normalized
     return ""
@@ -7435,6 +9062,10 @@ def _mapping_or_attr(obj: object, name: str, default: Any = "") -> Any:
 def _default_wizard_field_hint(label: str, kind: str, flag: str = "") -> str:
     lowered = label.lower()
     if kind == "bool":
+        if lowered.startswith("restart gateway"):
+            return _RESTART_GATEWAY_HINT
+        if lowered == "verify after setup":
+            return "Run the connectivity checks once the settings are saved."
         return f"Toggle {lowered}."
     if kind in {"choice", "preset", "whtype", "regid"}:
         return f"Select {lowered}."

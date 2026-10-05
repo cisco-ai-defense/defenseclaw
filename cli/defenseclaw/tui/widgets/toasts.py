@@ -107,9 +107,12 @@ class ToastStack(Vertical):
     """Vertical stack of 1-line toast bars rendered above the hint bar."""
 
     DEFAULT_CSS = """
+    /* One row per toast, no gaps: with a 1-row margin under each, three
+       toasts needed 6 rows in a 4-row stack and the newest (often the
+       error) was the one cut off. */
     ToastStack {
         height: auto;
-        max-height: 4;
+        max-height: 3;
         layout: vertical;
         padding: 0 1;
         background: transparent;
@@ -122,7 +125,7 @@ class ToastStack(Vertical):
     ToastStack Static.toast {
         height: 1;
         padding: 0 1;
-        margin: 0 0 1 0;
+        margin: 0;
         background: #1F2937;
         color: #E5E7EB;
         text-style: bold;

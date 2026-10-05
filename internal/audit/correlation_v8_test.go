@@ -516,6 +516,57 @@ func TestConnectorCustodyHotPathIsMonotonicAndExplicitUpdatesRemainPossible(t *t
 	}
 }
 
+func TestScopedConnectorInstancesStayApartFromTheDefault(t *testing.T) {
+	_, repo := newCorrelationTestStore(t)
+	def := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal)
+	scopedID, err := NewConnectorInstanceID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v1", ConnectorCustodyExternal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoped.ConnectorInstanceID != scopedID || scoped.Default || scoped.ExportCustody != ConnectorCustodyExternal {
+		t.Fatalf("scoped=%+v", scoped)
+	}
+	// The default resolver is not made ambiguous by the scoped instance.
+	if again := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyExternal); again.ConnectorInstanceID != def.ConnectorInstanceID {
+		t.Fatalf("default moved to %s", again.ConnectorInstanceID)
+	}
+	promoted, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v2", ConnectorCustodyDefenseClaw)
+	if err != nil || promoted.ExportCustody != ConnectorCustodyDefenseClaw || promoted.ProfileVersion != "codex-profile-v2" {
+		t.Fatalf("promoted=%+v err=%v", promoted, err)
+	}
+	for _, attempted := range []ConnectorExportCustody{ConnectorCustodyExternal, ConnectorCustodyHookOnly} {
+		resolved, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "codex", "codex-profile-v2", attempted)
+		if err != nil || resolved.ExportCustody != ConnectorCustodyDefenseClaw || resolved.ConnectorInstanceID != scopedID {
+			t.Fatalf("hot-path custody downgraded: %+v err=%v", resolved, err)
+		}
+	}
+	if def, err := repo.GetConnectorInstance(t.Context(), def.ConnectorInstanceID); err != nil ||
+		def.ExportCustody != ConnectorCustodyExternal {
+		t.Fatalf("scoped promotion touched the default: %+v err=%v", def, err)
+	}
+	// A scope can never resolve to a default or to another connector.
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), def.ConnectorInstanceID, "codex", "codex-profile-v1",
+		ConnectorCustodyExternal); !errors.Is(err, ErrCorrelationConflict) {
+		t.Fatalf("scoped resolution of the default instance: %v", err)
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), scopedID, "claudecode", "claudecode-profile-v1",
+		ConnectorCustodyExternal); !errors.Is(err, ErrCorrelationConflict) {
+		t.Fatalf("scoped resolution for another connector: %v", err)
+	}
+	if _, err := repo.ResolveScopedConnectorInstance(t.Context(), "not-a-uuid", "codex", "codex-profile-v1",
+		ConnectorCustodyExternal); err == nil {
+		t.Fatal("malformed scoped id accepted")
+	}
+	instances, err := repo.ListConnectorInstances(t.Context())
+	if err != nil || len(instances) != 2 {
+		t.Fatalf("instances=%+v err=%v", instances, err)
+	}
+}
+
 func TestCorrelationStateQueriesSurviveRestartAndRejectAmbiguity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	store, err := NewStore(path)
@@ -603,6 +654,30 @@ func TestCorrelationStateQueriesSurviveRestartAndRejectAmbiguity(t *testing.T) {
 	}})
 	if _, err := repo.FindActiveCursor(t.Context(), instance.ConnectorInstanceID, "session"); !errors.Is(err, ErrCorrelationConflict) {
 		t.Fatalf("ambiguous active cursor error=%v", err)
+	}
+	// Only a cursor that is its own root answers the root lookup: one such
+	// cursor next to the others is the answer; two are ambiguous again.
+	if _, err := repo.FindActiveRootCursor(t.Context(), instance.ConnectorInstanceID, "session"); !errors.Is(err, ErrCorrelationNotFound) {
+		t.Fatalf("root cursor without a root error=%v", err)
+	}
+	for index, agent := range []string{"agent-main", "agent-other-main"} {
+		at := now.Add(time.Duration(2+index) * time.Second)
+		seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: at, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+			if err := tx.PutCursor(t.Context(), CorrelationCursor{
+				ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "session", AgentID: agent,
+				RootAgentID: agent, Phase: "active", Sequence: 1, LastSemanticEventID: event.SemanticEventID,
+				ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: at,
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}})
+		root, err := repo.FindActiveRootCursor(t.Context(), instance.ConnectorInstanceID, "session")
+		if index == 0 && (err != nil || root.AgentID != "agent-main") {
+			t.Fatalf("root cursor=%+v err=%v", root, err)
+		}
+		if index == 1 && !errors.Is(err, ErrCorrelationConflict) {
+			t.Fatalf("two root cursors: cursor=%+v err=%v", root, err)
+		}
 	}
 	if _, err := repo.FindUniquePendingOperation(t.Context(), CorrelationPendingQuery{
 		ConnectorInstanceID: instance.ConnectorInstanceID, Namespace: "cursor", Kind: CorrelationIdentifierTool,

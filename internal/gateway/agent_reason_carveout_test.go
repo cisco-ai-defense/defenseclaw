@@ -26,7 +26,8 @@ const carveoutReason = "matched: PII-EMAIL:alice@example.com"
 // TestAgentReasonCarveOut_HookResponses pins the managed_enterprise
 // contract for every connector response shaper: with the agent-reason
 // carve-out enabled, the reason handed back to codex/cursor/claude is the
-// full, non-redacted string; with it disabled the reason is redacted.
+// full, non-redacted string; with it disabled the agent sees the DefenseClaw
+// policy wording, which names the rule and never the matched literal.
 //
 // All three shapers set the top-level Reason to the same safeReason that
 // feeds their nested output message fields, so asserting on Reason covers
@@ -76,8 +77,8 @@ func TestAgentReasonCarveOut_HookResponses(t *testing.T) {
 		t.Run(name+"/carveout_off_redacted", func(t *testing.T) {
 			redaction.SetAgentReasonRedactionDisabled(false)
 			got := shape()
-			if !strings.Contains(got, "<redacted") {
-				t.Fatalf("%s carve-out off must redact the reason, got %q", name, got)
+			if got != "DefenseClaw policy blocked this action (rule PII-EMAIL). Do not retry it in another form." {
+				t.Fatalf("%s carve-out off must name only the rule, got %q", name, got)
 			}
 			if strings.Contains(got, "alice@example.com") {
 				t.Fatalf("%s carve-out off leaked the matched literal, got %q", name, got)

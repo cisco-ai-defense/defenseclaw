@@ -1,0 +1,32 @@
+```text title="First-run report"
+  DefenseClaw First-Run
+  status=ready connector=claudecode profile=observe
+  ────────────────────────────────────────────────────────
+
+  Setup
+  ✓ Config  created defaults
+  ✓ Bootstrap  ~/.defenseclaw
+  ✓ Skill scanner  ~/.local/bin/skill-scanner
+  ✓ MCP scanner  ~/.local/bin/mcp-scanner
+  ✓ Guardrail  claudecode, mode=observe, fail mode=open
+  ✓ Sidecar  started
+
+  Readiness
+  ✓ Config file  ~/.defenseclaw/config.yaml
+  ✓ Audit database  ~/.defenseclaw/audit.db
+  ✓ Device key  ~/.defenseclaw/device.key
+  ✓ Skill scanner  ~/.local/bin/skill-scanner
+  ✓ MCP scanner  ~/.local/bin/mcp-scanner
+  ✓ Connector  Claude Code settings found
+  ✓ Sidecar  running
+  - LLM API  not configured
+  - Cisco AI Defense  scanner_mode is local
+  ✓ Gateway binary  found on PATH
+
+  Next
+  defenseclaw doctor
+  defenseclaw keys list
+  Adding another agent later: defenseclaw setup <connector>
+  After a reboot, agent hooks start the gateway on their next call; after defenseclaw-gateway stop, run: defenseclaw-gateway start
+  Running coding agents in OpenShell sandboxes: defenseclaw sandbox setup
+```

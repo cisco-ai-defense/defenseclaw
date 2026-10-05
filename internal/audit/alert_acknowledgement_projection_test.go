@@ -1224,6 +1224,25 @@ func TestAlertAcknowledgementLegacyACKBecomesBaselineWithoutModernAction(t *test
 	if err := store.Init(); err != nil {
 		t.Fatal(err)
 	}
+	// The replay runs on every startup, so it must seek the severity index
+	// instead of reading every legacy row of a multi-GB audit_events.
+	plan, err := store.db.Query("EXPLAIN QUERY PLAN "+legacyACKScanQuery("?"), "scan-finding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planText strings.Builder
+	for plan.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := plan.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		planText.WriteString(detail + "\n")
+	}
+	_ = plan.Close()
+	if !strings.Contains(planText.String(), "USING INDEX idx_audit_severity_timestamp") {
+		t.Fatalf("legacy ACK replay plan does not seek the severity index:\n%s", planText.String())
+	}
 	writer := newAlertProjectionWriter(t, store)
 	projection, err := writer.ReconcileAlertAcknowledgement(context.Background(), "legacy-alert")
 	if err != nil {

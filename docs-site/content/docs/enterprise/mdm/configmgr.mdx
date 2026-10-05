@@ -1,0 +1,264 @@
+---
+title: Configuration Manager
+description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile on Windows with a Microsoft Configuration Manager application and compliance settings.
+keywords:
+  - DefenseClaw Configuration Manager
+  - Microsoft Configuration Manager
+  - SCCM
+  - MECM
+  - Script Installer deployment type
+  - configuration item remediation
+---
+
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+
+This recipe deploys the [standalone profile](/docs/enterprise/concepts) to
+Windows devices with Microsoft Configuration Manager, formerly System Center
+Configuration Manager (SCCM) and Microsoft Endpoint Configuration Manager
+(MECM). An application installs and upgrades DefenseClaw, and an optional
+configuration item keeps it healthy.
+For the contract every recipe follows, such as exit codes, detection and how
+config and keys are delivered, see [Install with an MDM](/docs/enterprise/mdm).
+
+## Prerequisites
+
+- Devices on native x64 Windows that meet the
+  [Windows requirements](/docs/enterprise/windows#requirements).
+- No Cisco Secure Client DefenseClaw deployment on the device.
+- PowerShell 7 from Microsoft's x64 MSI, deployed as its own application. The
+  standalone lifecycle runs on it and refuses without it. The kit recommends
+  7.4 or later.
+- Your administrator `config.yaml`. See [Where the config lives](/docs/enterprise/configuration#where-the-config-lives)
+  and [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
+  The default config protects no agent.
+- `DefenseClawSetup-Enterprise-Standalone-x64.exe` from the release, verified
+  against the release's cosign-signed `checksums.txt`; see
+  [Install with an MDM](/docs/enterprise/mdm).
+
+## How Configuration Manager runs the application
+
+| Behavior | Configuration Manager | Source |
+| --- | --- | --- |
+| Deployment type | **Script Installer**, for setup programs and script wrappers | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Identity | **Installation behavior**: **Install for system** installs once, for all users | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Bitness | **Run installation and uninstall program as 32-bit process on 64-bit clients** is an option; leave it cleared | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Timeout | **Maximum allowed run time**, 120 minutes by default | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Return codes | Script Installer defaults: `0` Success (no reboot), `1641` Hard Reboot, `3010` Soft Reboot, `1618` Fast Retry. Other codes are failures. **Fast Retry** retries every two hours, 10 times in total. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Detection script | A non-zero exit code means detection failed and the state is **Unknown**. Exit `0` with output means **Installed**; exit `0` with no output means **Not installed**. | [Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications) |
+| Re-evaluation | Clients re-evaluate deployments every seven days by default | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
+| Scripts the client runs | The **PowerShell execution policy** client setting defaults to **All Signed** | [Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings) |
+
+## Build the content
+
+On an administrator workstation with PowerShell 7.4 or later, run the kit's packager
+without `-IntuneWinAppUtil`, and use its `content` folder as the content
+location. Despite its name, the content does not depend on Intune:
+
+```powershell
+./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
+  -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 '<SHA-256 from the cosign-verified checksums.txt>' `
+  -ConfigPath .\config.yaml `
+  -OutputDirectory \\server\sources\DefenseClaw\1.0.0 `
+  -ProductVersion 1.0.0
+```
+
+The `content` folder holds:
+
+| File | Role |
+| --- | --- |
+| `DefenseClawSetup-Enterprise-Standalone-x64.exe` | The standalone Setup |
+| `config.yaml` | Your administrator config. The packager refuses one with an inline `api_key`. |
+| `Install-DefenseClawIntune.ps1` | The launcher that runs as the installation program |
+| `intune-package.json` | The SHA-256 pins of the Setup and the config |
+
+Setup refuses relative paths, and the client cache path is not known in
+advance. The launcher solves both: it re-checks the pins, then starts
+`DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure JSON=1` with an
+absolute `CONFIG=` path to the config in its own folder. It runs in 32- or
+64-bit Windows PowerShell 5.1.
+
+Setup also refuses a config file that a non-administrator can change, or that
+sits in a folder a non-administrator can replace. If the client cache does not
+meet that, Setup stops with exit code `1603` and names the file.
+
+## Create the application
+
+Create the PowerShell 7 application first, with a Windows Installer
+deployment type for the x64 MSI. Then create the DefenseClaw application in
+**Software Library** > **Application Management** > **Applications** >
+**Create Application**, choose **Manually specify the application
+information**, and add a **Script Installer** deployment type
+([Create applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/create-applications)):
+
+| Page | Setting | Value |
+| --- | --- | --- |
+| Content | **Content location** | The `content` folder, such as `\\server\sources\DefenseClaw\<version>\content` |
+| | **Installation program** | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` |
+| | **Uninstall program** | `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` |
+| | **Run installation and uninstall program as 32-bit process on 64-bit clients** | Cleared |
+| Detection Method | **Setting type** | **Registry** |
+| | **Hive** | `HKEY_LOCAL_MACHINE` |
+| | **Key** | `SOFTWARE\Cisco\DefenseClaw\Enterprise` |
+| | **Value** | `ProductVersion` |
+| | **Data Type** | **Version** |
+| | Rule | **This registry setting must satisfy the following rule**: **Greater than or equal to** `<version>` |
+| | **This registry key is associated with a 32-bit application on 64-bit systems** | Cleared |
+| User Experience | **Installation behavior** | **Install for system** |
+| | **Logon requirement** | **Whether or not a user is logged on** |
+| | **Installation program visibility** | **Hidden** |
+| | **Maximum allowed run time (minutes)** | `120` |
+| Dependencies | Dependency group | The PowerShell 7 application, with **Auto Install** |
+
+Keep the default return codes on the deployment type's **Return Codes** tab.
+Deploy the application to a device collection as **Required**.
+
+The lifecycle's `1603` and `1639` then report as failures: read the error
+code before you retry, because `1639` always needs a fix. `1618` means another
+DefenseClaw lifecycle run holds the lock, and **Fast Retry** handles it. Setup
+does not return `3010` or `1641` today.
+
+### Why registry detection
+
+The lifecycle writes `ProductVersion` under
+`HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` only after a successful install,
+upgrade, repair or ensure, in the 64-bit registry view, and removes the key
+after a successful uninstall. Only SYSTEM and administrators can write it.
+
+Do not use `packaging/mdm/windows/detect.ps1` as the detection script here.
+It follows Intune's convention and exits `1` when DefenseClaw is not installed,
+which Configuration Manager reports as **Unknown**, not **Not installed**.
+
+The first install needs the config in the content: `/ensure` without one
+exits `1639`.
+
+## Keep it healthy
+
+The registry value proves what is installed, not that it is enforcing. To
+repair drift between deployments, create a configuration item in **Assets and
+Compliance** > **Compliance Settings** > **Configuration Items** > **Create
+Configuration Item**, type **Windows Desktops and Servers (custom)**, with one
+setting
+([Create custom configuration items](https://learn.microsoft.com/en-us/intune/configmgr/compliance/deploy-use/create-custom-configuration-items-for-windows-desktop-and-server-computers-managed-with-the-client)):
+
+| Setting | Value |
+| --- | --- |
+| **Setting type** | **Script** |
+| **Data type** | String |
+| **Discovery script** | The PowerShell discovery script below |
+| **Remediation script** | The PowerShell remediation script below |
+| Compliance rule | **Value** rule: the value **Equals** `Compliant`, with **Remediate noncompliant rules when supported** |
+
+The discovery script reads the protected marker in the 64-bit registry view
+and runs the installed CLI's read-only `verify`:
+
+```powershell
+# DefenseClaw health check for a Configuration Manager configuration item.
+# Prints Compliant when verify passes, or when DefenseClaw is not installed
+# (the application deployment installs it).
+$hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$marker = $hklm.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $marker) { 'Compliant'; exit 0 }
+$cli = Join-Path ([string]$marker.GetValue('InstallRoot')) 'bin\defenseclaw.exe'
+$null = & $cli enterprise windows verify --profile standalone --json 2>&1
+if ($LASTEXITCODE -eq 0) { 'Compliant' } else { 'NonCompliant' }
+```
+
+The remediation script runs `ensure`, which repairs from the installed
+payload. Configuration Manager reports a remediation failure only when the
+script throws, so it throws on a non-zero exit code:
+
+```powershell
+# DefenseClaw repair for a Configuration Manager configuration item.
+# Runs ensure, which repairs from the installed payload; throws on failure
+# so Configuration Manager reports the remediation as failed.
+$hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+$marker = $hklm.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
+if ($null -eq $marker) { exit 0 }
+$cli = Join-Path ([string]$marker.GetValue('InstallRoot')) 'bin\defenseclaw.exe'
+$null = & $cli enterprise windows ensure --profile standalone --json 2>&1
+if ($LASTEXITCODE -ne 0) { throw "DefenseClaw ensure exited $LASTEXITCODE" }
+```
+
+Add the configuration item to a configuration baseline and deploy the
+baseline with remediation. Configuration Manager runs these scripts under the
+**PowerShell execution policy** client setting, which defaults to **All
+Signed**: sign the scripts, or change the setting. Scripts time out after 60
+seconds unless you raise **Script Execution Timeout (seconds)** in the
+compliance client settings, up to 600
+([Client settings](https://learn.microsoft.com/en-us/intune/configmgr/core/clients/deploy/about-client-settings)).
+A full repair can take longer than that. If the remediation times out, run the
+application's `/ensure` again on that device. On unsigned (hash-pinned)
+releases the script's `ensure` keeps the marker's `hash_pinned` trust mode,
+so `detect.ps1` and `uninstall.ps1` keep accepting the unsigned CLI.
+
+Health means what `verify` reports; see [Health fields](/docs/enterprise/operations#health-fields).
+
+## Deliver the AI Defense key
+
+The key is optional. Without it the local policy engine decides alone. Do not
+put it in the content, in `config.yaml`, in a command line or in a script.
+
+Store it after the first install, from an elevated session or your secrets
+tooling, on standard input:
+
+```powershell
+Get-Content -Raw C:\secure\ai-defense-key.txt | & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise secret set --name ai-defense-api-key --from-stdin --json
+```
+
+`enterprise secret set` runs only elevated and only when a standalone
+deployment is installed. It stores the key and restarts the gateway, and exits
+`1639` for invalid input or `1603` on failure. Then set
+`enterprise.inspection.ai_defense.enabled: true` and
+`credential: ai-defense-api-key` in `config.yaml`. See
+[Deliver the AI Defense key](/docs/enterprise/mdm#deliver-the-ai-defense-key)
+and [AI Defense key](/docs/enterprise/ai-defense-key).
+
+## Upgrade, roll back and change the config
+
+| Task | What to do |
+| --- | --- |
+| Upgrade | Build content for the new release and create a new application. On its **Supersedence** tab, add the old application and leave **Uninstall** cleared, so the new deployment type upgrades in place ([Revise and supersede applications](https://learn.microsoft.com/en-us/intune/configmgr/apps/deploy-use/revise-and-supersede-applications)). Raise the detection rule to the new version. `/ensure` upgrades in place, keeps the state, and applies the config in the new content. |
+| Roll back | `ensure` refuses to downgrade on Windows. Follow [Roll back](/docs/enterprise/lifecycle#roll-back). |
+| Change the config | Build new content with the new `config.yaml` and deploy it the same way. `/ensure` validates the config, applies it, and rolls back if applying fails. |
+
+See [Upgrades, rollback and config changes](/docs/enterprise/mdm#upgrades-rollback-and-config-changes).
+
+## Uninstall
+
+Deploy the application with the **Uninstall** action. The uninstall program,
+`DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1`, stops and
+deletes the services, removes DefenseClaw's hooks and machine-policy entries
+while it keeps administrator entries, removes the Add/Remove Programs entry
+and the registry marker, and removes the config, the AI Defense key and the
+machine state. To also remove each enrolled account's
+`%USERPROFILE%\.defenseclaw` and per-user binaries, use
+`DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1 PURGE=1` as
+the uninstall program. Remove the configuration baseline deployment
+first, so remediation does not run against a removed deployment.
+
+## Logs
+
+| Where | What |
+| --- | --- |
+| `%WINDIR%\CCM\Logs\AppEnforce.log` | Install and uninstall actions for applications ([Log file reference](https://learn.microsoft.com/en-us/intune/configmgr/core/plan-design/hierarchy/log-files)) |
+| `%WINDIR%\CCM\Logs\AppDiscovery.log` | Application detection |
+| `%WINDIR%\CCM\Logs\DcmWmiProvider.log` | Configuration item scripts |
+| `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | Every lifecycle result, one JSON line per run |
+| `DefenseClaw` event log, source `DefenseClaw Lifecycle` (legacy copy: Application log, source `DefenseClaw Enterprise`) | Installed, upgraded, repaired, failed, busy and refused events |
+
+See [Logs](/docs/enterprise/mdm#logs).
+
+## Exit codes in Configuration Manager
+
+| Code | Meaning | Configuration Manager |
+| --- | --- | --- |
+| `0` | Success, or nothing to do | Success (no reboot) |
+| `1603` | The action failed and rolled back, the config does not validate, Setup is not elevated, or a non-administrator can change the config file | Failure; read `errors[].code` in `enterprise-lifecycle.log` and see [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes) |
+| `1618` | Another lifecycle run holds the lock | Fast Retry |
+| `1639` | Invalid arguments, such as a first install without a config, an unknown Setup property, or a relative or environment-expanded `CONFIG=` path | Failure; fix the content |
+| `3010` | Reserved; Setup does not return it today | Soft Reboot |
+
+For the full table, see [Exit codes](/docs/enterprise/mdm#exit-codes).

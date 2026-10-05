@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import shutil
 import sys
 from typing import Any
 
@@ -28,9 +29,17 @@ def hint(*lines: str) -> None:
     """Print dim post-command hints, only when stdout is a terminal."""
     if not sys.stdout.isatty():
         return
+    width = shutil.get_terminal_size().columns
     click.echo()
     for line in lines:
-        click.echo(click.style(line, dim=True))
+        # GAP-2363: a "Label:  command" hint wider than the terminal puts the
+        # command on its own line, so the wrap never splits the command.
+        label, sep, command = line.partition(":  ")
+        if sep and len(line) > width:
+            click.echo(click.style(f"{label}:", dim=True))
+            click.echo(click.style(f"  {command}", dim=True))
+        else:
+            click.echo(click.style(line, dim=True))
 
 
 def resolve_list_connector(app: Any, requested: str | None) -> str:
@@ -71,13 +80,43 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     by_norm = {_normalize_alias(name): name for name in configured if name}
     match = active if not requested else by_norm.get(_normalize_alias(requested))
     if match is None:
-        allowed = ", ".join(sorted(configured)) or active
-        raise click.UsageError(
-            f"connector {requested!r} is not configured. Configured connectors: {allowed}."
+        wanted = _normalize_alias(requested)
+        setup_name = "claude-code" if wanted == "claudecode" else wanted
+        setup_cmd = (
+            f"defenseclaw setup {setup_name}"
+            if connector_paths.is_known(wanted)
+            else "defenseclaw setup <connector>"
         )
-    if connector_paths.is_cleanup_only(match):
-        raise click.UsageError(connector_paths.cleanup_only_guidance(match))
+        names = sorted(name for name in configured if name)
+        if not names:
+            # GAP-1690: with nothing configured, don't name the phantom
+            # "openclaw" default; say so and give the next step.
+            raise click.ClickException(
+                f"connector {requested!r} is not configured: no connector is "
+                f"configured yet. Set one up first: {setup_cmd}"
+            )
+        raise click.UsageError(
+            f"connector {requested!r} is not configured. Configured connectors: "
+            f"{', '.join(names)}. To add it: {setup_cmd}"
+        )
     return match
+
+
+NO_CONNECTOR_HINT = "no connector configured — run 'defenseclaw setup <connector>'"
+
+
+def echo_no_connector() -> None:
+    """Print the empty state of a list command with no connector configured.
+
+    With ``--json`` stdout stays JSON (an empty list) and the hint goes to
+    stderr, so scripts and the TUI panels can parse the output (GAP-2073).
+    """
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None and ctx.params.get("as_json"):
+        click.echo("[]")
+        click.echo(NO_CONNECTOR_HINT, err=True)
+        return
+    click.echo(NO_CONNECTOR_HINT)
 
 
 def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
@@ -88,8 +127,7 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
 
     * An explicit ``--connector X`` narrows to exactly that one validated
       peer.
-    * With no flag the listing covers every non-retired active connector;
-      cleanup-only connectors are excluded from catalog fan-out.
+    * With no flag the listing covers every active connector.
       ``Config.active_connectors()`` returns a single name on a
       single-connector install and N names on a fan-out install, so the
       caller renders the same way regardless of count — the operator never
@@ -114,24 +152,13 @@ def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
         except Exception:  # noqa: BLE001 — fail open to legacy behavior.
             configured = True
         if not configured:
-            click.echo(
-                "no connector configured — run 'defenseclaw setup <connector>'"
-            )
+            echo_no_connector()
             raise SystemExit(0)
     try:
         if cfg is not None and hasattr(cfg, "active_connectors"):
             names = [n for n in cfg.active_connectors() if n]
             if names:
-                from defenseclaw import connector_paths
-
-                active_names = [
-                    name for name in names if not connector_paths.is_cleanup_only(name)
-                ]
-                if active_names:
-                    return active_names
-                raise click.UsageError(
-                    connector_paths.cleanup_only_guidance(names[0])
-                )
+                return names
     except click.UsageError:
         raise
     except Exception:  # noqa: BLE001 — fall back to the singular active connector.

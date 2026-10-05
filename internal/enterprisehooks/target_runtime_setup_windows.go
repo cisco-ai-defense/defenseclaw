@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -34,7 +35,18 @@ const (
 	windowsManagedRuntimeStateCanonical    = "canonical"
 	windowsManagedRuntimeStateAbsent       = "absent"
 
-	windowsManagedRuntimeStagePrefix       = ".defenseclaw.setup-"
+	// windowsManagedRuntimeBaselinePending is a standalone Upgrade/Repair
+	// root whose rows are all deferred and whose data directory is absent or
+	// one the account created itself before enrollment. Setup neither stages
+	// nor validates it: the guardian proves it pending and creates or adopts
+	// it in the account's session, so one account's folder never fails the
+	// whole lifecycle. Only validation plans carry it.
+	windowsManagedRuntimeBaselinePending = "pending"
+
+	windowsManagedRuntimeStagePrefix = ".defenseclaw.setup-"
+	// windowsManagedRuntimeRollbackPrefix names a transaction-created root
+	// the rollback kept aside because it holds content cleanup did not write.
+	windowsManagedRuntimeRollbackPrefix    = ".defenseclaw.rollback-"
 	windowsManagedRuntimeStageRandomBytes  = 16
 	windowsManagedRuntimeMarkerSubAuths    = 8
 	windowsManagedRuntimeMaxRoots          = 128
@@ -129,12 +141,47 @@ type windowsManagedRuntimeCleanupFileContract uint8
 const (
 	windowsManagedRuntimeCleanupCanonicalFile windowsManagedRuntimeCleanupFileContract = iota + 1
 	windowsManagedRuntimeCleanupGatewayFile
+	// windowsManagedRuntimeCleanupOwnedLockFile is a lock the connector code
+	// creates as the account (connector.withOwnedFileLock): owned by the
+	// account, with a protected DACL of full control for the account,
+	// LocalSystem and Administrators only. The canonical file DACL is also
+	// accepted, for a lock a later pass canonicalized.
+	windowsManagedRuntimeCleanupOwnedLockFile
+	// windowsManagedRuntimeCleanupConnectorBackupFile is a connector backup
+	// record (connector.writeManagedFileBackup, as the account): owned by the
+	// account, with a protected DACL of full control for the account and
+	// LocalSystem only. The canonical file DACL is also accepted, for a
+	// record the guardian hardened after a successful setup.
+	windowsManagedRuntimeCleanupConnectorBackupFile
+	// windowsManagedRuntimeCleanupHookFile is a file in the account's
+	// DefenseClaw hooks folder, owned by the account, LocalSystem or
+	// Administrators, with any DACL: a guardian retry, an older release's
+	// disabled-hook tombstone or the account may have rewritten it, and
+	// refusing such a file left the rollback pending with no recovery.
+	windowsManagedRuntimeCleanupHookFile
 )
+
+// windowsManagedRuntimeCleanupOwnedLocks are the root leaves the connector
+// code creates with withOwnedFileLock's owner-only descriptor.
+var windowsManagedRuntimeCleanupOwnedLocks = map[string]struct{}{
+	".hermes-lifecycle.lock":       {},
+	".hook-api-token-publish.lock": {},
+}
+
+// windowsManagedRuntimeCleanupPrivateRootFiles are the root leaves the
+// connector code writes as the account with the owner-private descriptor of
+// a connector backup record (full control for the account and LocalSystem).
+var windowsManagedRuntimeCleanupPrivateRootFiles = map[string]struct{}{
+	"kiro-created-dirs.json": {},
+}
 
 type windowsManagedRuntimeCleanupSpec struct {
 	rootFiles            map[string]windowsManagedRuntimeCleanupFileContract
 	hookFiles            map[string]windowsManagedRuntimeCleanupFileContract
 	generationConnectors map[string]struct{}
+	// backupFiles holds, per connector, the leaves of its
+	// connector_backups\<connector> directory.
+	backupFiles map[string]map[string]windowsManagedRuntimeCleanupFileContract
 }
 
 var (
@@ -161,6 +208,29 @@ func PlanWindowsManagedRuntimeRoots(
 	manifest Manifest,
 	manifestPath string,
 	manifestSHA256 string,
+) (WindowsManagedRuntimePlan, error) {
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, false)
+}
+
+// PlanWindowsManagedRuntimeRootsForValidation is the Upgrade/Repair plan. It
+// is PlanWindowsManagedRuntimeRoots, except that in the standalone profile a
+// root whose rows are all deferred and whose data directory is absent or was
+// created by the account itself before enrollment is planned pending, as the
+// guardian's pending proof treats it, instead of failing the lifecycle.
+// Stage, finalize and cleanup refuse a plan with a pending root.
+func PlanWindowsManagedRuntimeRootsForValidation(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+) (WindowsManagedRuntimePlan, error) {
+	return planWindowsManagedRuntimeRoots(manifest, manifestPath, manifestSHA256, true)
+}
+
+func planWindowsManagedRuntimeRoots(
+	manifest Manifest,
+	manifestPath string,
+	manifestSHA256 string,
+	validation bool,
 ) (WindowsManagedRuntimePlan, error) {
 	var plan WindowsManagedRuntimePlan
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
@@ -201,9 +271,15 @@ func PlanWindowsManagedRuntimeRoots(
 		TargetCount:    targetCount,
 		Roots:          make([]WindowsManagedRuntimeRootPlan, 0, len(targets)),
 	}
+	pendingAllowed := validation && windowsEnterpriseStandaloneProcess()
+	// Only a standalone install plan re-protects a folder a standalone purge
+	// kept; a validation plan never changes a folder.
+	adoptPurgeKept := !validation && windowsEnterpriseStandaloneProcess()
+	deferredOnly := windowsManagedRuntimeDeferredOnlyRoots(manifest)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, target := range targets {
-			root, inspectErr := planWindowsManagedRuntimeRoot(target)
+			key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
+			root, inspectErr := planWindowsManagedRuntimeRoot(target, pendingAllowed && deferredOnly[key], adoptPurgeKept)
 			if inspectErr != nil {
 				return inspectErr
 			}
@@ -214,7 +290,26 @@ func PlanWindowsManagedRuntimeRoots(
 	if err != nil {
 		return WindowsManagedRuntimePlan{}, err
 	}
-	return plan, validateWindowsManagedRuntimePlan(plan, manifest)
+	return plan, validateWindowsManagedRuntimePlanRows(plan, manifest, false, pendingAllowed)
+}
+
+// windowsManagedRuntimeDeferredOnlyRoots returns the root keys of the
+// profiles whose enabled manifest rows are all deferred.
+func windowsManagedRuntimeDeferredOnlyRoots(manifest Manifest) map[string]bool {
+	roots := make(map[string]bool)
+	for _, row := range manifest.Targets {
+		if !row.IsEnabled() {
+			continue
+		}
+		target, err := resolveWindowsManagedRuntimeTarget(row.UserHome, row.SID, row.DataDir)
+		if err != nil {
+			continue
+		}
+		key := windowsManagedRuntimeRootKey(target.sid.String(), target.home)
+		deferred, seen := roots[key]
+		roots[key] = row.IsDeferred() && (deferred || !seen)
+	}
+	return roots
 }
 
 // StageWindowsManagedRuntimeRoots creates only random staging leaves. It never
@@ -297,8 +392,12 @@ func FinalizeWindowsManagedRuntimeRoots(
 // CleanupWindowsManagedRuntimeRoots removes only roots created by this plan.
 // A marker-staged root may be removed without a journaled identity because the
 // target cannot read or forge its protected random marker. Any root carrying
-// the canonical target DACL requires an exact journaled identity. Unexpected
-// content or substitutions fail closed and leave recovery authority intact.
+// the canonical target DACL requires an exact journaled identity.
+// Substitutions fail closed and leave recovery authority intact. Content the
+// preflight cannot prove DefenseClaw wrote (an unexpected entry, a changed
+// owner or DACL, a hard link) is never deleted: the journaled root holding it
+// is renamed aside (windowsManagedRuntimeRollbackPrefix) so the rollback
+// still completes instead of staying pending.
 func CleanupWindowsManagedRuntimeRoots(
 	request WindowsManagedRuntimeRequest,
 	manifest Manifest,
@@ -307,18 +406,29 @@ func CleanupWindowsManagedRuntimeRoots(
 	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(strings.TrimSpace(manifestSHA256), request.Plan.ManifestSHA256) {
-		return nil, fmt.Errorf("enterprise hooks: managed runtime manifest digest changed after planning")
-	}
-	claimsByRoot, err := validateWindowsManagedRuntimeRequest(request, manifest, false)
+	// The hook enumerator republishes targets.yaml whenever a row changes (an
+	// agent update, a newly discovered agent, a deferred row), including while
+	// a failed install waits for readiness. Rollback cleanup acts only on the
+	// plan's own roots, authenticated by their marker SIDs and journaled
+	// identities, so it accepts a republished manifest that keeps exactly the
+	// planned profile roots; stage and finalize still require the planned
+	// digest.
+	rowDrift := !strings.EqualFold(strings.TrimSpace(manifestSHA256), request.Plan.ManifestSHA256)
+	request, manifest, vanished := dropVanishedWindowsManagedRuntimeProfiles(request, manifest)
+	rowDrift = rowDrift || len(vanished) > 0
+	claimsByRoot, err := validateWindowsManagedRuntimeRequestRows(request, manifest, false, rowDrift)
 	if err != nil {
+		if rowDrift {
+			return nil, fmt.Errorf("enterprise hooks: managed runtime manifest digest changed after planning and the republished manifest does not keep the planned profile roots: %w", err)
+		}
 		return nil, err
 	}
 	cleanupSpecs, err := windowsManagedRuntimeCleanupSpecs(request.Plan, manifest)
 	if err != nil {
 		return nil, err
 	}
-	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Plan.Roots))
+	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Plan.Roots)+len(vanished))
+	claims = append(claims, vanished...)
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
 		for _, rootPlan := range request.Plan.Roots {
 			key := windowsManagedRuntimeRootKey(rootPlan.SID, rootPlan.UserHome)
@@ -333,6 +443,57 @@ func CleanupWindowsManagedRuntimeRoots(
 		return nil
 	})
 	return claims, err
+}
+
+// dropVanishedWindowsManagedRuntimeProfiles takes out of a rollback cleanup
+// each planned root whose profile folder no longer exists: the account was
+// deleted with its profile while the install ran, so nothing of it is left
+// to clean. Validating it failed on the missing folder and kept the
+// transaction pending with the services stopped, and no Setup could recover
+// it (GAP-1293). Each such root is reported as its baseline.
+func dropVanishedWindowsManagedRuntimeProfiles(
+	request WindowsManagedRuntimeRequest,
+	manifest Manifest,
+) (WindowsManagedRuntimeRequest, Manifest, []WindowsManagedRuntimeClaim) {
+	gone := map[string]bool{}
+	var vanished []WindowsManagedRuntimeClaim
+	roots := make([]WindowsManagedRuntimeRootPlan, 0, len(request.Plan.Roots))
+	for _, root := range request.Plan.Roots {
+		home := filepath.Clean(strings.TrimSpace(root.UserHome))
+		if _, err := os.Lstat(home); filepath.IsAbs(home) && errors.Is(err, os.ErrNotExist) {
+			gone[strings.ToUpper(home)] = true
+			claim := windowsManagedRuntimeClaimFromPlan(root)
+			claim.State = windowsManagedRuntimeStateAbsent
+			if root.Baseline == windowsManagedRuntimeBaselineCanonical {
+				// An existing baseline is never changed by cleanup.
+				claim.State = windowsManagedRuntimeStateCanonical
+				claim.Identity = root.BaselineIdentity
+			}
+			vanished = append(vanished, claim)
+			continue
+		}
+		roots = append(roots, root)
+	}
+	if len(vanished) == 0 {
+		return request, manifest, nil
+	}
+	isGone := func(home string) bool { return gone[strings.ToUpper(filepath.Clean(strings.TrimSpace(home)))] }
+	request.Plan.Roots = roots
+	claims := make([]WindowsManagedRuntimeClaim, 0, len(request.Claims))
+	for _, claim := range request.Claims {
+		if !isGone(claim.UserHome) {
+			claims = append(claims, claim)
+		}
+	}
+	request.Claims = claims
+	targets := make([]ManifestTarget, 0, len(manifest.Targets))
+	for _, row := range manifest.Targets {
+		if !isGone(row.UserHome) {
+			targets = append(targets, row)
+		}
+	}
+	manifest.Targets = targets
+	return request, manifest, vanished
 }
 
 func windowsManagedRuntimeCleanupClaimReportable(claim WindowsManagedRuntimeClaim) bool {
@@ -420,32 +581,145 @@ func windowsManagedRuntimeCleanupSpecs(plan WindowsManagedRuntimePlan, manifest 
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(row.Connector))
-		switch name {
-		case "codex", "cursor", "claudecode":
-			spec.hookFiles[".hookcfg."+name] = windowsManagedRuntimeCleanupCanonicalFile
-			spec.hookFiles[".hook-"+name+".token"] = windowsManagedRuntimeCleanupCanonicalFile
-			spec.generationConnectors[name] = struct{}{}
-		case "":
+		if name == "" {
 			return nil, fmt.Errorf("enterprise hooks: absent-baseline cleanup target %d has no connector", index)
-		default:
+		}
+		files, ok := windowsManagedRuntimeCleanupConnectors[name]
+		if !ok {
 			return nil, fmt.Errorf("enterprise hooks: no bounded absent-baseline cleanup contract for connector %q", row.Connector)
 		}
-		if name == "claudecode" {
-			for _, leaf := range []string{
-				"_hardening.sh",
-				"inspect-tool.sh",
-				"inspect-request.sh",
-				"inspect-response.sh",
-				"inspect-tool-response.sh",
-				"claude-code-hook.sh",
-			} {
-				spec.hookFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+		for _, leaf := range files.root {
+			spec.rootFiles[leaf] = windowsManagedRuntimeCleanupCanonicalFile
+			if _, lock := windowsManagedRuntimeCleanupOwnedLocks[leaf]; lock {
+				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupOwnedLockFile
 			}
+			if _, private := windowsManagedRuntimeCleanupPrivateRootFiles[leaf]; private {
+				spec.rootFiles[leaf] = windowsManagedRuntimeCleanupConnectorBackupFile
+			}
+		}
+		for _, leaf := range files.hooks {
+			spec.hookFiles[leaf] = windowsManagedRuntimeCleanupHookFile
+		}
+		if files.generation {
+			spec.generationConnectors[name] = struct{}{}
+		}
+		if len(files.backups) > 0 {
+			if spec.backupFiles == nil {
+				spec.backupFiles = make(map[string]map[string]windowsManagedRuntimeCleanupFileContract)
+			}
+			backups := make(map[string]windowsManagedRuntimeCleanupFileContract, len(files.backups))
+			for _, leaf := range files.backups {
+				backups[leaf] = windowsManagedRuntimeCleanupConnectorBackupFile
+			}
+			spec.backupFiles[name] = backups
 		}
 		specs[key] = spec
 	}
 	return specs, nil
 }
+
+// windowsManagedRuntimeCleanupConnectorFiles is the bounded footprint one
+// connector's managed install writes into a ~\.defenseclaw that the same
+// transaction created (an absent baseline): leaves in the root, in hooks,
+// and in the connector's own connector_backups\<connector> records, and
+// whether it publishes immutable runtime generations. Rollback deletes
+// exactly these names, each only with the canonical target-owned owner,
+// DACL and single link; any other entry (an account's own file, the
+// foreign-hook backups of displaced user hooks, a noncanonical inode)
+// refuses the whole root.
+type windowsManagedRuntimeCleanupConnectorFiles struct {
+	root       []string
+	hooks      []string
+	backups    []string
+	generation bool
+}
+
+// windowsManagedRuntimeCleanupBackupDir holds the per-connector config
+// backup records (connector.managedFileBackupPath).
+const windowsManagedRuntimeCleanupBackupDir = "connector_backups"
+
+// windowsManagedRuntimeSharedHookScripts are the shell hook scripts and
+// helper every script-rendering connector writes into hooks.
+var windowsManagedRuntimeSharedHookScripts = []string{
+	"_hardening.sh",
+	"inspect-tool.sh",
+	"inspect-request.sh",
+	"inspect-response.sh",
+	"inspect-tool-response.sh",
+}
+
+func windowsManagedRuntimeRuntimeLeaves(name string, extra ...string) []string {
+	return append([]string{".hookcfg." + name, ".hook-" + name + ".token"}, extra...)
+}
+
+// windowsManagedRuntimeCleanupConnectors lists every connector a Windows
+// managed manifest can enroll. codex, cursor and claudecode are machine
+// policy rows; the rest are the standalone per-user connectors
+// (WindowsStandalonePerUserConnectorNames). Copilot, and OpenCode while its
+// machine policy is in force, write only the per-user runtime
+// (install_windows_runtime_only.go). The other per-user rows also render
+// their hook scripts or plugin token, record the guardian-selected
+// executable (agent_selection.json) and back up the agent file they patch.
+var windowsManagedRuntimeCleanupConnectors = map[string]windowsManagedRuntimeCleanupConnectorFiles{
+	"codex":  {hooks: windowsManagedRuntimeRuntimeLeaves("codex"), generation: true},
+	"cursor": {hooks: windowsManagedRuntimeRuntimeLeaves("cursor"), generation: true},
+	"claudecode": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("claudecode", append([]string{"claude-code-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		generation: true,
+	},
+	"copilot": {hooks: windowsManagedRuntimeRuntimeLeaves("copilot"), generation: true},
+	"antigravity": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("antigravity", append([]string{"antigravity-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"hooks.json.json"},
+		generation: true,
+	},
+	"devin": {
+		hooks:      windowsManagedRuntimeRuntimeLeaves("devin", append([]string{"devin-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"config.json"},
+		generation: true,
+	},
+	"hermes": {
+		root:       []string{".hermes-lifecycle.lock", "agent_selection.json", "agent_selection.json.lock"},
+		hooks:      windowsManagedRuntimeRuntimeLeaves("hermes", append([]string{"hermes-hook.sh", "hermes-direct-native-state.json"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"config.yaml.json", "shell-hooks-allowlist.json.json"},
+		generation: true,
+	},
+	"kiro": {
+		// kiro-created-dirs.json lists the Kiro folders setup created
+		// (connector.kiroCreatedDirsFile). Unlisted, it kept every failed
+		// first install's root aside as .defenseclaw.rollback-<id> (GAP-1287).
+		root:       []string{"kiro-created-dirs.json"},
+		hooks:      windowsManagedRuntimeRuntimeLeaves("kiro", append([]string{"kiro-hook.sh"}, windowsManagedRuntimeSharedHookScripts...)...),
+		backups:    []string{"hooks-global.json", "agent-defenseclaw.json", "settings-cli.json"},
+		generation: true,
+	},
+	"opencode": {
+		root:       []string{"agent_selection.json", "agent_selection.json.lock", ".hook-api-token-publish.lock"},
+		hooks:      windowsManagedRuntimeRuntimeLeaves("opencode"),
+		backups:    []string{"config.json"},
+		generation: true,
+	},
+	"amp": {
+		root:    []string{"agent_selection.json", "agent_selection.json.lock", ".hook-api-token-publish.lock"},
+		hooks:   []string{".hook-amp.token"},
+		backups: []string{"config.json"},
+	},
+}
+
+// windowsManagedRuntimeCleanupLeaves is every leaf name the cleanup
+// contracts can open below the root.
+var windowsManagedRuntimeCleanupLeaves = func() map[string]struct{} {
+	leaves := map[string]struct{}{windowsManagedRuntimeCleanupBackupDir: {}}
+	for name, files := range windowsManagedRuntimeCleanupConnectors {
+		leaves[name] = struct{}{}
+		for _, group := range [][]string{files.root, files.hooks, files.backups} {
+			for _, leaf := range group {
+				leaves[leaf] = struct{}{}
+			}
+		}
+	}
+	return leaves
+}()
 
 func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (windowsManagedRuntimeTarget, error) {
 	home, target, err := validateWindowsEnterpriseHome(userHome, rawSID)
@@ -472,7 +746,25 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 	return windowsManagedRuntimeTarget{home: home, data: dataDir, sid: target}, nil
 }
 
-func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsManagedRuntimeRootPlan, error) {
+// windowsManagedRuntimeAccountCreatedBaseline reports whether the opened
+// data directory is one the account created itself before enrollment
+// (windowsAccountCreatedDataDir), which the guardian adopts at enrollment.
+func windowsManagedRuntimeAccountCreatedBaseline(final windows.Handle, target windowsManagedRuntimeTarget) bool {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	ok, err := windowsAccountCreatedDataDir(target.data, descriptor, target.sid)
+	return err == nil && ok
+}
+
+// planWindowsManagedRuntimeRoot inspects one target root. With pendingAllowed
+// (a standalone validation plan of a profile whose rows are all deferred), an
+// absent data directory, or one the account created itself before enrollment,
+// is planned pending instead of absent or refused. With adoptPurgeKept (a
+// standalone install plan), a data directory left by a standalone uninstall
+// with purge is given the canonical DACL again and planned canonical.
+func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget, pendingAllowed, adoptPurgeKept bool) (WindowsManagedRuntimeRootPlan, error) {
 	parent, err := openWindowsManagedRuntimeProfile(target)
 	if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, err
@@ -486,19 +778,36 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsM
 	final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
 	if windowsManagedRuntimeRootMissing(err) {
 		root.Baseline = windowsManagedRuntimeBaselineAbsent
+		if pendingAllowed {
+			root.Baseline = windowsManagedRuntimeBaselinePending
+		}
 	} else if err != nil {
 		return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
 	} else {
 		defer windows.CloseHandle(final)
-		if err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid); err != nil {
-			return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+		err := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+		if err != nil && adoptPurgeKept {
+			adopted, adoptErr := adoptWindowsManagedRuntimePurgeKeptRoot(parent, final, target)
+			if adoptErr != nil {
+				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: restore the managed DACL on the folder a purge kept: %w", adoptErr)
+			}
+			if adopted {
+				err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+			}
 		}
-		identity, err := windowsManagedRuntimeHandleIdentity(final, true)
 		if err != nil {
-			return WindowsManagedRuntimeRootPlan{}, err
+			if !pendingAllowed || !windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+				return WindowsManagedRuntimeRootPlan{}, fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+			}
+			root.Baseline = windowsManagedRuntimeBaselinePending
+		} else {
+			identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+			if err != nil {
+				return WindowsManagedRuntimeRootPlan{}, err
+			}
+			root.Baseline = windowsManagedRuntimeBaselineCanonical
+			root.BaselineIdentity = identity
 		}
-		root.Baseline = windowsManagedRuntimeBaselineCanonical
-		root.BaselineIdentity = identity
 	}
 	randomLeaf := make([]byte, windowsManagedRuntimeStageRandomBytes)
 	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, randomLeaf); err != nil {
@@ -511,6 +820,54 @@ func planWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) (WindowsM
 	}
 	root.MarkerSID = marker.String()
 	return root, nil
+}
+
+// adoptWindowsManagedRuntimePurgeKeptRoot restores the canonical DACL on a
+// data directory that a standalone uninstall with purge kept. The purge keeps
+// the disabled hook scripts and returns what it keeps to the owner-private
+// shape (LocalSystem and OWNER RIGHTS full control) so that a later per-user
+// install can protect its own folder. A later managed install then found 2
+// ACEs instead of the canonical 7 and refused the folder, and only deleting
+// it as LocalSystem let the machine enroll again. Only a plain, target-owned
+// directory whose DACL is exactly that owner-private shape changes, through a
+// second handle bound to the same inode; its hooks folder, which the purge
+// relaxed the same way, gets the canonical DACL too. It reports whether it
+// changed the folder.
+func adoptWindowsManagedRuntimePurgeKeptRoot(parent, final windows.Handle, target windowsManagedRuntimeTarget) (bool, error) {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(target.sid) {
+		return false, err
+	}
+	if relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil || !relaxed {
+		return false, err
+	}
+	identity, err := windowsManagedRuntimeHandleIdentity(final, true)
+	if err != nil {
+		return false, err
+	}
+	writer, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess()|windows.WRITE_DAC, false)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(writer)
+	if got, err := windowsManagedRuntimeHandleIdentity(writer, true); err != nil || got != identity {
+		return false, errors.Join(err, fmt.Errorf("enterprise hooks: %s changed while it was inspected", target.data))
+	}
+	acl, err := windowsUserPathProtectionACL(target.sid, true)
+	if err != nil {
+		return false, err
+	}
+	if err := setWindowsObjectDACLNoPropagation(writer, acl, true); err != nil {
+		return false, err
+	}
+	if _, err := windowsRecoverSetupRelaxedHookDirectory(target.data, target.sid); err != nil && !windowsManagedRuntimeRootMissing(err) {
+		return true, err
+	}
+	return true, nil
 }
 
 func stageWindowsManagedRuntimeRoot(rootPlan WindowsManagedRuntimeRootPlan, journal func(WindowsManagedRuntimeClaim) error) (WindowsManagedRuntimeClaim, error) {
@@ -733,29 +1090,34 @@ func cleanupWindowsManagedRuntimeRoot(
 		windows.FILE_SHARE_READ,
 	)
 	if finalErr == nil {
+		var refusal error
+		staging := false
 		identity, err := windowsManagedRuntimeHandleIdentity(final, true)
 		if err != nil || (expected.Identity != "" && identity != expected.Identity) {
-			_ = windows.CloseHandle(final)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of changed managed runtime root identity")
+			refusal = fmt.Errorf("enterprise hooks: refuse cleanup of changed managed runtime root identity")
+		} else {
+			canonical := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid) == nil
+			staging = validateWindowsManagedRuntimeCleanupMarkerHandle(final, target.sid, marker) == nil
+			claim.Identity = identity
+			claim.Created = true
+			if canonical {
+				claim.State = windowsManagedRuntimeStateCanonical
+			} else if staging {
+				claim.State = windowsManagedRuntimeStateStaged
+			}
+			if expected.Identity == "" && !staging {
+				refusal = fmt.Errorf("enterprise hooks: refuse cleanup of canonical managed runtime root without journaled identity")
+			} else if !canonical && !staging {
+				refusal = fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated managed runtime root")
+			}
 		}
-		canonical := validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid) == nil
-		staging := validateWindowsManagedRuntimeCleanupMarkerHandle(final, target.sid, marker) == nil
-		claim.Identity = identity
-		claim.Created = true
-		if canonical {
-			claim.State = windowsManagedRuntimeStateCanonical
-		} else if staging {
-			claim.State = windowsManagedRuntimeStateStaged
-		}
-		if expected.Identity == "" && !staging {
-			_ = windows.CloseHandle(final)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of canonical managed runtime root without journaled identity")
-		}
-		if !canonical && !staging {
-			_ = windows.CloseHandle(final)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated managed runtime root")
-		}
-		if staging && expected.Identity == "" {
+		if refusal != nil {
+			if err := keepWindowsManagedRuntimeRootAside(refusal, final, parent, target, staging); err != nil {
+				_ = windows.CloseHandle(final)
+				return claim, err
+			}
+			err = nil
+		} else if staging && expected.Identity == "" {
 			err = requireWindowsManagedRuntimeDirectoryEmpty(final)
 			if err == nil {
 				var attributes uint32
@@ -766,6 +1128,10 @@ func cleanupWindowsManagedRuntimeRoot(
 			}
 		} else {
 			err = removeWindowsManagedRuntimeRootContents(final, target, marker, spec, staging)
+			var refused *windowsManagedRuntimeCleanupRefusal
+			if errors.As(err, &refused) {
+				err = keepWindowsManagedRuntimeRootAside(err, final, parent, target, staging)
+			}
 		}
 		if err != nil {
 			claim = refreshWindowsManagedRuntimeFailedCleanupClaim(claim, final, target, marker)
@@ -788,35 +1154,37 @@ func cleanupWindowsManagedRuntimeRoot(
 		windows.FILE_SHARE_READ,
 	)
 	if stageErr == nil {
+		var refusal error
+		staging := false
 		identity, err := windowsManagedRuntimeHandleIdentity(stage, true)
 		if err != nil {
-			_ = windows.CloseHandle(stage)
-			return claim, err
+			refusal = err
+		} else if expected.Identity != "" && identity != expected.Identity {
+			refusal = fmt.Errorf("enterprise hooks: refuse cleanup of changed staging identity")
+		} else {
+			staging = validateWindowsManagedRuntimeStagingHandle(stage, target.sid, marker) == nil
+			canonical := expected.Identity != "" && validateWindowsTargetOwnedDirectoryHandle(stage, filepath.Join(target.home, rootPlan.StagingLeaf), target.sid) == nil
+			claim.Identity = identity
+			claim.Created = true
+			if staging {
+				claim.State = windowsManagedRuntimeStateStaged
+			} else if canonical {
+				claim.State = windowsManagedRuntimeStateCanonical
+			}
+			if !staging && !canonical {
+				refusal = fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated staging root")
+			} else if err := requireWindowsManagedRuntimeDirectoryEmpty(stage); err != nil {
+				refusal = err
+			}
 		}
-		if expected.Identity != "" && identity != expected.Identity {
-			_ = windows.CloseHandle(stage)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of changed staging identity")
-		}
-		staging := validateWindowsManagedRuntimeStagingHandle(stage, target.sid, marker) == nil
-		canonical := expected.Identity != "" && validateWindowsTargetOwnedDirectoryHandle(stage, filepath.Join(target.home, rootPlan.StagingLeaf), target.sid) == nil
-		claim.Identity = identity
-		claim.Created = true
-		if staging {
-			claim.State = windowsManagedRuntimeStateStaged
-		} else if canonical {
-			claim.State = windowsManagedRuntimeStateCanonical
-		}
-		if !staging && !canonical {
-			_ = windows.CloseHandle(stage)
-			return claim, fmt.Errorf("enterprise hooks: refuse cleanup of unauthenticated staging root")
-		}
-		if err := requireWindowsManagedRuntimeDirectoryEmpty(stage); err != nil {
-			_ = windows.CloseHandle(stage)
-			return claim, err
-		}
-		attributes, err := windowsQuarantineHandleAttributes(stage)
-		if err == nil {
-			err = markWindowsQuarantineHandleForDeletion(stage, attributes)
+		if refusal != nil {
+			err = keepWindowsManagedRuntimeRootAside(refusal, stage, parent, target, staging)
+		} else {
+			var attributes uint32
+			attributes, err = windowsQuarantineHandleAttributes(stage)
+			if err == nil {
+				err = markWindowsQuarantineHandleForDeletion(stage, attributes)
+			}
 		}
 		closeErr := windows.CloseHandle(stage)
 		if err != nil {
@@ -1220,6 +1588,16 @@ func renameWindowsManagedRuntimeHandle(handle, parent windows.Handle, finalLeaf 
 }
 
 func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest Manifest) error {
+	return validateWindowsManagedRuntimePlanRows(plan, manifest, false, false)
+}
+
+// validateWindowsManagedRuntimePlanRows validates plan against manifest. With
+// allowRowDrift the manifest's enabled row count may differ from the plan's
+// (a republication that changed rows of the same users); the resolved profile
+// roots must still match the plan exactly, in order. Only a validation plan
+// (allowPending) may carry a pending root, and only for a profile whose rows
+// are all deferred.
+func validateWindowsManagedRuntimePlanRows(plan WindowsManagedRuntimePlan, manifest Manifest, allowRowDrift, allowPending bool) error {
 	if plan.SchemaVersion != WindowsManagedRuntimePlanSchemaVersion {
 		return fmt.Errorf("enterprise hooks: unsupported managed runtime plan schema %d", plan.SchemaVersion)
 	}
@@ -1239,7 +1617,7 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 			targetCount++
 		}
 	}
-	if plan.TargetCount != targetCount || targetCount > windowsManagedRuntimeMaxRoots*3 {
+	if (!allowRowDrift && plan.TargetCount != targetCount) || targetCount > windowsManagedRuntimeMaxRoots*3 {
 		return fmt.Errorf("enterprise hooks: managed runtime plan target count does not match manifest")
 	}
 	if len(plan.Roots) != len(targets) || len(plan.Roots) > windowsManagedRuntimeMaxRoots {
@@ -1247,15 +1625,21 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 	}
 	seenLeaf := make(map[string]bool)
 	seenMarker := make(map[string]bool)
+	var deferredOnly map[string]bool
+	if allowPending {
+		deferredOnly = windowsManagedRuntimeDeferredOnlyRoots(manifest)
+	}
 	for index, target := range targets {
 		root := plan.Roots[index]
 		if !sameWindowsEnterprisePath(root.UserHome, target.home) || !sameWindowsEnterprisePath(root.DataDir, target.data) || !strings.EqualFold(root.SID, target.sid.String()) {
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d does not match manifest", index)
 		}
-		if root.Baseline != windowsManagedRuntimeBaselineAbsent && root.Baseline != windowsManagedRuntimeBaselineCanonical {
+		pending := root.Baseline == windowsManagedRuntimeBaselinePending &&
+			deferredOnly[windowsManagedRuntimeRootKey(target.sid.String(), target.home)]
+		if root.Baseline != windowsManagedRuntimeBaselineAbsent && root.Baseline != windowsManagedRuntimeBaselineCanonical && !pending {
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d has invalid baseline", index)
 		}
-		if (root.Baseline == windowsManagedRuntimeBaselineAbsent) != (root.BaselineIdentity == "") || (root.BaselineIdentity != "" && !validWindowsManagedRuntimeIdentity(root.BaselineIdentity)) {
+		if (root.Baseline == windowsManagedRuntimeBaselineCanonical) != (root.BaselineIdentity != "") || (root.BaselineIdentity != "" && !validWindowsManagedRuntimeIdentity(root.BaselineIdentity)) {
 			return fmt.Errorf("enterprise hooks: managed runtime plan root %d has invalid baseline identity", index)
 		}
 		if !validWindowsManagedRuntimeStageLeaf(root.StagingLeaf) || seenLeaf[strings.ToLower(root.StagingLeaf)] {
@@ -1272,10 +1656,14 @@ func validateWindowsManagedRuntimePlan(plan WindowsManagedRuntimePlan, manifest 
 }
 
 func validateWindowsManagedRuntimeRequest(request WindowsManagedRuntimeRequest, manifest Manifest, requireClaims bool) (map[string]WindowsManagedRuntimeClaim, error) {
+	return validateWindowsManagedRuntimeRequestRows(request, manifest, requireClaims, false)
+}
+
+func validateWindowsManagedRuntimeRequestRows(request WindowsManagedRuntimeRequest, manifest Manifest, requireClaims, allowRowDrift bool) (map[string]WindowsManagedRuntimeClaim, error) {
 	if request.SchemaVersion != WindowsManagedRuntimeRequestSchemaVersion {
 		return nil, fmt.Errorf("enterprise hooks: unsupported managed runtime request schema %d", request.SchemaVersion)
 	}
-	if err := validateWindowsManagedRuntimePlan(request.Plan, manifest); err != nil {
+	if err := validateWindowsManagedRuntimePlanRows(request.Plan, manifest, allowRowDrift, false); err != nil {
 		return nil, err
 	}
 	planRoots := make(map[string]WindowsManagedRuntimeRootPlan, len(request.Plan.Roots))
@@ -1379,15 +1767,14 @@ func validateWindowsManagedRuntimeLeaf(value string) error {
 	if _, _, ok := parseWindowsManagedRuntimeBundleLeaf(value); ok {
 		return nil
 	}
+	if _, ok := windowsManagedRuntimeCleanupLeaves[value]; ok {
+		return nil
+	}
 	for _, leaf := range []string{
 		"hooks",
 		"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
 		"hook_contract_lock.json", "hook_contract_lock.json.lock",
 		".token", ".hookcfg", ".hookcfg.lock",
-		".hookcfg.codex", ".hookcfg.claudecode", ".hookcfg.cursor",
-		".hook-codex.token", ".hook-claudecode.token", ".hook-cursor.token",
-		"_hardening.sh", "inspect-tool.sh", "inspect-request.sh",
-		"inspect-response.sh", "inspect-tool-response.sh", "claude-code-hook.sh",
 	} {
 		if value == leaf {
 			return nil
@@ -1491,28 +1878,52 @@ type windowsManagedRuntimePinnedCleanupFile struct {
 	contract windowsManagedRuntimeCleanupFileContract
 }
 
+// windowsManagedRuntimePinnedCleanupDir is one pinned subdirectory below the
+// root: hooks, connector_backups, or one connector_backups\<connector>.
+type windowsManagedRuntimePinnedCleanupDir struct {
+	parent windows.Handle
+	name   string
+	path   string
+	label  string
+	handle windows.Handle
+	id     string
+	names  map[string]struct{}
+	files  []*windowsManagedRuntimePinnedCleanupFile
+	// connectorBackup marks connector_backups and its connector folders,
+	// which may keep their connector setup descriptor.
+	connectorBackup bool
+}
+
 type windowsManagedRuntimePinnedCleanupTree struct {
 	rootNames map[string]struct{}
 	rootFiles []*windowsManagedRuntimePinnedCleanupFile
-	hook      windows.Handle
-	hookID    string
-	hookNames map[string]struct{}
-	hookFiles []*windowsManagedRuntimePinnedCleanupFile
+	// dirs lists every pinned subdirectory, each one after its parent.
+	dirs []*windowsManagedRuntimePinnedCleanupDir
+}
+
+func (tree *windowsManagedRuntimePinnedCleanupTree) files() []*windowsManagedRuntimePinnedCleanupFile {
+	files := append([]*windowsManagedRuntimePinnedCleanupFile(nil), tree.rootFiles...)
+	for _, dir := range tree.dirs {
+		files = append(files, dir.files...)
+	}
+	return files
 }
 
 func (tree *windowsManagedRuntimePinnedCleanupTree) close() {
 	if tree == nil {
 		return
 	}
-	for _, file := range append(tree.rootFiles, tree.hookFiles...) {
+	for _, file := range tree.files() {
 		if file != nil && file.handle != 0 {
 			_ = windows.CloseHandle(file.handle)
 			file.handle = 0
 		}
 	}
-	if tree.hook != 0 {
-		_ = windows.CloseHandle(tree.hook)
-		tree.hook = 0
+	for index := len(tree.dirs) - 1; index >= 0; index-- {
+		if dir := tree.dirs[index]; dir.handle != 0 {
+			_ = windows.CloseHandle(dir.handle)
+			dir.handle = 0
+		}
 	}
 }
 
@@ -1531,7 +1942,10 @@ func removeWindowsManagedRuntimeRootContents(
 	}
 	tree, err := pinWindowsManagedRuntimeCleanupTree(root, target, spec)
 	if err != nil {
-		return err
+		if windowsManagedRuntimeCleanupTransient(err) {
+			return err
+		}
+		return &windowsManagedRuntimeCleanupRefusal{err: err}
 	}
 	defer tree.close()
 
@@ -1539,17 +1953,23 @@ func removeWindowsManagedRuntimeRootContents(
 	// deletion. Existing data writers conflict with read-only sharing. After
 	// preflight, the root namespace is changed through that same handle to the
 	// plan's unforgeable marker descriptor, closing the path-based create window
-	// before any known inode is deleted. The pinned hooks handle rejects a
-	// pre-existing or newly opened FILE_ADD/DELETE-capable directory handle.
-	if err := requireWindowsManagedRuntimePinnedNames(root, tree.rootNames, "managed runtime root"); err != nil {
-		return err
-	}
-	if tree.hook != 0 {
-		if err := requireWindowsManagedRuntimePinnedNames(tree.hook, tree.hookNames, "managed hooks directory"); err != nil {
+	// before any known inode is deleted. The pinned subdirectory handles reject
+	// a pre-existing or newly opened FILE_ADD/DELETE-capable directory handle.
+	requireNames := func() error {
+		if err := requireWindowsManagedRuntimePinnedNames(root, tree.rootNames, "managed runtime root"); err != nil {
 			return err
 		}
+		for _, dir := range tree.dirs {
+			if err := requireWindowsManagedRuntimePinnedNames(dir.handle, dir.names, dir.label); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	for _, file := range append(append([]*windowsManagedRuntimePinnedCleanupFile(nil), tree.rootFiles...), tree.hookFiles...) {
+	if err := requireNames(); err != nil {
+		return err
+	}
+	for _, file := range tree.files() {
 		identity, err := validateWindowsManagedRuntimeCleanupFileHandle(file.handle, target, file.contract, file.label)
 		if err != nil || identity != file.identity {
 			return fmt.Errorf("enterprise hooks: managed runtime cleanup file %q changed after preflight", file.name)
@@ -1558,13 +1978,12 @@ func removeWindowsManagedRuntimeRootContents(
 	if err := validateWindowsManagedRuntimeCleanupDirectoryHandle(root, target.data, target.sid, marker, rootMarker); err != nil {
 		return fmt.Errorf("enterprise hooks: managed runtime cleanup root changed after preflight: %w", err)
 	}
-	if tree.hook != 0 {
-		hookPath := filepath.Join(target.data, "hooks")
-		if err := validateWindowsTargetOwnedDirectoryHandle(tree.hook, hookPath, target.sid); err != nil {
-			return fmt.Errorf("enterprise hooks: managed hooks directory changed after preflight: %w", err)
+	for _, dir := range tree.dirs {
+		if err := validateWindowsManagedRuntimeCleanupSubdirectoryHandle(dir.handle, dir.path, target.sid, dir.connectorBackup); err != nil {
+			return fmt.Errorf("enterprise hooks: %s changed after preflight: %w", dir.label, err)
 		}
-		if identity, err := windowsManagedRuntimeHandleIdentity(tree.hook, true); err != nil || identity != tree.hookID {
-			return fmt.Errorf("enterprise hooks: managed hooks directory identity changed after preflight")
+		if identity, err := windowsManagedRuntimeHandleIdentity(dir.handle, true); err != nil || identity != dir.id {
+			return fmt.Errorf("enterprise hooks: %s identity changed after preflight", dir.label)
 		}
 	}
 	if !rootMarker {
@@ -1584,38 +2003,35 @@ func removeWindowsManagedRuntimeRootContents(
 	// Re-enumeration detects anything that raced before marker quarantine. Once
 	// the root carries the marker descriptor, the enrolled target has no
 	// path-based traversal, create, or rename capability through deletion.
-	if err := requireWindowsManagedRuntimePinnedNames(root, tree.rootNames, "managed runtime root"); err != nil {
+	if err := requireNames(); err != nil {
 		return err
 	}
-	if tree.hook != 0 {
-		if err := requireWindowsManagedRuntimePinnedNames(tree.hook, tree.hookNames, "managed hooks directory"); err != nil {
-			return err
-		}
-	}
 
-	for _, file := range tree.hookFiles {
-		if err := deleteWindowsManagedRuntimePinnedFile(file, target); err != nil {
+	// Children are deleted before their parents.
+	for index := len(tree.dirs) - 1; index >= 0; index-- {
+		dir := tree.dirs[index]
+		for _, file := range dir.files {
+			if err := deleteWindowsManagedRuntimePinnedFile(file, target); err != nil {
+				return err
+			}
+		}
+		if err := requireWindowsManagedRuntimeDirectoryEmpty(dir.handle); err != nil {
 			return err
 		}
-	}
-	if tree.hook != 0 {
-		if err := requireWindowsManagedRuntimeDirectoryEmpty(tree.hook); err != nil {
-			return err
-		}
-		attributes, err := windowsQuarantineHandleAttributes(tree.hook)
+		attributes, err := windowsQuarantineHandleAttributes(dir.handle)
 		if err == nil {
-			err = markWindowsQuarantineHandleForDeletion(tree.hook, attributes)
+			err = markWindowsQuarantineHandleForDeletion(dir.handle, attributes)
 		}
-		closeErr := windows.CloseHandle(tree.hook)
-		tree.hook = 0
+		closeErr := windows.CloseHandle(dir.handle)
+		dir.handle = 0
 		if err != nil {
 			return err
 		}
 		if closeErr != nil {
-			return fmt.Errorf("enterprise hooks: close deleted managed hooks directory: %w", closeErr)
+			return fmt.Errorf("enterprise hooks: close deleted %s: %w", dir.label, closeErr)
 		}
-		if err := requireWindowsManagedRuntimeChildAbsent(root, "hooks"); err != nil {
-			return fmt.Errorf("enterprise hooks: managed hooks directory remains after cleanup: %w", err)
+		if err := requireWindowsManagedRuntimeChildAbsent(dir.parent, dir.name); err != nil {
+			return fmt.Errorf("enterprise hooks: %s remains after cleanup: %w", dir.label, err)
 		}
 	}
 	for _, file := range tree.rootFiles {
@@ -1633,6 +2049,56 @@ func removeWindowsManagedRuntimeRootContents(
 	return markWindowsQuarantineHandleForDeletion(root, attributes)
 }
 
+// windowsManagedRuntimeCleanupRefusal is a cleanup preflight that refused the
+// root's content before anything was changed. Nothing in the root is deleted;
+// cleanupWindowsManagedRuntimeRoot keeps the root aside instead.
+type windowsManagedRuntimeCleanupRefusal struct{ err error }
+
+func (r *windowsManagedRuntimeCleanupRefusal) Error() string { return r.err.Error() }
+func (r *windowsManagedRuntimeCleanupRefusal) Unwrap() error { return r.err }
+
+// windowsManagedRuntimeCleanupTransient reports a preflight failure a retry
+// can clear: a live handle on the root's content, or an entry that went away
+// while it was pinned. Those keep the transaction pending as before.
+func windowsManagedRuntimeCleanupTransient(err error) bool {
+	return errors.Is(err, windows.STATUS_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) || windowsManagedRuntimeRootMissing(err)
+}
+
+// keepWindowsManagedRuntimeRootAside ends a cleanup that refused root before
+// deleting anything. The Secure Client profile returns the refusal, so its
+// rollback stays pending as before. The standalone profile renames root aside
+// (detachWindowsManagedRuntimeRoot) and the rollback goes on.
+func keepWindowsManagedRuntimeRootAside(refusal error, root, parent windows.Handle, target windowsManagedRuntimeTarget, markerOwned bool) error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return refusal
+	}
+	if err := detachWindowsManagedRuntimeRoot(root, parent, target, markerOwned); err != nil {
+		return errors.Join(refusal, err)
+	}
+	return nil
+}
+
+// detachWindowsManagedRuntimeRoot renames a journaled root whose content the
+// preflight refused to .defenseclaw.rollback-<random> beside it, so neither
+// managed name remains and the rollback completes without deleting anything
+// it could not authenticate. A marker-quarantined root goes back to the
+// account's own owner and DACL, best effort, so the account can review it.
+func detachWindowsManagedRuntimeRoot(root, parent windows.Handle, target windowsManagedRuntimeTarget, markerOwned bool) error {
+	random := make([]byte, windowsManagedRuntimeStageRandomBytes)
+	if _, err := io.ReadFull(windowsManagedRuntimeEntropy, random); err != nil {
+		return fmt.Errorf("enterprise hooks: name the kept managed runtime root: %w", err)
+	}
+	leaf := windowsManagedRuntimeRollbackPrefix + hex.EncodeToString(random)
+	if err := renameWindowsManagedRuntimeHandle(root, parent, leaf); err != nil {
+		return fmt.Errorf("enterprise hooks: keep the refused managed runtime root aside as %s: %w", leaf, err)
+	}
+	if markerOwned {
+		_ = setWindowsManagedRuntimeFinalSecurity(root, target.sid)
+	}
+	return nil
+}
+
 func pinWindowsManagedRuntimeCleanupTree(
 	root windows.Handle,
 	target windowsManagedRuntimeTarget,
@@ -1643,22 +2109,55 @@ func pinWindowsManagedRuntimeCleanupTree(
 		tree.close()
 		return nil, err
 	}
+	// pinDir pins one subdirectory and records its names; the caller then
+	// admits each name.
+	pinDir := func(parent windows.Handle, name, path, label string, connectorBackup bool) (*windowsManagedRuntimePinnedCleanupDir, []string, error) {
+		handle, err := openWindowsManagedRuntimeCleanupChild(parent, name, true)
+		if err != nil {
+			return nil, nil, fmt.Errorf("enterprise hooks: pin %s: %w", label, err)
+		}
+		dir := &windowsManagedRuntimePinnedCleanupDir{parent: parent, name: name, path: path, label: label, handle: handle, names: make(map[string]struct{}), connectorBackup: connectorBackup}
+		tree.dirs = append(tree.dirs, dir)
+		if err := validateWindowsManagedRuntimeCleanupSubdirectoryHandle(handle, path, target.sid, connectorBackup); err != nil {
+			return nil, nil, err
+		}
+		if dir.id, err = windowsManagedRuntimeHandleIdentity(handle, true); err != nil {
+			return nil, nil, err
+		}
+		names, err := windowsQuarantineDirectoryNames(handle)
+		if err != nil {
+			return nil, nil, fmt.Errorf("enterprise hooks: enumerate %s for cleanup: %w", label, err)
+		}
+		for _, child := range names {
+			dir.names[child] = struct{}{}
+		}
+		return dir, names, nil
+	}
+	pinFile := func(dir *windowsManagedRuntimePinnedCleanupDir, name string, contract windowsManagedRuntimeCleanupFileContract) error {
+		file, err := pinWindowsManagedRuntimeCleanupFile(dir.handle, name, target, contract, filepath.Join(dir.path, name))
+		if err != nil {
+			return err
+		}
+		dir.files = append(dir.files, file)
+		return nil
+	}
 	names, err := windowsQuarantineDirectoryNames(root)
 	if err != nil {
 		return fail(fmt.Errorf("enterprise hooks: enumerate managed runtime cleanup root: %w", err))
 	}
+	var hooks, backups []string
+	var hookDir, backupDir *windowsManagedRuntimePinnedCleanupDir
 	for _, name := range names {
 		tree.rootNames[name] = struct{}{}
-		if name == "hooks" {
-			handle, err := openWindowsManagedRuntimeCleanupChild(root, name, true)
+		switch {
+		case name == "hooks":
+			hookDir, hooks, err = pinDir(root, name, filepath.Join(target.data, name), "managed hooks directory", false)
 			if err != nil {
-				return fail(fmt.Errorf("enterprise hooks: pin managed hooks directory: %w", err))
-			}
-			tree.hook = handle
-			if err := validateWindowsTargetOwnedDirectoryHandle(handle, filepath.Join(target.data, "hooks"), target.sid); err != nil {
 				return fail(err)
 			}
-			tree.hookID, err = windowsManagedRuntimeHandleIdentity(handle, true)
+			continue
+		case name == windowsManagedRuntimeCleanupBackupDir && len(spec.backupFiles) > 0:
+			backupDir, backups, err = pinDir(root, name, filepath.Join(target.data, name), "managed connector backup directory", true)
 			if err != nil {
 				return fail(err)
 			}
@@ -1674,16 +2173,7 @@ func pinWindowsManagedRuntimeCleanupTree(
 		}
 		tree.rootFiles = append(tree.rootFiles, file)
 	}
-	if tree.hook == 0 {
-		return tree, nil
-	}
-	tree.hookNames = make(map[string]struct{})
-	hookNames, err := windowsQuarantineDirectoryNames(tree.hook)
-	if err != nil {
-		return fail(fmt.Errorf("enterprise hooks: enumerate managed hooks cleanup directory: %w", err))
-	}
-	for _, name := range hookNames {
-		tree.hookNames[name] = struct{}{}
+	for _, name := range hooks {
 		contract, allowed := spec.hookFiles[name]
 		if !allowed {
 			connectorName, _, parsed := parseWindowsManagedRuntimeBundleLeaf(name)
@@ -1697,11 +2187,28 @@ func pinWindowsManagedRuntimeCleanupTree(
 		if !allowed {
 			return fail(fmt.Errorf("enterprise hooks: refuse managed hooks cleanup with unexpected entry %q", name))
 		}
-		file, err := pinWindowsManagedRuntimeCleanupFile(tree.hook, name, target, contract, filepath.Join(target.data, "hooks", name))
+		if err := pinFile(hookDir, name, contract); err != nil {
+			return fail(err)
+		}
+	}
+	for _, connectorName := range backups {
+		records, allowed := spec.backupFiles[connectorName]
+		if !allowed {
+			return fail(fmt.Errorf("enterprise hooks: refuse managed connector backup cleanup with unexpected entry %q", connectorName))
+		}
+		dir, leaves, err := pinDir(backupDir.handle, connectorName, filepath.Join(backupDir.path, connectorName), "managed "+connectorName+" backup directory", true)
 		if err != nil {
 			return fail(err)
 		}
-		tree.hookFiles = append(tree.hookFiles, file)
+		for _, leaf := range leaves {
+			contract, allowed := records[leaf]
+			if !allowed {
+				return fail(fmt.Errorf("enterprise hooks: refuse managed %s backup cleanup with unexpected entry %q", connectorName, leaf))
+			}
+			if err := pinFile(dir, leaf, contract); err != nil {
+				return fail(err)
+			}
+		}
 	}
 	return tree, nil
 }
@@ -1756,6 +2263,25 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: cleanup file owner is unavailable")
 	}
 	dacl, daclDefaulted, err := descriptor.DACL()
+	if contract == windowsManagedRuntimeCleanupHookFile && windowsEnterpriseStandaloneProcess() {
+		// Standalone profile only. The handle identity already proves a
+		// regular, single-link file reached without a reparse point inside
+		// the authenticated root, and the hooks folder only ever holds
+		// DefenseClaw scripts and tombstones, so the DACL is not provenance
+		// here: removing the file fails safe, refusing it wedged the rollback.
+		if ownerDefaulted || !windowsManagedRuntimeHookCleanupOwner(owner, target.sid) {
+			return "", fmt.Errorf("enterprise hooks: hook cleanup file has foreign owner %s", windowsSIDString(owner))
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: hook cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
+		return identity, nil
+	}
 	if err != nil || dacl == nil {
 		return "", fmt.Errorf("enterprise hooks: cleanup file DACL is unavailable")
 	}
@@ -1775,6 +2301,48 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		if size > windowsEnterpriseUserFileMaxBytes {
 			return "", fmt.Errorf("enterprise hooks: canonical cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
 		}
+	case windowsManagedRuntimeCleanupOwnedLockFile:
+		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
+			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file owner or DACL provenance is invalid")
+		}
+		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
+			if err := validateWindowsManagedRuntimeOwnedLockACL(label, descriptor, dacl, target.sid); err != nil {
+				return "", err
+			}
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: owned lock cleanup file exceeds %d bytes", windowsEnterpriseUserFileMaxBytes)
+		}
+	case windowsManagedRuntimeCleanupConnectorBackupFile, windowsManagedRuntimeCleanupHookFile:
+		kind := "connector backup"
+		if contract == windowsManagedRuntimeCleanupHookFile {
+			kind = "hook"
+		}
+		if ownerDefaulted || daclDefaulted || !owner.Equals(target.sid) {
+			return "", fmt.Errorf("enterprise hooks: %s cleanup file owner or DACL provenance is invalid", kind)
+		}
+		if canonicalErr := validateWindowsUserPathProtectionACL(label, descriptor, dacl, target.sid, false); canonicalErr != nil {
+			system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+			if err != nil {
+				return "", err
+			}
+			if err := validateWindowsManagedRuntimeExactFileACL(label, kind, descriptor, dacl, []*windows.SID{target.sid, system}); err != nil {
+				return "", err
+			}
+		}
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			return "", err
+		}
+		size := int64(uint64(info.FileSizeHigh)<<32 | uint64(info.FileSizeLow))
+		if size > windowsEnterpriseUserFileMaxBytes {
+			return "", fmt.Errorf("enterprise hooks: %s cleanup file exceeds %d bytes", kind, windowsEnterpriseUserFileMaxBytes)
+		}
 	case windowsManagedRuntimeCleanupGatewayFile:
 		administrators, administratorsErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 		if administratorsErr != nil || ownerDefaulted || (!owner.Equals(target.sid) && !owner.Equals(administrators)) {
@@ -1787,6 +2355,133 @@ func validateWindowsManagedRuntimeCleanupFileHandle(
 		return "", fmt.Errorf("enterprise hooks: unknown cleanup file contract")
 	}
 	return identity, nil
+}
+
+// windowsManagedRuntimeHookCleanupOwner reports whether owner is one a
+// DefenseClaw writer leaves on a hook file: the account (writes under its
+// token) or the machine (writes as LocalSystem, owned by LocalSystem or
+// Administrators).
+func windowsManagedRuntimeHookCleanupOwner(owner, target *windows.SID) bool {
+	if owner.Equals(target) {
+		return true
+	}
+	for _, known := range []windows.WELL_KNOWN_SID_TYPE{windows.WinLocalSystemSid, windows.WinBuiltinAdministratorsSid} {
+		sid, err := windows.CreateWellKnownSid(known)
+		if err == nil && owner.Equals(sid) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateWindowsManagedRuntimeOwnedLockACL accepts exactly the descriptor
+// connector.withOwnedFileLock creates a lock with: a protected DACL of three
+// non-inherited full-control ACEs, one each for the account, LocalSystem and
+// Administrators.
+func validateWindowsManagedRuntimeOwnedLockACL(
+	label string,
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	target *windows.SID,
+) error {
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return err
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return err
+	}
+	return validateWindowsManagedRuntimeExactFileACL(label, "owned lock", descriptor, dacl, []*windows.SID{target, system, administrators})
+}
+
+// validateWindowsManagedRuntimeExactFileACL requires a protected DACL of
+// exactly one non-inherited full-control ACE for each expected principal.
+func validateWindowsManagedRuntimeExactFileACL(
+	label, kind string,
+	descriptor *windows.SECURITY_DESCRIPTOR,
+	dacl *windows.ACL,
+	expected []*windows.SID,
+) error {
+	control, _, err := descriptor.Control()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect %s DACL control for %s: %w", kind, label, err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("enterprise hooks: %s DACL is not protected on %s", kind, label)
+	}
+	if int(dacl.AceCount) != len(expected) {
+		return fmt.Errorf(
+			"enterprise hooks: %s DACL on %s has %d ACEs, expected %d",
+			kind,
+			label,
+			dacl.AceCount,
+			len(expected),
+		)
+	}
+	seen := make([]bool, len(expected))
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return fmt.Errorf("enterprise hooks: inspect %s ACE %d for %s: %w", kind, index, label, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
+			mapWindowsUserPathGenericMask(ace.Mask) != windows.ACCESS_MASK(0x001f01ff) {
+			return fmt.Errorf("enterprise hooks: %s DACL on %s contains a non-canonical ACE at index %d", kind, label, index)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		match := -1
+		for candidate, want := range expected {
+			if !seen[candidate] && sid.Equals(want) {
+				match = candidate
+				break
+			}
+		}
+		if match < 0 {
+			return fmt.Errorf(
+				"enterprise hooks: %s DACL on %s contains unexpected or duplicate ACE for principal %s",
+				kind,
+				label,
+				windowsSIDString(sid),
+			)
+		}
+		seen[match] = true
+	}
+	return nil
+}
+
+// validateWindowsManagedRuntimeCleanupSubdirectoryHandle requires the
+// canonical target-owned directory DACL. connector_backups and its connector folders
+// may instead keep the descriptor per-user connector setup creates them with
+// (safefile.ProtectDirectory as the account: owned by the account, LocalSystem
+// and OWNER RIGHTS full control, inherited). The guardian never hardens them.
+func validateWindowsManagedRuntimeCleanupSubdirectoryHandle(
+	handle windows.Handle,
+	path string,
+	target *windows.SID,
+	connectorBackup bool,
+) error {
+	canonicalErr := validateWindowsTargetOwnedDirectoryHandle(handle, path, target)
+	if canonicalErr == nil || !connectorBackup {
+		return canonicalErr
+	}
+	if err := validateWindowsGuardianACLHandle(handle, target, true, true, false); err != nil {
+		return err
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	if setup, err := windowsSetupRelaxedDirectoryDACL(descriptor); err != nil {
+		return err
+	} else if !setup {
+		return canonicalErr
+	}
+	return nil
 }
 
 func requireWindowsManagedRuntimePinnedNames(handle windows.Handle, expected map[string]struct{}, label string) error {

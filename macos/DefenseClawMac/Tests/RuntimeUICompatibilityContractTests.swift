@@ -28,12 +28,19 @@ enum RuntimeUICompatibilityContractTests {
         let configEditorSource = try source(
             at: root.appendingPathComponent("DefenseClawMac/Features/ConfigEditorDefinitions.swift")
         )
+        let modelsSource = try source(
+            at: root.appendingPathComponent("DefenseClawMac/DataLayer/Models.swift")
+        )
         let logsSource = try source(
             at: root.appendingPathComponent("DefenseClawMac/Features/LogsView.swift")
         )
 
         expect(!configEditorSource.contains("privacy.disable_redaction"),
                "the config editor must not expose the removed privacy.disable_redaction key")
+        expect(!configEditorSource.contains("ai_discovery.lookup_model_provenance_online"),
+               "the offline editor must not expose the mainline-only online provenance option to runtime 0.8.10")
+        expect(modelsSource.contains(#"case "amp": return "Amp""#),
+               "the runtime-supported Amp connector must retain its display name")
 
         for unsupportedSurface in [
             "setup redaction",
@@ -45,10 +52,10 @@ enum RuntimeUICompatibilityContractTests {
                    "the Logs UI must not expose the unsupported runtime 0.8.10 surface: \(unsupportedSurface)")
         }
 
-        expect(logsSource.contains(".inspector(isPresented:"),
-               "the Logs view must retain the native inspector crash hotfix")
-        expect(logsSource.contains(".dcInspectorColumnWidth()"),
-               "the Logs inspector must retain its bounded column width")
+        expect(logsSource.contains(".dcInspector(isPresented:"),
+               "the Logs view must use the shared inline detail pane")
+        expect(!logsSource.contains(".inspector(isPresented:"),
+               "the Logs view must not restore the nested native inspector crash path")
 
         print("RuntimeUICompatibilityContractTests passed")
     }

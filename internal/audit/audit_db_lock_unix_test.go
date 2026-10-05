@@ -114,6 +114,60 @@ func TestJudgeBodySQLiteRetainsLocksUntilClose(t *testing.T) {
 	assertAuditDBUnlockedByPeerProcess(t, path)
 }
 
+// A timed-out startup check on a large store can drop the pool's only
+// connection. SQLite then deletes -wal and -shm and recreates them on the next
+// open; that must not stop the store, while a hard-linked replacement still
+// must.
+func TestAuditStoreAcceptsSQLiteSidecarsRecreatedAfterLastClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	existing, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := existing.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := existing.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	original, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatalf("stat WAL after open: %v", err)
+	}
+	dropPool := func() {
+		store.db.SetMaxIdleConns(0)
+		store.db.SetMaxIdleConns(1)
+		if _, err := os.Lstat(path + "-wal"); !os.IsNotExist(err) {
+			t.Fatalf("SQLite kept the WAL after its last connection closed: %v", err)
+		}
+	}
+	dropPool()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init after SQLite recreated its sidecars: %v", err)
+	}
+	recreated, err := os.Stat(path + "-wal")
+	if err != nil || os.SameFile(original, recreated) {
+		t.Fatalf("WAL was not recreated (err=%v)", err)
+	}
+
+	dropPool()
+	victim := filepath.Join(filepath.Dir(path), "other")
+	if err := os.WriteFile(victim, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, path+"-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := revalidateHardenedAuditSQLite(store.dbPathGuard); err == nil || !strings.Contains(err.Error(), "hard links") {
+		t.Fatalf("revalidation accepted a hard-linked WAL: %v", err)
+	}
+}
+
 func assertAuditDBLockedByPeerProcess(t *testing.T, path string) {
 	t.Helper()
 	runAuditDBHelperProcess(t, path, "TestAuditDBLockProbeHelperProcess")

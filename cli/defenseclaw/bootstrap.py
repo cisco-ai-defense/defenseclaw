@@ -30,10 +30,11 @@ and safe to call from background contexts.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import io
 import json
 import os
+import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -48,13 +49,10 @@ from defenseclaw.connector_paths import (
     connector_home,
     copilot_home,
     devin_hook_config_path,
+    devin_user_config_path,
     hermes_config_path,
     omnigent_config_path,
-)
-from defenseclaw.file_permissions import (
-    open_regular_file_no_follow,
-    root_owned_private_regular_file,
-    trusted_runtime_owner,
+    opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
 
@@ -114,6 +112,15 @@ class StepResult:
         }
 
 
+# ``init --sandbox`` is accepted so existing automation keeps working; the
+# legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
+SANDBOX_FLAG_DEPRECATION = (
+    "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
+    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
+    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
+)
+
+
 @dataclass
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
@@ -137,6 +144,9 @@ class FirstRunOptions:
     llm_api_key: str = ""
     llm_api_key_env: str = "DEFENSECLAW_LLM_KEY"
     llm_base_url: str = ""
+    # Provider-typed LLM settings (bedrock_region, bedrock_auth_mode, ...),
+    # passed to cmd_setup._apply_llm_provider_typed_flags.
+    llm_provider_typed: dict[str, str] | None = None
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
@@ -217,303 +227,271 @@ class FirstRunReport:
         return data
 
 
-class FreshMigrationStateError(OSError):
-    """A fresh v8 config was published but its migration cursor was not."""
+
+_DEFAULT_API_PORT = 18970
+# Step past the sandbox ingress and egress ports (api_port + 1 and + 2).
+_FIRST_RUN_API_PORT_STEP = 10
+# The gateway's own suggestion (freeGatewayAPIPort, gatewayAPIPortTries) looks
+# at the same window, so init, setup gateway, doctor, status and start agree
+# on a busy shared host (GAP-1807).
+_FIRST_RUN_API_PORT_TRIES = 50
 
 
-_FRESH_MIGRATION_PENDING_FILE = ".migration_state.fresh.pending.json"
-_FRESH_MIGRATION_PENDING_SCHEMA = 1
-_MAX_FRESH_MIGRATION_PENDING_BYTES = 16 * 1024
-_MAX_FRESH_CONFIG_BYTES = 4 * 1024 * 1024
+def _api_port_free(host: str, port: int) -> bool:
+    """Whether this account could listen on ``host:port`` right now."""
+    import socket
 
-
-def fresh_migration_pending_path(data_dir: str) -> str:
-    """Return the exact-config retry marker used by init and signed recovery."""
-    normalized = os.path.abspath(os.path.expanduser(data_dir))
-    return os.path.join(normalized, _FRESH_MIGRATION_PENDING_FILE)
-
-
-def _fresh_migration_pending_path(data_dir: str) -> str:
-    """Compatibility alias for the private name introduced by PR #610."""
-    return fresh_migration_pending_path(data_dir)
-
-
-def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> bytes:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
     try:
-        descriptor = open_regular_file_no_follow(path)
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            if platform_support.host_os() == "windows":
+                # On Windows SO_REUSEADDR lets a bind succeed over another
+                # account's listener, so ask for the port exclusively instead.
+                # Only Windows sockets have the option; elsewhere a plain bind.
+                exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+                if exclusive is not None:
+                    sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            else:
+                # The gateway listens with SO_REUSEADDR too, so a TIME_WAIT
+                # connection does not count as a holder.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((host, port))
     except OSError:
-        if private and root_owned_private_regular_file(path):
-            raise OSError(
-                "fresh migration-state recovery evidence is root-owned from a sudo-started gateway"
-            ) from None
-        raise
-    try:
-        info = os.fstat(descriptor)
-        # CPython 3.12 reports st_nlink as zero on Windows; the secure opener
-        # already rejects reparse points and verifies the opened file identity.
-        if (
-            (os.name != "nt" and info.st_nlink != 1)
-            or not 0 < info.st_size <= maximum
-            or (
-                private
-                and os.name != "nt"
-                and (
-                    not trusted_runtime_owner(info.st_uid)
-                    or stat.S_IMODE(info.st_mode) & 0o077
-                )
-            )
-        ):
-            raise OSError("fresh migration-state recovery evidence is not a bounded private file")
-        raw = b""
-        while len(raw) <= info.st_size:
-            chunk = os.read(descriptor, info.st_size + 1 - len(raw))
-            if not chunk:
-                break
-            raw += chunk
-        if len(raw) != info.st_size:
-            raise OSError("fresh migration-state recovery evidence changed while reading")
-        return raw
-    finally:
-        os.close(descriptor)
-
-
-def _fresh_config_identity(cfg: Config) -> tuple[str, str]:
-    from defenseclaw.config import config_path_for_data_dir
-
-    path = os.path.abspath(os.fspath(config_path_for_data_dir(cfg.data_dir)))
-    raw = _read_bounded_regular_file(path, _MAX_FRESH_CONFIG_BYTES, private=False)
-    return path, hashlib.sha256(raw).hexdigest()
-
-
-def _fresh_migration_state():
-    from defenseclaw import __version__, migration_state
-    from defenseclaw.migrations import MIGRATIONS
-
-    return migration_state.bootstrap(
-        None,
-        from_version=__version__,
-        package_version=__version__,
-        registry_versions=[version for version, _description, _migration in MIGRATIONS],
-    )
-
-
-def _fresh_migration_pending_payload(cfg: Config) -> dict[str, object]:
-    from defenseclaw import __version__
-
-    config_path, config_sha256 = _fresh_config_identity(cfg)
-    return {
-        "schema": _FRESH_MIGRATION_PENDING_SCHEMA,
-        "package_version": __version__,
-        "config_path": config_path,
-        "config_sha256": config_sha256,
-    }
-
-
-def _load_fresh_migration_pending(cfg: Config) -> dict[str, object] | None:
-    """Load exact retry authority without trusting paths stored inside it."""
-    marker_path = fresh_migration_pending_path(cfg.data_dir)
-    if not os.path.lexists(marker_path):
-        return None
-
-    from defenseclaw import __version__
-
-    try:
-        payload = json.loads(
-            _read_bounded_regular_file(
-                marker_path,
-                _MAX_FRESH_MIGRATION_PENDING_BYTES,
-                private=True,
-            )
-        )
-    except (json.JSONDecodeError, UnicodeError, OSError, TypeError) as exc:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery evidence is unsafe or unreadable; "
-            "leave it in place and run the latest signed upgrade resolver"
-        ) from exc
-
-    expected_keys = {"schema", "package_version", "config_path", "config_sha256"}
-    if not isinstance(payload, dict) or set(payload) != expected_keys:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery evidence has an unknown shape; "
-            "leave it in place and run the latest signed upgrade resolver"
-        )
-    if payload.get("package_version") != __version__:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery is pending from DefenseClaw "
-            f"{payload.get('package_version', 'unknown')}; run the latest signed upgrade resolver "
-            "instead of inferring migration state with a different version"
-        )
-
-    try:
-        expected = _fresh_migration_pending_payload(cfg)
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery config is unavailable; "
-            "leave the marker in place and run the latest signed upgrade resolver"
-        ) from exc
-    if payload != expected or getattr(cfg, "_source_config_version", None) != 8:
-        raise FreshMigrationStateError(
-            "fresh migration-state recovery evidence does not match the current config; "
-            "leave it in place and run the latest signed upgrade resolver"
-        )
-    return payload
-
-
-def _record_fresh_migration_retry(cfg: Config) -> str:
-    from defenseclaw.file_lock import locked_file_update
-    from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
-
-    try:
-        payload = _fresh_migration_pending_payload(cfg)
-    except OSError as exc:
-        raise FreshMigrationStateError("fresh migration-state recovery config is unavailable") from exc
-    marker_path = _fresh_migration_pending_path(cfg.data_dir)
-
-    make_private_directory(cfg.data_dir)
-    with locked_file_update(marker_path):
-        if os.path.lexists(marker_path):
-            raise OSError("fresh migration-state recovery evidence already exists")
-
-        def write_marker(stream) -> None:
-            json.dump(payload, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-
-        atomic_write_text_secure(
-            marker_path,
-            write_marker,
-            prefix=".migration_state.fresh.pending.",
-        )
-        persisted = _load_fresh_migration_pending(cfg)
-        if persisted is None:
-            raise FreshMigrationStateError("fresh migration-state recovery evidence disappeared during publication")
-        if persisted != payload:
-            raise FreshMigrationStateError("fresh migration-state recovery evidence changed during publication")
-    return marker_path
-
-
-def repair_pending_first_run_config(cfg: Config) -> bool:
-    """Retry cursor publication for an exact config saved by a fresh run.
-
-    The pending record is written only after the fresh v8 config is durably
-    saved and binds the retry to those exact config bytes, package version,
-    and path. A later init can therefore repair the cursor before mutating the
-    config again without treating an unrelated cursorless v8 installation as
-    fresh.
-    """
-    marker_path = _fresh_migration_pending_path(cfg.data_dir)
-    if not os.path.lexists(marker_path):
         return False
-
-    from defenseclaw import migration_state
-    from defenseclaw.file_lock import locked_file_update
-    from defenseclaw.file_permissions import delete_file_durable
-
-    try:
-        with locked_file_update(marker_path):
-            if _load_fresh_migration_pending(cfg) is None:
-                raise FreshMigrationStateError(
-                    "fresh migration-state recovery evidence disappeared before cursor publication; "
-                    "no migration cursor was inferred"
-                )
-            state = _fresh_migration_state()
-            try:
-                migration_state.save_if_absent(cfg.data_dir, state)
-            except OSError as exc:
-                raise FreshMigrationStateError(
-                    "could not publish the pending fresh migration cursor; "
-                    "the retry marker was retained for signed recovery"
-                ) from exc
-            try:
-                observed = migration_state.load(cfg.data_dir)
-            except OSError as exc:
-                raise FreshMigrationStateError(
-                    "the pending fresh migration cursor was published but could not be read back; "
-                    "the retry marker was retained for signed recovery"
-                ) from exc
-            if observed != state:
-                raise FreshMigrationStateError(
-                    "an existing migration cursor does not match the pending fresh installation; "
-                    "it was preserved and the retry marker remains for signed recovery"
-                )
-            try:
-                delete_file_durable(marker_path)
-            except OSError as exc:
-                raise FreshMigrationStateError(
-                    "the pending fresh migration cursor is complete, but its retry marker could not be cleared; "
-                    "rerun init with this version to finish cleanup"
-                ) from exc
-    except FreshMigrationStateError:
-        raise
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "could not complete the pending fresh migration cursor; the retry marker was retained for signed recovery"
-        ) from exc
     return True
 
 
-def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> bool:
-    """Publish the finalized config and, for a fresh v8 install, its cursor.
+# A per-user gateway start leaves an empty file owned by its account here for
+# its API port (internal/cli/gateway_port_claim_unix.go). A stopped or crashed
+# gateway frees its port, so init on another account checks these claims too
+# (GAP-1261). A claim left by a deleted account counts too: nobody else can
+# remove it (GAP-1704). On Windows the claims are in %ProgramData% and hold
+# the claiming account's SID (gateway_port_claim_windows.go, GAP-1569).
+_API_PORT_CLAIM_DIR = "/var/tmp"
+_API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
+# init claims a guardrail proxy port the same way, so two accounts that run
+# init at the same time don't both pick it (GAP-2198). Only init writes these.
+_GUARDRAIL_PORT_CLAIM_PREFIX = "defenseclaw-guardrail-port-"
+_WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
 
-    ``was_config_absent`` must be captured before any first-run mutation.
-    Guided setup can save the config several times while configuring the
-    connector, and :func:`bootstrap_env` runs after the first publication, so
-    checking for the config file here would misclassify every successful fresh
-    install as an existing one.
 
-    Cursor publication is deliberately ordered after ``cfg.save()``.  A failed
-    config write therefore cannot create or advance migration state.  Existing
-    cursor paths are preserved without parsing so corrupt, unknown-schema, and
-    future-schema recovery evidence remains untouched.
+def _windows_port_claims() -> bool:
+    return platform_support.host_os() == "windows"
 
-    Returns ``True`` when a fresh cursor was created and ``False`` for an
-    existing config or cursor.
+
+def _api_port_claim_dir() -> str:
+    if _windows_port_claims():
+        return os.environ.get("ProgramData") or r"C:\ProgramData"
+    return _API_PORT_CLAIM_DIR
+
+
+def _windows_claim_sid(path: str) -> str:
+    """The account SID a Windows claim names, or ""."""
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
+            return ""
+        with open(path, encoding="ascii") as handle:
+            sid = handle.read().strip()
+    except (OSError, ValueError):
+        return ""
+    return sid if _WINDOWS_CLAIM_SID.fullmatch(sid) else ""
+
+
+def _windows_own_sid() -> str:
+    try:
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        return _windows_current_user_sid()
+    except OSError:
+        return ""
+
+
+def _api_port_claimed_by_other_account(port: int, prefix: str = _API_PORT_CLAIM_PREFIX) -> bool:
+    path = os.path.join(_api_port_claim_dir(), f"{prefix}{port}")
+    if _windows_port_claims():
+        sid = _windows_claim_sid(path)
+        own = _windows_own_sid()
+        return bool(sid and own) and sid.upper() != own.upper()
+    if os.name == "nt":
+        return False
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    # No standard account can remove or replace another uid's claim in the
+    # sticky /var/tmp, even a deleted account's. Skipping only live owners'
+    # claims let two accounts take the same port: the first one's gateway
+    # could not claim it, so the next init picked it again (GAP-1704).
+    return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
+
+
+def remove_own_api_port_claims() -> None:
+    """Drop this account's port claims (``uninstall --all``). Best effort."""
+    windows = _windows_port_claims()
+    if os.name == "nt" and not windows:
+        return
+    claim_dir = _api_port_claim_dir()
+    try:
+        names = os.listdir(claim_dir)
+    except OSError:
+        return
+    own = _windows_own_sid() if windows else ""
+    for name in names:
+        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
+            continue
+        path = os.path.join(claim_dir, name)
+        if windows:
+            sid = _windows_claim_sid(path)
+            if own and sid.upper() == own.upper():
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+            continue
+        try:
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+                os.unlink(path)
+        except OSError:
+            continue
+
+
+def _api_port_available(host: str, port: int) -> bool:
+    return _api_port_free(host, port) and not _api_port_claimed_by_other_account(port)
+
+
+def _reserve_api_port(port: int, prefix: str = _API_PORT_CLAIM_PREFIX) -> bool:
+    """Claim ``port`` for this account now, as its gateway start would.
+
+    Two accounts running init at the same time could otherwise both pick a
+    port neither gateway listens on yet (GAP-1462). O_EXCL makes the claim
+    atomic; False only when another account claimed the port first. Windows
+    claims carry the account SID and are left to the gateway start.
     """
-    cfg.save()
-    if not was_config_absent:
-        return False
-    if getattr(cfg, "_source_config_version", None) != 8:
-        return False
-
-    from defenseclaw import migration_state
-    from defenseclaw.file_permissions import delete_file_durable
-
+    if os.name == "nt" or _windows_port_claims():
+        return True
     try:
-        marker_path = _record_fresh_migration_retry(cfg)
-    except (FreshMigrationStateError, OSError) as exc:
-        raise FreshMigrationStateError(
-            "config was saved, but retryable fresh migration state could not be registered; "
-            "run the latest signed upgrade resolver before continuing"
-        ) from exc
-
-    state = _fresh_migration_state()
-    try:
-        created = migration_state.save_if_absent(cfg.data_dir, state)
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "could not publish the fresh-install migration cursor; "
-            "the retry marker was retained, so rerunning init with this version is safe"
-        ) from exc
-
-    try:
-        observed = migration_state.load(cfg.data_dir)
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "the fresh-install migration cursor was published but could not be read back; "
-            "the retry marker was retained, so rerunning init with this version is safe"
-        ) from exc
-    if observed != state:
-        raise FreshMigrationStateError(
-            "an existing migration cursor does not match the pending fresh installation; "
-            "it was preserved and the retry marker remains for signed recovery"
+        os.close(
+            os.open(
+                os.path.join(_API_PORT_CLAIM_DIR, f"{prefix}{port}"),
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
         )
-    try:
-        delete_file_durable(marker_path)
-    except OSError as exc:
-        raise FreshMigrationStateError(
-            "the fresh migration cursor is complete, but its retry marker could not be cleared; "
-            "rerun init with this version to finish cleanup"
-        ) from exc
-    return created
+    except FileExistsError:
+        return not _api_port_claimed_by_other_account(port, prefix)
+    except OSError:
+        return True  # a claim is only a hint
+    return True
+
+
+def suggest_free_api_port(host: str, port: int) -> int:
+    """A port after ``port``, in the first-run steps, this account can use now; 0 if none."""
+    host = (host or "127.0.0.1").strip("[]")
+    if host in {"", "localhost"}:
+        host = "127.0.0.1"
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        candidate = port + step * _FIRST_RUN_API_PORT_STEP
+        # Like the gateway's own suggestion (freeGatewayAPIPort), the two
+        # sandbox ports next to it must be free too, so doctor, status and
+        # start name the same port (GAP-1706).
+        if (
+            candidate + 2 <= 65535
+            and _api_port_available(host, candidate)
+            and _api_port_free(host, candidate + 1)
+            and _api_port_free(host, candidate + 2)
+        ):
+            return candidate
+    return 0
+
+
+def choose_first_run_api_port(cfg: Config) -> str:
+    """Move a new config off the default API port when something holds it.
+
+    Per-user installs of several accounts on one host all default to 18970.
+    The account installed second would otherwise send its hook calls, with its
+    token, to the first account's gateway, which refuses them. Only a new
+    config that still has the default port moves. Returns a line for the
+    first-run output, or "" when nothing moved.
+    """
+    if int(getattr(cfg.gateway, "api_port", 0) or 0) != _DEFAULT_API_PORT:
+        return ""
+    from defenseclaw.config import api_bind_host
+
+    host = api_bind_host(cfg)
+    if host in {"", "localhost"}:
+        host = "127.0.0.1"
+    host = host.strip("[]")
+    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _api_port_available(host, port) and _reserve_api_port(port):
+            cfg.gateway.api_port = port
+            return (
+                f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
+                f"so this account's gateway uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_API_PORT} and the next {_FIRST_RUN_API_PORT_TRIES} candidate ports are in use or "
+        "configured by other accounts; choose a free port with "
+        "`defenseclaw setup gateway --api-port <free port> --non-interactive`"
+    )
+
+
+_DEFAULT_GUARDRAIL_PORT = 4000
+
+
+def _guardrail_port_available(host: str, port: int) -> bool:
+    """``port`` is free, not claimed by another account, and now claimed by this one."""
+    return (
+        _api_port_free(host, port)
+        and not _api_port_claimed_by_other_account(port, _GUARDRAIL_PORT_CLAIM_PREFIX)
+        and _reserve_api_port(port, _GUARDRAIL_PORT_CLAIM_PREFIX)
+    )
+
+
+def choose_first_run_guardrail_port(cfg: Config) -> str:
+    """Move a new config's guardrail proxy port off 4000 when something holds it.
+
+    Like the API port: a second account's proxy (OpenClaw) on the same host
+    could not listen on the first account's 4000, so its gateway never
+    started (GAP-1701). The chosen port is claimed like the API port, so two
+    accounts that run init at the same time get different ports (GAP-2198).
+    Returns a line for the first-run output, or "".
+    """
+    gc = cfg.guardrail
+    if int(getattr(gc, "port", 0) or 0) != _DEFAULT_GUARDRAIL_PORT:
+        return ""
+    host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+    if host.lower() in {"", "localhost", "::1"}:
+        host = "127.0.0.1"
+    if _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
+        return ""
+    for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
+        port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
+        if _guardrail_port_available(host, port):
+            gc.port = port
+            return (
+                # A claim by another account's init has no listener yet, so
+                # "in use" alone sent users looking for one (GAP-2283).
+                f"{host}:{_DEFAULT_GUARDRAIL_PORT} is in use or claimed by another account's DefenseClaw install, "
+                f"so this account's guardrail proxy uses port {port}"
+            )
+    return (
+        f"{host}:{_DEFAULT_GUARDRAIL_PORT} and the next {_FIRST_RUN_API_PORT_TRIES} candidate ports are in use or "
+        "claimed by other accounts; choose a free guardrail proxy port with "
+        "`defenseclaw setup guardrail --port <free port> --non-interactive`"
+    )
+
+
+def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
+    """Publish the finalized first-run config.
+
+    ``was_config_absent`` is kept for callers that capture it before guided
+    setup saves the config several times; publication is the same either way.
+    """
+    del was_config_absent
+    cfg.save()
 
 
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
@@ -656,7 +634,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     from defenseclaw.logger import Logger
 
     setup: list[StepResult] = []
-    retain_pending_migration_transaction = False
     rollback_first_run_transaction = False
     connector = _normalize_connector(options.connector)
     profile = _normalize_profile(options.profile, connector)
@@ -724,6 +701,16 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         # unversioned/legacy objects after the hard cutover.
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
+
+    if new_config:
+        port_note = choose_first_run_api_port(cfg)
+        if port_note:
+            status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
+            setup.append(StepResult("Gateway API port", status, port_note))
+        proxy_note = choose_first_run_guardrail_port(cfg)
+        if proxy_note:
+            status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
+            setup.append(StepResult("Guardrail proxy port", status, proxy_note))
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
@@ -822,33 +809,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             connector_mode_warnings=connector_mode_warnings,
         )
 
-    try:
-        repaired_migration_state = repair_pending_first_run_config(cfg)
-    except FreshMigrationStateError as exc:
-        setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
-        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
-        if rollback_error:
-            setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
-        return FirstRunReport(
-            status="needs_attention",
-            config_file=str(cfg_mod.config_path()),
-            data_dir=cfg.data_dir,
-            connector=connector,
-            profile=profile,
-            setup=setup,
-            next_commands=["defenseclaw init"],
-            connector_mode_warnings=connector_mode_warnings,
-        )
-    except BaseException as exc:
-        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
-        if rollback_error:
-            raise OSError(
-                f"first-run migration repair failed ({exc}); rollback was incomplete: {rollback_error}"
-            ) from exc
-        raise
-    if repaired_migration_state:
-        setup.append(StepResult("Migration State", "pass", "recovered pending fresh cursor"))
 
+    # GAP-1551: hooks bake their fail mode in when the gateway writes them,
+    # so a rerun that only changes it must restart a running gateway.
+    hook_fail_modes_before = _hook_fail_modes(cfg)
     try:
         if protected_selection is not None:
             from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
@@ -890,6 +854,19 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         if connector != "none":
             _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+        else:
+            if new_config:
+                # A fresh config defaults to OpenClaw. Persist the explicit
+                # "no connector" markers (the state `setup remove --force`
+                # leaves) so status and uninstall do not treat an uninstalled
+                # OpenClaw as the active connector (GAP-1056).
+                cfg.claw.mode = ""
+                cfg.guardrail.connector = ""
+                cfg.guardrail.connectors = {}
+            # GAP-2592: no connector still saves the scanner mode and the
+            # LLM / Cisco AI Defense flags (llm.* also drives the scanners).
+            cfg.guardrail.scanner_mode = scanner_mode
+            _apply_first_run_llm_choices(cfg, options)
     except BaseException as exc:
         rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
         if rollback_error:
@@ -979,13 +956,16 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 StepResult(
                     "Sandbox",
                     "warn",
-                    "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
-                    "defenseclaw sandbox setup",
+                    SANDBOX_FLAG_DEPRECATION,
+                    "defenseclaw sandbox legacy-cleanup --dry-run",
                 )
             )
 
         if options.start_gateway:
-            gateway_step = _start_gateway_structured(cfg)
+            gateway_step = _start_gateway_structured(
+                cfg,
+                hook_fail_mode_changed=_hook_fail_modes(cfg) != hook_fail_modes_before,
+            )
             setup.append(gateway_step)
             if gateway_step.status == "fail":
                 rollback_first_run_transaction = True
@@ -1018,11 +998,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                         "init did not retain the pre-init trusted binary "
                         "prefix transaction"
                     )
-        except FreshMigrationStateError as exc:
-            setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
-            retain_pending_migration_transaction = os.path.isfile(
-                fresh_migration_pending_path(cfg.data_dir)
-            ) and os.path.isfile(cfg_mod.config_path())
         except OSError as exc:
             setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
             rollback_first_run_transaction = True
@@ -1035,6 +1010,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if any(step.status == "fail" for step in readiness):
             rollback_first_run_transaction = True
 
+        _defer_hooks_to_gateway_start(setup, readiness)
         next_commands = _next_commands(setup, readiness, cfg, profile)
         status = _rollup_status(setup, readiness)
         report = FirstRunReport(
@@ -1074,12 +1050,27 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 ) from close_error
             raise close_error
 
-    if rollback_first_run_transaction and not retain_pending_migration_transaction:
+    if rollback_first_run_transaction:
         rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
         report._protected_selection = None
         if rollback_error:
             report.setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        else:
+            # The OK rows above describe the run, not what was kept (GAP-2590).
+            report.setup.append(
+                StepResult(
+                    "First-run rollback",
+                    "fail",
+                    "a step failed, so init restored the previous config; nothing was saved",
+                    "fix the failed step, then run defenseclaw init again",
+                )
+            )
     return report
+
+
+def _until_key_ok(detail: str) -> str:
+    """Readiness suffix for a failed key check: a missing key vs a rejected one (GAP-2596)."""
+    return "until the key is set" if "not set" in detail else "until a valid key is set"
 
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
@@ -1141,6 +1132,9 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
                 "defenseclaw-gateway status" if not running else "",
             )
         )
+        runtime_step = _connector_runtime_readiness(cfg, connector) if running else None
+        if runtime_step is not None:
+            steps.append(runtime_step)
 
     llm = cfg.resolve_llm("guardrail")
     if cfg.guardrail.enabled and llm.is_local_provider():
@@ -1149,12 +1143,34 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         else:
             steps.append(StepResult("Local LLM", "warn", "local provider set without base_url"))
     elif cfg.guardrail.enabled and (llm.model or options.llm_api_key or llm.api_key):
-        steps.append(_doctor_check("_check_llm_api_key", cfg, "LLM API key"))
+        key_step = _doctor_check("_check_llm_api_key", cfg, "LLM API key")
+        if key_step.status == "fail":
+            # The key is supplied afterwards; a missing or rejected key must not
+            # roll back the config and connectors this run just wrote.
+            env_name = llm.api_key_env or cfg.guardrail.api_key_env or "DEFENSECLAW_LLM_KEY"
+            key_step = StepResult(
+                "LLM API key",
+                "warn",
+                f"{key_step.detail}; the LLM judge stays inactive {_until_key_ok(key_step.detail)}",
+                f"defenseclaw keys set {env_name}",
+            )
+        steps.append(key_step)
     else:
         steps.append(StepResult("LLM API", "skip", "not configured"))
 
     if cfg.guardrail.enabled and cfg.guardrail.scanner_mode in ("remote", "both"):
-        steps.append(_doctor_check("_check_cisco_ai_defense", cfg, "Cisco AI Defense"))
+        aid_step = _doctor_check("_check_cisco_ai_defense", cfg, "Cisco AI Defense")
+        if aid_step.status == "fail":
+            # Like the LLM key (GAP-1057): a missing or rejected Cisco key is
+            # set afterwards and must not roll back this run's config (GAP-2590).
+            env_name = cfg.cisco_ai_defense.api_key_env or "CISCO_AI_DEFENSE_API_KEY"
+            aid_step = StepResult(
+                "Cisco AI Defense",
+                "warn",
+                f"{aid_step.detail}; remote scanning stays inactive {_until_key_ok(aid_step.detail)}",
+                f"defenseclaw keys set {env_name}",
+            )
+        steps.append(aid_step)
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
@@ -1225,7 +1241,12 @@ def _preflight_first_run_agent_selections(
 ) -> tuple[object | None, str]:
     """Record one complete protected roster before first-run state mutation."""
 
-    if platform_support.host_os() != "windows":
+    host_os = platform_support.host_os()
+    if host_os == "darwin" and _normalize_connector(connector) == "openhands":
+        # The macOS gateway installs OpenHands hooks only from a setup-selected,
+        # digest-pinned executable, the same receipt `setup openhands` writes.
+        selected_connectors = ("openhands",)
+    elif host_os != "windows":
         return None, ""
 
     from defenseclaw.agent_selection import (
@@ -1307,6 +1328,12 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         "next_command": f"defenseclaw setup {key} --mode action",
     }
     signal = getattr(discovery, "agents", {}).get(key) if discovery is not None else None
+    if key == "hermes" and not getattr(signal, "binary_path", "") and not _hermes_installed():
+        # Its version cannot be checked before it is installed, and setup
+        # alone cannot fix that, so name the install first (GAP-2383).
+        record["reason"] = "Hermes is not installed, so its version cannot be checked yet"
+        record["next_command"] = f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes --mode action"
+        return record
     if (
         signal is not None
         and getattr(signal, "error", "") == agent_discovery.UNTRUSTED_PREFIX_ERROR
@@ -1325,8 +1352,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
     elif signal is not None and getattr(signal, "version", ""):
+        from defenseclaw.connector_contracts import resolve_connector_contract
+
+        why = resolve_connector_contract(key, signal.version).reason
         record["reason"] = (
-            f"installed version {signal.version} is not covered by a known hook contract"
+            f"installed version {signal.version} is not covered by a known hook contract ({why})"
         )
         record["installed_version"] = signal.version
     return record
@@ -1347,7 +1377,9 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         steps.append(
             StepResult(
                 f"{label} mode",
-                "fail",
+                # A connector that stays in observe is protected but not
+                # blocking; it must not fail init/quickstart (and `make all`).
+                "warn",
                 detail,
                 warning.get("next_command", ""),
             )
@@ -1407,9 +1439,9 @@ def _apply_first_run_choices(
     _apply_first_run_connector_override(cfg, connector, profile_mode)
 
     # Honor an explicit operator choice supplied via flag/prompt.
-    # Empty string means "leave whatever was loaded alone" — usually
-    # the canonical default ("open") seeded by _migrate_0_4_0 or by
-    # default_config(). Anything other than the literal "closed"
+    # Empty string means "leave whatever was loaded alone": "closed"
+    # from default_config() on a new install, or "open" seeded by
+    # _migrate_0_4_0 on an old one. Anything other than the literal "closed"
     # sentinel is silently downgraded to "open" because failing-open
     # on a typo is strictly safer than failing-closed and bricking
     # the agent. Mirrors normalizeHookFailMode in
@@ -1456,7 +1488,12 @@ def _apply_first_run_choices(
         )
     elif severity and selected_pc is not None and selected_pc.hilt is not None:
         selected_pc.hilt.min_severity = cfg.guardrail.hilt.min_severity
+    pin_cursor_posture(cfg.guardrail, connector)
+    _apply_first_run_llm_choices(cfg, options)
 
+
+def _apply_first_run_llm_choices(cfg: Config, options: FirstRunOptions) -> None:
+    """Save the unified LLM and Cisco AI Defense flags, with or without a connector."""
     if options.llm_provider:
         cfg.llm.provider = options.llm_provider.strip()
     if options.llm_model:
@@ -1468,11 +1505,40 @@ def _apply_first_run_choices(
         cfg.llm.api_key_env = options.llm_api_key_env.strip()
     if options.llm_base_url:
         cfg.llm.base_url = options.llm_base_url.strip()
+    if options.llm_provider_typed:
+        from defenseclaw.commands.cmd_setup import _apply_llm_provider_typed_flags
+
+        _apply_llm_provider_typed_flags(cfg.llm, **options.llm_provider_typed)
 
     if options.cisco_endpoint:
         cfg.cisco_ai_defense.endpoint = options.cisco_endpoint.strip()
     if options.cisco_api_key_env:
         cfg.cisco_ai_defense.api_key_env = options.cisco_api_key_env.strip()
+
+
+def pin_cursor_posture(gc, primary: str = "") -> None:
+    """Pin Cursor's fail mode to its guardrail mode and turn approvals off.
+
+    Cursor's hook contract ties failures to the mode (action fails closed)
+    and has no native approval prompt; ``setup cursor`` already forces both,
+    and doctor fails any other persisted combination.
+    """
+    from defenseclaw.config import HILTConfig
+
+    connectors = getattr(gc, "connectors", None) or {}
+    key = next((k for k in connectors if _normalize_connector(str(k)) == "cursor"), "")
+    if not key and _normalize_connector(primary or gc.connector or "") != "cursor":
+        return
+    fail_mode = "closed" if gc.effective_mode("cursor").strip().lower() == "action" else "open"
+    hilt = gc.effective_hilt("cursor")
+    if key:
+        pc = connectors[key]
+        pc.hook_fail_mode = fail_mode
+        if hilt.enabled:
+            pc.hilt = HILTConfig(enabled=False, min_severity=hilt.min_severity or "HIGH")
+    else:
+        gc.hook_fail_mode = fail_mode
+        gc.hilt.enabled = False
 
 
 def _apply_first_run_connector_override(cfg: Config, connector: str, mode: str) -> None:
@@ -1566,22 +1632,24 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
 def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
-    if connector == "openclaw":
-        oc_path = os.path.expanduser(app.cfg.claw.config_file)
-        if not os.path.isfile(oc_path):
-            try:
-                app.cfg.save()
-            except OSError:
-                pass
-            return StepResult(
-                "Guardrail",
-                "warn",
-                f"OpenClaw config not found at {app.cfg.claw.config_file}; saved config but skipped connector patch",
-                "defenseclaw setup guardrail",
-            )
-
+    # OpenClaw needs no openclaw.json yet: the gateway registers its plugin
+    # there (creating the file) when it starts, as for every connector. This
+    # step used to skip with a warning that Readiness then contradicted (GAP-1523).
     buf = io.StringIO()
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(buf)
+    port_note = ""
+    if connector == "openclaw":
+        # GAP-1778: first-run saved config.yaml before bootstrap_env ran, so
+        # its new-config port sync never applied and the sidecar dialed
+        # 18789 while OpenClaw listened where openclaw.json says. Adopt the
+        # port the same way `setup openclaw` does (GAP-1524).
+        from defenseclaw.commands.cmd_setup import _adopt_openclaw_gateway_port
+
+        port_before = app.cfg.gateway.port
+        with contextlib.redirect_stdout(io.StringIO()):
+            _adopt_openclaw_gateway_port(app)
+        if app.cfg.gateway.port != port_before:
+            port_note = f", OpenClaw gateway port {app.cfg.gateway.port} from openclaw.json"
     try:
         with sink:
             ok, warnings = execute_guardrail_setup(app, save_config=True)
@@ -1596,7 +1664,12 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             if hasattr(app.cfg.guardrail, "effective_mode")
             else app.cfg.guardrail.mode
         )
-        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}")
+        fail_mode = (
+            app.cfg.guardrail.effective_hook_fail_mode(connector)
+            if hasattr(app.cfg.guardrail, "effective_hook_fail_mode")
+            else app.cfg.guardrail.hook_fail_mode
+        )
+        return StepResult("Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}{port_note}")
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")
     return StepResult("Guardrail", "fail", "setup returned false", "defenseclaw setup guardrail")
@@ -1638,7 +1711,98 @@ def _running_connector_from_state_file(data_dir: str) -> str | None:
     return name or None
 
 
-def _start_gateway_structured(cfg: Config) -> StepResult:
+def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | None:
+    """Read back whether the running gateway guards *connector* (GAP-1589).
+
+    Setup and "Sidecar already running" only prove the config was written and
+    some gateway is up. The gateway can still have refused the connector, or
+    its hook files can have drifted, which ``status`` shows as DEGRADED and
+    ``doctor`` as a failed hook row. Use the same checks here so first run
+    does not report the agent as guarded when it is not.
+    """
+
+    if connector in ("", "none"):
+        return None
+    from defenseclaw.commands.cmd_setup import _CONNECTOR_META
+    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    roster = _running_connectors_from_state_file(cfg.data_dir)
+    if roster is not None and connector not in roster:
+        return StepResult(
+            "Connector runtime",
+            "warn",
+            f"the running gateway has not loaded {label}, so it is not guarded yet",
+            "defenseclaw-gateway restart",
+        )
+    try:
+        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the doctor hook rows report unreadable state.
+        return None
+    if not problems:
+        return None
+    return StepResult(
+        "Connector runtime",
+        "warn",
+        f"{label} is not guarded: {problems[0]}",
+        setup_command(connector),
+    )
+
+
+def _running_connectors_from_state_file(data_dir: str) -> list[str] | None:
+    """Return the sorted connector roster the running sidecar booted with.
+
+    Reads ``names`` from ``active_connector.json`` (the v2+ roster), falling
+    back to the legacy single ``name``. ``None`` keeps the I-don't-know rule of
+    :func:`_running_connector_from_state_file`.
+    """
+    path = os.path.join(data_dir, "active_connector.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    names = data.get("names")
+    if isinstance(names, list) and names:
+        roster = sorted({n.strip().lower() for n in names if isinstance(n, str) and n.strip()})
+        return roster or None
+    single = _running_connector_from_state_file(data_dir)
+    return [single] if single else None
+
+
+# `defenseclaw-gateway start|restart` waits for READY itself (600 s on
+# Windows; elsewhere 60 s, extended by setup progress up to 180 s) and only
+# then starts the watchdog, so wait past that: killing it earlier left the
+# gateway without its watchdog (GAP-1346, GAP-1556, GAP-1850). Before that
+# wait it applies a pending one-time audit upgrade, which took minutes on a
+# 2 GB 0.x audit.db (GAP-1909).
+_GATEWAY_AUDIT_UPGRADE_ALLOWANCE = 600
+_GATEWAY_START_TIMEOUT = (660 if os.name == "nt" else 210) + _GATEWAY_AUDIT_UPGRADE_ALLOWANCE
+
+# Progress banners the gateway prints before it fails, e.g.
+# "[audit] applying migration 1: initial schema: ...".
+_GATEWAY_PROGRESS_LINE = re.compile(r"^\[[\w.-]+\] applying migration \d+")
+
+
+def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) -> str:
+    """The output line that explains a failed gateway start or restart.
+
+    On a fresh home the gateway prints audit migration banners first, so
+    the first line hid the real cause (GAP-2341). Use the last ``Error:``
+    line, else the first line that is not a migration banner.
+    """
+    text = "\n".join(part for part in (result.stderr, result.stdout) if part)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith("Error:")]
+    if errors:
+        return errors[-1]
+    useful = [line for line in lines if not _GATEWAY_PROGRESS_LINE.match(line)]
+    return useful[0] if useful else default
+
+
+def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
 
@@ -1678,15 +1842,26 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         # while the gateway was up — restart so the new config
         # takes effect now instead of "next time the operator
         # bounces the daemon themselves".
+        # Compare the whole roster: re-running init to add a connector keeps
+        # the same primary, and the gateway only loads (and writes hooks for)
+        # the connectors it booted with (GAP-1270).
         desired = cfg.active_connector()
-        running = _running_connector_from_state_file(cfg.data_dir)
-        if running is not None and running != desired:
+        desired_roster = sorted(
+            {str(c).strip().lower() for c in cfg.active_connectors() if str(c).strip()} or {desired}
+        )
+        roster = _running_connectors_from_state_file(cfg.data_dir)
+        running = None
+        if roster is not None and roster != desired_roster:
+            running = roster[0] if len(roster) == 1 else f"{len(roster)} connectors"
+            if len(desired_roster) > 1:
+                desired = f"{len(desired_roster)} connectors"
+        if running is not None:
             try:
                 result = subprocess.run(
                     [gw, "restart"],
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=_GATEWAY_START_TIMEOUT,
                 )
             except subprocess.TimeoutExpired:
                 return StepResult(
@@ -1703,30 +1878,83 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
                     "defenseclaw-gateway restart",
                 )
             if result.returncode == 0:
-                return StepResult(
-                    "Sidecar",
-                    "pass",
-                    f"restarted (was {running}, now {desired})",
+                active = cfg.active_connectors()
+                detail = (
+                    f"restarted (was {running}, now {desired})"
+                    if len(active) <= 1
+                    else f"restarted to load the {len(active)} selected connectors"
                 )
-            detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
+                # GAP-1938: name the connectors this restart stops guarding.
+                dropped = sorted(set(roster or ()) - set(desired_roster))
+                if dropped and len(active) > 1:
+                    detail += f"; no longer guarding {', '.join(dropped)}"
+                return StepResult("Sidecar", "pass", detail)
             return StepResult(
                 "Sidecar",
                 "warn",
                 f"connector drift detected ({running} → {desired}) but restart failed: "
-                f"{detail[0] if detail else 'restart failed'}",
+                f"{gateway_failure_detail(result, 'restart failed')}",
                 "defenseclaw-gateway restart",
             )
+        if hook_fail_mode_changed:
+            return _restart_for_hook_fail_mode(gw)
         return StepResult("Sidecar", "pass", "already running")
     try:
-        result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=30)
+        result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return StepResult("Sidecar", "warn", "start timed out", "defenseclaw-gateway status")
+        # GAP-1382: a slow first start (Windows) comes up after init stops waiting.
+        if _pid_file_running(pid_file):
+            return StepResult(
+                "Sidecar",
+                "warn",
+                f"still starting after {_GATEWAY_START_TIMEOUT} s; check it with defenseclaw-gateway status",
+                "defenseclaw-gateway status",
+            )
+        return StepResult(
+            "Sidecar",
+            "warn",
+            f"did not start within {_GATEWAY_START_TIMEOUT} s",
+            "defenseclaw-gateway start",
+        )
     except OSError as exc:
         return StepResult("Sidecar", "warn", str(exc), "defenseclaw-gateway status")
     if result.returncode == 0:
         return StepResult("Sidecar", "pass", "started")
-    detail = (result.stderr or result.stdout or "start failed").strip().splitlines()
-    return StepResult("Sidecar", "warn", detail[0] if detail else "start failed", "defenseclaw-gateway status")
+    first = gateway_failure_detail(result, "start failed")
+    # A port held by another account names its own fix; lead with it.
+    port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
+    return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
+
+
+def _hook_fail_modes(cfg: Config) -> dict[str, str]:
+    """Effective hook fail mode per configured hook connector."""
+    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+    gc = cfg.guardrail
+    try:
+        names = cfg.active_connectors() if cfg.has_connector_configured() else []
+    except Exception:
+        return {}
+    return {
+        name: str(gc.effective_hook_fail_mode(name) or "").lower()
+        for name in names
+        if _normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
+    }
+
+
+def _restart_for_hook_fail_mode(gw: str) -> StepResult:
+    """Restart a running gateway so it rewrites the hooks with the new fail mode."""
+    stale = "the hooks keep the old fail mode until the gateway restarts"
+    try:
+        result = subprocess.run([gw, "restart"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return StepResult("Sidecar", "warn", f"restart timed out; {stale}", "defenseclaw-gateway restart")
+    except OSError as exc:
+        return StepResult("Sidecar", "warn", f"restart failed ({exc}); {stale}", "defenseclaw-gateway restart")
+    if result.returncode == 0:
+        return StepResult("Sidecar", "pass", "restarted to apply the new hook fail mode")
+    first = gateway_failure_detail(result, "restart failed")
+    return StepResult("Sidecar", "warn", f"restart failed: {first}; {stale}", "defenseclaw-gateway restart")
 
 
 def _pid_file_running(pid_file: str) -> bool:
@@ -1776,10 +2004,38 @@ def _pid_looks_like_gateway(pid: int) -> bool:
     return process_is_gateway(pid)
 
 
+def _file_mentions_defenseclaw(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return "defenseclaw" in fh.read(1 << 20).lower()
+    except OSError:
+        return False
+
+
+# Where to get Hermes when it is missing (GAP-2383).
+HERMES_INSTALL_HINT = "install Hermes (https://github.com/NousResearch/hermes-agent)"
+
+
+def _hermes_installed() -> bool:
+    spec = agent_discovery._SPECS["hermes"]
+    if agent_discovery._binary_path_for_agent("hermes", spec):
+        return True
+    # The upstream installer links ~/.local/bin/hermes, which may not be on PATH yet.
+    return os.path.isfile(os.path.expanduser("~/.local/bin/hermes"))
+
+
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "none":
         return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
+        if not shutil.which("openclaw"):
+            # The gateway writes openclaw.json even without OpenClaw (GAP-1523).
+            return StepResult(
+                "Connector",
+                "warn",
+                "OpenClaw is not installed (openclaw is not on PATH)",
+                "defenseclaw setup openclaw",
+            )
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):
             return StepResult("Connector", "pass", f"OpenClaw config found: {cfg.claw.config_file}")
@@ -1805,6 +2061,15 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
+        if not _hermes_installed():
+            # Setup writes Hermes' config.yaml hooks even before Hermes is
+            # installed, so the file alone is not readiness (GAP-2354).
+            return StepResult(
+                "Connector",
+                "warn",
+                "Hermes is not installed (hermes is not on PATH)",
+                f"{HERMES_INSTALL_HINT}, then run: defenseclaw setup hermes",
+            )
         path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
@@ -1817,30 +2082,14 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "devin":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
-        path = devin_hook_config_path(workspace)
-        if path and os.path.isfile(path):
-            return StepResult("Connector", "pass", "Devin project hooks found")
-        return StepResult(
-            "Connector",
-            "warn",
-            "Devin project hooks not found; pin a workspace and run setup",
-            "defenseclaw setup devin --workspace <project>",
-        )
-    if connector == "geminicli":
-        path = connector_config_files("geminicli")[0]
-        if os.path.isfile(path):
-            return StepResult(
-                "Connector",
-                "warn",
-                "Gemini CLI integration is deprecated; remove managed state and use Antigravity",
-                "defenseclaw setup remove geminicli --yes",
-            )
-        return StepResult(
-            "Connector",
-            "warn",
-            "Gemini CLI integration is deprecated; use Antigravity",
-            "defenseclaw setup antigravity",
-        )
+        if workspace:
+            if os.path.isfile(devin_hook_config_path(workspace)):
+                return StepResult("Connector", "pass", "Devin project hooks found")
+        elif _file_mentions_defenseclaw(devin_user_config_path()):
+            # Devin reads user-global hooks from its config.json; only a pinned
+            # workspace moves them to <workspace>/.devin/hooks.v1.json.
+            return StepResult("Connector", "pass", "Devin hooks found")
+        return StepResult("Connector", "warn", "Devin hooks not found yet", "defenseclaw setup devin")
     if connector == "copilot":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
@@ -1883,6 +2132,16 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
+        if loose := opencode_writable_plugin_folder([path]):
+            # The gateway will not install its plugin there and does not
+            # start; `setup opencode` would fail the same way.
+            return StepResult(
+                "Connector",
+                "warn",
+                f"{loose} can be written by other accounts, so the gateway does not install the "
+                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
+                f"chmod go-w {shlex.quote(loose)}",
+            )
         return StepResult(
             "Connector",
             "warn",
@@ -1921,7 +2180,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult(
                 "Connector",
                 "warn",
-                f"OmniGent custom policy configured at {path}; OmniGent 0.7.0 does not expose "
+                f"OmniGent custom policy configured at {path}; OmniGent does not expose "
                 "a loaded policy generation/module identity, so live action/fail-closed "
                 "enforcement is unverified pending OmniGent reload/restart",
                 "defenseclaw doctor",
@@ -1932,6 +2191,19 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             f"OmniGent custom policy not found at {path}",
             "defenseclaw setup omnigent",
         )
+    if connector == "kiro":
+        # Kiro merges hooks from every scope; setup writes the global
+        # ~/.kiro/hooks/defenseclaw.json and, with claw.workspace_dir, the
+        # project's .kiro/hooks/defenseclaw.json. Either one is enough here.
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        candidates = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
+        if workspace:
+            candidates.append(os.path.join(workspace, ".kiro", "hooks", "defenseclaw.json"))
+        for path in candidates:
+            if os.path.isfile(path):
+                return StepResult("Connector", "pass", f"Kiro hooks found at {path}")
+        return StepResult("Connector", "warn", "Kiro hooks not found yet", "defenseclaw setup kiro")
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 
@@ -1991,6 +2263,36 @@ def _rollup_status(setup: list[StepResult], readiness: list[StepResult]) -> str:
     return "ready"
 
 
+_PLAIN_SETUP_HINT = re.compile(r"defenseclaw setup [a-z][a-z-]*")
+
+
+def _defer_hooks_to_gateway_start(setup: list[StepResult], readiness: list[StepResult]) -> None:
+    """Point missing connector hooks at the gateway when it did not start.
+
+    The sidecar writes every connector's hooks, plugin or policy when it
+    starts, so with the start failed they are missing for that reason alone
+    and ``defenseclaw setup <connector>`` would hit the same wall. Rows whose
+    hint asks for more than the plain setup command (a workspace, a mode
+    fix) keep it.
+    """
+    failed = any(step.name == "Sidecar" and step.status in ("warn", "fail") for step in setup)
+    # GAP-1491: a gateway not started on purpose (--no-start-gateway, or "no"
+    # at the prompt) leaves them pending, not broken.
+    skipped = any(step.name == "Sidecar" and step.status == "skip" for step in setup)
+    if not (failed or skipped):
+        return
+    for step in readiness:
+        if (
+            step.name == "Connector"
+            and step.status == "warn"
+            and _PLAIN_SETUP_HINT.fullmatch(step.next_command or "")
+        ):
+            step.detail += " — written when the gateway starts"
+            step.next_command = "defenseclaw-gateway start"
+            if skipped and not failed:
+                step.status = "skip"
+
+
 def _next_commands(
     setup: list[StepResult],
     readiness: list[StepResult],
@@ -2003,6 +2305,10 @@ def _next_commands(
         if step.next_command and step.next_command not in seen:
             commands.append(step.next_command)
             seen.add(step.next_command)
+    # "setup hermes --mode action" already covers a plain "setup hermes"
+    # (GAP-1372); the plain one prompts with observe as the default.
+    commands = [cmd for cmd in commands if not any(other.startswith(cmd + " --mode ") for other in commands)]
+    seen = set(commands)
     if "defenseclaw doctor" not in seen:
         commands.append("defenseclaw doctor")
     if getattr(cfg, "data_dir", "") and "defenseclaw keys list" not in seen:

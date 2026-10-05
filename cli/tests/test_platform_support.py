@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from click.testing import CliRunner
+from defenseclaw.commands.cmd_doctor import _HOOK_ENFORCED_CONNECTORS as _DOCTOR_HOOK_ENFORCED
 from defenseclaw.commands.cmd_init import _normalize_connector_arg, init_cmd
 from defenseclaw.commands.cmd_sandbox import sandbox as sandbox_group
 from defenseclaw.commands.cmd_setup import (
@@ -30,13 +31,11 @@ from defenseclaw.commands.cmd_setup import (
 )
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
-    cleanup_only_guidance,
-    is_cleanup_only,
 )
 from defenseclaw.context import AppContext
+from defenseclaw.credentials import _HOOK_POLICY_ONLY_CONNECTORS
 from defenseclaw.platform_support import (
     ACP_ONLY_CONNECTORS,
-    DEPRECATED_CONNECTORS,
     NOT_CERTIFIED,
     PREVIEW,
     PROXY_CONNECTORS,
@@ -83,7 +82,7 @@ WINDOWS_SUPPORTED: set[str] = {
 }
 WINDOWS_PREVIEW: set[str] = set()
 WINDOWS_NOT_CERTIFIED: set[str] = set()
-WINDOWS_UNSUPPORTED = {"geminicli", "openhands", "openclaw", "zeptoclaw"}
+WINDOWS_UNSUPPORTED = {"openhands", "openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
 
@@ -187,26 +186,8 @@ def test_non_windows_behavior_is_unchanged() -> None:
     for os_name in ("linux", "darwin"):
         for name in ALL_CONNECTORS:
             support = connector_platform_support(name, os_name)
-            if name in DEPRECATED_CONNECTORS:
-                assert support.status == UNSUPPORTED
-                assert support.available is False
-            else:
-                assert support.status == SUPPORTED
-                assert support.available
-
-
-def test_windsurf_is_globally_cleanup_only_and_routes_to_devin() -> None:
-    assert "windsurf" in DEPRECATED_CONNECTORS
-    assert "windsurf" not in KNOWN_CONNECTORS
-    assert is_cleanup_only("windsurf") is True
-    guidance = cleanup_only_guidance("windsurf")
-    assert "cleanup-only" in guidance
-    assert "Devin" in guidance
-    for os_name in ("windows", "darwin", "linux"):
-        support = connector_platform_support("windsurf", os_name)
-        assert support.status == UNSUPPORTED
-        assert support.available is False
-        assert "use Devin" in support.reason
+            assert support.status == SUPPORTED
+            assert support.available
 
 
 def test_supported_connectors_preserves_order_and_available_windows_scope() -> None:
@@ -233,86 +214,54 @@ def test_host_os_returns_known_token() -> None:
     assert host_os() in {"windows", "darwin", "linux"} or isinstance(host_os(), str)
 
 
-def test_windows_sandbox_setup_rejects_every_connector_before_side_effects() -> None:
-    for connector in ("codex", "claudecode", "openclaw"):
-        app = AppContext()
-        app.cfg = SimpleNamespace(guardrail=SimpleNamespace(connector=connector))
-
-        with (
-            patch("defenseclaw.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.commands.cmd_setup_sandbox._resolve_active_connector",
-                side_effect=AssertionError("connector resolver reached"),
-            ) as resolve_connector,
-            patch(
-                "defenseclaw.commands.cmd_setup_sandbox._ensure_sudo_cache",
-                side_effect=AssertionError("setup helper reached"),
-            ) as ensure_sudo,
-            patch(
-                "defenseclaw.commands.cmd_setup_sandbox._validate_sandbox_connector",
-                side_effect=AssertionError("connector validation reached"),
-            ) as validate_connector,
-            patch(
-                "defenseclaw.commands.cmd_setup_sandbox._disable_sandbox",
-                side_effect=AssertionError("filesystem mutation reached"),
-            ) as disable_sandbox,
-            patch(
-                "defenseclaw.commands.cmd_setup_sandbox.os.makedirs",
-                side_effect=AssertionError("filesystem write reached"),
-            ) as makedirs,
-            patch(
-                "defenseclaw.commands.cmd_setup_sandbox.subprocess.run",
-                side_effect=AssertionError("subprocess reached"),
-            ) as subprocess_run,
-        ):
-            result = CliRunner().invoke(sandbox_group, ["setup"], obj=app)
-
-        output = result.output.lower()
-        assert result.exit_code != 0, connector
-        assert "unsupported on native windows" in output, connector
-        assert "openclaw" not in output, connector
-        assert "connector" not in output, connector
-        resolve_connector.assert_not_called()
-        ensure_sudo.assert_not_called()
-        validate_connector.assert_not_called()
-        disable_sandbox.assert_not_called()
-        makedirs.assert_not_called()
-        subprocess_run.assert_not_called()
-
-
-def test_linux_sandbox_setup_preserves_connector_guidance() -> None:
-    app = AppContext()
-    app.cfg = SimpleNamespace(
-        _source_config_version=8,
-        guardrail=SimpleNamespace(connector="codex"),
-    )
-    app.store = object()
-    app.logger = object()
-
-    with patch("defenseclaw.platform_support.host_os", return_value="linux"):
-        result = CliRunner().invoke(sandbox_group, ["setup"], obj=app)
-
-    assert result.exit_code != 0
-    assert "requires the OpenClaw connector" in result.output
-    assert "defenseclaw setup guardrail --connector openclaw" in result.output
-
-
-def test_windows_sandbox_init_keeps_nonzero_rejection_with_aligned_wording() -> None:
-    with patch("defenseclaw.platform_support.host_os", return_value="windows"):
-        result = CliRunner().invoke(sandbox_group, ["init"], obj=AppContext())
+def test_windows_sandbox_legacy_cleanup_rejects_before_any_inspection() -> None:
+    with (
+        patch("defenseclaw.platform_support.host_os", return_value="windows"),
+        patch(
+            "defenseclaw.sandbox_legacy.detect",
+            side_effect=AssertionError("host inspection reached"),
+        ) as detect,
+    ):
+        result = CliRunner().invoke(sandbox_group, ["legacy-cleanup", "--dry-run"], obj=AppContext())
 
     assert result.exit_code != 0
     assert "unsupported on native Windows" in result.output
+    detect.assert_not_called()
+
+
+def test_legacy_sandbox_setup_and_init_commands_are_gone() -> None:
+    result = CliRunner().invoke(sandbox_group, ["init"], obj=AppContext())
+    assert result.exit_code == 2
+    assert "No such command" in result.output
+    # ``sandbox setup`` is the OpenShell 0.1 setup now; the legacy standalone
+    # options are not part of it.
+    for legacy in ("--sandbox-ip", "--host-ip", "--no-auto-pair", "--no-host-networking"):
+        result = CliRunner().invoke(sandbox_group, ["setup", legacy], obj=AppContext())
+        assert result.exit_code == 2, legacy
+        assert "No such option" in result.output, legacy
+
+
+def test_openshell_sandboxes_are_linux_and_macos_only() -> None:
+    from defenseclaw.platform_support import openshell_sandboxes_supported
+
+    assert openshell_sandboxes_supported("linux") is True
+    assert openshell_sandboxes_supported("darwin") is True
+    assert openshell_sandboxes_supported("windows") is False
+    assert openshell_sandboxes_supported("win32") is False
 
 
 def test_all_connector_lists_share_one_taxonomy() -> None:
-    active = ALL_CONNECTORS - DEPRECATED_CONNECTORS - ACP_ONLY_CONNECTORS
+    active = ALL_CONNECTORS - ACP_ONLY_CONNECTORS
     assert set(KNOWN_CONNECTORS) == ALL_CONNECTORS - ACP_ONLY_CONNECTORS
     assert set(_CONNECTOR_NAMES_FALLBACK) == active
     assert set(CONNECTORS) == active
     assert {choice.wire for choice in MODE_PICKER_CHOICES} == active
     assert set(CONNECTOR_CHOICES) == active
     assert set(_HOOK_ENFORCED_CONNECTORS) == active - set(PROXY_CONNECTORS)
+    # Doctor's proxy-port check and the LLM key requirement use their own
+    # copies; a missing name made a rules-only Kiro setup demand an LLM key.
+    assert set(_DOCTOR_HOOK_ENFORCED) == active - set(PROXY_CONNECTORS)
+    assert set(_HOOK_POLICY_ONLY_CONNECTORS) == active - set(PROXY_CONNECTORS)
 
 
 def test_windows_views_include_supported_and_labeled_preview_connectors() -> None:
@@ -323,22 +272,15 @@ def test_windows_views_include_supported_and_labeled_preview_connectors() -> Non
     win_modes = visible_mode_picker_choices("windows")
     assert {choice.wire for choice in win_modes} == expected
     labels = {choice.wire: choice.label.lower() for choice in win_modes}
-    assert "geminicli" not in labels
     assert all("preview" not in label for label in labels.values())
     assert {"copilot", "antigravity"} <= set(labels)
     assert "omnigent" in {choice.wire for choice in win_modes}
 
 
 def test_non_windows_views_are_unfiltered() -> None:
-    assert supported_connector_choices("linux") == tuple(
-        connector for connector in CONNECTORS if connector not in DEPRECATED_CONNECTORS
-    )
-    assert visible_mode_picker_choices("darwin") == tuple(
-        choice for choice in MODE_PICKER_CHOICES if choice.wire not in DEPRECATED_CONNECTORS
-    )
-    assert visible_connector_choices("linux") == tuple(
-        connector for connector in CONNECTOR_CHOICES if connector not in DEPRECATED_CONNECTORS
-    )
+    assert supported_connector_choices("linux") == tuple(CONNECTORS)
+    assert visible_mode_picker_choices("darwin") == tuple(MODE_PICKER_CHOICES)
+    assert visible_connector_choices("linux") == tuple(CONNECTOR_CHOICES)
 
 
 def test_discovery_default_preserves_non_windows_and_avoids_unsupported_windows() -> None:
@@ -389,22 +331,6 @@ def test_direct_windows_setup_rejects_unsupported_with_reason() -> None:
         assert "requires WSL" in openhands.output
     finally:
         cleanup_app(app, db_path, tmp_dir)
-
-
-def test_gemini_setup_aliases_are_globally_deprecated_before_mutation() -> None:
-    for os_name in ("windows", "darwin", "linux"):
-        for alias in ("geminicli", "gemini-cli", "gemini"):
-            app, tmp_dir, db_path = make_app_context()
-            try:
-                with patch("defenseclaw.platform_support.host_os", return_value=os_name):
-                    result = CliRunner().invoke(setup_group, [alias], obj=app)
-                assert result.exit_code != 0
-                assert "deprecated" in result.output.lower()
-                assert "setup antigravity" in result.output
-                assert "setup remove geminicli" in result.output
-                assert app.cfg.guardrail.connectors == {}
-            finally:
-                cleanup_app(app, db_path, tmp_dir)
 
 
 def test_bare_windows_setup_rejects_explicit_unsupported_before_mutation() -> None:

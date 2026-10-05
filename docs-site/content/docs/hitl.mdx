@@ -12,7 +12,7 @@ keywords:
 Human-in-the-Loop (HITL) changes a confirmable policy finding into an approval request **only when the current connector event has a native ask surface**. A supported event pauses in the agent UI while the operator approves or denies it. A connector without native ask cannot manufacture that pause: it applies its documented fallback and preserves `raw_action: "confirm"` for audit.
 
 <Callout type="info">
-HITL is opt-in and only affects **action mode**. Observe mode records findings without enforcing them. CRITICAL findings reach the block threshold before HITL is considered and still block unconditionally with the default policy profile.
+HITL is opt-in and only affects **action mode**. Observe mode records findings without enforcing them. With the default rule pack, CRITICAL findings reach the block level before HITL is considered, so they still block.
 </Callout>
 
 <DefenseClawDemo scenario="hitl-native-approval" variant="approve" />
@@ -39,10 +39,12 @@ A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can p
 | Antigravity | `PreToolUse` only | `PreInvocation` and `PostInvocation` are context-transform surfaces, `PostToolUse` is observation-only, and DefenseClaw returns allow for `Stop`. No permission-bypass override is claimed without persisted official-client evidence. |
 | Amp | `tool.call` and model-bound `tool.result` in the active foreground thread | A background thread or unavailable plugin UI rejects the call or withholds the result safely |
 | OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Post-phase confirm is audited and continues without a pause; DENY may suppress onward-visible content but cannot roll back completed work |
-| ZeptoClaw, Codex, Hermes, Devin, OpenHands | None | Connector-specific alert/allow/context behavior; no pause or TUI resume. |
-| OpenCode | `permission.ask` intentionally unimplemented | No native ask or context injection claim; no pause or TUI resume |
+| ZeptoClaw, Codex, Hermes, Devin, OpenHands, Kiro | None | Connector-specific alert/allow/context behavior; no pause or TUI resume. In the standalone enterprise profile, a confirm verdict on a Hermes `pre_tool_call` or an OpenHands `PreToolUse` is blocked instead, with a message that the organization's rule needs a confirmation the agent cannot ask for. |
+| OpenCode | None (`permission.ask` is not used) | No pause, no added context, and no TUI resume |
 
-For block events, fail-closed support, and the machine-readable source, see the [Capability Matrix](/docs/capability-matrix).
+Kiro records a confirm and turns it into an alert. When Kiro runs behind the [ACP guard](/docs/acp-guard), the editor's own permission requests still appear in the editor, and the guard can deny one before the editor shows it.
+
+For block events, fail-closed support, and the machine-readable source, see the [Capability Matrix](/docs/connectors/capability-matrix).
 
 ## Configure
 
@@ -63,39 +65,48 @@ defenseclaw setup guardrail \
     },
     "--hilt-min-severity": {
       type: "high|medium|low|critical",
-      description: "Lowest non-blocked severity eligible for confirmation. CRITICAL reaches the default block threshold first. Click accepts the value case-insensitively; config stores the canonical uppercase label.",
+      description: "Lowest severity that asks for approval, below the block level. CRITICAL reaches the default block level first. Any case works; the value is saved in upper case.",
       default: "high",
     },
   }}
 />
 
-With the default balanced thresholds, CRITICAL blocks, HIGH can become `confirm` when HITL is enabled, MEDIUM alerts, and LOW allows. Without HITL, HIGH is an alert rather than a silent block. A strict or custom policy pack can change those thresholds.
+With the default rule pack, CRITICAL blocks, HIGH can become `confirm` when HITL is on, MEDIUM alerts, and LOW is allowed. Without HITL, HIGH is an alert rather than a block. The strict pack, a custom pack, or `defenseclaw guardrail block-at` and `alert-at` change those levels.
+
+Already set up? Turn HITL on or off without re-running setup:
+
+```bash
+defenseclaw guardrail hilt on --min-severity HIGH
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail hilt off
+```
+
+`defenseclaw guardrail hilt` with no argument shows the current setting. With
+`--connector`, the change applies to that connector only (on installs with
+several connectors). In the [TUI](/docs/tui#policies-panel-protection-center),
+press `P` for **Policies**, highlight a scope on **Posture**, and press `h`.
 
 ## Decision flow
 
 <Flow
   direction="TB"
-  caption="Policy thresholds run first. HITL only changes a non-blocked, confirmable finding, and a real pause requires native ask support on that event."
+  caption="How the gateway picks a verdict for a tool call in action mode, and whether that verdict can pause the agent. The levels shown are the default rule pack's; the strict pack, block-at or --hilt-min-severity moves them. Observe mode records the verdict and lets the call run. In the standalone enterprise profile, Hermes and OpenHands tool calls are blocked instead of falling back to an alert."
 >
-  <Node id="req" kind="generic">Tool call</Node>
-  <Node id="score" kind="policy">Score finding</Node>
-  <Node id="block" kind="decision">At block threshold?</Node>
-  <Node id="deny" kind="generic">Block</Node>
-  <Node id="eligible" kind="decision">HITL enabled and at minimum?</Node>
-  <Node id="normal" kind="generic">Normal alert / allow tier</Node>
-  <Node id="native" kind="decision">Native ask on this event?</Node>
-  <Node id="ask" kind="agent">Ask in agent UI</Node>
-  <Node id="fallback" kind="operator">Connector fallback + audit</Node>
-  <Node id="result" kind="generic">Host applies operator decision</Node>
-  <Edge from="req" to="score" />
-  <Edge from="score" to="block" />
+  <Node id="call" kind="gateway">{`Gateway rates the call\nby its worst finding`}</Node>
+  <Node id="block" kind="decision">{`At the block level?\nCRITICAL by default`}</Node>
+  <Node id="deny" kind="generic">{`Blocked\nno prompt`}</Node>
+  <Node id="hitl" kind="decision">{`Needs approval?\nHITL on · HIGH and up`}</Node>
+  <Node id="alert" kind="generic">{`Alert or allow\nalerts at MEDIUM and up`}</Node>
+  <Node id="native" kind="decision">{`Can this event ask?\nnative agent prompt`}</Node>
+  <Node id="ask" kind="agent">{`Agent asks the user\napprove runs · deny stops`}</Node>
+  <Node id="fallback" kind="connector">{`Alert, no pause\nconfirm kept in audit`}</Node>
+  <Edge from="call" to="block" />
   <Edge from="block" to="deny" label="yes" />
-  <Edge from="block" to="eligible" label="no" />
-  <Edge from="eligible" to="normal" label="no" />
-  <Edge from="eligible" to="native" label="yes" />
+  <Edge from="block" to="hitl" label="no" />
+  <Edge from="hitl" to="alert" label="no" />
+  <Edge from="hitl" to="native" label="yes" />
   <Edge from="native" to="ask" label="yes" />
   <Edge from="native" to="fallback" label="no" />
-  <Edge from="ask" to="result" />
 </Flow>
 
 ## Operator workflow

@@ -40,26 +40,61 @@ export const KIND_TO_STYLE: Record<DiagramKind, KindStyle> = {
   generic:   { accent: 'var(--diagram-role-system)', label: 'System' },
 };
 
+// Trust-zone tones for <Zone> inside <Flow>. A zone's meaning is carried by
+// the tone name printed on its badge; the tint and border only reinforce it.
+// Zones outside the trust boundary (untrusted, external) also get a broken
+// border, so the boundary still reads in grayscale.
+export type ZoneTone =
+  | 'trusted'
+  | 'privileged'
+  | 'restricted'
+  | 'protected'
+  | 'untrusted'
+  | 'external';
+
+export interface ZoneToneStyle {
+  // Tone color: badge tag text, and mixed into the zone border.
+  accent: string;
+  // Faint zone fill.
+  fill: string;
+  label: string;
+  dash?: string;
+}
+
+export const ZONE_TONE_STYLE: Record<ZoneTone, ZoneToneStyle> = {
+  trusted:    { accent: 'var(--diagram-zone-trusted)',    fill: 'var(--diagram-zone-trusted-bg)',    label: 'Trusted' },
+  privileged: { accent: 'var(--diagram-zone-privileged)', fill: 'var(--diagram-zone-privileged-bg)', label: 'Privileged' },
+  restricted: { accent: 'var(--diagram-zone-restricted)', fill: 'var(--diagram-zone-restricted-bg)', label: 'Restricted' },
+  protected:  { accent: 'var(--diagram-zone-protected)',  fill: 'var(--diagram-zone-protected-bg)',  label: 'Protected' },
+  untrusted:  { accent: 'var(--diagram-zone-untrusted)',  fill: 'var(--diagram-zone-untrusted-bg)',  label: 'Untrusted', dash: '6 4' },
+  external:   { accent: 'var(--diagram-zone-external)',   fill: 'var(--diagram-zone-external-bg)',   label: 'External',  dash: '2 3' },
+};
+
 // Estimation constants, calibrated to the docs-site system-ui stack
 // at 14px medium. We can't measure text on the server, so every
 // dimension below is conservative: text never gets clipped, but
 // diagrams stay tight enough not to feel airy.
 export const CHAR_WIDTH = 7.2;
 export const LINE_HEIGHT = 17;
-export const NODE_PAD_X = 16;
-export const NODE_PAD_Y = 12;
-export const NODE_ICON_SPACE = 44;
-export const NODE_MIN_W = 184;
-export const NODE_MAX_W = 304;
+export const NODE_PAD_X = 14;
+export const NODE_PAD_Y = 11;
+// Horizontal room for the small role glyph in front of the title
+// (14px glyph + 8px gap). The glyph is the non-color role cue.
+export const NODE_ICON_SPACE = 22;
+export const NODE_MIN_W = 168;
+export const NODE_MAX_W = 288;
 // Compact mode trims the upper bound only — narrow nodes still fit.
 // Combined with the tighter dagre nodesep/ranksep in <Flow>, this
 // shaves ~15-20% off the natural width with negligible legibility
 // cost.
-export const NODE_MAX_W_COMPACT = 264;
+export const NODE_MAX_W_COMPACT = 256;
 export const NODE_MIN_W_DENSE = 148;
-export const NODE_MAX_W_DENSE = 172;
-export const NODE_MIN_H = 78;
-export const STRIPE_WIDTH = 4;
+export const NODE_MAX_W_DENSE = 184;
+export const NODE_MIN_H = 52;
+// Height of the optional tag line (Node `tag`, or the role label when
+// a Flow opts into `kindLabels`).
+export const NODE_TAG_H = 16;
+export const STRIPE_WIDTH = 3;
 
 // Article column targets used by the build-time width gate
 // (scripts/check-diagram-widths.ts) and the runtime fit modes. Kept
@@ -115,33 +150,63 @@ export function flattenToLines(node: React.ReactNode): string[] {
   return trimmed.length === 0 ? [''] : trimmed;
 }
 
+// Estimate the rendered width of one line of semibold Inter (the
+// docs-site sans) at `fontSize` px. The per-character factors were
+// fitted in Chromium against every edge and message label on the site:
+// most letters are ~0.645em, capitals, digits, m and w ~0.725em, and
+// spaces, punctuation and thin letters ~0.29em. Callers add their own
+// padding plus a few px of safety, because the fit can be ~6px short.
+const NARROW_CHARS = new Set([' ', '.', ',', ':', ';', '·', "'", '|', 'i', 'l', 'j', 'I', '!', '(', ')', '/', 't', 'f', 'r']);
+const WIDE_CHARS = /[A-Z0-9@#%&mwMW_]/;
+export function estimateTextWidth(text: string, fontSize: number): number {
+  let em = 0;
+  for (const ch of text) {
+    if (NARROW_CHARS.has(ch)) em += 0.29;
+    else if (WIDE_CHARS.test(ch)) em += 0.725;
+    else em += 0.645;
+  }
+  return em * fontSize;
+}
+
 // Estimate width/height for a label. The diagram engine consumes this
 // to lay out nodes; the actual render uses foreignObject + flexbox so
 // CSS handles the final wrapping inside the box we reserved here.
 export function measureLabel(
   lines: string[],
-  opts: { kind?: DiagramKind; compact?: boolean; dense?: boolean } = {},
+  opts: { kind?: DiagramKind; compact?: boolean; dense?: boolean; tag?: string; emphasis?: boolean } = {},
 ): { width: number; height: number; lines: string[] } {
-  const widthsPx = lines.map(l => Math.max(1, l.length) * CHAR_WIDTH);
-  const naturalWidth = Math.max(...widthsPx) + NODE_PAD_X * 2 + NODE_ICON_SPACE;
+  // Title: 14px semibold (14.5px when emphasized); details: 12px at a
+  // lighter weight, ~4% narrower than semibold.
+  const lineWidth = (l: string, index: number) =>
+    index === 0
+      ? estimateTextWidth(l || ' ', opts.emphasis ? 14.5 : 14)
+      : estimateTextWidth(l || ' ', 12) * 0.96;
+  const widthsPx = lines.map(lineWidth);
+  if (opts.tag) widthsPx.push(estimateTextWidth(opts.tag, 11));
+  // +6px safety, as for every estimateTextWidth caller.
+  const chrome = NODE_PAD_X * 2 + NODE_ICON_SPACE + 2;
+  const naturalWidth = Math.max(...widthsPx) + chrome + 6;
   const lowerBound = opts.dense ? NODE_MIN_W_DENSE : NODE_MIN_W;
   const upperBound = opts.dense
     ? NODE_MAX_W_DENSE
     : opts.compact
       ? NODE_MAX_W_COMPACT
       : NODE_MAX_W;
-  let width = Math.min(Math.max(lowerBound, naturalWidth), upperBound);
-  const innerWidth = width - NODE_PAD_X * 2 - NODE_ICON_SPACE;
-  const wrappedLineCount = lines.reduce((sum, l) => {
-    const w = Math.max(1, l.length) * CHAR_WIDTH;
+  const width = Math.min(Math.max(lowerBound, naturalWidth), upperBound);
+  const innerWidth = width - chrome;
+  const wrappedLineCount = lines.reduce((sum, l, i) => {
+    // Word wrapping wastes up to a word per line; budget 8% for it.
+    const w = lineWidth(l, i) * 1.08;
     return sum + Math.max(1, Math.ceil(w / innerWidth));
   }, 0);
-  // Reserve a classification line, a primary title line, and any detail
-  // lines. The icon occupies horizontal space only, so it does not make
-  // short cards unnecessarily tall.
-  let height = Math.max(
+  // Reserve the title line, any detail lines (plus the 3px gap between
+  // them) and, only when the node has one, the tag line. The glyph
+  // occupies horizontal space only, so it does not make short cards
+  // taller.
+  const detailGap = lines.length > 1 ? 3 : 0;
+  const height = Math.max(
     NODE_MIN_H,
-    wrappedLineCount * LINE_HEIGHT + NODE_PAD_Y * 2 + 18,
+    wrappedLineCount * LINE_HEIGHT + NODE_PAD_Y * 2 + detailGap + (opts.tag ? NODE_TAG_H : 0),
   );
 
   return { width, height, lines };
@@ -205,28 +270,7 @@ export function smoothPath(points: { x: number; y: number }[]): string {
   if (points.length === 0) return '';
   if (points.length === 1) return `M ${points[0].x} ${points[0].y}`;
 
-  const orthogonal: { x: number; y: number }[] = [points[0]];
-  for (let index = 1; index < points.length; index++) {
-    const previous = points[index - 1];
-    const current = points[index];
-    const dx = current.x - previous.x;
-    const dy = current.y - previous.y;
-
-    if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5 && Math.abs(dx) >= Math.abs(dy)) {
-      const midX = (previous.x + current.x) / 2;
-      orthogonal.push({ x: midX, y: previous.y }, { x: midX, y: current.y });
-    } else if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5) {
-      const midY = (previous.y + current.y) / 2;
-      orthogonal.push({ x: previous.x, y: midY }, { x: current.x, y: midY });
-    }
-    orthogonal.push(current);
-  }
-
-  const deduped = orthogonal.filter((point, index) => {
-    if (index === 0) return true;
-    const previous = orthogonal[index - 1];
-    return Math.abs(point.x - previous.x) >= 0.5 || Math.abs(point.y - previous.y) >= 0.5;
-  });
+  const deduped = orthogonalRoute(points);
   if (deduped.length < 2) return `M ${deduped[0].x} ${deduped[0].y}`;
 
   const commands = [`M ${deduped[0].x} ${deduped[0].y}`];
@@ -252,6 +296,34 @@ export function smoothPath(points: { x: number; y: number }[]): string {
   return commands.join(' ');
 }
 
+// The right-angle route smoothPath draws, before corner rounding:
+// diagonal segments become doglegs and zero-length steps are dropped.
+// Expects at least one point.
+export function orthogonalRoute(points: { x: number; y: number }[]): { x: number; y: number }[] {
+  const orthogonal: { x: number; y: number }[] = [points[0]];
+  for (let index = 1; index < points.length; index++) {
+    const previous = points[index - 1];
+    const current = points[index];
+    const dx = current.x - previous.x;
+    const dy = current.y - previous.y;
+
+    if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5 && Math.abs(dx) >= Math.abs(dy)) {
+      const midX = (previous.x + current.x) / 2;
+      orthogonal.push({ x: midX, y: previous.y }, { x: midX, y: current.y });
+    } else if (Math.abs(dx) >= 0.5 && Math.abs(dy) >= 0.5) {
+      const midY = (previous.y + current.y) / 2;
+      orthogonal.push({ x: previous.x, y: midY }, { x: current.x, y: midY });
+    }
+    orthogonal.push(current);
+  }
+
+  return orthogonal.filter((point, index) => {
+    if (index === 0) return true;
+    const previous = orthogonal[index - 1];
+    return Math.abs(point.x - previous.x) >= 0.5 || Math.abs(point.y - previous.y) >= 0.5;
+  });
+}
+
 // A short, deterministic-ish id we use to namespace SVG marker/filter
 // ids per diagram instance. Crypto.randomUUID isn't available during
 // SSG without polyfills, and we don't need uniqueness across requests
@@ -263,21 +335,24 @@ export function nextDiagramId(prefix: string): string {
 }
 
 // Common shape: text node label rendered inside a foreignObject. We
-// use an HTML div so CSS handles word-wrapping, ellipsis (none for
-// now), and font fallback. The div fills the bounding box and
-// flex-centers the lines.
+// use an HTML div so CSS handles word-wrapping and font fallback. The
+// card reads top to bottom: an optional tag (only when it carries
+// meaning, e.g. the identity a component runs as), the title with a
+// small role glyph in front of it, then muted detail lines.
 export function NodeLabel({
   width,
   height,
   lines,
   kind,
   emphasis,
+  tag,
 }: {
   width: number;
   height: number;
   lines: string[];
   kind: DiagramKind;
   emphasis?: boolean;
+  tag?: string;
 }) {
   const kindStyle = KIND_TO_STYLE[kind];
   const [title = '', ...detailLines] = lines;
@@ -288,100 +363,94 @@ export function NodeLabel({
           width: '100%',
           height: '100%',
           display: 'flex',
-          flexDirection: 'row',
-          alignItems: 'center',
+          flexDirection: 'column',
+          alignItems: 'stretch',
           justifyContent: 'center',
-          gap: '12px',
-          padding: `${NODE_PAD_Y}px ${NODE_PAD_X}px`,
+          padding: `${NODE_PAD_Y}px ${NODE_PAD_X}px ${NODE_PAD_Y}px ${NODE_PAD_X + 2}px`,
           boxSizing: 'border-box',
           textAlign: 'left',
           fontFamily: 'var(--font-sans), system-ui, sans-serif',
           color: 'var(--diagram-text)',
         }}
       >
-        <span
-          style={{
-            display: 'inline-flex',
-            flex: '0 0 auto',
-            alignItems: 'center',
-            justifyContent: 'center',
-            width: '30px',
-            height: '30px',
-            border: `1px solid color-mix(in oklab, ${kindStyle.accent} 28%, var(--diagram-border))`,
-            borderRadius: '5px',
-            background: `color-mix(in oklab, ${kindStyle.accent} 8%, var(--diagram-node-bg))`,
-            color: kindStyle.accent,
-          }}
-          aria-hidden
-        >
-          <DiagramKindIcon kind={kind} />
-        </span>
-        <span
-          style={{
-            display: 'flex',
-            minWidth: 0,
-            flex: '1 1 auto',
-            flexDirection: 'column',
-            alignItems: 'stretch',
-          }}
-        >
+        {tag && (
           <span
             style={{
-              color: kindStyle.accent,
-              fontFamily: 'var(--font-mono), ui-monospace, monospace',
-              fontSize: '9px',
-              fontWeight: 750,
-              letterSpacing: '0.09em',
-              lineHeight: 1.2,
-              textTransform: 'uppercase',
+              display: 'block',
+              marginBottom: '3px',
+              paddingLeft: `${NODE_ICON_SPACE}px`,
+              color: 'var(--diagram-muted)',
+              fontSize: '11px',
+              fontWeight: 600,
+              lineHeight: '13px',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
             }}
           >
-            {kindStyle.label}
+            {tag}
+          </span>
+        )}
+        <span style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', minWidth: 0 }}>
+          <span
+            aria-hidden
+            style={{
+              display: 'inline-flex',
+              flex: '0 0 auto',
+              width: '14px',
+              height: '17px',
+              alignItems: 'center',
+              color: emphasis && kind === 'gateway' ? 'var(--diagram-accent-blue)' : kindStyle.accent,
+            }}
+          >
+            <DiagramKindIcon kind={kind} size={14} />
           </span>
           <span
             style={{
-              marginTop: '4px',
+              minWidth: 0,
+              flex: '1 1 auto',
               fontSize: emphasis ? '14.5px' : '14px',
-              fontWeight: emphasis ? 680 : 620,
-              letterSpacing: '-0.012em',
-              lineHeight: 1.25,
+              fontWeight: emphasis ? 650 : 600,
+              letterSpacing: '-0.01em',
+              lineHeight: 1.22,
               overflowWrap: 'anywhere',
             }}
           >
             {title || '\u00A0'}
           </span>
-          {detailLines.length > 0 && (
-            <span
-              style={{
-                display: 'block',
-                marginTop: '3px',
-                color: 'var(--diagram-muted)',
-                fontSize: '11.5px',
-                fontWeight: 480,
-                lineHeight: 1.35,
-              }}
-            >
-              {detailLines.map((line, index) => (
-                <span key={index} style={{ display: 'block', overflowWrap: 'anywhere' }}>
-                  {line || '\u00A0'}
-                </span>
-              ))}
-            </span>
-          )}
         </span>
+        {detailLines.length > 0 && (
+          <span
+            style={{
+              display: 'block',
+              marginTop: '3px',
+              paddingLeft: `${NODE_ICON_SPACE}px`,
+              color: 'var(--diagram-muted)',
+              fontSize: '12px',
+              fontWeight: 450,
+              lineHeight: 1.35,
+            }}
+          >
+            {detailLines.map((line, index) => (
+              <span key={index} style={{ display: 'block', overflowWrap: 'anywhere' }}>
+                {line || '\u00A0'}
+              </span>
+            ))}
+          </span>
+        )}
       </ForeignDiv>
     </foreignObject>
   );
 }
 
-export function DiagramKindIcon({ kind }: { kind: DiagramKind }) {
+export function DiagramKindIcon({ kind, size = 16 }: { kind: DiagramKind; size?: number }) {
   const shared = {
-    width: 16,
-    height: 16,
+    width: size,
+    height: size,
     viewBox: '0 0 24 24',
     fill: 'none',
     stroke: 'currentColor',
-    strokeWidth: 1.8,
+    strokeWidth: 2,
     strokeLinecap: 'round' as const,
     strokeLinejoin: 'round' as const,
   };

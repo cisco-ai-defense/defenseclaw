@@ -441,6 +441,52 @@ func TestWindowsManagedRuntimeCleanupValidatesCanonicalBaselineWithoutDeletingIt
 	assertWindowsTargetOwnedCanonicalDirectory(t, preserved, target)
 }
 
+func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testing.T) {
+	previous := windowsEnterpriseStandaloneProcess
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+	target := currentWindowsTestSID(t)
+	home := newWindowsTargetOwnedTestHome(t, target)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if _, err := ensureWindowsTargetOwnedDirectoryTree(home, hookDir, target); err != nil {
+		t.Fatal(err)
+	}
+	// The purge returns what it keeps to the owner-private setup shape.
+	relaxed, err := windows.SecurityDescriptorFromString(windowsSetupRelaxedDirectorySDDL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relaxedDACL, _, err := relaxed.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{dataDir, hookDir} {
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, relaxedDACL, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := windowsManagedRuntimeTestManifest(home, target)
+	digest := strings.Repeat("5", 64)
+
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest); err == nil {
+		t.Fatal("a Secure Client plan adopted the folder a purge kept")
+	}
+
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil {
+		t.Fatalf("standalone install plan refused the folder a purge kept: %v", err)
+	}
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical {
+		t.Fatalf("plan roots = %+v, want canonical baseline", plan.Roots)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+	assertWindowsTargetOwnedCanonicalDirectory(t, hookDir, target)
+}
+
 func TestWindowsManagedRuntimeCleanupRejectsCanonicalBaselineDACLDrift(t *testing.T) {
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
@@ -544,6 +590,14 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	target := currentWindowsTestSID(t)
 	home := newWindowsManagedRuntimeBAOwnedProfile(t, target)
 	manifest := windowsManagedRuntimeTestManifest(home, target)
+	// Every standalone per-user connector needs a bounded fresh-root
+	// contract: without one, a failed first install's rollback refused the
+	// whole plan and left the created root behind.
+	for _, name := range WindowsStandalonePerUserConnectorNames() {
+		manifest.Targets = append(manifest.Targets, ManifestTarget{
+			UserHome: home, SID: target.String(), DataDir: filepath.Join(home, ".defenseclaw"), Connector: name, AgentVersion: "1.0.0",
+		})
+	}
 	digest := strings.Repeat("7", 64)
 	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
 	if err != nil {
@@ -565,7 +619,31 @@ func TestWindowsManagedRuntimeCleanupRemovesExactMultiConnectorFreshFootprint(t 
 	}
 	spec := specs[windowsManagedRuntimeRootKey(plan.Roots[0].SID, plan.Roots[0].UserHome)]
 	known := writeWindowsManagedRuntimeCleanupFixture(t, plan.Roots[0], target, spec)
-	for index, connectorName := range []string{"codex", "claudecode", "cursor"} {
+	if len(spec.backupFiles) == 0 {
+		t.Fatal("per-user connector cleanup contract has no connector backup records")
+	}
+	// The guardian hardens neither connector_backups nor its connector
+	// folders, and a setup that failed before hardening leaves its records
+	// as written: give them the descriptors per-user connector setup leaves.
+	backupRoot := filepath.Join(plan.Roots[0].DataDir, windowsManagedRuntimeCleanupBackupDir)
+	setWindowsManagedRuntimeCleanupConnectorBackupShape(t, backupRoot, target, true)
+	for connectorName, records := range spec.backupFiles {
+		setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(backupRoot, connectorName), target, true)
+		for leaf := range records {
+			setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(backupRoot, connectorName, leaf), target, false)
+		}
+	}
+	// Kiro setup writes kiro-created-dirs.json as the account with that
+	// owner-private shape; unlisted, it kept the root aside (GAP-1287).
+	if _, listed := spec.rootFiles["kiro-created-dirs.json"]; !listed {
+		t.Fatal("kiro cleanup contract does not list kiro-created-dirs.json")
+	}
+	setWindowsManagedRuntimeCleanupConnectorBackupShape(t, filepath.Join(plan.Roots[0].DataDir, "kiro-created-dirs.json"), target, false)
+	generations := make([]string, 0, len(spec.generationConnectors))
+	for connectorName := range spec.generationConnectors {
+		generations = append(generations, connectorName)
+	}
+	for index, connectorName := range generations {
 		leaf, err := windowsManagedRuntimeBundleLeaf(
 			connectorName,
 			fmt.Sprintf("%032x", index+1),
@@ -1137,12 +1215,16 @@ func writeWindowsManagedRuntimeCleanupFixture(
 		t.Fatalf("create exact managed hooks fixture: %v", err)
 	}
 	var paths []string
-	for name := range spec.rootFiles {
+	for name, contract := range spec.rootFiles {
 		path := filepath.Join(root.DataDir, name)
 		if err := os.WriteFile(path, []byte("managed root artifact"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		if contract == windowsManagedRuntimeCleanupOwnedLockFile {
+			setWindowsManagedRuntimeCleanupFileOwnedLock(t, path, target)
+		} else {
+			setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+		}
 		paths = append(paths, path)
 	}
 	for name := range spec.hookFiles {
@@ -1152,6 +1234,39 @@ func writeWindowsManagedRuntimeCleanupFixture(
 		}
 		setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
 		paths = append(paths, path)
+	}
+	if len(spec.backupFiles) > 0 {
+		descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mkdir := func(path string) {
+			if _, err := os.Lstat(path); err == nil {
+				return
+			}
+			name, err := windows.UTF16PtrFromString(path)
+			if err == nil {
+				err = windows.CreateDirectory(name, &windows.SecurityAttributes{
+					Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor,
+				})
+			}
+			if err != nil {
+				t.Fatalf("create exact connector backup directory %s: %v", path, err)
+			}
+		}
+		backupRoot := filepath.Join(root.DataDir, windowsManagedRuntimeCleanupBackupDir)
+		mkdir(backupRoot)
+		for connectorName, records := range spec.backupFiles {
+			mkdir(filepath.Join(backupRoot, connectorName))
+			for leaf := range records {
+				path := filepath.Join(backupRoot, connectorName, leaf)
+				if err := os.WriteFile(path, []byte("managed backup record"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				setWindowsManagedRuntimeCleanupFileCanonical(t, path, target)
+				paths = append(paths, path)
+			}
+		}
 	}
 	// Elevated gateway creation may legitimately select BA as the SQLite owner.
 	// Preserve the exact protected safe DACL while exercising that owner form.
@@ -1185,6 +1300,78 @@ func setWindowsManagedRuntimeCleanupFileCanonical(t *testing.T, path string, tar
 	}
 	if err := setWindowsUserPathProtection(path, target, false); err != nil {
 		t.Fatalf("install exact cleanup fixture DACL on %s: %v", path, err)
+	}
+}
+
+// setWindowsManagedRuntimeCleanupFileOwnedLock gives a fixture lock the
+// descriptor connector.withOwnedFileLock creates real locks with (seen on
+// dc-win for .hermes-lifecycle.lock and .hook-api-token-publish.lock).
+func setWindowsManagedRuntimeCleanupFileOwnedLock(t *testing.T, path string, target *windows.SID) {
+	t.Helper()
+	sid := target.String()
+	descriptor, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSetupPrivilege(func() error {
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			target,
+			nil,
+			dacl,
+			nil,
+		)
+	}); err != nil {
+		t.Fatalf("install owned lock fixture descriptor on %s: %v", path, err)
+	}
+}
+
+// setWindowsManagedRuntimeCleanupConnectorBackupShape gives a fixture
+// connector backup folder or record the descriptor per-user connector setup
+// creates it with (connector.writeManagedFileBackup through safefile, as seen
+// on a Windows host): folders grant SYSTEM and OWNER RIGHTS full control,
+// inherited; records grant SYSTEM and the account.
+func setWindowsManagedRuntimeCleanupConnectorBackupShape(t *testing.T, path string, target *windows.SID, directory bool) {
+	t.Helper()
+	sid := target.String()
+	sddl := "O:" + sid + "D:P(A;;FA;;;SY)(A;;FA;;;" + sid + ")"
+	if directory {
+		sddl = "O:" + sid + "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)"
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedRuntimeSetupPrivilege(func() error {
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			target,
+			nil,
+			dacl,
+			nil,
+		)
+	}); err != nil {
+		t.Fatalf("install connector backup fixture descriptor on %s: %v", path, err)
 	}
 }
 
@@ -1392,4 +1579,130 @@ func withWindowsManagedRuntimeRestrictedTarget(t *testing.T, fn func()) {
 	}
 	reverted = true
 	safeUnlock = true
+}
+
+// withWindowsStandaloneProcess runs the test as the standalone profile, the
+// only profile whose rollback keeps refused content aside (WIN-R1-20).
+func withWindowsStandaloneProcess(t *testing.T) {
+	t.Helper()
+	previous := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+}
+
+// On the standalone profile a root the cleanup refuses (content it did not
+// write, or a root DACL the account rewrote) is kept aside under
+// .defenseclaw.rollback-<random> with nothing deleted, and the rollback
+// finishes instead of staying pending (WIN-R1-20).
+func TestWindowsManagedRuntimeStandaloneCleanupKeepsRefusedRootAside(t *testing.T) {
+	withWindowsStandaloneProcess(t)
+	target := currentWindowsTestSID(t)
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(root string) error{
+		"unexpected content": func(root string) error {
+			return os.WriteFile(filepath.Join(root, "user-owned.txt"), []byte("preserve"), 0o600)
+		},
+		"rewritten root DACL": func(root string) error {
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+				windowsManagedRuntimeTestAccess(target, 0x001f01ff),
+				windowsManagedRuntimeTestAccess(users, 0x001200a9),
+			}, nil)
+			if err != nil {
+				return err
+			}
+			return windows.SetNamedSecurityInfo(root, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := newWindowsTargetOwnedTestHome(t, target)
+			manifest := windowsManagedRuntimeTestManifest(home, target)
+			digest := strings.Repeat("f", 64)
+			plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := StageWindowsManagedRuntimeRoots(plan, manifest, digest, func([]WindowsManagedRuntimeClaim) error { return nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := WindowsManagedRuntimeRequest{SchemaVersion: WindowsManagedRuntimeRequestSchemaVersion, Plan: plan, Claims: claims}
+			if request.Claims, err = FinalizeWindowsManagedRuntimeRoots(request, manifest, digest); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(home, ".defenseclaw")
+			if err := change(root); err != nil {
+				t.Fatal(err)
+			}
+			claims, err = CleanupWindowsManagedRuntimeRoots(request, manifest, digest)
+			if err != nil {
+				t.Fatalf("refused root left the rollback pending: %v", err)
+			}
+			if len(claims) != 1 || claims[0].State != windowsManagedRuntimeStateAbsent {
+				t.Fatalf("cleanup claims = %+v, want the managed root absent", claims)
+			}
+			if _, err := os.Lstat(root); !os.IsNotExist(err) {
+				t.Fatalf("managed root still in place: %v", err)
+			}
+			if kept, err := filepath.Glob(filepath.Join(home, windowsManagedRuntimeRollbackPrefix+"*")); err != nil || len(kept) != 1 {
+				t.Fatalf("kept roots = %v (err=%v), want one root kept aside", kept, err)
+			}
+		})
+	}
+}
+
+// A hook file whose DACL a guardian retry rewrote must not wedge the
+// standalone rollback (WIN-R1-20); the Secure Client profile and connector
+// backups still require the exact DACL.
+func TestWindowsManagedRuntimeCleanupAcceptsHookFileWithRewrittenDACL(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	path := filepath.Join(t.TempDir(), "kiro-hook.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsManagedRuntimeTestAccess(target, 0x001f01ff),
+		windowsManagedRuntimeTestAccess(system, 0x001f01ff),
+		windowsManagedRuntimeTestAccess(users, 0x001200a9),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, rewritten, nil); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(handle)
+	info := windowsManagedRuntimeTarget{sid: target}
+	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupHookFile, path); err == nil {
+		t.Fatal("Secure Client profile accepted a hook file with a rewritten DACL")
+	}
+	withWindowsStandaloneProcess(t)
+	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupHookFile, path); err != nil {
+		t.Fatalf("hook file with a rewritten DACL was refused: %v", err)
+	}
+	if _, err := validateWindowsManagedRuntimeCleanupFileHandle(handle, info, windowsManagedRuntimeCleanupConnectorBackupFile, path); err == nil {
+		t.Fatal("connector backup with a rewritten DACL was accepted")
+	}
 }

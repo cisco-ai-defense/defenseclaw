@@ -55,7 +55,6 @@ func TestHookProfileMatrix(t *testing.T) {
 		// via defenseclaw_extract_trace_context.
 		{"codex", true, NativeOTLPTOMLBlock, true, false, true, true},
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
-		{"geminicli", true, NativeOTLPJSONBlock, true, false, true, true},
 		{"copilot", true, "", true, true, false, true},
 		{"openhands", true, openHandsNativeOTLPKind, true, false, true, true},
 		// Cursor's native beforeShellExecution and preToolUse events can deny

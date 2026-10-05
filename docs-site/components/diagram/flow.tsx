@@ -1,38 +1,100 @@
 import * as React from 'react';
 import dagre from '@dagrejs/dagre';
-import type { GraphLabel, NodeLabel as DagreNodeLabel, EdgeLabel } from '@dagrejs/dagre';
+import type { Graph, GraphLabel, NodeLabel as DagreNodeLabel, EdgeLabel } from '@dagrejs/dagre';
 import {
   type DiagramKind,
   type EdgeVariant,
+  type ZoneTone,
   ARTICLE_WIDTH_TARGET,
   KIND_TO_STYLE,
   STRIPE_WIDTH,
+  ZONE_TONE_STYLE,
   DiagramDefs,
+  estimateTextWidth,
   NodeLabel,
   ForeignDiv,
   flattenToLines,
   measureLabel,
+  orthogonalRoute,
   smoothPath,
   nextDiagramId,
 } from './shared';
 import { DiagramLightbox } from './lightbox';
 
-// Marker symbols. <Node> and <Edge> are pure data carriers — they
-// return null but are tagged via a non-enumerable property so <Flow>
-// can identify them inside React.Children without relying on
+// Marker symbols. <Node>, <Edge> and <Zone> are pure data carriers —
+// they return null but are tagged via a non-enumerable property so
+// <Flow> can identify them inside React.Children without relying on
 // component-name strings (which break under prod minification).
 const NODE_MARKER = Symbol.for('defenseclaw.diagram.Node');
 const EDGE_MARKER = Symbol.for('defenseclaw.diagram.Edge');
+const ZONE_MARKER = Symbol.for('defenseclaw.diagram.Zone');
 const EDGE_LABEL_MIN_WIDTH = 40;
-const EDGE_LABEL_MAX_WIDTH = 220;
-const EDGE_LABEL_CHAR_WIDTH = 6.4;
-const EDGE_LABEL_PADDING = 14;
+const EDGE_LABEL_MAX_WIDTH = 240;
+// Edge labels are 11.5px semibold; the chip pads 6px a side, plus 6px
+// of safety for the estimate.
+const EDGE_LABEL_FONT = 11.5;
+const EDGE_LABEL_PADDING = 18;
 
 function measureEdgeLabel(label?: string): number {
   if (!label) return 0;
-  return Math.min(
-    EDGE_LABEL_MAX_WIDTH,
-    Math.max(EDGE_LABEL_MIN_WIDTH, label.length * EDGE_LABEL_CHAR_WIDTH + EDGE_LABEL_PADDING),
+  return Math.ceil(
+    Math.min(
+      EDGE_LABEL_MAX_WIDTH,
+      Math.max(EDGE_LABEL_MIN_WIDTH, estimateTextWidth(label, EDGE_LABEL_FONT) + EDGE_LABEL_PADDING),
+    ),
+  );
+}
+
+// Zone geometry. Each zone is a dagre compound cluster, which reserves
+// a region only its members (and their edges) may occupy: ranksep/2
+// beyond the members along the rank axis, (nodesep + edgesep)/2 across
+// it. The frame is drawn from the member slots plus the padding below,
+// which always fits inside that region. The frame is not drawn on the
+// cluster bounds themselves: those sit exactly on the border ranks
+// where edges dogleg (a frame there would run along edge segments),
+// they stretch around edge dummies, and dagre takes them from the last
+// rank's border nodes only.
+const ZONE_PAD_SIDE = 16;
+// Half the badge (it straddles the top border) plus clearance above
+// the first member.
+const ZONE_PAD_TOP = 24;
+const ZONE_PAD_BOTTOM = 16;
+// Compact TB spacing for zoned flows. Every zone spends its padding on
+// both sides, so siblings sit closer (nodesep 38 -> 30, edgesep
+// 24 -> 16) to keep a three-zone rank near the article column; that
+// still reserves (30 + 16) / 2 = 23px beside members, 7px beyond the
+// frame. ranksep grows (54 -> 64) so ranksep/2 clears ZONE_PAD_TOP by
+// 8px and an edge dogleg on a cluster's border rank never lands on
+// the frame line. LR keeps its spacing, which already clears the pads.
+const ZONE_TB_NODESEP = 30;
+const ZONE_TB_EDGESEP = 16;
+const ZONE_TB_RANKSEP = 64;
+const ZONE_RADIUS = 8;
+// The zone header is a tab on the top border: the trust level in the
+// tone color, then the zone label. Half of it sits above the border,
+// so ZONE_PAD_TOP (24) still clears it by 13px.
+const ZONE_BADGE_HEIGHT = 22;
+const ZONE_BADGE_INSET = 12;
+const ZONE_BADGE_PAD_X = 8;
+const ZONE_BADGE_GAP = 7;
+// Flows wider than this become a stacked list on phones (see
+// FlowProps.mobile). At 390px the canvas is about 340px wide, so a
+// 460px drawing would already shrink to ~74% and its 14px titles to
+// ~10px.
+const MOBILE_STACK_MIN_WIDTH = 460;
+// Layouts per Flow, at most: the first, plus re-layouts after widening
+// member slots for badges. One re-layout is normally enough.
+const ZONE_LAYOUT_PASSES = 3;
+
+function measureZoneBadge(label: string, tone: ZoneTone): number {
+  // Trust level 10.5px bold (~5% wider than semibold), label 11.5px
+  // semibold, plus 4px of safety.
+  return Math.ceil(
+    ZONE_BADGE_PAD_X * 2 +
+      estimateTextWidth(ZONE_TONE_STYLE[tone].label, 10.5) * 1.05 +
+      ZONE_BADGE_GAP +
+      estimateTextWidth(label, 11.5) +
+      4,
   );
 }
 
@@ -40,6 +102,13 @@ export interface NodeProps {
   id: string;
   kind?: DiagramKind;
   emphasis?: boolean;
+  // Id of the <Zone> this node sits in. Only needed when the node is
+  // not nested inside its <Zone>; nesting wins if both are given.
+  zone?: string;
+  // Short tag printed above the title, e.g. the identity a component
+  // runs as ("root", "user"). Only use it when it carries meaning;
+  // the role glyph already tells readers what kind of thing it is.
+  tag?: string;
   children?: React.ReactNode;
 }
 
@@ -49,6 +118,17 @@ export interface EdgeProps {
   label?: string;
   variant?: EdgeVariant;
   emphasis?: boolean;
+}
+
+export interface ZoneProps {
+  id: string;
+  // Printed on the zone badge, e.g. "Z1 · Privileged services".
+  label: string;
+  // Printed on the badge next to the label and drives the tint.
+  tone: ZoneTone;
+  // <Node> (and optionally <Edge>) children. A zone may instead be
+  // declared empty and populated with <Node zone="id">.
+  children?: React.ReactNode;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -63,11 +143,41 @@ export function Edge(_props: EdgeProps): React.ReactElement | null {
 }
 (Edge as unknown as { __diagramKind: symbol }).__diagramKind = EDGE_MARKER;
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function Zone(_props: ZoneProps): React.ReactElement | null {
+  return null;
+}
+(Zone as unknown as { __diagramKind: symbol }).__diagramKind = ZONE_MARKER;
+
+type ZoneSpec = Omit<ZoneProps, 'children'>;
+
+interface ResolvedZone {
+  id: string;
+  label: string;
+  tone: ZoneTone;
+  members: string[];
+  badgeWidth: number;
+}
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface PlacedZone extends ResolvedZone, Rect {
+  // Left edge of the badge; it straddles the zone's top border.
+  badgeX: number;
+}
+
 interface ResolvedNode {
   id: string;
   kind: DiagramKind;
   emphasis: boolean;
   lines: string[];
+  tag?: string;
+  zone?: string;
   width: number;
   height: number;
   // Set by dagre after layout — center coordinates of the node.
@@ -100,6 +210,18 @@ interface ResolvedEdge {
 //    expand button when the inline scale gets too small.
 export type DiagramFit = 'native' | 'scale' | 'auto';
 
+// How a Flow behaves below 640px:
+//
+//  - 'stack': the drawing is replaced by a vertical list, grouped by
+//    zone, where each card lists its outgoing arrows ("reads → Config").
+//    The expand button still opens the drawing.
+//  - 'scale': the drawing shrinks to the column width.
+//  - 'scroll': the drawing keeps up to 620px and pans sideways, with a
+//    "scroll sideways" hint.
+//  - 'auto' (default): 'stack' when the drawing is wider than 460px,
+//    otherwise 'scale'.
+export type FlowMobile = 'auto' | 'stack' | 'scale' | 'scroll';
+
 interface FlowProps {
   direction?: 'LR' | 'TB';
   caption?: string;
@@ -118,30 +240,113 @@ interface FlowProps {
   // (scripts/check-diagram-widths.ts) fails the build at
   // ARTICLE_WIDTH_HARD_LIMIT.
   oversize?: boolean;
+  // Print each node's role ("Policy", "Control plane") as a tag above
+  // its title. Off by default: the role glyph carries the role, and a
+  // tag on every card is noise. A node's own `tag` always wins.
+  kindLabels?: boolean;
+  // Phone behaviour; see FlowMobile.
+  mobile?: FlowMobile;
   children?: React.ReactNode;
 }
 
-// Read all <Node>/<Edge> children, ignore stray whitespace/p-tags
-// from the MDX renderer, and bucket them by marker.
+// Read all <Node>/<Edge>/<Zone> children, ignore stray whitespace/p-tags
+// from the MDX renderer, and bucket them by marker. Nodes nested in a
+// <Zone> are tagged with that zone's id.
 function partitionChildren(children: React.ReactNode): {
   nodes: NodeProps[];
   edges: EdgeProps[];
+  zones: ZoneSpec[];
 } {
   const nodes: NodeProps[] = [];
   const edges: EdgeProps[] = [];
-  React.Children.forEach(children, (child) => {
-    if (!React.isValidElement(child)) return;
-    const marker = (child.type as unknown as { __diagramKind?: symbol }).__diagramKind;
-    if (marker === NODE_MARKER) {
-      nodes.push(child.props as NodeProps);
-    } else if (marker === EDGE_MARKER) {
-      edges.push(child.props as EdgeProps);
+  const zones: ZoneSpec[] = [];
+  const walk = (list: React.ReactNode, zoneId?: string) => {
+    React.Children.forEach(list, (child) => {
+      if (!React.isValidElement(child)) return;
+      const marker = (child.type as unknown as { __diagramKind?: symbol }).__diagramKind;
+      if (marker === NODE_MARKER) {
+        const props = child.props as NodeProps;
+        if (zoneId === undefined) {
+          nodes.push(props);
+          return;
+        }
+        if (props.zone !== undefined && props.zone !== zoneId) {
+          console.warn(
+            `[diagram] <Node id="${props.id}" zone="${props.zone}"> is nested in <Zone id="${zoneId}">; using "${zoneId}".`,
+          );
+        }
+        nodes.push({ ...props, zone: zoneId });
+      } else if (marker === EDGE_MARKER) {
+        edges.push(child.props as EdgeProps);
+      } else if (marker === ZONE_MARKER) {
+        const { children: zoneChildren, ...spec } = child.props as ZoneProps;
+        if (zoneId !== undefined) {
+          // Zones do not nest; the inner one is drawn as a sibling.
+          console.warn(
+            `[diagram] <Zone id="${spec.id}"> is nested in <Zone id="${zoneId}">; zones do not nest, drawing it as a sibling.`,
+          );
+        }
+        zones.push(spec);
+        walk(zoneChildren, spec.id);
+      }
+      // Anything else (whitespace, accidental <p>) is silently dropped —
+      // authors get a clean error from the missing-id check below if a
+      // typo turns into a no-op.
+    });
+  };
+  walk(children);
+  return { nodes, edges, zones };
+}
+
+// Match nodes to zones, drop zones nobody sits in (dagre would lay an
+// empty cluster out as a stray point), and flag authoring mistakes
+// without failing the page.
+function resolveZones(specs: ZoneSpec[], nodes: NodeProps[]): ResolvedZone[] {
+  const byId = new Map<string, ResolvedZone>();
+  for (const spec of specs) {
+    if (byId.has(spec.id)) {
+      console.warn(`[diagram] duplicate <Zone id="${spec.id}">; keeping the first.`);
+      continue;
     }
-    // Anything else (whitespace, accidental <p>) is silently dropped —
-    // authors get a clean error from the missing-id check below if a
-    // typo turns into a no-op.
-  });
-  return { nodes, edges };
+    let tone = spec.tone;
+    if (!Object.hasOwn(ZONE_TONE_STYLE, tone)) {
+      // Assume the least trust rather than guess a friendlier tone.
+      console.warn(`[diagram] <Zone id="${spec.id}"> has unknown tone "${String(tone)}"; using "external".`);
+      tone = 'external';
+    }
+    const label = spec.label ?? spec.id;
+    byId.set(spec.id, {
+      id: spec.id,
+      label,
+      tone,
+      members: [],
+      badgeWidth: measureZoneBadge(label, tone),
+    });
+  }
+  for (const node of nodes) {
+    if (node.zone === undefined) continue;
+    const zone = byId.get(node.zone);
+    if (!zone) {
+      console.warn(`[diagram] <Node id="${node.id}"> references unknown zone "${node.zone}".`);
+      continue;
+    }
+    if (!zone.members.includes(node.id)) zone.members.push(node.id);
+  }
+  const zones: ResolvedZone[] = [];
+  for (const zone of byId.values()) {
+    if (zone.members.length === 0) {
+      console.warn(`[diagram] <Zone id="${zone.id}"> has no nodes; skipping it.`);
+      continue;
+    }
+    zones.push(zone);
+  }
+  return zones;
+}
+
+// Dagre node id for a zone's cluster. The NUL prefix keeps it from
+// colliding with any author-chosen node id.
+function zoneClusterId(id: string): string {
+  return `\u0000zone:${id}`;
 }
 
 export function Flow({
@@ -150,9 +355,15 @@ export function Flow({
   fit = 'auto',
   compact,
   oversize = false,
+  kindLabels = false,
+  mobile = 'auto',
   children,
 }: FlowProps) {
-  const { nodes: nodeProps, edges: edgeProps } = partitionChildren(children);
+  const { nodes: nodeProps, edges: edgeProps, zones: zoneSpecs } = partitionChildren(children);
+  const zones = resolveZones(zoneSpecs, nodeProps);
+  // Every zone-specific branch below keys off this, so a Flow without
+  // (populated) zones takes exactly the pre-zone code path.
+  const hasZones = zones.length > 0;
 
   if (nodeProps.length === 0) {
     return (
@@ -173,6 +384,7 @@ export function Flow({
     const measured = measureLabel(flattenToLines(node.children), {
       kind,
       compact: true,
+      tag: node.tag ?? (kindLabels ? KIND_TO_STYLE[kind].label : undefined),
     });
     return sum + measured.width;
   }, 0);
@@ -181,7 +393,12 @@ export function Flow({
     return sum + Math.max(54, labelWidth);
   }, 0);
   const compactCandidateWidth = compactNodeWidth + compactTransitionWidth + 56;
+  // Zoned flows keep the author's direction and topology-sized cards:
+  // the zone frames are the organizing structure, so the chain
+  // promotions and the dense geometry (whose 11px side gap cannot fit
+  // a zone border) do not apply.
   const autoLinearHorizontal =
+    !hasZones &&
     direction === 'TB' &&
     compact !== false &&
     isLinear &&
@@ -189,8 +406,9 @@ export function Flow({
     compactCandidateWidth <= ARTICLE_WIDTH_TARGET;
   const layoutDirection: 'LR' | 'TB' = autoLinearHorizontal ? 'LR' : direction;
   const compactMode = compact ?? (layoutDirection === 'TB' || autoLinearHorizontal);
-  const processRail = direction === 'TB' && isLinear && !autoLinearHorizontal;
-  const denseMode = layoutDirection === 'TB' && !processRail && nodeProps.length >= 10;
+  const processRail = !hasZones && direction === 'TB' && isLinear && !autoLinearHorizontal;
+  const denseMode =
+    !hasZones && layoutDirection === 'TB' && !processRail && nodeProps.length >= 10;
 
   // Resolve node labels and dimensions. We do this once before the
   // dagre layout so the engine has correct widths to work with.
@@ -200,16 +418,21 @@ export function Flow({
     const kind: DiagramKind = p.kind ?? 'generic';
     const emphasis = Boolean(p.emphasis) || kind === 'gateway';
     const lines = flattenToLines(p.children);
+    const tag = p.tag ?? (kindLabels ? KIND_TO_STYLE[kind].label : undefined);
     const measured = measureLabel(lines, {
       kind,
       compact: compactMode,
       dense: denseMode,
+      tag,
+      emphasis,
     });
     return {
       id: p.id,
       kind,
       emphasis,
       lines: measured.lines,
+      tag,
+      zone: p.zone,
       // A vertical process should read like an intentional operating
       // procedure, not a skinny stack of unrelated cards. Give each step a
       // consistent rail width while leaving branched architecture diagrams
@@ -223,41 +446,86 @@ export function Flow({
 
   const idToNode = new Map(resolved.map((n) => [n.id, n]));
 
+  const zonedTB = hasZones && layoutDirection === 'TB';
+  const marginX = denseMode ? 16 : compactMode ? 26 : 28;
+  const marginY = denseMode ? 16 : 28;
+
   // Build the dagre graph. Spacing is tuned a touch wider than the
   // dagre defaults so labels don't crowd their neighbors at docs
   // widths. `compact` halves the breathing room — useful when the
   // graph is structurally fine but bumping up against the column.
-  const g = new dagre.graphlib.Graph<GraphLabel, DagreNodeLabel, EdgeLabel>();
-  g.setGraph({
-    rankdir: layoutDirection,
-    nodesep: denseMode ? 10 : compactMode ? 38 : 56,
-    ranksep: denseMode ? 50 : compactMode ? 54 : 78,
-    edgesep: denseMode ? 12 : 24,
-    marginx: denseMode ? 16 : compactMode ? 26 : 28,
-    marginy: denseMode ? 16 : 28,
-  });
-  g.setDefaultEdgeLabel(() => ({}));
-
-  for (const n of resolved) {
-    g.setNode(n.id, { width: n.width, height: n.height });
-  }
-  for (const e of edgeProps) {
-    if (!idToNode.has(e.from) || !idToNode.has(e.to)) {
-      // Skip edges with broken refs. We don't want to crash the page;
-      // an authoring typo should produce a visible-but-recoverable
-      // diagram.
-      continue;
-    }
-    g.setEdge(e.from, e.to, {
-      // Edge labels need a hint to dagre about their footprint so the
-      // layout makes room for them.
-      labelpos: 'c',
-      width: measureEdgeLabel(e.label),
-      height: e.label ? 22 : 0,
+  //
+  // Zones become dagre compound clusters. `extraWidth` widens a
+  // node's layout slot (not its card) so a zone can fit its badge.
+  const runLayout = (extraWidth?: Map<string, number>) => {
+    const g = hasZones
+      ? new dagre.graphlib.Graph<GraphLabel, DagreNodeLabel, EdgeLabel>({ compound: true })
+      : new dagre.graphlib.Graph<GraphLabel, DagreNodeLabel, EdgeLabel>();
+    g.setGraph({
+      rankdir: layoutDirection,
+      nodesep: denseMode ? 10 : compactMode ? (zonedTB ? ZONE_TB_NODESEP : 38) : 56,
+      ranksep: denseMode ? 50 : compactMode ? (zonedTB ? ZONE_TB_RANKSEP : 54) : 78,
+      edgesep: denseMode ? 12 : zonedTB ? ZONE_TB_EDGESEP : 24,
+      marginx: marginX,
+      marginy: marginY,
     });
-  }
+    g.setDefaultEdgeLabel(() => ({}));
 
-  dagre.layout(g);
+    for (const n of resolved) {
+      g.setNode(n.id, { width: n.width + (extraWidth?.get(n.id) ?? 0), height: n.height });
+    }
+    for (const zone of zones) {
+      g.setNode(zoneClusterId(zone.id), { width: 0, height: 0 });
+      for (const member of zone.members) g.setParent(member, zoneClusterId(zone.id));
+    }
+    for (const e of edgeProps) {
+      if (!idToNode.has(e.from) || !idToNode.has(e.to)) {
+        // Skip edges with broken refs. We don't want to crash the page;
+        // an authoring typo should produce a visible-but-recoverable
+        // diagram.
+        continue;
+      }
+      g.setEdge(e.from, e.to, {
+        // Edge labels need a hint to dagre about their footprint so the
+        // layout makes room for them.
+        labelpos: 'c',
+        width: measureEdgeLabel(e.label),
+        height: e.label ? 22 : 0,
+      });
+    }
+
+    dagre.layout(g);
+    return g;
+  };
+
+  let g = runLayout();
+
+  // A zone must be wide enough for its badge. When one is not, widen
+  // its widest member's slot until that slot alone spans the badge,
+  // which guarantees the fit on the next layout however dagre places
+  // the other members. The card keeps its measured size, centered in
+  // the wider slot. Re-check every zone after each layout: moving one
+  // zone can narrow another whose width came from offset members.
+  const extraWidth = new Map<string, number>();
+  if (hasZones) {
+    for (let pass = 1; pass < ZONE_LAYOUT_PASSES; pass++) {
+      let grew = false;
+      for (const zone of zones) {
+        const needed = zone.badgeWidth + ZONE_BADGE_INSET * 2;
+        if (zoneBounds(g, zone, idToNode, extraWidth).width >= needed) continue;
+        const widest = zone.members.reduce((best, memberId) =>
+          (idToNode.get(memberId)?.width ?? 0) > (idToNode.get(best)?.width ?? 0) ? memberId : best,
+        );
+        const extra = Math.ceil(needed - ZONE_PAD_SIDE * 2 - (idToNode.get(widest)?.width ?? 0));
+        if (extra > (extraWidth.get(widest) ?? 0)) {
+          extraWidth.set(widest, extra);
+          grew = true;
+        }
+      }
+      if (!grew) break;
+      g = runLayout(extraWidth);
+    }
+  }
 
   for (const n of resolved) {
     const laid = g.node(n.id);
@@ -287,8 +555,41 @@ export function Flow({
     });
 
   const graphLabel = g.graph();
-  const width = Math.ceil(graphLabel.width ?? 0) + 16;
-  const height = Math.ceil(graphLabel.height ?? 0) + 16;
+  let contentWidth = graphLabel.width ?? 0;
+  let contentHeight = graphLabel.height ?? 0;
+
+  let placedZones: PlacedZone[] = [];
+  if (hasZones) {
+    // Dagre routed edges to the widened slot; pull the ends of those
+    // edges back onto the visible card.
+    if (extraWidth.size > 0) {
+      for (const edge of resolvedEdges) {
+        const pts = edge.points;
+        if (pts.length < 2 || edge.from === edge.to) continue;
+        const source = idToNode.get(edge.from);
+        const target = idToNode.get(edge.to);
+        const next = [...pts];
+        if (source && extraWidth.has(source.id)) next[0] = intersectRect(source, pts[1]);
+        if (target && extraWidth.has(target.id)) {
+          next[next.length - 1] = intersectRect(target, pts[pts.length - 2]);
+        }
+        edge.points = next;
+      }
+    }
+
+    placedZones = placeZoneBadges(
+      zones.map((zone) => ({ ...zone, ...zoneBounds(g, zone, idToNode, extraWidth) })),
+      resolvedEdges,
+    );
+    // Frames sit inside their clusters, which dagre already counted in
+    // the graph size; take the max anyway so the width gate and the
+    // lightbox can never see a frame poke out of the viewBox.
+    contentWidth = Math.max(contentWidth, ...placedZones.map((z) => z.x + z.width + marginX));
+    contentHeight = Math.max(contentHeight, ...placedZones.map((z) => z.y + z.height + marginY));
+  }
+
+  const width = Math.ceil(contentWidth) + 16;
+  const height = Math.ceil(contentHeight) + 16;
 
   // Rank each node along the layout's primary axis so the entrance
   // animation lights up nodes in reading order (LR → left-to-right
@@ -348,6 +649,15 @@ export function Flow({
     >
       <DiagramDefs id={id} />
 
+      {/* Zone frames sit underneath everything else. */}
+      {placedZones.length > 0 && (
+        <g className="fd-flow-zones">
+          {placedZones.map((zone) => (
+            <FlowZone key={zone.id} zone={zone} />
+          ))}
+        </g>
+      )}
+
       {/* Edges first so they sit underneath the node panels. */}
       {resolvedEdges.map((edge, i) => (
         <FlowEdge
@@ -355,8 +665,20 @@ export function Flow({
           edge={edge}
           markerId={id}
           fromRank={rankById.get(edge.from) ?? 0}
+          labelBackground={labelBackground(edge, placedZones)}
         />
       ))}
+
+      {/* Zone badges go over the edges, like edge label chips, so an
+          edge entering a zone never strikes through its name. Padding
+          keeps them clear of every node. */}
+      {placedZones.length > 0 && (
+        <g className="fd-flow-zone-badges">
+          {placedZones.map((zone) => (
+            <FlowZoneBadge key={zone.id} zone={zone} />
+          ))}
+        </g>
+      )}
 
       {resolved.map((node) => (
         <FlowNode
@@ -369,6 +691,9 @@ export function Flow({
     </svg>
   );
 
+  const mobileMode: Exclude<FlowMobile, 'auto'> =
+    mobile === 'auto' ? (width > MOBILE_STACK_MIN_WIDTH ? 'stack' : 'scale') : mobile;
+
   return (
     <DiagramLightbox
       caption={caption}
@@ -376,10 +701,266 @@ export function Flow({
       naturalHeight={height}
       ariaLabel={ariaLabel}
       oversize={oversize}
+      mobile={mobileMode}
+      mobileFallback={
+        mobileMode === 'stack' ? (
+          <FlowStack
+            nodes={resolved}
+            edges={resolvedEdges}
+            zones={zones}
+            direction={layoutDirection}
+            numbered={processRail}
+            ariaLabel={ariaLabel}
+          />
+        ) : undefined
+      }
     >
       {svg}
     </DiagramLightbox>
   );
+}
+
+// The fill behind an edge label: the zone it sits in, else the canvas,
+// so the label reads as cut out of the line rather than a white box
+// floating on a tinted zone.
+function labelBackground(edge: ResolvedEdge, zones: PlacedZone[]): string {
+  if (!edge.label || zones.length === 0) return 'var(--diagram-canvas)';
+  const first = edge.points[0];
+  const last = edge.points[edge.points.length - 1];
+  const point = edge.labelPoint ?? (first && last ? { x: (first.x + last.x) / 2, y: (first.y + last.y) / 2 } : undefined);
+  if (!point) return 'var(--diagram-canvas)';
+  const zone = zones.find(
+    (z) => point.x >= z.x && point.x <= z.x + z.width && point.y >= z.y && point.y <= z.y + z.height,
+  );
+  return zone ? ZONE_TONE_STYLE[zone.tone].fill : 'var(--diagram-canvas)';
+}
+
+// Short name of a zone for the phone list: "Z1" from "Z1 · Services",
+// else the whole label.
+function zoneShortName(label: string): string {
+  const head = label.split(' · ')[0]?.trim();
+  return head && /^Z\d+$/i.test(head) ? head : label;
+}
+
+// Phone render of a Flow: the same nodes and edges as a vertical list,
+// grouped by zone in declaration order. Each card names its outgoing
+// arrows, so the relationships survive without the drawing.
+function FlowStack({
+  nodes,
+  edges,
+  zones,
+  direction,
+  numbered,
+  ariaLabel,
+}: {
+  nodes: ResolvedNode[];
+  edges: ResolvedEdge[];
+  zones: ResolvedZone[];
+  direction: 'LR' | 'TB';
+  numbered: boolean;
+  ariaLabel: string;
+}) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const zoneById = new Map(zones.map((z) => [z.id, z]));
+  const readingOrder = (a: ResolvedNode, b: ResolvedNode) =>
+    direction === 'LR' ? a.x - b.x || a.y - b.y : a.y - b.y || a.x - b.x;
+  const groups: { zone?: ResolvedZone; nodes: ResolvedNode[] }[] = zones.map((zone) => ({
+    zone,
+    nodes: zone.members
+      .map((m) => byId.get(m))
+      .filter((n): n is ResolvedNode => Boolean(n))
+      .sort(readingOrder),
+  }));
+  const loose = nodes.filter((n) => !n.zone || !zoneById.has(n.zone)).sort(readingOrder);
+  if (loose.length > 0) groups.push({ nodes: loose });
+
+  const title = (n: ResolvedNode | undefined) => n?.lines[0] || n?.id || '';
+  const stepById = new Map(groups.flatMap((g) => g.nodes).map((n, i) => [n.id, i + 1]));
+  return (
+    <div className="diagram-stack" aria-label={`${ariaLabel} (list view)`}>
+      <p className="diagram-stack-hint">
+        List view for small screens. Use the expand button to open the drawing.
+      </p>
+      {groups.map((group, gi) => {
+        const tone = group.zone ? ZONE_TONE_STYLE[group.zone.tone] : undefined;
+        return (
+          <section
+            key={group.zone?.id ?? `loose-${gi}`}
+            className="diagram-stack-group"
+            data-zone-tone={group.zone?.tone}
+            style={
+              tone
+                ? ({ ['--zone-accent' as string]: tone.accent, ['--zone-fill' as string]: tone.fill } as React.CSSProperties)
+                : undefined
+            }
+          >
+            {group.zone && tone && (
+              <p className="diagram-stack-zone">
+                <span className="diagram-stack-tone">{tone.label}</span>
+                <span>{group.zone.label}</span>
+              </p>
+            )}
+            <ol className="diagram-stack-nodes">
+              {group.nodes.map((node) => {
+                const out = edges.filter((e) => e.from === node.id);
+                const inBidi = edges.filter((e) => e.to === node.id && e.variant === 'bidirectional');
+                const [, ...details] = node.lines;
+                return (
+                  <li
+                    key={node.id}
+                    className="diagram-stack-node"
+                    data-emphasis={node.emphasis ? 'true' : undefined}
+                    style={{ ['--node-accent' as string]: KIND_TO_STYLE[node.kind].accent } as React.CSSProperties}
+                  >
+                    {node.tag && <span className="diagram-stack-tag">{node.tag}</span>}
+                    <span className="diagram-stack-title">
+                      {numbered && <span className="diagram-stack-step">{stepById.get(node.id)}.</span>}
+                      {title(node)}
+                    </span>
+                    {details.map((line, i) => (
+                      <span key={i} className="diagram-stack-detail">{line}</span>
+                    ))}
+                    {(out.length > 0 || inBidi.length > 0) && (
+                      <ul className="diagram-stack-edges">
+                        {[...out.map((e) => ({ e, other: e.to })), ...inBidi.map((e) => ({ e, other: e.from }))].map(
+                          ({ e, other }, i) => {
+                            const target = byId.get(other);
+                            const targetZone = target?.zone ? zoneById.get(target.zone) : undefined;
+                            const crosses = Boolean(targetZone) && target?.zone !== node.zone;
+                            return (
+                              <li key={i}>
+                                {e.label && <span className="diagram-stack-verb">{e.label}</span>}
+                                <span aria-hidden className="diagram-stack-arrow">
+                                  {e.variant === 'bidirectional' ? '↔' : '→'}
+                                </span>
+                                <span className="diagram-stack-target">{title(target)}</span>
+                                {crosses && targetZone && (
+                                  <span className="diagram-stack-crossing">
+                                    {zoneShortName(targetZone.label)}
+                                  </span>
+                                )}
+                              </li>
+                            );
+                          },
+                        )}
+                      </ul>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+// Zone frame: the member layout slots (a card plus any badge-driven
+// widening) padded by ZONE_PAD_*. See the note on ZONE_PAD_SIDE for
+// why this, and not dagre's cluster bounds, is what gets drawn.
+function zoneBounds(
+  g: Graph<GraphLabel, DagreNodeLabel, EdgeLabel>,
+  zone: ResolvedZone,
+  idToNode: Map<string, ResolvedNode>,
+  extraWidth: Map<string, number>,
+): Rect {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const memberId of zone.members) {
+    const laid = g.node(memberId);
+    const card = idToNode.get(memberId);
+    if (!laid || !card) continue;
+    const x = laid.x ?? 0;
+    const y = laid.y ?? 0;
+    const halfW = (card.width + (extraWidth.get(memberId) ?? 0)) / 2;
+    left = Math.min(left, x - halfW - ZONE_PAD_SIDE);
+    right = Math.max(right, x + halfW + ZONE_PAD_SIDE);
+    top = Math.min(top, y - card.height / 2 - ZONE_PAD_TOP);
+    bottom = Math.max(bottom, y + card.height / 2 + ZONE_PAD_BOTTOM);
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+// Where a line from the card's center toward `point` leaves the card.
+// Mirrors dagre's own endpoint rule.
+function intersectRect(
+  node: ResolvedNode,
+  point: { x: number; y: number },
+): { x: number; y: number } {
+  const dx = point.x - node.x;
+  const dy = point.y - node.y;
+  if (dx === 0 && dy === 0) return { x: node.x, y: node.y };
+  let halfW = node.width / 2;
+  let halfH = node.height / 2;
+  if (Math.abs(dy) * halfW > Math.abs(dx) * halfH) {
+    if (dy < 0) halfH = -halfH;
+    return { x: node.x + (halfH * dx) / dy, y: node.y + halfH };
+  }
+  if (dx < 0) halfW = -halfW;
+  return { x: node.x + halfW, y: node.y + (halfW * dy) / dx };
+}
+
+// Pick where each badge sits along its zone's top border: left-aligned
+// unless another spot crosses fewer edges or edge label chips. Edges
+// still pass under a badge when every spot is crossed; the badge is
+// opaque, so the name stays legible either way.
+function placeZoneBadges(
+  zones: (ResolvedZone & Rect)[],
+  edges: ResolvedEdge[],
+): PlacedZone[] {
+  const chips: Rect[] = edges
+    .filter((edge) => edge.label && edge.labelPoint)
+    .map((edge) => {
+      const w = measureEdgeLabel(edge.label);
+      return { x: edge.labelPoint!.x - w / 2, y: edge.labelPoint!.y - 10, width: w, height: 20 };
+    });
+  const routes = edges
+    .filter((edge) => edge.points.length >= 2)
+    .map((edge) => orthogonalRoute(edge.points));
+  const overlaps = (a: Rect, b: Rect) =>
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+  return zones.map((zone) => {
+    const badgeW = Math.min(zone.badgeWidth, zone.width - ZONE_BADGE_INSET * 2);
+    const minX = zone.x + ZONE_BADGE_INSET;
+    const maxX = zone.x + zone.width - ZONE_BADGE_INSET - badgeW;
+    const bandTop = zone.y - ZONE_BADGE_HEIGHT / 2;
+    const bandBottom = zone.y + ZONE_BADGE_HEIGHT / 2;
+
+    // x positions where a drawn (right-angle) edge segment passes
+    // through the badge band.
+    const crossings: number[] = [];
+    for (const route of routes) {
+      for (let i = 1; i < route.length; i++) {
+        const a = route[i - 1];
+        const b = route[i];
+        if (Math.max(a.y, b.y) < bandTop || Math.min(a.y, b.y) > bandBottom) continue;
+        if (Math.abs(a.x - b.x) < 0.5) crossings.push(a.x);
+        else crossings.push(a.x, b.x, (a.x + b.x) / 2);
+      }
+    }
+
+    const candidates = [minX, maxX];
+    for (const cx of crossings) candidates.push(cx + 8, cx - 8 - badgeW);
+    let bestX = minX;
+    let bestScore = Infinity;
+    for (const raw of candidates) {
+      const x = Math.min(maxX, Math.max(minX, raw));
+      const band = { x, y: bandTop, width: badgeW, height: ZONE_BADGE_HEIGHT };
+      const crossed = crossings.filter((cx) => cx > x - 2 && cx < x + badgeW + 2).length;
+      const chipHits = chips.filter((chip) => overlaps(chip, band)).length;
+      // A covered edge label is worse than an edge passing underneath.
+      const score = chipHits * 100 + crossed;
+      if (score < bestScore || (score === bestScore && x < bestX)) {
+        bestScore = score;
+        bestX = x;
+      }
+    }
+    return { ...zone, badgeWidth: badgeW, badgeX: bestX };
+  });
 }
 
 function isLinearChain(nodes: NodeProps[], edges: EdgeProps[]): boolean {
@@ -460,7 +1041,7 @@ function FlowNode({
   const strokeColor = node.emphasis
     ? 'var(--diagram-accent-blue)'
     : 'var(--diagram-node-border)';
-  const strokeWidth = node.emphasis ? 1.6 : 1;
+  const strokeWidth = node.emphasis ? 1.5 : 1;
   const nodeAnimDelay = `${rank * 60}ms`;
 
   return (
@@ -470,8 +1051,8 @@ function FlowNode({
         y={y}
         width={node.width}
         height={node.height}
-        rx={6}
-        ry={6}
+        rx={7}
+        ry={7}
         style={{
           fill: node.emphasis
             ? 'var(--diagram-node-emphasis-bg)'
@@ -481,17 +1062,17 @@ function FlowNode({
         }}
       />
 
-      {/* Role rail pairs a stable icon and text label with color. This keeps
-          the diagram accessible without turning every component into a
-          different pictogram shape. */}
+      {/* A thin role rail inside the card's left edge. It pairs with
+          the role glyph in front of the title, so color is never the
+          only cue. */}
       {style.accent && (
         <rect
-          x={x}
-          y={y}
+          x={x + 0.5}
+          y={y + 6}
           width={STRIPE_WIDTH}
-          height={node.height}
-          rx={3}
-          ry={3}
+          height={Math.max(0, node.height - 12)}
+          rx={1.5}
+          ry={1.5}
           style={{ fill: node.emphasis ? 'var(--diagram-accent-blue)' : style.accent }}
         />
       )}
@@ -503,27 +1084,117 @@ function FlowNode({
           lines={node.lines}
           kind={node.kind}
           emphasis={node.emphasis}
+          tag={node.tag}
         />
       </g>
 
       {processStep !== undefined && (
         <text
           x={x + node.width - 14}
-          y={y + 19}
+          y={y + 20}
           textAnchor="end"
           aria-hidden="true"
           style={{
             fill: 'var(--diagram-row-number)',
-            fontFamily: 'var(--font-mono), ui-monospace, monospace',
-            fontSize: 9,
-            fontWeight: 720,
-            letterSpacing: '0.08em',
+            fontFamily: 'var(--font-sans), system-ui, sans-serif',
+            fontSize: 11,
+            fontWeight: 650,
+            fontVariantNumeric: 'tabular-nums',
           }}
         >
-          {String(processStep).padStart(2, '0')}
+          {processStep}
         </text>
       )}
     </g>
+  );
+}
+
+// Strong enough to read as a boundary (about 3:1 against the canvas in
+// both themes), still quieter than the cards inside it.
+function zoneStroke(tone: ZoneTone): string {
+  return `color-mix(in oklab, ${ZONE_TONE_STYLE[tone].accent} 62%, var(--diagram-border))`;
+}
+
+function FlowZone({ zone }: { zone: PlacedZone }) {
+  const tone = ZONE_TONE_STYLE[zone.tone];
+  return (
+    <rect
+      className="fd-flow-zone"
+      data-zone={zone.id}
+      data-zone-tone={zone.tone}
+      x={zone.x}
+      y={zone.y}
+      width={zone.width}
+      height={zone.height}
+      rx={ZONE_RADIUS}
+      ry={ZONE_RADIUS}
+      style={{
+        fill: tone.fill,
+        stroke: zoneStroke(zone.tone),
+        strokeWidth: 1.25,
+        strokeDasharray: tone.dash,
+      }}
+    />
+  );
+}
+
+// The zone's header tab, straddling its top border: the trust level in
+// the tone color (it carries the zone's meaning, so it is spelled out
+// rather than left to the tint), then the zone label.
+function FlowZoneBadge({ zone }: { zone: PlacedZone }) {
+  const tone = ZONE_TONE_STYLE[zone.tone];
+  return (
+    <foreignObject
+      className="fd-flow-zone-badge"
+      data-zone={zone.id}
+      x={zone.badgeX}
+      y={zone.y - ZONE_BADGE_HEIGHT / 2}
+      width={zone.badgeWidth}
+      height={ZONE_BADGE_HEIGHT}
+    >
+      <ForeignDiv
+        style={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          gap: `${ZONE_BADGE_GAP}px`,
+          padding: `0 ${ZONE_BADGE_PAD_X - 1}px`,
+          boxSizing: 'border-box',
+          border: `1.25px solid ${zoneStroke(zone.tone)}`,
+          borderRadius: '5px',
+          background: 'var(--diagram-canvas)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          fontFamily: 'var(--font-sans), system-ui, sans-serif',
+          lineHeight: 1,
+        }}
+      >
+        <span
+          style={{
+            flex: '0 0 auto',
+            color: tone.accent,
+            fontSize: '10.5px',
+            fontWeight: 700,
+          }}
+        >
+          {tone.label}
+        </span>
+        <span
+          style={{
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            color: 'var(--diagram-text)',
+            fontSize: '11.5px',
+            fontWeight: 600,
+            letterSpacing: '-0.005em',
+          }}
+        >
+          {zone.label}
+        </span>
+      </ForeignDiv>
+    </foreignObject>
   );
 }
 
@@ -531,9 +1202,12 @@ function FlowEdge({
   edge,
   markerId,
   fromRank,
+  labelBackground,
 }: {
   edge: ResolvedEdge;
   markerId: string;
+  // Fill behind the label: the zone it sits in, or the canvas.
+  labelBackground: string;
   // Source-node rank. The edge animation starts a half-step after the
   // source node's entrance lands so the line "draws out" of an
   // already-visible node.
@@ -542,7 +1216,7 @@ function FlowEdge({
   if (edge.points.length < 2) return null;
   const isEmphasis = edge.emphasis;
   const stroke = isEmphasis ? 'var(--diagram-accent-blue)' : 'var(--diagram-edge)';
-  const strokeWidth = isEmphasis ? 1.75 : 1.25;
+  const strokeWidth = isEmphasis ? 1.6 : 1.25;
   const dasharray = edge.variant === 'dashed' ? '6 5' : undefined;
   const arrow = isEmphasis ? `${markerId}-arrow-emphasis` : `${markerId}-arrow`;
 
@@ -593,6 +1267,7 @@ function FlowEdge({
           x={mid.x}
           y={mid.y}
           label={edge.label}
+          background={labelBackground}
           animationDelay={labelAnimDelay}
         />
       )}
@@ -600,20 +1275,22 @@ function FlowEdge({
   );
 }
 
+// Edge labels read as cut out of their line: sans text on the fill
+// behind it (zone or canvas), so the line stops short of the words
+// instead of running under floating mono text.
 function EdgeLabelChip({
   x,
   y,
   label,
+  background,
   animationDelay,
 }: {
   x: number;
   y: number;
   label: string;
+  background: string;
   animationDelay?: string;
 }) {
-  // Estimate chip width from char count. The chip uses an HTML
-  // foreignObject so we get full font fallback and crisp anti-aliased
-  // text instead of SVG <text> spacing quirks.
   const chipW = measureEdgeLabel(label);
   const chipH = 20;
   return (
@@ -634,15 +1311,16 @@ function EdgeLabelChip({
           justifyContent: 'center',
           padding: '0 6px',
           boxSizing: 'border-box',
-          fontFamily: 'var(--font-mono), ui-monospace, monospace',
-          fontSize: '10px',
-          fontWeight: 650,
+          fontFamily: 'var(--font-sans), system-ui, sans-serif',
+          fontSize: '11.5px',
+          fontWeight: 560,
+          lineHeight: 1,
           color: 'var(--diagram-edge-label)',
-          background: 'var(--diagram-canvas)',
+          background,
+          borderRadius: '4px',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',
-          letterSpacing: '-0.005em',
         }}
       >
         {label}

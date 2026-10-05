@@ -61,6 +61,47 @@ func defaultHookConfigStubForConnector(conn connector.Connector, opts connector.
 			Contents:    []byte("{}\n"),
 			Mode:        0o600,
 		}
+	case "openhands":
+		// OpenHands CLI loads user-global ~/.openhands/hooks.json but only
+		// creates it when the user writes hooks; without the file the user
+		// would stay unprotected and every repair would fail (seen live on
+		// RHEL and macOS). A pinned workspace keeps the strict check, and so
+		// does the Secure Client profile, whose guardian never bootstrapped
+		// this file.
+		if !standaloneProfileProcess() || strings.TrimSpace(opts.WorkspaceDir) != "" {
+			return connector.HookConfigStub{}
+		}
+		return connector.HookConfigStub{
+			ContentPath: filepath.Join(home, ".openhands", "hooks.json"),
+			Contents:    []byte("{}\n"),
+			Mode:        0o600,
+		}
+	case "antigravity":
+		// agy reads ~/.gemini/config/hooks.json but never creates it, so a
+		// user who has not written hooks yet would otherwise stay
+		// unprotected (seen live on RHEL). Standalone profile only, as for
+		// OpenHands.
+		if !standaloneProfileProcess() {
+			return connector.HookConfigStub{}
+		}
+		return connector.HookConfigStub{
+			ContentPath: filepath.Join(home, ".gemini", "config", "hooks.json"),
+			Contents:    []byte("{}\n"),
+		}
+	case "omnigent":
+		// OmniGent creates ~/.omnigent/config.yaml only on its first
+		// `omnigent setup`, so a user who installed it but never ran it
+		// failed verify for the whole host (seen live on macOS). An empty
+		// mapping is a valid OmniGent config. Standalone profile only, as
+		// for OpenHands.
+		if !standaloneProfileProcess() {
+			return connector.HookConfigStub{}
+		}
+		return connector.HookConfigStub{
+			ContentPath: filepath.Join(home, ".omnigent", "config.yaml"),
+			Contents:    []byte("{}\n"),
+			Mode:        0o600,
+		}
 	case "cursor":
 		return connector.HookConfigStub{
 			ContentPath: filepath.Join(home, ".cursor", "hooks.json"),

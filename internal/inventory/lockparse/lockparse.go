@@ -461,9 +461,18 @@ func parseRequirementsTxt(r io.Reader) ([]Component, error) {
 }
 
 func splitRequirementSpec(line string) (string, string) {
+	// Drop PEP 508 environment markers ("pkg==1.0; python_version >= '3.10'")
+	// so the marker never ends up in the version column.
+	if idx := strings.IndexByte(line, ';'); idx >= 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
 	for _, op := range []string{"===", "==", ">=", "<=", "~=", "!=", ">", "<"} {
 		if idx := strings.Index(line, op); idx > 0 {
-			return strings.TrimSpace(line[:idx]), strings.TrimSpace(line[idx+len(op):])
+			name := strings.TrimSpace(line[:idx])
+			if b := strings.IndexByte(name, '['); b > 0 {
+				name = strings.TrimSpace(name[:b])
+			}
+			return name, strings.TrimSpace(line[idx+len(op):])
 		}
 	}
 	// "pkg @ git+https://…" — keep the name only.

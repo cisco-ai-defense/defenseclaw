@@ -61,9 +61,7 @@ from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context
 
-# Active scan-capable connector names. Retired Windsurf and Gemini CLI remain
-# known only so authenticated lifecycle cleanup can resolve their old state;
-# they must not participate in new scan-command matrices.
+# Active scan-capable connector names.
 ACTIVE_SCAN_CONNECTORS = (
     "openclaw",
     "codex",
@@ -223,7 +221,7 @@ class TestMCPScanConnectorMatrix(_MatrixBase):
                 self._force_connector(connector)
                 result = self.runner.invoke(
                     mcp,
-                    ["scan", "http://localhost:3000"],
+                    ["scan", "http://localhost:3000", "--connector", connector],
                     obj=self.app,
                     catch_exceptions=False,
                 )

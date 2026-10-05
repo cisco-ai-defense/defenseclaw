@@ -70,8 +70,25 @@ const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pro
 // users, 5+ sub-authorities), matching the same coarse gate the hook
 // enumerator applies at internal/enterprisehooks/enumerator_windows.go. Stale
 // ProfileList entries whose ProfileImagePath no longer exists are skipped so
-// the scan does not waste ticks on ghost profiles.
-func platformDiscoveryHomeDirs() []string {
+// the scan does not waste ticks on ghost profiles. The standalone profile
+// uses winpath.IsInteractiveUserSID, the predicate the standalone hook
+// enumerator applies, which also admits Microsoft Entra ID users.
+func platformDiscoveryHomeDirs(standalone bool) []string {
+	owners := platformDiscoveryHomeOwners(standalone)
+	if len(owners) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(owners))
+	for _, owner := range owners {
+		out = append(out, owner.Home)
+	}
+	return out
+}
+
+// platformDiscoveryHomeOwners is platformDiscoveryHomeDirs with the account
+// of each profile (its SID and account name), so a service-context scan can
+// attribute what it finds under a profile to that profile's user.
+func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, profileListRegistryKey, registry.READ)
 	if err != nil {
 		return nil
@@ -82,9 +99,13 @@ func platformDiscoveryHomeDirs() []string {
 		return nil
 	}
 	seen := make(map[string]struct{}, len(names))
-	out := make([]string, 0, len(names))
+	out := make([]discoveryHomeOwner, 0, len(names))
 	for _, sid := range names {
-		if !isInteractiveUserSID(sid) {
+		if standalone {
+			if !winpath.IsInteractiveUserSID(sid, winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
+				continue
+			}
+		} else if !isInteractiveUserSID(sid) {
 			continue
 		}
 		subKey, err := registry.OpenKey(
@@ -116,9 +137,20 @@ func platformDiscoveryHomeDirs() []string {
 			continue
 		}
 		seen[lower] = struct{}{}
-		out = append(out, expanded)
+		out = append(out, discoveryHomeOwner{Home: expanded, UserID: sid, UserName: windowsProfileAccountName(sid, expanded)})
 	}
 	return out
+}
+
+// windowsProfileAccountName is the account name of sid, or the profile
+// folder's name when the account cannot be looked up.
+func windowsProfileAccountName(sid, home string) string {
+	if parsed, err := windows.StringToSid(sid); err == nil {
+		if account, _, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
+			return account
+		}
+	}
+	return filepath.Base(home)
 }
 
 // normalizeProfileImagePath trims and cleans a raw ProfileImagePath

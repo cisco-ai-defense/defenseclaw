@@ -17,23 +17,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      release_candidate_replay_run_id:
-        description: Actions run ID that produced the sealed release candidate to replay.
-        required: false
-        type: string
-      release_candidate_replay_artifact:
-        description: Exact release-candidate artifact name from that run.
-        required: false
-        type: string
-      release_candidate_replay_version:
-        description: Canonical X.Y.Z version bound into the candidate.
-        required: false
-        type: string
-      release_candidate_replay_commit:
-        description: Exact lowercase 40-character commit bound into the candidate.
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -47,8 +30,33 @@ defaults:
     shell: pwsh
 
 jobs:
+  changes:
+    # Pick the Windows suites a pull request needs (scripts/ci_changes.py).
+    # Every other event runs everything. A gated job is skipped, and Windows
+    # Native Required accepts a skip only when this job selected it away.
+    name: Select Windows suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      windows_go: ${{ steps.classify.outputs.windows_go }}
+      windows_python: ${{ steps.classify.outputs.windows_python }}
+      windows_pkg: ${{ steps.classify.outputs.windows_pkg }}
+      pwsh: ${{ steps.classify.outputs.pwsh }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          # The pull_request merge commit and its base parent.
+          fetch-depth: 2
+      - id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci_changes.py --event $env:EVENT_NAME --github-output $env:GITHUB_OUTPUT
+
   windows-go:
     name: Windows x64 Go suite / shard ${{ matrix.shard }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_go != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -297,14 +305,12 @@ jobs:
 
   windows-python:
     name: Windows Python suite / shard ${{ matrix.shard }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_python != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 75
     env:
       PYTHON_SHARD: ${{ matrix.shard }}
-      # Linux CI already runs the complete Python/TUI suite on every PR.
-      # Keep the native Windows PR gate focused on platform smoke coverage;
-      # main and manual/release-candidate runs retain the complete Windows TUI.
-      WINDOWS_TUI_MODE: ${{ github.event_name == 'pull_request' && 'smoke' || 'full' }}
       # The selective Telemetry Registry Exhaustive workflow owns these two
       # mutation-heavy modules on PRs. Keep their native Windows updater paths
       # here, while main and manual/release-candidate runs retain both modules.
@@ -342,85 +348,43 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
-      - name: Run Python test shard ${{ matrix.shard }} of 8 with bounded PR coverage
+      - name: Run Python test shard ${{ matrix.shard }} of 8
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
-          $allTestFiles = @(Get-ChildItem cli/tests -Recurse -File -Filter 'test_*.py' | Sort-Object FullName)
           $shardIndex = [int]$env:PYTHON_SHARD - 1
-          $appShellFile = @($allTestFiles | Where-Object { $_.Name -eq 'test_app_shell.py' })
-          if ($appShellFile.Count -ne 1) {
-            throw "Expected exactly one test_app_shell.py file, found $($appShellFile.Count)"
-          }
-          $fullTUI = $env:WINDOWS_TUI_MODE -eq 'full'
           $fullTelemetryRegistry = $env:WINDOWS_TELEMETRY_REGISTRY_MODE -eq 'full'
-          $exhaustiveTelemetryPaths = @(
-            [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'cli\tests\test_telemetry_registry_generator.py')),
-            [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'cli\tests\test_telemetry_registry_candidate_renderer.py'))
+          $exhaustiveTelemetryFiles = @(
+            'cli/tests/test_telemetry_registry_generator.py',
+            'cli/tests/test_telemetry_registry_candidate_renderer.py'
           )
-          foreach ($telemetryPath in $exhaustiveTelemetryPaths) {
+          foreach ($telemetryFile in $exhaustiveTelemetryFiles) {
+            $telemetryPath = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE $telemetryFile))
             if (-not (Test-Path -LiteralPath $telemetryPath -PathType Leaf)) {
               throw "Expected exhaustive telemetry registry test file $telemetryPath"
             }
           }
-          $tuiRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'cli\tests\tui'))
-          $tuiPrefix = $tuiRoot + [IO.Path]::DirectorySeparatorChar
-          $testFiles = @(
-            $allTestFiles | Where-Object {
-              if ($_.FullName -eq $appShellFile[0].FullName) { return $false }
-              if (-not $fullTelemetryRegistry -and $_.FullName -in $exhaustiveTelemetryPaths) { return $false }
-              $isTUI = $_.FullName.StartsWith($tuiPrefix, [StringComparison]::OrdinalIgnoreCase)
-              return $fullTUI -or -not $isTUI
+          # Balance whole test files (the TUI suite included) across the
+          # eight shards by source size, as the Linux coverage shards do.
+          $shardSelectionArgs = @('run', '--frozen', 'python', 'scripts/python_test_shards.py', '--shard-count', '8', '--shard-index', [string]$shardIndex)
+          if (-not $fullTelemetryRegistry) {
+            foreach ($telemetryFile in $exhaustiveTelemetryFiles) {
+              $shardSelectionArgs += @('--exclude', $telemetryFile)
             }
-          )
+          }
+          $shardSelection = Invoke-WindowsNativeProcess $uv $shardSelectionArgs -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-files.log' -f $env:PYTHON_SHARD))
           $shardFiles = @(
-            for ($index = 0; $index -lt $testFiles.Count; $index++) {
-              if (($index % 8) -eq $shardIndex) {
-                $testFiles[$index].FullName
-              }
-            }
+            [regex]::Split([string]$shardSelection.StdOut, '\r?\n') |
+              ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '^cli/tests/.+\.py$' }
           )
-          # These assertions exercise the POSIX-only OpenShell ownership path
-          # (pwd, root-owned mkdir/chown, and Linux sandbox users). Symlink
-          # capability alone is not enough to make that product path native to
-          # Windows, so keep the exact nodes in Linux CI and omit them here.
           $windowsInapplicableTests = @(
-            '--deselect=cli/tests/test_cmd_setup_sandbox.py::TestTrustedPrivilegedCommands::test_existing_openclaw_integration_requires_pin',
-            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestSandboxInitIdempotentPin::test_f0162_refuses_swapped_symlink',
-            '--deselect=cli/tests/test_remediation_setup_sandbox.py::TestInitSandboxChownTOCTOU::test_f0421_rechecks_pinned_home_before_chown',
             # Windows os.readlink returns the preserved absolute target with
             # an equivalent \\?\ prefix, so this raw POSIX string assertion
             # remains covered by the Linux suite.
             '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
           )
-          $tuiTargets = @()
-          if ($fullTUI) {
-            $appShellCollectionLog = Join-Path $env:DC_STATE_ROOT 'pytest-app-shell-collection.log'
-            $appShellCollectionArgs = @('run', '--frozen', 'python', '-m', 'pytest', $appShellFile[0].FullName, '--collect-only', '-q', '--color=no')
-            Invoke-WindowsNativeProcess $uv $appShellCollectionArgs -TimeoutSeconds 300 -LogPath $appShellCollectionLog | Out-Null
-            $appShellNodes = @(
-              Get-Content -LiteralPath $appShellCollectionLog |
-                Where-Object { $_ -match '^cli[/\\]tests[/\\]tui[/\\]test_app_shell\.py::' }
-            )
-            if (-not $appShellNodes) {
-              throw 'Collected no test_app_shell.py nodes'
-            }
-            $tuiTargets = @(
-              for ($index = 0; $index -lt $appShellNodes.Count; $index++) {
-                if (($index % 8) -eq $shardIndex) {
-                  $appShellNodes[$index]
-                }
-              }
-            )
-          } elseif ($shardIndex -eq 0) {
-            $tuiTargets = @(
-              'cli/tests/tui/test_app_shell.py::test_textual_shell_starts_on_overview',
-              'cli/tests/tui/test_app_shell.py::test_digit_shortcut_switches_panel_placeholder',
-              'cli/tests/tui/test_executor_gateway_windows.py',
-              'cli/tests/tui/test_windows_clipboard.py'
-            )
-          }
           $nativeTelemetryTargets = @()
           if (-not $fullTelemetryRegistry -and $shardIndex -eq 2) {
             $nativeTelemetryTargets = @(
@@ -435,18 +399,11 @@ jobs:
           if (-not $shardFiles) {
             throw "Python test shard $($shardIndex + 1) selected no ordinary test files"
           }
-          if ($fullTUI -and -not $tuiTargets) {
-            throw "Python test shard $($shardIndex + 1) selected no test_app_shell.py nodes"
-          }
           # Run focused suites in fresh interpreters before the ordinary file
           # shard so their process-global state cannot leak across suites.
           if ($nativeTelemetryTargets) {
             $nativeTelemetryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $nativeTelemetryTargets + @('-vv', '--durations=25', '--color=no')
             Invoke-WindowsNativeProcess $uv $nativeTelemetryPytestArgs -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-native-telemetry.log' -f $env:PYTHON_SHARD)) | Out-Null
-          }
-          if ($tuiTargets) {
-            $tuiPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $tuiTargets + @('-vv', '--durations=25', '--color=no')
-            Invoke-WindowsNativeProcess $uv $tuiPytestArgs -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-tui.log' -f $env:PYTHON_SHARD)) | Out-Null
           }
           $ordinaryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
           Invoke-WindowsNativeProcess $uv $ordinaryPytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-ordinary.log' -f $env:PYTHON_SHARD)) | Out-Null
@@ -467,6 +424,8 @@ jobs:
 
   powershell-static:
     name: Windows PowerShell harness validation
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.pwsh != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -527,6 +486,8 @@ jobs:
 
   package-artifact:
     name: Windows packaged artifact build
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.windows_pkg != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 35
     env:
@@ -619,7 +580,7 @@ jobs:
           [IO.Directory]::CreateDirectory($verificationRoot) | Out-Null
           Expand-Archive -LiteralPath $archivePath -DestinationPath $verificationRoot
           foreach ($binary in @(
-            @{ File = 'defenseclaw.exe'; Name = 'defenseclaw-gateway' },
+            @{ File = 'defenseclaw-gateway.exe'; Name = 'defenseclaw-gateway' },
             @{ File = 'defenseclaw-hook.exe'; Name = 'defenseclaw-hook' }
           )) {
             $path = Join-Path $verificationRoot $binary.File
@@ -700,230 +661,6 @@ jobs:
         if: ${{ always() }}
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
-  public-bootstrap-acceptance:
-    name: Windows public install.ps1 acceptance
-    runs-on: windows-latest
-    timeout-minutes: 50
-    permissions:
-      actions: read
-      contents: read
-    env:
-      BOOTSTRAP_FIXTURE_VERSION: 0.8.7
-      # Before 0.8.7 exists, replay the sealed candidate that exposed the
-      # fake-profile harness defect. Once published, the job automatically uses
-      # permanent release assets and this fallback remains fail-closed evidence.
-      BOOTSTRAP_FIXTURE_RUN_ID: "30063491006"
-      BOOTSTRAP_FIXTURE_ARTIFACT: release-candidate-30063491006-1
-      # 0.8.7 predates immutable install.ps1 release assets. The compatibility
-      # fallback below is review-bound to these exact repository bytes and is
-      # refused for every other release/candidate identity.
-      BOOTSTRAP_LEGACY_INSTALLER_SHA256: 9e2caed9b1b2408b1b576257f1a9ab8f2fa99a94f038cd2a20a4b4f3a368ef9b
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - name: Initialize isolated paths
-        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf bootstrap -DiagnosticsLeaf windows-native-diagnostics-bootstrap -ArtifactLeaf windows-bootstrap-fixture
-      - name: Stage pinned Windows Cosign verifier
-        run: ./scripts/install-pinned-windows-cosign.ps1
-      - name: Select permanent release or sealed candidate fixture
-        id: fixture
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $previousErrorActionPreference = $ErrorActionPreference
-          try {
-            $ErrorActionPreference = 'Continue'
-            $lookup = (
-              gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
-                --repo $env:GITHUB_REPOSITORY `
-                --json isDraft `
-                --jq '.isDraft' 2>&1 |
-                Out-String -Width 32768
-            ).Trim()
-            $lookupExit = $LASTEXITCODE
-          } finally {
-            $ErrorActionPreference = $previousErrorActionPreference
-          }
-          if ($lookupExit -eq 0) {
-            $published = $lookup -ceq 'false'
-          } elseif ($lookup -ceq 'release not found') {
-            $published = $false
-          } else {
-            throw "Could not resolve bootstrap fixture release: $lookup"
-          }
-          if ($published) {
-            'source=release' >> $env:GITHUB_OUTPUT
-          } else {
-            'source=candidate' >> $env:GITHUB_OUTPUT
-          }
-          # GitHub's pwsh wrapper exits with the last native exit code. A
-          # missing release is the expected pre-publication branch, not an
-          # error after its candidate fallback has been selected.
-          $global:LASTEXITCODE = 0
-      - name: Download authenticated public bootstrap fixture
-        if: ${{ steps.fixture.outputs.source == 'release' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $fixture = Join-Path $env:DC_ARTIFACT_ROOT 'release'
-          [IO.Directory]::CreateDirectory($fixture) | Out-Null
-          function Invoke-AuthenticatedReleaseAssetDownload {
-            param(
-              [Parameter(Mandatory)] [string] $Asset,
-              [Parameter(Mandatory)] [string] $FailureMessage
-            )
-            $maxAttempts = 3
-            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
-              gh release download $env:BOOTSTRAP_FIXTURE_VERSION `
-                --repo $env:GITHUB_REPOSITORY `
-                --pattern $Asset `
-                --dir $fixture `
-                --clobber
-              if ($LASTEXITCODE -eq 0) {
-                return
-              }
-              if ($attempt -eq $maxAttempts) {
-                throw $FailureMessage
-              }
-              Write-Warning (
-                "Authenticated release asset download failed for $Asset " +
-                "(attempt $attempt/$maxAttempts); retrying."
-              )
-              Start-Sleep -Seconds $attempt
-            }
-          }
-          foreach ($asset in @(
-            'DefenseClawSetup-x64.exe',
-            'DefenseClawSetup-x64.exe.provenance.json',
-            'upgrade-manifest.json',
-            'checksums.txt',
-            'checksums.txt.sig',
-            'checksums.txt.pem',
-            'checksums.txt.bundle'
-          )) {
-            Invoke-AuthenticatedReleaseAssetDownload `
-              -Asset $asset `
-              -FailureMessage "Could not download authenticated bootstrap fixture asset: $asset"
-          }
-          $installerAssetCount = (
-            gh release view $env:BOOTSTRAP_FIXTURE_VERSION `
-              --repo $env:GITHUB_REPOSITORY `
-              --json assets `
-              --jq '[.assets[] | select(.name == "install.ps1")] | length'
-          )
-          if ($LASTEXITCODE -ne 0 -or $installerAssetCount -notmatch '^[0-9]+$') {
-            throw 'Could not resolve the immutable install.ps1 asset inventory'
-          }
-          if ([int]$installerAssetCount -gt 1) {
-            throw 'The immutable release contains duplicate install.ps1 assets'
-          }
-          if ([int]$installerAssetCount -eq 1) {
-            Invoke-AuthenticatedReleaseAssetDownload `
-              -Asset install.ps1 `
-              -FailureMessage 'Could not download the immutable install.ps1 asset'
-          } elseif ($env:BOOTSTRAP_FIXTURE_VERSION -cne '0.8.7') {
-            throw (
-              'The authenticated release is missing its exact immutable ' +
-              'install.ps1 asset'
-            )
-          } else {
-            Write-Host (
-              'Pinned legacy 0.8.7 has no install.ps1 asset; the digest-bound ' +
-              'compatibility fixture will be staged later.'
-            )
-          }
-          "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
-      - name: Download sealed pre-publication bootstrap fixture
-        if: ${{ steps.fixture.outputs.source == 'candidate' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ env.BOOTSTRAP_FIXTURE_ARTIFACT }}
-          path: ${{ env.DC_ARTIFACT_ROOT }}\candidate
-          repository: cisco-ai-defense/defenseclaw
-          run-id: ${{ env.BOOTSTRAP_FIXTURE_RUN_ID }}
-          github-token: ${{ github.token }}
-      - name: Select sealed candidate distribution
-        if: ${{ steps.fixture.outputs.source == 'candidate' }}
-        run: |
-          $fixture = Join-Path $env:DC_ARTIFACT_ROOT 'candidate\dist'
-          if (-not (Test-Path -LiteralPath $fixture -PathType Container)) {
-            throw "Sealed bootstrap candidate distribution is missing: $fixture"
-          }
-          "DC_BOOTSTRAP_RELEASE_DIR=$fixture" >> $env:GITHUB_ENV
-      - name: Exercise current public bootstrap under a real disposable user
-        env:
-          BOOTSTRAP_FIXTURE_SOURCE: ${{ steps.fixture.outputs.source }}
-        run: |
-          # The pinned 0.8.7 regression fixture predates immutable installer
-          # assets. Every current candidate/release must provide its exact
-          # downloaded install.ps1. The only fallback is this explicitly pinned
-          # legacy fixture, whose reviewed repository bytes are digest-bound
-          # before and after staging.
-          $fixtureInstaller = Join-Path $env:DC_BOOTSTRAP_RELEASE_DIR 'install.ps1'
-          if (-not (Test-Path -LiteralPath $fixtureInstaller -PathType Leaf)) {
-            $isPinnedLegacyFixture = (
-              $env:BOOTSTRAP_FIXTURE_VERSION -ceq '0.8.7' -and
-              (
-                $env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'release' -or
-                (
-                  $env:BOOTSTRAP_FIXTURE_SOURCE -ceq 'candidate' -and
-                  $env:BOOTSTRAP_FIXTURE_RUN_ID -ceq '30063491006' -and
-                  $env:BOOTSTRAP_FIXTURE_ARTIFACT -ceq 'release-candidate-30063491006-1'
-                )
-              )
-            )
-            if (-not $isPinnedLegacyFixture) {
-              throw (
-                'The authenticated candidate/release is missing its exact ' +
-                'immutable install.ps1 asset'
-              )
-            }
-            $legacyInstaller = (
-              Resolve-Path -LiteralPath ./scripts/install.ps1 -ErrorAction Stop
-            ).Path
-            $legacyDigest = (
-              Get-FileHash -LiteralPath $legacyInstaller -Algorithm SHA256
-            ).Hash.ToLowerInvariant()
-            if ($legacyDigest -cne $env:BOOTSTRAP_LEGACY_INSTALLER_SHA256) {
-              throw (
-                'The reviewed legacy 0.8.7 installer digest changed: ' +
-                "$legacyDigest"
-              )
-            }
-            Copy-Item -LiteralPath $legacyInstaller `
-              -Destination $fixtureInstaller -ErrorAction Stop
-            $stagedLegacyDigest = (
-              Get-FileHash -LiteralPath $fixtureInstaller -Algorithm SHA256
-            ).Hash.ToLowerInvariant()
-            if ($stagedLegacyDigest -cne $env:BOOTSTRAP_LEGACY_INSTALLER_SHA256) {
-              throw 'The staged legacy 0.8.7 installer lost its digest binding'
-            }
-          }
-          $bootstrapState = Join-Path $env:DC_STATE_ROOT (
-            'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
-          )
-          ./scripts/test-fresh-install-release-windows.ps1 `
-            -ReleaseDir $env:DC_BOOTSTRAP_RELEASE_DIR `
-            -TargetVersion $env:BOOTSTRAP_FIXTURE_VERSION `
-            -UninstallContract immediate `
-            -StateRoot $bootstrapState `
-            -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Capture bounded diagnostics
-        if: ${{ failure() || cancelled() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-bootstrap-diagnostics
-          path: ${{ env.DC_DIAGNOSTICS }}\**
-          if-no-files-found: ignore
-          retention-days: 5
-      - name: Always clean isolated processes, listeners, and temp state
-        if: ${{ always() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
-
   connector-contract:
     name: Windows x64 connector contract / ${{ matrix.connector }}
     needs: [powershell-static, package-artifact]
@@ -967,8 +704,7 @@ jobs:
           if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -cne $expected) {
             throw 'pinned Devin CLI archive digest mismatch'
           }
-      - name: Required connector contract with one bounded telemetry retry
-        id: connector_contract
+      - name: Required connector contract
         run: |
           $nativeHarness = (Resolve-Path './scripts/windows-native-ci.ps1').Path
           $standardUserHarness = (Resolve-Path './scripts/invoke-windows-setup-standard-user-ci.ps1').Path
@@ -976,75 +712,21 @@ jobs:
           $contractStateRoot = [IO.Path]::GetFullPath($env:DC_STATE_ROOT)
           $artifactRoot = [IO.Path]::GetFullPath($env:DC_ARTIFACT_ROOT)
           $diagnosticsRoot = [IO.Path]::GetFullPath($env:DC_DIAGNOSTICS)
+          $contractDiagnostics = Join-Path $diagnosticsRoot 'contract-child'
           $pwsh = Join-Path $PSHOME 'pwsh.exe'
-          function Invoke-ConnectorContractAttempt([int]$Attempt) {
-            $attemptDiagnostics = Join-Path $diagnosticsRoot "attempt-$Attempt-child"
-            return Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-              '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $standardUserHarness,
-              '-Mode', 'contract', '-Connector', $env:CONNECTOR,
-              '-StateRoot', $contractStateRoot, '-ArtifactRoot', $artifactRoot,
-              '-DiagnosticsRoot', $attemptDiagnostics, '-TimeoutSeconds', '1800'
-            ) -AllowedExitCodes @(0, 1) -TimeoutSeconds 1860 -LogPath (
-              Join-Path $diagnosticsRoot "attempt-$Attempt-wrapper.log"
-            )
-          }
-          # This returns only after the first wrapper exits and its output drains.
-          $first = Invoke-ConnectorContractAttempt 1
-          if ($first.ExitCode -eq 0) {
-            'retried=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-            return
-          }
-          $retrySignal = 'event_history=sqlite_write_failed'
-          $firstOutput = @($first.StdOut, $first.StdErr | Where-Object { $_ }) -join [Environment]::NewLine
-          $cleanupFailurePrefixes = @(
-            'disposable execution boundary:',
-            'interactive desktop ACL restore:',
-            'ancestor ACL lease restore:',
-            'diagnostic handoff:',
-            'account/profile cleanup:',
-            'sandbox cleanup:',
-            'parent-only sibling cleanup:'
+          # The wrapper creates a GUID-named user/profile/sandbox and returns
+          # only after it exits and its output drains.
+          $contract = Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $standardUserHarness,
+            '-Mode', 'contract', '-Connector', $env:CONNECTOR,
+            '-StateRoot', $contractStateRoot, '-ArtifactRoot', $artifactRoot,
+            '-DiagnosticsRoot', $contractDiagnostics, '-TimeoutSeconds', '1800'
+          ) -AllowedExitCodes @(0, 1) -TimeoutSeconds 1860 -LogPath (
+            Join-Path $diagnosticsRoot 'contract-wrapper.log'
           )
-          $cleanupFailure = @($cleanupFailurePrefixes | Where-Object {
-            $firstOutput.Contains($_, [StringComparison]::Ordinal)
-          } | Select-Object -First 1)
-          if ($cleanupFailure.Count -ne 0) {
-            throw 'packaged connector contract reported incomplete disposable-user cleanup'
+          if ($contract.ExitCode -ne 0) {
+            throw 'packaged connector contract failed'
           }
-          if (-not $firstOutput.Contains($retrySignal, [StringComparison]::Ordinal)) {
-            throw 'packaged connector contract failed without the retryable telemetry signal'
-          }
-          Write-BoundedText -Path (Join-Path $diagnosticsRoot "$env:CONNECTOR-event-history-retry.txt") `
-            -MaxBytes 4096 -Text "attempt=1`nsignal=$retrySignal"
-          try {
-            Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-              '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $nativeHarness,
-              '-Operation', 'capture', '-StateRoot', $contractStateRoot,
-              '-DiagnosticsRoot', (Join-Path $diagnosticsRoot 'attempt-1-state')
-            ) -TimeoutSeconds 120 -LogPath (
-              Join-Path $diagnosticsRoot 'attempt-1-capture.log'
-            ) | Out-Null
-          } catch {
-            Write-BoundedText -Path (Join-Path $diagnosticsRoot 'attempt-1-capture-failure.log') `
-              -MaxBytes 32768 -Text $_.Exception.Message
-            Write-Warning 'bounded first-attempt state capture failed; cleanup remains mandatory'
-          }
-          Invoke-WindowsNativeProcess -FilePath $pwsh -ArgumentList @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $nativeHarness,
-            '-Operation', 'cleanup', '-StateRoot', $contractStateRoot
-          ) -TimeoutSeconds 180 -LogPath (
-            Join-Path $diagnosticsRoot 'attempt-1-cleanup.log'
-          ) | Out-Null
-          if ((Test-Path -LiteralPath $contractStateRoot) -or
-              @(Get-StateProcesses $contractStateRoot).Count -ne 0) {
-            throw 'connector retry cleanup did not remove its exact state and rooted processes'
-          }
-          # The wrapper creates a GUID-named user/profile/sandbox on every call.
-          $second = Invoke-ConnectorContractAttempt 2
-          if ($second.ExitCode -ne 0) {
-            throw 'packaged connector contract failed on its final attempt'
-          }
-          'retried=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - name: Upload deterministic contract results
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -1056,8 +738,8 @@ jobs:
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload diagnostics on failure or recovered telemetry retry
-        if: ${{ failure() || cancelled() || steps.connector_contract.outputs.retried == 'true' }}
+      - name: Upload diagnostics on failure
+        if: ${{ failure() || cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-native-contract-diagnostics-${{ matrix.connector }}
@@ -1110,122 +792,16 @@ jobs:
         if: ${{ always() }}
         run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
 
-  release-validator-replay:
-    name: Windows exact release validator replay
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      inputs.release_candidate_replay_run_id != ''
-    runs-on: windows-latest
-    timeout-minutes: 50
-    permissions:
-      # Download the sealed candidate from its producing run and check out the
-      # repository containing the replay validator and signature verifier.
-      actions: read
-      contents: read
-    env:
-      REPLAY_RUN_ID: ${{ inputs.release_candidate_replay_run_id }}
-      REPLAY_ARTIFACT: ${{ inputs.release_candidate_replay_artifact }}
-      REPLAY_VERSION: ${{ inputs.release_candidate_replay_version }}
-      REPLAY_COMMIT: ${{ inputs.release_candidate_replay_commit }}
-    steps:
-      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          persist-credentials: false
-      - name: Validate exact replay identity
-        run: |
-          if ($env:REPLAY_RUN_ID -notmatch '^[1-9][0-9]*$') {
-            throw 'release candidate replay run ID must be a positive integer'
-          }
-          $escapedRunID = [regex]::Escape($env:REPLAY_RUN_ID)
-          if ($env:REPLAY_ARTIFACT -notmatch (
-              "^release-candidate-${escapedRunID}-[1-9][0-9]*$"
-          )) {
-            throw 'release candidate replay artifact must bind the exact run ID and attempt'
-          }
-          if ($env:REPLAY_VERSION -notmatch (
-              '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-          )) {
-            throw 'release candidate replay version must be canonical X.Y.Z'
-          }
-          if ($env:REPLAY_COMMIT -cnotmatch '^[0-9a-f]{40}$') {
-            throw 'release candidate replay commit must be an exact lowercase SHA'
-          }
-      - name: Initialize isolated replay paths
-        run: >-
-          ./scripts/initialize-windows-native-ci-paths.ps1
-          -Leaf release-replay
-          -DiagnosticsLeaf windows-release-validator-replay-diagnostics
-          -ArtifactLeaf windows-release-validator-replay
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.11.28"
-          python-version: "3.13"
-      - name: Stage pinned Windows Cosign verifier
-        run: ./scripts/install-pinned-windows-cosign.ps1
-      - name: Download exact sealed release candidate
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: ${{ inputs.release_candidate_replay_artifact }}
-          path: ${{ env.DC_ARTIFACT_ROOT }}\transport
-          repository: cisco-ai-defense/defenseclaw
-          run-id: ${{ inputs.release_candidate_replay_run_id }}
-          github-token: ${{ github.token }}
-      - name: Restore and authenticate exact release candidate
-        run: |
-          $candidateRoot = Join-Path $env:DC_ARTIFACT_ROOT 'candidate'
-          python scripts/release_candidate.py unpack-transport `
-            --archive (Join-Path $env:DC_ARTIFACT_ROOT 'transport\release-candidate.tar') `
-            --destination $candidateRoot
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/release_candidate.py verify `
-            --root $candidateRoot `
-            --version $env:REPLAY_VERSION `
-            --commit $env:REPLAY_COMMIT
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $certificateIdentity = (
-            "https://github.com/$env:GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main"
-          )
-          python scripts/verify-sigstore-blob.py `
-            --certificate (Join-Path $candidateRoot 'dist\checksums.txt.pem') `
-            --signature (Join-Path $candidateRoot 'dist\checksums.txt.sig') `
-            --certificate-identity $certificateIdentity `
-            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
-            (Join-Path $candidateRoot 'dist\checksums.txt')
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "DC_REPLAY_RELEASE_DIR=$(Join-Path $candidateRoot 'dist')" >> $env:GITHUB_ENV
-      - name: Replay current validator against exact failed candidate
-        run: |
-          $replayState = Join-Path $env:DC_STATE_ROOT (
-            'defenseclaw-bootstrap-acceptance-' + [guid]::NewGuid().ToString('N')
-          )
-          ./scripts/test-fresh-install-release-windows.ps1 `
-            -ReleaseDir $env:DC_REPLAY_RELEASE_DIR `
-            -TargetVersion $env:REPLAY_VERSION `
-            -UninstallContract deferred `
-            -StateRoot $replayState `
-            -DiagnosticsRoot $env:DC_DIAGNOSTICS
-      - name: Upload exact replay diagnostics on failure
-        if: ${{ failure() || cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-release-validator-replay-diagnostics
-          path: ${{ env.DC_DIAGNOSTICS }}\**
-          if-no-files-found: warn
-          retention-days: 7
-      - name: Always clean exact replay state
-        if: ${{ always() }}
-        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
-
   windows-native-required:
     name: Windows Native Required
     if: ${{ always() }}
     needs:
+      - changes
       - windows-go
       - windows-python
       - powershell-static
       - package-artifact
       - packaged-acceptance
-      - public-bootstrap-acceptance
       - connector-contract
       - omnigent-native-degraded
     runs-on: ubuntu-latest
@@ -1236,7 +812,12 @@ jobs:
       - name: Fail unless every deterministic Windows validation job succeeded
         run: |
           $results = $env:REQUIRED_RESULTS | ConvertFrom-Json
-          $failed = @($results.PSObject.Properties | Where-Object { $_.Value.result -ne 'success' })
+          # A pull request skips the suites its files do not feed. A skip
+          # counts only when the classifier ran; any other result fails.
+          $selected = $results.changes.result -eq 'success'
+          $failed = @($results.PSObject.Properties | Where-Object {
+            $_.Value.result -ne 'success' -and -not ($selected -and $_.Value.result -eq 'skipped')
+          })
           if ($failed.Count) {
             $summary = $failed | ForEach-Object { "$($_.Name)=$($_.Value.result)" }
             throw "Required Windows validation did not succeed: $($summary -join ', ')"

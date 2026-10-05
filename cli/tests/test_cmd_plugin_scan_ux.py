@@ -157,7 +157,14 @@ class TestScanUXVerdictLines(_PluginScanUXBase):
         result = self.invoke(["scan", self.plugin_name])
         # Exit code is still zero — scan only reports; install --action enforces.
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("[BLOCKED]", result.output)
+        # GAP-1592: a scan blocks nothing; the policy verdict and how to act
+        # follow the WARN line, as in 'skill scan'.
+        self.assertIn("[WARN]", result.output)
+        self.assertNotIn("[BLOCKED]", result.output)
+        self.assertIn("policy: rejected", result.output)
+        # GAP-2111: block only refuses new installs; quarantine stops the copy.
+        self.assertIn(f"Stop it: defenseclaw plugin quarantine {self.plugin_name}", result.output)
+        self.assertNotIn("plugin block", result.output)
         # Finding count must be visible.
         self.assertIn("1 finding", result.output)
         # Severity surfaced via the "max severity:" detail string.
@@ -176,17 +183,46 @@ class TestScanUXSummary(_PluginScanUXBase):
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Summary: 1 plugin scanned", result.output)
-        self.assertIn("clean=1", result.output)
-        self.assertIn("blocked=0", result.output)
+        self.assertIn("clean=1, warning=0, blocked=0", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_summary_blocked(self, mock_scan) -> None:
+    def test_summary_rejected_is_not_blocked(self, mock_scan) -> None:
         mock_scan.return_value = self._blocked_result()
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Summary: 1 plugin scanned", result.output)
         self.assertIn("clean=0", result.output)
+        self.assertIn("blocked=0", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_summary_block_listed_is_blocked(self, mock_scan) -> None:
+        from defenseclaw.enforce import PolicyEngine
+
+        PolicyEngine(self.app.store).block("plugin", self.plugin_name, "test")
+        mock_scan.return_value = self._blocked_result()
+        result = self.invoke(["scan", self.plugin_name])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[BLOCKED]", result.output)
         self.assertIn("blocked=1", result.output)
+        self.assertNotIn("policy: rejected", result.output)
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_low_only_finding_is_warn_not_blocked(self, mock_scan) -> None:
+        # GAP-1413: a LOW-only plugin is not blocked by policy, so it must
+        # not read [BLOCKED] or count in blocked=.
+        mock_scan.return_value = ScanResult(
+            scanner="plugin-scanner",
+            target="demo-plugin",
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="P2", title="Plugin declares no permissions", severity="LOW")],
+            duration=timedelta(milliseconds=5),
+        )
+        result = self.invoke(["scan", self.plugin_name])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("[BLOCKED]", result.output)
+        self.assertIn("[WARN]", result.output)
+        # GAP-2336: the [WARN] plugin is counted, so the counts add up.
+        self.assertIn("Summary: 1 plugin scanned, clean=0, warning=1, blocked=0, findings=1", result.output)
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_summary_includes_duration_ms(self, mock_scan) -> None:
@@ -265,6 +301,56 @@ class TestScanHostConnectorResolve(_PluginScanUXBase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(mock_scan.call_args.args[0], plugin_file)
+
+
+class TestScanPathConnector(_PluginScanUXBase):
+    """GAP-1087: a path scan names the connector that owns the path."""
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_path_names_owning_connector(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        amp_dir = os.path.join(self.tmp_dir, "amp-plugins")
+        hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
+        target = os.path.join(hermes_dir, "browser")
+        os.makedirs(amp_dir)
+        os.makedirs(target)
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: {  # type: ignore[method-assign]
+            "amp": [amp_dir],
+            "hermes": [hermes_dir],
+        }.get(c, [])
+
+        result = self.invoke(["scan", target])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 plugin on hermes", result.output)
+        self.assertNotIn("on amp", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_path_outside_every_root_is_adhoc(self, mock_scan, _mock_oc) -> None:
+        # GAP-1640: a folder no connector root holds is not "on <first connector>".
+        mock_scan.return_value = self._blocked_result()
+        amp_dir = os.path.join(self.tmp_dir, "amp-plugins")
+        target = os.path.join(self.tmp_dir, "staging", "spotify")
+        os.makedirs(amp_dir)
+        os.makedirs(target)
+        with open(os.path.join(target, "plugin.json"), "w") as f:
+            f.write('{"name": "spotify", "version": "1.0.0"}')
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: {"amp": [amp_dir]}.get(c, [])  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", target])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Scanning 1 plugin at a path (not from a connector config)", result.output)
+        self.assertNotIn("on amp", result.output)
+        self.assertIn("the policy would refuse this plugin at install.", result.output)
+        self.assertNotIn("still loads", result.output)
+        self.assertNotIn("--connector amp", result.output)
 
 
 class TestScanAllSweep(_PluginScanUXBase):
@@ -395,8 +481,9 @@ class TestScanAllSweep(_PluginScanUXBase):
                     ["scan", "--all", "--connector", "claudecode"]
                 )
                 self.assertEqual(text_result.exit_code, 0, text_result.output)
-                self.assertIn(registry, text_result.output)
-                self.assertIn(f"— {expected_state}; entries=0", text_result.output)
+                # GAP-2274/GAP-2317: a missing or empty registry only means no plugins yet.
+                self.assertNotIn(registry, text_result.output)
+                self.assertNotIn("entries=0", text_result.output)
                 self.assertIn("No plugins found to scan", text_result.output)
 
                 json_result = self.invoke(
@@ -612,3 +699,60 @@ class TestScanAllSweep(_PluginScanUXBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_plugin_info_card_states_total_and_max_severity(capsys):
+    # GAP-1507: 1 HIGH + 1 LOW is "2 findings (max severity: HIGH)", not "2 HIGH findings".
+    from defenseclaw.commands.cmd_plugin import _print_plugin_info_card
+
+    _print_plugin_info_card(
+        {"name": "spotify", "scan": {"clean": False, "total_findings": 2, "max_severity": "HIGH", "target": "/p"}},
+        "spotify",
+    )
+    out = capsys.readouterr().out
+    assert "Findings: 2 findings (max severity: HIGH)" in out
+    assert "2 HIGH findings" not in out
+
+
+def test_plugin_info_card_reads_the_same_for_every_outcome(capsys):
+    # GAP-2201: yes/no values; Verdict, Findings and scan time for clean and warned plugins.
+    from datetime import datetime, timezone
+
+    from defenseclaw.commands.cmd_plugin import _plugin_scan_payload_from_latest, _print_plugin_info_card
+
+    when = datetime(2026, 10, 3, 4, 14, 21, tzinfo=timezone.utc)
+    # GAP-2201 (b11): Verdict is the plugin list word, not the severity.
+    for count, sev, verdict in ((0, "INFO", "clean"), (1, "MEDIUM", "warning")):
+        scan = _plugin_scan_payload_from_latest(
+            {"target": "/p", "finding_count": count, "max_severity": sev, "timestamp": when}
+        )
+        _print_plugin_info_card({"name": "p", "installed": True, "quarantined": False, "scan": scan}, "p")
+        out = capsys.readouterr().out
+        assert "Installed:   yes" in out and "Quarantined: no" in out
+        assert "True" not in out and "False" not in out
+        assert f"Verdict:  {verdict}" in out
+        assert "Verdict:  MEDIUM" not in out and "Verdict:  CLEAN" not in out
+        assert "Findings: " in out
+        assert "Scanned:  2026-10-03 04:14:21 UTC" in out
+
+
+class TestScanFolderOfPlugins(_PluginScanUXBase):
+    """GAP-1580: a Hermes category folder is not scanned as one plugin."""
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_folder_of_plugins_lists_them_and_exits_2(self, mock_scan) -> None:
+        folder = os.path.join(self.tmp_dir, "browser")
+        for child in ("browser_use", "firecrawl"):
+            os.makedirs(os.path.join(folder, child))
+            with open(os.path.join(folder, child, "plugin.yaml"), "w") as f:
+                f.write(f"name: {child}\n")
+        os.makedirs(os.path.join(folder, "__pycache__"))
+
+        result = self.runner.invoke(plugin, ["scan", folder], obj=self.app)
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("is a folder of 2 plugin(s), not a plugin", result.output)
+        self.assertIn("It holds: browser_use, firecrawl", result.output)
+        self.assertIn(os.path.join(folder, "browser_use"), result.output)
+        self.assertNotIn("BLOCKED", result.output)
+        mock_scan.assert_not_called()

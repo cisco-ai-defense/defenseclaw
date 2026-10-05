@@ -79,7 +79,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (body_defenseclaw_ai_runtime_plane) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane_running=\"false\")[$__interval]))) or vector(0)",
+          "expr": "count(sum by (body_defenseclaw_ai_runtime_plane) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane_running=\"false\")[5m]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -136,7 +136,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_processes_observed)[$__interval])",
+          "expr": "max(max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_processes_observed)[5m]))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -179,7 +179,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_connections_observed)[$__interval])",
+          "expr": "max(max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_connections_observed)[5m]))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -222,7 +222,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_connections_unattributed)[$__interval])",
+          "expr": "max(max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_connections_unattributed)[5m]))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -275,7 +275,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_processes_skipped)[$__interval])",
+          "expr": "max(max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_processes_skipped)[5m]))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -328,7 +328,7 @@
       },
       "targets": [
         {
-          "expr": "max(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | outcome=\"partial\")[$__interval])) or vector(0)",
+          "expr": "max(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | outcome=\"partial\")[5m])) or vector(0)",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -382,7 +382,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_host_plane_observations)[$__interval])",
+          "expr": "max(max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_host_plane_observations)[5m]))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -436,7 +436,7 @@
       },
       "targets": [
         {
-          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_host_plane_gated)[$__interval])",
+          "expr": "max(max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_host_plane_gated)[5m]))",
           "refId": "A",
           "instant": true,
           "datasource": {

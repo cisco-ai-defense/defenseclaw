@@ -135,7 +135,7 @@ DefenseClaw should read both `serverUrl` and `url`, preserve unknown fields, and
 
 ## Implemented Decisions
 
-- DefenseClaw writes Antigravity hooks only to `~/.gemini/config/hooks.json`. Google documents no `ANTIGRAVITY_CONFIG_DIR` or `GEMINI_CONFIG_DIR` override. Older DefenseClaw-only custom bindings remain internal custody solely for exact restoration and migration to the official path. Workspace and plugin hook files are discovery-only so agy's multi-file merge cannot duplicate DefenseClaw hook firings.
+- DefenseClaw writes Antigravity hooks only to `~/.gemini/config/hooks.json`. Google documents no configuration-home environment override (for example, no `ANTIGRAVITY_CONFIG_DIR`). Older DefenseClaw-only custom bindings remain internal custody solely for exact restoration and migration to the official path. Workspace and plugin hook files are discovery-only so agy's multi-file merge cannot duplicate DefenseClaw hook firings.
 - All five documented events are registered with their exact mixed schema and an event-bound command. Only synchronous `PreToolUse` stdout `{"decision":"deny"}` is claimed as hard blocking; non-zero exit status is not.
 - MCP read/write support uses `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`; plugin MCP configs are discovery-only. DefenseClaw writes `serverUrl` for remote entries, reads `url` for compatibility, preserves unknown fields, and does not log secret-bearing `env` or `headers` values.
 - AgentSkills folder form is read/write at `~/.gemini/config/skills/<skill>/SKILL.md` and `<workspace>/.agents/skills/<skill>/SKILL.md`. CLI direct markdown skills under `~/.gemini/antigravity-cli/skills/` remain discovery-only because they use a different shape.
