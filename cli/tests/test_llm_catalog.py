@@ -194,3 +194,21 @@ def test_live_mode_fails_when_litellm_used_its_bundled_fallback(monkeypatch, cap
     monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils.get_model_cost_map", cost_map)
     assert mod.main(["--live"]) == 2
     assert "upstream not used: fetch failed" in capsys.readouterr().err
+
+
+def test_live_mode_fails_when_litellm_cannot_report_its_registry_source(monkeypatch, capsys) -> None:
+    """Without source info the radar cannot rule out the bundled snapshot."""
+    import sys
+    import types
+
+    litellm = types.ModuleType("litellm")
+    litellm.model_cost = _FAKE_COST
+    monkeypatch.setitem(sys.modules, "litellm", litellm)
+    monkeypatch.setitem(sys.modules, "litellm.litellm_core_utils", types.ModuleType("litellm.litellm_core_utils"))
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm.litellm_core_utils.get_model_cost_map",
+        types.ModuleType("litellm.litellm_core_utils.get_model_cost_map"),
+    )
+    assert mod.main(["--live"]) == 2
+    assert "cannot confirm litellm used the upstream registry" in capsys.readouterr().err

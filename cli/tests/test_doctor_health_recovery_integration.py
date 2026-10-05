@@ -668,6 +668,62 @@ def test_audit_read_only_uri_preserves_question_and_fragment_path_bytes(
     assert result.checks[0]["reason_code"] == ""
 
 
+def test_inventory_storage_check_is_quiet_below_threshold(tmp_path) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    result = _DoctorResult()
+
+    cmd_doctor._check_inventory_storage(cfg, result)  # no inventory.db yet
+    (data_dir / "inventory.db").write_bytes(b"\0" * 4096)
+    cmd_doctor._check_inventory_storage(cfg, result)
+
+    assert result.checks == []
+
+
+@pytest.mark.parametrize(
+    ("retention_days", "expected"),
+    [(None, "7-day"), (30, "30-day"), (0, "positive window")],
+)
+def test_inventory_storage_check_warns_at_one_gib(tmp_path, retention_days, expected) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    cfg.observability = SimpleNamespace(local=SimpleNamespace(retention_days=retention_days))
+    cfg.ai_discovery = SimpleNamespace(enabled=True)
+    with open(data_dir / "inventory.db", "wb") as stream:
+        stream.truncate(1024 * 1024 * 1024 - 4096)
+    (data_dir / "inventory.db-wal").write_bytes(b"\0" * 4096)
+
+    result = _DoctorResult()
+    cmd_doctor._check_inventory_storage(cfg, result)
+
+    [check] = result.checks
+    assert check["status"] == "warn"
+    assert check["check_id"] == "doctor.state.inventory-storage-size"
+    assert check["reason_code"] == "inventory-storage-large"
+    assert expected in check["remediation"]
+    if retention_days != 0:
+        assert "lower observability.local.retention_days" in check["remediation"]
+
+
+def test_inventory_storage_check_with_discovery_disabled_does_not_promise_pruning(tmp_path) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    cfg.observability = SimpleNamespace(local=SimpleNamespace(retention_days=7))
+    cfg.ai_discovery = SimpleNamespace(enabled=False)
+    with open(data_dir / "inventory.db", "wb") as stream:
+        stream.truncate(1024 * 1024 * 1024)
+
+    result = _DoctorResult()
+    cmd_doctor._check_inventory_storage(cfg, result)
+
+    [check] = result.checks
+    assert check["status"] == "warn"
+    assert check["check_id"] == "doctor.state.inventory-storage-size"
+    assert "keep the gateway running" not in check["remediation"]
+    assert "re-enable ai_discovery" in check["remediation"]
+    assert "delete inventory.db" in check["remediation"]
+
+
 def test_upgraded_install_with_large_audit_db_and_legacy_key_gets_next_steps(tmp_path, monkeypatch) -> None:
     from defenseclaw import doctor_recovery
 

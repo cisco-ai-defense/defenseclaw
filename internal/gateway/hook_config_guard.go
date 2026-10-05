@@ -771,14 +771,24 @@ func (g *HookConfigGuard) rearmAfterBusyRepair(requested []string, err error) bo
 		delay = hookGuardBusyRearmMaxDelay
 	}
 	g.busyRepairs++
-	// Nothing was published, so there is no self-write to suppress. Replace
-	// queued events with the re-armed request: they came from the failed
-	// attempt and would otherwise bypass the backoff.
+	// Nothing was published, so there is no self-write to suppress. Events
+	// queued during the failed attempt join the re-armed request with the
+	// later due time: they keep the backoff, and an unrelated edit that
+	// arrived meanwhile keeps its path name.
 	g.suppressUntil = time.Time{}
 	due := time.Now().Add(delay - g.debounce)
-	g.pending = make(map[string]time.Time, len(requested))
+	if g.pending == nil {
+		g.pending = make(map[string]time.Time, len(requested))
+	}
+	for item, queued := range g.pending {
+		if queued.Before(due) {
+			g.pending[item] = due
+		}
+	}
 	for _, item := range requested {
-		g.pending[item] = due
+		if queued, ok := g.pending[item]; !ok || queued.Before(due) {
+			g.pending[item] = due
+		}
 	}
 	return true
 }

@@ -108,6 +108,16 @@ func (s *Store) checkpointConn() (*sql.DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
 		}
+		// sql.Open is lazy. Force the open, then repeat the path guard's
+		// post-open checks so the cached pool is bound to the validated file.
+		if err := db.Ping(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("audit: verify SQLite checkpoint connection: %w", err)
+		}
+		if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("audit: revalidate database paths for checkpoint connection: %w", err)
+		}
 		s.checkpointDB = db
 	}
 	return s.checkpointDB, nil

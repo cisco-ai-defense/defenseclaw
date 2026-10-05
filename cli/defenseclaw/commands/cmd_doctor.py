@@ -2037,6 +2037,58 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         )
 
 
+def _check_inventory_storage(cfg, r: _DoctorResult) -> None:
+    """Warn when AI discovery scan history in inventory.db has grown large.
+
+    Read-only: only file sizes are inspected, so a running gateway's
+    database is never opened.
+    """
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return
+    db_path = os.path.join(data_dir, "inventory.db")
+    total = 0
+    for path in (db_path, db_path + "-wal"):
+        try:
+            total += os.stat(path).st_size
+        except OSError:
+            if path == db_path:
+                return
+    if total < 1024 * 1024 * 1024:
+        return
+    retention_days = _configured_local_retention_days(cfg)
+    discovery_enabled = bool(getattr(getattr(cfg, "ai_discovery", None), "enabled", False))
+    if not discovery_enabled:
+        # The gateway only prunes and compacts inventory.db from the running
+        # discovery service, so with discovery off nothing maintains it.
+        remediation = (
+            "the gateway does not maintain inventory.db while ai_discovery is disabled; "
+            "re-enable ai_discovery so the gateway prunes and compacts it, or stop the "
+            "gateway and delete inventory.db (it only holds AI discovery scan history)"
+        )
+    elif retention_days > 0:
+        remediation = (
+            f"keep the gateway running; it prunes AI discovery scan history older than the "
+            f"{retention_days}-day observability.local.retention_days window and compacts the file; "
+            f"if it stays this large, the history inside the window is itself large, so lower "
+            f"observability.local.retention_days"
+        )
+    else:
+        remediation = (
+            "set observability.local.retention_days to a positive window; 0 keeps AI discovery "
+            "scan history indefinitely"
+        )
+    _emit(
+        "warn",
+        "Inventory database size",
+        f"{total // (1024 * 1024)} MiB of AI discovery scan history on disk",
+        r=r,
+        check_id="doctor.state.inventory-storage-size",
+        reason_code="inventory-storage-large",
+        remediation=remediation,
+    )
+
+
 def _check_device_identity(cfg, r: _DoctorResult) -> None:
     """Validate the local Ed25519 identity and its continuity evidence."""
 
@@ -10270,6 +10322,7 @@ def doctor(
     _check_config(cfg, r)
     _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
+    _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
     _check_legacy_sandbox(cfg, r)
 

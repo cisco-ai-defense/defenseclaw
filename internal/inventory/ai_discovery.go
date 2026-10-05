@@ -536,6 +536,10 @@ type ContinuousDiscoveryService struct {
 	// queries are disabled.
 	invStore         *InventoryStore
 	confidenceParams ConfidenceParams
+	// historyRetentionDays bounds invStore scan history (0 = unbounded);
+	// historySweep schedules the pruning. See ai_discovery_history.go.
+	historyRetentionDays atomic.Int64
+	historySweep         inventoryHistorySweeper
 
 	mu              sync.RWMutex
 	last            AIDiscoveryReport
@@ -634,6 +638,9 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 		store:    NewAIStateStore(filepath.Join(opts.DataDir, "ai_discovery_state.json")),
 		triggers: make(chan chan scanResponse, 1),
 	}
+	// Scan history follows the observability.local.retention_days default
+	// until the gateway applies the effective window.
+	svc.historyRetentionDays.Store(config.ObservabilityV8DefaultRetentionDays)
 	if opts.LookupModelProvenanceOnline {
 		svc.modelProvenanceHub = newHuggingFaceProvenanceResolver()
 	}
@@ -943,6 +950,10 @@ func (s *ContinuousDiscoveryService) runClaimed(ctx context.Context) (runErr err
 			}
 		}
 	}()
+	// Registered after the close defer so the sweeper has stopped before
+	// the history store closes.
+	stopHistory := s.startHistoryRetention(ctx)
+	defer stopHistory()
 	_, _ = s.runScan(ctx, true, "startup")
 
 	fullTicker := time.NewTicker(s.opts.ScanInterval)

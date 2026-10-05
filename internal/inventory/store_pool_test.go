@@ -12,7 +12,7 @@ import (
 )
 
 // TestInventoryStore_ConcurrentWritersSerialize fires a burst of
-// PruneScansBefore calls in parallel to confirm the inventory store
+// PruneScanHistory calls in parallel to confirm the inventory store
 // can absorb the same kind of write contention the audit store
 // guards against. The interesting failure mode is `database is
 // locked` returning to the caller; with MaxOpenConns(1) + retryBusy
@@ -36,7 +36,7 @@ func TestInventoryStore_ConcurrentWritersSerialize(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := st.PruneScansBefore(ctx, cutoff); err != nil {
+			if _, err := st.PruneScanHistory(ctx, cutoff, time.Second); err != nil {
 				errs <- err
 			}
 		}()
@@ -45,7 +45,7 @@ func TestInventoryStore_ConcurrentWritersSerialize(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		if err != nil {
-			t.Fatalf("PruneScansBefore returned error: %v", err)
+			t.Fatalf("PruneScanHistory returned error: %v", err)
 		}
 	}
 }
@@ -70,6 +70,7 @@ func TestInventoryStore_PragmasAppliedAcrossPool(t *testing.T) {
 		{"busy_timeout", 5000},
 		{"synchronous", 1}, // NORMAL
 		{"foreign_keys", 1},
+		{"auto_vacuum", 2}, // INCREMENTAL
 	}
 	for _, tc := range cases {
 		var got int64

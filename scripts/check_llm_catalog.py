@@ -194,7 +194,14 @@ def main(argv: list[str] | None = None) -> int:
 
             info = get_model_cost_map_source_info()
         except (ImportError, AttributeError):
-            info = {}
+            # Without source info the radar cannot tell the upstream registry
+            # from the bundled snapshot, so it fails rather than pass unchecked.
+            print(
+                "check_llm_catalog: error: cannot confirm litellm used the upstream registry "
+                "(get_model_cost_map_source_info is unavailable)",
+                file=sys.stderr,
+            )
+            return 2
         if info.get("source") == "local":
             # The upstream fetch failed or was disabled.
             reason = info.get("fallback_reason") or "LITELLM_LOCAL_MODEL_COST_MAP is set"

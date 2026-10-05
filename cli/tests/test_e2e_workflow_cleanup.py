@@ -173,7 +173,14 @@ def test_workspace_repair_is_a_noop_when_owned_and_refuses_odd_layouts(tmp_path:
         environment.update({"RUNNER_WORKSPACE": os.fspath(base), "GITHUB_WORKSPACE": os.fspath(workspace)})
         if path is not None:
             environment["PATH"] = path
-        return subprocess.run(["bash", os.fspath(script)], capture_output=True, text=True, env=environment)
+        return subprocess.run(
+            ["bash", os.fspath(script)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=120,
+            check=False,
+        )
 
     healthy = run(runner_workspace)
     assert (healthy.returncode, healthy.stdout, healthy.stderr) == (0, "", "")

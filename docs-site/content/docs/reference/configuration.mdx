@@ -495,7 +495,8 @@ Exactly one generated local SQLite destination is mandatory. It is configured
 only through `observability.local`, not listed under `destinations`, and cannot
 be disabled or filtered. Omitting `retention_days` uses the seven-day rolling
 default shown above. Set a larger value only when the additional local storage
-and retention scope are intentional. `retention_days: 0` means retain forever
+and retention scope are intentional. The same window bounds AI discovery scan
+history in `<data_dir>/inventory.db`. `retention_days: 0` means retain forever
 and produces a capacity warning. `guardrail.retain_judge_bodies` independently
 controls whether new raw judge bodies are captured.
 

@@ -304,8 +304,11 @@ func TestInventoryStoreNilSafe(t *testing.T) {
 	if err != nil || hist != nil {
 		t.Errorf("nil ComponentHistory should be no-op, got %v / %v", hist, err)
 	}
-	n, err := st.PruneScansBefore(context.Background(), time.Now())
-	if err != nil || n != 0 {
-		t.Errorf("nil Prune should be no-op, got %d / %v", n, err)
+	pruned, err := st.PruneScanHistory(context.Background(), time.Now(), time.Second)
+	if err != nil || pruned.ScansDeleted != 0 || !pruned.Drained {
+		t.Errorf("nil Prune should be no-op, got %+v / %v", pruned, err)
+	}
+	if compacted, err := st.CompactScanHistory(context.Background(), pruned); err != nil || compacted != (ScanHistoryCompaction{}) {
+		t.Errorf("nil Compact should be no-op, got %+v / %v", compacted, err)
 	}
 }

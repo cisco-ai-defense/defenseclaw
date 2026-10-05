@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations"
@@ -223,6 +224,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 	if reloadErr != nil {
 		return result, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapReload, reloadErr)
 	}
+	s.applyAIDiscoveryHistoryRetention(s.aiDiscoverySnapshot())
 	return result, nil
 }
 
@@ -828,6 +830,23 @@ func (s *Sidecar) observabilityV8ActivePlan() *config.ObservabilityV8Plan {
 		return nil
 	}
 	return owner.runtime.Active().Plan()
+}
+
+// applyAIDiscoveryHistoryRetention bounds the discovery service's
+// inventory.db scan history by the same effective
+// observability.local.retention_days window the audit retention reaper uses,
+// read from the committed graph so defaults and reloads match exactly. Without
+// an owned graph the service keeps its built-in default. Callers must not
+// hold observabilityV8Mu.
+func (s *Sidecar) applyAIDiscoveryHistoryRetention(service *inventory.ContinuousDiscoveryService) {
+	if service == nil {
+		return
+	}
+	plan := s.observabilityV8ActivePlan()
+	if plan == nil {
+		return
+	}
+	service.SetHistoryRetentionDays(plan.Snapshot().Local.RetentionDays)
 }
 
 // sidecarObservabilityV8SecretResolver resolves env references from the key
