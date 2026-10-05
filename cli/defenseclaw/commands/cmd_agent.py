@@ -1063,11 +1063,11 @@ def confidence_policy_validate(
 # ---------------------------------------------------------------------------
 # agent discovery — one-shot toggle for the sidecar AI-discovery service.
 #
-# Background: ``ai_discovery.enabled`` is read once at sidecar boot
-# (``inventory.NewContinuousDiscoveryService`` returns nil otherwise),
-# so flipping the flag on disk is necessary but not sufficient. The
-# operator-friendly path is "flip + save + restart + (optional) scan",
-# and the previous workflow required three separate commands plus
+# Background: a running gateway hot-reloads ``ai_discovery``, but the
+# reload is asynchronous, so the operator-friendly path stays "flip +
+# save + restart + (optional) scan": the restart waits for the new
+# gateway before the scan runs. The previous workflow required three
+# separate commands plus
 # manual YAML editing. These subcommands fold all of that into one
 # step and stay parameter-compatible with ``defenseclaw guardrail
 # {enable,disable}`` so muscle memory transfers.

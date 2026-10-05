@@ -1014,6 +1014,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// rebind in-process (apiNeedsRestart). Only the legacy standalone
 		// mode behind the bind shim needs a fresh process (below).
 		"openshell": {},
+		// applyConfigReload rebuilds the discovery service and restarts the
+		// discovery and runtime-plane workers in-process (aiRestart). Keeping
+		// it restart-required failed the whole reload, so a profile edit saved
+		// with an ai_discovery edit silently never applied (GAP-0047).
+		"ai_discovery": {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)
