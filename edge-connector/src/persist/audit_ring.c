@@ -8,28 +8,12 @@ static uint16_t ring_head = 0; /* next write position in flash ring */
 
 /*
  * Audit HMAC computation (chained integrity).
- * When DCLAW_HAS_MBEDTLS=1: real HMAC-SHA256 truncated to 4 bytes.
- * When DCLAW_HAS_MBEDTLS=0: FNV-1a stub for dev builds only.
+ * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 4 bytes.
+ * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 4 bytes.
  */
-#if !defined(DCLAW_HAS_MBEDTLS) || DCLAW_HAS_MBEDTLS == 0
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
 
-#pragma message "Audit HMAC uses FNV-1a stub — DO NOT USE IN PRODUCTION"
-
-static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_hmac,
-                         uint8_t *out_hmac) {
-    uint8_t data[12 + 4]; /* 12 bytes of entry fields + 4 bytes prev hmac */
-    memcpy(data, entry, 12);
-    memcpy(data + 12, prev_hmac, 4);
-
-    uint32_t h = 0x811c9dc5; /* FNV offset basis */
-    for (size_t i = 0; i < sizeof(data); i++) {
-        h ^= data[i];
-        h *= 0x01000193; /* FNV prime */
-    }
-    memcpy(out_hmac, &h, 4);
-}
-
-#else /* DCLAW_HAS_MBEDTLS == 1 */
+/* mbedTLS path — real HMAC-SHA256 via mbedtls_md */
 
 #include <mbedtls/md.h>
 
@@ -52,6 +36,27 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
     mbedtls_md_hmac_update(&ctx, entry_data, 12);
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
+
+    /* Truncate to 4 bytes */
+    memcpy(out_hmac, hmac_full, 4);
+}
+
+#else /* Built-in HMAC-SHA256 — no external library required */
+
+#include "hmac_sha256.h"
+
+static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_hmac,
+                         uint8_t *out_hmac) {
+    /*
+     * Real HMAC-SHA256 truncated to 4 bytes.
+     * Key: prev_hmac (chained, 4 bytes), Message: entry fields (first 12 bytes).
+     * Matches the mbedTLS path semantics exactly.
+     */
+    uint8_t hmac_full[32];
+    uint8_t entry_data[12];
+    memcpy(entry_data, entry, 12);
+
+    dclaw_hmac_sha256(prev_hmac, 4, entry_data, 12, hmac_full);
 
     /* Truncate to 4 bytes */
     memcpy(out_hmac, hmac_full, 4);

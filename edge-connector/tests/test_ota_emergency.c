@@ -1,7 +1,9 @@
 #include "defenseclaw.h"
 #include "platform.h"
+#include "hmac_sha256.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <assert.h>
 
 extern dclaw_state_t *dclaw_get_state(void);
@@ -24,14 +26,30 @@ static void make_policy_blob(uint8_t *blob, size_t *len, uint16_t version,
     *len = 64;
 }
 
-/* Helper: build a "valid" signature (dev stub: starts with 0xED) */
-static void make_valid_signature(uint8_t *sig) {
+/*
+ * Helper: build a valid signature for the given blob.
+ * When mbedTLS is available, this would need real Ed25519 signing (not testable here).
+ * Without mbedTLS, the built-in path uses HMAC-SHA256(ota_key, blob).
+ * Since DCLAW_OTA_KEY is not set, the key is all zeros.
+ */
+static void make_valid_signature_for(const uint8_t *blob, size_t blob_len, uint8_t *sig) {
     memset(sig, 0, 64);
-    sig[0] = 0xED; /* Dev stub marker */
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
+    /* mbedTLS path uses real Ed25519 — tests would need a keypair.
+     * This branch is not exercised when mbedTLS is not found. */
+    (void)blob; (void)blob_len;
+#else
+    /* Built-in path: HMAC-SHA256(zero_key, blob), first 32 bytes in sig */
+    uint8_t zero_key[32];
+    memset(zero_key, 0, sizeof(zero_key));
+    dclaw_hmac_sha256(zero_key, 32, blob, blob_len, sig);
+#endif
 }
 
 static void make_invalid_signature(uint8_t *sig) {
-    memset(sig, 0xAA, 64); /* Does NOT start with 0xED */
+    /* Fill with bytes that won't match any valid HMAC */
+    memset(sig, 0xAA, 64);
+    sig[0] = 0xBB; /* Ensure it doesn't accidentally match */
 }
 
 /* === Policy OTA Tests === */
@@ -45,7 +63,7 @@ static void test_policy_apply_valid(void) {
     make_policy_blob(blob, &len, 1, 5); /* version=1, baseline=5 */
 
     uint8_t sig[64];
-    make_valid_signature(sig);
+    make_valid_signature_for(blob, len, sig);
 
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == 0);
@@ -77,7 +95,7 @@ static void test_policy_rollback_version_rejected(void) {
     make_policy_blob(blob, &len, 3, 5); /* version 3 < current 5 */
 
     uint8_t sig[64];
-    make_valid_signature(sig);
+    make_valid_signature_for(blob, len, sig);
 
     int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(rc == -2);
@@ -93,7 +111,7 @@ static void test_policy_canary_rollback(void) {
     make_policy_blob(blob, &len, 6, 2); /* baseline = 2 blocks/min */
 
     uint8_t sig[64];
-    make_valid_signature(sig);
+    make_valid_signature_for(blob, len, sig);
 
     dclaw_apply_policy(blob, (uint32_t)len, sig);
     assert(s->canary.canary_active == true);
@@ -135,11 +153,11 @@ static void make_emergency_msg(uint8_t *buf, uint32_t seq, uint8_t cmd, bool val
     /* scope */
     buf[9] = 0x00; /* ALL_DEVICES */
     /* payload[32] + reserved[2] = 34 bytes of zeros (already memset) */
-    /* signature at offset 44 */
+    /* signature at offset 44 — sign the first 44 bytes */
     if (valid_sig) {
-        buf[44] = 0xED; /* Dev stub: valid */
+        make_valid_signature_for(buf, 44, buf + 44);
     } else {
-        buf[44] = 0xAA; /* Invalid */
+        make_invalid_signature(buf + 44);
     }
 }
 
@@ -211,6 +229,9 @@ static void test_emergency_no_gap(void) {
 }
 
 int main(void) {
+    /* Ensure the OTA key defaults to zero key for test reproducibility */
+    unsetenv("DCLAW_OTA_KEY");
+
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
     dclaw_init(&info);

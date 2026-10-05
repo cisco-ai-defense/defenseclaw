@@ -11,6 +11,7 @@ typedef struct {
     uint16_t                 offset;
 } dclaw_content_finding_t;
 
+/* Legacy DFA types (kept for ABI compat; unused by Aho-Corasick path) */
 typedef struct {
     uint8_t                  transitions[256];
     dclaw_content_category_t accept_category;

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	"github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 )
 
@@ -19,14 +20,29 @@ import (
 type API struct {
 	manager *manager.FleetManager
 	cache   *verdict.Cache
+	policy  *policy.Service
 	mux     *http.ServeMux
 }
 
 // NewAPI creates the fleet API with its dependencies.
-func NewAPI(mgr *manager.FleetManager, cache *verdict.Cache) *API {
+// The policy service is optional; if nil, policy endpoints return 501.
+func NewAPI(mgr *manager.FleetManager, cache *verdict.Cache, opts ...APIOption) *API {
 	api := &API{manager: mgr, cache: cache, mux: http.NewServeMux()}
+	for _, opt := range opts {
+		opt(api)
+	}
 	api.registerRoutes()
 	return api
+}
+
+// APIOption configures optional API dependencies.
+type APIOption func(*API)
+
+// WithPolicyService attaches a policy distribution service to the API.
+func WithPolicyService(svc *policy.Service) APIOption {
+	return func(a *API) {
+		a.policy = svc
+	}
 }
 
 // Handler returns the http.Handler for mounting.
@@ -66,6 +82,9 @@ func (a *API) registerRoutes() {
 	a.mux.HandleFunc("POST /devices/{id}/command", wrap(a.sendCommand))
 	a.mux.HandleFunc("GET /fleet/health", wrap(a.getFleetHealth))
 	a.mux.HandleFunc("POST /policy/simulate", wrap(a.simulatePolicy))
+	a.mux.HandleFunc("POST /policy/push", wrap(a.pushPolicy))
+	a.mux.HandleFunc("GET /policy/versions", wrap(a.listPolicyVersions))
+	a.mux.HandleFunc("POST /policy/emergency", wrap(a.pushEmergency))
 	a.mux.HandleFunc("POST /threat-intel/push", wrap(a.pushThreatIntel))
 	a.mux.HandleFunc("POST /devices/decommission-batch", wrap(a.decommissionBatch))
 }
@@ -169,11 +188,219 @@ func (a *API) getFleetHealth(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) simulatePolicy(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+
+	if a.policy == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"verdicts_tested":     0,
+			"verdicts_changed":    0,
+			"fits_target_profile": true,
+			"status":              "policy service not configured",
+		})
+		return
+	}
+
+	var req struct {
+		PolicyYAML string `json:"policy_yaml"`
+		Profile    string `json:"profile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if req.Profile == "" {
+		req.Profile = "standard"
+	}
+
+	// Dry-run: compile without signing or distributing
+	blob, err := a.policy.Compile([]byte(req.PolicyYAML), req.Profile, 0)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
+			"error":  "compilation failed",
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	hdr, _ := policy.ParseHeader(blob)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"verdicts_tested":     0,
-		"verdicts_changed":    0,
+		"blob_size":           len(blob),
+		"payload_len":         hdr.PayloadLen,
+		"canary_baseline":     hdr.CanaryBaseline,
 		"fits_target_profile": true,
-		"status":              "simulation not yet connected to pipeline",
+		"status":              "dry-run compilation succeeded",
+	})
+}
+
+// pushPolicy handles POST /policy/push — compiles, signs, stores, and distributes.
+func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+
+	if a.policy == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "policy service not configured",
+		})
+		return
+	}
+
+	var req struct {
+		TenantID   uint64 `json:"tenant_id"`
+		FleetID    uint64 `json:"fleet_id"`
+		PolicyYAML string `json:"policy_yaml"`
+		Profile    string `json:"profile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if req.TenantID == 0 || req.FleetID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "tenant_id and fleet_id are required",
+		})
+		return
+	}
+	if req.PolicyYAML == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "policy_yaml is required",
+		})
+		return
+	}
+	if req.Profile == "" {
+		req.Profile = "standard"
+	}
+
+	signed, version, err := a.policy.CompileSignAndStore([]byte(req.PolicyYAML), req.Profile, req.TenantID, req.FleetID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error":  "policy compilation/signing failed",
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	if err := a.policy.Distribute(r.Context(), req.TenantID, req.FleetID, signed); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error":  "distribution failed",
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":    version,
+		"blob_size":  len(signed),
+		"tenant_id":  req.TenantID,
+		"fleet_id":   req.FleetID,
+		"profile":    req.Profile,
+		"status":     "distributed",
+	})
+}
+
+// listPolicyVersions handles GET /policy/versions?tenant_id=X&fleet_id=Y
+func (a *API) listPolicyVersions(w http.ResponseWriter, r *http.Request) {
+	if a.policy == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "policy service not configured",
+		})
+		return
+	}
+
+	tenantStr := r.URL.Query().Get("tenant_id")
+	fleetStr := r.URL.Query().Get("fleet_id")
+
+	tenantID, err := strconv.ParseUint(tenantStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tenant_id"})
+		return
+	}
+	fleetID, err := strconv.ParseUint(fleetStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid fleet_id"})
+		return
+	}
+
+	versions, err := a.policy.Store().ListVersions(tenantID, fleetID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tenant_id": tenantID,
+		"fleet_id":  fleetID,
+		"versions":  versions,
+	})
+}
+
+// pushEmergency handles POST /policy/emergency — sends an emergency command to a fleet.
+func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+
+	if a.policy == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{
+			"error": "policy service not configured",
+		})
+		return
+	}
+
+	var req struct {
+		TenantID uint64 `json:"tenant_id"`
+		FleetID  uint64 `json:"fleet_id"`
+		Command  string `json:"command"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if req.TenantID == 0 || req.FleetID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "tenant_id and fleet_id are required",
+		})
+		return
+	}
+
+	var cmd policy.EmergencyCommand
+	switch strings.ToUpper(req.Command) {
+	case "FLUSH_CACHE":
+		cmd = policy.EmergencyFlushCache
+	case "ENTER_LOCKDOWN":
+		cmd = policy.EmergencyEnterLockdown
+	case "REVOKE_SESSIONS":
+		cmd = policy.EmergencyRevokeSessions
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unknown command: must be FLUSH_CACHE, ENTER_LOCKDOWN, or REVOKE_SESSIONS",
+		})
+		return
+	}
+
+	if err := a.policy.DistributeEmergency(r.Context(), req.TenantID, req.FleetID, cmd); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error":  "emergency distribution failed",
+			"detail": err.Error(),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tenant_id": req.TenantID,
+		"fleet_id":  req.FleetID,
+		"command":   req.Command,
+		"status":    "distributed",
 	})
 }
 

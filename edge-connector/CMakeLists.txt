@@ -86,6 +86,8 @@ endif()
 # Sources common to all profiles
 set(CORE_SOURCES
     src/dclaw_core.c
+    src/crypto/sha256.c
+    src/crypto/hmac_sha256.c
     src/decision/policy_table.c
     src/decision/correlator.c
     src/decision/verdict_cache.c

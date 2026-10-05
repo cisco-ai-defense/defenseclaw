@@ -1,6 +1,8 @@
 #include "defenseclaw.h"
 #include "platform.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /*
  * OTA Policy + Emergency Broadcast Handler.
@@ -42,19 +44,9 @@ typedef struct {
  * When DCLAW_HAS_MBEDTLS=1: uses TweetNaCl crypto_sign_ed25519_verify_detached.
  * When DCLAW_HAS_MBEDTLS=0: stub for dev builds only.
  */
-#if !defined(DCLAW_HAS_MBEDTLS) || DCLAW_HAS_MBEDTLS == 0
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
 
-#pragma message "Ed25519 verification is STUBBED — DO NOT USE IN PRODUCTION"
-
-static bool verify_ed25519(const uint8_t *message, size_t msg_len,
-                           const uint8_t *signature,
-                           const uint8_t *pubkey) {
-    (void)message; (void)msg_len; (void)pubkey;
-    /* Dev stub: signature[0] == 0xED means "valid" for testing */
-    return signature[0] == 0xED;
-}
-
-#else /* DCLAW_HAS_MBEDTLS == 1 */
+/* mbedTLS path — real Ed25519 signature verification */
 
 /* TweetNaCl Ed25519 verification — declaration for the inline/linked implementation */
 extern int crypto_sign_ed25519_verify_detached(const uint8_t *sig,
@@ -70,15 +62,85 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
                                                pubkey) == 0;
 }
 
+#else /* Built-in HMAC-SHA256 verification — no external library required */
+
+/*
+ * NOTE: This path uses HMAC-SHA256 for integrity verification instead of Ed25519.
+ * It is cryptographically sound for integrity checking with a pre-shared key, but
+ * does NOT provide non-repudiation (asymmetric signatures).
+ * Production deployments should enable mbedTLS for proper Ed25519 verification.
+ */
+#pragma message "Ed25519 unavailable — using HMAC-SHA256 verification. Enable mbedTLS for Ed25519."
+
+#include "hmac_sha256.h"
+
+static bool verify_ed25519(const uint8_t *message, size_t msg_len,
+                           const uint8_t *signature,
+                           const uint8_t *pubkey) {
+    /*
+     * HMAC-SHA256 integrity verification using the pubkey as a pre-shared key.
+     * The first 32 bytes of the 64-byte signature field hold the expected
+     * HMAC-SHA256(pubkey, message) truncated to 32 bytes.
+     *
+     * Constant-time comparison to prevent timing side-channels.
+     */
+    uint8_t expected[32];
+    dclaw_hmac_sha256(pubkey, ED25519_PUBKEY_LEN, message, msg_len, expected);
+
+    volatile uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) {
+        diff |= signature[i] ^ expected[i];
+    }
+    return diff == 0;
+}
+
 #endif /* DCLAW_HAS_MBEDTLS */
 
-/* OTA CA public key — pinned in firmware at build time */
-static const uint8_t ota_ca_pubkey[ED25519_PUBKEY_LEN] = {
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
-};
+/*
+ * OTA CA key — loaded from DCLAW_OTA_KEY env var (hex-encoded 32 bytes)
+ * at first use, falling back to a zero key with a warning.
+ *
+ * When DCLAW_HAS_MBEDTLS=1 this is the Ed25519 public key.
+ * When DCLAW_HAS_MBEDTLS=0 this is the HMAC-SHA256 pre-shared key.
+ */
+static uint8_t ota_ca_key[ED25519_PUBKEY_LEN];
+static bool    ota_ca_key_loaded = false;
+
+static int hex_char_to_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static const uint8_t *get_ota_ca_key(void) {
+    if (ota_ca_key_loaded) return ota_ca_key;
+    ota_ca_key_loaded = true;
+
+    const char *env = getenv("DCLAW_OTA_KEY");
+    if (env != NULL && strlen(env) == 64) {
+        /* Parse 64 hex characters into 32 bytes */
+        bool valid = true;
+        for (int i = 0; i < 32; i++) {
+            int hi = hex_char_to_nibble(env[i * 2]);
+            int lo = hex_char_to_nibble(env[i * 2 + 1]);
+            if (hi < 0 || lo < 0) {
+                valid = false;
+                break;
+            }
+            ota_ca_key[i] = (uint8_t)((hi << 4) | lo);
+        }
+        if (valid) return ota_ca_key;
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY has invalid hex — falling back to zero key\n");
+    } else if (env != NULL) {
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY must be 64 hex chars (32 bytes) — falling back to zero key\n");
+    } else {
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY not set — using zero key. OTA integrity verification is INSECURE.\n");
+    }
+
+    memset(ota_ca_key, 0, sizeof(ota_ca_key));
+    return ota_ca_key;
+}
 
 /* === Policy OTA (REQ-33 through REQ-36) === */
 
@@ -89,8 +151,8 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     if (blob_len < sizeof(dclaw_policy_header_t)) return -1;
     if (blob_len > HAL_FLASH_POLICY_A_SIZE) return -1;
 
-    /* REQ-33: Verify Ed25519 signature */
-    if (!verify_ed25519(blob, blob_len, signature, ota_ca_pubkey)) {
+    /* REQ-33: Verify Ed25519 signature (or HMAC-SHA256 when mbedTLS unavailable) */
+    if (!verify_ed25519(blob, blob_len, signature, get_ota_ca_key())) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, 0, 0);
         return -1;
     }
@@ -223,8 +285,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     uint8_t command = msg[8];
     const uint8_t *signature = msg + 44;
 
-    /* REQ-30: Verify Ed25519 signature over first 44 bytes */
-    if (!verify_ed25519(msg, 44, signature, ota_ca_pubkey)) {
+    /* REQ-30: Verify Ed25519 signature over first 44 bytes
+     * (or HMAC-SHA256 when mbedTLS unavailable) */
+    if (!verify_ed25519(msg, 44, signature, get_ota_ca_key())) {
         return -1;
     }
 

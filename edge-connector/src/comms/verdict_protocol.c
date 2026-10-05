@@ -26,42 +26,12 @@ extern int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
 
 /*
  * Verdict HMAC computation.
- * When DCLAW_HAS_MBEDTLS=1: real HMAC-SHA256 truncated to 4 bytes.
- * When DCLAW_HAS_MBEDTLS=0: FNV-1a stub for dev builds only.
+ * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 4 bytes.
+ * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 4 bytes.
  */
-#if !defined(DCLAW_HAS_MBEDTLS) || DCLAW_HAS_MBEDTLS == 0
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
 
-#pragma message "Verdict HMAC uses FNV-1a stub — DO NOT USE IN PRODUCTION"
-
-static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
-                                 const char *session_id,
-                                 uint16_t request_id, uint8_t action,
-                                 const uint8_t *tool_hash,
-                                 uint8_t *out_4bytes) {
-    /* FNV-1a stub: deterministic 4-byte output for dev/test only */
-    uint32_t h = 0x811c9dc5;
-    for (size_t i = 0; i < key_len; i++) {
-        h ^= device_key[i];
-        h *= 0x01000193;
-    }
-    for (const char *p = session_id; *p; p++) {
-        h ^= (uint8_t)*p;
-        h *= 0x01000193;
-    }
-    h ^= (request_id & 0xFF);
-    h *= 0x01000193;
-    h ^= (request_id >> 8);
-    h *= 0x01000193;
-    h ^= action;
-    h *= 0x01000193;
-    for (int i = 0; i < 8; i++) {
-        h ^= tool_hash[i];
-        h *= 0x01000193;
-    }
-    memcpy(out_4bytes, &h, 4);
-}
-
-#else /* DCLAW_HAS_MBEDTLS == 1 */
+/* mbedTLS path — real HMAC-SHA256 via mbedtls_md */
 
 #include <mbedtls/md.h>
 
@@ -97,6 +67,46 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
 
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
+
+    /* Truncate to 4 bytes */
+    memcpy(out_4bytes, hmac_full, 4);
+}
+
+#else /* Built-in HMAC-SHA256 — no external library required */
+
+#include "hmac_sha256.h"
+
+static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
+                                 const char *session_id,
+                                 uint16_t request_id, uint8_t action,
+                                 const uint8_t *tool_hash,
+                                 uint8_t *out_4bytes) {
+    /*
+     * Real HMAC-SHA256 truncated to 4 bytes.
+     * Input: HMAC-SHA256(device_key, session_id || request_id || action || tool_hash[0:8])
+     * Matches the mbedTLS path semantics exactly.
+     */
+    uint8_t hmac_full[32];
+    uint8_t msg[256]; /* Plenty for session_id + 2 + 1 + 8 */
+    size_t msg_len = 0;
+
+    /* Feed: session_id (NUL-terminated string, excluding NUL) */
+    size_t sid_len = strlen(session_id);
+    memcpy(msg + msg_len, session_id, sid_len);
+    msg_len += sid_len;
+
+    /* Feed: request_id (2 bytes, little-endian) */
+    msg[msg_len++] = (uint8_t)(request_id & 0xFF);
+    msg[msg_len++] = (uint8_t)(request_id >> 8);
+
+    /* Feed: action (1 byte) */
+    msg[msg_len++] = action;
+
+    /* Feed: tool_hash[0:8] */
+    memcpy(msg + msg_len, tool_hash, 8);
+    msg_len += 8;
+
+    dclaw_hmac_sha256(device_key, key_len, msg, msg_len, hmac_full);
 
     /* Truncate to 4 bytes */
     memcpy(out_4bytes, hmac_full, 4);

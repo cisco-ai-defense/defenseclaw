@@ -1,4 +1,5 @@
 #include "content_scanner.h"
+#include "policy_tables.h"
 #include <string.h>
 #include <ctype.h>
 
@@ -37,6 +38,74 @@ static bool is_boundary(char c) {
            c == '=' || c == '+' || c == '-' || c == '*' || c == '%' ||
            c == '#' || c == '@' || c == '`' || c == '~';
 }
+
+/* ================================================================== */
+/*  Aho-Corasick DFA Scanner (O(n) single-pass)                       */
+/* ================================================================== */
+
+#ifdef DCLAW_AC_DFA_AVAILABLE
+
+/**
+ * Run the compiled Aho-Corasick DFA over the content in a single pass.
+ * For each byte the DFA transitions deterministically; when a match
+ * state is reached, each emitted pattern is recorded via add_finding().
+ *
+ * Pattern flags control boundary semantics:
+ *   0 = word-boundary required before the match start
+ *   1 = substring match (no boundary check)
+ *   2 = needs_suffix (reserved, currently unused)
+ */
+static void scan_dfa(const char *content, uint16_t content_len,
+                     dclaw_scan_context_t *ctx) {
+    uint16_t state = 0;
+
+    for (uint16_t i = 0; i < content_len; i++) {
+        uint8_t byte_val = (uint8_t)tolower((unsigned char)content[i]);
+        state = ac_transitions[state][byte_val];
+
+        /* Check for matches at this state */
+        if (ac_match_index[state].count > 0) {
+            uint16_t off = ac_match_index[state].offset;
+            uint8_t  cnt = ac_match_index[state].count;
+
+            for (uint8_t m = 0; m < cnt; m++) {
+                uint8_t pid = ac_match_pids[off + m];
+                const dclaw_ac_pattern_t *pat = &ac_patterns[pid];
+
+                /* Calculate the start position of this match */
+                uint16_t match_start = (i + 1 >= pat->pat_len)
+                                     ? (i + 1 - pat->pat_len)
+                                     : 0;
+
+                /* For word-boundary patterns (flags==0), verify boundary
+                   before the match start position. */
+                if (pat->flags == 0 && match_start > 0 &&
+                    !is_boundary(content[match_start - 1])) {
+                    continue;
+                }
+
+                add_finding(ctx,
+                           (dclaw_content_category_t)pat->category,
+                           (dclaw_severity_t)pat->severity,
+                           match_start);
+
+                if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+#endif /* DCLAW_AC_DFA_AVAILABLE */
+
+/* ================================================================== */
+/*  Manual (fallback) scanners — used when DFA tables not available    */
+/*  or for structural patterns (PII formats, exfil heuristics)        */
+/* ================================================================== */
+
+/* Manual keyword scanners — only compiled when DFA is NOT available */
+#ifndef DCLAW_AC_DFA_AVAILABLE
 
 /**
  * Check if a pattern matches at the given position with word boundaries.
@@ -99,8 +168,13 @@ static void scan_secrets(const char *content, uint16_t content_len, dclaw_scan_c
     }
 }
 
+#endif /* !DCLAW_AC_DFA_AVAILABLE (keyword scanners) */
+
 /**
  * Scan for PII patterns (SSN, email, phone, credit card).
+ *
+ * These are structural/regex-like patterns that the DFA does not cover,
+ * so this scanner always runs regardless of DFA availability.
  */
 static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_context_t *ctx) {
     /* Look for SSN pattern: XXX-XX-XXXX */
@@ -120,6 +194,52 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
     for (uint16_t i = 1; i + 1 < content_len; i++) {
         if (content[i] == '@' && !is_boundary(content[i-1]) && !is_boundary(content[i+1])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i - 1);
+            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
+        }
+    }
+
+    /* Look for phone number patterns:
+     * Format 1: XXX-XXX-XXXX  (e.g. 555-123-4567)
+     * Format 2: (XXX) XXX-XXXX (e.g. (555) 123-4567)
+     * Format 3: XXX.XXX.XXXX  (e.g. 555.123.4567)
+     */
+    for (uint16_t i = 0; i < content_len; i++) {
+        /* Format 1: XXX-XXX-XXXX (12 chars) */
+        if (i + 11 < content_len &&
+            isdigit(content[i]) && isdigit(content[i+1]) && isdigit(content[i+2]) &&
+            content[i+3] == '-' &&
+            isdigit(content[i+4]) && isdigit(content[i+5]) && isdigit(content[i+6]) &&
+            content[i+7] == '-' &&
+            isdigit(content[i+8]) && isdigit(content[i+9]) &&
+            isdigit(content[i+10]) && isdigit(content[i+11])) {
+            /* Disambiguate from SSN (XXX-XX-XXXX): SSN has 2 digits in middle group */
+            /* Phone has 3 digits in middle group, so this is different from SSN */
+            add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
+            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
+        }
+
+        /* Format 2: (XXX) XXX-XXXX (14 chars) */
+        if (i + 13 < content_len &&
+            content[i] == '(' &&
+            isdigit(content[i+1]) && isdigit(content[i+2]) && isdigit(content[i+3]) &&
+            content[i+4] == ')' && content[i+5] == ' ' &&
+            isdigit(content[i+6]) && isdigit(content[i+7]) && isdigit(content[i+8]) &&
+            content[i+9] == '-' &&
+            isdigit(content[i+10]) && isdigit(content[i+11]) &&
+            isdigit(content[i+12]) && isdigit(content[i+13])) {
+            add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
+            if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
+        }
+
+        /* Format 3: XXX.XXX.XXXX (12 chars) */
+        if (i + 11 < content_len &&
+            isdigit(content[i]) && isdigit(content[i+1]) && isdigit(content[i+2]) &&
+            content[i+3] == '.' &&
+            isdigit(content[i+4]) && isdigit(content[i+5]) && isdigit(content[i+6]) &&
+            content[i+7] == '.' &&
+            isdigit(content[i+8]) && isdigit(content[i+9]) &&
+            isdigit(content[i+10]) && isdigit(content[i+11])) {
+            add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
             if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
     }
@@ -144,48 +264,77 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
 
 /**
  * Scan for CREDENTIAL patterns (username/password pairs, auth headers).
+ * Reduced false-positives: "username" and "login" now require = or : suffix.
  */
+#ifndef DCLAW_AC_DFA_AVAILABLE
 static void scan_credentials(const char *content, uint16_t content_len, dclaw_scan_context_t *ctx) {
-    const char *cred_patterns[] = {
+    /* Exact-match patterns (substring, no word boundaries) */
+    const char *exact_patterns[] = {
         "Authorization:", "Basic ",
         "Bearer ", "Token ",
-        "username", "login"
     };
-    const uint8_t num_patterns = sizeof(cred_patterns) / sizeof(cred_patterns[0]);
+    const uint8_t num_exact = sizeof(exact_patterns) / sizeof(exact_patterns[0]);
+
+    /* Suffix-required patterns: match "username=" "username:" "login=" "login:" */
+    const char *suffix_patterns[] = {
+        "username=", "username:",
+        "login=", "login:",
+    };
+    const uint8_t num_suffix = sizeof(suffix_patterns) / sizeof(suffix_patterns[0]);
 
     for (uint16_t i = 0; i < content_len; i++) {
-        for (uint8_t p = 0; p < num_patterns; p++) {
-            const char *pattern = cred_patterns[p];
+        /* Check exact-match patterns */
+        for (uint8_t p = 0; p < num_exact; p++) {
+            const char *pattern = exact_patterns[p];
             uint16_t pattern_len = (uint16_t)strlen(pattern);
 
-            /* For "Authorization:", "Basic ", "Bearer ", "Token " - exact match without word boundaries */
-            if (p < 4) {
-                if (i + pattern_len <= content_len) {
-                    bool match = true;
-                    for (uint16_t j = 0; j < pattern_len; j++) {
-                        if (tolower((unsigned char)content[i + j]) != tolower((unsigned char)pattern[j])) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) {
-                        add_finding(ctx, DCLAW_CONTENT_CATEGORY_CREDENTIAL, DCLAW_SEV_HIGH, i);
-                        i += pattern_len - 1;
+            if (i + pattern_len <= content_len) {
+                bool match = true;
+                for (uint16_t j = 0; j < pattern_len; j++) {
+                    if (tolower((unsigned char)content[i + j]) != tolower((unsigned char)pattern[j])) {
+                        match = false;
                         break;
                     }
                 }
-            } else {
-                /* For "username", "login" - use word boundaries */
-                if (matches_pattern_at(content, i, content_len, pattern, pattern_len)) {
+                if (match) {
                     add_finding(ctx, DCLAW_CONTENT_CATEGORY_CREDENTIAL, DCLAW_SEV_HIGH, i);
                     i += pattern_len - 1;
-                    break;
+                    goto next_pos;
                 }
             }
         }
+
+        /* Check suffix-required patterns (e.g., "username=" or "login:") */
+        for (uint8_t p = 0; p < num_suffix; p++) {
+            const char *pattern = suffix_patterns[p];
+            uint16_t pattern_len = (uint16_t)strlen(pattern);
+
+            if (i + pattern_len <= content_len) {
+                bool match = true;
+                for (uint16_t j = 0; j < pattern_len; j++) {
+                    if (tolower((unsigned char)content[i + j]) != tolower((unsigned char)pattern[j])) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    /* Also require word boundary before */
+                    if (i > 0 && !is_boundary(content[i - 1])) {
+                        continue;
+                    }
+                    add_finding(ctx, DCLAW_CONTENT_CATEGORY_CREDENTIAL, DCLAW_SEV_HIGH, i);
+                    i += pattern_len - 1;
+                    goto next_pos;
+                }
+            }
+        }
+
+        next_pos: ;
         if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) break;
     }
 }
+
+#endif /* !DCLAW_AC_DFA_AVAILABLE (credential scanner) */
 
 /**
  * Scan for EXFIL patterns (base64 blobs, large encoded data).
@@ -215,21 +364,55 @@ static void scan_exfil(const char *content, uint16_t content_len, dclaw_scan_con
     }
 }
 
+#ifndef DCLAW_AC_DFA_AVAILABLE
 /**
  * Scan for INJECTION patterns (SQL, XSS, command injection).
+ * Reduced false-positives: SQL keywords require a word boundary before them.
  */
 static void scan_injection(const char *content, uint16_t content_len, dclaw_scan_context_t *ctx) {
-    const char *injection_patterns[] = {
-        "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ",
-        "UNION ", "<script", "javascript:", "onerror=",
+    /* SQL keywords — require word boundary before (matches_pattern_at handles both sides) */
+    const char *sql_patterns[] = {
+        "SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "UNION ",
+    };
+    const uint8_t num_sql = sizeof(sql_patterns) / sizeof(sql_patterns[0]);
+
+    /* Substring patterns — no boundary requirement */
+    const char *substr_patterns[] = {
+        "<script", "javascript:", "onerror=",
         "../", "../../", "..<", "..\\",
         "${", "eval(", "exec("
     };
-    const uint8_t num_patterns = sizeof(injection_patterns) / sizeof(injection_patterns[0]);
+    const uint8_t num_substr = sizeof(substr_patterns) / sizeof(substr_patterns[0]);
 
     for (uint16_t i = 0; i < content_len; i++) {
-        for (uint8_t p = 0; p < num_patterns; p++) {
-            const char *pattern = injection_patterns[p];
+        /* SQL patterns with word boundary */
+        for (uint8_t p = 0; p < num_sql; p++) {
+            const char *pattern = sql_patterns[p];
+            uint16_t pattern_len = (uint16_t)strlen(pattern);
+
+            /* Require boundary before */
+            if (i > 0 && !is_boundary(content[i - 1])) {
+                continue;
+            }
+            if (i + pattern_len <= content_len) {
+                bool match = true;
+                for (uint16_t j = 0; j < pattern_len; j++) {
+                    if (tolower((unsigned char)content[i + j]) != tolower((unsigned char)pattern[j])) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    add_finding(ctx, DCLAW_CONTENT_CATEGORY_INJECTION, DCLAW_SEV_HIGH, i);
+                    i += pattern_len - 1;
+                    goto next_inj;
+                }
+            }
+        }
+
+        /* Substring patterns */
+        for (uint8_t p = 0; p < num_substr; p++) {
+            const char *pattern = substr_patterns[p];
             uint16_t pattern_len = (uint16_t)strlen(pattern);
 
             if (i + pattern_len <= content_len) {
@@ -243,10 +426,12 @@ static void scan_injection(const char *content, uint16_t content_len, dclaw_scan
                 if (match) {
                     add_finding(ctx, DCLAW_CONTENT_CATEGORY_INJECTION, DCLAW_SEV_HIGH, i);
                     i += pattern_len - 1;
-                    break;
+                    goto next_inj;
                 }
             }
         }
+
+        next_inj: ;
         if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) break;
     }
 }
@@ -277,6 +462,65 @@ static void scan_commands(const char *content, uint16_t content_len, dclaw_scan_
     }
 }
 
+#endif /* !DCLAW_AC_DFA_AVAILABLE */
+
+/* ================================================================== */
+/*  Scope-aware dispatcher                                             */
+/*                                                                     */
+/*  When the Aho-Corasick DFA is compiled in, it replaces the keyword  */
+/*  scanners (secrets, credentials, injection, commands) but we still  */
+/*  need the structural scanners (PII formats, exfil heuristic).       */
+/*  When the DFA is NOT available, we fall back to the manual set.     */
+/* ================================================================== */
+
+#ifdef DCLAW_AC_DFA_AVAILABLE
+
+static void scan_content_for_scope(const char *content, uint16_t content_len,
+                                   dclaw_content_scope_t scope,
+                                   dclaw_scan_context_t *ctx) {
+    /* Single O(n) DFA pass for keyword patterns */
+    scan_dfa(content, content_len, ctx);
+
+    /* Structural patterns the DFA cannot express */
+    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+        scan_pii(content, content_len, ctx);
+    }
+
+    /* EXFIL only for USER_INPUT scope */
+    if (scope != DCLAW_CONTENT_SCOPE_TOOL_OUTPUT &&
+        ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+        scan_exfil(content, content_len, ctx);
+    }
+}
+
+#else /* !DCLAW_AC_DFA_AVAILABLE — manual fallback */
+
+static void scan_content_for_scope(const char *content, uint16_t content_len,
+                                   dclaw_content_scope_t scope,
+                                   dclaw_scan_context_t *ctx) {
+    if (scope == DCLAW_CONTENT_SCOPE_TOOL_OUTPUT) {
+        scan_secrets(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_pii(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_credentials(content, content_len, ctx);
+    } else {
+        scan_secrets(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_pii(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_credentials(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_exfil(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_injection(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS)
+            scan_commands(content, content_len, ctx);
+    }
+}
+
+#endif /* DCLAW_AC_DFA_AVAILABLE */
+
 #endif /* DCLAW_CONTENT_SCAN */
 
 /* === Main Scanning Function === */
@@ -302,34 +546,7 @@ int dclaw_content_scan(const char *content, uint16_t content_len,
     }
 
 #if DCLAW_CONTENT_SCAN
-    if (scope == DCLAW_CONTENT_SCOPE_TOOL_OUTPUT) {
-        /* TOOL_OUTPUT scope: run SECRET, PII, CREDENTIAL categories only */
-        scan_secrets(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_pii(content, content_len, ctx);
-        }
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_credentials(content, content_len, ctx);
-        }
-    } else {
-        /* USER_INPUT scope (and UNKNOWN): run ALL category scanners */
-        scan_secrets(content, content_len, ctx);
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_pii(content, content_len, ctx);
-        }
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_credentials(content, content_len, ctx);
-        }
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_exfil(content, content_len, ctx);
-        }
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_injection(content, content_len, ctx);
-        }
-        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-            scan_commands(content, content_len, ctx);
-        }
-    }
+    scan_content_for_scope(content, content_len, scope, ctx);
 #endif
 
     return ctx->finding_count;
@@ -342,7 +559,7 @@ dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx,
     }
 
     if (scope == DCLAW_CONTENT_SCOPE_USER_INPUT) {
-        /* USER_INPUT: lower thresholds — block on MEDIUM+ findings */
+        /* USER_INPUT: lower thresholds -- block on MEDIUM+ findings */
         for (uint8_t i = 0; i < ctx->finding_count; i++) {
             if (ctx->findings[i].severity >= DCLAW_SEV_HIGH) {
                 return DCLAW_ACTION_BLOCK;
@@ -445,7 +662,7 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         }
     }
 
-    /* Check for inline credentials (user:pass@host pattern) — only in URL authority */
+    /* Check for inline credentials (user:pass@host pattern) -- only in URL authority */
     const char *authority_start = dest;
     const char *scheme_end = strstr(dest, "://");
     if (scheme_end) {

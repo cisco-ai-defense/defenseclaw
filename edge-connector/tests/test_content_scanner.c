@@ -93,14 +93,57 @@ static void test_detect_credit_card_pii(void) {
 
 static void test_detect_username_credential(void) {
     dclaw_scan_context_t ctx;
+    /* "username:" with the colon should trigger (reduced false-positive rule) */
     const char *content = "Please provide username: admin for access";
     int result = dclaw_content_scan(content, (uint16_t)strlen(content),
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
-    assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_CREDENTIAL);
-    assert(ctx.findings[0].severity == DCLAW_SEV_HIGH);
+    /* Find the credential finding (may not be first due to DFA ordering) */
+    bool found_cred = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_CREDENTIAL) {
+            found_cred = true;
+            assert(ctx.findings[i].severity == DCLAW_SEV_HIGH);
+            break;
+        }
+    }
+    assert(found_cred);
     printf("  PASS: detect username credential\n");
+}
+
+static void test_bare_username_no_false_positive(void) {
+    dclaw_scan_context_t ctx;
+    /* Bare "username" without = or : should NOT trigger credential finding */
+    const char *content = "The username field is mandatory";
+    int result = dclaw_content_scan(content, (uint16_t)strlen(content),
+                                    DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    bool found_cred = false;
+    for (uint8_t i = 0; i < (uint8_t)result; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_CREDENTIAL) {
+            found_cred = true;
+            break;
+        }
+    }
+    assert(!found_cred);
+    printf("  PASS: bare 'username' does not trigger credential (false-positive reduction)\n");
+}
+
+static void test_bare_login_no_false_positive(void) {
+    dclaw_scan_context_t ctx;
+    /* Bare "login" without = or : should NOT trigger credential finding */
+    const char *content = "Please login to continue";
+    int result = dclaw_content_scan(content, (uint16_t)strlen(content),
+                                    DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    bool found_cred = false;
+    for (uint8_t i = 0; i < (uint8_t)result; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_CREDENTIAL) {
+            found_cred = true;
+            break;
+        }
+    }
+    assert(!found_cred);
+    printf("  PASS: bare 'login' does not trigger credential (false-positive reduction)\n");
 }
 
 static void test_detect_bearer_token_credential(void) {
@@ -110,8 +153,69 @@ static void test_detect_bearer_token_credential(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
-    assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_CREDENTIAL);
+    /* Find credential finding (DFA may reorder) */
+    bool found_cred = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_CREDENTIAL) {
+            found_cred = true;
+            break;
+        }
+    }
+    assert(found_cred);
     printf("  PASS: detect bearer token credential\n");
+}
+
+/* === Phone Number PII Tests === */
+
+static void test_detect_phone_dash_format(void) {
+    dclaw_scan_context_t ctx;
+    const char *content = "Call me at 555-123-4567 anytime";
+    int result = dclaw_content_scan(content, (uint16_t)strlen(content),
+                                    DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    assert(result >= 1);
+    bool found_phone = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII) {
+            found_phone = true;
+            break;
+        }
+    }
+    assert(found_phone);
+    printf("  PASS: detect phone number (XXX-XXX-XXXX)\n");
+}
+
+static void test_detect_phone_paren_format(void) {
+    dclaw_scan_context_t ctx;
+    const char *content = "Call me at (555) 123-4567 anytime";
+    int result = dclaw_content_scan(content, (uint16_t)strlen(content),
+                                    DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    assert(result >= 1);
+    bool found_phone = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII) {
+            found_phone = true;
+            break;
+        }
+    }
+    assert(found_phone);
+    printf("  PASS: detect phone number ((XXX) XXX-XXXX)\n");
+}
+
+static void test_detect_phone_dot_format(void) {
+    dclaw_scan_context_t ctx;
+    const char *content = "Call me at 555.123.4567 anytime";
+    int result = dclaw_content_scan(content, (uint16_t)strlen(content),
+                                    DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    assert(result >= 1);
+    bool found_phone = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_PII) {
+            found_phone = true;
+            break;
+        }
+    }
+    assert(found_phone);
+    printf("  PASS: detect phone number (XXX.XXX.XXXX)\n");
 }
 
 static void test_detect_base64_exfil(void) {
@@ -134,9 +238,33 @@ static void test_detect_sql_injection(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
-    assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_INJECTION);
-    assert(ctx.findings[0].severity == DCLAW_SEV_HIGH);
+    bool found_inj = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
+            found_inj = true;
+            assert(ctx.findings[i].severity == DCLAW_SEV_HIGH);
+            break;
+        }
+    }
+    assert(found_inj);
     printf("  PASS: detect SQL injection\n");
+}
+
+static void test_sql_keyword_no_false_positive(void) {
+    dclaw_scan_context_t ctx;
+    /* "SELECTED" should NOT trigger — word boundary required after SQL keywords */
+    const char *content = "The selected items are ready";
+    int result = dclaw_content_scan(content, (uint16_t)strlen(content),
+                                    DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
+    bool found_inj = false;
+    for (uint8_t i = 0; i < (uint8_t)result; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
+            found_inj = true;
+            break;
+        }
+    }
+    assert(!found_inj);
+    printf("  PASS: 'selected' does not trigger injection (false-positive reduction)\n");
 }
 
 static void test_detect_xss_injection(void) {
@@ -146,7 +274,14 @@ static void test_detect_xss_injection(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
-    assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_INJECTION);
+    bool found_inj = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
+            found_inj = true;
+            break;
+        }
+    }
+    assert(found_inj);
     printf("  PASS: detect XSS injection\n");
 }
 
@@ -157,7 +292,14 @@ static void test_detect_path_traversal_injection(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
-    assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_INJECTION);
+    bool found_inj = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_INJECTION) {
+            found_inj = true;
+            break;
+        }
+    }
+    assert(found_inj);
     printf("  PASS: detect path traversal injection\n");
 }
 
@@ -168,8 +310,15 @@ static void test_detect_shell_command(void) {
                                     DCLAW_CONTENT_SCOPE_USER_INPUT, &ctx);
     assert(result >= 1);
     assert(ctx.finding_count >= 1);
-    assert(ctx.findings[0].category == DCLAW_CONTENT_CATEGORY_COMMAND);
-    assert(ctx.findings[0].severity == DCLAW_SEV_HIGH);
+    bool found_cmd = false;
+    for (uint8_t i = 0; i < ctx.finding_count; i++) {
+        if (ctx.findings[i].category == DCLAW_CONTENT_CATEGORY_COMMAND) {
+            found_cmd = true;
+            assert(ctx.findings[i].severity == DCLAW_SEV_HIGH);
+            break;
+        }
+    }
+    assert(found_cmd);
     printf("  PASS: detect shell command\n");
 }
 
@@ -254,6 +403,16 @@ int main(void) {
     test_detect_path_traversal_injection();
     test_detect_shell_command();
 
+    /* Phone number PII tests */
+    test_detect_phone_dash_format();
+    test_detect_phone_paren_format();
+    test_detect_phone_dot_format();
+
+    /* False-positive reduction tests */
+    test_bare_username_no_false_positive();
+    test_bare_login_no_false_positive();
+    test_sql_keyword_no_false_positive();
+
     /* SSRF tests */
     test_ssrf_blocks_loopback();
     test_ssrf_blocks_metadata();
@@ -265,6 +424,6 @@ int main(void) {
     test_high_severity_returns_block();
     test_medium_severity_returns_warn();
 
-    printf("  ALL PASSED (22 tests)\n");
+    printf("  ALL PASSED (28 tests)\n");
     return 0;
 }

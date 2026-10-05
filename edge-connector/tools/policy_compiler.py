@@ -21,6 +21,7 @@ import hashlib
 import struct
 import sys
 import os
+from collections import deque
 from pathlib import Path
 
 try:
@@ -80,6 +81,162 @@ CONTENT_CATEGORY_MAP = {
     "injection": 5,
     "command": 6,
 }
+
+
+# ── Aho-Corasick DFA builder ──────────────────────────────────────────────
+
+# All patterns for each content category.
+# Each entry: (lowercase_pattern_string, category_int, severity_int, flags)
+# flags: 0 = normal word-boundary match, 1 = substring (no boundary), 2 = needs_suffix
+CONTENT_DFA_PATTERNS = [
+    # SECRET category (category=1, severity=HIGH=3)
+    ("api_key",                          1, 3, 0),
+    ("apikey",                           1, 3, 0),
+    ("api-key",                          1, 3, 0),
+    ("secret_key",                       1, 3, 0),
+    ("secretkey",                        1, 3, 0),
+    ("secret-key",                       1, 3, 0),
+    ("private_key",                      1, 3, 0),
+    ("privatekey",                       1, 3, 0),
+    ("private-key",                      1, 3, 0),
+    ("access_token",                     1, 3, 0),
+    ("accesstoken",                      1, 3, 0),
+    ("access-token",                     1, 3, 0),
+    ("bearer_token",                     1, 3, 0),
+    ("bearertoken",                      1, 3, 0),
+    ("bearer-token",                     1, 3, 0),
+    ("password",                         1, 3, 0),
+    ("passwd",                           1, 3, 0),
+    ("-----begin private key-----",      1, 3, 1),
+    ("-----begin rsa private key-----",  1, 3, 1),
+
+    # CREDENTIAL category (category=3, severity=HIGH=3)
+    ("authorization:",                   3, 3, 1),
+    ("basic ",                           3, 3, 1),
+    ("bearer ",                          3, 3, 1),
+    ("token ",                           3, 3, 1),
+    # "username" and "login" require = or : after (suffix flag=2)
+    ("username=",                         3, 3, 1),
+    ("username:",                         3, 3, 1),
+    ("login=",                            3, 3, 1),
+    ("login:",                            3, 3, 1),
+
+    # INJECTION category (category=5, severity=HIGH=3)
+    # SQL keywords with trailing space (word-boundary enforced via pattern shape)
+    ("select ",                          5, 3, 0),
+    ("insert ",                          5, 3, 0),
+    ("update ",                          5, 3, 0),
+    ("delete ",                          5, 3, 0),
+    ("drop ",                            5, 3, 0),
+    ("union ",                           5, 3, 0),
+    # XSS / template injection (substring match)
+    ("<script",                          5, 3, 1),
+    ("javascript:",                      5, 3, 1),
+    ("onerror=",                         5, 3, 1),
+    # Path traversal
+    ("../",                              5, 3, 1),
+    ("..\\",                             5, 3, 1),
+    # Code injection
+    ("${",                               5, 3, 1),
+    ("eval(",                            5, 3, 1),
+    ("exec(",                            5, 3, 1),
+
+    # COMMAND category (category=6, severity=HIGH=3)
+    ("rm ",                              6, 3, 0),
+    ("chmod ",                           6, 3, 0),
+    ("chown ",                           6, 3, 0),
+    ("kill ",                            6, 3, 0),
+    ("sudo ",                            6, 3, 0),
+    ("su ",                              6, 3, 0),
+    ("system(",                          6, 3, 1),
+    ("/bin/",                            6, 3, 1),
+    ("/usr/bin/",                        6, 3, 1),
+    ("cmd.exe",                          6, 3, 0),
+    ("powershell",                       6, 3, 0),
+]
+
+
+class AhoCorasickBuilder:
+    """
+    Build an Aho-Corasick automaton from a set of byte patterns, then
+    flatten it into a compact DFA transition table suitable for C codegen.
+
+    The automaton operates on lowercased bytes (the C scanner lowercases
+    on the fly).  Each accepting state carries a list of
+    (pattern_id, category, severity, flags) tuples.
+    """
+
+    def __init__(self):
+        self.goto = [{}]       # goto[state][byte] -> state
+        self.fail = [0]        # fail[state] -> state
+        self.output = [[]]     # output[state] -> [(pid, cat, sev, flags)]
+        self._next_state = 1
+
+    # -- trie construction --------------------------------------------------
+
+    def add_pattern(self, pattern_bytes: bytes, pattern_id: int,
+                    category: int, severity: int, flags: int):
+        state = 0
+        for b in pattern_bytes:
+            if b not in self.goto[state]:
+                self.goto[state][b] = self._next_state
+                self.goto.append({})
+                self.fail.append(0)
+                self.output.append([])
+                self._next_state += 1
+            state = self.goto[state][b]
+        self.output[state].append((pattern_id, category, severity, flags))
+
+    # -- failure link computation (BFS) ------------------------------------
+
+    def build(self):
+        q = deque()
+        # depth-1 states: fail -> 0
+        for b, s in self.goto[0].items():
+            self.fail[s] = 0
+            q.append(s)
+
+        while q:
+            u = q.popleft()
+            for b, v in self.goto[u].items():
+                q.append(v)
+                f = self.fail[u]
+                while f != 0 and b not in self.goto[f]:
+                    f = self.fail[f]
+                self.fail[v] = self.goto[f].get(b, 0)
+                if self.fail[v] == v:
+                    self.fail[v] = 0
+                # merge output from fail chain
+                self.output[v] = self.output[v] + self.output[self.fail[v]]
+
+    # -- DFA flattening (precompute all 256 transitions per state) ----------
+
+    def flatten(self):
+        """
+        Returns (table, matches) where:
+          table[state] = [next_state for byte 0..255]
+          matches[state] = [(pattern_id, category, severity, flags), ...]
+        """
+        n = self._next_state
+        table = [[0] * 256 for _ in range(n)]
+        for state in range(n):
+            for byte_val in range(256):
+                s = state
+                while s != 0 and byte_val not in self.goto[s]:
+                    s = self.fail[s]
+                table[state][byte_val] = self.goto[s].get(byte_val, 0)
+        return table, self.output
+
+
+def build_content_dfa():
+    """Build the Aho-Corasick DFA from CONTENT_DFA_PATTERNS.
+    Returns (table, matches, pattern_list) ready for C codegen."""
+    ac = AhoCorasickBuilder()
+    for pid, (pat, cat, sev, flags) in enumerate(CONTENT_DFA_PATTERNS):
+        ac.add_pattern(pat.encode('ascii'), pid, cat, sev, flags)
+    ac.build()
+    table, matches = ac.flatten()
+    return table, matches, CONTENT_DFA_PATTERNS
 
 
 def parse_policy(yaml_path: Path) -> dict:
@@ -399,6 +556,98 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append(f'DCLAW_UNUSED static const uint8_t trust_strict_user_input = {1 if trust_boundaries["strict_user_input"] else 0};')
     lines.append(f'DCLAW_UNUSED static const uint8_t trust_user_input_block_threshold = {trust_boundaries["user_input_block_threshold"]};')
     lines.append(f'DCLAW_UNUSED static const uint8_t trust_system_block_threshold = {trust_boundaries["system_block_threshold"]};')
+    lines.append('')
+
+    # ── Aho-Corasick Content DFA ─────────────────────────────────────────
+    dfa_table, dfa_matches, dfa_patterns = build_content_dfa()
+    num_states = len(dfa_table)
+
+    lines.append('/* === Aho-Corasick Content Scanner DFA === */')
+    lines.append('')
+    lines.append(f'#define DCLAW_AC_NUM_STATES {num_states}')
+    lines.append(f'#define DCLAW_AC_NUM_PATTERNS {len(dfa_patterns)}')
+    lines.append('')
+
+    # Pattern metadata table
+    lines.append('typedef struct {')
+    lines.append('    uint8_t category;  /* dclaw_content_category_t */')
+    lines.append('    uint8_t severity;  /* dclaw_severity_t */')
+    lines.append('    uint8_t flags;     /* 0=word-boundary, 1=substring, 2=needs_suffix */')
+    lines.append('    uint8_t pat_len;   /* original pattern length */')
+    lines.append('} dclaw_ac_pattern_t;')
+    lines.append('')
+    lines.append('DCLAW_UNUSED')
+    lines.append('static const dclaw_ac_pattern_t ac_patterns[] = {')
+    for pat, cat, sev, flags in dfa_patterns:
+        lines.append(f'    {{ {cat}, {sev}, {flags}, {len(pat)} }},  /* "{pat}" */')
+    lines.append('};')
+    lines.append('')
+
+    # Per-state match lists — collect which states have matches
+    # Build a flat array of (pattern_id) entries plus an index table.
+    match_entries = []   # flat list of pattern ids
+    match_index = []     # (offset, count) per state
+    for state_matches in dfa_matches:
+        if state_matches:
+            match_index.append((len(match_entries), len(state_matches)))
+            for pid, _cat, _sev, _flags in state_matches:
+                match_entries.append(pid)
+        else:
+            match_index.append((0, 0))
+
+    lines.append(f'#define DCLAW_AC_MATCH_ENTRIES {len(match_entries)}')
+    lines.append('')
+    if match_entries:
+        lines.append('DCLAW_UNUSED')
+        lines.append('static const uint8_t ac_match_pids[] = {')
+        # emit in rows of 16
+        for i in range(0, len(match_entries), 16):
+            chunk = match_entries[i:i+16]
+            lines.append('    ' + ', '.join(str(x) for x in chunk) + ',')
+        lines.append('};')
+    else:
+        lines.append('DCLAW_UNUSED')
+        lines.append('static const uint8_t ac_match_pids[] = { 0 };')
+    lines.append('')
+
+    # Match index table: (offset, count) per state — stored as uint16_t pairs
+    lines.append('typedef struct {')
+    lines.append('    uint16_t offset;')
+    lines.append('    uint8_t  count;')
+    lines.append('} dclaw_ac_match_index_t;')
+    lines.append('')
+    lines.append('DCLAW_UNUSED')
+    lines.append('static const dclaw_ac_match_index_t ac_match_index[] = {')
+    for off, cnt in match_index:
+        lines.append(f'    {{ {off}, {cnt} }},')
+    lines.append('};')
+    lines.append('')
+
+    # Transition table: ac_transitions[state][byte] -> next_state
+    # Use uint16_t since state count can exceed 255
+    lines.append('DCLAW_UNUSED')
+    lines.append(f'static const uint16_t ac_transitions[{num_states}][256] = {{')
+    for state_idx, row in enumerate(dfa_table):
+        # Check if all zeros (common for many states)
+        if all(v == 0 for v in row):
+            lines.append(f'    /* state {state_idx} */ {{0}},')
+        else:
+            # Emit non-zero entries compactly using designated initializers
+            nonzero = [(i, v) for i, v in enumerate(row) if v != 0]
+            if len(nonzero) <= 12:
+                entries = ', '.join(f'[{i}]={v}' for i, v in nonzero)
+                lines.append(f'    /* state {state_idx} */ {{{entries}}},')
+            else:
+                lines.append(f'    /* state {state_idx} */ {{')
+                for i in range(0, 256, 16):
+                    chunk = row[i:i+16]
+                    lines.append('        ' + ', '.join(f'{v:>3}' for v in chunk) + ',')
+                lines.append('    },')
+    lines.append('};')
+    lines.append('')
+
+    # DFA availability flag
+    lines.append('#define DCLAW_AC_DFA_AVAILABLE 1')
     lines.append('')
 
     lines.append('#endif /* DCLAW_POLICY_TABLES_H */')
