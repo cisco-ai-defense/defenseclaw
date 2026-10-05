@@ -1879,7 +1879,10 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         mock_path.return_value = Path(self.tmp_dir)
 
         app = AppContext()
-        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+        # A gateway already on the host's default API port moved init to the
+        # next free port, which then appeared in the written config.
+        with patch("defenseclaw.bootstrap._api_port_free", return_value=True):
+            result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
 
         config_file = os.path.join(self.tmp_dir, "config.yaml")
