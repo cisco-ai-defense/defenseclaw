@@ -1835,6 +1835,14 @@ type GuardrailConfig struct {
 	Profiles           map[string]GuardrailProfile `mapstructure:"profiles"            yaml:"profiles,omitempty"`
 	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
 	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
+
+	// profileConnectors is set only on a configuration DerivedForProfile
+	// returns: the profile's own connectors map, keyed by normalized
+	// connector name. policyOverride layers it over Connectors so a profile
+	// can tune one connector without making it a member of
+	// guardrail.connectors. It is unexported, so it never reaches YAML,
+	// JSON or a cloned configuration.
+	profileConnectors map[string]PerConnectorGuardrailConfig
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -1948,7 +1956,7 @@ func (g *GuardrailConfig) EffectiveMode(connector string) string {
 	if g == nil {
 		return "observe"
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if m := strings.TrimSpace(pc.Mode); m != "" {
 			return m
 		}
@@ -1987,7 +1995,7 @@ func (g *GuardrailConfig) EffectiveHILT(connector string) HILTConfig {
 	if g == nil {
 		return HILTConfig{}
 	}
-	if pc, ok := g.connectorOverride(connector); ok && pc.HILT != nil {
+	if pc, ok := g.policyOverride(connector); ok && pc.HILT != nil {
 		return *pc.HILT
 	}
 	return g.HILT
@@ -2000,7 +2008,7 @@ func (g *GuardrailConfig) EffectiveBlockMessage(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if pc.BlockMessage != "" {
 			return pc.BlockMessage
 		}
@@ -2015,7 +2023,7 @@ func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if strings.TrimSpace(pc.RulePackDir) != "" {
 			return pc.RulePackDir
 		}
@@ -2034,7 +2042,7 @@ func (g *GuardrailConfig) EffectiveBlockAt(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if level := canonicalGuardrailLevel(pc.BlockAt); level != "" {
 			return level
 		}
@@ -2050,7 +2058,7 @@ func (g *GuardrailConfig) EffectiveAlertAt(connector string) string {
 	if g == nil {
 		return ""
 	}
-	if pc, ok := g.connectorOverride(connector); ok {
+	if pc, ok := g.policyOverride(connector); ok {
 		if level := canonicalGuardrailLevel(pc.AlertAt); level != "" {
 			return level
 		}
