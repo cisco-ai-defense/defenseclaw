@@ -81,7 +81,7 @@ var (
 	profileSubjectSource = func(context.Context) (profileSubject, bool) { return profileSubject{}, false }
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
-	profileAgentSource = func(context.Context) (string, bool) { return "", false }
+	profileAgentSource = agentIdentityFromContext
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupLocalProfileSubject
