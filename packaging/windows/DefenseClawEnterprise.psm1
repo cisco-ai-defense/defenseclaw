@@ -4409,8 +4409,9 @@ function Get-DefenseClawPathAclVerdicts {
         }
         if ((Test-DefenseClawWriteLikeRights -Rights $rule.FileSystemRights) -and $sid -notin $AllowedWriterSIDs) {
             $verdicts.Add([pscustomobject]@{
-                Kind   = 'Access'
-                Reason = "untrusted principal $sid has write-like access to managed path: $Path"
+                Kind     = 'Access'
+                Severity = 'Write'
+                Reason   = "untrusted principal $sid has write-like access to managed path: $Path"
             })
         }
         if ($RejectUntrustedRead -and
@@ -4418,8 +4419,9 @@ function Get-DefenseClawPathAclVerdicts {
             $sid -notin $AllowedReaderSIDs -and
             -not ($AllowUsersRead -and $sid -eq $script:UsersSID)) {
             $verdicts.Add([pscustomobject]@{
-                Kind   = 'Access'
-                Reason = "untrusted principal $sid can read protected managed path: $Path"
+                Kind     = 'Access'
+                Severity = 'Read'
+                Reason   = "untrusted principal $sid can read protected managed path: $Path"
             })
         }
     }
@@ -4554,22 +4556,32 @@ function Assert-DefenseClawPathAcl {
             # EITHER when the caller passed -AdvisoryUntrustedAccess
             # (ancestor-advisory posture, same as before) OR when the
             # canonical re-stamp ran as part of this call OR, in
-            # non-strict managed_enterprise mode, unconditionally.
+            # non-strict managed_enterprise mode, specifically for
+            # Read-severity verdicts.
             #
-            # The unconditional downgrade covers the case where
-            # Set-Acl/SetNamedSecurityInfo silently dropped
-            # SE_DACL_PROTECTED and the Assert-DefenseClawCanonicalRawPathAcl
-            # self-heal (icacls /inheritance:r) also could not force the
-            # protected flag (Group Policy, filesystem driver, or a WDAC
-            # policy actively re-admitting the ACE). The file then
-            # inherits BUILTIN\Users read from %ProgramData% defaults,
-            # which this verdict chain would otherwise refuse. The trust
-            # envelope is still SYSTEM/Administrators at minimum; the
-            # alternative is leaving the endpoint unprotected because an
-            # inherited Users read ACE is on an admin-only file.
-            # Operators who want fail-closed posture restore it with
+            # The non-strict Read downgrade covers Group Policy / WDAC /
+            # filesystem drivers that silently drop SE_DACL_PROTECTED
+            # and re-admit an inherited BUILTIN\Users read ACE from the
+            # %ProgramData% default template. The trust envelope stays
+            # SYSTEM/Administrators at minimum; the alternative is
+            # leaving the endpoint unprotected because an inherited
+            # Users READ ACE sits on an admin-only file.
+            #
+            # Write-severity verdicts stay FATAL even in non-strict
+            # mode: an untrusted principal with write-like access to a
+            # managed path is a security incident (foreign code could
+            # tamper with gateway state, inject hook commands, or
+            # replace the lifecycle lock contents). The lifecycle-lock
+            # smoke test and other security-critical surfaces rely on
+            # this strictness.
+            #
+            # Operators who want fail-closed posture for BOTH severities
+            # (restoring the pre-v13 behaviour) set
             # DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1.
-            'Access' { $advisory -or $selfHealed -or (-not $strict) }
+            'Access' {
+                $advisory -or $selfHealed -or
+                (-not $strict -and $verdict.Severity -eq 'Read')
+            }
             'Contract' { $advisory -and $selfHealed }
             default { $false }
         }
@@ -24431,8 +24443,20 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     # + Remove-Item. Strict mode
     # (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1) restores the full
     # forensic pipeline for hardened production deployments.
+    #
+    # Route to nuclear ONLY when both roots are inside the real managed-
+    # mode safe-root scope. The PowerShell smoke-test harness uses temp
+    # paths like C:\Users\<runner>\AppData\...\DefenseClaw-PowerShellSmoke
+    # for isolation; those are not production/certification installs and
+    # must stay on the regular validator path so smoke tests can observe
+    # the authenticated teardown they are written for.
+    $nuclearSafeRootPattern =
+        '^[A-Z]:\\(Program Files|ProgramData)\\Cisco\\' +
+        'Cisco Secure Client\\DefenseClaw(-Cert)?(\\|$)'
     if ($Action -eq 'Uninstall' -and $Purge -and
-        -not (Test-DefenseClawTrustStrictAncestors)) {
+        -not (Test-DefenseClawTrustStrictAncestors) -and
+        $InstallRoot -match $nuclearSafeRootPattern -and
+        $StateRoot   -match $nuclearSafeRootPattern) {
         return Invoke-DefenseClawNuclearUninstall `
             -Layout @{
                 InstallRoot = $InstallRoot

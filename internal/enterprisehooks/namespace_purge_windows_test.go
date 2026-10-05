@@ -64,16 +64,29 @@ func TestValidateWindowsNamespacePurgeProductionStateRootAcceptsOnlyExactLayout(
 	}
 	base := filepath.Join(programData, "Cisco", "Cisco Secure Client")
 	production := filepath.Join(base, "DefenseClaw")
-	if err := validateWindowsNamespacePurgeProductionStateRoot(production); err != nil {
-		t.Fatalf("validate production StateRoot: %v", err)
-	}
+	// Both the signed production StateRoot and the scoped certification
+	// StateRoot (DefenseClaw-Cert\<10-hex-char runID>) are valid managed-
+	// enterprise roots. The validator must accept both.
 	for name, path := range map[string]string{
-		"vendor parent": base,
-		"sibling":       filepath.Join(base, "AVC"),
-		"descendant":    filepath.Join(production, "install"),
+		"production":    production,
 		"certification": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e"),
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run("accept/"+name, func(t *testing.T) {
+			if err := validateWindowsNamespacePurgeProductionStateRoot(path); err != nil {
+				t.Fatalf("validate %s StateRoot: %v", name, err)
+			}
+		})
+	}
+	for name, path := range map[string]string{
+		"vendor parent":           base,
+		"sibling":                 filepath.Join(base, "AVC"),
+		"descendant":              filepath.Join(production, "install"),
+		"certification parent":    filepath.Join(base, "DefenseClaw-Cert"),
+		"certification short id":  filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d"),
+		"certification long id":   filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e5f"),
+		"certification bad chars": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3dXZ"),
+	} {
+		t.Run("reject/"+name, func(t *testing.T) {
 			if err := validateWindowsNamespacePurgeProductionStateRoot(path); err == nil {
 				t.Fatalf("non-production StateRoot was accepted: %s", path)
 			}
@@ -88,16 +101,29 @@ func TestValidateWindowsNamespacePurgeProductionInstallRootAcceptsOnlyExactLayou
 	}
 	base := filepath.Join(programFiles, "Cisco", "Cisco Secure Client")
 	production := filepath.Join(base, "DefenseClaw")
-	if err := validateWindowsNamespacePurgeProductionInstallRoot(production); err != nil {
-		t.Fatalf("validate production InstallRoot: %v", err)
-	}
+	// Both the signed production InstallRoot and the scoped certification
+	// InstallRoot are valid managed-enterprise roots. The validator must
+	// accept both.
 	for name, path := range map[string]string{
-		"vendor parent": base,
-		"sibling":       filepath.Join(base, "AVC"),
-		"descendant":    filepath.Join(production, "bin"),
+		"production":    production,
 		"certification": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e"),
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run("accept/"+name, func(t *testing.T) {
+			if err := validateWindowsNamespacePurgeProductionInstallRoot(path); err != nil {
+				t.Fatalf("validate %s InstallRoot: %v", name, err)
+			}
+		})
+	}
+	for name, path := range map[string]string{
+		"vendor parent":           base,
+		"sibling":                 filepath.Join(base, "AVC"),
+		"descendant":              filepath.Join(production, "bin"),
+		"certification parent":    filepath.Join(base, "DefenseClaw-Cert"),
+		"certification short id":  filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d"),
+		"certification long id":   filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e5f"),
+		"certification bad chars": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3dXZ"),
+	} {
+		t.Run("reject/"+name, func(t *testing.T) {
 			if err := validateWindowsNamespacePurgeProductionInstallRoot(path); err == nil {
 				t.Fatalf("non-production InstallRoot was accepted: %s", path)
 			}
