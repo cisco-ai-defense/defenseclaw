@@ -1559,6 +1559,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # selected on behalf of the app so delayed sync messages cannot bounce
         # the operator back to an older tab after rapid mouse clicks.
         self._suppressed_tab_activations: dict[str, int] = {}
+        # When the guardrail profile for this account was last asked for.
+        self._guardrail_profile_at = float("-inf")
         # The Inventory sub-tab the button bar last scrolled to.
         self._inventory_bar_subtab = ""
         # Auto-dismissing toast queue. Mirrors the Go TUI's
@@ -15136,6 +15138,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._ai_usage_poll_running = False
 
+    async def _refresh_guardrail_profile(self) -> None:
+        """Ask, at most once a minute, which guardrail profile decides for you."""
+
+        now = monotonic()
+        if now - self._guardrail_profile_at < 60:
+            return
+        self._guardrail_profile_at = now
+        from defenseclaw.gateway import current_user_guardrail_profile
+
+        try:
+            result = await asyncio.to_thread(current_user_guardrail_profile, self.config)
+        except Exception:  # noqa: BLE001 - the profile line is informational.
+            result = None
+        self.overview_model.set_guardrail_profile(result)
+
     async def _poll_health(self) -> None:
         result = await asyncio.to_thread(_fetch_gateway_health, self.config)
         # Compatibility for tests/extensions that replace the fetcher with
@@ -15155,6 +15172,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if snapshot is not None:
             self.overview_model.set_health(snapshot)
             self._propagate_connector(snapshot)
+            await self._refresh_guardrail_profile()
         # Mirror Go: clear the queued-restart banner once the gateway
         # has actually restarted (its StartedAt moved). Without this
         # the banner sticks around forever even though the restart
