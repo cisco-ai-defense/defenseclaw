@@ -31,7 +31,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback only
 TESTS_DIR = Path(__file__).resolve().parent
 CLI_DIR = TESTS_DIR.parent
 REPO_ROOT = CLI_DIR.parent
-DATA = CLI_DIR / "defenseclaw" / "_data"
+# The tracked sources. `make _bundle-data` mirrors these directories verbatim
+# into the gitignored cli/defenseclaw/_data/ build-staging tree; reading that
+# copy made every test here fail on a fresh checkout that had not run it.
+DATA = REPO_ROOT / "bundles"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 OBS = DATA / "local_observability_stack"
@@ -39,9 +42,6 @@ COMPOSE = OBS / "docker-compose.yml"
 PASSWORD_COMPOSE = OBS / "docker-compose.password.yml"
 OTEL = OBS / "otel-collector" / "config.yaml"
 OBS_README = OBS / "README.md"
-SOURCE_OBS = REPO_ROOT / "bundles" / "local_observability_stack"
-SOURCE_COMPOSE = SOURCE_OBS / "docker-compose.yml"
-SOURCE_PASSWORD_COMPOSE = SOURCE_OBS / "docker-compose.password.yml"
 
 BRIDGE_DIR = DATA / "splunk_local_bridge"
 CI_COMPOSE = BRIDGE_DIR / "compose" / "docker-compose.ci.yml"
@@ -146,11 +146,6 @@ def _load_module(name: str, path: Path, stubs: dict[str, types.ModuleType] | Non
 # --------------------------------------------------------------------------- #
 # Local-observability Compose publishing contract
 # --------------------------------------------------------------------------- #
-def test_local_observability_compose_source_matches_packaged_data() -> None:
-    assert COMPOSE.read_bytes() == SOURCE_COMPOSE.read_bytes()
-    assert PASSWORD_COMPOSE.read_bytes() == SOURCE_PASSWORD_COMPOSE.read_bytes()
-
-
 @pytest.mark.parametrize(
     ("service", "expected_ports"),
     _LOCAL_OBSERVABILITY_PORTS.items(),
