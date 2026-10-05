@@ -6131,7 +6131,11 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
     if not isinstance(raw, dict):
         return AIDiscoveryConfig(enabled=False)
     return AIDiscoveryConfig(
-        enabled=bool(raw.get("enabled", True)),
+        # Go defaults ai_discovery.enabled to false (viper), so a block that
+        # omits the key is disabled there too. Defaulting to true here made the
+        # CLI report discovery as on while the gateway kept it off, and a later
+        # save never wrote the flag because it already matched the loaded value.
+        enabled=_coerce_bool(raw.get("enabled", False)),
         mode=str(raw.get("mode", "enhanced") or "enhanced"),
         scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
