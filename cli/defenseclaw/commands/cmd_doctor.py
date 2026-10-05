@@ -2190,6 +2190,28 @@ def _check_inventory_storage(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
+    """Name the guardrail profile the gateway resolves for this account."""
+    from defenseclaw.commands.cmd_guardrail import profile_status_text
+    from defenseclaw.gateway import current_user_guardrail_profile
+
+    result = current_user_guardrail_profile(cfg)
+    if result is None:
+        return
+    lookup_error = result.get("lookup_error")
+    if result.get("error") or lookup_error:
+        _emit(
+            "warn",
+            "Guardrail profile",
+            profile_status_text(cfg, result) + ("; the user lookup failed" if lookup_error else ""),
+            r=r,
+            check_id="doctor.guardrail.profile",
+            remediation="defenseclaw guardrail profile explain",
+        )
+        return
+    _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
+
+
 def _check_device_identity(cfg, r: _DoctorResult) -> None:
     """Validate the local Ed25519 identity and its continuity evidence."""
 
@@ -10568,6 +10590,8 @@ def doctor(
         _doctor_subsection("Services")
     r.set_section("services")
     sidecar_health = _check_sidecar(cfg, r)
+    if sidecar_health is not None:
+        _check_guardrail_profile(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):

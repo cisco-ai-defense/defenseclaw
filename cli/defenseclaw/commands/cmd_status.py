@@ -471,6 +471,7 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         _print_audit_log_health(cfg, health)
         _print_agents(cfg, health=health)
+        _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
@@ -625,6 +626,16 @@ def _connector_scope_text(cfg) -> str:
     if workspace:
         return f"workspace ({workspace})"
     return "global user config"
+
+
+def _print_guardrail_profile(cfg) -> None:
+    """The guardrail profile that decides for this account, when any are set."""
+    from defenseclaw.commands.cmd_guardrail import profile_status_text
+    from defenseclaw.gateway import current_user_guardrail_profile
+
+    result = current_user_guardrail_profile(cfg)
+    if result is not None:
+        _status_row("Profile", profile_status_text(cfg, result))
 
 
 def _guardrail_turned_off(gc) -> bool:
