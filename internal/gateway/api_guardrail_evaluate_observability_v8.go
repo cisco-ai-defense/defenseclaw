@@ -292,7 +292,10 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 		)
 		envelope.ObservedAt = observability.Present(facts.completedAt)
 		envelope.Correlation.EvaluationID = facts.request.EvaluationID
+		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
 			GenAIConversationID:                 optionalJudgeMetricText(facts.meta.SessionID),
@@ -401,7 +404,10 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		return observability.SpanGuardrailApplyInput{}, false
 	}
 	events = append(events, decisionEvent)
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	return observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.completedAt),
 			Source:     observability.SourceGateway, Connector: facts.routeConnector(),

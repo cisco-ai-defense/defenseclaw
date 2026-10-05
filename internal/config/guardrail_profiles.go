@@ -4,6 +4,9 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -222,19 +225,296 @@ func (p GuardrailProfile) validate() error {
 	return nil
 }
 
-// ErrProfilesNotImplemented is returned by DerivedForProfile until profile
-// resolution lands.
-var ErrProfilesNotImplemented = errors.New("guardrail profiles: DerivedForProfile not implemented")
-
 // DerivedForProfile returns the effective configuration for subjects of the
-// named profile: a copy of c with the profile's overrides applied by the
-// precedence above, precomputed at load and reload with a digest per
-// profile. The empty name returns c unchanged.
+// named profile: a deep copy of c with the profile's overrides applied. The
+// empty name returns c unchanged.
 //
-// It is a stub until the profile resolver is implemented.
+// Every set profile field is written over guardrail.*, over every
+// guardrail.connectors entry, and over application_protection.guardrail and
+// its connector overlays, so the existing Effective*ForConnector resolvers
+// yield the documented precedence:
+//
+//	profile.connectors[c] > profile field > guardrail.connectors[c] >
+//	application_protection overlay > global guardrail.*
+//
+// profile.connectors[c] is layered by the resolvers themselves
+// (policyOverride), so a profile can tune a connector without making it a
+// member of guardrail.connectors. A profile mode also replaces the legacy
+// per-connector hook mode (claude_code.mode, codex.mode, connector_hooks)
+// for its subjects. enabled and hook_fail_mode are never copied: both are
+// baked into the installed hooks. Connector membership, enablement and hook
+// fail mode therefore keep reading the base configuration.
+//
+// The result is read-only. It must not be cloned through YAML or JSON, which
+// drops the unexported profile connector layer.
 func (c *Config) DerivedForProfile(name string) (*Config, error) {
-	if strings.TrimSpace(name) == "" {
+	name = strings.TrimSpace(name)
+	if name == "" {
 		return c, nil
 	}
-	return nil, ErrProfilesNotImplemented
+	if c == nil {
+		return nil, fmt.Errorf("guardrail profile %q: configuration is unavailable", name)
+	}
+	profile, ok := c.Guardrail.Profiles[name]
+	if !ok {
+		return nil, fmt.Errorf("guardrail profile %q is not defined", name)
+	}
+	out, err := deepCopyConfig(c)
+	if err != nil {
+		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
+	}
+	applyGuardrailProfile(out, profile)
+	return out, nil
+}
+
+// DerivedGuardrailProfile is one precomputed profile: its derived
+// configuration and the digest of its derived guardrail policy.
+type DerivedGuardrailProfile struct {
+	Name   string
+	Config *Config
+	Digest string
+}
+
+// DeriveGuardrailProfiles derives every profile in guardrail.profiles. The
+// gateway calls it at load and on every reload; nil means no profiles.
+func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, error) {
+	if c == nil || len(c.Guardrail.Profiles) == 0 {
+		return nil, nil
+	}
+	names := make([]string, 0, len(c.Guardrail.Profiles))
+	for name := range c.Guardrail.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make(map[string]DerivedGuardrailProfile, len(names))
+	for _, name := range names {
+		derived, err := c.DerivedForProfile(name)
+		if err != nil {
+			return nil, err
+		}
+		digest, err := GuardrailPolicyDigest(derived)
+		if err != nil {
+			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
+		}
+		out[name] = DerivedGuardrailProfile{Name: name, Config: derived, Digest: digest}
+	}
+	return out, nil
+}
+
+// guardrailPolicyDigestView is the canonical form of a derived guardrail
+// block that a profile digest covers: every value a profile can change and
+// every value it inherits from. Secret-bearing guardrail settings (the
+// upstream and judge LLM blocks) are deliberately left out, so a digest never
+// commits to a credential.
+type guardrailPolicyDigestView struct {
+	Version           int                                    `json:"v"`
+	Mode              string                                 `json:"mode"`
+	BlockAt           string                                 `json:"block_at"`
+	AlertAt           string                                 `json:"alert_at"`
+	HILT              HILTConfig                             `json:"hilt"`
+	RulePackDir       string                                 `json:"rule_pack_dir"`
+	BlockMessage      string                                 `json:"block_message"`
+	Connectors        map[string]PerConnectorGuardrailConfig `json:"connectors"`
+	ProfileConnectors map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
+	AutoProtection    PerConnectorGuardrailConfig            `json:"application_protection"`
+	AutoConnectors    map[string]PerConnectorGuardrailConfig `json:"application_protection_connectors"`
+	HookModes         map[string]string                      `json:"hook_modes"`
+}
+
+// GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
+// JSON of cfg's guardrail policy (see guardrailPolicyDigestView). Map keys
+// marshal sorted and struct fields in declaration order, so equal policies
+// always yield the same digest.
+func GuardrailPolicyDigest(cfg *Config) (string, error) {
+	if cfg == nil {
+		return "", errors.New("guardrail policy digest: configuration is unavailable")
+	}
+	g := cfg.Guardrail
+	view := guardrailPolicyDigestView{
+		Version:        1,
+		Mode:           strings.TrimSpace(g.Mode),
+		BlockAt:        canonicalGuardrailLevel(g.BlockAt),
+		AlertAt:        canonicalGuardrailLevel(g.AlertAt),
+		HILT:           g.HILT,
+		RulePackDir:    g.RulePackDir,
+		BlockMessage:   g.BlockMessage,
+		Connectors:     g.Connectors,
+		AutoProtection: cfg.ApplicationProtection.Guardrail,
+		HookModes: map[string]string{
+			"claude_code": cfg.ClaudeCode.Mode,
+			"codex":       cfg.Codex.Mode,
+		},
+	}
+	if len(g.profileConnectors) > 0 {
+		view.ProfileConnectors = g.profileConnectors
+	}
+	if len(cfg.ApplicationProtection.Connectors) > 0 {
+		view.AutoConnectors = make(map[string]PerConnectorGuardrailConfig, len(cfg.ApplicationProtection.Connectors))
+		for name, pc := range cfg.ApplicationProtection.Connectors {
+			view.AutoConnectors[name] = pc.Guardrail
+		}
+	}
+	for name, hook := range cfg.ConnectorHooks {
+		view.HookModes["connector_hooks."+name] = hook.Mode
+	}
+	data, err := json.Marshal(view)
+	if err != nil {
+		return "", fmt.Errorf("guardrail policy digest: %w", err)
+	}
+	sum := sha256.Sum256(data)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// policyFields returns the profile's policy fields in the per-connector
+// shape the overlay helpers take.
+func (p GuardrailProfile) policyFields() PerConnectorGuardrailConfig {
+	return PerConnectorGuardrailConfig{
+		Mode:         p.Mode,
+		HILT:         p.HILT,
+		BlockMessage: p.BlockMessage,
+		RulePackDir:  p.RulePackDir,
+		BlockAt:      p.BlockAt,
+		AlertAt:      p.AlertAt,
+	}
+}
+
+// overlayGuardrailPolicy writes every set policy field of src over dst.
+// withLevels false skips block_at and alert_at, which the
+// application_protection overlays do not support. enabled and
+// hook_fail_mode are never copied.
+func overlayGuardrailPolicy(dst, src PerConnectorGuardrailConfig, withLevels bool) PerConnectorGuardrailConfig {
+	if mode := strings.TrimSpace(src.Mode); mode != "" {
+		dst.Mode = mode
+	}
+	if src.HILT != nil {
+		hilt := *src.HILT
+		dst.HILT = &hilt
+	}
+	if src.BlockMessage != "" {
+		dst.BlockMessage = src.BlockMessage
+	}
+	if strings.TrimSpace(src.RulePackDir) != "" {
+		dst.RulePackDir = src.RulePackDir
+	}
+	if withLevels {
+		if level := canonicalGuardrailLevel(src.BlockAt); level != "" {
+			dst.BlockAt = level
+		}
+		if level := canonicalGuardrailLevel(src.AlertAt); level != "" {
+			dst.AlertAt = level
+		}
+	}
+	return dst
+}
+
+// applyGuardrailProfile writes profile over a deep copy (see
+// DerivedForProfile).
+func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
+	fields := profile.policyFields()
+	g := &out.Guardrail
+	if mode := strings.TrimSpace(fields.Mode); mode != "" {
+		g.Mode = mode
+	}
+	if fields.HILT != nil {
+		g.HILT = *fields.HILT
+	}
+	if fields.BlockMessage != "" {
+		g.BlockMessage = fields.BlockMessage
+	}
+	if strings.TrimSpace(fields.RulePackDir) != "" {
+		g.RulePackDir = fields.RulePackDir
+	}
+	if level := canonicalGuardrailLevel(fields.BlockAt); level != "" {
+		g.BlockAt = level
+	}
+	if level := canonicalGuardrailLevel(fields.AlertAt); level != "" {
+		g.AlertAt = level
+	}
+	for name, pc := range g.Connectors {
+		g.Connectors[name] = overlayGuardrailPolicy(pc, fields, true)
+	}
+	ap := &out.ApplicationProtection
+	ap.Guardrail = overlayGuardrailPolicy(ap.Guardrail, fields, false)
+	for name, pc := range ap.Connectors {
+		pc.Guardrail = overlayGuardrailPolicy(pc.Guardrail, fields, false)
+		ap.Connectors[name] = pc
+	}
+	if strings.TrimSpace(fields.Mode) != "" {
+		clearHookModes(out, "")
+	}
+	g.profileConnectors = nil
+	for name, pc := range profile.Connectors {
+		key := normalizeConnectorKey(name)
+		if key == "" {
+			continue
+		}
+		if g.profileConnectors == nil {
+			g.profileConnectors = make(map[string]PerConnectorGuardrailConfig, len(profile.Connectors))
+		}
+		g.profileConnectors[key] = overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
+		if strings.TrimSpace(pc.Mode) != "" {
+			clearHookModes(out, key)
+		}
+	}
+}
+
+// clearHookModes resets the legacy per-connector hook mode (claude_code.mode,
+// codex.mode, connector_hooks.<c>.mode) to inherit, for one normalized
+// connector or, with "", for all, so the guardrail chain carrying the
+// profile's mode decides.
+func clearHookModes(out *Config, connector string) {
+	if connector == "" || connector == "claudecode" {
+		out.ClaudeCode.Mode = ""
+	}
+	if connector == "" || connector == "codex" {
+		out.Codex.Mode = ""
+	}
+	for name, hook := range out.ConnectorHooks {
+		if connector == "" || normalizeConnectorKey(name) == connector {
+			hook.Mode = ""
+			out.ConnectorHooks[name] = hook
+		}
+	}
+}
+
+// policyOverride is connectorOverride plus, on a derived configuration, the
+// profile's own connectors[c] entry, which wins field by field. Connector
+// membership (HasConnector), enablement and hook fail mode keep reading
+// connectorOverride: a profile never changes which hooks are installed.
+func (g *GuardrailConfig) policyOverride(connector string) (PerConnectorGuardrailConfig, bool) {
+	pc, ok := g.connectorOverride(connector)
+	if g == nil || len(g.profileConnectors) == 0 {
+		return pc, ok
+	}
+	if profile, hit := g.profileConnectors[normalizeConnectorKey(connector)]; hit && strings.TrimSpace(connector) != "" {
+		return overlayGuardrailPolicy(pc, profile, true), true
+	}
+	return pc, ok
+}
+
+// profileConnectorOverlay layers the profile's connectors[c] entry over an
+// application_protection overlay. block_at and alert_at stay with the
+// guardrail chain, which reads them through policyOverride.
+func (g *GuardrailConfig) profileConnectorOverlay(connector string, overlay PerConnectorGuardrailConfig) PerConnectorGuardrailConfig {
+	if g == nil || len(g.profileConnectors) == 0 || strings.TrimSpace(connector) == "" {
+		return overlay
+	}
+	if profile, hit := g.profileConnectors[normalizeConnectorKey(connector)]; hit {
+		return overlayGuardrailPolicy(overlay, profile, false)
+	}
+	return overlay
+}
+
+// deepCopyConfig copies c through JSON, which keeps nil and empty maps and
+// slices apart (the gateway's cloneConfig uses the same encoding).
+func deepCopyConfig(c *Config) (*Config, error) {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("copy configuration: %w", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("copy configuration: %w", err)
+	}
+	return &out, nil
 }

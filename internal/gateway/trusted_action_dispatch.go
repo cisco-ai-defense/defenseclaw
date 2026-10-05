@@ -119,7 +119,7 @@ func dispatchTrustedAction(
 	analyzed = true
 	ctx := parent
 
-	generation := snapshotRulePackGeneration(request.Connector)
+	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,

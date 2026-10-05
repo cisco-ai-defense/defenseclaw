@@ -944,6 +944,11 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("watch", oldCfg.Watch, newCfg.Watch)
 	add("guardrail", oldCfg.Guardrail, newCfg.Guardrail)
 	add("guardrail.retain_judge_bodies", oldCfg.Guardrail.RetainJudgeBodies, newCfg.Guardrail.RetainJudgeBodies)
+	// Identity-based guardrail profiles are named on their own so a profile
+	// edit is visible in the change summary; they reload hot.
+	add("guardrail.profiles",
+		[]any{oldCfg.Guardrail.Profiles, oldCfg.Guardrail.ProfileAssignments, oldCfg.Guardrail.DefaultProfile},
+		[]any{newCfg.Guardrail.Profiles, newCfg.Guardrail.ProfileAssignments, newCfg.Guardrail.DefaultProfile})
 	oldEffectiveGateway := effectiveGatewayConfigForDiff(oldCfg.Gateway)
 	newEffectiveGateway := effectiveGatewayConfigForDiff(newCfg.Gateway)
 	add("gateway", oldEffectiveGateway, newEffectiveGateway)
@@ -991,15 +996,16 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 
 	var restart []string
 	hotReloadable := map[string]struct{}{
-		"acp":              {},
-		"guardrail":        {},
-		"webhooks":         {},
-		"observability":    {},
-		"notifications":    {},
-		"environment":      {},
-		"tenant_id":        {},
-		"workspace_id":     {},
-		"discovery_source": {},
+		"acp":                {},
+		"guardrail":          {},
+		"guardrail.profiles": {},
+		"webhooks":           {},
+		"observability":      {},
+		"notifications":      {},
+		"environment":        {},
+		"tenant_id":          {},
+		"workspace_id":       {},
+		"discovery_source":   {},
 		// The gateway never reads registry sources (the CLI fetches and
 		// promotes them into asset_policy), so a registry add/edit must not
 		// make every later reload fail as restart-required (GAP-2422).

@@ -501,6 +501,30 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 
 // ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
 // the live proxy without rereading any side files.
+// profileModeFor applies the request's identity-based guardrail profile to
+// the proxy's mode and block message. It changes them only for a request
+// with a verified user-scoped identity (profileProxyOverride) and never for
+// a disabled ("passthrough") guardrail.
+func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage string) (string, string) {
+	if mode == "passthrough" {
+		return mode, blockMessage
+	}
+	connectorName := ""
+	p.rtMu.RLock()
+	if p.cfg != nil {
+		connectorName = p.cfg.Connector
+	}
+	p.rtMu.RUnlock()
+	profileMode, profileMessage, ok := profileProxyOverride(ctx, connectorName)
+	if !ok {
+		return mode, blockMessage
+	}
+	if profileMessage != "" {
+		blockMessage = profileMessage
+	}
+	return normalizeAgentHookMode(profileMode), blockMessage
+}
+
 func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if p == nil || cfg == nil {
 		return
@@ -1093,6 +1117,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	mode := p.mode
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
+	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
 	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
@@ -2741,6 +2766,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	mode := p.mode
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
+	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
 	// Hot-disabled: guardrail was turned off without sidecar restart.
 	// Return 503 so the fetch interceptor stops routing through the proxy.

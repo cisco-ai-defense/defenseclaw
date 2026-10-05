@@ -220,6 +220,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Resolve the identity-based guardrail profile once, after
+		// authentication, from the route's connector and the verified
+		// subject (never the payload). No-op without profiles.
+		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
 		// handler bounded as a standalone unit too because connector tests and
@@ -984,6 +988,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// authoritative before any lifecycle or telemetry producer observes the
 	// request; reduced fixtures and future bridges are not required to duplicate
 	// it inside agentHookRequest.
+	ctx = a.withGuardrailProfileDecision(ctx, firstNonEmpty(connectorName, req.ConnectorName))
 	if strings.TrimSpace(connectorName) != "" {
 		req.ConnectorName = connectorName
 	}
@@ -1337,7 +1342,7 @@ func (a *APIServer) safeEvaluateHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(connectorName))
+			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName))
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -1361,7 +1366,7 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 		if r := recover(); r != nil {
 			panicked = true
 			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(connectorName))
+			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName))
 			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
 		}
 	}()
@@ -2036,7 +2041,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// enforced: DefenseClaw launched that harness itself, usually with its
 	// own permission prompts off, and the host's connector selection and
 	// guardrail mode say nothing about what runs inside a sandbox.
-	mode := sandboxHookMode(ctx, req.ConnectorName, a.agentHookMode(req.ConnectorName))
+	mode := sandboxHookMode(ctx, req.ConnectorName, a.agentHookMode(ctx, req.ConnectorName))
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, req.ConnectorName) && !a.agentHookEnabled(req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
@@ -2186,7 +2191,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// verdicts only. The audit row + notification dispatched above keep the
 	// original verdict reason, so telemetry retains the "why" while the agent
 	// shows the operator's message. Resolved per connector.
-	responseReason := resolveHookBlockReasonForConfig(a.scannerCfg, req.ConnectorName, action, reason)
+	responseReason := resolveHookBlockReasonForConfig(a.decisionConfig(ctx), req.ConnectorName, action, reason)
 	resp := agentHookResponseForProfile(
 		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps,
 		sinkPolicyFor(ctx, verdict.RedactionEnabled),
@@ -2505,16 +2510,27 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), name)
 }
 
-func (a *APIServer) agentHookMode(name string) string {
+// agentHookMode returns the hook mode for a request: the request's guardrail
+// profile, when one applies, else the start-time configuration.
+func (a *APIServer) agentHookMode(ctx context.Context, name string) string {
+	if a == nil {
+		return "observe"
+	}
+	return hookModeForConfig(a.decisionConfig(ctx), name)
+}
+
+// hookModeForConfig resolves a connector's hook mode in cfg: the legacy
+// per-connector hook mode when set, else the guardrail chain.
+func hookModeForConfig(cfg *config.Config, name string) string {
 	mode := "observe"
-	if a != nil && a.scannerCfg != nil {
-		hookCfg := a.scannerCfg.ConnectorHookConfig(name)
+	if cfg != nil {
+		hookCfg := cfg.ConnectorHookConfig(name)
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || strings.EqualFold(mode, "inherit") {
 			// Per-connector guardrail override (guardrail.connectors[name].mode)
 			// wins over the global mode; EffectiveMode encapsulates that
 			// precedence and falls back to the global mode then "observe".
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector(name))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))
 		}
 	}
 	return normalizeAgentHookMode(mode)

@@ -976,13 +976,13 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	api := NewAPIServer("", nil, nil, nil, nil, cloneConfig(boot))
 	api.SetConfigRuntime(nil, func() *config.Config { return live })
 
-	if got := api.codexMode(); got != "action" {
+	if got := api.codexMode(context.Background()); got != "action" {
 		t.Fatalf("Codex mode = %q, want published action", got)
 	}
-	if got := api.claudeCodeMode(); got != "action" {
+	if got := api.claudeCodeMode(context.Background()); got != "action" {
 		t.Fatalf("Claude Code mode = %q, want published action", got)
 	}
-	rows := api.connectorModesSummary()
+	rows := api.connectorModesSummary(context.Background())
 	if len(rows) != 2 {
 		t.Fatalf("connector mode rows = %d, want 2: %#v", len(rows), rows)
 	}

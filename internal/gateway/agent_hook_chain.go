@@ -198,14 +198,14 @@ func (a *APIServer) applyAgentHookToolChains(
 			projectSQLValuePersistenceSink(ctx, req, &projection)
 		}
 		projection = toolChainProjectionForPolicyPosture(
-			a.scannerCfg,
+			a.decisionConfig(ctx),
 			req.ConnectorName,
 			projection,
 		)
 	}
 	if len(typedFindings) != 0 {
 		intent := guardrailToolCallActionForConnector(
-			a.scannerCfg,
+			a.decisionConfig(ctx),
 			req.ConnectorName,
 			HighestSeverity(typedFindings),
 			true,
@@ -431,7 +431,7 @@ func (a *APIServer) applyAgentHookToolChains(
 
 	caps := profile.Capabilities
 	denyEligible := toolChainProjectionHasBlockIntent(
-		a.scannerCfg,
+		a.decisionConfig(ctx),
 		req.ConnectorName,
 		observationProjection,
 	) &&
@@ -447,7 +447,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// prevents a CRITICAL candidate on the same sink from promoting an
 		// unrelated HIGH match to a block.
 		observationProjection = toolChainBlockEligibleProjection(
-			a.scannerCfg,
+			a.decisionConfig(ctx),
 			req.ConnectorName,
 			observationProjection,
 		)
@@ -490,7 +490,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
 			guardrailToolCallActionForConnector(
-				a.scannerCfg,
+				a.decisionConfig(ctx),
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
 				true,
@@ -531,7 +531,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
 			guardrailToolCallActionForConnector(
-				a.scannerCfg,
+				a.decisionConfig(ctx),
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
 				true,

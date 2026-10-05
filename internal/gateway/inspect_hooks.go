@@ -70,7 +70,7 @@ func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Du
 
 	ch := make(chan []RuleFinding, 1)
 	go func() {
-		ch <- ScanAllRules(text, toolName)
+		ch <- scanAllRulesFor(ctx, text, toolName)
 	}()
 	select {
 	case findings := <-ch:
@@ -160,13 +160,13 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
-		verdict = a.buildVerdict(ruleFindings, "prompt", false)
+		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
 		// Apply the prompt-surface UX contract before mode handling so
 		// "action" mode operators see alert (instead of block) and "observe"
 		// mode operators see the same audit reason explaining the demotion.
 		clampPromptDirectionToolVerdict(verdict, "prompt")
 	}
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -245,9 +245,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
-		verdict = a.buildVerdict(ruleFindings, "completion", false)
+		verdict = a.buildVerdict(r.Context(), ruleFindings, "completion", false)
 	}
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -338,7 +338,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
-		verdict = a.buildVerdict(ruleFindings, "tool_response", false)
+		verdict = a.buildVerdict(r.Context(), ruleFindings, "tool_response", false)
 
 		// Judge lane (J3-3c/J3-3d): the generic /inspect/tool-response
 		// endpoint was regex-only. Forward the tool output to the LLM judge
@@ -359,7 +359,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	verdict.applyMode(inspectMode(a.scannerCfg))
+	verdict.applyMode(inspectMode(a.decisionConfig(r.Context())))
 
 	elapsed := time.Since(t0)
 
@@ -408,10 +408,10 @@ func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerd
 	return buildVerdictWithConfig(ruleFindings, direction, nil, false)
 }
 
-func (a *APIServer) buildVerdict(ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
+func (a *APIServer) buildVerdict(ctx context.Context, ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
 	cfg := (*config.Config)(nil)
 	if a != nil {
-		cfg = a.scannerCfg
+		cfg = a.decisionConfig(ctx)
 	}
 	return buildVerdictWithConfig(ruleFindings, direction, cfg, confirmable)
 }

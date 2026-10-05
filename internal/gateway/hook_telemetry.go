@@ -332,11 +332,12 @@ func isPromptClassHookEvent(name string) bool {
 // effectiveRulePackDir resolves the rule-pack directory for a connector
 // via the per-connector > global resolver, nil-safe for bare test
 // servers that never wired a config.
-func (a *APIServer) effectiveRulePackDir(connector string) string {
-	if a == nil || a.scannerCfg == nil {
+func (a *APIServer) effectiveRulePackDir(ctx context.Context, connector string) string {
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
 		return ""
 	}
-	return a.scannerCfg.EffectiveRulePackDirForConnector(connector)
+	return cfg.EffectiveRulePackDirForConnector(connector)
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on
@@ -354,7 +355,7 @@ func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName
 	}
 	env.StepIdx = a.stepIndexForTurn(sandboxSessionStateKey(ctx, req.SessionID), req.TurnID, req.HookEventName)
 	env.Enforced = resp.Action == "block"
-	env.RulePackDir = a.effectiveRulePackDir(connectorName)
+	env.RulePackDir = a.effectiveRulePackDir(ctx, connectorName)
 
 	meta := hookLLMEventMeta(
 		ctx,

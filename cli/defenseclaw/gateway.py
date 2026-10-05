@@ -541,6 +541,21 @@ class OrchestratorClient:
             raise ValueError("gateway returned a malformed ACP profiles response")
         return data
 
+    def guardrail_profile_resolve(self, *, user: str = "", connector: str = "", agent: str = "") -> dict[str, Any]:
+        """GET /api/v1/guardrail/profiles/resolve: the profile a subject would get."""
+        params = {key: value for key, value in (("user", user), ("connector", connector), ("agent", agent)) if value}
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/guardrail/profiles/resolve",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gateway returned a malformed profile resolution")
+        return data
+
     def emit_cli_observability(self, payload: Mapping[str, Any]) -> None:
         """Hand one raw Python-CLI fact to the canonical v8 runtime.
 
