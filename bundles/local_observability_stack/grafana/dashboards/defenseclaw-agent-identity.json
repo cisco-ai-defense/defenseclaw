@@ -694,7 +694,7 @@
     {
       "type": "timeseries",
       "title": "AI signals by category",
-      "description": "Observed signals by the bounded continuous-discovery taxonomy. Per-sidecar cumulative counter maxima are summed across the selected range so a one-export discovery run is not undercounted.",
+      "description": "Observed signals by the bounded continuous-discovery taxonomy. A series first seen in the range counts in full, so a one-export discovery run is not undercounted.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -707,7 +707,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (signal_category) (increase(defenseclaw_ai_discovery_signals_total[$__range]))",
+          "expr": "sum by (signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total[$__range])))",
           "legendFormat": "{{signal_category}}",
           "refId": "A"
         }
@@ -733,7 +733,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (increase(defenseclaw_ai_discovery_signals_total[$__range])))",
+          "expr": "topk(20, sum by (ai_vendor, ai_product, signal_category) (((last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) - (last_over_time(defenseclaw_ai_discovery_signals_total[1d] offset $__range) or last_over_time(defenseclaw_ai_discovery_signals_total[$__range]) * 0)) >= 0 or last_over_time(defenseclaw_ai_discovery_signals_total[$__range]))))",
           "instant": true,
           "format": "table",
           "refId": "A"
