@@ -549,14 +549,137 @@ jobs:
           & scripts/test-install-lifecycle.ps1 -Assets release -Lanes ($lanes -join ' ') @extra
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  # Upgrades the previous release's standalone enterprise packages to this
+  # release's, through the lane scripts' --upgrade-from mode: the upgrade
+  # keeps the administrator config intent, secrets and guardian ledger and
+  # reports the applied policy, and on Linux and macOS a failed upgrade rolls
+  # back (the root-only lifecycle test fault). The lane names are stable
+  # check names. Without a previous 1.x release every lane is a notice.
+  enterprise-upgrade-gate:
+    name: Enterprise Upgrade (${{ matrix.lane }})
+    needs: [validate, sign, dry-run-assets]
+    if: >-
+      ${{ !cancelled() && needs.validate.result == 'success' &&
+      ((!inputs.dry_run && needs.sign.result == 'success') ||
+      (inputs.dry_run && needs.dry-run-assets.result == 'success')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: deb
+            runner: ubuntu-latest
+            asset: linux-amd64.deb
+          - lane: rpm-el9
+            runner: ubuntu-24.04
+            asset: linux-amd64.rpm
+            image: registry.access.redhat.com/ubi9/ubi-init@sha256:762319bbd0b15a4eff9078eb373b1f426de3e8b5560cf314715c62844b7b0fc8
+          - lane: pkg
+            runner: macos-15
+            asset: darwin-arm64.pkg
+          - lane: Windows
+            runner: windows-latest
+            asset: setup
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      PREVIOUS: ${{ needs.validate.outputs.previous }}
+      GH_TOKEN: ${{ github.token }}
+      LANE: ${{ matrix.lane }}
+      LANE_ASSET: ${{ matrix.asset }}
+      LANE_IMAGE: ${{ matrix.image }}
+    steps:
+      - name: Note a release with nothing to upgrade from
+        if: env.PREVIOUS == ''
+        shell: bash
+        run: echo "::notice title=Enterprise upgrade::No previous 1.x release, so there is no enterprise package to upgrade from"
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: env.PREVIOUS != ''
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        if: env.PREVIOUS != ''
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: env.PREVIOUS != ''
+        with:
+          cosign-release: "v2.6.3"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: env.PREVIOUS != ''
+        with:
+          name: release
+          path: release
+      - name: Fetch and verify the previous release's enterprise package
+        id: previous
+        if: env.PREVIOUS != ''
+        shell: bash
+        run: >-
+          bash scripts/fetch-previous-enterprise-package.sh --asset "$LANE_ASSET" --version "$PREVIOUS" --require
+          --dir "$RUNNER_TEMP/previous" --github-output "$GITHUB_OUTPUT"
+      - name: Remove group and other write access from the runner /opt
+        if: env.PREVIOUS != '' && matrix.lane == 'deb'
+        shell: bash
+        run: sudo chmod go-w /opt
+      - name: Give the runner Windows log folder its usual owner and access
+        if: env.PREVIOUS != '' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $logs = Join-Path $env:windir 'Logs'
+          $account = (Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }).SID.Value
+          icacls $logs /setowner '*S-1-5-32-544' | Out-Null
+          if ($account) {
+            icacls $logs /inheritance:d | Out-Null
+            icacls $logs /remove:g "*$account" | Out-Null
+          }
+      - name: Upgrade, drill the rollback, converge, verify and remove
+        if: env.PREVIOUS != '' && runner.os != 'Windows'
+        shell: bash
+        env:
+          PREVIOUS_PACKAGE: ${{ steps.previous.outputs.package }}
+        run: |
+          set -euo pipefail
+          args=(--package "release/defenseclaw-enterprise-${VERSION}-${LANE_ASSET}" --version "$VERSION"
+            --upgrade-from "$PREVIOUS_PACKAGE" --previous-version "$PREVIOUS" --results "$RUNNER_TEMP/lane-results")
+          if [ "$LANE" = rpm-el9 ]; then
+            bash scripts/test-enterprise-linux-container.sh --image "$LANE_IMAGE" "${args[@]}"
+          else
+            sudo bash scripts/test-enterprise-unix-install.sh "${args[@]}"
+          fi
+      - name: Upgrade, converge, verify and remove the standalone services
+        if: env.PREVIOUS != '' && runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          ./scripts/test-enterprise-windows-install.ps1
+          -Setup (Resolve-Path 'release\DefenseClawSetup-Enterprise-Standalone-x64.exe').Path
+          -Version $env:VERSION -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+          -UpgradeFrom '${{ steps.previous.outputs.package }}' -PreviousVersion $env:PREVIOUS
+      - name: Make the lifecycle results readable
+        if: always() && env.PREVIOUS != '' && runner.os != 'Windows'
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - name: The upgrade kept the administrator config intent
+        if: env.PREVIOUS != ''
+        shell: bash
+        run: >-
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py
+          --before "$RUNNER_TEMP/lane-results/config-v8.yaml"
+          --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml"
+          --record "$RUNNER_TEMP/lane-results/migration-v9.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always() && env.PREVIOUS != ''
+        with:
+          name: enterprise-upgrade-results-${{ matrix.lane }}
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
   publish:
     name: Publish
     # Explicit results: dry-run-assets is always skipped here, and a skipped
     # job anywhere upstream would make the implicit success() false.
     if: >-
       ${{ !inputs.dry_run && !cancelled() && needs.sign.result == 'success' &&
-      needs.install-gate.result == 'success' && needs.enterprise-macos.result == 'success' }}
-    needs: [sign, install-gate, enterprise-macos]
+      needs.install-gate.result == 'success' && needs.enterprise-upgrade-gate.result == 'success' &&
+      needs.enterprise-macos.result == 'success' }}
+    needs: [sign, install-gate, enterprise-upgrade-gate, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
