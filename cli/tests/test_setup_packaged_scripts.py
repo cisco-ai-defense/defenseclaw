@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.environment import source_package_env
+
 ROOT = Path(__file__).resolve().parents[2]
 SETUP_MAIN = ROOT / "cmd" / "defenseclaw-setup" / "main.go"
 VERSION = "9.9.9"
@@ -68,7 +70,7 @@ def _run(install: dict[str, Path], script: str, *args: str) -> subprocess.Comple
     )
     return subprocess.run(
         [sys.executable, "-X", "utf8", "-c", script, *args],
-        env=env,
+        env=source_package_env(env),
         capture_output=True,
         text=True,
         timeout=120,

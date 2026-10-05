@@ -1787,17 +1787,34 @@ jobs:
       # connector; we use -run to filter to just one connector per
       # matrix cell so failures point at exactly which connector
       # regressed instead of a mass red.
+      #
+      # Each test runs on its own and must report its connector subtest:
+      # a renamed or removed test matches nothing and go test still exits
+      # 0, which is how two names in the old combined pattern
+      # (TestV7Observability_DestinationAppPerConnector,
+      # TestHandleGuardrailEvent_OTelAgentName_PerConnector) went unnoticed.
       - name: Connector lifecycle matrix
+        env:
+          CONNECTOR: ${{ matrix.connector }}
         run: |
-          go test -count=1 -v ./test/e2e/ \
-            -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}"
-      # Watcher rescan + gateway proxy + OTel parity tests are
-      # connector-parameterized too; run only the active matrix cell's
-      # subtests for fast iteration on PRs.
+          set -euo pipefail
+          for test in TestConnectorLifecycle_Matrix TestConnectorVerifyCleanOnFreshDataDir; do
+            go test -count=1 -v ./test/e2e/ -run "^${test}\$/^${CONNECTOR}\$" | tee "$RUNNER_TEMP/go-test.log"
+            grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log" \
+              || { echo "::error::${test}/${CONNECTOR} did not run"; exit 1; }
+          done
+      # Gateway proxy parity tests are connector-parameterized too; run only
+      # the active matrix cell's subtests for fast iteration on PRs.
       - name: Per-connector parity tests
+        env:
+          CONNECTOR: ${{ matrix.connector }}
         run: |
-          go test -count=1 -v ./internal/gateway/ \
-            -run "TestProxy_PerConnectorPrefixStrip/${{ matrix.connector }}|TestSwitchConnector_PerConnectorPersistsState/${{ matrix.connector }}|TestApplyRuntime_PerConnectorSwitch/${{ matrix.connector }}|TestHandleGuardrailEvent_OTelAgentName_PerConnector/${{ matrix.connector }}"
+          set -euo pipefail
+          for test in TestProxy_PerConnectorPrefixStrip TestSwitchConnector_PerConnectorPersistsState TestApplyRuntime_PerConnectorSwitch; do
+            go test -count=1 -v ./internal/gateway/ -run "^${test}\$/^${CONNECTOR}\$" | tee "$RUNNER_TEMP/go-test.log"
+            grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log" \
+              || { echo "::error::${test}/${CONNECTOR} did not run"; exit 1; }
+          done
       - name: Per-connector watcher rescan tests
         if: matrix.connector != 'openclaw'
         run: |

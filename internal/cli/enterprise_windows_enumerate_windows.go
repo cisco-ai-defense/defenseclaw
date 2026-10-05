@@ -64,6 +64,10 @@ var enterpriseWindowsEnumerateSessionSettle = 15 * time.Second
 // replace it to fire the window on an explicit event instead of a clock.
 var enterpriseWindowsEnumerateSessionSettleAfter = time.After
 
+// enterpriseWindowsEnumerateSessionNow reads the clock for sign-in times.
+// Tests replace it so a late sign-in's remaining settle time is exact.
+var enterpriseWindowsEnumerateSessionNow = time.Now
+
 // enterpriseWindowsEnumerateOptions carries the CLI flags for the
 // `enterprise windows enumerate` subcommand. Parsed in
 // `newEnterpriseWindowsEnumerateCommand`.
@@ -438,19 +442,29 @@ func runEnterpriseWindowsEnumerateInterval(
 	// internal/winsession; never fires otherwise) runs one extra cycle after
 	// a settle delay, so a newly signed-in user is enrolled without waiting
 	// for the next interval tick.
-	// Sign-ins received while the window is armed join it. A nil channel
-	// never fires, so the window is idle until the first sign-in.
+	// Sign-ins received while the window is armed join it, so a stream of
+	// sign-ins cannot postpone the cycle forever. A nil channel never fires,
+	// so the window is idle until the first sign-in.
 	var session <-chan time.Time
+	var lastLogon time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-winsession.Logons():
+			lastLogon = enterpriseWindowsEnumerateSessionNow()
 			if session == nil {
 				session = enterpriseWindowsEnumerateSessionSettleAfter(enterpriseWindowsEnumerateSessionSettle)
 			}
 		case <-session:
 			session = nil
+			// A sign-in that joined the window late has not had its settle
+			// time yet: its profile may still be incomplete. Run the cycle for
+			// the earlier sign-ins and arm one more window for the rest.
+			if remaining := enterpriseWindowsEnumerateSessionSettle -
+				enterpriseWindowsEnumerateSessionNow().Sub(lastLogon); remaining > 0 {
+				session = enterpriseWindowsEnumerateSessionSettleAfter(remaining)
+			}
 			fmt.Fprintf(stderr, "[hook-enumerator] session sign-in: running an extra cycle\n")
 			if err := runEnterpriseWindowsEnumerateSingleCycle(ctx, stderr, manifestPath, true); err != nil {
 				if !isEnterpriseWindowsEnumerateConfigMissing(err) {

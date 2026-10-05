@@ -29,14 +29,17 @@ import (
 
 // A sign-in forwarded through internal/winsession arms one settle window and
 // runs one extra cycle when it fires, instead of waiting for the interval
-// tick. Sign-ins the loop receives while the window is armed join it.
+// tick. Sign-ins the loop receives while the window is armed join it; one
+// that joined late gets one more window for the rest of its settle time.
 func TestEnterpriseWindowsEnumerateIntervalRunsACycleOnSignIn(t *testing.T) {
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
 	previousConfig := enterpriseWindowsEnumerateConfigLoader
 	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
 	previousWriter := enterpriseWindowsEnumerateManifestWriter
 	previousSettleAfter := enterpriseWindowsEnumerateSessionSettleAfter
+	previousNow := enterpriseWindowsEnumerateSessionNow
 	t.Cleanup(func() {
+		enterpriseWindowsEnumerateSessionNow = previousNow
 		enterpriseWindowsEnumerateConfigLoader = previousConfig
 		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
 		enterpriseWindowsEnumerateManifestWriter = previousWriter
@@ -49,6 +52,18 @@ func TestEnterpriseWindowsEnumerateIntervalRunsACycleOnSignIn(t *testing.T) {
 	enterpriseWindowsEnumerateSessionSettleAfter = func(d time.Duration) <-chan time.Time {
 		armed <- d
 		return settle
+	}
+	// The loop reads the clock at each sign-in and when a window fires: the
+	// second sign-in arrives 10 s into the 15 s window, and the follow-up
+	// window fires once that sign-in has had its full settle time.
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	readings := []time.Time{
+		start, start.Add(10 * time.Second),
+		start.Add(enterpriseWindowsEnumerateSessionSettle), start.Add(25 * time.Second),
+	}
+	var reads atomic.Int32
+	enterpriseWindowsEnumerateSessionNow = func() time.Time {
+		return readings[min(int(reads.Add(1))-1, len(readings)-1)]
 	}
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) {
 		return &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}, nil
@@ -101,14 +116,21 @@ func TestEnterpriseWindowsEnumerateIntervalRunsACycleOnSignIn(t *testing.T) {
 	if n := <-started; n != 2 {
 		t.Fatalf("sign-in cycle = %d, want 2", n)
 	}
+	if d := <-armed; d != 10*time.Second {
+		t.Fatalf("late sign-in window = %v, want the 10 s it has left", d)
+	}
+	settle <- time.Now()
+	if n := <-started; n != 3 {
+		t.Fatalf("late sign-in cycle = %d, want 3", n)
+	}
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatalf("interval loop: %v", err)
 	}
-	if got := cycles.Load(); got != 2 {
-		t.Fatalf("two sign-ins in one settle window ran %d cycles in total, want 2", got)
+	if got := cycles.Load(); got != 3 {
+		t.Fatalf("two sign-ins ran %d cycles in total, want 3", got)
 	}
 	if extra := len(armed); extra != 0 {
-		t.Fatalf("two sign-ins in one settle window armed %d extra windows, want 0", extra)
+		t.Fatalf("two sign-ins armed %d extra windows, want 0", extra)
 	}
 }

@@ -125,6 +125,27 @@ def _no_shared_hook_temp_dirs(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_host_gateway_listener(monkeypatch: pytest.MonkeyPatch):
+    """Keep doctor's API-port ownership checks off the host's real sockets.
+
+    A host running its own gateway on the default API port (a shared dev box)
+    made doctor report "held by PID ..., not by this account's gateway", and
+    every sidecar, legacy-sandbox and gateway-repair test failed there. Tests
+    that exercise ownership patch these themselves or call the readers that
+    take an explicit proc root.
+    """
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.doctor_gateway import ListenerEvidence
+
+    monkeypatch.setattr(cmd_doctor, "_linux_foreign_listener_accounts", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_listener_evidence",
+        lambda *_args, **_kwargs: ListenerEvidence("missing"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_live_gateway_policy_reload(monkeypatch: pytest.MonkeyPatch):
     """Keep ``policy activate`` (reload on by default) off any real gateway.
 

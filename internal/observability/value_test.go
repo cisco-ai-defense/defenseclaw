@@ -459,3 +459,24 @@ func TestZeroValueCannotMarshal(t *testing.T) {
 		t.Fatalf("zero marshal error = %v", err)
 	}
 }
+
+func TestExactInt64ReadsCanonicalExponentSpellings(t *testing.T) {
+	value, err := NewValue(map[string]any{"pause": int64(5_000_000), "count": int64(-1500)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := value.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pause, pauseOK := ExactInt64(object["pause"].(json.Number))
+	count, countOK := ExactInt64(object["count"].(json.Number))
+	if !pauseOK || pause != 5_000_000 || !countOK || count != -1500 {
+		t.Fatalf("pause=%d/%t count=%d/%t from %s", pause, pauseOK, count, countOK, value.Bytes())
+	}
+	for _, text := range []string{"1.5e0", "1e19", "1e999999999", "5"} {
+		if got, ok := ExactInt64(json.Number(text)); ok != (text == "5") {
+			t.Errorf("ExactInt64(%q) = %d, %t", text, got, ok)
+		}
+	}
+}

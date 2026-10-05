@@ -127,6 +127,18 @@ func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
 		},
 	}
 
+	// Connector homes follow these variables before $HOME. A host that sets
+	// one (CODEX_HOME on a dev box) moved the dirs off the expected paths.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME", "ZEPTOCLAW_HOME"} {
+		t.Setenv(name, "") // restored after the test
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	wcfg := config.GatewayWatcherConfig{}
 	wcfg.Skill.Enabled = true
 	wcfg.Plugin.Enabled = true

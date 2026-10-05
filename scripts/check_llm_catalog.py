@@ -96,7 +96,7 @@ def load_bundled_registry() -> dict | None:
 
     Reads the JSON file directly, without importing ``litellm`` (its import
     fetches the upstream registry over the network by default). Returns
-    ``None`` when ``litellm`` is not installed or ships no snapshot.
+    ``None`` when ``litellm`` is not installed or ships no readable snapshot.
     """
     spec = importlib.util.find_spec("litellm")
     if spec is None or not spec.submodule_search_locations:
@@ -104,7 +104,12 @@ def load_bundled_registry() -> dict | None:
     path = Path(next(iter(spec.submodule_search_locations))) / BUNDLED_REGISTRY
     if not path.is_file():
         return None
-    registry = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(registry, dict):
+        return None
     # LiteLLM exposes each entry's ``aliases`` as extra top-level keys.
     for entry in list(registry.values()):
         if isinstance(entry, dict) and isinstance(entry.get("aliases"), list):

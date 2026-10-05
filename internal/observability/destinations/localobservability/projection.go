@@ -371,8 +371,8 @@ func integerValue(value any) int64 {
 	if !ok {
 		return -1
 	}
-	parsed, err := number.Int64()
-	if err != nil {
+	parsed, ok := observability.ExactInt64(number)
+	if !ok {
 		return -1
 	}
 	return parsed

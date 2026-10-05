@@ -44,6 +44,7 @@ from defenseclaw.migrations import (
     _yaml_scalar,
 )
 
+from tests.environment import source_package_env
 from tests.permissions import assert_owner_only_file, grant_everyone
 
 
@@ -79,7 +80,7 @@ sys.modules["defenseclaw.config"] = legacy_config
 import defenseclaw.migrations
 assert not hasattr(legacy_config, "locked_file_update")
 """
-        subprocess.run([sys.executable, "-c", script], check=True)
+        subprocess.run([sys.executable, "-c", script], check=True, env=source_package_env())
 
 
 class TestYAMLScalarRendering(unittest.TestCase):

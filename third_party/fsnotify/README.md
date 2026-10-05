@@ -2,7 +2,8 @@
 
 This is github.com/fsnotify/fsnotify v1.9.0 (BSD-3-Clause, see LICENSE)
 without its tests and commands. The root go.mod replaces the upstream
-module with this directory. Only backend_windows.go differs from v1.9.0.
+module with this directory. Only backend_windows.go and the kqueue Close
+fix below differ from v1.9.0.
 
 On Windows, Remove and Close cancel a watch's pending ReadDirectoryChanges
 call, close its handle and drop the watch at once. The cancelled call still
@@ -25,6 +26,11 @@ fsnotify v1.10.1. The changes:
 - sendError puts Close's handshake back, so Close no longer hangs when an
   error is reported during Close. Upstream issue #768 and pull request #769
   describe the double close and this hang.
+
+On kqueue (macOS and the BSDs), Close marked the watcher closed before it
+removed the watches, and the closed check in remove skipped every
+unix.Close, so each closed watcher leaked one descriptor per watched path.
+Close now releases them directly (backend_kqueue.go, removeWatch).
 
 Remove this directory and the replace directive once an upstream release
 fixes these.

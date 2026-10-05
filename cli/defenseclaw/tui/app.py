@@ -664,6 +664,22 @@ class _BodyStatic(Static):
             event.stop()
 
 
+class _PanelMain(Vertical):
+    """``#panel-main``: re-fits an open detail once the pane has its new size.
+
+    A terminal resize renders the detail from ``call_after_refresh``, which
+    can still measure the old layout, and a fixed 0.25 s re-check came too
+    early on a slow terminal: grown from 80x24 the box kept its old 16 rows
+    under blank rows until the next refresh tick (GAP-2603). This pane's own
+    Resize arrives after it is laid out at the new size.
+    """
+
+    def on_resize(self, event: events.Resize) -> None:
+        recheck = getattr(self.app, "_recheck_detail_box", None)
+        if recheck is not None:
+            self.app.call_after_refresh(recheck)
+
+
 class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     """Textual TUI foundation.
 
@@ -2087,7 +2103,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # neither, #panel-main lays out exactly as before.
                 with Horizontal(id="panel-split"):
                     yield PanelNav(id="panel-nav", classes="hidden")
-                    with Vertical(id="panel-main"):
+                    with _PanelMain(id="panel-main"):
                         yield Static("LOCAL MODELS", id="ai-model-table-label", classes="hidden")
                         yield MeasuredDataTable(
                             id="ai-model-table",
@@ -2801,12 +2817,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 or self._panel_aside(panel) is not None
                 or self.detail_text
             ):
+                # That render can still measure the old layout; #panel-main
+                # measures the free rows again once it has its new size.
                 self.call_after_refresh(self._render_chrome)
-                if self.detail_text:
-                    # That render can still measure the old layout: grown
-                    # from 80x24 the box stayed 16 rows under blank rows.
-                    # Measure the free rows again once the layout settles.
-                    self.set_timer(0.25, self._recheck_detail_box)
             elif panel == "overview":
                 # Overview's cards are built for the current width (GAP-2509).
                 self.call_after_refresh(self._update_body_only)
