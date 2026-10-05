@@ -190,7 +190,7 @@ const InterceptionSelfTestFreshness = 3 * time.Minute
 
 // InterceptionHealth is the additive doctor signal that a live
 // :4000 listener is actually receiving interceptor-rewritten LLM
-// traffic, not just answering /health/liveliness.
+// traffic, not just answering /health.
 type InterceptionHealth struct {
 	Verified           bool   `json:"verified"`
 	LastVerifiedAt     string `json:"last_verified_at,omitempty"`

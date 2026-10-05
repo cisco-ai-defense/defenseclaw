@@ -2979,7 +2979,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):
     """D6: whether the proxy port is 'intentionally closed' is decided over the
     FULL active set. A proxy peer (openclaw/zeptoclaw) that binds port 4000
-    forces the real liveliness probe even when the primary is hook-enforced.
+    forces the real /health probe even when the primary is hook-enforced.
     """
 
     def _cfg(self, connectors, mode="observe"):

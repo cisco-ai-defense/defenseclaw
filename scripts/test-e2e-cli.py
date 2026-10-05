@@ -406,9 +406,9 @@ def test_guardrail_proxy(t: TestRunner):
 
     # Health check
     try:
-        resp = urllib.request.urlopen(f"http://127.0.0.1:{GUARDRAIL_PORT}/health/liveliness", timeout=5)
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{GUARDRAIL_PORT}/health", timeout=5)
         alive = resp.read().decode()
-        t._record("guardrail: health check", "alive" in alive.lower(), alive)
+        t._record("guardrail: health check", "healthy" in alive.lower(), alive)
     except Exception as e:
         t._record("guardrail: health check", False, "", str(e))
         return
