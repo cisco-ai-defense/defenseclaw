@@ -15,6 +15,7 @@
 #
 # Usage:
 #   test-enterprise-linux-container.sh --image REF --package FILE --version VERSION [--results DIR]
+#       [--upgrade-from FILE --previous-version VERSION]
 #
 #   --image REF     a systemd image whose entrypoint boots /sbin/init, for
 #                   example registry.access.redhat.com/ubi9/ubi-init@sha256:...
@@ -23,6 +24,9 @@
 #   --version V     the product version the package's binaries report
 #   --results DIR   where to keep the lifecycle results (default: a new
 #                   temporary directory)
+#   --upgrade-from FILE, --previous-version VERSION
+#                   run the upgrade lane from this previous package (see
+#                   test-enterprise-unix-install.sh)
 
 set -euo pipefail
 
@@ -31,13 +35,17 @@ image=""
 package=""
 version=""
 results=""
+upgrade_from=""
+previous_version=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --image) image=${2:?--image needs a value}; shift 2 ;;
         --package) package=${2:?--package needs a value}; shift 2 ;;
         --version) version=${2:?--version needs a value}; shift 2 ;;
         --results) results=${2:?--results needs a value}; shift 2 ;;
-        -h | --help) sed -n '4,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --upgrade-from) upgrade_from=${2:?--upgrade-from needs a value}; shift 2 ;;
+        --previous-version) previous_version=${2:?--previous-version needs a value}; shift 2 ;;
+        -h | --help) sed -n '4,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -50,6 +58,13 @@ command -v docker >/dev/null 2>&1 || { echo "docker is required" >&2; exit 2; }
 
 package_dir=$(cd "$(dirname "$package")" && pwd)
 package_name=$(basename "$package")
+upgrade_volume=()
+upgrade_args=()
+if [ -n "$upgrade_from" ]; then
+    [ -f "$upgrade_from" ] || { echo "$upgrade_from does not exist" >&2; exit 2; }
+    upgrade_volume=(--volume "$(cd "$(dirname "$upgrade_from")" && pwd):/lane-previous:ro")
+    upgrade_args=(--upgrade-from "/lane-previous/$(basename "$upgrade_from")" --previous-version "$previous_version")
+fi
 results=${results:-$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-install-lane.XXXXXX")}
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
@@ -74,6 +89,7 @@ docker run --detach --name "$name" --privileged \
     --volume "$repo:/src:ro" \
     --volume "$package_dir:/lane-package:ro" \
     --volume "$results:/lane-results" \
+    ${upgrade_volume[@]+"${upgrade_volume[@]}"} \
     "$image" >/dev/null
 
 # Wait for systemd to finish booting; "degraded" only means an unrelated
@@ -95,4 +111,5 @@ case "$state" in
 esac
 
 docker exec "$name" bash /src/scripts/test-enterprise-unix-install.sh \
-    --package "/lane-package/$package_name" --version "$version" --results /lane-results
+    --package "/lane-package/$package_name" --version "$version" --results /lane-results \
+    ${upgrade_args[@]+"${upgrade_args[@]}"}

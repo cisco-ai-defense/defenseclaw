@@ -134,6 +134,55 @@ def test_checker_rejects_a_result_that_does_not_match(
     assert result.stderr.startswith("FAIL step: ")
 
 
+def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
+    # The rollback drill's step must fail with the test fault and roll back.
+    drill = _result(
+        ok=False,
+        exit_code=1,
+        errors=[{"code": "lifecycle_test_fault", "message": "fault"}],
+        warnings=[{"code": "lifecycle_test_fault", "message": "fault"}, {"code": "rolled_back", "message": "restored"}],
+    )
+    result = _check(
+        tmp_path, drill, "--expect-error", "lifecycle_test_fault",
+        "--allow-warning", "lifecycle_test_fault", "--allow-warning", "rolled_back",
+    )
+    assert result.returncode == 0, result.stderr
+    # The upgrade itself must report an applied policy from a newer config generation.
+    upgraded = _result(policy={"effective_digest": "sha256:ab", "config_generation": 2, "applied": True})
+    assert _check(tmp_path, upgraded, *FULL, "--policy-applied", "--config-generation-above", "1").returncode == 0
+    result = _check(tmp_path, _result(), *FULL, "--policy-applied")
+    assert "  - the result reports no policy" in result.stderr.splitlines(), result.stderr
+
+
+def test_upgrade_config_check_requires_every_v8_value_kept_or_recorded(tmp_path: Path) -> None:
+    import hashlib
+
+    before = b"config_version: 8\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nskill_actions:\n  high: {install: block}\n"
+    (tmp_path / "v8.yaml").write_bytes(before)
+    record = {
+        "from_version": 8,
+        "to_version": 9,
+        "source_sha256": hashlib.sha256(before).hexdigest(),
+        "moved": [{"from": "skill_actions.high.install", "to": "admission.skill.actions.high"}],
+        "conflicts": [],
+    }
+    (tmp_path / "record.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def run(after: str) -> subprocess.CompletedProcess[str]:
+        (tmp_path / "v9.yaml").write_text(after, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "check_enterprise_upgrade_config.py"), "--before", str(tmp_path / "v8.yaml"),
+             "--after", str(tmp_path / "v9.yaml"), "--record", str(tmp_path / "record.json")],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+
+    kept = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nadmission:\n  skill:\n    actions: {high: block}\n"
+    assert run(kept).returncode == 0, run(kept).stderr
+    changed = run(kept.replace("mode: observe", "mode: action"))
+    assert changed.returncode == 1
+    assert "  - guardrail.mode changed from 'observe' to 'action'" in changed.stderr.splitlines()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
 def test_unit_check_fails_on_diagnostics_outside_the_allow_list(tmp_path: Path) -> None:
     """The lane's unit check fails on a directive the systemd 239 allow list does not name."""
