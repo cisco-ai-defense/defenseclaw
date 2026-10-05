@@ -44,10 +44,16 @@ type fakeKCM struct {
 
 func (k *fakeKCM) Write(p []byte) (int, error) {
 	// 4-byte length, major 2, minor 0, 2-byte opcode, data.
-	k.ops = append(k.ops, binary.BigEndian.Uint16(p[7:9]))
+	if p[4] != 2 || p[5] != 0 {
+		panic("unexpected KCM protocol version")
+	}
+	k.ops = append(k.ops, binary.BigEndian.Uint16(p[6:8]))
 	reply := k.replies[0]
 	k.replies = k.replies[1:]
+	// Length, transport status, then the reply with its own status word,
+	// as sssd-kcm writes it.
 	_ = binary.Write(&k.out, binary.BigEndian, uint32(4+len(reply)))
+	_ = binary.Write(&k.out, binary.BigEndian, uint32(0))
 	_ = binary.Write(&k.out, binary.BigEndian, uint32(0))
 	k.out.Write(reply)
 	return len(p), nil

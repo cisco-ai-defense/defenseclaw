@@ -91,7 +91,7 @@ const (
 	kcmMaxReply            = 64 << 10
 	DefaultKCMSocketPath   = "/run/.heim_org.h5l.kcm-socket"
 	LegacyKCMSocketPath    = "/var/run/.heim_org.h5l.kcm-socket"
-	kcmRequestHeaderLength = 5
+	kcmRequestHeaderLength = 4
 )
 
 // KCMDefaultPrincipal asks a KCM daemon on conn for the default principal of
@@ -121,23 +121,30 @@ func KCMDefaultPrincipal(conn io.ReadWriter, cacheName string) (string, error) {
 	return reader.principal()
 }
 
-// kcmCall sends one request and returns the reply payload after the status
-// word. Unix-socket framing is a 32-bit big-endian length on each message.
+// kcmCall sends one request and returns the reply payload. A request is the
+// protocol version (one byte major, one byte minor), a 16-bit big-endian
+// opcode and the operation's data, framed on the Unix socket by a 32-bit
+// big-endian length. A reply is that length, a 32-bit transport status
+// outside it, then the reply itself, which starts with the operation's own
+// 32-bit status (MIT kcmio_unix_socket_read and kcmio_call; sssd-kcm
+// answers the same way).
 func kcmCall(conn io.ReadWriter, opcode uint16, data []byte) ([]byte, error) {
 	request := make([]byte, 4, 4+kcmRequestHeaderLength+len(data))
 	binary.BigEndian.PutUint32(request, uint32(kcmRequestHeaderLength+len(data)))
-	request = binary.BigEndian.AppendUint16(request, kcmProtocolMajor)
-	request = append(request, kcmProtocolMinor)
+	request = append(request, kcmProtocolMajor, kcmProtocolMinor)
 	request = binary.BigEndian.AppendUint16(request, opcode)
 	request = append(request, data...)
 	if _, err := conn.Write(request); err != nil {
 		return nil, err
 	}
-	var length [4]byte
-	if _, err := io.ReadFull(conn, length[:]); err != nil {
+	var header [8]byte
+	if _, err := io.ReadFull(conn, header[:]); err != nil {
 		return nil, err
 	}
-	size := binary.BigEndian.Uint32(length[:])
+	size := binary.BigEndian.Uint32(header[:4])
+	if status := int32(binary.BigEndian.Uint32(header[4:])); status != 0 {
+		return nil, fmt.Errorf("useridentity: KCM operation %d failed with status %d", opcode, status)
+	}
 	if size < 4 || size > kcmMaxReply {
 		return nil, errCCacheFormat
 	}

@@ -112,8 +112,8 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	if result, queryErr := r.query("group", keys...); queryErr == nil &&
 		(result.exitCode == getentExitOK || result.exitCode == getentExitNotFound) {
 		for _, line := range nonEmptyLines(string(result.stdout)) {
-			if group, parseErr := ParseGroupLine(line); parseErr == nil {
-				names[group.GID] = group.Name
+			if gid, name, ok := parseGroupName(line); ok {
+				names[gid] = name
 			}
 		}
 	}
@@ -148,4 +148,25 @@ func ParseNSSwitchPasswdServices(content string) []string {
 		return out
 	}
 	return nil
+}
+
+// parseGroupName reads the name and gid of a group(5) line. Unlike
+// ParseGroupLine it accepts the spaces directory group names carry ("domain
+// users@corp.example.com"): the name is only reported, never used to
+// resolve an account.
+func parseGroupName(line string) (int, string, bool) {
+	fields := strings.Split(strings.TrimRight(line, "\r\n"), ":")
+	if len(fields) != 4 || fields[0] == "" || len(fields[0]) > maxNameLength {
+		return 0, "", false
+	}
+	for _, r := range fields[0] {
+		if r < 0x20 || r == 0x7f || r == ',' {
+			return 0, "", false
+		}
+	}
+	gid, err := parseID(fields[2], "gid")
+	if err != nil {
+		return 0, "", false
+	}
+	return gid, fields[0], true
 }
