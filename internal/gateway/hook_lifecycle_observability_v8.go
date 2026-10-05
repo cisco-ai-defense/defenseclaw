@@ -328,6 +328,7 @@ func buildHookToolLifecycleV8Record(
 		DefenseClawTelemetryInputReported:  false,
 		DefenseClawTelemetryOutputReported: false,
 	}
+	meta.Identity.applyTo(&base)
 	if meta.LifecycleEvent == observability.TelemetryEventToolEnd {
 		return builder.BuildLogCompatToolEnd(observability.LogCompatToolEndInput(base))
 	}

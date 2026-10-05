@@ -1299,6 +1299,13 @@ defenseclaw_extract_trace_context() {
 # guardrail hook under errexit, where a nonzero return would convert a missing
 # telemetry field into a blocked or allowed tool call.
 defenseclaw_user_identity_args() {
+  local facts
+  facts="$(defenseclaw_session_facts_value)"
+  if [ -n "$facts" ]; then
+    printf '%s\n' "-H"
+    printf '%s\n' "X-DefenseClaw-Session-Facts: $facts"
+  fi
+
   command -v id >/dev/null 2>&1 || return 0
 
   local uid name
@@ -1317,5 +1324,37 @@ defenseclaw_user_identity_args() {
   esac
   printf '%s\n' "-H"
   printf '%s\n' "X-DefenseClaw-User-Name: $name"
+  return 0
+}
+
+# defenseclaw_session_facts_value renders the X-DefenseClaw-Session-Facts
+# value from the SSH and logind variables of this session (v1;k=ssh;tty=..;
+# ls=..;ca=..). The Go hook runner also reports the Kerberos default
+# principal; a shell hook does not read credential caches. Every value is
+# claimed attribution and is dropped unless it matches the header's
+# allowlisted charset.
+defenseclaw_session_facts_value() {
+  local value kind tty ls ca pair v
+  value="v1"
+  kind=""
+  ca="${SSH_CONNECTION:-}"
+  ca="${ca%% *}"
+  tty="${SSH_TTY:-}"
+  tty="${tty#/dev/}"
+  ls="${XDG_SESSION_ID:-}"
+  if [ -n "$ca" ] || [ -n "$tty" ]; then
+    kind="ssh"
+  elif [ -n "$ls" ]; then
+    kind="local"
+  fi
+  for pair in "k=$kind" "tty=$tty" "ls=$ls" "ca=$ca"; do
+    v="${pair#*=}"
+    case "$v" in
+      '' | *[!A-Za-z0-9._@/:-]*) continue ;;
+    esac
+    [ "${#v}" -le 256 ] || continue
+    value="$value;$pair"
+  done
+  [ "$value" = "v1" ] || printf '%s' "$value"
   return 0
 }

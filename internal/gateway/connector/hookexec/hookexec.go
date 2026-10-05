@@ -780,6 +780,12 @@ func setUserIdentityHeaders(req *http.Request) {
 	if v := identity.Name; safeIdentityHeaderValue(v) {
 		req.Header.Set("X-DefenseClaw-User-Name", v)
 	}
+	// The session the hook runs in (SSH, logind, the Kerberos default
+	// principal): claimed facts the gateway uses for attribution only.
+	// useridentity renders it from an allowlisted charset and bounds it.
+	if v := useridentity.CurrentSessionFactsHeader(); v != "" {
+		req.Header.Set(useridentity.SessionFactsHeader, v)
+	}
 }
 
 // safeIdentityHeaderValue accepts only printable US-ASCII without the

@@ -360,6 +360,10 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				if tid := traceIDFromHeaders(r.Header); tid != "" {
 					ctx = ContextWithTraceID(ctx, tid)
 				}
+				// The hook's claimed session facts (identity_subject.go):
+				// attribution only, never authority, and ignored entirely
+				// under the Secure Client integration.
+				ctx = withClaimedSessionFacts(ctx, r.Header)
 			}
 			if TraceIDFromContext(ctx) == "" {
 				if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {

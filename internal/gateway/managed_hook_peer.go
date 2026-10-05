@@ -487,6 +487,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 				peer.UID, peer.Name, connectorName, route)
 		}
 		ctx := PromoteSessionIfAuthenticated(r.Context())
+		ctx = a.attachVerifiedSubject(ctx, strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
 		if inspect {
 			ctx = withAuthenticatedInspectConnector(ctx, connectorName)
 		} else {

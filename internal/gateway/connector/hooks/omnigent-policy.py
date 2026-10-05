@@ -426,6 +426,9 @@ def _identity_headers() -> dict[str, str]:
     so a hostile account name cannot smuggle a second header into every call.
     """
     headers: dict[str, str] = {}
+    facts = _session_facts_header()
+    if facts:
+        headers["X-DefenseClaw-Session-Facts"] = facts
     try:
         # os.getuid is absent on Windows, where no POSIX uid exists.
         uid = os.getuid()  # type: ignore[attr-defined]
@@ -444,6 +447,30 @@ def _identity_headers() -> dict[str, str]:
     if name and len(name) <= 256 and _SAFE_ACCOUNT_NAME.fullmatch(name):
         headers["X-DefenseClaw-User-Name"] = name
     return headers
+
+
+_SAFE_SESSION_FACT = re.compile(r"[A-Za-z0-9._@/:-]{1,256}")
+
+
+def _session_facts_header() -> str:
+    """Render the claimed SSH and logind session facts.
+
+    The value is the X-DefenseClaw-Session-Facts header the hook runner also
+    sends. Each value is dropped unless it matches the header's allowlisted
+    charset; everything here is claimed attribution, never authority.
+    """
+    connection = os.environ.get("SSH_CONNECTION", "").split()
+    address = connection[0] if connection else ""
+    tty = os.environ.get("SSH_TTY", "")
+    if tty.startswith("/dev/"):
+        tty = tty[len("/dev/"):]
+    session = os.environ.get("XDG_SESSION_ID", "")
+    kind = "ssh" if address or tty else ("local" if session else "")
+    parts = ["v1"]
+    for key, value in (("k", kind), ("tty", tty), ("ls", session), ("ca", address)):
+        if value and _SAFE_SESSION_FACT.fullmatch(value):
+            parts.append(f"{key}={value}")
+    return ";".join(parts) if len(parts) > 1 else ""
 
 
 def _scoped_hook_token() -> str:

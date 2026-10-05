@@ -124,7 +124,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 				ConfigGeneration: int64(snapshot.Generation()), ConfigDigest: snapshot.Digest(),
 			},
 		}
-		return builder.BuildLogCompatHookDecision(observability.LogCompatHookDecisionInput{
+		identityInput := observability.LogCompatHookDecisionInput{
 			Envelope: envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
@@ -172,7 +172,9 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
-		})
+		}
+		meta.Identity.applyTo(&identityInput)
+		return builder.BuildLogCompatHookDecision(identityInput)
 	})
 }
 

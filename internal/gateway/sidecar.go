@@ -508,6 +508,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	setStandaloneEnterpriseActive(cfg.StandaloneEnterprise())
 	setManagedServiceHosted(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
+	applyIdentityPosture(cfg)
 	return sidecar, nil
 }
 
@@ -1823,6 +1824,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setStandaloneEnterpriseActive(next.StandaloneEnterprise())
 	setManagedServiceHosted(nextManagedEnterprise)
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
+	applyIdentityPosture(&next)
 
 	appliedCfg := current
 	if !onlyReloadModeChange {

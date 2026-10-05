@@ -98,7 +98,29 @@ function defenseclawIdentityHeaders() {
   if (defenseclawSafeIdentityValue(info.username)) {
     headers["X-DefenseClaw-User-Name"] = info.username;
   }
+  const facts = defenseclawSessionFactsHeader();
+  if (facts !== "") {
+    headers["X-DefenseClaw-Session-Facts"] = facts;
+  }
   return headers;
+}
+
+// defenseclawSessionFactsHeader renders the claimed SSH and logind session
+// facts as the X-DefenseClaw-Session-Facts value the hook runner also sends.
+// Each value is dropped unless it matches the header's allowlisted charset.
+function defenseclawSessionFactsHeader() {
+  const env = process.env;
+  const address = String(env.SSH_CONNECTION || "").trim().split(/\s+/)[0] || "";
+  const tty = String(env.SSH_TTY || "").replace(/^\/dev\//, "");
+  const session = String(env.XDG_SESSION_ID || "");
+  const kind = address !== "" || tty !== "" ? "ssh" : (session !== "" ? "local" : "");
+  const parts = ["v1"];
+  for (const [key, value] of [["k", kind], ["tty", tty], ["ls", session], ["ca", address]]) {
+    if (value.length > 0 && value.length <= 256 && /^[A-Za-z0-9._@\/:-]+$/.test(value)) {
+      parts.push(key + "=" + value);
+    }
+  }
+  return parts.length > 1 ? parts.join(";") : "";
 }
 
 // defenseclawSafeIdentityValue mirrors the account-name allowlist the POSIX
