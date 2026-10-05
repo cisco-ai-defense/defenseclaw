@@ -1648,7 +1648,7 @@ func TestProxyWithLocalInspector(t *testing.T) {
 		// the TestProxyPreCallInspection/confirm_*_alerts_and_forwards
 		// subtests.
 		prov := &mockProvider{}
-		insp := NewGuardrailInspector("local", nil, nil, "")
+		insp := NewGuardrailInspector("local", nil, nil)
 		proxy := newTestProxy(t, prov, insp, "action")
 
 		reqBody := mustJSON(t, map[string]interface{}{
@@ -1672,7 +1672,7 @@ func TestProxyWithLocalInspector(t *testing.T) {
 
 	t.Run("local_scanner_allows_clean_prompt", func(t *testing.T) {
 		prov := &mockProvider{}
-		insp := NewGuardrailInspector("local", nil, nil, "")
+		insp := NewGuardrailInspector("local", nil, nil)
 		proxy := newTestProxy(t, prov, insp, "action")
 
 		reqBody := mustJSON(t, map[string]interface{}{
@@ -1705,7 +1705,7 @@ func TestProxyWithLocalInspector(t *testing.T) {
 				}},
 			},
 		}
-		insp := NewGuardrailInspector("local", nil, nil, "")
+		insp := NewGuardrailInspector("local", nil, nil)
 		proxy := newTestProxy(t, prov, insp, "action")
 
 		reqBody := mustJSON(t, map[string]interface{}{
@@ -3961,7 +3961,7 @@ func TestApplyRuntime_ConnectorSwitch(t *testing.T) {
 			APIAddr:   "127.0.0.1:18970",
 		},
 		health:    NewSidecarHealth(),
-		inspector: NewGuardrailInspector("local", nil, nil, ""),
+		inspector: NewGuardrailInspector("local", nil, nil),
 	}
 
 	cfg := map[string]any{"connector": "openclaw"}

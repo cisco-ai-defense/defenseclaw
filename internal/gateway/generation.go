@@ -61,6 +61,15 @@ type Generation struct {
 	// scanner_policy:skill, yara_rules:mcp, builtin, profile:<name>).
 	Components map[string]string
 	BuiltAt    time.Time
+
+	// active is the pack the shared scanners and the judge use: the single
+	// enabled connector's, else the global one.
+	active *guardrail.RulePack
+	// opaError is why a non-strict build has no OPA ("" when it has one).
+	opaError string
+	// assetDirs are the directories the config watcher follows for this
+	// generation (rule packs and Rego modules).
+	assetDirs []string
 }
 
 // ResolvedThresholds is the block and alert severity for one (profile,

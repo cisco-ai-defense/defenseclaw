@@ -99,51 +99,86 @@ func SignalStrengthToSeverity(unambiguous, highImpact bool) string {
 	}
 }
 
-func guardrailRuntimeAction(cfg *config.Config, severity string, confirmable bool) string {
-	if cfg == nil {
-		return guardrailRuntimeActionForGuardrail(nil, severity, confirmable)
+// One threshold model (config.yaml guardrail.block_at / alert_at at the
+// global, connector and profile scopes, else the selected rule pack's
+// posture) decides every guardrail surface: hook prompts, completions, tool
+// responses and messages, tool calls, the proxy and its OPA policy. The
+// levels are resolved by resolveThresholds (thresholds.go).
+
+// guardrailActionForConnector maps a severity to an action for the
+// connector of cfg, which may be a profile-derived configuration. An empty
+// connector resolves the global levels.
+func guardrailActionForConnector(cfg *config.Config, connector, severity string, confirmable bool) string {
+	blockThreshold, alertThreshold := guardrailThresholdRanks(resolveThresholds(cfg, connector))
+	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
+		confirmable && hiltEnabledForConfig(cfg, connector), hiltMinRankForConfig(cfg, connector))
+}
+
+// guardrailActionForGuardrailConnector is guardrailActionForConnector for a
+// caller that holds only the guardrail block (the proxy and the router).
+func guardrailActionForGuardrailConnector(gc *config.GuardrailConfig, connector, severity string, confirmable bool) string {
+	blockThreshold, alertThreshold := guardrailThresholdRanks(resolveGuardrailThresholds(gc, connector))
+	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
+		confirmable && hiltEnabled(gc, connector), hiltMinRank(gc, connector))
+}
+
+func guardrailActionForConnectorFindings(
+	cfg *config.Config,
+	connector string,
+	findings []RuleFinding,
+	confirmable bool,
+) string {
+	return guardrailActionForFindings(findings, func(severity string) string {
+		return guardrailActionForConnector(cfg, connector, severity, confirmable)
+	})
+}
+
+// guardrailContentAction is guardrailActionForConnector for a content
+// surface (prompt, completion, tool response, message). Under the Secure
+// Client integration content keeps the rule pack's posture levels, as it
+// did before the one threshold model, so that deployment's decisions and
+// records do not change.
+func guardrailContentAction(cfg *config.Config, connector, severity string, confirmable bool) string {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		blockThreshold, alertThreshold := guardrailThresholdRanks(resolvePackThresholds(cfg, connector))
+		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
+			confirmable && hiltEnabledForConfig(cfg, connector), hiltMinRankForConfig(cfg, connector))
 	}
-	return guardrailRuntimeActionForGuardrail(&cfg.Guardrail, severity, confirmable)
+	return guardrailActionForConnector(cfg, connector, severity, confirmable)
 }
 
-func guardrailRuntimeActionForGuardrail(gc *config.GuardrailConfig, severity string, confirmable bool) string {
-	return guardrailRuntimeActionForGuardrailConnector(gc, "", severity, confirmable)
-}
-
-func guardrailRuntimeActionForFindings(
-	cfg *config.Config,
-	connector string,
-	findings []RuleFinding,
-	confirmable bool,
-) string {
+func guardrailContentActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable bool) string {
 	return guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailRuntimeActionForConnector(cfg, connector, severity, confirmable)
+		return guardrailContentAction(cfg, connector, severity, confirmable)
 	})
 }
 
-// guardrailToolCallActionForFindings is guardrailRuntimeActionForFindings for
-// a tool-call decision, where guardrail.block_at / alert_at apply (see
-// guardrailToolCallActionForConnector).
-func guardrailToolCallActionForFindings(
-	cfg *config.Config,
-	connector string,
-	findings []RuleFinding,
-	confirmable bool,
-) string {
-	return guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailToolCallActionForConnector(cfg, connector, severity, confirmable)
-	})
+// guardrailContentActionForGuardrail is guardrailContentAction for a caller
+// that holds only the guardrail block; the Secure Client posture comes from
+// the process-wide managed flag.
+func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, severity string) string {
+	if ManagedEnterpriseActive() {
+		posture := "default"
+		if gc != nil {
+			ref := gc.EffectiveRulePackRef("")
+			posture = packPosture(ref, ref.Dir)
+		}
+		blockThreshold, alertThreshold := guardrailProfileThresholds(posture)
+		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
+	}
+	return guardrailActionForGuardrailConnector(gc, "", severity, false)
 }
 
-// guardrailToolCallActionForGuardrailFindings maps the guardrail proxy's
-// tool-call findings with the global guardrail.block_at / alert_at applied.
-func guardrailToolCallActionForGuardrailFindings(
+// guardrailActionForGuardrailFindings maps the guardrail proxy's findings
+// for the request's connector.
+func guardrailActionForGuardrailFindings(
 	gc *config.GuardrailConfig,
+	connector string,
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
 	return guardrailActionForFindings(findings, func(severity string) string {
-		return guardrailToolCallActionForGuardrailConnector(gc, "", severity, confirmable)
+		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
 	})
 }
 
@@ -183,52 +218,6 @@ func strongerGuardrailAction(left, right string) string {
 	return left
 }
 
-// guardrailRuntimeActionForConnector mirrors guardrailRuntimeAction but
-// resolves the block/alert threshold from the request connector's effective
-// rule pack (guardrail.connectors[X].rule_pack_dir, falling back to the
-// global pack). This gives each connector its own enforcement posture —
-// strict on one agent, permissive on another — matching single-connector
-// behavior where the pack IS the posture. An empty connector resolves to the
-// global pack, so existing single-connector callers are unaffected. This is
-// the mapping for prompts, completions, tool responses and message content;
-// tool-call decisions use guardrailToolCallActionForConnector.
-func guardrailRuntimeActionForConnector(cfg *config.Config, connector, severity string, confirmable bool) string {
-	if cfg == nil {
-		return guardrailRuntimeActionForGuardrailConnector(nil, connector, severity, confirmable)
-	}
-	blockThreshold, alertThreshold := guardrailThresholdsForConfigConnector(cfg, connector)
-	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
-		confirmable && hiltEnabledForConfig(cfg, connector), hiltMinRankForConfig(cfg, connector))
-}
-
-// guardrailToolCallActionForConnector is guardrailRuntimeActionForConnector
-// for a tool-call decision (inspect/tool, CodeGuard on a write, tool chains,
-// artifact promotion, sandbox shell commands): guardrail.block_at / alert_at
-// (per connector, else global) replace the rule pack's levels. Only tool
-// calls take these levels; the CLI and the TUI call them tool-call levels.
-func guardrailToolCallActionForConnector(cfg *config.Config, connector, severity string, confirmable bool) string {
-	if cfg == nil {
-		return guardrailToolCallActionForGuardrailConnector(nil, connector, severity, confirmable)
-	}
-	blockThreshold, alertThreshold := guardrailToolCallThresholdsForConfigConnector(cfg, connector)
-	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
-		confirmable && hiltEnabledForConfig(cfg, connector), hiltMinRankForConfig(cfg, connector))
-}
-
-func guardrailRuntimeActionForGuardrailConnector(gc *config.GuardrailConfig, connector, severity string, confirmable bool) string {
-	blockThreshold, alertThreshold := guardrailThresholdsForConnector(gc, connector)
-	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
-		confirmable && hiltEnabled(gc, connector), hiltMinRank(gc, connector))
-}
-
-// guardrailToolCallActionForGuardrailConnector is
-// guardrailRuntimeActionForGuardrailConnector for a tool-call decision.
-func guardrailToolCallActionForGuardrailConnector(gc *config.GuardrailConfig, connector, severity string, confirmable bool) string {
-	blockThreshold, alertThreshold := guardrailToolCallThresholdsForConnector(gc, connector)
-	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold,
-		confirmable && hiltEnabled(gc, connector), hiltMinRank(gc, connector))
-}
-
 // guardrailActionForRank maps a severity rank to an action: block at or above
 // the block threshold, then ask a human (when confirm is armed) at or above
 // hiltMin, then alert at or above the alert threshold.
@@ -247,46 +236,7 @@ func guardrailActionForRank(rank, blockThreshold, alertThreshold int, confirm bo
 	}
 }
 
-// guardrailThresholdsForConnector returns the block and alert severity ranks
-// of the connector's rule-pack profile, from a bare GuardrailConfig.
-func guardrailThresholdsForConnector(gc *config.GuardrailConfig, connector string) (blockThreshold int, alertThreshold int) {
-	return guardrailProfileThresholds(guardrailProfileForConnector(gc, connector))
-}
-
-// guardrailToolCallThresholdsForConnector is guardrailThresholdsForConnector
-// with guardrail.block_at / alert_at applied (guardrailLevelThresholds). A nil
-// gc resolves no levels, only the default profile.
-func guardrailToolCallThresholdsForConnector(gc *config.GuardrailConfig, connector string) (blockThreshold int, alertThreshold int) {
-	blockThreshold, alertThreshold = guardrailThresholdsForConnector(gc, connector)
-	return guardrailLevelThresholds(
-		blockThreshold, alertThreshold,
-		gc.EffectiveBlockAt(connector), gc.EffectiveAlertAt(connector),
-	)
-}
-
-// guardrailThresholdsForConfigConnector is guardrailThresholdsForConnector
-// for a full Config, whose rule pack also honors application_protection
-// overlays.
-func guardrailThresholdsForConfigConnector(cfg *config.Config, connector string) (blockThreshold int, alertThreshold int) {
-	return guardrailProfileThresholds(guardrailProfileForConfigConnector(cfg, connector))
-}
-
-// guardrailToolCallThresholdsForConfigConnector is
-// guardrailThresholdsForConfigConnector with guardrail.block_at / alert_at
-// applied. The levels come from guardrail.connectors and the global guardrail
-// block only; the application_protection overlays can't set them.
-func guardrailToolCallThresholdsForConfigConnector(cfg *config.Config, connector string) (blockThreshold int, alertThreshold int) {
-	blockThreshold, alertThreshold = guardrailThresholdsForConfigConnector(cfg, connector)
-	if cfg == nil {
-		return blockThreshold, alertThreshold
-	}
-	return guardrailLevelThresholds(
-		blockThreshold, alertThreshold,
-		cfg.Guardrail.EffectiveBlockAt(connector), cfg.Guardrail.EffectiveAlertAt(connector),
-	)
-}
-
-// guardrailProfileThresholds maps a rule-pack profile to its block and alert
+// guardrailProfileThresholds maps a rule-pack posture to its block and alert
 // severity ranks: strict blocks MEDIUM+ and alerts LOW+, permissive blocks
 // CRITICAL and alerts HIGH+, default blocks CRITICAL and alerts MEDIUM+.
 func guardrailProfileThresholds(profile string) (blockThreshold int, alertThreshold int) {
@@ -300,56 +250,16 @@ func guardrailProfileThresholds(profile string) (blockThreshold int, alertThresh
 	}
 }
 
-// guardrailLevelThresholds applies the resolved block_at / alert_at levels to
-// the rule pack's ranks. The per-connector value wins over the global one
-// (config.GuardrailConfig.EffectiveBlockAt), and an empty level keeps the
-// pack's rank. The alert rank is then clamped to the block rank, so anything
-// that blocks also alerts. Every level ranks at most CRITICAL, so CRITICAL
-// findings block whatever the levels say.
-func guardrailLevelThresholds(packBlock, packAlert int, blockAt, alertAt string) (blockThreshold int, alertThreshold int) {
-	blockThreshold, alertThreshold = packBlock, packAlert
-	if rank := guardrailSeverityRank(blockAt); rank > severityNone {
-		blockThreshold = rank
-	}
-	if rank := guardrailSeverityRank(alertAt); rank > severityNone {
-		alertThreshold = rank
-	}
-	return blockThreshold, min(alertThreshold, blockThreshold)
-}
-
-func guardrailProfile(gc *config.GuardrailConfig) string {
-	return guardrailProfileForConnector(gc, "")
-}
-
-// guardrailProfileForConnector resolves the posture profile from the
-// connector's effective rule pack (per-connector override > global pack).
-// connector="" yields the global pack, preserving single-connector behavior.
-func guardrailProfileForConnector(gc *config.GuardrailConfig, connector string) string {
-	if gc == nil {
-		return "default"
-	}
-	dir := strings.ToLower(strings.TrimSpace(gc.EffectiveRulePackDir(connector)))
-	return guardrailProfileForDir(dir)
-}
-
-func guardrailProfileForConfigConnector(cfg *config.Config, connector string) string {
-	if cfg == nil {
-		return "default"
-	}
-	dir := strings.ToLower(strings.TrimSpace(cfg.EffectiveRulePackDirForConnector(connector)))
-	return guardrailProfileForDir(dir)
-}
-
+// guardrailProfileForDir is the posture of a rule-pack folder without a
+// manifest posture: its base name (strict, permissive), else default. Only
+// the three built-in packs rely on it.
 func guardrailProfileForDir(dir string) string {
-	if dir == "" {
+	if strings.TrimSpace(dir) == "" {
 		return "default"
 	}
 	base := strings.ToLower(filepath.Base(filepath.Clean(dir)))
 	switch base {
-	case "strict", "permissive", "default", "balanced":
-		if base == "balanced" {
-			return "default"
-		}
+	case "strict", "permissive":
 		return base
 	default:
 		return "default"

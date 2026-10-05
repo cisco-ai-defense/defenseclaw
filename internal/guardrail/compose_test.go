@@ -1,0 +1,60 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package guardrail
+
+import (
+	"strings"
+	"testing"
+)
+
+// TestComposeAppliesRulesLayersInOrder pins guardrail.rules composition: a
+// protection pack replaces same-id rules and adds its file, then enable,
+// disable, severity_overrides, suppressions and sensitive_tools apply; the
+// base pack is never modified and unknown IDs are errors.
+func TestComposeAppliesRulesLayersInOrder(t *testing.T) {
+	base, err := LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := true
+	base.RuleFiles = []*RulesFileYAML{{
+		Version: 1, Category: "secret", SourcePath: "/packs/default/rules/secrets.yaml",
+		Rules: []RuleDefYAML{
+			{ID: "SEC-A", Pattern: "a+", Title: "A", Severity: "HIGH", Confidence: 0.9, Tags: []string{"t"}},
+			{ID: "SEC-B", Pattern: "b+", Title: "B", Severity: "LOW", Confidence: 0.9, Tags: []string{"t"}, Enabled: &enabled},
+		},
+	}}
+	protections := func(name string) ([]ProtectionRuleFile, error) {
+		return []ProtectionRuleFile{{Name: "secrets.yaml", Data: []byte(
+			"version: 1\ncategory: secret\nrules:\n  - id: SEC-A\n    pattern: 'aa+'\n    title: A2\n    severity: CRITICAL\n    confidence: 0.8\n    tags: [p]\n")}}, nil
+	}
+	off := false
+	got, err := Compose(base, protections, Customization{
+		Protections:       []string{"pack"},
+		Disable:           []string{"SEC-B"},
+		SeverityOverrides: map[string]string{"SEC-A": "medium"},
+		Suppressions:      []FindingSuppression{{ID: "SUPP-X", FindingPattern: "^SEC-A$", Reason: "fixture"}},
+		SensitiveTools:    []SensitiveToolOverride{{Name: "crm_export", ResultInspection: &enabled, JudgeResult: &off}},
+	})
+	if err != nil {
+		t.Fatalf("Compose: %v", err)
+	}
+	a, b := got.findRule("SEC-A"), got.findRule("SEC-B")
+	if a == nil || a.Title != "A2" || a.Severity != "MEDIUM" {
+		t.Fatalf("SEC-A = %+v, want the protection pack's rule at MEDIUM", a)
+	}
+	if b == nil || b.Enabled == nil || *b.Enabled {
+		t.Fatalf("SEC-B = %+v, want disabled", b)
+	}
+	if base.findRule("SEC-B").Enabled != &enabled || *base.findRule("SEC-B").Enabled != true || base.findRule("SEC-A").Title != "A" {
+		t.Fatal("Compose modified the base pack")
+	}
+	if got.LookupSensitiveTool("crm_export") == nil {
+		t.Fatal("sensitive tool was not merged")
+	}
+	if _, err := Compose(base, protections, Customization{Enable: []string{"SEC-NOPE"}}); err == nil ||
+		!strings.Contains(err.Error(), "unknown rule SEC-NOPE") {
+		t.Fatalf("unknown rule = %v", err)
+	}
+}

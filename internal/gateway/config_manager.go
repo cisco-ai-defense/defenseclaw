@@ -36,6 +36,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -45,6 +46,14 @@ const configReloadDebounce = 500 * time.Millisecond
 const configReloadSnapshotAttempts = 3
 
 const configReloadStartupQuietPeriod = 25 * time.Millisecond
+
+// configDiffAssets is the Changed entry of a reload that no config key
+// caused: a referenced asset (rule pack, Rego module) changed on disk.
+const configDiffAssets = "assets"
+
+// errGenerationUnchanged reports an asset reload whose rebuilt generation
+// has the live generation's digest; nothing is swapped.
+var errGenerationUnchanged = errors.New("config reload: generation unchanged")
 
 type ConfigDiff struct {
 	Changed         []string
@@ -89,6 +98,10 @@ type ConfigManager struct {
 	v8Plan          *config.ObservabilityV8Plan
 	afterWatchAdded func()
 	observabilityV8 hookLifecycleMetricV8Runtime
+	// assetDirs lists the directories of the assets the live generation
+	// references (generation.assetDirs); the watcher follows them so an
+	// edited rule pack or Rego module rebuilds the generation.
+	assetDirs func() []string
 
 	// envConfigPath is the AVC-authored env_config.json (see
 	// config.ResolveDefaultEnvConfigPath). When set, Reload overlays
@@ -252,6 +265,48 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	if m.afterWatchAdded != nil {
 		m.afterWatchAdded()
 	}
+	// watchedAssets is the asset directory set currently registered with
+	// fsw; syncAssetWatches reconciles it after every reload.
+	watchedAssets := map[string]struct{}{}
+	syncAssetWatches := func() {
+		if m.assetDirs == nil {
+			return
+		}
+		want := map[string]struct{}{}
+		for _, assetDir := range m.assetDirs() {
+			if assetDir = filepath.Clean(assetDir); assetDir != dir {
+				want[assetDir] = struct{}{}
+			}
+		}
+		for assetDir := range watchedAssets {
+			if _, keep := want[assetDir]; !keep {
+				_ = fsw.Remove(assetDir)
+				delete(watchedAssets, assetDir)
+			}
+		}
+		for assetDir := range want {
+			if _, done := watchedAssets[assetDir]; done {
+				continue
+			}
+			if err := fsw.Add(assetDir); err == nil {
+				watchedAssets[assetDir] = struct{}{}
+			}
+		}
+	}
+	isAsset := func(path string) bool {
+		cleaned := filepath.Clean(path)
+		if _, ok := watchedAssets[filepath.Dir(cleaned)]; !ok {
+			if _, ok := watchedAssets[cleaned]; !ok {
+				return false
+			}
+		}
+		switch strings.ToLower(filepath.Ext(cleaned)) {
+		case ".yaml", ".yml", ".rego", ".json", "":
+			return true
+		default:
+			return false
+		}
+	}
 	if startupReady != nil {
 		if err := m.reconcileStartup(ctx, fsw); err != nil {
 			signalConfigStartupReady(startupReady, err)
@@ -259,6 +314,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 		}
 		signalConfigStartupReady(startupReady, nil)
 	}
+	syncAssetWatches()
 
 	// Best-effort watch on the AVC env_config.json parent directory.
 	// The dir may not exist yet (AVC packaging can drop it AFTER
@@ -346,6 +402,10 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	// wins (subsequent events in the same debounce window are
 	// already scheduled and don't need to be re-labelled).
 	pendingTrigger := ""
+	// pendingKinds records every kind of file in the burst: an asset forces
+	// a generation rebuild even without a config diff, and a burst of only
+	// config.generation.json refreshes config_generation.
+	pendingKinds := map[string]bool{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -355,6 +415,9 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			return ctx.Err()
 		case event := <-fsw.Events:
 			which := m.classify(event.Name)
+			if which == "" && isAsset(event.Name) {
+				which = configDiffAssets
+			}
 			if which == "" {
 				// Unclassified event, but it might be a Create under
 				// our ancestor watch — the "AVC just mkdir'd the
@@ -370,12 +433,16 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 				}
 				continue
 			}
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+				continue
+			}
+			if which != configDiffAssets && event.Op&fsnotify.Remove != 0 {
 				continue
 			}
 			if !pending {
 				pendingTrigger = which
 			}
+			pendingKinds[which] = true
 			pending = true
 			resetTimer(timer, configReloadDebounce)
 		case err := <-fsw.Errors:
@@ -390,13 +457,20 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			if pendingTrigger != "" {
 				reason = "fsnotify:" + pendingTrigger
 			}
+			kinds := pendingKinds
 			pending = false
 			pendingTrigger = ""
+			pendingKinds = map[string]bool{}
+			if len(kinds) == 1 && kinds[configGenerationTrigger] {
+				refreshConfigGeneration(nil)
+				continue
+			}
 			// A reload the gateway's own stop or restart cancelled is not a
 			// failure; the restart applies the new config (GAP-1698).
-			if err := m.Reload(ctx, reason); err != nil && ctx.Err() == nil {
+			if err := m.reload(ctx, reason, kinds[configDiffAssets]); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
+			syncAssetWatches()
 			// Piggyback on the reload path — the AVC packaging pipeline
 			// may have just created the env_config directory. The
 			// independent envWatchRetryTicker below covers the case
@@ -462,6 +536,17 @@ func signalConfigStartupReady(ready chan<- error, err error) {
 }
 
 func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
+	return m.reload(ctx, reason, false)
+}
+
+// ReloadAssets is Reload that rebuilds the generation even when config.yaml
+// is unchanged, because a referenced asset may have changed
+// (/policy/reload).
+func (m *ConfigManager) ReloadAssets(ctx context.Context, reason string) error {
+	return m.reload(ctx, reason, true)
+}
+
+func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) error {
 	if m == nil {
 		return nil
 	}
@@ -471,6 +556,7 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)
 	if err != nil {
+		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "candidate_invalid")
 		if m.health != nil {
 			m.health.SetConfig(StateError, err.Error(), map[string]interface{}{
@@ -597,7 +683,11 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
+	if len(diff.Changed) == 0 && assets {
+		diff.Changed = []string{configDiffAssets}
+	}
 	if len(diff.Changed) == 0 {
+		refreshConfigGeneration(source.raw)
 		if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 			m.v8PlanDigest = source.compiledV8.Plan.Digest()
 			m.v8Plan = source.compiledV8.Plan
@@ -625,7 +715,11 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 		return fmt.Errorf("config reload schema v8 requires a source-aware apply callback")
 	}
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
+	if errors.Is(applyErr, errGenerationUnchanged) {
+		return nil
+	}
 	if applyErr != nil {
+		recordGenerationBuildError(applyErr)
 		m.recordLoadError(ctx, "apply_rejected")
 		if m.health != nil {
 			m.health.SetConfig(StateError, applyErr.Error(), map[string]interface{}{
@@ -855,8 +949,15 @@ func (m *ConfigManager) classify(path string) string {
 	if envPath := m.getEnvConfigPath(); envPath != "" && cleaned == filepath.Clean(envPath) {
 		return "env_config"
 	}
+	if cleaned == filepath.Join(filepath.Dir(m.path), configwrite.GenerationFileName) {
+		return configGenerationTrigger
+	}
 	return ""
 }
+
+// configGenerationTrigger classifies config.generation.json, which the
+// config writer updates next to config.yaml.
+const configGenerationTrigger = "generation"
 
 func resetTimer(timer *time.Timer, d time.Duration) {
 	if !timer.Stop() {
@@ -965,6 +1066,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
 	add("routing", oldCfg.Routing, newCfg.Routing)
+	add("admission", oldCfg.Admission, newCfg.Admission)
+	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
+	add("update", oldCfg.Update, newCfg.Update)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
@@ -994,6 +1098,12 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		add("enterprise", oldEnterprise, newEnterprise)
 	}
 
+	// Everything a request decides with reloads hot through the
+	// configuration generation (rule packs, rules, levels, profiles, OPA,
+	// judge). The rest of this list is the explicit restart set: keys a
+	// process-level resource captures once (listeners, stores, identity,
+	// the OTel resource), plus sections whose consumers still read the
+	// start-time configuration.
 	var restart []string
 	hotReloadable := map[string]struct{}{
 		"acp":                {},
@@ -1002,10 +1112,6 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"webhooks":           {},
 		"observability":      {},
 		"notifications":      {},
-		"environment":        {},
-		"tenant_id":          {},
-		"workspace_id":       {},
-		"discovery_source":   {},
 		// The gateway never reads registry sources (the CLI fetches and
 		// promotes them into asset_policy), so a registry add/edit must not
 		// make every later reload fail as restart-required (GAP-2422).
@@ -1014,14 +1120,21 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// rebind in-process (apiNeedsRestart). Only the legacy standalone
 		// mode behind the bind shim needs a fresh process (below).
 		"openshell": {},
+		// The discovery service is rebuilt from the new configuration
+		// (aiDiscoveryNeedsRestart).
+		"ai_discovery": {},
+		// Admission, providers and update settings are read from the
+		// generation or by the CLI.
+		"admission":     {},
+		"llm_providers": {},
+		"update":        {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)
 	// and the OTel log-sink rebuild (otelNeedsReload folds
 	// CiscoAIDefense.Endpoint) together cover every field on the
-	// struct. Opensource callers keep the pre-existing restart-required
-	// behavior so a stray CiscoAIDefense change on that path still
-	// forces the operator's attention.
+	// struct. Opensource callers keep the restart because the proxy
+	// constructs its AI Defense client once.
 	if managed.IsManagedEnterprise(newCfg.DeploymentMode) {
 		hotReloadable["cisco_ai_defense"] = struct{}{}
 	}
@@ -1045,7 +1158,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 			restart = append(restart, path)
 			continue
 		}
-		if path == "gateway" && onlyConfigReloadModeChanged(oldCfg, newCfg) {
+		if path == "gateway" {
+			// gateway.config_reload is read per reload and gateway.watcher
+			// restarts the install watcher in-process; every other gateway
+			// key (listeners, TLS, device key, token) is process-level.
 			continue
 		}
 		if _, ok := hotReloadable[path]; !ok {
@@ -1057,22 +1173,13 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// construction; entering or leaving legacy mode needs a fresh process.
 		restart = append(restart, "openshell.mode")
 	}
-	if oldCfg.DataDir != newCfg.DataDir {
-		restart = append(restart, "data_dir")
-	}
-	if oldCfg.AuditDB != newCfg.AuditDB {
-		restart = append(restart, "audit_db")
-	}
-	if oldCfg.JudgeBodiesDB != newCfg.JudgeBodiesDB {
-		restart = append(restart, "judge_bodies_db")
-	}
 	if oldCfg.Gateway.DeviceKeyFile != newCfg.Gateway.DeviceKeyFile {
 		restart = append(restart, "gateway.device_key_file")
 	}
 	oldGateway := oldEffectiveGateway
 	newGateway := newEffectiveGateway
-	oldGateway.ConfigReload = config.GatewayConfigReloadConfig{}
-	newGateway.ConfigReload = config.GatewayConfigReloadConfig{}
+	oldGateway.ConfigReload, newGateway.ConfigReload = config.GatewayConfigReloadConfig{}, config.GatewayConfigReloadConfig{}
+	oldGateway.Watcher, newGateway.Watcher = config.GatewayWatcherConfig{}, config.GatewayWatcherConfig{}
 	if !reflect.DeepEqual(oldGateway, newGateway) {
 		restart = append(restart, "gateway")
 	}
@@ -1080,32 +1187,8 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		restart = append(restart, "guardrail.scanner_mode")
 	}
 	if oldCfg.Guardrail.Connector != newCfg.Guardrail.Connector ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Connectors, newCfg.Guardrail.Connectors) {
+		!reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors)) {
 		restart = append(restart, "guardrail.connectors")
-	}
-	if oldCfg.DeploymentMode != newCfg.DeploymentMode {
-		restart = append(restart, "deployment_mode")
-	}
-	// The provider factory captures these resource-identity values once at
-	// process bootstrap. A plan-only graph reload cannot safely rewrite them;
-	// publishing the Config as hot would make exported telemetry retain stale
-	// identity. Require a process restart until provider-factory replacement is
-	// part of the transaction.
-	if oldCfg.ConfigVersion == config.ObservabilityV8ConfigVersion &&
-		newCfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
-		for _, identity := range []struct {
-			path    string
-			changed bool
-		}{
-			{path: "environment", changed: oldCfg.Environment != newCfg.Environment},
-			{path: "tenant_id", changed: oldCfg.TenantID != newCfg.TenantID},
-			{path: "workspace_id", changed: oldCfg.WorkspaceID != newCfg.WorkspaceID},
-			{path: "discovery_source", changed: oldCfg.DiscoverySource != newCfg.DiscoverySource},
-		} {
-			if identity.changed {
-				restart = append(restart, identity.path)
-			}
-		}
 	}
 	return ConfigDiff{Changed: changed, RestartRequired: sortedUniqueStrings(restart)}
 }

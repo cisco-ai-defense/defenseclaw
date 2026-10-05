@@ -109,48 +109,21 @@ func guardrailFallbackActionForSeverity(severity string) string {
 	return guardrailFallbackActionForProfile(severity, "default")
 }
 
+// guardrailFallbackActionForProfile maps a severity with a rule-pack
+// posture's default levels and no human confirmation.
 func guardrailFallbackActionForProfile(severity, profile string) string {
-	severity = strings.ToUpper(strings.TrimSpace(severity))
-	switch strings.ToLower(strings.TrimSpace(profile)) {
-	case "strict":
-		switch severity {
-		case "CRITICAL", "HIGH", "MEDIUM":
-			return "block"
-		case "LOW":
-			return "alert"
-		default:
-			return "allow"
-		}
-	case "permissive":
-		switch severity {
-		case "CRITICAL":
-			return "block"
-		case "HIGH":
-			return "alert"
-		default:
-			return "allow"
-		}
-	}
-	switch severity {
-	case "CRITICAL":
-		return "block"
-	case "MEDIUM", "HIGH":
-		return "alert"
-	default:
-		return "allow"
-	}
+	blockThreshold, alertThreshold := guardrailProfileThresholds(strings.ToLower(strings.TrimSpace(profile)))
+	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
 }
 
-func fallbackGuardrailVerdict(v *ScanVerdict) *ScanVerdict {
-	return fallbackGuardrailVerdictForProfile(v, "default")
-}
-
-func fallbackGuardrailVerdictForProfile(v *ScanVerdict, profile string) *ScanVerdict {
+// fallbackGuardrailVerdictForThresholds applies resolved thresholds to a
+// verdict when no OPA policy decides; there is no human confirmation.
+func fallbackGuardrailVerdictForThresholds(v *ScanVerdict, thresholds policy.ThresholdsInput) *ScanVerdict {
 	if v == nil {
 		return allowVerdict("fallback")
 	}
 	out := *v
-	out.Action = guardrailFallbackActionForProfile(out.Severity, profile)
+	out.Action = guardrailActionForRank(guardrailSeverityRank(out.Severity), thresholds.Block, thresholds.Alert, false, 0)
 	return &out
 }
 
@@ -212,10 +185,13 @@ type GuardrailInspector struct {
 	// Toggled by NewGuardrailProxy via SetManagedMode; defaults to
 	// false so existing tests and opensource callers see the exact
 	// pre-change behavior.
-	managedMode       bool
+	managedMode bool
+	// fixedThresholds, when set (SetPosture), replaces per-request
+	// threshold resolution.
+	fixedThresholds atomic.Pointer[policy.ThresholdsInput]
+	// judgeMu guards judge, which a configuration generation replaces.
+	judgeMu           sync.RWMutex
 	judge             *LLMJudge
-	policyDir         string
-	fallbackProfile   atomic.Value // string; default, strict, or permissive
 	detectionStrategy string
 	strategyPrompt    string
 	strategyComplete  string
@@ -236,17 +212,6 @@ type GuardrailInspector struct {
 	// wire config.HILT. New gateway boots set this to true so config.yaml
 	// becomes the single source of truth for prompt-side verdicts.
 	hiltSet bool
-
-	// Rego policy engine — lazily constructed on first finalize() call and
-	// cached for the lifetime of the inspector. Previously policy.New() ran
-	// on every inspection (parsing every .rego file and compiling the
-	// module set from scratch), which dominated guardrail latency under
-	// load. Reload is caller-driven via ReloadPolicies().
-	engineMu        sync.RWMutex
-	engine          *policy.Engine
-	engineLoadErr   error
-	engineInitOnce  sync.Once
-	engineErrLogged sync.Once
 
 	// tracer is set from the sidecar wiring layer once the process-owned v8
 	// runtime is available.
@@ -270,45 +235,58 @@ type GuardrailInspector struct {
 // Managed-mode installs that need to inject the token-authenticated
 // *CiscoDefenseClawInspectClient use SetCiscoInspector after
 // construction instead.
-func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge *LLMJudge, policyDir string) *GuardrailInspector {
+//
+// The inspector evaluates the OPA guardrail policy prepared by the live
+// configuration generation; without one (no policy_dir, or its Rego failed
+// to load) it applies the resolved thresholds directly.
+func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge *LLMJudge) *GuardrailInspector {
 	g := &GuardrailInspector{
 		scannerMode: scannerMode,
 		judge:       judge,
-		policyDir:   policyDir,
 	}
-	g.SetFallbackProfile("default")
 	if cisco != nil {
 		g.ciscoClient = cisco
 	}
 	return g
 }
 
-// SetFallbackProfile preserves the configured posture when OPA is absent or
-// unavailable. The value is atomic because validated config reloads can race
-// in-flight inspections.
-func (g *GuardrailInspector) SetFallbackProfile(profile string) {
+// SetPosture pins the inspector's thresholds to a rule-pack posture's
+// defaults (default, strict or permissive) for an embedder without a
+// configuration generation (the detection benchmark). The gateway never
+// calls it: its inspectors resolve thresholds per request.
+func (g *GuardrailInspector) SetPosture(posture string) {
 	if g == nil {
 		return
 	}
-	switch strings.ToLower(strings.TrimSpace(profile)) {
-	case "strict":
-		g.fallbackProfile.Store("strict")
-	case "permissive":
-		g.fallbackProfile.Store("permissive")
-	default:
-		g.fallbackProfile.Store("default")
-	}
+	block, alert := guardrailProfileThresholds(strings.ToLower(strings.TrimSpace(posture)))
+	g.fixedThresholds.Store(&policy.ThresholdsInput{Block: block, Alert: alert, CiscoTrustLevel: "full"})
 }
 
-func (g *GuardrailInspector) currentFallbackProfile() string {
+func (g *GuardrailInspector) thresholds(ctx context.Context) policy.ThresholdsInput {
+	if fixed := g.fixedThresholds.Load(); fixed != nil {
+		return *fixed
+	}
+	return requestThresholds(ctx)
+}
+
+// SetJudge replaces the LLM judge (nil disables it) for a new
+// configuration generation.
+func (g *GuardrailInspector) SetJudge(judge *LLMJudge) {
 	if g == nil {
-		return "default"
+		return
 	}
-	profile, _ := g.fallbackProfile.Load().(string)
-	if profile == "" {
-		return "default"
+	g.judgeMu.Lock()
+	g.judge = judge
+	g.judgeMu.Unlock()
+}
+
+func (g *GuardrailInspector) currentJudge() *LLMJudge {
+	if g == nil {
+		return nil
 	}
-	return profile
+	g.judgeMu.RLock()
+	defer g.judgeMu.RUnlock()
+	return g.judge
 }
 
 // SetCiscoInspector replaces the remote inspector after construction.
@@ -1083,11 +1061,12 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// signals as MEDIUM alerts so they appear in the audit log rather than
 	// being silently dropped.
 	var judgeVerdict *ScanVerdict
+	judge := g.currentJudge()
 	if len(review) > 0 {
-		if g.judge != nil {
+		if judge != nil {
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.adjudicate")
-			judgeVerdict = g.judge.AdjudicateFindings(judgeCtx, direction, content, review)
+			judgeVerdict = judge.AdjudicateFindings(judgeCtx, direction, content, review)
 			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
@@ -1098,10 +1077,10 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	}
 
 	// NO_SIGNAL + judge_sweep: run full classification.
-	if len(signals) == 0 && g.judgeSweep && g.judge != nil {
+	if len(signals) == 0 && g.judgeSweep && judge != nil {
 		sweepStart := time.Now()
 		sweepCtx, endSweep := g.startPhaseSpan(ctx, "judge.sweep")
-		judgeVerdict = g.judge.RunJudges(sweepCtx, direction, content, "")
+		judgeVerdict = judge.RunJudges(sweepCtx, direction, content, "")
 		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart))
 	}
 
@@ -1152,7 +1131,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// fall back to an error sentinel so the parent always proceeds
 	// (judge → regex fallback, triage → empty signal set) even under
 	// a pathological policy / scanner bug.
-	if g.judge != nil {
+	if judge := g.currentJudge(); judge != nil {
 		go func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1163,7 +1142,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			}()
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.sweep")
-			v := g.judge.RunJudges(judgeCtx, direction, content, "")
+			v := judge.RunJudges(judgeCtx, direction, content, "")
 			endJudge(phaseAction(v), phaseSeverity(v), time.Since(judgeStart))
 			judgeCh <- result{verdict: v}
 		}()
@@ -1304,60 +1283,17 @@ func phaseSeverity(v *ScanVerdict) string {
 	return v.Severity
 }
 
-// policyEngine returns the cached Rego engine, initializing it on first call.
-// Returns nil if construction failed; the error is logged exactly once so
-// OPA misconfiguration surfaces in logs without flooding them on every
-// request. Callers fall back to the merged scanner verdict when nil.
-func (g *GuardrailInspector) policyEngine() *policy.Engine {
-	g.engineInitOnce.Do(func() {
-		eng, err := policy.New(g.policyDir)
-		g.engineMu.Lock()
-		g.engine = eng
-		g.engineLoadErr = err
-		g.engineMu.Unlock()
-	})
-	g.engineMu.RLock()
-	eng, err := g.engine, g.engineLoadErr
-	g.engineMu.RUnlock()
-	if err != nil {
-		g.engineErrLogged.Do(func() {
-			fmt.Fprintf(defaultLogWriter,
-				"  [guardrail] policy engine unavailable, falling back to scanner verdict: %v\n", err)
-		})
-		return nil
-	}
-	return eng
-}
-
-// ReloadPolicies rebuilds the policy engine from disk. Call this when the
-// policy directory has changed (e.g. config reload). If the new bundle
-// fails to compile, the previous engine is retained and an error is
-// returned.
-func (g *GuardrailInspector) ReloadPolicies() error {
-	if g.policyDir == "" {
-		return nil
-	}
-	eng, err := policy.New(g.policyDir)
-	if err != nil {
-		return err
-	}
-	g.engineMu.Lock()
-	g.engine = eng
-	g.engineLoadErr = nil
-	g.engineMu.Unlock()
-	return nil
-}
-
-// finalize runs OPA policy evaluation if available, otherwise applies the
-// built-in posture-equivalent fallback.
+// finalize runs the live generation's OPA guardrail policy when there is
+// one, otherwise it applies the resolved thresholds to the merged verdict.
+// Both read input.thresholds for the request's connector and profile.
 func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
-	if g.policyDir == "" {
-		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
+	thresholds := g.thresholds(ctx)
+	var prepared *policy.Prepared
+	if gen := currentGeneration(); gen != nil {
+		prepared = gen.OPA
 	}
-
-	engine := g.policyEngine()
-	if engine == nil {
-		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
+	if prepared == nil {
+		return fallbackGuardrailVerdictForThresholds(merged, thresholds)
 	}
 
 	input := policy.GuardrailInput{
@@ -1367,6 +1303,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		ScannerMode:   g.scannerMode,
 		ContentLength: len(content),
 		HILT:          g.hiltInput(),
+		Thresholds:    &thresholds,
 	}
 
 	if merged != nil && merged.Severity != "NONE" {
@@ -1388,13 +1325,13 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 
 	opaStart := time.Now()
 	opaCtx, endOPA := g.startPhaseSpan(ctx, "opa")
-	out, err := engine.EvaluateGuardrail(opaCtx, input)
+	out, err := prepared.EvaluateGuardrail(opaCtx, input)
 	opaLatency := time.Since(opaStart)
 	if err != nil || out == nil {
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
+		return fallbackGuardrailVerdictForThresholds(merged, thresholds)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 

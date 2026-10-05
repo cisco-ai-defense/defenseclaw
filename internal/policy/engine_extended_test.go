@@ -93,16 +93,6 @@ func setupExtendedRegoDir(t *testing.T) string {
 			"default_permissions":     []string{},
 			"denied_endpoints_global": []string{"169.254.169.254"},
 		},
-		"guardrail": map[string]interface{}{
-			"severity_rank": map[string]int{
-				"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4,
-			},
-			"block_threshold":   3,
-			"alert_threshold":   2,
-			"cisco_trust_level": "full",
-			"patterns":          map[string]interface{}{},
-			"severity_mappings": map[string]interface{}{},
-		},
 	}
 
 	raw, _ := json.MarshalIndent(data, "", "  ")
@@ -328,11 +318,12 @@ func TestEngine_EvaluateGuardrail_BlockHighLocal(t *testing.T) {
 			Reason:   "matched: ignore previous",
 		},
 		ContentLength: 200,
+		Thresholds:    &ThresholdsInput{Block: 3, Alert: 2, CiscoTrustLevel: "full"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// HIGH has severity_rank=3, block_threshold=3 → >=, so block
+	// HIGH has rank 3 and the input block threshold is 3, so block
 	if out.Action != "block" {
 		t.Errorf("want block for HIGH local finding, got %s", out.Action)
 	}

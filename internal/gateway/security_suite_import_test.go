@@ -50,7 +50,7 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 		t.Skip("generator; set SECURITY_SUITE_IMPORT=1 to regenerate the generated block of regex/corpus.jsonl")
 	}
 
-	g := NewGuardrailInspector("local", nil, nil, "")
+	g := NewGuardrailInspector("local", nil, nil)
 	g.SetDetectionStrategy("regex_only", "", "", "", false)
 
 	strictPack, err := guardrail.LoadRulePack(filepath.Join("..", "..", "policies", "guardrail", "strict"))

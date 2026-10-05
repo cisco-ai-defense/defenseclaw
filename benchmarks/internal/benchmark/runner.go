@@ -120,9 +120,9 @@ func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string
 				allowedRuleIDs[definition.ID] = struct{}{}
 			}
 		}
-		textInspector := gateway.NewGuardrailInspector("local", nil, nil, "")
+		textInspector := gateway.NewGuardrailInspector("local", nil, nil)
 		textInspector.SetDetectionStrategy("regex_only", "", "", "", false)
-		textInspector.SetFallbackProfile(lane.posture)
+		textInspector.SetPosture(lane.posture)
 
 		for _, benchmarkCase := range cases {
 			// Code and external artifact scanners own separate policies. Until a

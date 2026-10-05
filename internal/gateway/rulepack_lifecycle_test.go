@@ -206,7 +206,7 @@ func TestColdStartDefersMultiConnectorRulePacksToIsolatedSetup(t *testing.T) {
 		"claudecode": {RulePackDir: invalidRulePackDir(t)},
 	}
 
-	rp, err := loadInitialSidecarRulePack(cfg)
+	_, rp, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		t.Fatalf("multi-connector cold-start global preflight: %v", err)
 	}
@@ -243,34 +243,6 @@ func TestRulePackCandidatePreflightChecksOnlyEnabledConnectorOverrides(t *testin
 		!strings.Contains(err.Error(), "connector codex rule pack") {
 		t.Fatalf("enabled invalid connector preflight error = %v", err)
 	}
-}
-
-func TestRulePackNeedsReloadTracksEffectiveActiveSingleConnector(t *testing.T) {
-	singleConnectorConfig := func(connector, rulePackDir string) *config.Config {
-		cfg := config.DefaultConfig()
-		cfg.Guardrail.Enabled = true
-		cfg.Guardrail.RulePackDir = "/global"
-		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-			connector: {RulePackDir: rulePackDir},
-		}
-		return cfg
-	}
-
-	t.Run("scoped pack A to B", func(t *testing.T) {
-		oldCfg := singleConnectorConfig("codex", "/scoped/a")
-		newCfg := singleConnectorConfig("codex", "/scoped/b")
-		if !rulePackNeedsReload(oldCfg, newCfg) {
-			t.Fatal("single-connector scoped rule-pack change did not require reload")
-		}
-	})
-
-	t.Run("active connector A to B", func(t *testing.T) {
-		oldCfg := singleConnectorConfig("codex", "/scoped/a")
-		newCfg := singleConnectorConfig("claudecode", "/scoped/b")
-		if !rulePackNeedsReload(oldCfg, newCfg) {
-			t.Fatal("active single-connector rule-pack change did not require reload")
-		}
-	})
 }
 
 func TestSingleConnectorScopedRulePackReloadPublishesActiveCandidate(t *testing.T) {

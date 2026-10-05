@@ -125,9 +125,11 @@ type guardrailProfileSet struct {
 	profiles       map[string]config.DerivedGuardrailProfile
 	assignments    []config.ProfileAssignment
 	defaultProfile string
-	// rules holds the compiled rule pack of every rule_pack_dir a derived
-	// profile can resolve to, keyed by the cleaned directory.
+	// rules holds the compiled rule pack of every scope a derived profile
+	// can resolve to, keyed by effectiveRulePackKey (directory plus rules).
 	rules map[string]*compiledRulePackCategories
+	// packs are the composed packs behind rules, by the same key.
+	packs map[string]*guardrail.RulePack
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -150,6 +152,7 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 		assignments:    append([]config.ProfileAssignment(nil), cfg.Guardrail.ProfileAssignments...),
 		defaultProfile: strings.TrimSpace(cfg.Guardrail.DefaultProfile),
 		rules:          make(map[string]*compiledRulePackCategories),
+		packs:          make(map[string]*guardrail.RulePack),
 	}
 	cache := guardrail.NewRulePackCache()
 	names := make([]string, 0, len(derived))
@@ -158,12 +161,12 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		for _, dir := range profileRulePackDirs(derived[name].Config) {
-			key := profileRulePackKey(dir)
+		for _, scope := range profileRulePackScopes(derived[name].Config) {
+			key := scope.key()
 			if _, done := set.rules[key]; done {
 				continue
 			}
-			rp, loadErr := loadValidatedRulePack(cache, dir, "guardrail profile "+name)
+			rp, loadErr := loadScopedRulePack(cache, derived[name].Config, scope, "guardrail profile "+name)
 			var compiled *compiledRulePackCategories
 			if loadErr == nil {
 				compiled, loadErr = compileRulePackCategories(rp)
@@ -177,43 +180,45 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 				continue
 			}
 			set.rules[key] = compiled
+			set.packs[key] = rp
 		}
 	}
 	return set, nil
 }
 
-// profileRulePackDirs lists every rule-pack directory a derived configuration
-// can resolve for some connector.
-func profileRulePackDirs(cfg *config.Config) []string {
+// profileRulePackScopes lists every rule-pack scope a derived configuration
+// can resolve for some connector, one per composed-pack key.
+func profileRulePackScopes(cfg *config.Config) []rulePackScope {
 	if cfg == nil {
 		return nil
 	}
 	seen := map[string]struct{}{}
-	var dirs []string
-	add := func(dir string) {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
+	var scopes []rulePackScope
+	add := func(scope rulePackScope) {
+		if scope.dir == "" && scope.ref.Name == "" && len(scope.layers) == 0 {
 			return
 		}
-		if _, ok := seen[profileRulePackKey(dir)]; ok {
+		if _, ok := seen[scope.key()]; ok {
 			return
 		}
-		seen[profileRulePackKey(dir)] = struct{}{}
-		dirs = append(dirs, dir)
+		seen[scope.key()] = struct{}{}
+		scopes = append(scopes, scope)
 	}
-	add(cfg.Guardrail.RulePackDir)
+	add(globalRulePackScope(cfg))
 	for name := range cfg.Guardrail.Connectors {
-		add(cfg.EffectiveRulePackDirForConnector(name))
+		add(connectorRulePackScope(cfg, name))
 	}
 	for _, name := range profileConnectorNames(cfg) {
-		add(cfg.EffectiveRulePackDirForConnector(name))
+		add(connectorRulePackScope(cfg, name))
 	}
-	add(cfg.ApplicationProtection.Guardrail.RulePackDir)
-	for _, pc := range cfg.ApplicationProtection.Connectors {
-		add(pc.Guardrail.RulePackDir)
+	if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
+		add(overlay)
 	}
-	sort.Strings(dirs)
-	return dirs
+	for name := range cfg.ApplicationProtection.Connectors {
+		add(connectorRulePackScope(cfg, name))
+	}
+	sort.Slice(scopes, func(i, j int) bool { return scopes[i].key() < scopes[j].key() })
+	return scopes
 }
 
 // profileConnectorNames returns every connector some profile tunes, so the
@@ -600,12 +605,17 @@ func anyEqualFold(have []string, want string) bool {
 }
 
 // decisionConfig returns the configuration a decision for ctx reads: the
-// derived configuration of the request's profile, or a.scannerCfg.
+// derived configuration of the request's profile, or the live generation's
+// configuration (a.scannerCfg for an API server without a generation).
 func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a == nil {
 		return nil
 	}
-	return a.decisionConfigFrom(ctx, a.scannerCfg)
+	base := a.scannerCfg
+	if g := a.generation(); g != nil && g.Config != nil {
+		base = g.Config
+	}
+	return a.decisionConfigFrom(ctx, base)
 }
 
 // decisionConfigFrom is decisionConfig for a caller that already holds a
@@ -659,11 +669,11 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	if r == nil || r.set == nil || r.derived == nil || r.set.base == nil {
 		return nil
 	}
-	dir := profileRulePackKey(r.derived.EffectiveRulePackDirForConnector(connectorName))
-	if dir == "" || dir == profileRulePackKey(r.set.base.EffectiveRulePackDirForConnector(connectorName)) {
+	key := effectiveRulePackKey(r.derived, connectorName)
+	if key == "" || key == effectiveRulePackKey(r.set.base, connectorName) {
 		return nil
 	}
-	return r.set.rules[dir]
+	return r.set.rules[key]
 }
 
 // profileProxyOverride returns the mode and block message the guardrail
