@@ -10,6 +10,7 @@ int dclaw_config_load_brokers(void) {
      * Each line is one URL, up to DCLAW_BROKER_FALLBACK_LIST_SIZE */
     memset(broker_urls, 0, sizeof(broker_urls));
     strncpy(broker_urls[0], "mqtts://localhost:8883", DCLAW_BROKER_URL_MAX - 1);
+    broker_urls[0][DCLAW_BROKER_URL_MAX - 1] = '\0'; /* explicit NUL after strncpy */
     return 0;
 }
 

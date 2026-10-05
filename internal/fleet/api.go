@@ -3,9 +3,13 @@
 package fleet
 
 import (
+	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
@@ -30,14 +34,39 @@ func (a *API) Handler() http.Handler {
 	return a.mux
 }
 
+// authMiddleware wraps an http.HandlerFunc with Bearer token validation.
+// If token is empty, the handler is returned as-is (development mode).
+func authMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
+	if token == "" {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != token {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		next(w, r)
+	}
+}
+
 func (a *API) registerRoutes() {
-	a.mux.HandleFunc("GET /devices", a.listDevices)
-	a.mux.HandleFunc("GET /devices/{id}", a.getDevice)
-	a.mux.HandleFunc("POST /devices/{id}/command", a.sendCommand)
-	a.mux.HandleFunc("GET /fleet/health", a.getFleetHealth)
-	a.mux.HandleFunc("POST /policy/simulate", a.simulatePolicy)
-	a.mux.HandleFunc("POST /threat-intel/push", a.pushThreatIntel)
-	a.mux.HandleFunc("POST /devices/decommission-batch", a.decommissionBatch)
+	token := os.Getenv("DCLAW_FLEET_API_TOKEN")
+	if token == "" {
+		log.Println("WARNING: DCLAW_FLEET_API_TOKEN not set, fleet API auth disabled (development mode)")
+	}
+
+	wrap := func(h http.HandlerFunc) http.HandlerFunc {
+		return authMiddleware(token, h)
+	}
+
+	a.mux.HandleFunc("GET /devices", wrap(a.listDevices))
+	a.mux.HandleFunc("GET /devices/{id}", wrap(a.getDevice))
+	a.mux.HandleFunc("POST /devices/{id}/command", wrap(a.sendCommand))
+	a.mux.HandleFunc("GET /fleet/health", wrap(a.getFleetHealth))
+	a.mux.HandleFunc("POST /policy/simulate", wrap(a.simulatePolicy))
+	a.mux.HandleFunc("POST /threat-intel/push", wrap(a.pushThreatIntel))
+	a.mux.HandleFunc("POST /devices/decommission-batch", wrap(a.decommissionBatch))
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
@@ -66,11 +95,16 @@ func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	var req struct {
 		Command string `json:"command"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{
@@ -91,6 +125,7 @@ func (a *API) getFleetHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) simulatePolicy(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	writeJSON(w, http.StatusOK, map[string]any{
 		"verdicts_tested":     0,
 		"verdicts_changed":    0,
@@ -100,13 +135,18 @@ func (a *API) simulatePolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	var req struct {
 		NewDenyHashes   []string `json:"new_deny_hashes"`
 		RevokeAllowHash []string `json:"revoke_allow_hashes"`
 		Emergency       bool     `json:"emergency"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -114,8 +154,21 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 		a.cache.FlushAll()
 	}
 	for _, hashHex := range req.RevokeAllowHash {
+		decoded, err := hex.DecodeString(hashHex)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid hex in revoke_allow_hashes: " + hashHex,
+			})
+			return
+		}
+		if len(decoded) != 32 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "hash must be exactly 32 bytes (64 hex chars): " + hashHex,
+			})
+			return
+		}
 		var hash [32]byte
-		copy(hash[:], []byte(hashHex))
+		copy(hash[:], decoded)
 		a.cache.Invalidate(hash)
 	}
 
@@ -126,6 +179,7 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"batch_id":         "pending",
 		"affected_devices": 0,

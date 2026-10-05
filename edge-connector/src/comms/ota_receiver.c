@@ -151,7 +151,7 @@ void dclaw_canary_tick(void) {
     dclaw_state_t *s = dclaw_get_state();
     if (!s->canary.canary_active) return;
 
-    uint32_t elapsed = hal_tick_ms() - s->canary.canary_started_at;
+    uint64_t elapsed = hal_tick_ms() - s->canary.canary_started_at;
 
     /* Check if canary window has expired (10 minutes) */
     if (elapsed >= (uint32_t)DCLAW_CANARY_WINDOW_SEC * 1000) {

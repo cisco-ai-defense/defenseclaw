@@ -108,12 +108,30 @@ iot_extensions:
   content_inspection:
     enabled: true
     categories:
-      secrets: true
-      pii: true
-      credentials: true
-      exfiltration: true
-      injection: true
-      commands: true
+      secret:
+        enabled: true
+        severity: high
+        action: block
+      pii:
+        enabled: true
+        severity: high
+        action: block
+      credential:
+        enabled: true
+        severity: high
+        action: block
+      exfil:
+        enabled: true
+        severity: high
+        action: block
+      injection:
+        enabled: true
+        severity: critical
+        action: block
+      command:
+        enabled: true
+        severity: critical
+        action: block
 
     ssrf_validation:
       enabled: true

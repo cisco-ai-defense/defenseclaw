@@ -49,9 +49,9 @@ Every tool call passes through all eight stages in order. The pipeline short-cir
 ```
 1. Input validation     →  Reject malformed requests at the IPC boundary
 2. Rate limiting        →  Three token buckets (tools, network, actuations)
-3. Hash deny-list       →  Known-bad tool hashes from threat intel
-4. Destination filter   →  Allowlist/denylist + SSRF validation
-5. Content scanning     →  Secrets, PII, credentials, exfil, injection, commands
+3. Content scanning     →  Secrets, PII, credentials, exfil, injection, commands
+4. Hash deny-list       →  Known-bad tool hashes from threat intel
+5. Destination filter   →  Allowlist/denylist + SSRF validation
 6. Sequence correlation →  Multi-step pattern detection via DFA
 7. Verdict cache        →  LRU lookup with TTL
 8. Cloud escalation     →  MQTT 5.0 with enriched content snippets

@@ -4,7 +4,9 @@
 package manager
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -85,6 +87,11 @@ type FleetManager struct {
 	devices           map[uint64]*Device
 	alertHandler      AlertHandler
 	heartbeatInterval time.Duration
+
+	// Metrics hooks (set externally to avoid circular imports)
+	onDeviceRegistered func()
+	onDeviceOffline    func()
+	onHeartbeat        func()
 }
 
 // New creates a new FleetManager instance.
@@ -96,14 +103,50 @@ func New(alertHandler AlertHandler) *FleetManager {
 	}
 }
 
+// SetMetricsHooks configures callbacks for metrics updates.
+func (fm *FleetManager) SetMetricsHooks(onRegistered, onOffline, onHeartbeat func()) {
+	fm.onDeviceRegistered = onRegistered
+	fm.onDeviceOffline = onOffline
+	fm.onHeartbeat = onHeartbeat
+}
+
+// StartMonitoring runs CheckOfflineDevices on a recurring interval.
+// It blocks until the context is cancelled.
+func (fm *FleetManager) StartMonitoring(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			fm.CheckOfflineDevices()
+		}
+	}
+}
+
+// ErrDeviceExists is returned when attempting to register a device that already exists.
+const ErrDeviceExists = fleetError("device already registered")
+
 // RegisterDevice adds a new device to the fleet registry.
+// Returns ErrDeviceExists if the device is already registered.
 func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32,
-	hwProfile, fwVersion string, policyVersion uint16, capabilities uint8) *Device {
+	hwProfile, fwVersion string, policyVersion uint16, capabilities uint8) (*Device, error) {
 
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
 	fm.mu.Lock()
 	defer fm.mu.Unlock()
+
+	if existing, ok := fm.devices[fullID]; ok {
+		// Update safe fields on re-registration, preserve counters
+		existing.FWVersion = fwVersion
+		existing.PolicyVersion = policyVersion
+		existing.HWProfile = hwProfile
+		existing.Capabilities = capabilities
+		copy := *existing
+		return &copy, ErrDeviceExists
+	}
 
 	dev := &Device{
 		DeviceID:      fullID,
@@ -118,7 +161,11 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 		LastHeartbeat: time.Now(),
 	}
 	fm.devices[fullID] = dev
-	return dev
+	if fm.onDeviceRegistered != nil {
+		fm.onDeviceRegistered()
+	}
+	copy := *dev
+	return &copy, nil
 }
 
 // ProcessHeartbeat updates device state from a heartbeat.
@@ -135,9 +182,14 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 	dev.LastHeartbeat = time.Now()
 	dev.PolicyVersion = hb.PolicyVersion
+	dev.FWVersion = fmt.Sprintf("%d", hb.FWVersion)
 	dev.Flags = hb.Flags
 	dev.DeniedTotal += uint64(hb.DeniedCount)
 	dev.AllowedTotal += uint64(hb.AllowedCount)
+
+	if fm.onHeartbeat != nil {
+		fm.onHeartbeat()
+	}
 
 	// Update status based on flags
 	if hb.Flags&0x04 != 0 { // TAMPER_DETECT
@@ -172,12 +224,16 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 // CheckOfflineDevices detects devices that have gone silent.
 func (fm *FleetManager) CheckOfflineDevices() {
-	fm.mu.RLock()
-	defer fm.mu.RUnlock()
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
 
 	threshold := time.Now().Add(-3 * fm.heartbeatInterval)
 	for _, dev := range fm.devices {
 		if dev.Status == StatusOnline && dev.LastHeartbeat.Before(threshold) {
+			dev.Status = StatusOffline
+			if fm.onDeviceOffline != nil {
+				fm.onDeviceOffline()
+			}
 			fm.fireAlert(Alert{
 				Type:      AlertDeviceOffline,
 				DeviceID:  dev.DeviceID,
@@ -189,12 +245,15 @@ func (fm *FleetManager) CheckOfflineDevices() {
 	}
 }
 
-// GetDevice returns a device by composite ID.
-func (fm *FleetManager) GetDevice(fullID uint64) (*Device, bool) {
+// GetDevice returns a copy of a device by composite ID.
+func (fm *FleetManager) GetDevice(fullID uint64) (Device, bool) {
 	fm.mu.RLock()
 	defer fm.mu.RUnlock()
 	dev, ok := fm.devices[fullID]
-	return dev, ok
+	if !ok {
+		return Device{}, false
+	}
+	return *dev, true
 }
 
 // GetFleetHealth returns aggregate fleet statistics.

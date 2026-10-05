@@ -58,7 +58,7 @@ ctest --output-on-failure
 - Full evaluate pipeline (end-to-end, 8 stages)
 - Verdict protocol (HMAC verification, dedup, clock sync)
 - OTA + Emergency (Ed25519, anti-rollback, canary, sequence replay)
-- Acceptance tests (AC-01 through AC-12)
+- Acceptance tests (AC-01 through AC-17)
 
 ## Benchmark
 

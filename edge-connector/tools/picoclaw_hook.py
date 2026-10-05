@@ -102,6 +102,8 @@ REASON_NAMES = {
     0x09: "BLOOM_HIT",
     0x0A: "INVALID_INPUT",
     0x0B: "RETROACTIVE",
+    0x0C: "CONTENT_BLOCK",
+    0x0D: "SSRF_BLOCK",
 }
 
 
@@ -112,6 +114,10 @@ class DclawToolRequest(ctypes.Structure):
         ("cap_flags", ctypes.c_uint8),
         ("destination", ctypes.c_char * 128),
         ("session_id", ctypes.c_uint16),
+        ("direction", ctypes.c_uint8),
+        ("content_scope", ctypes.c_uint8),
+        ("content", ctypes.c_char_p),
+        ("content_len", ctypes.c_uint16),
     ]
 
 
@@ -185,6 +191,10 @@ class DclawEngine:
         req.cap_flags = cap_flags
         req.destination = destination.encode("ascii", errors="replace")[:127]
         req.session_id = session_id
+        req.direction = 0       # DCLAW_DIRECTION_REQUEST
+        req.content_scope = 0   # DCLAW_CONTENT_SCOPE_UNKNOWN
+        req.content = None
+        req.content_len = 0
 
         verdict = self.lib.dclaw_evaluate(ctypes.byref(req))
 
@@ -311,6 +321,8 @@ def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
             "RATE_LIMIT": "Tool call rate limit exceeded. Too many requests in the current time window.",
             "HASH_DENY": "This tool's hash matches a known-malicious signature in the threat intelligence deny-list.",
             "INVALID_INPUT": "The tool request failed input validation (payload size, encoding, or format).",
+            "CONTENT_BLOCK": "Content inspection detected dangerous material (secrets, PII, credentials, exfiltration, injection, or commands) in the tool call payload.",
+            "SSRF_BLOCK": "The destination targets a private/internal IP range or cloud metadata endpoint. SSRF protection blocked the request.",
         }
         explanation = reason_explanations.get(reason_name, f"Security policy violation: {reason_name}")
 

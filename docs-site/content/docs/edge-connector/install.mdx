@@ -28,7 +28,7 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-10 test binaries covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-12).
+10 test binaries covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-17).
 
 ### Install system-wide
 
@@ -99,12 +99,30 @@ iot_extensions:
   content_inspection:
     enabled: true
     categories:
-      secrets: true        # API keys, tokens, private keys
-      pii: true            # SSN, credit cards, emails
-      credentials: true    # AWS keys, GCP service accounts
-      exfiltration: true   # Base64 blobs, hex dumps
-      injection: true      # Prompt injection, jailbreaks
-      commands: true       # Shell commands, SQL, code exec
+      secret:              # API keys, tokens, private keys
+        enabled: true
+        severity: high
+        action: block
+      pii:                 # SSN, credit cards, emails
+        enabled: true
+        severity: high
+        action: block
+      credential:          # AWS keys, GCP service accounts
+        enabled: true
+        severity: high
+        action: block
+      exfil:               # Base64 blobs, hex dumps
+        enabled: true
+        severity: high
+        action: block
+      injection:           # Prompt injection, jailbreaks
+        enabled: true
+        severity: critical
+        action: block
+      command:             # Shell commands, SQL, code exec
+        enabled: true
+        severity: critical
+        action: block
 
     ssrf_validation:
       enabled: true
@@ -157,7 +175,7 @@ Add to `hooks.processes`:
 
 | Hook | What happens | Actions |
 | --- | --- | --- |
-| `before_tool` | Full 8-stage pipeline (rate limit, deny-list, dest filter, content scan, SSRF, sequence, cache, escalation) | `deny_tool` or `continue` |
+| `before_tool` | Full 8-stage pipeline (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence, cache, escalation) | `deny_tool` or `continue` |
 | `before_llm` | Prompt injection detection (20+ patterns) | `abort_turn` or `continue` |
 | `after_llm` | PII/credential leakage scanning | Detection + logging |
 
@@ -193,8 +211,8 @@ lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
-  "tool_name":"exec_shell","cap_flags":4,"destination":"","session_id":1
-}}' | socat - UNIX-CONNECT:/var/run/edge-connector.sock
+  "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
+}}' | socat - UNIX-CONNECT:/tmp/defenseclaw.sock
 ```
 
 ## Tool-to-capability mapping
@@ -213,13 +231,20 @@ Each tool must map to a capability that determines how the Edge Connector handle
 
 ## Environment variables
 
+**Runtime environment variables** (read by the Python hook at startup):
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
-| `DCLAW_POLICY_PATH` | (compiled in) | Path to custom policy binary |
-| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Flash emulation directory |
-| `DEFENSECLAW_MAX_ESCALATION_PAYLOAD_BYTES` | `1024` | Max content snippet size for cloud escalation |
+
+**Compile-time constants** (set in `CMakeLists.txt`; changing these requires rebuilding):
+
+| Constant | Default | Description |
+| --- | --- | --- |
+| `DCLAW_POLICY_PATH` | (embedded in binary) | Policy tables compiled into binary via `policy_tables.h` |
+| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Flash emulation directory (CMake variable) |
+| `DCLAW_ESCALATION_PAYLOAD_MAX` | `1024` | Max content snippet size for cloud escalation (set in `config.h.in`) |
 
 ## Benchmark
 

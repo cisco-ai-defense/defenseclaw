@@ -60,7 +60,9 @@ func TestGetDeviceInvalidID(t *testing.T) {
 
 func TestPushThreatIntel(t *testing.T) {
 	api := setupAPI()
-	body := `{"new_deny_hashes":["abc"],"revoke_allow_hashes":["def"],"emergency":false}`
+	// Use valid 64-char hex strings (32 bytes decoded)
+	hash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	body := `{"new_deny_hashes":["abc123"],"revoke_allow_hashes":["` + hash + `"],"emergency":false}`
 	req := httptest.NewRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
@@ -68,6 +70,33 @@ func TestPushThreatIntel(t *testing.T) {
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", w.Code)
+	}
+}
+
+func TestPushThreatIntelInvalidHex(t *testing.T) {
+	api := setupAPI()
+	body := `{"new_deny_hashes":[],"revoke_allow_hashes":["not-valid-hex"],"emergency":false}`
+	req := httptest.NewRequest("POST", "/threat-intel/push", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid hex", w.Code)
+	}
+}
+
+func TestPushThreatIntelWrongLength(t *testing.T) {
+	api := setupAPI()
+	// Valid hex but only 4 bytes, not 32
+	body := `{"new_deny_hashes":[],"revoke_allow_hashes":["deadbeef"],"emergency":false}`
+	req := httptest.NewRequest("POST", "/threat-intel/push", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for wrong hash length", w.Code)
 	}
 }
 

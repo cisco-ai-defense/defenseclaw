@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <poll.h>
+#include <errno.h>
 
 #ifndef DCLAW_IPC_SOCKET_PATH
 #define DCLAW_IPC_SOCKET_PATH "/tmp/defenseclaw.sock"
@@ -56,8 +57,13 @@ static int write_verdict_response(int fd, const dclaw_verdict_t *v) {
 }
 
 int main(void) {
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     dclaw_device_info_t info = {
         .tenant_id = 1,
@@ -102,7 +108,7 @@ int main(void) {
     fds[0].fd = server_fd;
     fds[0].events = POLLIN;
 
-    uint32_t last_idle_flush = hal_tick_ms();
+    uint64_t last_idle_flush = hal_tick_ms();
 
     while (g_running) {
         hal_watchdog_feed();
@@ -140,6 +146,10 @@ int main(void) {
 
             char buf[DCLAW_IPC_BUF_SIZE];
             ssize_t n = read(client_fds[i], buf, sizeof(buf) - 1);
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                /* Non-blocking: no data yet, skip this client */
+                continue;
+            }
             if (n <= 0) {
                 /* Client disconnected or error */
                 hal_ipc_socket_close(client_fds[i]);
@@ -172,8 +182,8 @@ int main(void) {
 
         /* Flush audit on idle periods (no client activity) */
         if (ready == 0) {
-            uint32_t now = hal_tick_ms();
-            if (now - last_idle_flush >= (uint32_t)(DCLAW_AUDIT_FLUSH_SEC * 1000)) {
+            uint64_t now = hal_tick_ms();
+            if (now - last_idle_flush >= (uint64_t)(DCLAW_AUDIT_FLUSH_SEC * 1000)) {
                 dclaw_flush_audit();
                 last_idle_flush = now;
             }

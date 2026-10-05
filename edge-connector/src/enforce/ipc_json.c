@@ -140,7 +140,7 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     if (!p || v > 1) return -1;
                     out->direction = (uint8_t)v;
                 } else if (strcmp(key_buf, "content") == 0) {
-                    /* Point directly into source buffer, don't copy */
+                    /* Copy content into owned buffer to avoid dangling pointer */
                     if (*p != '"') return -1;
                     const char *content_start = p + 1;
                     /* Find closing quote */
@@ -151,8 +151,10 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     }
                     if (*scan != '"') return -1;
                     uint16_t clen = (uint16_t)(scan - content_start);
-                    if (clen > DCLAW_CONTENT_MAX) clen = DCLAW_CONTENT_MAX;
-                    out->content = content_start;
+                    if (clen > DCLAW_CONTENT_MAX - 1) clen = DCLAW_CONTENT_MAX - 1;
+                    memcpy(out->content_buf, content_start, clen);
+                    out->content_buf[clen] = '\0';
+                    out->content = out->content_buf;
                     out->content_len = clen;
                     p = scan + 1;
                 } else {

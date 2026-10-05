@@ -19,10 +19,10 @@ static const char *get_flash_path(void) {
 
 static int flash_fd = -1;
 
-uint32_t hal_tick_ms(void) {
+uint64_t hal_tick_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
 }
 
 int hal_flash_read(uint32_t offset, void *buf, size_t len) {
@@ -53,7 +53,17 @@ int hal_ipc_socket_create(const char *path) {
     if (fd < 0) return -1;
     fcntl(fd, F_SETFL, O_NONBLOCK);
 
-    unlink(path);
+    /* Prevent symlink attack: only unlink if path is a socket or doesn't exist */
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode)) {
+            /* Path exists but is not a socket — refuse to unlink */
+            close(fd);
+            return -1;
+        }
+        unlink(path);
+    }
+    /* else: ENOENT — path doesn't exist, no unlink needed */
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -74,7 +84,11 @@ int hal_ipc_socket_create(const char *path) {
 }
 
 int hal_ipc_socket_accept(int server_fd) {
-    return accept(server_fd, NULL, NULL);
+    int fd = accept(server_fd, NULL, NULL);
+    if (fd >= 0) {
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+    }
+    return fd;
 }
 
 void hal_ipc_socket_close(int fd) {

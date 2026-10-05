@@ -15,7 +15,18 @@ extern dclaw_state_t *dclaw_get_state(void);
 
 /* === CBOR Encoder === */
 
-static size_t cbor_encode_uint(uint8_t *buf, uint8_t major, uint64_t val) {
+/* Returns the number of bytes needed to encode val, without writing. */
+static size_t cbor_uint_size(uint64_t val) {
+    if (val < 24) return 1;
+    if (val <= 0xFF) return 2;
+    if (val <= 0xFFFF) return 3;
+    if (val <= 0xFFFFFFFF) return 5;
+    return 9;
+}
+
+static size_t cbor_encode_uint_safe(uint8_t *buf, size_t remaining, uint8_t major, uint64_t val) {
+    size_t needed = cbor_uint_size(val);
+    if (needed > remaining) return 0;
     uint8_t mt = (major << 5);
     if (val < 24) {
         buf[0] = mt | (uint8_t)val;
@@ -49,15 +60,20 @@ static size_t cbor_encode_uint(uint8_t *buf, uint8_t major, uint64_t val) {
     return 9;
 }
 
-static size_t cbor_encode_bytes(uint8_t *buf, const uint8_t *data, size_t len) {
-    size_t hdr = cbor_encode_uint(buf, 2, len);
+static size_t cbor_encode_bytes_safe(uint8_t *buf, size_t remaining,
+                                     const uint8_t *data, size_t len) {
+    size_t hdr_size = cbor_uint_size(len);
+    if (hdr_size + len > remaining) return 0;
+    size_t hdr = cbor_encode_uint_safe(buf, remaining, 2, len);
     memcpy(buf + hdr, data, len);
     return hdr + len;
 }
 
-static size_t cbor_encode_text(uint8_t *buf, const char *str) {
+static size_t cbor_encode_text_safe(uint8_t *buf, size_t remaining, const char *str) {
     size_t len = strlen(str);
-    size_t hdr = cbor_encode_uint(buf, 3, len);
+    size_t hdr_size = cbor_uint_size(len);
+    if (hdr_size + len > remaining) return 0;
+    size_t hdr = cbor_encode_uint_safe(buf, remaining, 3, len);
     memcpy(buf + hdr, str, len);
     return hdr + len;
 }
@@ -108,8 +124,8 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     buf[pos++] = (uint8_t)(s->device.device_id >> 8);
     buf[pos++] = (uint8_t)(s->device.device_id);
 
-    /* uptime_sec (4 bytes) */
-    uint32_t uptime = hal_tick_ms() / 1000;
+    /* uptime_sec (4 bytes, wire format truncated to 32-bit) */
+    uint32_t uptime = (uint32_t)(hal_tick_ms() / 1000);
     buf[pos++] = (uint8_t)(uptime >> 24);
     buf[pos++] = (uint8_t)(uptime >> 16);
     buf[pos++] = (uint8_t)(uptime >> 8);
@@ -177,59 +193,68 @@ int dclaw_cbor_encode_verdict_request(const dclaw_tool_request_t *req,
                                       uint8_t session_risk,
                                       uint8_t *buf, size_t *out_len,
                                       size_t buf_size) {
-    if (buf_size < 256) return -1; /* Increased from 128 to accommodate content */
     size_t pos = 0;
+    size_t n;
+
+#define CBOR_CHECK(expr) do { n = (expr); if (n == 0) return -1; pos += n; } while(0)
 
     /* request_id: uint16 */
-    pos += cbor_encode_uint(buf + pos, 0, request_id);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, request_id));
 
     /* sha256: 32 bytes */
-    pos += cbor_encode_bytes(buf + pos, req->tool_hash, 32);
+    CBOR_CHECK(cbor_encode_bytes_safe(buf + pos, buf_size - pos, req->tool_hash, 32));
 
     /* tool_name: text string (up to 32 chars for wire efficiency) */
     char short_name[33];
+    memset(short_name, 0, sizeof(short_name)); /* safety: zero buffer before strncpy */
     strncpy(short_name, req->tool_name, 32);
-    short_name[32] = '\0';
-    pos += cbor_encode_text(buf + pos, short_name);
+    short_name[32] = '\0'; /* explicit NUL-termination after strncpy */
+    CBOR_CHECK(cbor_encode_text_safe(buf + pos, buf_size - pos, short_name));
 
     /* cap_flags: uint8 */
-    pos += cbor_encode_uint(buf + pos, 0, req->cap_flags);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, req->cap_flags));
 
     /* session_risk: uint8 */
-    pos += cbor_encode_uint(buf + pos, 0, session_risk);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, session_risk));
 
     /* session_caps: uint8 (prior caps in session — simplified) */
-    pos += cbor_encode_uint(buf + pos, 0, req->cap_flags);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, req->cap_flags));
 
     /* destination: optional text (only if non-empty) */
     if (req->destination[0] != '\0') {
-        pos += cbor_encode_text(buf + pos, req->destination);
+        CBOR_CHECK(cbor_encode_text_safe(buf + pos, buf_size - pos, req->destination));
     } else {
         /* Empty string if no destination */
-        pos += cbor_encode_text(buf + pos, "");
+        CBOR_CHECK(cbor_encode_text_safe(buf + pos, buf_size - pos, ""));
     }
 
     /* direction: uint8 */
-    pos += cbor_encode_uint(buf + pos, 0, req->direction);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, req->direction));
 
     /* content_scope: uint8 */
-    pos += cbor_encode_uint(buf + pos, 0, req->content_scope);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, req->content_scope));
 
     /* content: text string (truncated to DCLAW_ESCALATION_PAYLOAD_MAX if needed) */
     if (req->content != NULL && req->content_len > 0) {
         /* Truncate content to fit in escalation payload max (typically 256 bytes) */
         size_t max_content = DCLAW_ESCALATION_PAYLOAD_MAX;
         size_t content_to_send = req->content_len < max_content ? req->content_len : max_content;
-        size_t hdr = cbor_encode_uint(buf + pos, 3, content_to_send);
+        size_t remaining = buf_size - pos;
+        size_t hdr_size = cbor_uint_size(content_to_send);
+        if (hdr_size + content_to_send > remaining) return -1;
+        size_t hdr = cbor_encode_uint_safe(buf + pos, remaining, 3, content_to_send);
+        if (hdr == 0) return -1;
         memcpy(buf + pos + hdr, req->content, content_to_send);
         pos += hdr + content_to_send;
     } else {
         /* Empty string if no content */
-        pos += cbor_encode_text(buf + pos, "");
+        CBOR_CHECK(cbor_encode_text_safe(buf + pos, buf_size - pos, ""));
     }
 
     /* findings: uint8 (bitmask of categories found locally - placeholder for now) */
-    pos += cbor_encode_uint(buf + pos, 0, 0);
+    CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, 0));
+
+#undef CBOR_CHECK
 
     *out_len = pos;
     return 0;

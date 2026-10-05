@@ -34,7 +34,7 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.initialized = true;
     dclaw_config_load_brokers();
 
-    uint32_t now = hal_tick_ms();
+    uint64_t now = hal_tick_ms();
     g_state.audit_writer.last_flush_tick = now;
 
     g_state.rate_limiters[0].bucket_size = 60;
@@ -65,9 +65,9 @@ void dclaw_shutdown(void) {
 
 extern int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size);
 
-void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len) {
+void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len, size_t buf_size) {
     size_t len = 0;
-    if (dclaw_cbor_encode_heartbeat(out_heartbeat, &len, 32) == 0) {
+    if (dclaw_cbor_encode_heartbeat(out_heartbeat, &len, buf_size) == 0) {
         *out_len = (uint8_t)len;
     } else {
         *out_len = 0;
@@ -101,6 +101,8 @@ static dclaw_verdict_t make_verdict(dclaw_action_t action, dclaw_reason_t reason
 }
 
 dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
+    if (!req) return (dclaw_verdict_t){.action = DCLAW_ACTION_BLOCK, .reason = DCLAW_REASON_INVALID_INPUT};
+
     uint16_t target_hash = compute_target_hash(req->tool_hash);
 
     /* Step 1: Input validation */

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate Edge Connector demo presentation — 3 slides."""
 
+import os
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
@@ -49,7 +50,7 @@ slide = add_dark_slide()
 add_text(slide, "Edge Connector", Inches(1.8), size=Pt(60), color=CISCO_BLUE)
 add_text(slide, "AI Agent Security for IoT & Edge Devices", Inches(3.2), size=Pt(32), color=WHITE, bold=False)
 add_text(slide,
-         "54 KB  ·  <3μs decisions  ·  25 KB RAM  ·  Open Source\n\n"
+         "~68 KB  ·  <3μs decisions  ·  25 KB RAM  ·  Open Source\n\n"
          "Protects AI agents on Raspberry Pi, Jetson, industrial gateways,\n"
          "robots, and any Linux device.",
          Inches(4.5), size=Pt(20), color=LIGHT_GRAY, bold=False)
@@ -68,7 +69,7 @@ add_text(slide,
          "│       │ every tool call                                         │\n"
          "│       ▼                                                         │\n"
          "│  ┌──────────────────────────────────────────────────────────┐  │\n"
-         "│  │  Edge Connector (54KB, <3μs)                             │  │\n"
+         "│  │  Edge Connector (~68KB, <3μs)                            │  │\n"
          "│  │                                                          │  │\n"
          "│  │  1. Input validation     5. Sequence detection           │  │\n"
          "│  │  2. Rate limiting        6. Verdict cache                │  │\n"
@@ -93,12 +94,12 @@ add_text(slide,
          Inches(3.5), size=Pt(28), color=WHITE, bold=False)
 add_text(slide,
          "github.com/cisco-ai-defense/defenseclaw\n\n"
-         "76 KB binary  ·  2.7μs latency  ·  370K decisions/sec  ·  Zero dependencies\n"
+         "~68 KB binary  ·  2.7μs latency  ·  370K decisions/sec  ·  Zero dependencies\n"
          "Supports: PicoClaw  |  Roadmap: Bubbaloop, IoT-Edge-MCP, TinyAgent",
          Inches(4.8), size=Pt(18), color=LIGHT_GRAY, bold=False)
 add_text(slide, "Cisco AI Defense", Inches(6.5), size=Pt(18), color=CISCO_BLUE, bold=False)
 
 # ============================================================
-output_path = "/Users/nghodki/workspace/defenseclaw-workspace/defenseclaw/edge-connector/demo/Edge-Connector-Demo.pptx"
+output_path = os.path.join(os.path.dirname(__file__), "Edge-Connector-Demo.pptx")
 prs.save(output_path)
 print(f"Saved: {output_path} ({len(prs.slides)} slides)")

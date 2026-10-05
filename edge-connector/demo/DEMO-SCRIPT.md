@@ -26,7 +26,7 @@ ssh nikghodki@nikraspberry.local "tail -f ~/edge-connector/dclaw_hook.log"
 
 ### Narration (20s)
 
-> "Edge Connector is a 54-kilobyte security engine that protects AI agents running on IoT devices. It intercepts every tool call an agent makes — drive a robot, execute a shell command, fetch a URL — and decides allow or block in under 3 microseconds. Today I'll show it running live on a Raspberry Pi, protecting a robot controlled by an AI agent."
+> "Edge Connector is a 68-kilobyte security engine that protects AI agents running on IoT devices. It intercepts every tool call an agent makes — drive a robot, execute a shell command, fetch a URL — and decides allow or block in under 3 microseconds. Today I'll show it running live on a Raspberry Pi, protecting a robot controlled by an AI agent."
 
 ---
 
@@ -54,7 +54,7 @@ EVAL tool=scan_surroundings caps=0x40 → action=0 (ALLOW)
 
 ### Narration (15s)
 
-> "Here's what's happening under the hood. Every tool call goes through a 7-stage pipeline: input validation, rate limiting, hash deny-list, destination filtering, capability sequence detection, verdict cache, and cloud escalation. The whole thing runs in 2.7 microseconds on ARM. Sensor reads are allowed. Physical actions like driving are blocked by policy."
+> "Here's what's happening under the hood. Every tool call goes through an 8-stage pipeline: input validation, rate limiting, content scanning, hash deny-list, destination filtering with SSRF checks, capability sequence detection, verdict cache, and cloud escalation. The whole thing runs in 2.7 microseconds on ARM. Sensor reads are allowed. Physical actions like driving are blocked by policy."
 
 ---
 
@@ -101,7 +101,7 @@ INJECTION_DETECT: matched pattern 'ignore previous instructions' in user input
 
 ### Narration (15s)
 
-> "76 kilobytes. 2.7 microseconds. 370,000 decisions per second. Zero dependencies. Open source. Edge Connector — AI agent security for every device that can run Linux. Check it out on GitHub."
+> "68 kilobytes. 2.7 microseconds. 370,000 decisions per second. Zero dependencies. Open source. Edge Connector — AI agent security for every device that can run Linux. Check it out on GitHub."
 
 ---
 

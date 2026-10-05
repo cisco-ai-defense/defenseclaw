@@ -54,9 +54,9 @@ func TestCacheInvalidateRemovesEntry(t *testing.T) {
 	c.Evaluate(hash) // store
 	c.Invalidate(hash)
 
-	entry := c.Lookup(hash)
-	if entry != nil {
-		t.Fatal("expected nil after invalidate")
+	_, found := c.Lookup(hash)
+	if found {
+		t.Fatal("expected not found after invalidate")
 	}
 }
 
@@ -87,7 +87,7 @@ func TestCacheLRUEviction(t *testing.T) {
 	}
 
 	// 0x01 should be evicted
-	if c.Lookup(makeHash(0x01)) != nil {
+	if _, found := c.Lookup(makeHash(0x01)); found {
 		t.Fatal("expected 0x01 to be evicted")
 	}
 }
@@ -105,8 +105,8 @@ func TestBlockVerdictCached(t *testing.T) {
 	}
 
 	// Verify it's cached
-	entry := c.Lookup(hash)
-	if entry == nil {
+	entry, found := c.Lookup(hash)
+	if !found {
 		t.Fatal("expected cached entry")
 	}
 	if entry.Action != ActionBlock {

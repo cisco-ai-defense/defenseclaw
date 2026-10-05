@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+
+	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 )
 
 // Metrics holds fleet-level Prometheus metrics.
@@ -12,6 +15,7 @@ type Metrics struct {
 	DevicesOffline     atomic.Int64
 	DevicesDegraded    atomic.Int64
 	DevicesLockdown    atomic.Int64
+	HeartbeatsReceived atomic.Int64
 	BlocksTotal        atomic.Int64
 	AllowsTotal        atomic.Int64
 	VerdictCacheHits   atomic.Int64
@@ -30,16 +34,25 @@ var GlobalMetrics Metrics
 func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 
+	// Device status metrics (labeled gauge family)
+	fmt.Fprintln(w, "# HELP defenseclaw_fleet_devices_total Total registered devices")
+	fmt.Fprintln(w, "# TYPE defenseclaw_fleet_devices_total gauge")
+	fmt.Fprintf(w, "defenseclaw_fleet_devices_total{status=\"online\"} %d\n", GlobalMetrics.DevicesOnline.Load())
+	fmt.Fprintf(w, "defenseclaw_fleet_devices_total{status=\"offline\"} %d\n", GlobalMetrics.DevicesOffline.Load())
+	fmt.Fprintf(w, "defenseclaw_fleet_devices_total{status=\"degraded\"} %d\n", GlobalMetrics.DevicesDegraded.Load())
+	fmt.Fprintf(w, "defenseclaw_fleet_devices_total{status=\"lockdown\"} %d\n", GlobalMetrics.DevicesLockdown.Load())
+
+	fmt.Fprintln(w, "# HELP defenseclaw_fleet_heartbeats_received_total Total heartbeats received")
+	fmt.Fprintln(w, "# TYPE defenseclaw_fleet_heartbeats_received_total counter")
+	fmt.Fprintf(w, "defenseclaw_fleet_heartbeats_received_total %d\n", GlobalMetrics.HeartbeatsReceived.Load())
+
+	// Simple counter/gauge metrics
 	metrics := []struct {
 		name  string
 		help  string
 		mtype string
 		value int64
 	}{
-		{"defenseclaw_fleet_devices_total{status=\"online\"}", "Online devices", "gauge", GlobalMetrics.DevicesOnline.Load()},
-		{"defenseclaw_fleet_devices_total{status=\"offline\"}", "Offline devices", "gauge", GlobalMetrics.DevicesOffline.Load()},
-		{"defenseclaw_fleet_devices_total{status=\"degraded\"}", "Degraded devices", "gauge", GlobalMetrics.DevicesDegraded.Load()},
-		{"defenseclaw_fleet_devices_total{status=\"lockdown\"}", "Lockdown devices", "gauge", GlobalMetrics.DevicesLockdown.Load()},
 		{"defenseclaw_fleet_blocks_total", "Total block verdicts", "counter", GlobalMetrics.BlocksTotal.Load()},
 		{"defenseclaw_fleet_allows_total", "Total allow verdicts", "counter", GlobalMetrics.AllowsTotal.Load()},
 		{"defenseclaw_fleet_verdict_cache_hits_total", "Verdict cache hits", "counter", GlobalMetrics.VerdictCacheHits.Load()},
@@ -56,4 +69,34 @@ func MetricsHandler(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE %s %s\n", m.name, m.mtype)
 		fmt.Fprintf(w, "%s %d\n", m.name, m.value)
 	}
+}
+
+// WireMetrics connects GlobalMetrics to the FleetManager and verdict Cache
+// via their metrics hook interfaces. Call this once at startup after creating
+// the manager and cache.
+func WireMetrics(mgr *manager.FleetManager, cache *verdict.Cache) {
+	mgr.SetMetricsHooks(
+		func() { // onDeviceRegistered
+			GlobalMetrics.DevicesOnline.Add(1)
+		},
+		func() { // onDeviceOffline
+			GlobalMetrics.DevicesOnline.Add(-1)
+			GlobalMetrics.DevicesOffline.Add(1)
+		},
+		func() { // onHeartbeat
+			GlobalMetrics.HeartbeatsReceived.Add(1)
+		},
+	)
+
+	cache.SetMetricsHooks(
+		func() { // onHit
+			GlobalMetrics.VerdictCacheHits.Add(1)
+		},
+		func() { // onMiss
+			GlobalMetrics.VerdictCacheMisses.Add(1)
+		},
+		func() { // onStore
+			GlobalMetrics.VerdictCacheSize.Add(1)
+		},
+	)
 }

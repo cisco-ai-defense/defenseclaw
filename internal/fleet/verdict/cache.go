@@ -44,6 +44,11 @@ type Cache struct {
 	pipeline PipelineFunc
 	hits     uint64
 	misses   uint64
+
+	// Metrics hooks (set externally to avoid circular imports)
+	onHit   func()
+	onMiss  func()
+	onStore func()
 }
 
 // NewCache creates a verdict cache with a max entry limit.
@@ -55,36 +60,49 @@ func NewCache(maxSize int, pipeline PipelineFunc) *Cache {
 	}
 }
 
-// Lookup checks the cache for a tool hash. Returns the cached entry or nil.
-func (c *Cache) Lookup(toolHash [32]byte) *CacheEntry {
-	c.mu.RLock()
-	entry, ok := c.entries[toolHash]
-	c.mu.RUnlock()
+// SetMetricsHooks configures callbacks for cache metrics updates.
+func (c *Cache) SetMetricsHooks(onHit, onMiss, onStore func()) {
+	c.onHit = onHit
+	c.onMiss = onMiss
+	c.onStore = onStore
+}
 
+// Lookup checks the cache for a tool hash. Returns a copy of the cached entry and true,
+// or a zero CacheEntry and false if not found or expired.
+func (c *Cache) Lookup(toolHash [32]byte) (CacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entry, ok := c.entries[toolHash]
 	if !ok {
-		c.mu.Lock()
 		c.misses++
-		c.mu.Unlock()
-		return nil
+		if c.onMiss != nil {
+			c.onMiss()
+		}
+		return CacheEntry{}, false
 	}
 
 	if time.Since(entry.CachedAt) > entry.TTL {
-		c.mu.Lock()
 		delete(c.entries, toolHash)
 		c.misses++
-		c.mu.Unlock()
-		return nil
+		if c.onMiss != nil {
+			c.onMiss()
+		}
+		return CacheEntry{}, false
 	}
 
-	c.mu.Lock()
+	// Update CachedAt on access for true LRU eviction (M6)
+	entry.CachedAt = time.Now()
 	c.hits++
-	c.mu.Unlock()
-	return entry
+	if c.onHit != nil {
+		c.onHit()
+	}
+	return *entry, true
 }
 
 // Evaluate checks cache first, then runs pipeline on miss.
 func (c *Cache) Evaluate(toolHash [32]byte) (Action, uint8) {
-	if entry := c.Lookup(toolHash); entry != nil {
+	if entry, ok := c.Lookup(toolHash); ok {
 		return entry.Action, entry.Severity
 	}
 
@@ -112,6 +130,9 @@ func (c *Cache) Store(toolHash [32]byte, action Action, severity uint8) {
 		Severity: severity,
 		CachedAt: time.Now(),
 		TTL:      ttl,
+	}
+	if c.onStore != nil {
+		c.onStore()
 	}
 }
 

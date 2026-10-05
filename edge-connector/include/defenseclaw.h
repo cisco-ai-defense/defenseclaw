@@ -108,8 +108,8 @@ typedef struct {
 
 typedef struct {
     uint32_t cloud_epoch;
-    uint32_t local_ticks;
-    uint32_t ticks_at_sync;
+    uint64_t local_ticks;
+    uint64_t ticks_at_sync;
     bool     time_trusted;
 } dclaw_clock_t;
 
@@ -121,6 +121,7 @@ typedef struct {
     uint16_t session_id;
     uint8_t  direction;
     uint8_t  content_scope;
+    char     content_buf[DCLAW_CONTENT_MAX];
     const char *content;
     uint16_t content_len;
 } dclaw_tool_request_t;
@@ -151,8 +152,9 @@ _Static_assert(sizeof(dclaw_audit_entry_t) == 16, "audit entry must be 16 bytes"
 typedef struct {
     dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE];
     uint8_t  count;
-    uint32_t last_flush_tick;
+    uint64_t last_flush_tick;
     uint32_t total_flash_writes;
+    uint8_t  prev_hmac[4];       /* HMAC of last entry written (for chaining across flushes) */
 } dclaw_audit_writer_t;
 
 /* === Session Correlator === */
@@ -162,8 +164,8 @@ typedef struct {
     uint8_t  cap_history[DCLAW_SESSION_HISTORY_DEPTH];
     uint8_t  cap_head;
     uint8_t  cap_count;
-    uint32_t started_at;
-    uint32_t last_activity;
+    uint64_t started_at;
+    uint64_t last_activity;
     uint8_t  risk_score;
 } dclaw_session_t;
 
@@ -176,7 +178,7 @@ typedef struct {
     uint8_t  category;          /* dclaw_content_category_t */
     char     evidence[64];      /* truncated evidence snippet */
     uint16_t ttl_minutes;
-    uint32_t cached_at_tick;
+    uint64_t cached_at_tick;
     bool     occupied;
 } dclaw_cache_entry_t;
 
@@ -185,7 +187,7 @@ typedef struct {
 typedef struct {
     uint16_t request_id;
     bool     resolved;
-    uint32_t resolved_at;
+    uint64_t resolved_at;
 } dclaw_pending_verdict_t;
 
 /* === Speculative Execution === */
@@ -210,7 +212,7 @@ typedef struct {
     uint16_t tokens;
     uint16_t bucket_size;
     uint16_t refill_rate;
-    uint32_t last_refill_tick;
+    uint64_t last_refill_tick;
 } dclaw_rate_limiter_t;
 
 /* === IPC Peer Verification === */
@@ -232,7 +234,7 @@ typedef struct {
     uint8_t  canary_minute;
     uint8_t  spike_streak;
     bool     canary_active;
-    uint32_t canary_started_at;
+    uint64_t canary_started_at;
 } dclaw_canary_state_t;
 
 /* === Emergency Broadcast === */
@@ -279,7 +281,7 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature);
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
 int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
-void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len);
+void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len, size_t buf_size);
 void dclaw_shutdown(void);
 
 typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,

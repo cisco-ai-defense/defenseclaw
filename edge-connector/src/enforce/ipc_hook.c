@@ -2,13 +2,15 @@
 #include "platform.h"
 #include <string.h>
 
-#define IPC_SOCKET_PATH "/var/run/edge-connector.sock"
+#ifndef DCLAW_IPC_SOCKET_PATH
+#define DCLAW_IPC_SOCKET_PATH "/tmp/defenseclaw.sock"
+#endif
 
 extern dclaw_state_t *dclaw_get_state(void);
 
 static int ipc_server_fd = -1;
 static uint32_t ipc_request_count_this_sec = 0;
-static uint32_t ipc_last_rate_check_tick = 0;
+static uint64_t ipc_last_rate_check_tick = 0;
 
 static bool validate_ascii(const char *s, size_t max_len) {
     for (size_t i = 0; i < max_len && s[i] != '\0'; i++) {
@@ -56,7 +58,7 @@ int dclaw_ipc_validate_request(const dclaw_tool_request_t *req) {
     if (req->cap_flags & 0x80) return -1;
 
     /* REQ-16: IPC rate limit */
-    uint32_t now = hal_tick_ms();
+    uint64_t now = hal_tick_ms();
     if (now - ipc_last_rate_check_tick >= 1000) {
         ipc_request_count_this_sec = 0;
         ipc_last_rate_check_tick = now;
@@ -68,7 +70,7 @@ int dclaw_ipc_validate_request(const dclaw_tool_request_t *req) {
 }
 
 int dclaw_ipc_init(void) {
-    ipc_server_fd = hal_ipc_socket_create(IPC_SOCKET_PATH);
+    ipc_server_fd = hal_ipc_socket_create(DCLAW_IPC_SOCKET_PATH);
     return (ipc_server_fd >= 0) ? 0 : -1;
 }
 

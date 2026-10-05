@@ -72,6 +72,9 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
         ring_head = (ring_head + 1) % DCLAW_AUDIT_RING_SIZE;
     }
 
+    /* Update prev_hmac to the last flushed entry for cross-flush HMAC chaining */
+    memcpy(w->prev_hmac, w->buffer[w->count - 1].hmac, 4);
+
     w->total_flash_writes++;
     w->count = 0;
     w->last_flush_tick = hal_tick_ms();
@@ -84,7 +87,7 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
     dclaw_audit_writer_t *w = &s->audit_writer;
 
     dclaw_audit_entry_t entry = {
-        .timestamp = hal_tick_ms(),
+        .timestamp = (uint32_t)hal_tick_ms(),
         .target_hash = target_hash,
         .session_id = session_id,
         .action = (uint8_t)action,
@@ -92,10 +95,12 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
         ._pad = {0, 0},
     };
 
-    /* Compute HMAC chain */
-    uint8_t prev_hmac[4] = {0};
+    /* Compute HMAC chain — use writer's prev_hmac for cross-flush continuity */
+    uint8_t prev_hmac[4];
     if (w->count > 0) {
         memcpy(prev_hmac, w->buffer[w->count - 1].hmac, 4);
+    } else {
+        memcpy(prev_hmac, w->prev_hmac, 4);
     }
     compute_hmac(&entry, prev_hmac, entry.hmac);
 
@@ -111,6 +116,8 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
         }
         ring_head = (ring_head + 1) % DCLAW_AUDIT_RING_SIZE;
         w->total_flash_writes++;
+        /* Update prev_hmac so the next buffered entry chains from this BLOCK entry */
+        memcpy(w->prev_hmac, entry.hmac, 4);
         return 0;
     }
 

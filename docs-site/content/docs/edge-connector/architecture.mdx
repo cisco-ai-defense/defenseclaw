@@ -30,11 +30,10 @@ keywords:
 │  Edge Connector Engine (libdclaw_core.so)               │
 │                                                         │
 │  8-Stage Pipeline (~2–3μs on ARM):                      │
-│  1. Input validation    5. Content scanning             │
+│  1. Input validation    5. Dest filtering + SSRF        │
 │  2. Rate limiting       6. Sequence correlation         │
-│  3. Hash deny-list      7. Verdict cache                │
-│  4. Dest filtering      8. Cloud escalation (enriched)  │
-│      + SSRF validation                                  │
+│  3. Content scanning    7. Verdict cache                │
+│  4. Hash deny-list      8. Cloud escalation (enriched)  │
 │                                                         │
 │  → ALLOW / BLOCK / WARN / PENDING                       │
 └─────────────────────────────────────────────────────────┘
@@ -44,7 +43,7 @@ keywords:
 
 ### Stage 1 — Input validation
 
-Rejects malformed requests at the IPC boundary. Validates JSON-RPC structure, required fields (`tool_name`, `cap_flags`, `destination`, `session_id`), and value ranges before any policy logic runs.
+Rejects malformed requests at the IPC boundary. Validates JSON-RPC structure, required fields (`tool_name`, `capabilities`, `destination`, `session_id`), and value ranges before any policy logic runs.
 
 ### Stage 2 — Rate limiting
 
@@ -58,22 +57,7 @@ Three independent token buckets, each refilled per-minute:
 
 When a bucket is empty, the verdict is `BLOCK` with reason `RATE_LIMIT`.
 
-### Stage 3 — Hash deny-list
-
-Checks the tool call against a precompiled set of known-bad hashes from threat intelligence feeds. The hash table is compiled into the policy binary by the policy compiler, so lookup is O(1).
-
-### Stage 4 — Destination filtering + SSRF validation
-
-Two checks run in sequence:
-
-**Allowlist/denylist** — wildcard domain matching against the policy's `destination_allowlist` and `destination_denylist`. A tool call to a denied or unlisted destination is blocked with reason `DEST_DENY`.
-
-**SSRF validation** — when enabled, blocks requests targeting:
-- Private ranges (`10.x`, `172.16–31.x`, `192.168.x`, `127.x`)
-- Cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`)
-- Link-local addresses (`fe80::/10`)
-
-### Stage 5 — Content scanning
+### Stage 3 — Content scanning
 
 When the `content` field is present in the evaluation request, the scanner runs DFA-compiled pattern categories against the payload:
 
@@ -87,6 +71,21 @@ When the `content` field is present in the evaluation request, the scanner runs 
 | `commands` | Shell commands, SQL statements, code execution patterns |
 
 Content findings can elevate a verdict from ALLOW to WARN or BLOCK depending on severity and policy configuration. The `direction` field controls which patterns apply — request-direction checks for injection and commands, response-direction checks for secrets and PII leakage.
+
+### Stage 4 — Hash deny-list
+
+Checks the tool call against a precompiled set of known-bad hashes from threat intelligence feeds. The hash table is compiled into the policy binary by the policy compiler, so lookup is O(1).
+
+### Stage 5 — Destination filtering + SSRF validation
+
+Two checks run in sequence:
+
+**Allowlist/denylist** — wildcard domain matching against the policy's `destination_allowlist` and `destination_denylist`. A tool call to a denied or unlisted destination is blocked with reason `DEST_DENY`.
+
+**SSRF validation** — when enabled, blocks requests targeting:
+- Private ranges (`10.x`, `172.16–31.x`, `192.168.x`, `127.x`)
+- Cloud metadata endpoints (`169.254.169.254`, `metadata.google.internal`)
+- Link-local addresses (`fe80::/10`)
 
 ### Stage 6 — Sequence correlation
 
@@ -139,10 +138,10 @@ The evaluation request uses JSON-RPC over Unix socket or stdio:
   "method": "evaluate",
   "params": {
     "tool_name": "call_api",
-    "cap_flags": 8,
+    "capabilities": 8,
     "destination": "api.example.com",
     "session_id": 1,
-    "direction": "request",
+    "direction": 0,
     "content": "Authorization: Bearer sk-proj-abc123..."
   }
 }
@@ -151,10 +150,10 @@ The evaluation request uses JSON-RPC over Unix socket or stdio:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `tool_name` | string | yes | Name of the tool being called |
-| `cap_flags` | int | yes | Capability bitmask |
+| `capabilities` | int | yes | Capability bitmask |
 | `destination` | string | yes | Target URL/host (empty if none) |
 | `session_id` | int | yes | Session ID for sequence correlation |
-| `direction` | string | no | `"request"` or `"response"` — controls which patterns run |
+| `direction` | int | no | `0` (request) or `1` (response) — controls which patterns run |
 | `content` | string | no | Text payload to inspect. When omitted, only rule-based checks run. |
 
 ## Cloud components

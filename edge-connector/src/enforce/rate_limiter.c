@@ -4,13 +4,13 @@
 extern dclaw_state_t *dclaw_get_state(void);
 
 static void refill_tokens(dclaw_rate_limiter_t *rl) {
-    uint32_t now = hal_tick_ms();
-    uint32_t elapsed_ms = now - rl->last_refill_tick;
+    uint64_t now = hal_tick_ms();
+    uint64_t elapsed_ms = now - rl->last_refill_tick;
 
     if (elapsed_ms < 1000) return; /* Refill at most once per second */
 
-    uint32_t elapsed_sec = elapsed_ms / 1000;
-    uint32_t new_tokens = (rl->refill_rate * elapsed_sec) / 60;
+    uint64_t elapsed_sec = elapsed_ms / 1000;
+    uint64_t new_tokens = (rl->refill_rate * elapsed_sec) / 60;
 
     if (new_tokens > 0) {
         rl->tokens = (rl->tokens + (uint16_t)new_tokens > rl->bucket_size)

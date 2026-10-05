@@ -29,7 +29,7 @@ sudo apt update && sudo apt install -y build-essential cmake git python3
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
-git checkout feature/edge-connector-phase1
+git checkout feature/defenseclaw-lite-phase1
 
 cd edge-connector
 mkdir build && cd build
@@ -112,7 +112,7 @@ if verdict.action == 1:  # BLOCK
 For agents that can't load a shared library, Edge Connector listens on a Unix socket:
 
 ```
-Path: /var/run/edge-connector.sock
+Path: /tmp/defenseclaw.sock
 Protocol: JSON-RPC 2.0
 
 Request:
@@ -120,6 +120,7 @@ Request:
   "tool_name": "drive",
   "tool_hash": "abcdef...",
   "capabilities": 32,
+  "direction": 0,
   "destination": "",
   "session_id": 1
 },"id":1}
@@ -166,7 +167,7 @@ config['hooks']['processes']['defenseclaw_gate'] = {
         'DCLAW_LIB_PATH': '$HOME/defenseclaw/edge-connector/build/libdclaw_core.so',
         'DCLAW_LOG_PATH': '$HOME/edge-connector-audit.log'
     },
-    'intercept': ['before_tool']
+    'intercept': ['before_tool', 'before_llm', 'after_llm']
 }
 
 with open('$HOME/.picoclaw/config.json', 'w') as f:
@@ -289,22 +290,23 @@ cd ~/defenseclaw/edge-connector/build/tests
 │                    RASPBERRY PI                            │
 │                                                           │
 │  ┌─────────────────┐      ┌────────────────────────────┐│
-│  │   AI Agent       │      │   Edge Connector (54KB)    ││
+│  │   AI Agent       │      │   Edge Connector (~68KB)   ││
 │  │   (PicoClaw)     │      │                            ││
 │  │                  │ hook │  ┌──────────────────────┐  ││
-│  │  "drive forward" │─────►│  │ 7-Stage Pipeline     │  ││
+│  │  "drive forward" │─────►│  │ 8-Stage Pipeline     │  ││
 │  │                  │      │  │ 1. Input validation  │  ││
 │  │  tool_call ──────│─────►│  │ 2. Rate limiting     │  ││
-│  │                  │      │  │ 3. Hash deny-list    │  ││
-│  │  ◄── verdict ────│◄─────│  │ 4. Dest filtering    │  ││
-│  │  (allow/block)   │      │  │ 5. Sequence detect   │  ││
-│  │                  │      │  │ 6. Verdict cache     │  ││
-│  └─────────────────┘      │  │ 7. Cloud escalation  │  ││
+│  │                  │      │  │ 3. Content scanning  │  ││
+│  │  ◄── verdict ────│◄─────│  │ 4. Hash deny-list    │  ││
+│  │  (allow/block)   │      │  │ 5. Dest filter+SSRF  │  ││
+│  │                  │      │  │ 6. Sequence detect   │  ││
+│  └─────────────────┘      │  │ 7. Verdict cache     │  ││
+│                            │  │ 8. Cloud escalation  │  ││
 │                            │  └──────────────────────┘  ││
 │                            │                            ││
 │                            │  Decision: <3μs            ││
 │                            │  RAM: 25KB                 ││
-│                            │  Binary: 76KB              ││
+│                            │  Binary: ~68KB             ││
 │                            └────────────────────────────┘│
 └──────────────────────────────────────────────────────────┘
 ```
@@ -434,7 +436,7 @@ TOOL_CAP_MAP = {
 ```
 edge-connector/
 ├── build/
-│   ├── edge-connector          # Main binary (76KB)
+│   ├── edge-connector          # Main binary (~68KB)
 │   ├── libdclaw_core.so          # Shared library for Python/FFI integration
 │   ├── libdclaw_core.a           # Static library for C linking
 │   └── tests/                    # Test binaries + benchmark

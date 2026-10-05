@@ -7,8 +7,8 @@
 
 /* Hardware Abstraction Layer — platform-specific operations. */
 
-/* Monotonic tick counter (millisecond resolution). Never wraps within device uptime. */
-uint32_t hal_tick_ms(void);
+/* Monotonic tick counter (millisecond resolution). Wraps after ~584 million years with uint64_t. */
+uint64_t hal_tick_ms(void);
 
 /* Flash operations */
 int hal_flash_read(uint32_t offset, void *buf, size_t len);

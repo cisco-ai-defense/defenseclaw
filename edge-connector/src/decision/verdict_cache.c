@@ -17,15 +17,15 @@ static bool is_expired(const dclaw_cache_entry_t *entry) {
     dclaw_state_t *s = dclaw_get_state();
     if (!s->clock.time_trusted) return true; /* Conservative: all expired if clock untrusted */
 
-    uint32_t now = hal_tick_ms();
-    uint32_t elapsed_min = (now - entry->cached_at_tick) / 60000;
+    uint64_t now = hal_tick_ms();
+    uint64_t elapsed_min = (now - entry->cached_at_tick) / 60000;
     return elapsed_min >= entry->ttl_minutes;
 }
 
 static size_t find_lru_slot(void) {
     dclaw_state_t *s = dclaw_get_state();
     size_t lru_idx = 0;
-    uint32_t lru_tick = UINT32_MAX;
+    uint64_t lru_tick = UINT64_MAX;
 
     for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
         if (!s->cache[i].occupied) return i;

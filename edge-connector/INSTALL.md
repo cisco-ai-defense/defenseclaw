@@ -112,12 +112,30 @@ The Edge Connector inspects tool call arguments and LLM responses for dangerous 
 
     # Enable or disable individual pattern categories
     categories:
-      secrets: true        # API keys, tokens, private keys, passwords
-      pii: true            # SSN, credit cards, email addresses, phone numbers
-      credentials: true    # AWS keys, GCP service accounts, database URIs
-      exfiltration: true   # Base64-encoded blobs, hex dumps, data URI payloads
-      injection: true      # Prompt injection, jailbreak attempts, system prompt overrides
-      commands: true       # Shell commands, SQL statements, code execution patterns
+      secret:              # API keys, tokens, private keys, passwords
+        enabled: true
+        severity: high
+        action: block
+      pii:                 # SSN, credit cards, email addresses, phone numbers
+        enabled: true
+        severity: high
+        action: block
+      credential:          # AWS keys, GCP service accounts, database URIs
+        enabled: true
+        severity: high
+        action: block
+      exfil:               # Base64-encoded blobs, hex dumps, data URI payloads
+        enabled: true
+        severity: high
+        action: block
+      injection:           # Prompt injection, jailbreak attempts, system prompt overrides
+        enabled: true
+        severity: critical
+        action: block
+      command:             # Shell commands, SQL statements, code execution patterns
+        enabled: true
+        severity: critical
+        action: block
 
     # SSRF validation for network destinations
     ssrf_validation:
@@ -191,7 +209,7 @@ Add to `hooks.processes`:
 
 | Hook | What DefenseClaw Does | Supported Actions |
 |------|----------------------|-------------------|
-| `before_tool` | 8-stage policy evaluation (rate limit, deny-list, dest filter, content scan, SSRF check, sequence detect, cache, escalation) | `deny_tool` with canned message, `continue` |
+| `before_tool` | 8-stage policy evaluation (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence detect, cache, escalation) | `deny_tool` with canned message, `continue` |
 | `before_llm` | Pattern-based prompt injection detection (20+ patterns) | `abort_turn` (blocks LLM call entirely), `continue` |
 | `after_llm` | PII/credential leakage scanning (SSN, credit cards, API keys, private keys) via content scanner | Detection + logging (redaction not supported in PicoClaw v0.3.x) |
 
@@ -244,8 +262,8 @@ lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
 **Unix Socket (JSON-RPC)** — query the daemon from any process:
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
-  "tool_name":"exec_shell","cap_flags":4,"destination":"","session_id":1
-}}' | socat - UNIX-CONNECT:/var/run/edge-connector.sock
+  "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
+}}' | socat - UNIX-CONNECT:/tmp/defenseclaw.sock
 ```
 
 If you'd like to contribute an integration adapter for your framework, see [CONTRIBUTING.md](../docs/CONTRIBUTING.md).
@@ -263,10 +281,10 @@ The evaluation request sent over the Unix socket or through the hook uses the fo
   "method": "evaluate",
   "params": {
     "tool_name": "call_api",
-    "cap_flags": 8,
+    "capabilities": 8,
     "destination": "api.example.com",
     "session_id": 1,
-    "direction": "request",
+    "direction": 0,
     "content": "Authorization: Bearer sk-proj-abc123..."
   }
 }
@@ -275,10 +293,10 @@ The evaluation request sent over the Unix socket or through the hook uses the fo
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `tool_name` | string | yes | Name of the tool being called |
-| `cap_flags` | int | yes | Capability bitmask (see table below) |
+| `capabilities` | int | yes | Capability bitmask (see table below) |
 | `destination` | string | yes | Target URL/host (empty string if none) |
 | `session_id` | int | yes | Session identifier for sequence correlation |
-| `direction` | string | no | `"request"` (tool call args) or `"response"` (LLM/tool output). Defaults to `"request"`. Controls which content patterns are evaluated — request-direction checks for injection and commands, response-direction checks for secrets and PII leakage. |
+| `direction` | int | no | `0` (request — tool call args) or `1` (response — LLM/tool output). Defaults to `0`. Controls which content patterns are evaluated — request-direction checks for injection and commands, response-direction checks for secrets and PII leakage. |
 | `content` | string | no | The actual text payload to inspect (tool arguments, LLM response body, etc.). When provided, the content scanner runs all enabled pattern categories against this field and includes matched findings in the verdict and cloud escalation payload. When omitted, only rule-based policy checks (deny-list, dest filter, rate limit, sequence) are performed. |
 
 ---
@@ -316,13 +334,20 @@ TOOL_CAP_MAP = {
 
 ## Environment Variables
 
+**Runtime environment variables** (read by the Python hook at startup):
+
 | Variable | Default | Description |
 |---|---|---|
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
 | `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
-| `DCLAW_POLICY_PATH` | (compiled in) | Path to custom policy binary |
-| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Directory for flash emulation |
-| `DEFENSECLAW_MAX_ESCALATION_PAYLOAD_BYTES` | `1024` | Maximum size in bytes of the content snippet included in cloud escalation requests. Content exceeding this limit is truncated. Set to `0` to omit content from escalation payloads entirely. |
+
+**Compile-time constants** (set in `CMakeLists.txt`; changing these requires rebuilding the binary):
+
+| Constant | Default | Description |
+|---|---|---|
+| `DCLAW_POLICY_PATH` | (embedded in binary) | Policy tables are compiled into the binary via `policy_tables.h`. To use a custom policy, recompile with the policy compiler and rebuild. |
+| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Directory for flash emulation (set via CMake `DCLAW_FLASH_DIR` variable) |
+| `DCLAW_ESCALATION_PAYLOAD_MAX` | `1024` | Maximum size in bytes of the content snippet included in cloud escalation requests. Set in `config.h.in` / CMakeLists.txt. |
 
 ---
 
@@ -405,11 +430,10 @@ sudo make install
 │  DefenseClaw Edge Connector Engine (libdclaw_core.so)   │
 │                                                         │
 │  8-Stage Pipeline (~2-3μs on ARM):                      │
-│  1. Input validation    5. Content scanning             │
+│  1. Input validation    5. Dest filtering + SSRF        │
 │  2. Rate limiting       6. Sequence correlation         │
-│  3. Hash deny-list      7. Verdict cache                │
-│  4. Dest filtering      8. Cloud escalation (enriched)  │
-│      + SSRF validation                                  │
+│  3. Content scanning    7. Verdict cache                │
+│  4. Hash deny-list      8. Cloud escalation (enriched)  │
 │                                                         │
 │  → ALLOW / BLOCK / WARN / PENDING                       │
 └─────────────────────────────────────────────────────────┘
@@ -433,4 +457,4 @@ sudo make install
 | Trust boundary inference | — |
 | Enriched cloud escalation with content | Max escalation payload size |
 | Response interception | — |
-| Pre-built hooks for PicoClaw, Claude Code | Custom hooks for other frameworks |
+| Pre-built hooks for PicoClaw | Custom hooks for other frameworks |

@@ -53,6 +53,13 @@ elseif(DCLAW_PROFILE STREQUAL "EDGE")
     set(DCLAW_ESCALATION_PAYLOAD_MAX 2048)
 endif()
 
+# Sanitizer support (ASan + UBSan)
+option(DCLAW_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(DCLAW_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # Generate config.h from profile settings
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/config.h.in
@@ -67,6 +74,14 @@ add_compile_options(
     -fno-strict-aliasing
     -Os
 )
+
+# Fortify source in release builds (requires optimization, incompatible with -O0 debug)
+add_compile_options($<$<CONFIG:Release>:-D_FORTIFY_SOURCE=2>)
+add_compile_options($<$<CONFIG:RelWithDebInfo>:-D_FORTIFY_SOURCE=2>)
+# Also apply unconditionally since the default build uses -Os above
+if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
+    add_compile_options(-D_FORTIFY_SOURCE=2)
+endif()
 
 # Sources common to all profiles
 set(CORE_SOURCES

@@ -23,9 +23,9 @@ typedef enum {
 typedef struct {
     mqtt_state_t state;
     uint8_t      broker_index;
-    uint32_t     backoff_ms;
-    uint32_t     last_attempt_tick;
-    uint32_t     last_heartbeat_tick;
+    uint64_t     backoff_ms;
+    uint64_t     last_attempt_tick;
+    uint64_t     last_heartbeat_tick;
     uint16_t     next_packet_id;
     int          socket_fd;
     char         session_id[32];
@@ -110,7 +110,7 @@ int dclaw_mqtt_connect(void) {
 int dclaw_mqtt_reconnect(void) {
     if (mqtt_ctx.state == MQTT_STATE_CONNECTED) return 0;
 
-    uint32_t now = hal_tick_ms();
+    uint64_t now = hal_tick_ms();
     if (now - mqtt_ctx.last_attempt_tick < mqtt_ctx.backoff_ms) {
         return -1; /* Too soon, backoff not elapsed */
     }
@@ -170,8 +170,8 @@ const char *dclaw_mqtt_get_session_id(void) {
 int dclaw_mqtt_send_heartbeat(void) {
     if (!dclaw_mqtt_is_connected()) return -1;
 
-    uint32_t now = hal_tick_ms();
-    if (now - mqtt_ctx.last_heartbeat_tick < (uint32_t)(DCLAW_HEARTBEAT_INTERVAL_SEC * 1000)) {
+    uint64_t now = hal_tick_ms();
+    if (now - mqtt_ctx.last_heartbeat_tick < (uint64_t)(DCLAW_HEARTBEAT_INTERVAL_SEC * 1000)) {
         return 0; /* Not time yet */
     }
     mqtt_ctx.last_heartbeat_tick = now;

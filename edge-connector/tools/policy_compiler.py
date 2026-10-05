@@ -272,6 +272,12 @@ def generate_c_header(policy: dict, version: int) -> str:
         '',
         '#include "defenseclaw.h"',
         '',
+        '#ifdef __GNUC__',
+        '#define DCLAW_UNUSED __attribute__((unused))',
+        '#else',
+        '#define DCLAW_UNUSED',
+        '#endif',
+        '',
         '/* === Severity Rules === */',
         '',
         'typedef struct {',
@@ -279,12 +285,13 @@ def generate_c_header(policy: dict, version: int) -> str:
         '    uint8_t action;',
         '} dclaw_severity_rule_t;',
         '',
+        'DCLAW_UNUSED',
         'static const dclaw_severity_rule_t severity_rules[] = {',
     ]
     for sev, act in severity_rules:
         lines.append(f'    {{ {sev}, {act} }},')
     lines.append('};')
-    lines.append(f'static const size_t severity_rules_count = {len(severity_rules)};')
+    lines.append(f'DCLAW_UNUSED static const size_t severity_rules_count = {len(severity_rules)};')
     lines.append('')
 
     # Sequence rules
@@ -298,53 +305,57 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append('    uint8_t action;')
     lines.append('} dclaw_sequence_rule_t;')
     lines.append('')
+    lines.append('DCLAW_UNUSED')
     lines.append('static const dclaw_sequence_rule_t sequence_rules[] = {')
     for seq, act in sequence_rules:
         seq_str = ', '.join(f'0x{b:02X}' for b in seq)
         pad = ', 0x00' * (4 - len(seq))
         lines.append(f'    {{ .seq = {{{seq_str}{pad}}}, .seq_len = {len(seq)}, .action = {act} }},')
     lines.append('};')
-    lines.append(f'static const size_t sequence_rules_count = {len(sequence_rules)};')
+    lines.append(f'DCLAW_UNUSED static const size_t sequence_rules_count = {len(sequence_rules)};')
     lines.append('')
 
     # Destination allowlist
     lines.append('/* === Destination Allowlist === */')
     lines.append('')
+    lines.append('DCLAW_UNUSED')
     lines.append('static const char *dest_allowlist[] = {')
     for dest in dest_allowlist:
         lines.append(f'    "{dest}",')
     lines.append('};')
-    lines.append(f'static const size_t dest_allowlist_count = {len(dest_allowlist)};')
+    lines.append(f'DCLAW_UNUSED static const size_t dest_allowlist_count = {len(dest_allowlist)};')
     lines.append('')
 
     # Deny hash list (empty — populated by threat intel)
     lines.append('/* === Deny Hash List (sorted for binary search) === */')
     lines.append('')
-    lines.append('static const uint8_t deny_hashes[][32] = {')
-    lines.append('};')
-    lines.append('static const size_t deny_hashes_count = 0;')
+    lines.append('/* no deny hashes configured */')
+    lines.append('DCLAW_UNUSED')
+    lines.append('static const uint8_t deny_hashes[1][32] = {{0}};')
+    lines.append('DCLAW_UNUSED static const size_t deny_hashes_count = 0;')
     lines.append('')
 
     # Escalation table
     lines.append('/* === Escalation Mode Table === */')
     lines.append('')
+    lines.append('DCLAW_UNUSED')
     lines.append('static const dclaw_escalation_entry_t escalation_table[] = {')
     for cap, mode in escalation_modes:
         lines.append(f'    {{ 0x{cap:02X}, {mode} }},')
     lines.append('};')
-    lines.append(f'static const size_t escalation_table_count = {len(escalation_modes)};')
+    lines.append(f'DCLAW_UNUSED static const size_t escalation_table_count = {len(escalation_modes)};')
     lines.append('')
 
     # Canary baseline
     lines.append(f'/* === Canary Baseline === */')
-    lines.append(f'static const uint16_t policy_canary_baseline_blocks_per_min = {canary_baseline};')
+    lines.append(f'DCLAW_UNUSED static const uint16_t policy_canary_baseline_blocks_per_min = {canary_baseline};')
     lines.append('')
 
     # Rate limits
     lines.append('/* === Rate Limit Defaults === */')
-    lines.append(f'static const uint16_t policy_rate_tool_calls_per_min = {rate_limits.get("tool_calls_per_minute", 60)};')
-    lines.append(f'static const uint16_t policy_rate_network_per_min = {rate_limits.get("network_requests_per_minute", 30)};')
-    lines.append(f'static const uint16_t policy_rate_actuations_per_min = {rate_limits.get("actuations_per_minute", 10)};')
+    lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_tool_calls_per_min = {rate_limits.get("tool_calls_per_minute", 60)};')
+    lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_network_per_min = {rate_limits.get("network_requests_per_minute", 30)};')
+    lines.append(f'DCLAW_UNUSED static const uint16_t policy_rate_actuations_per_min = {rate_limits.get("actuations_per_minute", 10)};')
     lines.append('')
 
     # Content inspection rules
@@ -357,36 +368,37 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append('    uint8_t enabled;')
     lines.append('} dclaw_content_rule_t;')
     lines.append('')
+    lines.append('DCLAW_UNUSED')
     lines.append('static const dclaw_content_rule_t content_rules[] = {')
     for rule in content_inspection["rules"]:
         lines.append(f'    {{ {rule["category"]}, {rule["severity"]}, {rule["action"]}, {rule["enabled"]} }},')
     lines.append('};')
-    lines.append(f'static const size_t content_rules_count = {len(content_inspection["rules"])};')
-    lines.append(f'static const uint8_t content_inspection_enabled = {1 if content_inspection["enabled"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const size_t content_rules_count = {len(content_inspection["rules"])};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t content_inspection_enabled = {1 if content_inspection["enabled"] else 0};')
     lines.append('')
 
     # SSRF protection
     lines.append('/* === SSRF Protection === */')
-    lines.append(f'static const uint8_t ssrf_enabled = {1 if ssrf_protection["enabled"] else 0};')
-    lines.append(f'static const uint8_t ssrf_block_private = {1 if ssrf_protection["block_private_ranges"] else 0};')
-    lines.append(f'static const uint8_t ssrf_block_loopback = {1 if ssrf_protection["block_loopback"] else 0};')
-    lines.append(f'static const uint8_t ssrf_block_link_local = {1 if ssrf_protection["block_link_local"] else 0};')
-    lines.append(f'static const uint8_t ssrf_block_cloud_metadata = {1 if ssrf_protection["block_cloud_metadata"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_enabled = {1 if ssrf_protection["enabled"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_private = {1 if ssrf_protection["block_private_ranges"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_loopback = {1 if ssrf_protection["block_loopback"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_link_local = {1 if ssrf_protection["block_link_local"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t ssrf_block_cloud_metadata = {1 if ssrf_protection["block_cloud_metadata"] else 0};')
     lines.append('')
 
     # Cloud escalation
     lines.append('/* === Cloud Escalation === */')
-    lines.append(f'static const uint16_t escalation_max_payload = {cloud_escalation["max_payload_bytes"]};')
-    lines.append(f'static const uint8_t escalation_include_content = {1 if cloud_escalation["include_content"] else 0};')
-    lines.append(f'static const uint8_t escalation_include_findings = {1 if cloud_escalation["include_local_findings"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint16_t escalation_max_payload = {cloud_escalation["max_payload_bytes"]};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t escalation_include_content = {1 if cloud_escalation["include_content"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t escalation_include_findings = {1 if cloud_escalation["include_local_findings"] else 0};')
     lines.append('')
 
     # Trust boundaries
     lines.append('/* === Trust Boundaries === */')
-    lines.append(f'static const uint8_t trust_infer_from_context = {1 if trust_boundaries["infer_from_context"] else 0};')
-    lines.append(f'static const uint8_t trust_strict_user_input = {1 if trust_boundaries["strict_user_input"] else 0};')
-    lines.append(f'static const uint8_t trust_user_input_block_threshold = {trust_boundaries["user_input_block_threshold"]};')
-    lines.append(f'static const uint8_t trust_system_block_threshold = {trust_boundaries["system_block_threshold"]};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t trust_infer_from_context = {1 if trust_boundaries["infer_from_context"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t trust_strict_user_input = {1 if trust_boundaries["strict_user_input"] else 0};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t trust_user_input_block_threshold = {trust_boundaries["user_input_block_threshold"]};')
+    lines.append(f'DCLAW_UNUSED static const uint8_t trust_system_block_threshold = {trust_boundaries["system_block_threshold"]};')
     lines.append('')
 
     lines.append('#endif /* DCLAW_POLICY_TABLES_H */')

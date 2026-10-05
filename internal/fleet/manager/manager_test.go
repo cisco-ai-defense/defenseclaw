@@ -14,7 +14,10 @@ func TestComposeID(t *testing.T) {
 
 func TestRegisterDevice(t *testing.T) {
 	fm := New(nil)
-	dev := fm.RegisterDevice(1, 1, 100, "sbc", "1.0.0", 1, 0xFF)
+	dev, err := fm.RegisterDevice(1, 1, 100, "sbc", "1.0.0", 1, 0xFF)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if dev.Status != StatusOnline {
 		t.Fatalf("new device status = %s, want online", dev.Status)
@@ -29,6 +32,24 @@ func TestRegisterDevice(t *testing.T) {
 	}
 	if got.HWProfile != "sbc" {
 		t.Fatalf("hw_profile = %s, want sbc", got.HWProfile)
+	}
+}
+
+func TestRegisterDeviceDuplicate(t *testing.T) {
+	fm := New(nil)
+	_, err := fm.RegisterDevice(1, 1, 100, "sbc", "1.0.0", 1, 0xFF)
+	if err != nil {
+		t.Fatalf("unexpected error on first register: %v", err)
+	}
+
+	// Second registration of same device should return ErrDeviceExists
+	dev, err := fm.RegisterDevice(1, 1, 100, "sbc", "2.0.0", 2, 0xFF)
+	if err != ErrDeviceExists {
+		t.Fatalf("expected ErrDeviceExists, got %v", err)
+	}
+	// Safe fields should be updated
+	if dev.FWVersion != "2.0.0" {
+		t.Fatalf("fw_version = %s, want 2.0.0", dev.FWVersion)
 	}
 }
 
