@@ -11,8 +11,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 type testVerifiedSubjectKey struct{}
@@ -135,6 +137,61 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 	if resp.Mode != "observe" {
 		t.Fatalf("forged identity hook ran in mode %q, want the default profile's observe", resp.Mode)
 	}
+}
+
+// TestGuardrailProfileSelectsVerifiedDirectoryGroup runs the real S1
+// source: a verified subject's directory group selects the group's profile,
+// a request that only claims that user in its headers gets the default, and
+// a waited-on lookup that never resolved reports default_lookup_failed.
+func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
+	prevOwner := processOwnerProfileSubject
+	processOwnerProfileSubject = func() (profileSubject, bool) { return profileSubject{}, false }
+	t.Cleanup(func() {
+		processOwnerProfileSubject = prevOwner
+		setIdentityFactsEnabled(false)
+		setIdentityLookupBlocking(false)
+		liveGuardrailProfiles.Store(nil)
+	})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"ml": {Mode: "action"}, "watch": {Mode: "observe"}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"DC-ML-Team@dclab.test"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "watch"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	applyIdentityPosture(cfg)
+	alice := VerifiedSubject{
+		UserID: "1201", UserName: "dcad-alice@dclab.test", Source: subjectSourcePeerCredentials,
+		Directory: useridentity.DirectoryFacts{
+			UPN: "dcad-alice@dclab.test", Groups: []string{"dc-ml-team@dclab.test"}, ResolvedAt: time.Now(),
+		},
+	}
+	unresolved := alice
+	unresolved.Directory = useridentity.DirectoryFacts{}
+	check := func(t *testing.T, ctx context.Context, profile, match, group string) {
+		t.Helper()
+		got := api.resolveProfile(api.withGuardrailProfileDecision(ctx, "claude-code"))
+		if got.Name != profile || got.Match != match || got.MatchedGroup != group {
+			t.Fatalf("resolveProfile = %+v, want profile=%q match=%q group=%q", got, profile, match, group)
+		}
+	}
+	t.Run("verified group", func(t *testing.T) {
+		check(t, withVerifiedSubject(context.Background(), alice), "ml", profileMatchGroup, "DC-ML-Team@dclab.test")
+	})
+	t.Run("unresolved lookup", func(t *testing.T) {
+		check(t, withVerifiedSubject(context.Background(), unresolved), "watch", profileMatchDefaultLookupFailed, "")
+	})
+	t.Run("claimed headers", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+		request.RemoteAddr = "127.0.0.1:40000"
+		request.Header.Set(llmEventUserIDHeader, "1201")
+		request.Header.Set(llmEventUserNameHeader, "dcad-alice@dclab.test")
+		request.Header.Set(useridentity.SessionFactsHeader, "v1;k=ssh;krb=dcad-alice@DCLAB.TEST;upn=dcad-alice@dclab.test")
+		CorrelationMiddleware(nil)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			check(t, r.Context(), "watch", profileMatchDefaultUnverified, "")
+		})).ServeHTTP(httptest.NewRecorder(), request)
+	})
 }
 
 // TestGuardrailProfileReloadRederivesProfiles pins the reload path: a profile

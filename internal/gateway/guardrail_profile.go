@@ -56,35 +56,39 @@ type profileSubject struct {
 	// like an unverified one, and the default reason is
 	// default_lookup_failed.
 	LookupFailed bool
+	// viaProcessOwner marks a subject verified as the per-user gateway's own
+	// account, so explain and telemetry report it as process_owner.
+	viaProcessOwner bool
 }
 
-// TODO(identity-round integration): wire profileSubjectSource to S1's
-// verifiedSubjectFromContext (internal/gateway/identity_subject.go) and
-// profileAgentSource to S2's agentIdentityFromContext, for example:
-//
-//	profileSubjectSource = func(ctx context.Context) (profileSubject, bool) {
-//		s, ok := verifiedSubjectFromContext(ctx)
-//		if !ok {
-//			return profileSubject{}, false
-//		}
-//		return profileSubject{UserID: s.UserID, ...}, true
-//	}
-//	profileAgentSource = agentIdentityFromContext
-//
-// profileExplainSubjectLookup should then resolve the same directory facts
-// for `guardrail profile explain --user`. Until then both identity sources
-// report "not verified", and only the per-user gateway's process owner
-// (profileProcessOwnerSubject) is a verified subject.
+// The verified subject comes from S1's VerifiedSubject
+// (internal/gateway/identity_subject.go), attached once at authentication:
+// a hook-socket peer, a per-user credential's account or, on a per-user
+// gateway, its process owner. profileSubjectFromVerified maps its directory
+// facts (the gateway's own NSS, guardian spool or Windows lookup) to the
+// matcher's view. When no subject was attached (routes that skip S1's
+// authentication points, or identity facts off), a per-user gateway still
+// falls back to its process owner (profileProcessOwnerSubject); a request
+// S1 already verified as the process owner never takes that fallback.
+// `guardrail profile explain --user` resolves the named account's facts the
+// same way (lookupDirectoryProfileSubject), falling back to the OS account
+// database (lookupLocalProfileSubject).
 var (
 	// profileSubjectSource returns the kernel- or credential-verified
 	// subject of a request.
-	profileSubjectSource = func(context.Context) (profileSubject, bool) { return profileSubject{}, false }
+	profileSubjectSource = func(ctx context.Context) (profileSubject, bool) {
+		subject, ok := verifiedSubjectFromContext(ctx)
+		if !ok {
+			return profileSubject{}, false
+		}
+		return profileSubjectFromVerified(subject, identityLookupBlocking.Load()), true
+	}
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
 	profileAgentSource = agentIdentityFromContext
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
-	profileExplainSubjectLookup = lookupLocalProfileSubject
+	profileExplainSubjectLookup = lookupDirectoryProfileSubject
 )
 
 // Match reasons (defenseclaw.guardrail.profile.match).
@@ -362,6 +366,9 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 // came from, or ("", "") when the request has none.
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	if subject, ok := profileSubjectSource(ctx); ok {
+		if subject.viaProcessOwner {
+			return &subject, profileSubjectProcessOwner
+		}
 		return &subject, profileSubjectVerified
 	}
 	if subject, ok := profileProcessOwnerSubject(); ok {
@@ -407,6 +414,49 @@ var processOwnerProfileSubject = sync.OnceValues(func() (profileSubject, bool) {
 	}
 	return localProfileSubject(current), true
 })
+
+// profileSubjectFromVerified maps S1's verified subject to the matcher's
+// view. lookupAttempted says the directory lookup was waited on (a group or
+// user assignment is configured); a subject whose facts then never resolved
+// (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
+// has unknown groups, not empty ones, and selects like an unverified one.
+func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
+	return profileSubject{
+		UserID:          s.UserID,
+		IDKind:          s.IDKind,
+		UserName:        s.UserName,
+		Principal:       s.Directory.Principal,
+		UPN:             s.Directory.UPN,
+		Groups:          s.Directory.Groups,
+		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
+		viaProcessOwner: s.Source == subjectSourceProcessOwner,
+	}
+}
+
+// lookupDirectoryProfileSubject resolves the account an administrator names
+// to `guardrail profile explain --user` with the directory facts a request
+// from that account would carry. An account the directory lookup cannot
+// name falls back to the OS account database.
+func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return profileSubject{}, fmt.Errorf("no user named")
+	}
+	id, userName, ok := profileExplainAccount(name)
+	if !ok {
+		return lookupLocalProfileSubject(name)
+	}
+	facts, err := profileExplainDirectoryFacts(id)
+	if err != nil || facts.ResolvedAt.IsZero() {
+		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+			return local, nil
+		}
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, nil
+	}
+	return profileSubjectFromVerified(VerifiedSubject{
+		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
+	}, true), nil
+}
 
 // lookupLocalProfileSubject resolves an account name or uid/SID through the
 // OS account database (NSS on Unix, the SAM/LSA on Windows).
@@ -509,8 +559,11 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 		reason, group = profileMatchGroup, matched
 	}
 	if len(m.Users) > 0 {
-		candidates := []string{subject.UserID, subject.UserName, subject.Principal, subject.UPN}
-		if !anyMatches(m.Users, func(v string) bool { return anyEqualFold(candidates, v) }) {
+		candidates := []string{subject.UserID, subject.UserName}
+		if !anyMatches(m.Users, func(v string) bool {
+			return anyEqualFold(candidates, v) ||
+				useridentity.PrincipalsEqual(subject.Principal, v) || useridentity.PrincipalsEqual(subject.UPN, v)
+		}) {
 			return "", "", false
 		}
 		reason, group = profileMatchUser, ""
