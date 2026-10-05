@@ -495,6 +495,28 @@ def _is_trusted_codex_node_repl(command: str) -> bool:
     return False
 
 
+def _stdio_path_command_error(cmd: str) -> str:
+    """Refusal text for a stdio command given as a path (GAP-2640).
+
+    The scanner never starts a command path, even one that ends in npx or
+    uvx: it resolves only the bare launcher names from PATH. The text keeps
+    "allowlisted stdio launcher" so callers that match on it still work.
+    """
+    base = cmd.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    for suffix in (".exe", ".cmd"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    fix = (
+        f"set the command to the bare name {base!r}"
+        if base in _SAFE_STDIO_LAUNCHERS
+        else "use the bare name npx or uvx, or a URL"
+    )
+    return (
+        f"command {cmd!r} is a path, and paths are never an allowlisted stdio launcher: "
+        f"the scanner starts only the bare names npx or uvx from PATH; {fix}"
+    )
+
+
 def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
     """Return a concise refusal reason, or ``None`` for an admitted command."""
     if not isinstance(command, str):
@@ -517,11 +539,10 @@ def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
         )
 
     # No path components — only bare launcher names. This blocks absolute and
-    # relative paths on every host.
-    if "/" in cmd or "\\" in cmd:
-        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
-    if os.sep in cmd or (os.altsep and os.altsep in cmd):
-        return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
+    # relative paths on every host. GAP-2640: say that paths are refused by
+    # design, so "/opt/homebrew/bin/npx" does not read as "npx is not allowed".
+    if "/" in cmd or "\\" in cmd or os.sep in cmd or (os.altsep and os.altsep in cmd):
+        return _stdio_path_command_error(cmd)
     if cmd.lower() not in _SAFE_STDIO_LAUNCHERS:
         return "command is not an allowlisted stdio launcher (allowed: npx, uvx)"
 

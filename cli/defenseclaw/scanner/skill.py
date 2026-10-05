@@ -168,6 +168,16 @@ class SkillScannerWrapper:
     def name(self) -> str:
         return "skill-scanner"
 
+    def batch_workers(self, **_scan_options) -> int:
+        """Items ``skill scan --all`` may scan at once (GAP-2643).
+
+        The LLM analyzer waits on the network for each skill, so those scans
+        overlap; the local analyzers alone stay one at a time.
+        """
+        from defenseclaw.commands._scan_ui import LLM_SCAN_WORKERS
+
+        return LLM_SCAN_WORKERS if self.config.use_llm else 1
+
     def scan(self, target: str) -> ScanResult:
         import time
 
