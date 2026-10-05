@@ -46,14 +46,14 @@ const HeaderSize = 8
 // EmergencyMsgSize is the size of the emergency wire format.
 // Matches dclaw_emergency_msg_t in ota_receiver.c:
 //
-//	[0:4]   sequence    uint32
-//	[4:8]   timestamp   uint32
-//	[8]     command     uint8
-//	[9]     scope       uint8
-//	[10:42] payload     [32]byte
-//	[42:44] _reserved   [2]byte
-//	[44:76] signature   [32]byte (HMAC-SHA256)
-const EmergencyMsgSize = 76
+//	[0:4]    sequence    uint32
+//	[4:8]    timestamp   uint32
+//	[8]      command     uint8
+//	[9]      scope       uint8
+//	[10:42]  payload     [32]byte
+//	[42:44]  _reserved   [2]byte
+//	[44:108] signature   [64]byte (HMAC-SHA256 in first 32, zero-padded)
+const EmergencyMsgSize = 108
 
 // ParseHeader decodes the 8-byte policy blob header (big-endian).
 func ParseHeader(data []byte) (*PolicyHeader, error) {
@@ -243,7 +243,10 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	seq := s.emergencySeq
 	s.mu.Unlock()
 
-	// Build the message (44 bytes of data + 32 bytes signature = 76 bytes)
+	// Build the message: 44 bytes of data + 64-byte signature field = 108 bytes.
+	// The signature field holds 32 bytes of HMAC-SHA256 followed by 32 bytes of
+	// zero padding, matching the C-side dclaw_emergency_msg_t which reserves a
+	// 64-byte Ed25519 signature field.
 	msg := make([]byte, EmergencyMsgSize)
 
 	// Sequence (big-endian)
@@ -260,18 +263,21 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 
 	// Payload [10:42] and reserved [42:44] are zero-filled
 
-	// Sign the first 44 bytes (everything before the signature field)
+	// Sign the first 44 bytes (everything before the 64-byte signature field).
+	// C side: sizeof(msg) - sizeof(msg.signature) = 108 - 64 = 44.
 	sig, err := s.signer.Sign(msg[:44])
 	if err != nil {
 		return fmt.Errorf("sign emergency msg: %w", err)
 	}
 
-	// Copy signature into message (truncate to 32 bytes if signer returns more)
+	// Copy HMAC-SHA256 (32 bytes) into the first half of the 64-byte signature
+	// field. The remaining 32 bytes stay zero (padding for the Ed25519 slot).
 	n := 32
 	if len(sig) < n {
 		n = len(sig)
 	}
 	copy(msg[44:44+n], sig[:n])
+	// msg[76:108] remains zero — Ed25519 padding
 
 	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
 

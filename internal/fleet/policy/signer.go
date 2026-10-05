@@ -39,19 +39,21 @@ func NewHMACSigner(key []byte) (*HMACSigner, error) {
 }
 
 // NewHMACSignerFromEnv creates a signer using the hex-encoded key from the
-// DCLAW_OTA_SIGNING_KEY environment variable. Falls back to a deterministic
-// dev key if the env var is not set (development mode only).
+// DCLAW_OTA_KEY environment variable (matching the C-side ota_receiver.c).
+// Falls back to a 32-byte all-zero key if the env var is not set, matching
+// the C-side development fallback for interoperability.
 func NewHMACSignerFromEnv() (*HMACSigner, error) {
-	keyHex := os.Getenv("DCLAW_OTA_SIGNING_KEY")
+	keyHex := os.Getenv("DCLAW_OTA_KEY")
 	if keyHex == "" {
-		// Development fallback — deterministic key for local testing.
-		devKey := sha256.Sum256([]byte("defenseclaw-dev-signing-key"))
-		return &HMACSigner{key: devKey[:]}, nil
+		// Development fallback — all-zero key, matching C-side ota_receiver.c
+		// get_ota_ca_key() which memsets to zero when DCLAW_OTA_KEY is unset.
+		devKey := make([]byte, 32)
+		return &HMACSigner{key: devKey}, nil
 	}
 
 	key, err := decodeHex(keyHex)
 	if err != nil {
-		return nil, fmt.Errorf("invalid DCLAW_OTA_SIGNING_KEY: %w", err)
+		return nil, fmt.Errorf("invalid DCLAW_OTA_KEY: %w", err)
 	}
 	return NewHMACSigner(key)
 }

@@ -128,7 +128,7 @@ func TestHMACSignerEmptyKeyRejected(t *testing.T) {
 }
 
 func TestHMACSignerFromEnvDevFallback(t *testing.T) {
-	// Without DCLAW_OTA_SIGNING_KEY set, should use dev fallback
+	// Without DCLAW_OTA_KEY set, should use dev fallback (all-zero key)
 	signer, err := NewHMACSignerFromEnv()
 	if err != nil {
 		t.Fatal(err)
@@ -449,9 +449,17 @@ func TestServiceDistributeEmergency(t *testing.T) {
 		t.Errorf("command = %d, want %d", msg[8], EmergencyFlushCache)
 	}
 
-	// Verify signature over first 44 bytes
+	// Verify signature over first 44 bytes (HMAC-SHA256 lives in first 32
+	// bytes of the 64-byte signature field at offset 44).
 	if err := svc.signer.Verify(msg[:44], msg[44:76]); err != nil {
 		t.Fatalf("emergency signature verification failed: %v", err)
+	}
+
+	// Verify the remaining 32 bytes of the signature field are zero-padded
+	for i := 76; i < 108; i++ {
+		if msg[i] != 0 {
+			t.Fatalf("expected zero padding at byte %d, got %02x", i, msg[i])
+		}
 	}
 }
 

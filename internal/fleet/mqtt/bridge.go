@@ -2,6 +2,9 @@ package mqtt
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"sync"
@@ -196,6 +199,15 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		ServerTS:  uint32(time.Now().Unix()),
 	}
 
+	// Compute the HMAC tag matching the C-side verdict_protocol.c scheme.
+	// The session ID on the C side comes from dclaw_mqtt_get_session_id()
+	// which returns the MQTT session identifier; here we use the session ID
+	// derived from the device's MQTT connection (device ID as string).
+	// The device key defaults to 32-byte zero key for dev parity with C.
+	sessionID := fmt.Sprintf("%d", parts.DeviceID)
+	deviceKey := make([]byte, 32) // zero key — dev fallback matching C HAL
+	resp.HMACTag = computeVerdictHMAC(deviceKey, sessionID, vr.RequestID, resp.Action, vr.ToolHash)
+
 	// Publish the response to the device's verdict/resp topic
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)
@@ -219,4 +231,38 @@ func (b *Bridge) incErrors() {
 	b.mu.Lock()
 	b.decodeErrors++
 	b.mu.Unlock()
+}
+
+// computeVerdictHMAC computes the 4-byte HMAC tag for a verdict response,
+// matching the C-side compute_verdict_hmac() in verdict_protocol.c.
+//
+// Input: HMAC-SHA256(deviceKey, sessionID || requestID(2 LE) || action(1) || toolHash[0:8])
+// Output: first 4 bytes of the HMAC-SHA256 digest.
+//
+// The deviceKey is loaded from the device's HAL secure element on the C side.
+// On the Go/cloud side we use a per-session or per-device key. For now, the
+// session ID is derived from the MQTT topic (device ID as string), and the
+// device key defaults to a 32-byte zero key for development parity with the
+// C-side fallback.
+func computeVerdictHMAC(deviceKey []byte, sessionID string, requestID uint16, action uint8, toolHash [32]byte) [4]byte {
+	mac := hmac.New(sha256.New, deviceKey)
+
+	// session_id (string bytes, no NUL terminator — matches C strlen)
+	mac.Write([]byte(sessionID))
+
+	// request_id: 2 bytes little-endian (matches C-side)
+	var rid [2]byte
+	binary.LittleEndian.PutUint16(rid[:], requestID)
+	mac.Write(rid[:])
+
+	// action: 1 byte
+	mac.Write([]byte{action})
+
+	// tool_hash[0:8]
+	mac.Write(toolHash[:8])
+
+	full := mac.Sum(nil)
+	var tag [4]byte
+	copy(tag[:], full[:4])
+	return tag
 }

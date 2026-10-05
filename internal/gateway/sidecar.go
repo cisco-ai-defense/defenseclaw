@@ -44,6 +44,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	fleetmanager "github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	fleetmqtt "github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
+	fleetpolicy "github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	fleetverdict "github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -6828,7 +6830,27 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		return fleetverdict.ActionAllow, 0
 	})
 	fleet.WireMetrics(fleetMgr, fleetCache)
-	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache))
+
+	// Wire the policy service so policy endpoints (push, emergency, versions)
+	// are functional instead of returning 501.
+	policySigner, _ := fleetpolicy.NewHMACSignerFromEnv()
+	policyStore := fleetpolicy.NewMemoryPolicyStore()
+	var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
+	policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, nil)
+
+	// Start the MQTT bridge if a broker URL is configured. The bridge
+	// subscribes to heartbeat and verdict-request topics from edge devices
+	// and routes them to the fleet manager / verdict cache.
+	if brokerURL := os.Getenv("DCLAW_MQTT_BROKER_URL"); brokerURL != "" {
+		// TODO: create a real Paho MQTT client from brokerURL and assign
+		// to fleetMQTTClient so the policy service can publish OTA updates.
+		// For now, log and skip — the bridge requires a concrete Client.
+		fmt.Fprintf(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL=%s — fleet MQTT bridge not yet wired (need Paho client)\n", brokerURL)
+	} else {
+		fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
+	}
+
+	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleet.WithPolicyService(policySvc)))
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token
