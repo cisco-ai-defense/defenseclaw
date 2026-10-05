@@ -426,6 +426,9 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 			providerType = inferProvider(model, apiKey)
 		}
 	}
+	// providerType is the role or overlay family when one was set, and
+	// otherwise the model prefix. A non-Apple family keeps its provider
+	// even when the model string starts with apple-fm/.
 	if isAppleFMProvider(providerType, model) {
 		return newAppleFMProvider(model)
 	}

@@ -758,6 +758,16 @@ class TestLLMPing(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no model", msg)
 
+    def test_ping_does_not_pass_apple_fm_without_a_probe(self) -> None:
+        from defenseclaw import llm as llm_mod
+
+        ok, msg = llm_mod.ping(LLMConfig(provider="apple-fm", model="apple-fm/system"))
+        self.assertFalse(ok)
+        self.assertIn("not probed", msg)
+        ok, msg = llm_mod.ping(LLMConfig(provider="apple_fm", model="apple_fm/system"))
+        self.assertFalse(ok)
+        self.assertIn("not probed", msg)
+
     def test_ping_swallows_litellm_errors(self) -> None:
         """A provider failure must come back as ``(False, msg)``, not
         an exception — the wizard wraps the result in a banner.

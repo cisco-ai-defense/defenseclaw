@@ -64,20 +64,14 @@ func completeWithFoundationModels(ctx context.Context, call appleFMCall) (string
 	}
 	defer session.Release()
 
-	// GenerationOptions is the library's public control surface. The cgo
-	// bridge currently answers through RespondSync and does not apply
-	// temperature or max tokens; they are still passed so a bridge that
-	// honors them does not need a gateway change.
-	options := &fm.GenerationOptions{}
-	if call.maxTokens > 0 {
-		maxTokens := call.maxTokens
-		options.MaxTokens = &maxTokens
-	}
-	temperature := call.temperature
-	options.Temperature = &temperature
-	text := session.Respond(call.prompt, options)
+	// Respond ignores GenerationOptions and calls RespondSync. Requests
+	// that set max_tokens or temperature are rejected before this point.
+	text := session.Respond(call.prompt, nil)
 	if text == "" {
 		return "", fmt.Errorf("apple-fm: Foundation Models returned an empty response")
+	}
+	if err := appleFMResponseError(text); err != nil {
+		return "", err
 	}
 	return text, nil
 }

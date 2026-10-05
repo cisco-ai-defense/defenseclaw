@@ -29,9 +29,6 @@ func TestAppleFMProviderUsesOnDeviceBridge(t *testing.T) {
 		if call.instructions == "" || call.prompt == "" {
 			t.Fatalf("call = %#v, want system instructions and a user prompt", call)
 		}
-		if call.maxTokens != 32 {
-			t.Fatalf("maxTokens = %d, want 32", call.maxTokens)
-		}
 		return "verdict:" + call.prompt, nil
 	})
 	defer restore()
@@ -43,13 +40,11 @@ func TestAppleFMProviderUsesOnDeviceBridge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	maxTokens := 32
 	resp, err := provider.ChatCompletion(context.Background(), &ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: "Return JSON"},
 			{Role: "user", Content: "hello"},
 		},
-		MaxTokens: &maxTokens,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -86,21 +81,121 @@ func TestAppleFMJudgeDoesNotRequireAPIKey(t *testing.T) {
 }
 
 func TestAppleFMCallSeparatesInstructions(t *testing.T) {
-	maxTokens := 8
-	temperature := 0.0
-	call := appleFMCallFromRequest(&ChatRequest{
+	call, err := appleFMCallFromRequest(&ChatRequest{
 		Messages: []ChatMessage{
 			{Role: "system", Content: "policy"},
 			{Role: "user", Content: "sample"},
 		},
-		MaxTokens:   &maxTokens,
-		Temperature: &temperature,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if call.instructions != "policy" || call.prompt != "sample" {
 		t.Fatalf("call = %#v", call)
 	}
-	if call.maxTokens != 8 || call.temperature != 0 {
-		t.Fatalf("generation = tokens %d temperature %v", call.maxTokens, call.temperature)
+}
+
+func TestAppleFMCallLabelsMultiTurnRoles(t *testing.T) {
+	call, err := appleFMCallFromRequest(&ChatRequest{
+		Messages: []ChatMessage{
+			{Role: "system", Content: "policy"},
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "reply"},
+			{Role: "user", Content: "second"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.instructions != "policy" {
+		t.Fatalf("instructions = %q", call.instructions)
+	}
+	want := "User:\nfirst\n\nAssistant:\nreply\n\nUser:\nsecond"
+	if call.prompt != want {
+		t.Fatalf("prompt = %q", call.prompt)
+	}
+}
+
+func TestAppleFMRejectsIgnoredGenerationLimits(t *testing.T) {
+	restore := swapAppleFMForTest(t, func(context.Context, appleFMCall) (string, error) {
+		t.Fatal("bridge was called with generation limits it cannot apply")
+		return "", nil
+	})
+	defer restore()
+
+	provider, err := newAppleFMProvider("system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxTokens := 1
+	temperature := 0.0
+	_, err = provider.ChatCompletion(context.Background(), &ChatRequest{
+		Messages:    []ChatMessage{{Role: "user", Content: "hello"}},
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
+	})
+	if err == nil || !strings.Contains(err.Error(), "max_tokens") {
+		t.Fatalf("err = %v, want a generation-limit rejection", err)
+	}
+}
+
+func TestAppleFMNativeErrorIsNotACompletion(t *testing.T) {
+	err := appleFMResponseError("Error: context window exceeded")
+	if err == nil || !strings.Contains(err.Error(), "context window exceeded") {
+		t.Fatalf("err = %v", err)
+	}
+	if err := appleFMResponseError("allow"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAppleFMUnderscoreAliasCanonicalizes(t *testing.T) {
+	restore := swapAppleFMForTest(t, func(context.Context, appleFMCall) (string, error) {
+		return "ok", nil
+	})
+	defer restore()
+
+	provider, err := NewProvider("apple_fm/system", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apple, ok := provider.(*appleFMProvider)
+	if !ok {
+		t.Fatalf("provider = %T, want *appleFMProvider", provider)
+	}
+	if apple.model != "apple-fm/system" {
+		t.Fatalf("model = %q", apple.model)
+	}
+}
+
+func TestExplicitProviderWinsOverAppleFMModel(t *testing.T) {
+	previous := appleFMAvailable
+	appleFMAvailable = false
+	t.Cleanup(func() { appleFMAvailable = previous })
+
+	provider, err := NewProviderForLLMConfig(&config.LLMConfig{
+		Provider: "openai",
+		Model:    "apple-fm/system",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := provider.(*appleFMProvider); ok {
+		t.Fatal("explicit openai provider selected the Apple FM bridge")
+	}
+}
+
+func TestAppleFMJudgeOmitsIgnoredGenerationOptions(t *testing.T) {
+	cfg := &config.JudgeConfig{}
+	judge := &LLMJudge{cfg: cfg, providerName: "apple-fm", model: "apple-fm/system"}
+	req := judge.judgeChatRequest([]ChatMessage{{Role: "user", Content: "sample"}}, 32, "injection")
+	if req.MaxTokens != nil || req.Temperature != nil {
+		t.Fatalf("apple-fm judge request = %#v", req)
+	}
+	other := &LLMJudge{cfg: cfg, providerName: "openai", model: "gpt-4o"}
+	otherReq := other.judgeChatRequest([]ChatMessage{{Role: "user", Content: "sample"}}, 32, "injection")
+	if otherReq.MaxTokens == nil || *otherReq.MaxTokens != 32 || otherReq.Temperature == nil {
+		t.Fatalf("openai judge request = %#v", otherReq)
 	}
 }
 

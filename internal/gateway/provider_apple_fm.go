@@ -29,15 +29,21 @@ import (
 // github.com/blacktop/go-foundationmodels, which is linked only into a
 // darwin/arm64 CGO build (-tags applefm). Release binaries stay
 // CGO_ENABLED=0 and report that the bridge is not linked.
-const appleFMModelPrefix = "apple-fm/"
+const (
+	appleFMModelPrefix           = "apple-fm/"
+	appleFMUnderscoreModelPrefix = "apple_fm/"
+)
 
 var errAppleFMNotLinked = errors.New("apple-fm requires a gateway built with CGO_ENABLED=1 GOARCH=arm64 -tags applefm on macOS 26 or later, using github.com/blacktop/go-foundationmodels")
+
+// errAppleFMGenerationLimits is returned when a request asks for controls
+// the pinned bridge cannot apply. SessionCompat.Respond ignores
+// GenerationOptions and calls the optionless native response.
+var errAppleFMGenerationLimits = errors.New("apple-fm: max_tokens and temperature are not applied by github.com/blacktop/go-foundationmodels v0.1.8; omit them")
 
 type appleFMCall struct {
 	instructions string
 	prompt       string
-	maxTokens    int
-	temperature  float32
 }
 
 // appleFMAvailable is true only in the cgo build that links the
@@ -55,24 +61,55 @@ func isAppleFMProvider(providerType, model string) bool {
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
 	case "apple-fm", "apple_fm":
 		return true
+	case "":
+		// A model prefix selects Apple FM only when no role or overlay
+		// provider was specified. An explicit family such as openai wins.
+		return isAppleFMModel(model)
+	default:
+		return false
 	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), appleFMModelPrefix)
+}
+
+func isAppleFMModel(model string) bool {
+	return appleFMPrefixLen(model) > 0
+}
+
+func appleFMPrefixLen(model string) int {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	switch {
+	case strings.HasPrefix(lower, appleFMModelPrefix):
+		return len(appleFMModelPrefix)
+	case strings.HasPrefix(lower, appleFMUnderscoreModelPrefix):
+		return len(appleFMUnderscoreModelPrefix)
+	default:
+		return 0
+	}
 }
 
 func canonicalAppleFMModel(model string) string {
 	model = strings.TrimSpace(model)
-	lower := strings.ToLower(model)
-	if strings.HasPrefix(lower, appleFMModelPrefix) {
-		name := strings.TrimSpace(model[len(appleFMModelPrefix):])
-		if name == "" || strings.EqualFold(name, "system") {
-			return "apple-fm/system"
-		}
-		return "apple-fm/" + name
+	if n := appleFMPrefixLen(model); n > 0 {
+		model = strings.TrimSpace(model[n:])
 	}
 	if model == "" || strings.EqualFold(model, "system") {
 		return "apple-fm/system"
 	}
 	return "apple-fm/" + model
+}
+
+// appleFMResponseError turns the pinned bridge's swallowed native
+// failure into an error. RespondSync catches a model error and returns
+// the text "Error: ..."; SessionCompat.Respond then reports success.
+func appleFMResponseError(text string) error {
+	const prefix = "Error: "
+	if !strings.HasPrefix(text, prefix) {
+		return nil
+	}
+	detail := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+	if detail == "" {
+		return errors.New("apple-fm: Foundation Models returned an error")
+	}
+	return fmt.Errorf("apple-fm: Foundation Models error: %s", detail)
 }
 
 func newAppleFMProvider(model string) (LLMProvider, error) {
@@ -90,7 +127,10 @@ func (p *appleFMProvider) ChatCompletion(ctx context.Context, req *ChatRequest) 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	call := appleFMCallFromRequest(req)
+	call, err := appleFMCallFromRequest(req)
+	if err != nil {
+		return nil, err
+	}
 	content, err := appleFMComplete(ctx, call)
 	if err != nil {
 		return nil, err
@@ -129,35 +169,78 @@ func (p *appleFMProvider) ChatCompletionStream(ctx context.Context, req *ChatReq
 	return resp.Usage, nil
 }
 
-func appleFMCallFromRequest(req *ChatRequest) appleFMCall {
+func appleFMCallFromRequest(req *ChatRequest) (appleFMCall, error) {
 	call := appleFMCall{}
 	if req == nil {
-		return call
+		return call, nil
+	}
+	if req.MaxTokens != nil || req.Temperature != nil {
+		return call, errAppleFMGenerationLimits
 	}
 	var systemParts []string
-	var userParts []string
+	var turns []appleFMTurn
 	for _, message := range req.Messages {
 		text := strings.TrimSpace(message.Content)
 		if text == "" {
 			continue
 		}
-		if strings.EqualFold(message.Role, "system") {
+		role := strings.ToLower(strings.TrimSpace(message.Role))
+		if role == "system" || role == "developer" {
 			systemParts = append(systemParts, text)
 			continue
 		}
-		userParts = append(userParts, text)
+		if role == "" {
+			role = "user"
+		}
+		turns = append(turns, appleFMTurn{role: role, text: text})
 	}
 	call.instructions = strings.Join(systemParts, "\n\n")
-	call.prompt = strings.Join(userParts, "\n\n")
+	call.prompt = appleFMPromptFromTurns(turns)
 	if call.prompt == "" {
 		call.prompt = call.instructions
 		call.instructions = ""
 	}
-	if req.MaxTokens != nil && *req.MaxTokens > 0 {
-		call.maxTokens = *req.MaxTokens
+	return call, nil
+}
+
+type appleFMTurn struct {
+	role string
+	text string
+}
+
+// appleFMPromptFromTurns keeps a single user turn as plain text. A
+// longer transcript names each role so an assistant reply is not sent
+// to the model as the next user prompt. The pinned session API accepts
+// one instruction string and one prompt, so the history is inlined.
+func appleFMPromptFromTurns(turns []appleFMTurn) string {
+	if len(turns) == 0 {
+		return ""
 	}
-	if req.Temperature != nil {
-		call.temperature = float32(*req.Temperature)
+	if len(turns) == 1 && turns[0].role == "user" {
+		return turns[0].text
 	}
-	return call
+	var b strings.Builder
+	for i, turn := range turns {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(appleFMRoleLabel(turn.role))
+		b.WriteString(":\n")
+		b.WriteString(turn.text)
+	}
+	return b.String()
+}
+
+func appleFMRoleLabel(role string) string {
+	switch role {
+	case "user":
+		return "User"
+	case "assistant":
+		return "Assistant"
+	default:
+		if role == "" {
+			return "User"
+		}
+		return role
+	}
 }

@@ -698,15 +698,20 @@ func judgeExtraParams(model string) map[string]any {
 }
 
 func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind string) *ChatRequest {
-	temperature := 0.0
-	return &ChatRequest{
+	req := &ChatRequest{
 		Messages:       messages,
-		MaxTokens:      intPtr(maxTok),
-		Temperature:    &temperature,
 		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
 		ExtraParams:    judgeExtraParams(j.model),
 	}
+	// The pinned Apple FM bridge ignores max tokens and temperature and
+	// the provider rejects a request that sets them.
+	if j == nil || !isAppleFMProvider(j.providerName, j.model) {
+		temperature := 0.0
+		req.MaxTokens = intPtr(maxTok)
+		req.Temperature = &temperature
+	}
+	return req
 }
 
 func judgeResponseFormat(kind string) json.RawMessage {
