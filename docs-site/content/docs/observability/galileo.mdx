@@ -19,6 +19,11 @@ stable lifecycle/execution correlation when those fields are present.
 The profile has six span families: agent invocation, workflow, model chat,
 tool execution, retrieval and guardrail judge. Per user, Galileo therefore shows
 which agent ran, its model and tool calls, and the rule that blocked a turn.
+A guardrail judge span (`chat <judge model>`) can be its own trace: for a
+connector hook, the judge call runs before the hook decision is recorded. It
+carries the same `user.id`, `defenseclaw.user.name`, `gen_ai.conversation.id`
+and `defenseclaw.turn.id` as the turn's agent spans, so filter on those to see
+a user's judge verdicts next to their turns.
 AI discovery, scanner, audit and other operational records are not in the
 profile, so Galileo never receives them. To see what AI discovery found, use
 the Grafana **AI Agent Usage & Detection** dashboard, Splunk, or another OTLP
