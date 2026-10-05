@@ -264,24 +264,6 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	var scanErr error
 	var result *ScanResult
 
-	// GAP-1671: the frontmatter description is scanned alongside the main
-	// scan (the upstream CLI checks only the SKILL.md body).
-	var descriptionFindings chan []Finding
-	if description := skillDescription(target); description != "" {
-		descriptionFindings = make(chan []Finding, 1)
-		go func() { descriptionFindings <- s.scanDescription(ctx, description) }()
-	}
-	collectDescription := func(result *ScanResult) {
-		if descriptionFindings != nil {
-			extra := <-descriptionFindings
-			descriptionFindings = nil
-			if result != nil {
-				result.Findings = append(result.Findings, extra...)
-			}
-		}
-	}
-	defer collectDescription(nil)
-
 	args := s.buildArgs(target)
 	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
 	cmd.Env = s.scanEnv()
@@ -330,7 +312,6 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		}
 		result.Findings = findings
 	}
-	collectDescription(result)
 
 	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit even when stdout parsed cleanly. See the matching

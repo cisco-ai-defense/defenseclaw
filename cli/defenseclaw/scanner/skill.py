@@ -48,46 +48,6 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-def _frontmatter_yara_analyzers(analyzers: list) -> list:
-    """YARA-scan the SKILL.md frontmatter description too (GAP-1376).
-
-    The SDK's static analyzer runs YARA on the SKILL.md body only, but the
-    description is the text an agent always loads, so an instruction-override
-    phrase there must be found like the same phrase in the body.
-    """
-    try:
-        from skill_scanner.core.analyzers.base import BaseAnalyzer
-        from skill_scanner.core.analyzers.static import StaticAnalyzer
-    except ImportError:
-        return []
-    static = next(
-        (
-            a for a in analyzers
-            if isinstance(a, StaticAnalyzer) and getattr(a, "yara_scanner", None) is not None
-        ),
-        None,
-    )
-    if static is None:
-        return []
-
-    class _FrontmatterYaraAnalyzer(BaseAnalyzer):
-        def __init__(self) -> None:
-            super().__init__("static_frontmatter", policy=static.policy)
-
-        def analyze(self, skill):  # type: ignore[no-untyped-def]
-            text = getattr(skill, "description", "") or ""
-            if not text.strip():
-                return []
-            findings = []
-            for match in static.yara_scanner.scan_content(text, "SKILL.md"):
-                if not static._is_rule_enabled(match.get("rule_name", "")):
-                    continue
-                findings.extend(static._create_findings_from_yara_match(match, skill))
-            return findings
-
-    return [_FrontmatterYaraAnalyzer()]
-
-
 # Skip warnings already printed in this process, so `skill scan --all` says
 # once why the LLM analyzer is off instead of once per skill (GAP-2628).
 _warned_llm_skips: set[str] = set()
@@ -293,7 +253,6 @@ class SkillScannerWrapper:
             build_kwargs["use_aidefense"] = True
 
         analyzers = build_analyzers(**build_kwargs)
-        analyzers.extend(_frontmatter_yara_analyzers(analyzers))
         scanner = SkillScanner(analyzers=analyzers, policy=policy)
 
         start = time.monotonic()
