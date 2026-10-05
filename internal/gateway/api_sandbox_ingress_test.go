@@ -1151,7 +1151,7 @@ func mainAPIRoutePaths(t *testing.T) []string {
 		"/api/v1/network-egress", "/api/v1/telemetry/canary", "/api/v1/watchdog/recovery",
 		destinationtest.EndpointPath, cliObservabilityV8Path, alertAcknowledgementV8Path,
 		"/v1/logs", "/v1/metrics", "/v1/traces", "/api/v1/agents/discovery", "/api/v1/ai-usage",
-		"/api/v1/ai-usage/scan", "/api/v1/ai-usage/discovery", "/api/v1/ai-usage/components",
+		"/api/v1/ai-usage/scan", "/api/v1/ai-usage/discovery", "/api/v1/ai-usage/components", "/api/v1/ai-usage/ide-plugins",
 		"/api/v1/ai-usage/runtime", "/api/v1/ai-usage/runtime/scan", "/api/v1/correlation/graph",
 		"/api/v1/correlation/explain", "/api/v1/correlation/timeline", "/api/v1/correlation/conflicts",
 		"/api/v1/ai-usage/confidence/policy", "/api/v1/ai-usage/confidence/policy/validate",

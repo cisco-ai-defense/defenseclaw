@@ -180,6 +180,13 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	if err := os.WriteFile(rawPath, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	extensions := filepath.Join(home, ".vscode", "extensions")
+	if err := os.MkdirAll(extensions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extensions, "extensions.json"), []byte(`[{"identifier":{"id":"example.raw-ai"},"version":"1.0.0","relativeLocation":"example.raw-ai-1.0.0"},{"identifier":{"id":"example.other"},"version":"2.0.0"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	svc := inventory.NewContinuousDiscoveryServiceWithOptions(
 		inventory.AIDiscoveryOptions{
@@ -195,11 +202,12 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 			StoreRawLocalPaths:      true,
 		},
 		[]inventory.AISignature{{
-			ID:          "raw-ai-config",
-			Name:        "Raw AI",
-			Vendor:      "Example",
-			Category:    inventory.SignalWorkspaceArtifact,
-			ConfigPaths: []string{"~/.raw-ai/config.json"},
+			ID:           "raw-ai-config",
+			Name:         "Raw AI",
+			Vendor:       "Example",
+			Category:     inventory.SignalWorkspaceArtifact,
+			ConfigPaths:  []string{"~/.raw-ai/config.json"},
+			ExtensionIDs: []string{"example.raw-ai"},
 		}},
 	)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -242,5 +250,26 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), rawPath) || strings.Contains(w.Body.String(), `"raw_path"`) {
 		t.Fatalf("usage API leaked raw path with redaction enabled: %s", w.Body.String())
+	}
+
+	// The IDE plugin list pages through the full inventory, filters to AI
+	// plugins on request, and carries paths only as hashes.
+	w = httptest.NewRecorder()
+	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1", nil))
+	var page struct {
+		Total      int                   `json:"total"`
+		NextCursor string                `json:"next_cursor"`
+		Plugins    []inventory.IDEPlugin `json:"plugins"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("ide-plugins = %d %s", w.Code, w.Body.String())
+	}
+	if page.Total != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
+		t.Fatalf("ide-plugins page = %s", w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?ai_only=true", nil))
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.Total != 1 || page.Plugins[0].PluginID != "example.raw-ai" || !page.Plugins[0].IsAI {
+		t.Fatalf("ai_only = %s", w.Body.String())
 	}
 }

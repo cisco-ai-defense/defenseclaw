@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -201,6 +203,21 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 			logErr = err
 		}
 	}
+	if inv := report.IDEInventory; inv != nil && !inv.Carried {
+		for _, plugin := range inv.Plugins {
+			if plugin.State != inventory.AIStateNew && plugin.State != inventory.AIStateChanged {
+				continue
+			}
+			if err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin); err != nil && logErr == nil {
+				logErr = err
+			}
+		}
+		for _, plugin := range inv.Removed {
+			if err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin); err != nil && logErr == nil {
+				logErr = err
+			}
+		}
+	}
 	metricErr := adapter.emitMetrics(ctx, report, components)
 	if logErr != nil {
 		return logErr
@@ -366,6 +383,138 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		aiDiscoveryV8Clamp(signal.Confidence),
 	)
 	return nil
+}
+
+var (
+	ideV8PluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9._@/:+-]*$`)
+	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
+	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
+	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+)
+
+func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observability.Optional[string] {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > limit || !pattern.MatchString(value) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(value)
+}
+
+// emitIDEPluginLog emits ide.plugin.{discovered,changed,removed} for one
+// plugin. Plugin ids and versions are exported as they are; paths never
+// leave the process (the row carries only their hashes, which this record
+// does not use). A plugin whose id does not fit the attribute's syntax is
+// skipped rather than rewritten.
+func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
+	ctx context.Context,
+	summary inventory.AIDiscoverySummary,
+	plugin inventory.IDEPlugin,
+) error {
+	var eventName observability.EventName
+	switch plugin.State {
+	case inventory.AIStateNew:
+		eventName = observability.EventName(observability.TelemetryEventIdePluginDiscovered)
+	case inventory.AIStateChanged:
+		eventName = observability.EventName(observability.TelemetryEventIdePluginChanged)
+	case inventory.AIStateGone:
+		eventName = observability.EventName(observability.TelemetryEventIdePluginRemoved)
+	default:
+		return nil
+	}
+	pluginID := strings.TrimSpace(plugin.PluginID)
+	if len(pluginID) > 256 || !ideV8PluginIDPattern.MatchString(pluginID) || !ideV8ProductPattern.MatchString(plugin.Product) {
+		return nil
+	}
+	metadata, err := router.NewClassifiedLogMetadata(
+		observability.ProducerGatewayEvent,
+		observability.ProducerKey("ai_discovery"),
+		observability.ClassificationContext{
+			Bucket: observability.BucketAIDiscovery, EventName: eventName, RawSeverity: "INFO",
+		},
+		observability.SourceSystem,
+		"",
+		observability.ProducerKey("ai_discovery"),
+	)
+	if err != nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+	}
+	_, err = adapter.runtime.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		builder, buildErr := aiDiscoveryV8Builder()
+		if buildErr != nil {
+			return observability.Record{}, buildErr
+		}
+		base := observability.LogIdePluginChangedInput{
+			Envelope:                     aiDiscoveryV8EmitEnvelope(ctx, snapshot, "ide_plugin"),
+			Severity:                     observability.Present(observability.SeverityInfo),
+			LogLevel:                     observability.Present(observability.LogLevelInfo),
+			DefenseClawIdeProduct:        plugin.Product,
+			DefenseClawIdePluginID:       pluginID,
+			DefenseClawIdePluginVersion:  ideV8Optional(plugin.Version, ideV8VersionPattern, 128),
+			DefenseClawIdePluginEnabled:  aiDiscoveryV8OptionalText(plugin.Enabled),
+			DefenseClawIdePluginAI:       observability.Present(plugin.IsAI),
+			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
+			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
+			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
+			DefenseClawUserName:          ideV8Optional(plugin.UserName, ideV8UserPattern, 256),
+		}
+		switch plugin.State {
+		case inventory.AIStateNew:
+			return builder.BuildLogIdePluginDiscovered(observability.LogIdePluginDiscoveredInput(base))
+		case inventory.AIStateChanged:
+			return builder.BuildLogIdePluginChanged(base)
+		default:
+			return builder.BuildLogIdePluginRemoved(observability.LogIdePluginRemovedInput(base))
+		}
+	})
+	return err
+}
+
+// emitIDEPluginMetricsV8 records the defenseclaw.inventory.ide_plugins
+// gauge: the plugin count per IDE product, AI flag and enabled state.
+func emitIDEPluginMetricsV8(recorder *aiDiscoveryV8MetricRecorder, inv *inventory.IDEInventory) {
+	if inv == nil {
+		return
+	}
+	type key struct {
+		product, enabled string
+		ai               bool
+	}
+	counts := map[key]int64{}
+	for _, p := range inv.Plugins {
+		product := p.Product
+		if !ideV8ProductPattern.MatchString(product) {
+			product = "other"
+		}
+		counts[key{product: product, enabled: p.Enabled, ai: p.IsAI}]++
+	}
+	keys := make([]key, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, b := keys[i], keys[j]
+		if a.product != b.product {
+			return a.product < b.product
+		}
+		if a.enabled != b.enabled {
+			return a.enabled < b.enabled
+		}
+		return !a.ai && b.ai
+	})
+	for _, k := range keys {
+		k, value := k, counts[k]
+		recorder.record(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawInventoryIdePlugins(observability.MetricDefenseClawInventoryIdePluginsInput{
+				Envelope: envelope, Value: value,
+				DefenseClawIdeProduct:       observability.Present(k.product),
+				DefenseClawIdePluginAI:      observability.Present(k.ai),
+				DefenseClawIdePluginEnabled: aiDiscoveryV8OptionalText(k.enabled),
+			})
+		})
+	}
 }
 
 // aiDiscoverySanitizeLogValue prepares a signal field for single-line stderr
@@ -643,6 +792,7 @@ func (adapter *aiDiscoveryV8Adapter) emitMetrics(
 	for _, component := range components {
 		emitComponentMetricsV8(recorder, component.Metrics)
 	}
+	emitIDEPluginMetricsV8(recorder, report.IDEInventory)
 	return recorder.result()
 }
 

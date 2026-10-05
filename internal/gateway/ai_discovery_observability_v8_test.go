@@ -523,3 +523,43 @@ func asSidecarObservabilityError(err error, target **sidecarObservabilityError) 
 	}
 	return ok
 }
+
+// The IDE inventory's lifecycle reaches the generated ide.plugin.* logs
+// and the per-product gauge, carrying plugin ids but no paths.
+func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
+	fixture := newOTLPV8MetricFixture(t)
+	runtime := &discoveryMetricFailureRuntime{aiDiscoveryV8Runtime: fixture.runtime}
+	adapter := &aiDiscoveryV8Adapter{runtime: runtime}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScanID: "scan-ide", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok"},
+		IDEInventory: &inventory.IDEInventory{
+			Plugins: []inventory.IDEPlugin{
+				{PluginID: "anthropic.claude-code", Product: "vscode", Version: "2.0.1", Enabled: "enabled", IsAI: true, UserID: "1001", UserName: "alice", PathHash: "sha256:" + strings.Repeat("a", 64), State: inventory.AIStateNew},
+				{PluginID: "ms-python.python", Product: "vscode", Enabled: "disabled", State: inventory.AIStateSeen},
+			},
+			Removed: []inventory.IDEPlugin{{PluginID: "com.github.copilot", Product: "pycharm", Enabled: "enabled", IsAI: true, State: inventory.AIStateGone}},
+		},
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatalf("EmitReport: %v", err)
+	}
+	var events []string
+	for _, row := range readStoredContinuousDiscoveryV8(t, fixture.path) {
+		events = append(events, row.eventName)
+		if raw, _ := json.Marshal(row.body); strings.Contains(string(raw), "sha256:aaaa") {
+			t.Fatalf("ide record carried a path hash: %s", raw)
+		}
+	}
+	if strings.Join(events, ",") != "ai.discovery.completed,ide.plugin.discovered,ide.plugin.removed" {
+		t.Fatalf("events = %v", events)
+	}
+	gauges := 0
+	for _, family := range runtime.snapshot() {
+		if family == observability.EventName(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins) {
+			gauges++
+		}
+	}
+	if gauges != 2 {
+		t.Fatalf("ide_plugins gauge records = %d, want one per (product, ai, enabled) of the current list", gauges)
+	}
+}

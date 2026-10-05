@@ -1062,6 +1062,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
 	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
 	// discovery -- presence and behaviour -- reads as one surface.
 	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
