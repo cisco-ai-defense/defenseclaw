@@ -25,7 +25,8 @@ import (
 
 // The OpenClaw RPC routes (/skill/*, /plugin/*, /skills, /mcps,
 // /tools/catalog) are registered only for an OpenClaw gateway, and never on
-// a standalone enterprise deployment, which runs no OpenClaw (GAP-1142).
+// a standalone enterprise deployment, which runs no OpenClaw (GAP-1142). The
+// Secure Client path keeps them.
 func TestOpenClawRoutesServedOnlyForOpenClaw(t *testing.T) {
 	for name, tc := range map[string]struct {
 		cfg  *config.Config
@@ -39,6 +40,10 @@ func TestOpenClawRoutesServedOnlyForOpenClaw(t *testing.T) {
 			Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
 			Guardrail:      config.GuardrailConfig{Connector: "openclaw"},
 		}, false},
+		"secure client": {&config.Config{
+			DeploymentMode: managed.DeploymentModeManagedEnterprise,
+			Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+		}, true},
 	} {
 		if got := (&APIServer{scannerCfg: tc.cfg}).servesOpenClawRoutes(); got != tc.want {
 			t.Errorf("%s: servesOpenClawRoutes() = %v, want %v", name, got, tc.want)

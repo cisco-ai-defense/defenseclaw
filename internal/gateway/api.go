@@ -915,12 +915,16 @@ func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 // servesOpenClawRoutes reports whether Run registers the routes that proxy
 // the OpenClaw gateway RPCs (/skill/*, /plugin/*, /skills, /mcps,
 // /tools/catalog): only when openclaw is an active connector, and never on a
-// standalone enterprise deployment, which does not run OpenClaw. A connector
-// change restarts the gateway, so the route set is fixed for the process.
+// standalone enterprise deployment, which does not run OpenClaw. The Secure
+// Client path keeps its route set unchanged. A connector change restarts the
+// gateway, so the route set is fixed for the process.
 func (a *APIServer) servesOpenClawRoutes() bool {
 	cfg := a.runtimeConfigSnapshot()
-	if cfg == nil || cfg.StandaloneEnterprise() {
+	switch {
+	case cfg == nil || cfg.StandaloneEnterprise():
 		return false
+	case cfg.SecureClientIntegration():
+		return true
 	}
 	return slices.Contains(cfg.ActiveConnectors(), "openclaw")
 }
