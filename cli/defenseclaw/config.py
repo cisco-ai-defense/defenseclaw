@@ -753,10 +753,12 @@ _RECOGNIZED_LLM_PROVIDERS = frozenset(
         "lm_studio",
         "lmstudio",
         "local",
+        "apple-fm",
+        "apple_fm",
     }
 )
 
-_LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
+_LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local", "apple-fm", "apple_fm"})
 
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
@@ -773,7 +775,7 @@ def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
         "openai/anthropic/azure/gemini/gemini-openai/vertex_ai/bedrock/"
         "groq/mistral/cohere/ollama/vllm/deepseek/xai/fireworks_ai/"
         "perplexity/huggingface/replicate/openrouter/together_ai/cerebras/"
-        "lm_studio/local. Gateway (Bifrost) and scanners (LiteLLM) may "
+        "lm_studio/local/apple-fm. Gateway (Bifrost) and scanners (LiteLLM) may "
         "disagree on how to route this model",
         prefix,
         component_path,
@@ -888,8 +890,9 @@ class LLMConfig:
     ``api_key`` vs ``api_key_env``: prefer ``api_key_env`` so the secret
     stays out of ``config.yaml``. An empty ``api_key_env`` falls back to
     ``DEFENSECLAW_LLM_KEY`` — the canonical env var for the whole
-    product. Local providers (``ollama/``, ``vllm/``, ``lm_studio/``)
-    don't need a key; an empty resolved value is allowed.
+    product. Local providers (``ollama/``, ``vllm/``, ``lm_studio/``,
+    ``apple-fm/``) don't need a key; an empty resolved value is allowed.
+    ``apple-fm/system`` is the on-device Apple Foundation Model.
 
     ``instance_name`` selects a named entry from
     ``~/.defenseclaw/custom-providers.json``. When set, the resolver

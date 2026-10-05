@@ -196,6 +196,9 @@ type LLMProvider interface {
 // The model format is "provider/model-name" (e.g. "anthropic/claude-opus-4-5").
 // All provider routing and API translation is handled by the Bifrost Go SDK.
 func NewProvider(model string, apiKey string) (LLMProvider, error) {
+	if isAppleFMProvider("", model) {
+		return newAppleFMProvider(model)
+	}
 	provider, modelID := splitModel(model)
 	if provider == "" {
 		provider = inferProvider(modelID, apiKey)
@@ -237,6 +240,9 @@ func inferProvider(model string, apiKey string) string {
 // The Bifrost SDK handles all provider-specific API differences (auth headers,
 // request format translation, streaming) internally.
 func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvider, error) {
+	if isAppleFMProvider("", model) {
+		return newAppleFMProvider(model)
+	}
 	if baseURL == "" {
 		return NewProvider(model, apiKey)
 	}
@@ -420,6 +426,9 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 			providerType = inferProvider(model, apiKey)
 		}
 	}
+	if isAppleFMProvider(providerType, model) {
+		return newAppleFMProvider(model)
+	}
 	providerKey, err := mapProviderKey(providerType)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: unsupported provider type %q: %w", providerType, err)
@@ -467,6 +476,8 @@ var knownProviders = map[string]bool{
 	"groq":           true,
 	"mistral":        true,
 	"ollama":         true,
+	"apple-fm":       true,
+	"apple_fm":       true,
 	"vertex":         true,
 	"cohere":         true,
 	"perplexity":     true,

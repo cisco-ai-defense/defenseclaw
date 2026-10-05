@@ -206,6 +206,7 @@ class InjectLLMEnvTests(unittest.TestCase):
             ("ollama", "ollama/llama3.1"),
             ("vllm", "vllm/meta-llama"),
             ("lm_studio", "lm_studio/custom"),
+            ("apple-fm", "apple-fm/system"),
         ):
             with self.subTest(provider=prov):
                 llm = LLMConfig(provider=prov, model=model)

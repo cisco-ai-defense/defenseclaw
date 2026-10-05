@@ -662,6 +662,8 @@ _PROVIDER_LABELS = {
     "huggingface": "Hugging Face",
     "vllm": "vLLM",
     "lm_studio": "LM Studio",
+    "apple-fm": "Apple Foundation Models",
+    "apple_fm": "Apple Foundation Models",
 }
 
 
@@ -707,6 +709,14 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     if not model:
         return (False, "no model configured (set llm.model or pass --model)")
     provider = (getattr(llm_config, "provider", "") or "").strip().lower()
+    if provider in {"apple-fm", "apple_fm"} or model.lower().startswith("apple-fm/"):
+        # The on-device model is called by the gateway through
+        # github.com/blacktop/go-foundationmodels, not by LiteLLM.
+        return (
+            True,
+            "apple-fm/system is selected; the gateway calls the on-device model "
+            "when built with CGO_ENABLED=1 -tags applefm",
+        )
     if provider and "/" not in model:
         model = f"{provider}/{model}"
     api_key = ""

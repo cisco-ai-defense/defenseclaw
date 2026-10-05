@@ -1372,6 +1372,23 @@ _bundle-data: _checkout-write-preflight
 	@# build left in this ignored staging tree so wheels cannot ship them.
 	@rm -rf cli/defenseclaw/_data/policies/openshell cli/defenseclaw/_data/scripts
 
+# On-device Apple Foundation Models judge. The published gateway is
+# CGO_ENABLED=0, so this is a separate darwin/arm64 build. It links
+# github.com/blacktop/go-foundationmodels, which needs the Swift shim
+# generated once next to that module (macOS 26 SDK, Xcode).
+.PHONY: build-gateway-apple-fm
+build-gateway-apple-fm:
+	go mod download github.com/blacktop/go-foundationmodels
+	@dir="$$(go list -m -f '{{.Dir}}' github.com/blacktop/go-foundationmodels)"; \
+	test -n "$$dir"; \
+	chmod u+w "$$dir" "$$dir"/*; \
+	if [ ! -f "$$dir/libFMShim.a" ]; then \
+		echo "Generating Foundation Models shim in $$dir"; \
+		(cd "$$dir" && go generate .); \
+	fi
+	CGO_ENABLED=1 go build -tags applefm -trimpath -ldflags "-X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
+		-o defenseclaw-gateway ./cmd/defenseclaw
+
 # Gateway archives with the published names. The Release workflow builds the
 # same names with goreleaser; this target is for local and CI install tests.
 DIST_TARGETS ?= linux/amd64 linux/arm64 darwin/arm64 windows/amd64

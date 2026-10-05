@@ -109,7 +109,7 @@ _PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
 # ``LLMConfig.base_url`` is what matters instead. Duplicated (with care)
 # from ``defenseclaw.config._LOCAL_LLM_PROVIDERS`` to avoid a circular
 # import at module load.
-_LOCAL_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
+_LOCAL_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local", "apple-fm", "apple_fm"})
 
 
 def provider_env_vars(provider: str) -> tuple[str, ...]:

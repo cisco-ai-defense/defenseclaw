@@ -658,6 +658,20 @@ setup.add_command(_acp_adopt_cmd, name="acp")
 # that route configure ``llm.base_url`` directly in ``config.yaml``.
 _LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
 
+# On-device Apple Foundation Models. No API key and no base URL: the
+# gateway calls github.com/blacktop/go-foundationmodels. The only model
+# is the system model.
+_APPLE_FM_PROVIDERS = {"apple-fm", "apple_fm"}
+
+
+def _apply_apple_fm_llm(llm) -> None:
+    """Point an LLM block at the on-device system model and clear credentials."""
+    llm.provider = "apple-fm"
+    llm.model = "apple-fm/system"
+    llm.base_url = ""
+    llm.api_key = ""
+    llm.api_key_env = ""
+
 # Default base URLs for local providers so the wizard can offer a sane
 # prefill. Operators can still override to point at a shared LAN host.
 _LOCAL_LLM_DEFAULT_BASE_URL = {
@@ -697,6 +711,7 @@ _WIZARD_LLM_PROVIDERS = [
     "ollama",
     "vllm",
     "lm_studio",
+    "apple-fm",
 ]
 
 
@@ -1519,7 +1534,11 @@ def _configure_llm(
         non_interactive=False,
     )
     current_model = (llm.model or "") if llm.provider == previous_provider else ""
-    if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
+    if (llm.provider or "").strip().lower() in _APPLE_FM_PROVIDERS:
+        _apply_apple_fm_llm(llm)
+        ux.subhead("On-device Apple Intelligence (macOS 26+). No API key. Model apple-fm/system.")
+        ux.subhead("The gateway must be built with CGO_ENABLED=1 -tags applefm.")
+    elif llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         # Local runtimes: no API key. Ask for the endpoint first so we
         # can list the models actually installed on that runtime.
         current_base_url = llm.base_url if llm.provider == previous_provider else ""
@@ -1714,8 +1733,9 @@ def _configure_llm_non_interactive(
     if instance_name is not None:
         llm.instance_name = instance_name.strip()
 
-    is_local = llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS
-    if is_local:
+    if (llm.provider or "").strip().lower() in _APPLE_FM_PROVIDERS:
+        _apply_apple_fm_llm(llm)
+    elif llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         llm.api_key = ""
         llm.api_key_env = ""
         if base_url is not None:
@@ -2071,7 +2091,9 @@ def _configure_inspect_llm(llm, data_dir: str) -> None:  # pragma: no cover
         default=default_provider,
     )
     llm.model = click.prompt("  LLM model name", default=llm.model or "", show_default=bool(llm.model))
-    if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
+    if (llm.provider or "").strip().lower() in _APPLE_FM_PROVIDERS:
+        _apply_apple_fm_llm(llm)
+    elif llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         default_base = llm.base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
         llm.base_url = click.prompt(f"  {llm.provider} base URL", default=default_base)
         llm.api_key = ""

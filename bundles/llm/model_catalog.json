@@ -1,5 +1,5 @@
 {
-  "_comment": "Curated provider/model catalog used by `defenseclaw setup llm` for picker autocomplete. It carries provider/auth/region metadata (env_keys, auth_modes, regions, api_versions, inference_profiles) that LiteLLM does not model, so it is hand-maintained rather than generated. Each cloud provider lists ~5 current chat models; the suggested ids are validated against LiteLLM's bundled registry by `make check-llm-catalog`, which fails on ids LiteLLM no longer knows or has marked deprecated. Runtime dispatch is handled by the Bifrost SDK (not LiteLLM). Not exhaustive: the picker accepts any model id and offers a 'type a model id' fall-through, and operators can add custom instances via `defenseclaw setup provider add` and choose from their `available_models`. Local providers (ollama/vllm/lm_studio) are not validated because LiteLLM does not track self-hosted tags. This is the tracked source; `make _bundle-data` copies it into cli/defenseclaw/_data/llm/ (a gitignored build-staging dir) so the wheel and editable installs can read it via importlib.resources.",
+  "_comment": "Curated provider/model catalog used by `defenseclaw setup llm` for picker autocomplete. It carries provider/auth/region metadata (env_keys, auth_modes, regions, api_versions, inference_profiles) that LiteLLM does not model, so it is hand-maintained rather than generated. Each cloud provider lists ~5 current chat models; the suggested ids are validated against LiteLLM's bundled registry by `make check-llm-catalog`, which fails on ids LiteLLM no longer knows or has marked deprecated. Runtime dispatch is handled by the Bifrost SDK (not LiteLLM). Not exhaustive: the picker accepts any model id and offers a 'type a model id' fall-through, and operators can add custom instances via `defenseclaw setup provider add` and choose from their `available_models`. Local providers (ollama/vllm/lm_studio/apple-fm) are not validated because LiteLLM does not track self-hosted tags. apple-fm is the on-device Apple Foundation Model (github.com/blacktop/go-foundationmodels), not an HTTP endpoint. This is the tracked source; `make _bundle-data` copies it into cli/defenseclaw/_data/llm/ (a gitignored build-staging dir) so the wheel and editable installs can read it via importlib.resources.",
   "schema_version": 1,
   "providers": [
     {
@@ -169,6 +169,13 @@
       "env_keys": [],
       "default_base_url": "http://127.0.0.1:1234/v1",
       "models": []
+    },
+    {
+      "name": "apple-fm",
+      "label": "Apple Foundation Models (on-device)",
+      "kind": "local",
+      "env_keys": [],
+      "models": ["apple-fm/system"]
     }
   ]
 }
