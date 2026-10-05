@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -30,18 +29,9 @@ func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
 }
 
 func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		lastErr = runCapacityMetricsUseCompleteGeneratedV8Families(t)
-		if lastErr == nil {
-			return
-		}
-		var metricErr *observabilityruntime.GeneratedMetricError
-		if !errors.As(lastErr, &metricErr) || metricErr.Code() != observabilityruntime.GeneratedMetricRecordFailed {
-			t.Fatal(lastErr)
-		}
+	if err := runCapacityMetricsUseCompleteGeneratedV8Families(t); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal(lastErr)
 }
 
 func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {

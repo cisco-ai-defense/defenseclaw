@@ -340,6 +340,31 @@ func (state *normalizationState) leave(visit normalizationVisit) {
 	delete(state.visiting, visit)
 }
 
+// ExactInt64 reads an integer from a canonical Value number. Normalization
+// writes a number in its shortest exact spelling, so 5000000 is "5e6" and
+// 1500 is "1.5e3", and json.Number.Int64 rejects both.
+func ExactInt64(number json.Number) (int64, bool) {
+	text := number.String()
+	if value, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return value, true
+	}
+	mantissa, exponentText, found := strings.Cut(strings.ToLower(text), "e")
+	if !found {
+		return 0, false
+	}
+	exponent, err := strconv.Atoi(exponentText)
+	// An int64 has at most 19 digits, which also bounds the expansion below.
+	if err != nil || exponent < 0 || exponent > 19 {
+		return 0, false
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	if len(fraction) > exponent {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(whole+fraction+strings.Repeat("0", exponent-len(fraction)), 10, 64)
+	return value, err == nil
+}
+
 func normalizeJSONNumber(number json.Number) (json.Number, error) {
 	text := number.String()
 	if len(text) > MaxCanonicalValueBytes {
