@@ -204,32 +204,45 @@ func (m *LiteLLMManager) WriteFullConfig(cfg *config.Config) (string, error) {
 	buf.WriteString("\nlitellm_settings:\n  drop_params: true\n  modify_params: true\n")
 	buf.WriteString("  callbacks: [\"filter_empty.proxy_handler_instance\", \"sr_router.proxy_handler_instance\"]\n")
 
-	// MCP servers from defenseclaw config — LiteLLM expects a dict keyed by server name
+	// MCP servers from defenseclaw config — LiteLLM expects a dict keyed by server name.
+	// Servers may be URL-based (SSE/streamable-http) or stdio-based (command+args).
 	if mcpServers := cfg.MCPServers; len(mcpServers) > 0 {
 		buf.WriteString("\nmcp_servers:\n")
 		for _, srv := range mcpServers {
 			buf.WriteString(fmt.Sprintf("  %s:\n", srv.Name))
-			buf.WriteString(fmt.Sprintf("    transport: %q\n", srv.Transport))
 			buf.WriteString("    allow_all_keys: true\n")
-			if srv.Command != "" {
-				buf.WriteString(fmt.Sprintf("    command: %q\n", srv.Command))
-			}
-			buf.WriteString("    args:\n")
-			for _, arg := range srv.Args {
-				buf.WriteString(fmt.Sprintf("      - %q\n", arg))
-			}
-			if len(srv.Env) > 0 {
-				buf.WriteString("    env:\n")
-				for k, v := range srv.Env {
-					upperK := strings.ToUpper(k)
-					if strings.HasSuffix(upperK, "_ENV") {
-						envVal := os.Getenv(v)
-						if envVal != "" {
-							realKey := strings.ToUpper(strings.TrimSuffix(upperK, "_ENV"))
-							buf.WriteString(fmt.Sprintf("      %s: %q\n", realKey, envVal))
+
+			if srv.URL != "" {
+				buf.WriteString(fmt.Sprintf("    url: %q\n", srv.URL))
+			} else {
+				transport := srv.Transport
+				if transport == "" {
+					transport = "stdio"
+				}
+				buf.WriteString(fmt.Sprintf("    transport: %q\n", transport))
+				if srv.Command != "" {
+					buf.WriteString(fmt.Sprintf("    command: %q\n", srv.Command))
+				}
+				if len(srv.Args) > 0 {
+					buf.WriteString("    args:\n")
+					for _, arg := range srv.Args {
+						resolved := os.Expand(arg, os.Getenv)
+						buf.WriteString(fmt.Sprintf("      - %q\n", resolved))
+					}
+				}
+				if len(srv.Env) > 0 {
+					buf.WriteString("    env:\n")
+					for k, v := range srv.Env {
+						upperK := strings.ToUpper(k)
+						if strings.HasSuffix(upperK, "_ENV") {
+							envVal := os.Getenv(v)
+							if envVal != "" {
+								realKey := strings.ToUpper(strings.TrimSuffix(upperK, "_ENV"))
+								buf.WriteString(fmt.Sprintf("      %s: %q\n", realKey, envVal))
+							}
+						} else {
+							buf.WriteString(fmt.Sprintf("      %s: %q\n", strings.ToUpper(k), v))
 						}
-					} else {
-						buf.WriteString(fmt.Sprintf("      %s: %q\n", strings.ToUpper(k), v))
 					}
 				}
 			}

@@ -91,7 +91,9 @@ func TranslateLiteLLMModels(cfg *config.Config) []LiteLLMModelParams {
 
 	var models []LiteLLMModelParams
 
-	// Main LLM model as the default
+	// Build the default model from the top-level llm: section.
+	// If llm: is missing/empty, fall back to the first routing model so we
+	// never emit a bare "openai/" with no base URL.
 	mainModel := config.RoutingModelBackend{
 		Name:      "default",
 		Provider:  cfg.LLM.Provider,
@@ -99,14 +101,23 @@ func TranslateLiteLLMModels(cfg *config.Config) []LiteLLMModelParams {
 		BaseURL:   cfg.LLM.BaseURL,
 		APIKeyEnv: cfg.LLM.APIKeyEnv,
 	}
-	models = append(models, TranslateLiteLLMModel(mainModel, dotenvPath))
+	if mainModel.Model == "" && len(cfg.Routing.Models) > 0 {
+		fb := cfg.Routing.Models[0]
+		mainModel.Provider = fb.Provider
+		mainModel.Model = fb.Model
+		mainModel.BaseURL = fb.BaseURL
+		mainModel.APIKeyEnv = fb.APIKeyEnv
+	}
+	if mainModel.Model != "" {
+		models = append(models, TranslateLiteLLMModel(mainModel, dotenvPath))
+	}
 
 	// Routing models
 	for _, m := range cfg.Routing.Models {
 		models = append(models, TranslateLiteLLMModel(m, dotenvPath))
 	}
 
-	// Wildcard: unknown model names → main LLM model
+	// Wildcard: unknown model names → default model
 	if len(models) > 0 {
 		wildcard := models[0]
 		wildcard.ModelName = "*"

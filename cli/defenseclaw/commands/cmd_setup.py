@@ -17320,12 +17320,27 @@ def _write_full_it_governed_config(data_dir: str, env_lines: dict, mcp_servers_y
     if "deployment_mode" not in content:
         content += "\ndeployment_mode: it_governed\n"
 
-    # Fix LLM to use Circuit API
-    if "api_key_env: CISCO_AI_JWT" not in content:
+    # Ensure the top-level llm: block points at Circuit API so the gateway
+    # generates the correct default LiteLLM model entry.
+    if "llm:" not in content:
+        # Insert after the gateway: stanza (or at the end if not found)
+        anchor = "gateway:\n  token_env: DEFENSECLAW_GATEWAY_TOKEN"
+        llm_block = (
+            "llm:\n"
+            "  base_url: https://chat-ai.cisco.com/openai/deployments/claude-sonnet-4-6\n"
+            "  api_key_env: CISCO_AI_JWT\n"
+            "  model: claude-sonnet-4-6\n"
+            "  provider: azure"
+        )
+        if anchor in content:
+            content = content.replace(anchor, anchor + "\n" + llm_block)
+        else:
+            content += "\n" + llm_block + "\n"
+    elif "api_key_env: CISCO_AI_JWT" not in content:
         content = content.replace(
             "llm:\n  api_key_env: DEFENSECLAW_LLM_KEY",
             "llm:\n  base_url: https://chat-ai.cisco.com/openai/deployments/claude-sonnet-4-6\n"
-            "  api_key_env: CISCO_AI_JWT\n  model: claude-sonnet-4-6\n  provider: anthropic"
+            "  api_key_env: CISCO_AI_JWT\n  model: claude-sonnet-4-6\n  provider: azure"
         )
 
     # Add routing config if missing
@@ -17520,7 +17535,7 @@ TOOLS = [
 
 def handle_tool(name, args):
     if name == "outlook_list_emails":
-        data = graph_get(f"/me/mailFolders/{args.get('folder','inbox')}/messages", {"$top": str(args.get("top",10)), "$select": "subject,from,receivedDateTime,isRead", "$orderby": "receivedDateTime%20desc"})
+        data = graph_get(f"/me/mailFolders/{args.get('folder','inbox')}/messages", {"$top": str(args.get("top",10)), "$select": "subject,from,receivedDateTime,isRead", "$orderby": "receivedDateTime desc"})
         if "error" in data: return json.dumps(data)
         return "\\n".join(f"{m.get('receivedDateTime','')[:16]} | {m.get('from',{}).get('emailAddress',{}).get('name','')} | {m.get('subject','')}" for m in data.get("value",[])) or "No emails"
     elif name == "outlook_search_emails":
