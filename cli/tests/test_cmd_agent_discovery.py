@@ -781,10 +781,9 @@ class TriggerPostEnableScanTests(unittest.TestCase):
                 pass
 
             def scan_ai_usage(self):
-                # Every call fails with 503 — sidecar is mid-restart and
-                # never finishes binding. We expect the helper to retry
-                # the configured number of times, then surface a single
-                # warning instead of crashing the enable flow.
+                # Every call fails with 503: the restarted gateway has AI
+                # discovery off. The helper retries, then warns once and
+                # points at discovery status instead of a slow sidecar.
                 attempts["n"] += 1
                 resp = MagicMock(status_code=503)
                 exc = requests.HTTPError("boot")
@@ -810,6 +809,8 @@ class TriggerPostEnableScanTests(unittest.TestCase):
         # but we MUST never silently swallow without warning.
         self.assertGreaterEqual(attempts["n"], 2)
         self.assertIn("Could not run an initial scan", output)
+        self.assertIn("agent discovery status", output)
+        self.assertNotIn("once the sidecar is up", output)
 
 
 class RequireLoadedConfigTests(unittest.TestCase):
