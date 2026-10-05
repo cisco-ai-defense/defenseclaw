@@ -254,9 +254,15 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
         assert "PURGE=1` to also remove the config" not in text, name
         assert "`/uninstall`, also remove managed state." not in text, name
         assert "remove state on uninstall" not in text, name
-    secure_client = " ".join(
-        _text(ROOT / "docs-site" / "content" / "docs" / "setup" / "enterprise-deployment.mdx").split()
+    # The Secure Client page moved from setup/enterprise-deployment.mdx to
+    # enterprise/secure-client.mdx in the 1.0 docs-site layout.
+    docs = ROOT / "docs-site" / "content" / "docs"
+    secure_client_page = next(
+        page
+        for page in (docs / "enterprise" / "secure-client.mdx", docs / "setup" / "enterprise-deployment.mdx")
+        if page.exists()
     )
+    secure_client = " ".join(_text(secure_client_page).split())
     assert "It keeps runtime state, logs and guardian evidence." in secure_client
     assert "the standalone Setup's `/uninstall` always removes its machine state" in secure_client
 
