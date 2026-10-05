@@ -1066,6 +1066,75 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(loaded.asset_policy.effective_mode("codex"), "action")
             self.assertEqual(loaded.asset_policy.effective_mode("hermes"), "observe")
 
+    def test_guardrail_profiles_and_ide_inventory_roundtrip(self):
+        # Parity with internal/config: profiles, ordered assignments, the
+        # default profile and the two ai_discovery identity keys survive a
+        # save/load cycle, and unset fields stay omitted (Go omitempty).
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                guardrail=_merge_guardrail(
+                    {
+                        "profiles": {
+                            "contractors": {
+                                "mode": "action",
+                                "block_at": "medium",
+                                "connectors": {"codex": {"mode": "observe"}},
+                            }
+                        },
+                        "profile_assignments": [
+                            {"profile": "contractors", "match": {"groups": ["CORP\\Contractors"]}},
+                        ],
+                        "default_profile": "contractors",
+                    },
+                    tmpdir,
+                ),
+                ai_discovery=config_mod._merge_ai_discovery(
+                    {"enabled": True, "ide_inventory": "ai_only", "include_user_principal": True}
+                ),
+            )
+            cfg.save()
+
+            with open(os.path.join(tmpdir, "config.yaml")) as f:
+                raw = yaml.safe_load(f)
+            self.assertEqual(
+                raw["guardrail"]["profiles"],
+                {"contractors": {"mode": "action", "block_at": "MEDIUM", "connectors": {"codex": {"mode": "observe"}}}},
+            )
+            self.assertEqual(
+                raw["guardrail"]["profile_assignments"],
+                [{"profile": "contractors", "match": {"groups": ["CORP\\Contractors"]}}],
+            )
+            self.assertEqual(raw["guardrail"]["default_profile"], "contractors")
+            self.assertEqual(raw["ai_discovery"]["ide_inventory"], "ai_only")
+            self.assertTrue(raw["ai_discovery"]["include_user_principal"])
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+            self.assertEqual(loaded.guardrail.profiles["contractors"].connectors["codex"].mode, "observe")
+            self.assertEqual(loaded.guardrail.profile_assignments[0].match.groups, ["CORP\\Contractors"])
+            self.assertEqual(loaded.ai_discovery.ide_inventory, "ai_only")
+
+            loaded.guardrail.profiles = {}
+            loaded.guardrail.profile_assignments = []
+            loaded.guardrail.default_profile = ""
+            loaded.ai_discovery.ide_inventory = "all"
+            loaded.ai_discovery.include_user_principal = False
+            loaded.save()
+            with open(os.path.join(tmpdir, "config.yaml")) as f:
+                raw = yaml.safe_load(f)
+            for key in ("profiles", "profile_assignments", "default_profile"):
+                self.assertFalse(raw.get("guardrail", {}).get(key))
+            self.assertNotIn("ide_inventory", raw.get("ai_discovery", {}))
+            self.assertNotIn("include_user_principal", raw.get("ai_discovery", {}))
+
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it
         # stays byte-identical to a pre-OTHER-7 config (omitempty mirror).

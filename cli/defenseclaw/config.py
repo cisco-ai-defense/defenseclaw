@@ -2209,6 +2209,54 @@ class PerConnectorGuardrailConfig:
 
 
 @dataclass
+class GuardrailProfileMatch:
+    """Subjects one ``guardrail.profile_assignments`` entry selects.
+
+    Mirrors ``config.ProfileMatch`` in ``internal/config/guardrail_profiles.go``.
+    Set keys combine with AND, the values of one key with OR.
+    """
+
+    groups: list[str] = field(default_factory=list)
+    users: list[str] = field(default_factory=list)
+    connectors: list[str] = field(default_factory=list)
+    agents: list[str] = field(default_factory=list)
+
+
+@dataclass
+class GuardrailProfileAssignment:
+    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+
+    Mirrors ``config.ProfileAssignment``.
+    """
+
+    profile: str = ""
+    match: GuardrailProfileMatch = field(default_factory=GuardrailProfileMatch)
+
+
+@dataclass
+class GuardrailProfile:
+    """One ``guardrail.profiles`` entry: identity-based guardrail overrides.
+
+    Mirrors ``config.GuardrailProfile``. Unset fields inherit. ``enabled`` and
+    ``hook_fail_mode`` are not allowed in a profile (the gateway rejects them
+    because both are baked into the installed hooks); they are modeled only
+    so a load/save round-trip preserves them for that check instead of
+    silently dropping them.
+    """
+
+    description: str = ""
+    mode: str = ""
+    block_at: str = ""
+    alert_at: str = ""
+    hilt: HILTConfig | None = None
+    rule_pack_dir: str = ""
+    block_message: str = ""
+    connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    enabled: bool | None = None
+    hook_fail_mode: str = ""
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"  # observe | action
@@ -2308,6 +2356,14 @@ class GuardrailConfig:
     # ``internal/config/config.go``; resolution goes through the
     # ``effective_*`` methods, never by reading the map directly.
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    # Identity-based guardrail profiles. Mirror ``GuardrailConfig.Profiles``,
+    # ``ProfileAssignments`` and ``DefaultProfile`` in
+    # ``internal/config/config.go``; all empty by default, which keeps the
+    # guardrail.* behaviour. The gateway validates them and rejects them
+    # under the Secure Client integration.
+    profiles: dict[str, GuardrailProfile] = field(default_factory=dict)
+    profile_assignments: list[GuardrailProfileAssignment] = field(default_factory=list)
+    default_profile: str = ""
 
     def _connector_override(self, connector: str) -> PerConnectorGuardrailConfig | None:
         """Return the override block for ``connector`` if configured.
@@ -2729,6 +2785,11 @@ class AIDiscoveryConfig:
     # person rather than an account on one endpoint, and it leaves the endpoint
     # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
     include_user_email: bool = False
+    # Opt-in like include_user_email: the directory principal (UPN or Kerberos
+    # principal) identifies a person. Mirrors IncludeUserPrincipal.
+    include_user_principal: bool = False
+    # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
+    ide_inventory: str = "all"
     lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
@@ -3678,6 +3739,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 if entry.get("hilt") is None:
                     entry.pop("hilt", None)
                 _strip_unset_levels(entry)
+    _serialize_guardrail_profiles(cfg, guardrail)
     # The compatibility dataclass can preview a retired ``splunk:`` source for
     # upgrade/credential recovery, but exact-v8 serialization must never write
     # it. Splunk forwarding is a canonical observability destination.
@@ -3690,6 +3752,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
     _prune_ai_runtime(d.get("ai_discovery"))
+    _strip_ai_discovery_omitempty(d.get("ai_discovery"))
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3725,6 +3788,75 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _serialize_openshell(d)
     _serialize_routing(d)
     return d
+
+
+def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal`` and
+    ``ide_inventory`` so configs that never set them stay byte-identical."""
+    if not isinstance(ai_discovery, dict):
+        return
+    if not ai_discovery.get("include_user_principal"):
+        ai_discovery.pop("include_user_principal", None)
+    if ai_discovery.get("ide_inventory") in (None, "", "all"):
+        ai_discovery.pop("ide_inventory", None)
+
+
+def _strip_empty_keys(block: dict[str, Any], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        if block.get(key) in (None, ""):
+            block.pop(key, None)
+
+
+def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
+    """Mirror Go's ``omitempty`` tags on the guardrail profile fields.
+
+    Empty profiles, assignments and default profile are dropped so existing
+    configs stay byte-identical, and unset profile fields are dropped so the
+    serialized profile only spells what the operator set (the v8 schema
+    rejects ``enabled`` and ``hook_fail_mode`` inside a profile, so an unset
+    one must not be written as an empty value). Like ``guardrail.connectors``,
+    a map that was populated at load and is now empty is written as ``{}`` so
+    the v8 structural delta clears it on disk.
+    """
+    if not isinstance(guardrail, dict):
+        return
+    profiles = guardrail.get("profiles")
+    if not profiles:
+        if (getattr(cfg, "_loaded_authoritative_dicts", None) or {}).get("guardrail.profiles"):
+            guardrail["profiles"] = {}
+        else:
+            guardrail.pop("profiles", None)
+    elif isinstance(profiles, dict):
+        for profile in profiles.values():
+            if not isinstance(profile, dict):
+                continue
+            _strip_empty_keys(
+                profile,
+                ("description", "mode", "rule_pack_dir", "block_message", "hilt", "enabled", "hook_fail_mode"),
+            )
+            _strip_unset_levels(profile)
+            connectors = profile.get("connectors")
+            if not connectors:
+                profile.pop("connectors", None)
+                continue
+            for entry in connectors.values():
+                if isinstance(entry, dict):
+                    _strip_empty_keys(
+                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "rule_pack_dir", "enabled")
+                    )
+                    _strip_unset_levels(entry)
+    assignments = guardrail.get("profile_assignments")
+    if not assignments:
+        guardrail.pop("profile_assignments", None)
+    elif isinstance(assignments, list):
+        for assignment in assignments:
+            match = assignment.get("match") if isinstance(assignment, dict) else None
+            if isinstance(match, dict):
+                for key in ("groups", "users", "connectors", "agents"):
+                    if not match.get(key):
+                        match.pop(key, None)
+    if not guardrail.get("default_profile"):
+        guardrail.pop("default_profile", None)
 
 
 def _strip_unset_levels(block: Any) -> None:
@@ -3876,6 +4008,9 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
         # deleted/cleared connector propagate to disk, which is the whole
         # point of the removal.
         "guardrail.connectors",
+        # Identity-based guardrail profiles map: fully modeled, so a removed
+        # profile must not be resurrected from the prior file.
+        "guardrail.profiles",
         # Per-connector asset_policy overrides map (OTHER-7). Same rationale as
         # guardrail.connectors: the dataclass is the single source of truth for
         # the configured per-connector set, so clearing an override in-memory and
@@ -3922,6 +4057,12 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.judge.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Identity-based guardrail profile selection: empty = no profiles.
+        "guardrail.profile_assignments",
+        "guardrail.default_profile",
+        # AI discovery identity/IDE opt-ins: stripped at their defaults.
+        "ai_discovery.include_user_principal",
+        "ai_discovery.ide_inventory",
     }
 )
 
@@ -4265,6 +4406,7 @@ def _disabled_ai_discovery_dict() -> dict[str, Any]:
     # "is this just the default?" comparison stays an equality check on one
     # shape rather than drifting every time a nested block gains a field.
     _prune_ai_runtime(disabled)
+    _strip_ai_discovery_omitempty(disabled)
     return disabled
 
 
@@ -4887,6 +5029,9 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
         llm_role=_normalize_llm_role(raw.get("llm_role", "")),
         connectors=_merge_guardrail_connectors(raw.get("connectors")),
+        profiles=_merge_guardrail_profiles(raw.get("profiles")),
+        profile_assignments=_merge_guardrail_profile_assignments(raw.get("profile_assignments")),
+        default_profile=str(raw.get("default_profile", "") or "").strip(),
     )
 
 
@@ -4924,6 +5069,60 @@ def _merge_guardrail_connectors(
             enabled=enabled,
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
+        )
+    return out
+
+
+def _string_list(raw: Any) -> list[str]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
+    """Parse ``guardrail.profiles`` (mirrors the Go unmarshal of
+    ``map[string]GuardrailProfile``). Load only: validation is the gateway's."""
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out: dict[str, GuardrailProfile] = {}
+    for name, entry in raw.items():
+        entry = entry if isinstance(entry, dict) else {}
+        hilt_entry = entry.get("hilt")
+        enabled_raw = entry.get("enabled")
+        out[str(name)] = GuardrailProfile(
+            description=str(entry.get("description", "") or ""),
+            mode=str(entry.get("mode", "") or ""),
+            block_at=normalize_guardrail_level(entry.get("block_at")),
+            alert_at=normalize_guardrail_level(entry.get("alert_at")),
+            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) else None,
+            rule_pack_dir=str(entry.get("rule_pack_dir", "") or ""),
+            block_message=str(entry.get("block_message", "") or ""),
+            connectors=_merge_guardrail_connectors(entry.get("connectors")),
+            enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
+            hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
+        )
+    return out
+
+
+def _merge_guardrail_profile_assignments(raw: Any) -> list[GuardrailProfileAssignment]:
+    """Parse the ordered ``guardrail.profile_assignments`` list."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[GuardrailProfileAssignment] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        match = entry.get("match") if isinstance(entry.get("match"), dict) else {}
+        out.append(
+            GuardrailProfileAssignment(
+                profile=str(entry.get("profile", "") or ""),
+                match=GuardrailProfileMatch(
+                    groups=_string_list(match.get("groups")),
+                    users=_string_list(match.get("users")),
+                    connectors=_string_list(match.get("connectors")),
+                    agents=_string_list(match.get("agents")),
+                ),
+            )
         )
     return out
 
@@ -5860,6 +6059,8 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
+        include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
@@ -5869,6 +6070,12 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
         runtime=_merge_ai_runtime(raw.get("runtime")),
     )
+
+
+def _normalize_ide_inventory(value: Any) -> str:
+    """Coerce ``ai_discovery.ide_inventory`` to all | ai_only | off (default all)."""
+    scope = str(value or "").strip().lower()
+    return scope if scope in {"ai_only", "off"} else "all"
 
 
 def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
