@@ -9,7 +9,7 @@ keywords:
   - confirm verdict fallback
 ---
 
-Human-in-the-Loop (HITL) changes a confirmable policy finding into an approval request **only when the current connector event has a native ask surface**. A supported event pauses in the agent UI while the operator approves or denies it. A connector without native ask cannot manufacture that pause: it applies its documented fallback and preserves `raw_action: "confirm"` for audit.
+Human-in-the-Loop (HITL) turns a confirmable policy finding into an approval request **only when the current connector event has a native ask surface**. A supported event pauses in the agent UI while the operator approves or denies it. A connector without native ask cannot manufacture that pause: it applies its documented fallback and preserves `raw_action: "confirm"` for audit.
 
 <Callout type="info">
 HITL is opt-in and only affects **action mode**. Observe mode records findings without enforcing them. With the default rule pack, CRITICAL findings reach the block level before HITL is considered, so they still block.
