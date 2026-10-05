@@ -18,7 +18,7 @@
 // truth the CLI/TUI use.
 // Minimal YAML subset parser (nested block mappings, scalars, simple lists),
 // sufficient for the keys the app consumes. Writes never go through this
-// store; they go via the gateway (/config/patch) or the defenseclaw CLI.
+// store; they go through the defenseclaw CLI.
 
 import Darwin
 import Foundation

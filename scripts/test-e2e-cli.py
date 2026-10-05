@@ -526,16 +526,6 @@ def test_api_audit_event(t: TestRunner):
     )
 
 
-def test_api_config(t: TestRunner):
-    print("\n--- API: Config ---")
-    t.api(
-        "POST /config/patch (proxied to OpenClaw gateway)",
-        "POST", "/config/patch",
-        body={"path": "watch.debounce_ms", "value": 500},
-        expect_status=502,  # 502 when OpenClaw gateway proxy fails; 200 on success
-    )
-
-
 # -----------------------------------------------------------------------
 # Phase 3: Gateway log verification
 # -----------------------------------------------------------------------
@@ -951,7 +941,6 @@ def main():
         test_api_skills_and_mcps(t)
         test_api_skill_actions(t)
         test_api_audit_event(t)
-        test_api_config(t)
 
         # Phase 3: Gateway log verification
         time.sleep(2)

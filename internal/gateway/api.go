@@ -1000,7 +1000,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
 	mux.HandleFunc("/plugin/enable", a.handlePluginEnable)
-	mux.HandleFunc("/config/patch", a.handleConfigPatch)
 	mux.HandleFunc("/scan/result", a.handleScanResult)
 	mux.HandleFunc("/enforce/block", a.handleEnforceBlock)
 	mux.HandleFunc("/enforce/allow", a.handleEnforceAllow)
@@ -1943,11 +1942,6 @@ func (a *APIServer) retryGatewayMutation(ctx context.Context, fn func(context.Co
 	return lastErr
 }
 
-type configPatchRequest struct {
-	Path  string      `json:"path"`
-	Value interface{} `json:"value"`
-}
-
 type enforcementRequest struct {
 	TargetType string `json:"target_type"`
 	TargetName string `json:"target_name"`
@@ -1983,41 +1977,6 @@ type policyEvaluateScanResult struct {
 	// would yield. Mirrors policy.ScanResultInput.
 	ExitCode  int    `json:"exit_code,omitempty"`
 	ScanError string `json:"scan_error,omitempty"`
-}
-
-func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req configPatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if req.Path == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
-		return
-	}
-
-	if a.client == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
-		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-		return
-	}
-
-	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIConfigPatch), req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
-	}
-	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
 }
 
 func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {

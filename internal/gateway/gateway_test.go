@@ -3372,59 +3372,6 @@ func TestAPIPluginEnableMethodNotAllowed(t *testing.T) {
 	}
 }
 
-func TestAPIConfigPatchMissingBody(t *testing.T) {
-	_, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger}
-
-	req := httptest.NewRequest(http.MethodPost, "/config/patch", bytes.NewBufferString("{bad"))
-	w := httptest.NewRecorder()
-	api.handleConfigPatch(w, req)
-
-	if w.Result().StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusBadRequest)
-	}
-}
-
-func TestAPIConfigPatchEmptyPath(t *testing.T) {
-	_, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), logger: logger}
-
-	body, _ := json.Marshal(configPatchRequest{Path: "", Value: true})
-	req := httptest.NewRequest(http.MethodPost, "/config/patch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	api.handleConfigPatch(w, req)
-
-	if w.Result().StatusCode != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusBadRequest)
-	}
-}
-
-func TestAPIConfigPatchNoClient(t *testing.T) {
-	_, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), client: nil, logger: logger}
-
-	body, _ := json.Marshal(configPatchRequest{Path: "gateway.auto_approve", Value: true})
-	req := httptest.NewRequest(http.MethodPost, "/config/patch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	api.handleConfigPatch(w, req)
-
-	if w.Result().StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusServiceUnavailable)
-	}
-}
-
-func TestAPIConfigPatchMethodNotAllowed(t *testing.T) {
-	api := &APIServer{health: NewSidecarHealth()}
-
-	req := httptest.NewRequest(http.MethodGet, "/config/patch", nil)
-	w := httptest.NewRecorder()
-	api.handleConfigPatch(w, req)
-
-	if w.Result().StatusCode != http.StatusMethodNotAllowed {
-		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusMethodNotAllowed)
-	}
-}
-
 func TestAPIScanResultHandlerLogsResult(t *testing.T) {
 	store, logger := testStoreAndV8Logger(t)
 	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
@@ -3952,29 +3899,6 @@ func TestWriteJSON(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Config patch audit redaction (P2 fix)
 // ---------------------------------------------------------------------------
-
-func TestConfigPatchAuditDoesNotLeakRawValue(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), client: nil, logger: logger, store: store}
-
-	secretValue := "sk_live_super_secret_key_12345678"
-	body, _ := json.Marshal(configPatchRequest{Path: "gateway.token", Value: secretValue})
-	req := httptest.NewRequest(http.MethodPost, "/config/patch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	api.handleConfigPatch(w, req)
-
-	// The request fails with 503 (no client) but the audit log would have been
-	// written if a client were present. Verify the handler code path: the logger
-	// call only happens on success so test that the format string is correct.
-	// We can directly test the format by checking what LogAction would receive.
-	detail := fmt.Sprintf("patched via REST API value_type=%T", secretValue)
-	if strings.Contains(detail, secretValue) {
-		t.Errorf("audit detail contains raw secret: %s", detail)
-	}
-	if !strings.Contains(detail, "value_type=") {
-		t.Errorf("audit detail should contain value_type=, got: %s", detail)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Client debug flag (P3 fix)
