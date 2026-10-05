@@ -1,7 +1,7 @@
 # Context — Rolling Work Log
 
 - 2026-08-06: Added spec 001-defenseclaw-lite-phase1 (requirements + design + plan + tasks). Phase 1 covers STANDARD profile C agent on Linux SBC + cloud fleet manager + policy compiler. Architecture proposal v1.2 approved as source of truth.
-- 2026-08-06: Implemented Tasks 1-3 (build system, HAL, core data structures). defenseclaw-lite/ compiles with CMake+Kconfig, 14 C source files, 6 test binaries pass. Binary=53KB on macOS. Branch: feature/defenseclaw-lite-phase1.
+- 2026-08-06: Implemented Tasks 1-3 (build system, HAL, core data structures). edge-connector/ compiles with CMake+Kconfig, 14 C source files, 6 test binaries pass. Binary=53KB on macOS. Branch: feature/defenseclaw-lite-phase1.
 - 2026-08-06: Implemented Tasks 4-6 (IPC JSON-RPC parser, full dclaw_evaluate pipeline wiring, comprehensive unit tests). 15 source files, 7 test binaries with 56 individual test assertions — all passing. Pipeline chains: input validation → rate limit → deny hash → destination check → correlator → cache → speculative/sync escalation.
 - 2026-08-06: Implemented Tasks 7-10 (MQTT client with broker fallback, CBOR codec for heartbeat+verdict, verdict protocol with session-scoped HMAC verification + dedup + clock sync). 17 source files, 8 test binaries, 76 assertions — all passing. Binary=54KB. Communication layer complete for Phase 1.
 - 2026-08-06: Implemented Tasks 20-22 (OTA receiver with Ed25519 verification + A/B partitions + canary health-check + auto-rollback, emergency broadcast handler with sequence anti-replay + gap detection). 17 source files, 9 test binaries, 94 assertions — all passing. Binary=54KB. Device-side C agent feature-complete for Phase 1.

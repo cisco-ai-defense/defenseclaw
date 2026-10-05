@@ -4958,7 +4958,7 @@
       "surface_in_doctor": false,
       "consumers": [
         {
-          "location": "docs/architecture/defenseclaw-lite-iot-proposal.md",
+          "location": "docs/architecture/edge-connector-iot-proposal.md",
           "description": "C header guard in documentation (not an env var)"
         }
       ],

@@ -1,0 +1,242 @@
+---
+title: Install
+description: Build the Edge Connector from source, configure a policy, and integrate it with your AI agent on Linux.
+keywords:
+  - Edge Connector install
+  - build from source
+  - Raspberry Pi
+  - PicoClaw integration
+  - CMake
+  - IoT setup
+---
+
+## Build from source
+
+Required: `gcc`, `cmake` (3.22+), `make`.
+
+```bash
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
+cd defenseclaw/edge-connector
+mkdir build && cd build
+cmake .. -DDCLAW_PROFILE=STANDARD
+make -j$(nproc)
+```
+
+### Run tests
+
+```bash
+ctest --output-on-failure
+```
+
+10 test binaries covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-12).
+
+### Install system-wide
+
+```bash
+sudo make install
+```
+
+### Build profiles
+
+```bash
+cmake .. -DDCLAW_PROFILE=MINIMAL   # ~22KB — MCUs, ultra-constrained devices
+cmake .. -DDCLAW_PROFILE=STANDARD  # ~68KB — Raspberry Pi, Jetson, SBCs
+cmake .. -DDCLAW_PROFILE=EDGE      # ~131KB — Edge gateways with bloom filter
+```
+
+## Configure the policy
+
+### Step 1 — Copy and edit
+
+```bash
+mkdir -p ~/.defenseclaw
+cp policies/strict.yaml ~/.defenseclaw/policy.yaml
+```
+
+Edit `~/.defenseclaw/policy.yaml`:
+
+```yaml title="~/.defenseclaw/policy.yaml"
+name: my-device-policy
+version: 1
+
+skill_actions:
+  critical:
+    runtime: disable    # BLOCK
+  high:
+    runtime: disable    # BLOCK
+  medium:
+    runtime: warn       # WARN (allow but log)
+
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [net_fetch, actuate]
+      action: block
+
+  destination_allowlist:
+    - "api.openai.com"
+    - "api.anthropic.com"
+    - "*.your-company.com"
+
+  rate_limits:
+    tool_calls_per_minute: 60
+    network_requests_per_minute: 30
+    actuations_per_minute: 10
+
+  escalation_mode:
+    sensor_read: speculative    # allow immediately
+    read_fs: speculative
+    net_fetch: speculative      # allow if dest in allowlist
+    actuate: sync_block         # BLOCK without cloud
+    exec_shell: sync_block      # BLOCK without cloud
+    write_fs: sync_block        # BLOCK without cloud
+```
+
+### Step 2 — Configure content inspection
+
+```yaml title="~/.defenseclaw/policy.yaml (continued)"
+  content_inspection:
+    enabled: true
+    categories:
+      secrets: true        # API keys, tokens, private keys
+      pii: true            # SSN, credit cards, emails
+      credentials: true    # AWS keys, GCP service accounts
+      exfiltration: true   # Base64 blobs, hex dumps
+      injection: true      # Prompt injection, jailbreaks
+      commands: true       # Shell commands, SQL, code exec
+
+    ssrf_validation:
+      enabled: true
+      block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
+      block_metadata_endpoints: true # 169.254.169.254
+```
+
+### Step 3 — Compile (optional)
+
+Only needed when you change the policy. Pre-built binaries include the default policy.
+
+```bash
+python3 tools/policy_compiler.py \
+  --input ~/.defenseclaw/policy.yaml \
+  --profile standard --version 1 \
+  --output-header generated/policy_tables.h \
+  --output-binary dist/policy.bin
+```
+
+## Integrate with your AI agent
+
+### PicoClaw
+
+PicoClaw is the primary supported agent framework. The Edge Connector integrates via PicoClaw's process hook system.
+
+```bash
+cp /usr/local/lib/defenseclaw/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
+picoclaw config edit
+```
+
+Add to `hooks.processes`:
+
+```json
+{
+  "defenseclaw_gate": {
+    "enabled": true,
+    "priority": 5,
+    "transport": "stdio",
+    "command": ["python3", "~/.picoclaw/hooks/defenseclaw_gate.py"],
+    "env": {
+      "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
+      "DCLAW_LOG_PATH": "~/edge-connector.log"
+    },
+    "intercept": ["before_tool", "before_llm", "after_llm"]
+  }
+}
+```
+
+#### What gets intercepted
+
+| Hook | What happens | Actions |
+| --- | --- | --- |
+| `before_tool` | Full 8-stage pipeline (rate limit, deny-list, dest filter, content scan, SSRF, sequence, cache, escalation) | `deny_tool` or `continue` |
+| `before_llm` | Prompt injection detection (20+ patterns) | `abort_turn` or `continue` |
+| `after_llm` | PII/credential leakage scanning | Detection + logging |
+
+#### Verify
+
+```bash
+# Test the hook standalone
+echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
+  DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
+  python3 ~/.picoclaw/hooks/defenseclaw_gate.py
+
+# Should ALLOW — sensor read
+picoclaw agent -m "check battery status"
+
+# Should BLOCK — shell execution
+picoclaw agent -m "run whoami in the shell"
+
+# Watch decisions
+tail -f ~/edge-connector.log
+```
+
+### Generic integration (any framework)
+
+**Shared library (FFI)** — load `libdclaw_core.so` from any language:
+
+```python
+import ctypes
+lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
+# Call dclaw_evaluate() for every tool call
+```
+
+**Unix socket (JSON-RPC)** — query the daemon from any process:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
+  "tool_name":"exec_shell","cap_flags":4,"destination":"","session_id":1
+}}' | socat - UNIX-CONNECT:/var/run/edge-connector.sock
+```
+
+## Tool-to-capability mapping
+
+Each tool must map to a capability that determines how the Edge Connector handles it.
+
+| Capability | Flag | Escalation | Behavior |
+| --- | --- | --- | --- |
+| `SENSOR_READ` | `0x40` | speculative | Allow immediately (read-only) |
+| `READ_FS` | `0x01` | speculative | Allow immediately |
+| `NET_FETCH` | `0x08` | speculative | Allow if destination in allowlist |
+| `SEND_MSG` | `0x10` | speculative | Allow if destination in allowlist |
+| `ACTUATE` | `0x20` | sync_block | Block without cloud (physical world) |
+| `EXEC_SHELL` | `0x04` | sync_block | Block without cloud (code execution) |
+| `WRITE_FS` | `0x02` | sync_block | Block without cloud (data modification) |
+
+## Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
+| `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
+| `DCLAW_POLICY_PATH` | (compiled in) | Path to custom policy binary |
+| `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Flash emulation directory |
+| `DEFENSECLAW_MAX_ESCALATION_PAYLOAD_BYTES` | `1024` | Max content snippet size for cloud escalation |
+
+## Benchmark
+
+```bash
+cd edge-connector/build
+./tests/bench_latency
+```
+
+Expected on ARM Cortex-A: &lt;5μs decisions, &gt;100K/sec throughput.
+
+## Troubleshooting
+
+| Problem | Solution |
+| --- | --- |
+| `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
+| All tools blocked | Check `TOOL_CAP_MAP` — unknown tools default to `EXEC_SHELL` |
+| `CLOUD_TIMEOUT` on allowed tools | Change escalation from `sync_block` to `speculative` |
+| `DEST_DENY` on valid URLs | Add domain to `destination_allowlist` |
+| `CONTENT_BLOCK` false positives | Disable the offending category or add an exception pattern |
+| `SSRF_BLOCK` on internal services | Add trusted hosts to `ssrf_validation.allowlist` |

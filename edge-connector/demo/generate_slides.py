@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate DefenseClaw Lite demo presentation — 3 slides."""
+"""Generate Edge Connector demo presentation — 3 slides."""
 
 from pptx import Presentation
 from pptx.util import Inches, Pt
@@ -46,7 +46,7 @@ def add_text(slide, text, top, left=Inches(0.8), width=Inches(11.5),
 # SLIDE 1: Title
 # ============================================================
 slide = add_dark_slide()
-add_text(slide, "DefenseClaw Lite", Inches(1.8), size=Pt(60), color=CISCO_BLUE)
+add_text(slide, "Edge Connector", Inches(1.8), size=Pt(60), color=CISCO_BLUE)
 add_text(slide, "AI Agent Security for IoT & Edge Devices", Inches(3.2), size=Pt(32), color=WHITE, bold=False)
 add_text(slide,
          "54 KB  ·  <3μs decisions  ·  25 KB RAM  ·  Open Source\n\n"
@@ -68,7 +68,7 @@ add_text(slide,
          "│       │ every tool call                                         │\n"
          "│       ▼                                                         │\n"
          "│  ┌──────────────────────────────────────────────────────────┐  │\n"
-         "│  │  DefenseClaw Lite (54KB, <3μs)                           │  │\n"
+         "│  │  Edge Connector (54KB, <3μs)                             │  │\n"
          "│  │                                                          │  │\n"
          "│  │  1. Input validation     5. Sequence detection           │  │\n"
          "│  │  2. Rate limiting        6. Verdict cache                │  │\n"
@@ -87,7 +87,7 @@ add_text(slide,
 # SLIDE 3: Closing
 # ============================================================
 slide = add_dark_slide()
-add_text(slide, "DefenseClaw Lite", Inches(2.0), size=Pt(54), color=CISCO_BLUE)
+add_text(slide, "Edge Connector", Inches(2.0), size=Pt(54), color=CISCO_BLUE)
 add_text(slide,
          "The IoT AI agent era is here. Now, so is the security.",
          Inches(3.5), size=Pt(28), color=WHITE, bold=False)
@@ -99,6 +99,6 @@ add_text(slide,
 add_text(slide, "Cisco AI Defense", Inches(6.5), size=Pt(18), color=CISCO_BLUE, bold=False)
 
 # ============================================================
-output_path = "/Users/nghodki/workspace/defenseclaw-workspace/defenseclaw/edge-connector/demo/DefenseClaw-Lite-Demo.pptx"
+output_path = "/Users/nghodki/workspace/defenseclaw-workspace/defenseclaw/edge-connector/demo/Edge-Connector-Demo.pptx"
 prs.save(output_path)
 print(f"Saved: {output_path} ({len(prs.slides)} slides)")

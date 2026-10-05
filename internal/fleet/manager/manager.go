@@ -1,6 +1,6 @@
 // Package manager implements the IoT Fleet Manager service.
 // It handles device registration, heartbeat processing, anomaly detection,
-// and alert dispatch for DefenseClaw Lite IoT devices.
+// and alert dispatch for Edge Connector IoT devices.
 package manager
 
 import (

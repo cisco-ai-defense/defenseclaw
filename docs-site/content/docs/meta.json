@@ -17,6 +17,7 @@
     "policies",
     "defaults",
     "---Integrations---",
+    "edge-connector",
     "openclaw",
     "observability",
     "stories",

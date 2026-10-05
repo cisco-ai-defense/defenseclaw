@@ -72,7 +72,7 @@ and webhook infrastructure.
 
 ### Pipeline Stages
 
-The edge connector runs an 8-stage pipeline for every intercepted call:
+The Edge Connector runs an 8-stage pipeline for every intercepted call:
 
 ```
 +-------+    +-------+    +---------+    +--------+    +---------+
@@ -303,7 +303,7 @@ RAM is required beyond the stack frame.
 
 ### Overview
 
-The edge connector infers a `content_scope` tag for each intercepted call, enabling
+The Edge Connector infers a `content_scope` tag for each intercepted call, enabling
 stricter policy rules for untrusted content without requiring the AI agent to explicitly
 label trust boundaries. This keeps the connector agent-agnostic.
 
@@ -337,7 +337,7 @@ scope-aware rules.
 
 ### Overview
 
-The edge connector supports bidirectional IPC, allowing it to inspect both outgoing
+The Edge Connector supports bidirectional IPC, allowing it to inspect both outgoing
 tool calls (requests) and incoming tool results (responses). This is achieved through
 a backward-compatible extension of the JSON-RPC schema.
 

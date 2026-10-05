@@ -4,7 +4,7 @@
 #include <stdio.h>
 
 /*
- * MQTT 5.0 client for DefenseClaw Lite.
+ * MQTT 5.0 client for Edge Connector.
  *
  * Phase 1 implementation: connection state machine with broker fallback.
  * TLS/mTLS handshake uses mbedTLS (when available).

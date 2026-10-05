@@ -5,7 +5,7 @@
 extern dclaw_state_t *dclaw_get_state(void);
 
 /*
- * Minimal CBOR encoder/decoder for DefenseClaw Lite fixed-schema messages.
+ * Minimal CBOR encoder/decoder for Edge Connector fixed-schema messages.
  * Implements only the CBOR types needed:
  *   - Unsigned integers (major type 0)
  *   - Byte strings (major type 2)

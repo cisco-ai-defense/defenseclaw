@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DefenseClaw Lite Policy Compiler
+Edge Connector Policy Compiler
 
 Compiles YAML policy files into:
   1. C header (policy_tables.h) — compile-time embed for device firmware
@@ -499,7 +499,7 @@ def compute_size_report(c_header: str, binary_blob: bytes, profile: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='DefenseClaw Lite Policy Compiler')
+    parser = argparse.ArgumentParser(description='Edge Connector Policy Compiler')
     parser.add_argument('--input', required=True, help='Input YAML policy file')
     parser.add_argument('--profile', default='standard',
                        choices=['minimal', 'standard', 'edge'],

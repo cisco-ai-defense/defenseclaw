@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""DefenseClaw Lite hook for PicoClaw.
+"""Edge Connector hook for PicoClaw.
 
-Bridges PicoClaw's JSON-RPC hook protocol (stdin/stdout) to the DefenseClaw
-Lite evaluation engine via ctypes. Every tool call PicoClaw's AI agent makes
-passes through dclaw_evaluate() before execution.
+Bridges PicoClaw's JSON-RPC hook protocol (stdin/stdout) to the Edge
+Connector evaluation engine via ctypes. Every tool call PicoClaw's AI agent
+makes passes through dclaw_evaluate() before execution.
 
 Install:
   1. Build libdclaw_core.so on the Pi
@@ -228,7 +228,7 @@ def get_engine() -> DclawEngine:
         log(f"Loading libdclaw from {LIBDCLAW_PATH}")
         _engine = DclawEngine(LIBDCLAW_PATH)
         _engine.init()
-        log("DefenseClaw Lite engine initialized")
+        log("Edge Connector engine initialized")
     return _engine
 
 
@@ -315,7 +315,7 @@ def handle_before_tool(params: dict[str, Any]) -> dict[str, Any]:
         explanation = reason_explanations.get(reason_name, f"Security policy violation: {reason_name}")
 
         msg = (
-            f"⛔ DefenseClaw Lite — Tool Blocked\n\n"
+            f"⛔ Edge Connector — Tool Blocked\n\n"
             f"• Tool: {raw_tool}\n"
             f"• Reason: {reason_name}\n"
             f"• Detail: {explanation}\n"
@@ -405,7 +405,7 @@ def handle_before_llm(params: dict[str, Any]) -> dict[str, Any]:
             return {
                 "action": "abort_turn",
                 "reason": (
-                    f"DefenseClaw Lite: prompt injection detected "
+                    f"Edge Connector: prompt injection detected "
                     f"(pattern: \"{pattern}\"). LLM call blocked."
                 ),
             }
@@ -449,7 +449,7 @@ def handle_after_llm(params: dict[str, Any]) -> dict[str, Any]:
         return {
             "action": "redact",
             "message": (
-                "⛔ DefenseClaw Lite — Response Redacted\n\n"
+                "⛔ Edge Connector — Response Redacted\n\n"
                 "The AI's response contained sensitive data that was blocked "
                 "from being displayed.\n\n"
                 f"• Detected: {', '.join(findings)}\n"
@@ -500,7 +500,7 @@ def handle_shutdown_signal(signum: int, _frame: Any) -> None:
 
 
 def main() -> int:
-    log("=== DefenseClaw Lite PicoClaw hook starting ===")
+    log("=== Edge Connector PicoClaw hook starting ===")
 
     try:
         get_engine()
@@ -543,7 +543,7 @@ def main() -> int:
     finally:
         if _engine:
             _engine.shutdown()
-        log("=== DefenseClaw Lite hook shutdown ===")
+        log("=== Edge Connector hook shutdown ===")
 
     return 0
 

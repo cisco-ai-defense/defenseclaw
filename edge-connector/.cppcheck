@@ -1,4 +1,4 @@
-# cppcheck configuration for DefenseClaw Lite
+# cppcheck configuration for Edge Connector
 # Run: cppcheck --project=.cppcheck src/ include/
 
 # Enable all checks

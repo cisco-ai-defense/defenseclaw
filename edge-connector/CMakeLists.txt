@@ -156,7 +156,7 @@ if(DCLAW_BUILD_TESTS)
 endif()
 
 # Print build summary
-message(STATUS "DefenseClaw Lite Configuration:")
+message(STATUS "Edge Connector Configuration:")
 message(STATUS "  Profile:          ${DCLAW_PROFILE}")
 message(STATUS "  Audit ring:       ${DCLAW_AUDIT_RING_SIZE} entries")
 message(STATUS "  Verdict cache:    ${DCLAW_VERDICT_CACHE_SIZE} entries")

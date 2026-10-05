@@ -1,5 +1,5 @@
 /*
- * Performance benchmark for DefenseClaw Lite.
+ * Performance benchmark for Edge Connector.
  * Measures local decision latency on target hardware.
  *
  * Targets (REQ-47, REQ-48, REQ-50):
@@ -106,7 +106,7 @@ int main(void) {
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
     dclaw_init(&info);
 
-    printf("DefenseClaw Lite Performance Benchmark\n");
+    printf("Edge Connector Performance Benchmark\n");
     printf("  Iterations: %d\n\n", ITERATIONS);
 
     bench_local_decision();

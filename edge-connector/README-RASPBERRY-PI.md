@@ -1,8 +1,8 @@
-# DefenseClaw Lite on Raspberry Pi — Installation & Demo Guide
+# Edge Connector on Raspberry Pi — Installation & Demo Guide
 
 Deploy a sub-microsecond AI agent security enforcement engine on a Raspberry Pi, protecting any MCP-based AI agent from prompt injection, tool abuse, and lateral movement attacks.
 
-**What you'll have at the end:** An AI agent (PicoClaw) controlling a robot, with DefenseClaw Lite intercepting every tool call, blocking dangerous operations in <3μs, and allowing safe ones through — all locally, no cloud required.
+**What you'll have at the end:** An AI agent (PicoClaw) controlling a robot, with Edge Connector intercepting every tool call, blocking dangerous operations in <3μs, and allowing safe ones through — all locally, no cloud required.
 
 ---
 
@@ -24,7 +24,7 @@ Deploy a sub-microsecond AI agent security enforcement engine on a Raspberry Pi,
 sudo apt update && sudo apt install -y build-essential cmake git python3
 ```
 
-## Step 2: Clone and Build DefenseClaw Lite
+## Step 2: Clone and Build Edge Connector
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
@@ -53,7 +53,7 @@ ls -la edge-connector
 Expected benchmark output on RPi4:
 
 ```
-DefenseClaw Lite Performance Benchmark
+Edge Connector Performance Benchmark
   Local decision:    ~2.7 μs    Target: <5μs → PASS
   Throughput:        ~370K decisions/sec
   Cache hit:         ~2.1 μs
@@ -84,7 +84,7 @@ Then rebuild: `cd build && make -j4`
 
 ## Step 4: Integrate with Your AI Agent
 
-DefenseClaw Lite provides two integration methods:
+Edge Connector provides two integration methods:
 
 ### Method A: Shared Library (Python/ctypes) — for hook-based agents
 
@@ -109,7 +109,7 @@ if verdict.action == 1:  # BLOCK
 
 ### Method B: Unix Socket (JSON-RPC) — for external agents
 
-For agents that can't load a shared library, DefenseClaw Lite listens on a Unix socket:
+For agents that can't load a shared library, Edge Connector listens on a Unix socket:
 
 ```
 Path: /var/run/edge-connector.sock
@@ -171,7 +171,7 @@ config['hooks']['processes']['defenseclaw_gate'] = {
 
 with open('$HOME/.picoclaw/config.json', 'w') as f:
     json.dump(config, f, indent=2)
-print('DefenseClaw Lite hook registered.')
+print('Edge Connector hook registered.')
 "
 ```
 
@@ -289,7 +289,7 @@ cd ~/defenseclaw/edge-connector/build/tests
 │                    RASPBERRY PI                            │
 │                                                           │
 │  ┌─────────────────┐      ┌────────────────────────────┐│
-│  │   AI Agent       │      │   DefenseClaw Lite (54KB)  ││
+│  │   AI Agent       │      │   Edge Connector (54KB)    ││
 │  │   (PicoClaw)     │      │                            ││
 │  │                  │ hook │  ┌──────────────────────┐  ││
 │  │  "drive forward" │─────►│  │ 7-Stage Pipeline     │  ││

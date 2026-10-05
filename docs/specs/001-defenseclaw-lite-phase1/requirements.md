@@ -201,73 +201,73 @@ to the cloud.
 
 ### Functional — Content Scanner
 
-- REQ-53: The edge connector SHALL scan tool call arguments and content for
+- REQ-53: The Edge Connector SHALL scan tool call arguments and content for
   secrets (API keys, bearer tokens, AWS keys, passwords, token assignments)
   using pre-compiled DFA pattern tables.
 
-- REQ-54: The edge connector SHALL scan content for PII data patterns (SSN
+- REQ-54: The Edge Connector SHALL scan content for PII data patterns (SSN
   format XXX-XX-XXXX, credit card numbers Visa/MC/Amex/Discover) using
   pre-compiled DFA tables.
 
-- REQ-55: The edge connector SHALL detect credential prefixes (sk-*, AKIA*,
+- REQ-55: The Edge Connector SHALL detect credential prefixes (sk-*, AKIA*,
   ghp_*, xoxb-*, eyJ JWT) with minimum length floors to prevent false
   positives.
 
-- REQ-56: The edge connector SHALL detect exfiltration intent by matching the
+- REQ-56: The Edge Connector SHALL detect exfiltration intent by matching the
   conjunction of: sensitive target path (/etc/passwd, .aws/credentials, SSH
   keys) + read verb + egress verb within a 240-byte context window.
 
-- REQ-57: The edge connector SHALL detect dangerous command patterns (shell
+- REQ-57: The Edge Connector SHALL detect dangerous command patterns (shell
   metacharacters ;, &&, |, backticks, $() ) in tool arguments targeting
   exec/shell capabilities.
 
-- REQ-58: The edge connector SHALL detect dangerous command sequences (rm -rf,
+- REQ-58: The Edge Connector SHALL detect dangerous command sequences (rm -rf,
   chmod 777, curl|sh, wget|bash) in tool arguments.
 
 ### Functional — SSRF/Network Validation
 
-- REQ-59: The edge connector SHALL block destinations resolving to loopback,
+- REQ-59: The Edge Connector SHALL block destinations resolving to loopback,
   link-local, cloud metadata (169.254.169.254, fd00:ec2::254), multicast,
   and unspecified addresses.
 
-- REQ-60: The edge connector SHALL reject URLs containing inline credentials
+- REQ-60: The Edge Connector SHALL reject URLs containing inline credentials
   (user:pass@ in userinfo).
 
-- REQ-61: The edge connector SHALL reject non-HTTP/HTTPS URL schemes (file://,
+- REQ-61: The Edge Connector SHALL reject non-HTTP/HTTPS URL schemes (file://,
   gopher://, ftp://).
 
-- REQ-62: The edge connector SHALL support an operator-configurable allowlist
+- REQ-62: The Edge Connector SHALL support an operator-configurable allowlist
   of specific private IP addresses that bypass SSRF protection, with
   loopback/link-local/metadata always denied.
 
 ### Functional — Trust Boundary Inference
 
-- REQ-63: The edge connector SHALL infer content_scope from session context:
+- REQ-63: The Edge Connector SHALL infer content_scope from session context:
   first call = system, tool_result direction = tool_output, all other =
   user_input.
 
-- REQ-64: The edge connector SHALL apply stricter pattern matching rules (lower
+- REQ-64: The Edge Connector SHALL apply stricter pattern matching rules (lower
   severity threshold for blocking) on content classified as user_input.
 
-- REQ-65: The edge connector SHALL track content_scope per session and include
+- REQ-65: The Edge Connector SHALL track content_scope per session and include
   it in cloud escalation payloads.
 
 ### Functional — Enriched Cloud Escalation
 
-- REQ-66: The edge connector SHALL include truncated content (tool arguments
+- REQ-66: The Edge Connector SHALL include truncated content (tool arguments
   and/or prompt text) in MQTT verdict request payloads, truncated to a
   configurable max_escalation_payload_bytes (default 1024).
 
-- REQ-67: The edge connector SHALL tag each escalation with a direction enum:
+- REQ-67: The Edge Connector SHALL tag each escalation with a direction enum:
   prompt, completion, tool_call, tool_result.
 
-- REQ-68: The edge connector SHALL include local findings (category + severity)
+- REQ-68: The Edge Connector SHALL include local findings (category + severity)
   in escalation payloads so the cloud can skip redundant local checks.
 
 - REQ-69: The cloud verdict response SHALL include a category enum (injection,
   pii, secret, exfil, command, behavioral) and a 64-byte evidence snippet.
 
-- REQ-70: The edge connector SHALL cache enriched verdicts (action + category +
+- REQ-70: The Edge Connector SHALL cache enriched verdicts (action + category +
   evidence) in the verdict cache.
 
 ### Functional — Response Interception

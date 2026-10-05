@@ -1,0 +1,158 @@
+---
+title: Policies
+description: Write Edge Connector policies — capability sequences, content patterns, destination rules, rate limits, and escalation modes.
+keywords:
+  - Edge Connector policy
+  - capability sequence
+  - content pattern
+  - policy compiler
+  - IoT policy
+---
+
+Edge Connector policies are YAML files compiled into binary DFA tables by the policy compiler. The compiled tables are either statically linked into the binary or distributed via OTA.
+
+## Policy structure
+
+```yaml title="~/.defenseclaw/policy.yaml"
+name: my-device-policy
+version: 1
+
+skill_actions:
+  critical:
+    runtime: disable    # BLOCK
+  high:
+    runtime: disable    # BLOCK
+  medium:
+    runtime: warn       # ALLOW + log
+
+iot_extensions:
+  capability_sequences: [...]
+  destination_allowlist: [...]
+  rate_limits: {...}
+  escalation_mode: {...}
+  content_inspection: {...}
+  canary:
+    baseline_blocks_per_min: 5
+```
+
+## Capability sequences
+
+Define dangerous multi-step patterns. When a session completes a configured sequence, the final tool call is blocked.
+
+```yaml
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [net_fetch, actuate]
+      action: block
+    - sequence: [sensor_read, net_fetch, exec_shell]
+      action: block
+```
+
+The policy compiler converts these into deterministic finite automata (DFA) tables evaluated in constant time per input symbol. Sequences are tracked per `session_id`.
+
+## Destination rules
+
+```yaml
+iot_extensions:
+  destination_allowlist:
+    - "api.openai.com"
+    - "api.anthropic.com"
+    - "*.your-company.com"
+
+  destination_denylist:
+    - "169.254.169.254"       # AWS metadata
+    - "metadata.google.internal"
+```
+
+Wildcards match any subdomain: `*.example.com` matches `api.example.com` and `deep.sub.example.com`. A tool call to an unlisted destination falls through to cloud escalation.
+
+## Rate limits
+
+Three independent token buckets, each refilled per-minute:
+
+```yaml
+iot_extensions:
+  rate_limits:
+    tool_calls_per_minute: 60
+    network_requests_per_minute: 30
+    actuations_per_minute: 10
+```
+
+## Escalation modes
+
+Controls what happens when local policy cannot decide:
+
+```yaml
+iot_extensions:
+  escalation_mode:
+    sensor_read: speculative    # allow immediately (safe, read-only)
+    read_fs: speculative
+    net_fetch: speculative      # allow if dest in allowlist
+    send_msg: speculative
+    actuate: sync_block         # BLOCK without cloud approval
+    exec_shell: sync_block      # BLOCK without cloud approval
+    write_fs: sync_block        # BLOCK without cloud approval
+```
+
+| Mode | Behavior |
+| --- | --- |
+| `speculative` | Allow the tool call immediately, send the verdict to the cloud asynchronously for logging |
+| `sync_block` | Block the tool call until the cloud returns a verdict. If the cloud is unreachable, the call stays blocked. |
+
+## Content inspection
+
+```yaml
+iot_extensions:
+  content_inspection:
+    enabled: true
+    categories:
+      secrets: true
+      pii: true
+      credentials: true
+      exfiltration: true
+      injection: true
+      commands: true
+
+    ssrf_validation:
+      enabled: true
+      block_private_ranges: true
+      block_metadata_endpoints: true
+      block_link_local: true
+
+    custom_patterns:
+      - name: "internal_project_code"
+        category: secrets
+        regex: "PROJ-[A-Z]{3}-[0-9]{6}"
+        severity: high
+```
+
+Custom patterns are compiled into the same DFA tables as built-in patterns. They follow the same format and can target any category.
+
+## Compile the policy
+
+```bash
+python3 tools/policy_compiler.py \
+  --input ~/.defenseclaw/policy.yaml \
+  --profile standard \
+  --version 1 \
+  --output-header generated/policy_tables.h \
+  --output-binary dist/policy.bin
+```
+
+The compiler produces:
+- **C header** (`policy_tables.h`) — for static linking into the binary
+- **Binary blob** (`policy.bin`) — for OTA distribution via MQTT
+
+## Canary deployment
+
+New policies can be tested on a subset of devices before fleet-wide rollout:
+
+```yaml
+iot_extensions:
+  canary:
+    baseline_blocks_per_min: 5
+```
+
+If the block rate exceeds the baseline after a policy update, the fleet manager automatically rolls back the affected devices to the previous policy version.
