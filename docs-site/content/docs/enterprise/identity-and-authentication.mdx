@@ -59,7 +59,10 @@ Who resolves the verified facts depends on the install:
 
 - **Linux:** the gateway resolves the NSS facts itself, on any install. The
   root guardian adds InfoPipe and `realm list` facts on the standalone
-  enterprise profile only.
+  enterprise profile only. SSSD serves AD, IPA and plain LDAP domains alike,
+  so on a per-user install an SSSD account has its domain and groups but no
+  `defenseclaw.user.directory`; only `winbind`, `ldap` and the Entra NSS
+  modules name the directory without the guardian.
 - **Windows:** the gateway resolves the account, UPN and tenant itself. Groups come from the SYSTEM enumerator, on the standalone
   enterprise profile only.
 - **macOS:** every verified fact comes from the root enumerator, so a
@@ -265,7 +268,7 @@ decisions by profile and match reason and the digest timeline.
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `ai_discovery.include_user_principal` | `false` | Adds `defenseclaw.user.principal` and `defenseclaw.session.kerberos_principal` to every record that carries identity: hook decisions, tool activity, agent, model and tool spans, and `identity.observed`. Off by default, like `include_user_email`, because a principal names a person across systems. The domain, directory and assurance are sent either way. |
+| `ai_discovery.include_user_principal` | `false` | Adds `defenseclaw.user.principal` and `defenseclaw.session.kerberos_principal` to every record that carries identity: hook decisions, tool activity, agent, model and tool spans, and `identity.observed`. Off by default, like `include_user_email`, because a principal names a person across systems. The domain, directory and assurance are sent either way, when they resolved. |
 | `ai_discovery.ide_inventory` | `all` | `all`, `ai_only` or `off`. Plugin lists can reveal personal tooling; `ai_only` keeps only AI plugins. |
 
 The principal, the Kerberos principal, the client address and the tenant ID
@@ -299,7 +302,8 @@ dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freed
 
 | Symptom | Check |
 | --- | --- |
-| No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice` and `id alice`; on SSSD, check InfoPipe as above. |
+| No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear when they resolved. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice` and `id alice`; on SSSD, check InfoPipe as above. |
+| No `defenseclaw.user.directory` for an SSSD account | Expected on a per-user Linux install: SSSD does not say which directory serves the account, and only the standalone enterprise guardian reads it from `realm list`. The domain and groups are still verified. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. Expected on a per-user macOS install. On Linux check `getent passwd alice`. |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
 | `default_lookup_failed` | The directory lookup for a verified user failed, so the default profile applied. Check that the directory service answers on the host. |
