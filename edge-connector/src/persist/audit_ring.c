@@ -78,6 +78,9 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
     w->total_flash_writes++;
     w->count = 0;
     w->last_flush_tick = hal_tick_ms();
+
+    /* Sync to durable storage on periodic flush */
+    hal_flash_sync();
     return 0;
 }
 

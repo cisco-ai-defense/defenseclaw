@@ -36,8 +36,12 @@ int hal_flash_write(uint32_t offset, const void *buf, size_t len) {
     if (flash_fd < 0) return -1;
     if (offset + len > FLASH_TOTAL_SIZE) return -1;
     if (pwrite(flash_fd, buf, len, (off_t)offset) != (ssize_t)len) return -1;
-    if (fdatasync(flash_fd) != 0) return -1;
     return 0;
+}
+
+int hal_flash_sync(void) {
+    if (flash_fd < 0) return -1;
+    return fdatasync(flash_fd);
 }
 
 int hal_flash_erase_sector(uint32_t sector) {

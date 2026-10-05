@@ -61,6 +61,7 @@ func (a *API) registerRoutes() {
 	}
 
 	a.mux.HandleFunc("GET /devices", wrap(a.listDevices))
+	a.mux.HandleFunc("POST /devices", wrap(a.registerDevice))
 	a.mux.HandleFunc("GET /devices/{id}", wrap(a.getDevice))
 	a.mux.HandleFunc("POST /devices/{id}/command", wrap(a.sendCommand))
 	a.mux.HandleFunc("GET /fleet/health", wrap(a.getFleetHealth))
@@ -76,6 +77,48 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 		"online":  health.Online,
 		"offline": health.Offline,
 	})
+}
+
+func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+
+	var req struct {
+		TenantID      uint16 `json:"tenant_id"`
+		FleetID       uint16 `json:"fleet_id"`
+		DeviceID      uint32 `json:"device_id"`
+		HWProfile     string `json:"hw_profile"`
+		FWVersion     string `json:"fw_version"`
+		PolicyVersion uint16 `json:"policy_version"`
+		Capabilities  uint8  `json:"capabilities"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if req.DeviceID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device_id is required"})
+		return
+	}
+
+	dev, err := a.manager.RegisterDevice(
+		req.TenantID, req.FleetID, req.DeviceID,
+		req.HWProfile, req.FWVersion, req.PolicyVersion, req.Capabilities,
+	)
+	if err == manager.ErrDeviceExists {
+		writeJSON(w, http.StatusOK, dev)
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, dev)
 }
 
 func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {

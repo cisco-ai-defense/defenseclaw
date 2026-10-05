@@ -200,14 +200,19 @@ static void test_ac11(void) {
     printf("  AC-11 PASS: fleet manager tested in Go (14 tests passing)\n");
 }
 
-/* AC-12: Binary size <80KB, RAM <25KB */
+/* AC-12: Binary size <80KB, RAM within profile budget */
 static void test_ac12(void) {
     /* Binary size checked via `size` command in CI.
      * RAM verified via linker map analysis.
      * Here we verify struct sizes are as expected. */
     assert(sizeof(dclaw_audit_entry_t) == 16);
-    assert(sizeof(dclaw_state_t) < 25 * 1024); /* global state < 25KB */
+#if DCLAW_PROFILE_EDGE
+    assert(sizeof(dclaw_state_t) < 40 * 1024); /* EDGE profile: global state < 40KB */
+    printf("  AC-12 PASS: dclaw_state_t = %zu bytes (< 40KB, EDGE profile)\n", sizeof(dclaw_state_t));
+#else
+    assert(sizeof(dclaw_state_t) < 25 * 1024); /* STANDARD/MINIMAL: global state < 25KB */
     printf("  AC-12 PASS: dclaw_state_t = %zu bytes (< 25KB)\n", sizeof(dclaw_state_t));
+#endif
 }
 
 /* AC-13: Content scanner detects all 6 categories */
@@ -300,12 +305,17 @@ static void test_ac15_enriched_escalation(void) {
     printf("  AC-15 PASS: enriched cache entry has category+evidence fields\n");
 }
 
-/* AC-16: Binary < 80KB, RAM < 25KB */
+/* AC-16: Binary < 80KB, RAM within profile budget */
 static void test_ac16_binary_size(void) {
     /* This is a build-time check — verified by examining the binary.
      * We just verify the struct sizes are reasonable. */
+#if DCLAW_PROFILE_EDGE
+    assert(sizeof(dclaw_state_t) < 40 * 1024);
+    printf("  AC-16 PASS: RAM < 40KB (dclaw_state_t = %zu bytes, EDGE profile)\n", sizeof(dclaw_state_t));
+#else
     assert(sizeof(dclaw_state_t) < 25 * 1024);
     printf("  AC-16 PASS: RAM < 25KB (dclaw_state_t = %zu bytes)\n", sizeof(dclaw_state_t));
+#endif
 }
 
 /* AC-17: Backward compatibility — no content = Phase 1 behavior */

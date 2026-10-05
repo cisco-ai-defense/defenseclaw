@@ -13,6 +13,7 @@ uint64_t hal_tick_ms(void);
 /* Flash operations */
 int hal_flash_read(uint32_t offset, void *buf, size_t len);
 int hal_flash_write(uint32_t offset, const void *buf, size_t len);
+int hal_flash_sync(void);   /* Flush OS page cache to durable storage */
 int hal_flash_erase_sector(uint32_t sector);
 
 /* Flash partition offsets (configured per platform) */

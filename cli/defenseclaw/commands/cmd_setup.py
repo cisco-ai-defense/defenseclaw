@@ -641,6 +641,13 @@ from defenseclaw.commands.cmd_setup_provider import provider  # noqa: E402
 
 setup.add_command(provider)
 
+# Register `defenseclaw setup edge-connector` (fleet management API wiring).
+# Guides the operator through building the edge-connector, setting the fleet
+# API bearer token, and emitting a sample fleet policy YAML.
+from defenseclaw.commands.cmd_setup_edge_connector import edge_connector  # noqa: E402
+
+setup.add_command(edge_connector)
+
 # `defenseclaw setup acp` is the discovery-first entry point: it finds
 # unguarded ACP agents and routes them through the guard, where
 # `defenseclaw acp setup` requires the operator to already know the pair.

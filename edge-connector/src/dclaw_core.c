@@ -63,21 +63,30 @@ void dclaw_shutdown(void) {
     hal_shutdown();
 }
 
+#if DCLAW_MQTT_ENABLED
 extern int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size);
+#endif
 
 void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len, size_t buf_size) {
+#if DCLAW_MQTT_ENABLED
     size_t len = 0;
     if (dclaw_cbor_encode_heartbeat(out_heartbeat, &len, buf_size) == 0) {
         *out_len = (uint8_t)len;
     } else {
         *out_len = 0;
     }
+#else
+    (void)out_heartbeat;
+    (void)buf_size;
+    *out_len = 0;
+#endif
 }
 
 static uint16_t compute_target_hash(const uint8_t *tool_hash) {
     return (uint16_t)(tool_hash[0] | (tool_hash[1] << 8));
 }
 
+#if DCLAW_SPECULATIVE_EXECUTION
 static bool is_sync_block_required(uint8_t cap_flags) {
     for (size_t i = 0; i < escalation_table_count; i++) {
         if ((cap_flags & escalation_table[i].cap_flag) && escalation_table[i].mode == 0) {
@@ -86,6 +95,7 @@ static bool is_sync_block_required(uint8_t cap_flags) {
     }
     return false;
 }
+#endif
 
 static dclaw_verdict_t make_verdict(dclaw_action_t action, dclaw_reason_t reason,
                                     dclaw_verdict_mode_t mode) {

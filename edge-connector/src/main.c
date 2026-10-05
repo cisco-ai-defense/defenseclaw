@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <errno.h>
+#include <stdlib.h>
 
 #ifndef DCLAW_IPC_SOCKET_PATH
 #define DCLAW_IPC_SOCKET_PATH "/tmp/defenseclaw.sock"
@@ -15,11 +16,13 @@
 #define DCLAW_IPC_BUF_SIZE    (DCLAW_IPC_MAX_PAYLOAD + 1)
 
 /* External module functions */
+#if DCLAW_MQTT_ENABLED
 extern int  dclaw_mqtt_init(void);
 extern int  dclaw_mqtt_connect(void);
 extern int  dclaw_mqtt_send_heartbeat(void);
 extern int  dclaw_mqtt_reconnect(void);
 extern void dclaw_canary_tick(void);
+#endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
                                     dclaw_tool_request_t *out);
 
@@ -42,15 +45,16 @@ static const char *action_string(dclaw_action_t a) {
 
 /* Write a JSON-RPC response for a verdict back to the client fd.
  * Returns 0 on success, -1 on write failure. */
-static int write_verdict_response(int fd, const dclaw_verdict_t *v) {
+static int write_verdict_response(int fd, const dclaw_verdict_t *v, int32_t request_id) {
     char resp[256];
     int n = snprintf(resp, sizeof(resp),
         "{\"jsonrpc\":\"2.0\",\"result\":{\"action\":\"%s\","
-        "\"reason\":%u,\"severity\":%u,\"cached\":%s},\"id\":1}\n",
+        "\"reason\":%u,\"severity\":%u,\"cached\":%s},\"id\":%d}\n",
         action_string(v->action),
         (unsigned)v->reason,
         (unsigned)v->severity,
-        v->from_cache ? "true" : "false");
+        v->from_cache ? "true" : "false",
+        (int)request_id);
     if (n <= 0 || (size_t)n >= sizeof(resp)) return -1;
     ssize_t w = write(fd, resp, (size_t)n);
     return (w == n) ? 0 : -1;
@@ -65,10 +69,14 @@ int main(void) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    const char *env_tenant = getenv("DCLAW_TENANT_ID");
+    const char *env_fleet  = getenv("DCLAW_FLEET_ID");
+    const char *env_device = getenv("DCLAW_DEVICE_ID");
+
     dclaw_device_info_t info = {
-        .tenant_id = 1,
-        .fleet_id = 1,
-        .device_id = 0, /* populated from config */
+        .tenant_id = env_tenant ? (uint16_t)strtoul(env_tenant, NULL, 10) : 1,
+        .fleet_id  = env_fleet  ? (uint16_t)strtoul(env_fleet, NULL, 10)  : 1,
+        .device_id = env_device ? (uint32_t)strtoul(env_device, NULL, 10) : 0,
         .policy_version = 0,
         .fw_version = 1,
         .hw_profile = 2, /* LINUX_SBC */
@@ -81,8 +89,10 @@ int main(void) {
     }
 
     /* Initialize MQTT and attempt initial connection */
+#if DCLAW_MQTT_ENABLED
     dclaw_mqtt_init();
     dclaw_mqtt_connect();
+#endif
 
     /* Create the IPC Unix domain socket */
     int server_fd = hal_ipc_socket_create(DCLAW_IPC_SOCKET_PATH);
@@ -93,8 +103,8 @@ int main(void) {
         return 1;
     }
 
-    fprintf(stderr, "edge-connector: running (profile=STANDARD, ipc=%s)\n",
-            DCLAW_IPC_SOCKET_PATH);
+    fprintf(stderr, "edge-connector: running (profile=%s, ipc=%s)\n",
+            DCLAW_PROFILE_NAME, DCLAW_IPC_SOCKET_PATH);
 
     /* pollfd array: slot 0 = server socket, slots 1..MAX = client connections */
     struct pollfd fds[1 + DCLAW_MAX_IPC_CLIENTS];
@@ -165,7 +175,7 @@ int main(void) {
             dclaw_tool_request_t req;
             if (dclaw_ipc_parse_request(buf, (size_t)n, &req) == 0) {
                 dclaw_verdict_t verdict = dclaw_evaluate(&req);
-                write_verdict_response(client_fds[i], &verdict);
+                write_verdict_response(client_fds[i], &verdict, req.request_id);
             } else {
                 /* Malformed request — send error response */
                 const char *err =
@@ -176,9 +186,11 @@ int main(void) {
         }
 
         /* Periodic tasks */
+#if DCLAW_MQTT_ENABLED
         dclaw_mqtt_send_heartbeat();
         dclaw_mqtt_reconnect();
         dclaw_canary_tick();
+#endif
 
         /* Flush audit on idle periods (no client activity) */
         if (ready == 0) {

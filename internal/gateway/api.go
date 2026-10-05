@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -268,6 +269,11 @@ type APIServer struct {
 	stepIdxBySession map[string]*sessionStepState
 
 	connectorRegistry *connector.Registry
+
+	// fleetAPI serves the Edge Connector fleet management surface.
+	// nil when fleet is not wired; the route registration simply skips
+	// mounting the handler in that case.
+	fleetAPI *fleet.API
 
 	// ciscoInspector calls the Cisco AI Defense /api/v1/inspect/chat
 	// route from the hook lane (inspectToolPolicy +
@@ -781,6 +787,15 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 	a.connectorRegistry = reg
 }
 
+// SetFleetAPI registers the Edge Connector fleet management API so its
+// routes are mounted when the HTTP server starts.
+func (a *APIServer) SetFleetAPI(api *fleet.API) {
+	if a == nil {
+		return
+	}
+	a.fleetAPI = api
+}
+
 // hookHandlers maps connector names to their gateway-side HTTP handlers.
 // connectorHookHandlerByName is the registry that lets api.go map a
 // connector name to the http.HandlerFunc that owns its hook endpoint.
@@ -1101,6 +1116,12 @@ func (a *APIServer) Run(ctx context.Context) error {
 	// can roll up turn counts + completion reasons per session.
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
+	// Edge Connector fleet management API. Mounted when the fleet subsystem
+	// is wired by the sidecar; skipped otherwise so un-configured gateways
+	// don't expose the surface.
+	if a.fleetAPI != nil {
+		mux.Handle("/api/v1/fleet/", http.StripPrefix("/api/v1/fleet", a.fleetAPI.Handler()))
+	}
 	a.registerSandboxRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)

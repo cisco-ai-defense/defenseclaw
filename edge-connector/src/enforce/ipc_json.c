@@ -73,6 +73,7 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
     /* We need: method, params.tool_name, params.tool_hash, params.capabilities,
      * params.session_id, and optionally params.destination */
     bool got_tool_name = false, got_hash = false, got_caps = false, got_session = false;
+    bool got_id = false;
 
     /* Simplified: scan for known keys in any order */
     char key_buf[32];
@@ -175,8 +176,26 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                 }
             }
             if (*p == '}') p++;
+        } else if (strcmp(key_buf, "id") == 0) {
+            /* Parse JSON-RPC id field */
+            uint32_t v;
+            const char *after_id = parse_uint(p, &v);
+            if (after_id) {
+                out->request_id = (int32_t)v;
+                got_id = true;
+                p = after_id;
+            } else {
+                /* id could be a string or null — skip it */
+                if (*p == '"') {
+                    p = parse_string(p, val_buf, sizeof(val_buf));
+                    if (!p) return -1;
+                } else {
+                    /* skip null or other literal */
+                    while (*p && *p != ',' && *p != '}') p++;
+                }
+            }
         } else {
-            /* Skip top-level values we don't need (jsonrpc, method, id) */
+            /* Skip top-level values we don't need (jsonrpc, method) */
             if (*p == '"') {
                 p = parse_string(p, val_buf, sizeof(val_buf));
                 if (!p) return -1;
@@ -194,5 +213,9 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
     }
 
     if (!got_tool_name || !got_hash || !got_caps || !got_session) return -1;
+
+    /* Default id to 1 for backward compatibility if not present */
+    if (!got_id) out->request_id = 1;
+
     return 0;
 }

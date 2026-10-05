@@ -124,6 +124,7 @@ typedef struct {
     char     content_buf[DCLAW_CONTENT_MAX];
     const char *content;
     uint16_t content_len;
+    int32_t  request_id;    /* JSON-RPC id from incoming request (0 = not set, default to 1) */
 } dclaw_tool_request_t;
 
 typedef struct {

@@ -81,12 +81,23 @@ type Alert struct {
 // AlertHandler is called when an anomaly is detected.
 type AlertHandler func(alert Alert)
 
+// DeviceStore is the persistence interface for fleet devices.
+// Implementations are provided in the parent fleet package to avoid
+// pulling storage dependencies into the manager core.
+type DeviceStore interface {
+	SaveDevice(dev *Device) error
+	LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*Device, error)
+	ListDevices() ([]*Device, error)
+	DeleteDevice(tenantID, fleetID uint16, deviceID uint32) error
+}
+
 // FleetManager is the core fleet management service.
 type FleetManager struct {
 	mu                sync.RWMutex
 	devices           map[uint64]*Device
 	alertHandler      AlertHandler
 	heartbeatInterval time.Duration
+	store             DeviceStore
 
 	// Metrics hooks (set externally to avoid circular imports)
 	onDeviceRegistered func()
@@ -101,6 +112,34 @@ func New(alertHandler AlertHandler) *FleetManager {
 		alertHandler:      alertHandler,
 		heartbeatInterval: 30 * time.Second,
 	}
+}
+
+// SetStore configures the persistence backend. When set, RegisterDevice
+// and ProcessHeartbeat will persist device state after mutation.
+// This must be called before processing any requests.
+func (fm *FleetManager) SetStore(store DeviceStore) {
+	fm.store = store
+}
+
+// LoadFromStore populates the in-memory device map from the configured store.
+// Call this once at startup after SetStore. Returns the number of devices loaded.
+func (fm *FleetManager) LoadFromStore() (int, error) {
+	if fm.store == nil {
+		return 0, nil
+	}
+
+	devices, err := fm.store.ListDevices()
+	if err != nil {
+		return 0, fmt.Errorf("load devices from store: %w", err)
+	}
+
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	for _, dev := range devices {
+		fm.devices[dev.DeviceID] = dev
+	}
+	return len(devices), nil
 }
 
 // SetMetricsHooks configures callbacks for metrics updates.
@@ -144,8 +183,11 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 		existing.PolicyVersion = policyVersion
 		existing.HWProfile = hwProfile
 		existing.Capabilities = capabilities
-		copy := *existing
-		return &copy, ErrDeviceExists
+		if fm.store != nil {
+			_ = fm.store.SaveDevice(existing)
+		}
+		devCopy := *existing
+		return &devCopy, ErrDeviceExists
 	}
 
 	dev := &Device{
@@ -161,11 +203,14 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 		LastHeartbeat: time.Now(),
 	}
 	fm.devices[fullID] = dev
+	if fm.store != nil {
+		_ = fm.store.SaveDevice(dev)
+	}
 	if fm.onDeviceRegistered != nil {
 		fm.onDeviceRegistered()
 	}
-	copy := *dev
-	return &copy, nil
+	devCopy := *dev
+	return &devCopy, nil
 }
 
 // ProcessHeartbeat updates device state from a heartbeat.
@@ -220,6 +265,11 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	hmacBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(hmacBytes, hb.AuditHeadHMAC)
 	dev.LastAuditHMAC = hmacBytes
+
+	// Persist updated state
+	if fm.store != nil {
+		_ = fm.store.SaveDevice(dev)
+	}
 }
 
 // CheckOfflineDevices detects devices that have gone silent.
@@ -231,6 +281,9 @@ func (fm *FleetManager) CheckOfflineDevices() {
 	for _, dev := range fm.devices {
 		if dev.Status == StatusOnline && dev.LastHeartbeat.Before(threshold) {
 			dev.Status = StatusOffline
+			if fm.store != nil {
+				_ = fm.store.SaveDevice(dev)
+			}
 			if fm.onDeviceOffline != nil {
 				fm.onDeviceOffline()
 			}

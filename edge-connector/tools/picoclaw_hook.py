@@ -109,15 +109,17 @@ REASON_NAMES = {
 
 class DclawToolRequest(ctypes.Structure):
     _fields_ = [
-        ("tool_name", ctypes.c_char * 64),
+        ("tool_name", ctypes.c_char * 64),       # DCLAW_TOOL_NAME_MAX
         ("tool_hash", ctypes.c_uint8 * 32),
         ("cap_flags", ctypes.c_uint8),
-        ("destination", ctypes.c_char * 128),
+        ("destination", ctypes.c_char * 128),     # DCLAW_DESTINATION_MAX
         ("session_id", ctypes.c_uint16),
         ("direction", ctypes.c_uint8),
         ("content_scope", ctypes.c_uint8),
+        ("content_buf", ctypes.c_char * 512),     # DCLAW_CONTENT_MAX
         ("content", ctypes.c_char_p),
         ("content_len", ctypes.c_uint16),
+        ("request_id", ctypes.c_int32),
     ]
 
 

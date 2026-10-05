@@ -42,6 +42,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/fleet"
+	fleetmanager "github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	fleetverdict "github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -6817,6 +6820,15 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)
 	}
 	api.SetConnectorRegistry(reg)
+	// Wire the Edge Connector fleet management API. The manager and verdict
+	// cache are lightweight in-process singletons; metrics are connected once
+	// so Prometheus scrapes reflect live fleet state.
+	fleetMgr := fleetmanager.New(nil)
+	fleetCache := fleetverdict.NewCache(4096, func(h [32]byte) (fleetverdict.Action, uint8) {
+		return fleetverdict.ActionAllow, 0
+	})
+	fleet.WireMetrics(fleetMgr, fleetCache)
+	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache))
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token
