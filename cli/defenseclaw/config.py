@@ -2869,8 +2869,9 @@ class AIDiscoveryConfig:
     # person rather than an account on one endpoint, and it leaves the endpoint
     # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
     include_user_email: bool = False
-    # Opt-in like include_user_email: the directory principal (UPN or Kerberos
-    # principal) identifies a person. Mirrors IncludeUserPrincipal.
+    # Opt-in like include_user_email: the directory principal (UPN) and the
+    # session's Kerberos principal identify a person. When on they ride every
+    # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
     include_user_principal: bool = False
     # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
     ide_inventory: str = "all"

@@ -2550,7 +2550,7 @@
         "include_user_principal": {
           "type": "boolean",
           "default": false,
-          "description": "Opt in to attaching the end-user directory principal (UPN or Kerberos principal) to AI discovery inventory records. Off by default: like the email address, the principal identifies a person across systems."
+          "description": "Opt in to attaching the end-user directory principal (UPN) and the session's Kerberos principal to every identity-carrying record: hook decisions, guardrail evaluations, tool activity, agent, model, tool and guardrail spans, and inventory records. Off by default: like the email address, the principal identifies a person across systems."
         },
         "ide_inventory": {
           "type": "string",

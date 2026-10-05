@@ -465,9 +465,11 @@ type AIDiscoveryConfig struct {
 	// present. Disabled by default; see AIRuntimeConfig.
 	Runtime AIRuntimeConfig `mapstructure:"runtime" yaml:"runtime,omitempty"`
 
-	// IncludeUserPrincipal adds the end-user directory principal (UPN or
-	// Kerberos principal) to AI discovery inventory records. Off by
-	// default for the same reason as IncludeUserEmail: the principal
+	// IncludeUserPrincipal adds the end-user directory principal (UPN) and
+	// the session's Kerberos principal to every record that carries
+	// identity: hook decisions, guardrail evaluations, tool activity, the
+	// agent, model, tool and guardrail spans, and the inventory records.
+	// Off by default for the same reason as IncludeUserEmail: the principal
 	// identifies a person across systems.
 	IncludeUserPrincipal bool `mapstructure:"include_user_principal" yaml:"include_user_principal,omitempty"`
 	// IDEInventory scopes the IDE extension and plugin inventory:
