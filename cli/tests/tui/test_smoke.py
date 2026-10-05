@@ -120,6 +120,11 @@ async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: 
         if subtab:
             assert app.inventory_model.active_sub == subtab
             assert table.row_count > 0, f"{subtab}: the fixture rows are not in the table"
+            # The active sub-tab button is scrolled into view (GAP-0020).
+            await pilot.pause()
+            bar = app.query_one("#inventory-controls")
+            button = app.query_one(f"#inventory-tab-{subtab}").region
+            assert button.width > 0 and bar.region.contains_region(button), f"{subtab}: its button is off the bar"
         if table.row_count > 0:
             assert table.display, f"{name}: table has rows but is hidden"
             assert table.region.height > 0, f"{name}: table has no height"
