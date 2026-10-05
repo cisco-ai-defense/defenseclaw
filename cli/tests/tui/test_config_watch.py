@@ -101,6 +101,14 @@ def test_atomic_replace_emits_one_generation(tmp_path: Path) -> None:
     assert watcher.poll(now=2.0) is None
 
 
+def test_writer_generation_is_part_of_the_signature(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("mode: observe\n", encoding="utf-8")
+    assert probe_config_generation(path).config_generation == 0
+    (tmp_path / "config.generation.json").write_text('{"generation": 4}', encoding="utf-8")
+    assert probe_config_generation(path).config_generation == 4
+
+
 def test_same_size_rapid_in_place_updates_use_content_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
