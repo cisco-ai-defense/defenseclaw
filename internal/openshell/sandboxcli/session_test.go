@@ -1529,6 +1529,20 @@ func TestLaunchOptionsSplitReportsAnUnkeptValue(t *testing.T) {
 	}
 }
 
+// A prompt after a switch as the last word is recorded right, so the run
+// notes it in one line rather than warning; a spaced word before more
+// options still warns, naming them (GAP-0006).
+func TestWarnUnkeptOptionValueNotesATrailingPrompt(t *testing.T) {
+	claude := harnessSpec(t, "claudecode")
+	ta := newTestApp(t, "")
+	ta.warnUnkeptOptionValue(claude, []string{"--verbose", "fix the tests"})
+	has(t, ta.output(), "passes --verbose without the last word")
+	lacks(t, ta.output(), "⚠", "fail to start")
+	ta = newTestApp(t, "")
+	ta.warnUnkeptOptionValue(claude, []string{"--verbose", "fix the tests", "--model", "haiku"})
+	has(t, ta.output(), "⚠", "leaves out --model")
+}
+
 // Certification OG-M1: a first word that is not an option is a prompt or a
 // one-off subcommand for most harnesses, but launch configuration for
 // some, and the options after it were lost with it (OmniGent's documented

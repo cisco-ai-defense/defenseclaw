@@ -402,7 +402,8 @@ word that is not an option, such as a prompt. An option followed by a word
 with a space ends the record: `sandbox connect` passes that option without
 the word, and none of the options after it, so with
 `-- --append-system-prompt "be brief" --model sonnet` it passes only
-`--append-system-prompt`. The run warns when this happens. Write the value
+`--append-system-prompt`. The run warns when this happens, and notes it in
+one line when that word is the last one, as a prompt after a switch is. Write the value
 attached (`-- --append-system-prompt="be brief"`) to have it recorded, and put
 a prompt after the options.
 

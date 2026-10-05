@@ -1209,20 +1209,21 @@ func (a *App) warnSecretEnv(env map[string]string) {
 // options after it. The run itself is unaffected - it uses the arguments as
 // given - and an option written as --option=value is recorded whole. The
 // word may have been a prompt instead (a prompt is kept out of the record on
-// purpose), so the message names both readings.
+// purpose), so the message names both readings. When it is the last word,
+// the common `-- --verbose "fix the tests"`, nothing else is lost and a
+// prompt after a switch is recorded right, so it is a one-line note.
 func (a *App) warnUnkeptOptionValue(spec *harness.Spec, args []string) {
 	_, flag, later := launchOptionsSplit(spec, args)
-	if flag == "" {
-		return
+	switch {
+	case flag == "":
+	case len(later) == 0:
+		a.note("A later `" + CommandName + " connect` passes " + flag + " without the last word; if that word is its value, write " +
+			flag + `="…"`)
+	default:
+		a.warn(flag + " is followed by a word with a space, so the record of this run stops there: a later `" +
+			CommandName + " connect` passes " + flag + " without that word and leaves out " + strings.Join(later, " ") +
+			". Put a prompt last, or write " + flag + `="…" if the word is its value`)
 	}
-	msg := flag + " is followed by a word with a space, so the record of this run stops there: a later `" +
-		CommandName + " connect` passes " + flag + " without that word"
-	if len(later) > 0 {
-		msg += " and leaves out " + strings.Join(later, " ") + ". Put a prompt last, or write "
-	} else {
-		msg += ". Write "
-	}
-	a.warn(msg + flag + `="…" if the word is its value`)
 }
 
 // resumable returns this folder's most recent sandbox of the harness.
