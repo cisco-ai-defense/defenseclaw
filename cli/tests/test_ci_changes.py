@@ -48,6 +48,8 @@ FAKE_REPO = {
     "cli/tests/test_docs_links.py": 'DOC = "docs-site/content/docs/tui.mdx"\n',
     "cli/tests/test_ci_workflow_efficiency.py": 'ROOT / ".github/workflows/ci.yml"\n',
     "cli/tests/test_unrelated.py": "def test_nothing(): pass\n",
+    # This contract names paths as fixtures and never pins them.
+    "cli/tests/test_ci_changes.py": 'CASE = "docs-site/content/docs/hitl.mdx"  # defenseclaw.tui\n',
     "cli/tests/test_status_panel.py": "from defenseclaw.tui import app\n",
     "cli/tests/tui/test_app_shell.py": "def test_mount(): pass\n",
     "cli/tests/tui/helpers.py": "def helper(): pass\n",
