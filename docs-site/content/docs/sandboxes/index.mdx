@@ -79,6 +79,47 @@ a dedicated **hook ingress** port, and web traffic leaves through the
 them. With the default API port 18970, the ingress is 18971 and the egress
 proxy 18972.
 
+## See it in action
+
+Both demos were recorded with Claude Code in skip-permissions mode on a Linux
+host.
+
+### What OpenShell protects
+
+- **Sensitive files stay hidden.** A `.env` file holds a dummy secret on the
+  host. Inside the sandbox the agent reads the same file and finds it empty.
+- **The real model key never enters the sandbox.** The harness gets a
+  placeholder token. When the agent searches its environment for an
+  `ANTHROPIC_*` key, it finds no real value.
+- **The host is out of reach.** The agent cannot list or read the host's home
+  directory, its `~/.ssh` or a payroll file planted on the host. Those paths
+  do not exist inside the sandbox.
+
+<Video
+  src="openshell-isolation"
+  aspect="16/10"
+  caption="OpenShell isolation: a .env secret that reads as empty inside the sandbox, an environment with only a placeholder model key, and host files the agent cannot see."
+/>
+
+### What DefenseClaw adds
+
+- **Prompt guardrails.** A malicious prompt is blocked before it reaches the
+  model. In the demo, `TRUST-IGNORE-PREVIOUS` stops an "ignore all previous
+  instructions" exfiltration request at `UserPromptSubmit`.
+- **Tool-call guardrails.** Unauthorized or malicious tool calls are stopped
+  before they run. In the demo, `C2-METADATA-AWS` blocks a `curl` to the cloud
+  metadata endpoint.
+- **Egress control.** The egress proxy blocks connections to suspicious
+  destinations and lets normal traffic through. In the demo, `github.com`
+  returns HTTP 200, and the connection to a request-inspection site is
+  refused with a 403.
+
+<Video
+  src="openshell-defenseclaw"
+  aspect="16/10"
+  caption="DefenseClaw inside OpenShell: a malicious prompt is blocked, a tool call to the cloud metadata endpoint is blocked, and the egress proxy allows github.com but refuses a request-inspection site."
+/>
+
 ## Linux and macOS at a glance
 
 Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They
