@@ -464,6 +464,34 @@ type AIDiscoveryConfig struct {
 	// observes what actually ran, next to this block's inventory of what is
 	// present. Disabled by default; see AIRuntimeConfig.
 	Runtime AIRuntimeConfig `mapstructure:"runtime" yaml:"runtime,omitempty"`
+
+	// IncludeUserPrincipal adds the end-user directory principal (UPN or
+	// Kerberos principal) to AI discovery inventory records. Off by
+	// default for the same reason as IncludeUserEmail: the principal
+	// identifies a person across systems.
+	IncludeUserPrincipal bool `mapstructure:"include_user_principal" yaml:"include_user_principal,omitempty"`
+	// IDEInventory scopes the IDE extension and plugin inventory:
+	// IDEInventoryAll (the default, also when empty), IDEInventoryAIOnly
+	// or IDEInventoryOff. Resolve through EffectiveIDEInventory.
+	IDEInventory string `mapstructure:"ide_inventory" yaml:"ide_inventory,omitempty"`
+}
+
+// IDE inventory scopes for AIDiscoveryConfig.IDEInventory.
+const (
+	IDEInventoryAll    = "all"
+	IDEInventoryAIOnly = "ai_only"
+	IDEInventoryOff    = "off"
+)
+
+// EffectiveIDEInventory returns the IDE inventory scope, treating an empty
+// value as IDEInventoryAll.
+func (a AIDiscoveryConfig) EffectiveIDEInventory() string {
+	switch scope := strings.TrimSpace(strings.ToLower(a.IDEInventory)); scope {
+	case IDEInventoryAIOnly, IDEInventoryOff:
+		return scope
+	default:
+		return IDEInventoryAll
+	}
 }
 
 // AIRuntimeConfig controls the AI Discovery runtime planes.
@@ -1798,6 +1826,15 @@ type GuardrailConfig struct {
 	// leaf package); the "must implement HookEndpoint" guard lives in the
 	// gateway boot loop where the registry is available.
 	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+
+	// Profiles, ProfileAssignments and DefaultProfile configure
+	// identity-based guardrail profiles (see guardrail_profiles.go). All
+	// three are empty by default, which keeps the behaviour above, and
+	// ValidateGuardrailProfiles rejects them under the Secure Client
+	// integration.
+	Profiles           map[string]GuardrailProfile `mapstructure:"profiles"            yaml:"profiles,omitempty"`
+	ProfileAssignments []ProfileAssignment         `mapstructure:"profile_assignments" yaml:"profile_assignments,omitempty"`
+	DefaultProfile     string                      `mapstructure:"default_profile"     yaml:"default_profile,omitempty"`
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -3109,6 +3146,12 @@ func loadConfigSourceChecked(
 	}
 
 	if err := cfg.Guardrail.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.ValidateGuardrailProfiles(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
