@@ -20,10 +20,14 @@ from typing import Any, Literal
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.overview_state import friendly_connector_name
 
-InventorySubTab = Literal["summary", "skills", "plugins", "mcp", "agents", "tools", "models", "memory"]
+InventorySubTab = Literal[
+    "summary", "skills", "plugins", "mcp", "agents", "tools", "models", "memory", "ide_plugins"
+]
 InventoryFilter = Literal["", "eligible", "warning", "blocked", "loaded", "disabled"]
 
-INVENTORY_CATEGORIES: tuple[str, ...] = ("skills", "plugins", "mcp", "agents", "tools", "models", "memory")
+INVENTORY_CATEGORIES: tuple[str, ...] = (
+    "skills", "plugins", "mcp", "agents", "tools", "models", "memory", "ide_plugins"
+)
 FAST_SCAN_CATEGORIES: tuple[str, ...] = ("skills", "plugins", "mcp")
 INVENTORY_SUBTABS: tuple[InventorySubTab, ...] = (
     "summary",
@@ -34,6 +38,7 @@ INVENTORY_SUBTABS: tuple[InventorySubTab, ...] = (
     "tools",
     "models",
     "memory",
+    "ide_plugins",
 )
 INVENTORY_SUBTAB_LABELS: Mapping[InventorySubTab, str] = {
     "summary": "Summary",
@@ -44,6 +49,15 @@ INVENTORY_SUBTAB_LABELS: Mapping[InventorySubTab, str] = {
     "tools": "Tools",
     "models": "Models",
     "memory": "Memory",
+    "ide_plugins": "IDE plugins",
+}
+
+# Enabled cell for an IDE plugin row; mirrors ``defenseclaw agent ide-plugins``.
+IDE_PLUGIN_ENABLED_LABELS: Mapping[str, str] = {
+    "enabled": "yes",
+    "disabled": "no",
+    "client_side_unknown": "client side",
+    "unknown": "unknown",
 }
 
 
@@ -120,6 +134,7 @@ class InventoryPlugin:
     scan_severity: str = ""
     scan_target: str = ""
     connector: str = ""
+    user: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryPlugin:
@@ -140,6 +155,7 @@ class InventoryPlugin:
             scan_findings=int(raw.get("scan_findings") or 0),
             scan_severity=str(raw.get("scan_severity") or ""),
             scan_target=str(raw.get("scan_target") or ""),
+            user=_user_of(raw),
         )
 
     @property
@@ -155,6 +171,7 @@ class InventoryMCP:
     command: str = ""
     url: str = ""
     connector: str = ""
+    user: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryMCP:
@@ -164,6 +181,7 @@ class InventoryMCP:
             transport=str(raw.get("transport") or ""),
             command=str(raw.get("command") or ""),
             url=str(raw.get("url") or ""),
+            user=_user_of(raw),
         )
 
     @property
@@ -181,6 +199,25 @@ class InventoryAgent:
     bindings: Mapping[str, Any] | None = None
     max_concurrent: int = 0
     connector: str = ""
+    user: str = ""
+    # Set on rows from ``defenseclaw agent identities`` (stable agent ids).
+    identity: bool = False
+    first_seen: str = ""
+    last_seen: str = ""
+    sessions_seen: int = 0
+
+    @classmethod
+    def from_identity(cls, raw: Mapping[str, Any]) -> InventoryAgent:
+        return cls(
+            id=str(raw.get("agent_id") or ""),
+            source="agent identity",
+            connector=str(raw.get("connector") or ""),
+            user=_user_of(raw),
+            identity=True,
+            first_seen=str(raw.get("first_seen") or ""),
+            last_seen=str(raw.get("last_seen") or ""),
+            sessions_seen=_safe_int(raw.get("sessions_seen")),
+        )
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryAgent:
@@ -204,7 +241,61 @@ class InventoryAgent:
             source=str(raw.get("source") or ""),
             bindings=parsed_bindings,
             max_concurrent=int(raw.get("subagents_max_concurrent") or raw.get("max_concurrent") or 0),
+            user=_user_of(raw),
         )
+
+
+@dataclass(frozen=True)
+class InventoryIDEPlugin:
+    """One IDE extension or plugin from the gateway's IDE inventory."""
+
+    plugin_id: str
+    fingerprint: str = ""
+    user: str = ""
+    ide_family: str = ""
+    ide_product: str = ""
+    display_name: str = ""
+    publisher: str = ""
+    version: str = ""
+    enabled: str = "unknown"
+    enabled_source: str = ""
+    scope: str = ""
+    is_ai: bool = False
+    ai_signature_id: str = ""
+    installed_at: str = ""
+    last_seen: str = ""
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryIDEPlugin:
+        return cls(
+            plugin_id=str(raw.get("plugin_id") or ""),
+            fingerprint=str(raw.get("fingerprint") or ""),
+            user=_user_of(raw),
+            ide_family=str(raw.get("ide_family") or ""),
+            ide_product=str(raw.get("ide_product") or ""),
+            display_name=str(raw.get("display_name") or ""),
+            publisher=str(raw.get("publisher") or ""),
+            version=str(raw.get("version") or ""),
+            enabled=str(raw.get("enabled") or "unknown"),
+            enabled_source=str(raw.get("enabled_source") or ""),
+            scope=str(raw.get("scope") or ""),
+            is_ai=bool(raw.get("is_ai")),
+            ai_signature_id=str(raw.get("ai_signature_id") or ""),
+            installed_at=str(raw.get("installed_at") or ""),
+            last_seen=str(raw.get("last_seen") or ""),
+        )
+
+    @property
+    def label(self) -> str:
+        return self.plugin_id or self.display_name
+
+    @property
+    def enabled_label(self) -> str:
+        return IDE_PLUGIN_ENABLED_LABELS.get(self.enabled, self.enabled)
+
+    @property
+    def key(self) -> str:
+        return self.fingerprint or "|".join((self.user, self.ide_product, self.plugin_id, self.scope))
 
 
 @dataclass(frozen=True)
@@ -371,6 +462,11 @@ class InventorySnapshot:
     errors: tuple[Any, ...] = ()
     limitations: tuple[InventoryLimitation, ...] = ()
     summary: InventorySummary = field(default_factory=InventorySummary)
+    # IDE plugins come from the gateway, once per user, not per connector.
+    # ``ide_collected`` is False when this scan did not ask for them.
+    ide_plugins: tuple[InventoryIDEPlugin, ...] = ()
+    ide_collected: bool = False
+    ide_note: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventorySnapshot:
@@ -436,6 +532,13 @@ class InventorySnapshot:
                 if isinstance(item, Mapping)
             ),
             summary=InventorySummary.from_mapping(summary_raw if isinstance(summary_raw, Mapping) else None),
+            ide_plugins=tuple(
+                InventoryIDEPlugin.from_mapping(item)
+                for item in raw.get("ide_plugins") or ()
+                if isinstance(item, Mapping)
+            ),
+            ide_collected="ide_plugins" in raw,
+            ide_note=str(raw.get("ide_plugins_note") or ""),
         )
 
     @classmethod
@@ -534,6 +637,9 @@ class InventoryPanelModel:
         # Per-connector snapshots kept so the Summary sub-tab can show a
         # breakdown; ``inventory`` holds the merged view used by every tab.
         self.connector_snapshots: tuple[tuple[str, InventorySnapshot], ...] = ()
+        # Stable agent ids from ``defenseclaw agent identities --json``; empty
+        # when the command is unavailable or fails.
+        self.agent_identities: tuple[InventoryAgent, ...] = ()
 
     def set_size(self, width: int, height: int) -> None:
         self.width = width
@@ -691,6 +797,36 @@ class InventoryPanelModel:
     def apply_json(self, text: str) -> None:
         self.apply_loaded(InventorySnapshot.from_json(text))
 
+    def identities_intent(self) -> InventoryCommandIntent:
+        return InventoryCommandIntent(
+            label="agent identities --json",
+            args=("agent", "identities", "--json"),
+            hint="Loading agent identities...",
+        )
+
+    def apply_agent_identities(self, text: str | None) -> None:
+        """Keep the agent identity rows; anything unreadable leaves none.
+
+        Older installs have no ``agent identities`` command, so a missing or
+        malformed answer is not an error the panel shows.
+        """
+        rows: tuple[InventoryAgent, ...] = ()
+        if text:
+            try:
+                raw = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                raw = None
+            agents = raw.get("agents") if isinstance(raw, Mapping) else None
+            if isinstance(agents, list):
+                rows = tuple(
+                    InventoryAgent.from_identity(item)
+                    for item in agents
+                    if isinstance(item, Mapping) and item.get("agent_id")
+                )
+        self.agent_identities = rows
+        if self.active_sub == "agents":
+            self.set_cursor(self.cursor)
+
     def apply_merged(self, results: Sequence[tuple[str, str | None]]) -> None:
         """Merge per-connector ``aibom scan`` payloads into one snapshot.
 
@@ -745,6 +881,16 @@ class InventoryPanelModel:
         tools = tuple(item for snap in snaps for item in snap.tools)
         models = tuple(item for snap in snaps for item in snap.models)
         memory = tuple(item for snap in snaps for item in snap.memory)
+        # Every per-connector scan carries the same per-user IDE inventory.
+        ide_seen: set[str] = set()
+        ide_plugins: list[InventoryIDEPlugin] = []
+        for snap in snaps:
+            for item in snap.ide_plugins:
+                if item.key not in ide_seen:
+                    ide_seen.add(item.key)
+                    ide_plugins.append(item)
+        ide_collected = any(snap.ide_collected for snap in snaps)
+        ide_note = next((snap.ide_note for snap in snaps if snap.ide_note), "") if not ide_plugins else ""
         total_errors = sum(len(snap.errors) for snap in snaps)
         limitations = tuple(item for snap in snaps for item in snap.limitations)
         rules = sum(_int_count(snap.summary.rules) for snap in snaps)
@@ -784,6 +930,9 @@ class InventoryPanelModel:
             errors=tuple(error for snap in snaps for error in snap.errors),
             limitations=limitations,
             summary=summary,
+            ide_plugins=tuple(ide_plugins),
+            ide_collected=ide_collected,
+            ide_note=ide_note,
         )
 
     def scroll_by(self, delta: int) -> None:
@@ -831,6 +980,8 @@ class InventoryPanelModel:
                 return len(self.filtered_models())
             case "memory":
                 return len(self.filtered_memory())
+            case "ide_plugins":
+                return len(self.filtered_ide_plugins())
             case _:
                 return 0
 
@@ -870,7 +1021,33 @@ class InventoryPanelModel:
     def filtered_agents(self) -> tuple[InventoryAgent, ...]:
         if self.inventory is None:
             return ()
-        return tuple(agent for agent in self.inventory.agents if self._connector_keep(agent))
+        agents = (*self.inventory.agents, *self.agent_identities)
+        return tuple(agent for agent in agents if self._connector_keep(agent))
+
+    def filtered_ide_plugins(self) -> tuple[InventoryIDEPlugin, ...]:
+        # IDE plugins belong to a user, not a connector: the connector
+        # filter does not narrow them.
+        if self.inventory is None:
+            return ()
+        return self.inventory.ide_plugins
+
+    @staticmethod
+    def _multi_user(items: Sequence[object]) -> bool:
+        users = {str(getattr(item, "user", "") or "") for item in items} - {""}
+        return len(users) > 1
+
+    def _show_user_column(self) -> bool:
+        if self.inventory is None:
+            return False
+        match self.active_sub:
+            case "plugins":
+                return self._multi_user(self.inventory.plugins)
+            case "mcp":
+                return self._multi_user(self.inventory.mcps)
+            case "agents":
+                return self._multi_user((*self.inventory.agents, *self.agent_identities))
+            case _:
+                return False
 
     def filtered_tools(self) -> tuple[InventoryTool, ...]:
         if self.inventory is None:
@@ -1000,6 +1177,8 @@ class InventoryPanelModel:
             ("Models", summary.counts["models"]),
             ("Memory", summary.counts["memory"]),
         ]
+        if inv is not None and inv.ide_collected:
+            rows.append(("IDE plugins", _ide_count_summary(inv)))
         if summary.errors not in {"0", "", "<nil>", "None"}:
             rows.append(("Errors", summary.errors))
         if summary.limitations not in {"0", "", "<nil>", "None"}:
@@ -1076,6 +1255,17 @@ class InventoryPanelModel:
                 if not 0 <= self.cursor < len(agent_rows):
                     return None
                 agent = agent_rows[self.cursor]
+                if agent.identity:
+                    return InventoryDetailInfo(
+                        f"AGENT: {agent.id}",
+                        (
+                            ("User", agent.user),
+                            ("Connector", agent.connector),
+                            ("First seen", agent.first_seen),
+                            ("Last seen", agent.last_seen),
+                            ("Sessions", str(agent.sessions_seen)),
+                        ),
+                    )
                 return InventoryDetailInfo(
                     f"AGENT: {agent.id}",
                     (
@@ -1134,6 +1324,28 @@ class InventoryPanelModel:
                 if memory.sources:
                     fields.append(("Sources", ", ".join(memory.sources)))
                 return InventoryDetailInfo(f"MEMORY: {memory.id}", tuple(fields))
+            case "ide_plugins":
+                ide_rows = self.filtered_ide_plugins()
+                if not 0 <= self.cursor < len(ide_rows):
+                    return None
+                ide = ide_rows[self.cursor]
+                return InventoryDetailInfo(
+                    f"IDE PLUGIN: {ide.label}",
+                    (
+                        ("Name", ide.display_name),
+                        ("Publisher", ide.publisher),
+                        ("Version", ide.version),
+                        ("User", ide.user),
+                        ("IDE", ide.ide_product or ide.ide_family),
+                        ("Enabled", ide.enabled),
+                        ("Enabled from", ide.enabled_source),
+                        ("Scope", ide.scope),
+                        ("AI", "yes" if ide.is_ai else "no"),
+                        ("AI signature", ide.ai_signature_id),
+                        ("Installed", ide.installed_at),
+                        ("Last seen", ide.last_seen),
+                    ),
+                )
             case _:
                 return None
 
@@ -1153,15 +1365,22 @@ class InventoryPanelModel:
                 base = ("ID", "Source", "Default Model", "Status")
             case "memory":
                 base = ("ID", "Backend", "Provider", "Files", "Chunks", "Workspace")
+            case "ide_plugins":
+                # Per user, never per connector: no Connector column.
+                return ("User", "IDE", "Plugin", "Version", "Enabled", "AI")
             case _:
                 # The Summary sub-tab is a key/value list, not a per-connector
                 # entity table, so it never carries a CONNECTOR column.
                 return ("Metric", "Value")
+        if self._show_user_column():
+            base = ("User", *base)
         if self.show_connector_column:
             return ("Connector", *base)
         return base
 
     def _with_connector_cell(self, entity: object, cells: tuple[str, ...]) -> tuple[str, ...]:
+        if self._show_user_column():
+            cells = (str(getattr(entity, "user", "") or "—"), *cells)
         if not self.show_connector_column:
             return cells
         return (str(getattr(entity, "connector", "") or "—"), *cells)
@@ -1210,7 +1429,13 @@ class InventoryPanelModel:
                 return tuple(
                     self._with_connector_cell(
                         agent,
-                        (agent.id, agent.source, agent.model, agent.workspace, "yes" if agent.default else "no"),
+                        (
+                            agent.id,
+                            agent.source,
+                            agent.model,
+                            agent.workspace,
+                            "" if agent.identity else ("yes" if agent.default else "no"),
+                        ),
                     )
                     for agent in self.filtered_agents()
                 )
@@ -1243,6 +1468,18 @@ class InventoryPanelModel:
                         ),
                     )
                     for memory in self.filtered_memory()
+                )
+            case "ide_plugins":
+                return tuple(
+                    (
+                        ide.user or "—",
+                        ide.ide_product or ide.ide_family,
+                        ide.label,
+                        ide.version,
+                        ide.enabled_label,
+                        "yes" if ide.is_ai else "",
+                    )
+                    for ide in self.filtered_ide_plugins()
                 )
             case _:
                 return self.summary_table_rows()
@@ -1318,6 +1555,13 @@ class InventoryPanelModel:
             return f"Scanning inventory from {friendly_connector_name(self.connector)}..."
         if not self.loaded or self.inventory is None:
             return 'Press "r" to load inventory. Runs "defenseclaw aibom scan".'
+        if self.active_sub == "ide_plugins" and self.current_list_len() == 0:
+            inv = self.inventory
+            if inv.ide_note:
+                return f"IDE plugins: {inv.ide_note}."
+            if not inv.ide_collected:
+                return 'IDE plugins are not in this scan scope. Press "o" for all categories, then "r".'
+            return "No IDE plugins found."
         if self.current_list_len() == 0 and self.active_sub != "summary":
             return "No items match the current filter." if self.filter else f"No {self.active_sub} found."
         return ""
@@ -1334,15 +1578,37 @@ class InventoryPanelModel:
             "skills": _kept(self.inventory.skills),
             "plugins": _kept(self.inventory.plugins),
             "mcp": _kept(self.inventory.mcps),
-            "agents": _kept(self.inventory.agents),
+            "agents": _kept((*self.inventory.agents, *self.agent_identities)),
             "tools": _kept(self.inventory.tools),
             "models": _kept(self.inventory.models),
             "memory": _kept(self.inventory.memory),
+            **({"ide_plugins": len(self.inventory.ide_plugins)} if self.inventory.ide_collected else {}),
         }
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _user_of(raw: Mapping[str, Any]) -> str:
+    return str(raw.get("user") or raw.get("user_name") or raw.get("user_id") or "")
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ide_count_summary(inv: InventorySnapshot) -> str:
+    if inv.ide_note and not inv.ide_plugins:
+        return inv.ide_note
+    plugins = inv.ide_plugins
+    ai = sum(1 for item in plugins if item.is_ai)
+    disabled = sum(1 for item in plugins if item.enabled == "disabled")
+    users = len({item.user for item in plugins} - {""})
+    return f"{len(plugins)} ({ai} AI, {disabled} disabled, {users} user{'s' if users != 1 else ''})"
 
 
 def _int_count(raw: Mapping[str, Any]) -> int:

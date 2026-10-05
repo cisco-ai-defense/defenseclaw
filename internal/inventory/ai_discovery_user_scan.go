@@ -49,8 +49,11 @@ const (
 	// UserScanDirName is the spool directory inside the guardian's
 	// authorization directory.
 	UserScanDirName = "ai-discovery"
-	// UserScanRecordVersion is the spool record schema.
-	UserScanRecordVersion = 1
+	// UserScanRecordVersion is the spool record schema. Version 2 added the
+	// report's IDE inventory; the gateway reads both.
+	UserScanRecordVersion = 2
+	// userScanRecordVersionV1 is the schema before the IDE inventory.
+	userScanRecordVersionV1 = 1
 	// MaxUserScanSignals bounds one user's report.
 	MaxUserScanSignals = 1024
 
@@ -73,6 +76,7 @@ type UserScanOptions struct {
 	MaxFilesPerScan         int      `json:"max_files_per_scan,omitempty"`
 	MaxFileBytes            int64    `json:"max_file_bytes,omitempty"`
 	StoreRawLocalPaths      bool     `json:"store_raw_local_paths,omitempty"`
+	IDEInventory            string   `json:"ide_inventory,omitempty"`
 }
 
 // UserScanOptionsFromConfig keeps the privacy settings of ai_discovery and
@@ -88,6 +92,7 @@ func UserScanOptionsFromConfig(cfg *config.Config) UserScanOptions {
 		MaxFilesPerScan:         ad.MaxFilesPerScan,
 		MaxFileBytes:            int64(ad.MaxFileBytes),
 		StoreRawLocalPaths:      ad.StoreRawLocalPaths,
+		IDEInventory:            ad.EffectiveIDEInventory(),
 	}
 }
 
@@ -191,7 +196,7 @@ func ReadUserScanPass(path string) (UserScanPass, error) {
 	if err := decoder.Decode(&pass); err != nil {
 		return UserScanPass{}, fmt.Errorf("parse pass record: %w", err)
 	}
-	if pass.Version != UserScanRecordVersion || pass.LastPassSeconds < 0 {
+	if (pass.Version != UserScanRecordVersion && pass.Version != userScanRecordVersionV1) || pass.LastPassSeconds < 0 {
 		return UserScanPass{}, errors.New("unsupported pass record")
 	}
 	return pass, nil
@@ -223,9 +228,10 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 			// leave this process only when the administrator keeps them.
 			StoreRawLocalPaths: true,
 			// Never written: this service has no state store.
-			DataDir:  filepath.Join(home, ".defenseclaw"),
-			HomeDir:  home,
-			HomeDirs: []string{home},
+			DataDir:      filepath.Join(home, ".defenseclaw"),
+			HomeDir:      home,
+			HomeDirs:     []string{home},
+			IDEInventory: opts.IDEInventory,
 		}),
 		catalog:       catalog,
 		processOwners: map[string]bool{account: true, strconv.Itoa(uid): true},
@@ -288,7 +294,33 @@ func ScanUserHome(ctx context.Context, home, account string, uid int, opts UserS
 	if stats.Errors > 0 {
 		summary.Result = "partial"
 	}
-	return AIDiscoveryReport{Summary: summary, Signals: out}
+	ide := stats.ideInventory
+	if ide != nil {
+		// The gateway names the account from the guardian's record.
+		sanitizeUserScanIDE(ide)
+		if len(ide.Plugins) > MaxIDEPluginsPerUser {
+			ide.Plugins, ide.Partial = ide.Plugins[:MaxIDEPluginsPerUser], true
+		}
+		if len(ide.Installations) > maxIDEInstallationsPerUser {
+			ide.Installations, ide.Partial = ide.Installations[:maxIDEInstallationsPerUser], true
+		}
+	}
+	return AIDiscoveryReport{Summary: summary, Signals: out, IDEInventory: ide}
+}
+
+// userScanNamespace re-derives a worker's digest in the account's
+// namespace with this installation's key.
+func userScanNamespace(uid string) func(string) string {
+	return func(value string) string {
+		if value == "" {
+			return ""
+		}
+		input := "ai-discovery/user-scan/v1\x00" + uid + "\x00" + value
+		if key := currentPathHashKey(); len(key) > 0 {
+			return "hmac-sha256:" + keyedHashHex(key, input)
+		}
+		return "sha256:" + hashHex(input)
+	}
 }
 
 func boundedUserScanList(values []string) []string {
@@ -338,6 +370,7 @@ func SanitizeUserScanReport(report *AIDiscoveryReport, catalog []AISignature, ke
 		return err
 	}
 	report.Summary.Source = AISourceUserScan
+	sanitizeUserScanIDE(report.IDEInventory)
 	for i := range report.Signals {
 		sig := &report.Signals[i]
 		sig.Source = AISourceUserScan
@@ -358,6 +391,9 @@ func ValidateUserScanReport(report AIDiscoveryReport, catalog []AISignature) err
 	}
 	if len(report.Signals) > MaxUserScanSignals {
 		return fmt.Errorf("%d signals exceed the per-user limit of %d", len(report.Signals), MaxUserScanSignals)
+	}
+	if err := validateUserScanIDE(report.IDEInventory); err != nil {
+		return err
 	}
 	if len(report.Summary.DetectorErrors) > maxUserScanField || len(report.Summary.DetectorDurations) > maxUserScanField {
 		return errors.New("too many detector entries")
@@ -427,13 +463,17 @@ var userScanFileTrustCheck = func(path string) error {
 // (at least 15 minutes), plus the time the guardian's passes take, is
 // skipped, so the signals of a user the guardian no longer scans age out as
 // gone while a slow pass keeps the others current.
-func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal, int, map[string]string) {
+func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal, int, *IDEInventory, map[string]string) {
 	entries, err := os.ReadDir(s.opts.UserScanDir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
+		return nil, 0, nil, nil
 	}
 	if err != nil {
-		return nil, 0, map[string]string{"user_scan": err.Error()}
+		return nil, 0, nil, map[string]string{"user_scan": err.Error()}
+	}
+	var ide *IDEInventory
+	if !s.opts.SecureClient && s.ideInventoryScope() != config.IDEInventoryOff {
+		ide = &IDEInventory{Scope: s.ideInventoryScope(), ScannedAt: now}
 	}
 	ttl := 3 * s.opts.ScanInterval
 	if ttl < 15*time.Minute {
@@ -476,8 +516,14 @@ func (s *ContinuousDiscoveryService) detectUserScans(now time.Time) ([]AISignal,
 		for _, sig := range record.Report.Signals {
 			out = append(out, s.attributeUserScanSignal(sig, uid, record.User))
 		}
+		if ide != nil && record.Report.IDEInventory != nil {
+			userIDE := attributeUserScanIDE(record.Report.IDEInventory, userScanNamespace(uid), uid, record.User)
+			userIDE.Scope = ide.Scope
+			userIDE.applyScope()
+			ide = mergeIDEInventory(ide, userIDE)
+		}
 	}
-	return out, files, errs
+	return out, files, ide, errs
 }
 
 // ReadUserScanRecord reads one spool record (<uid>.json) with the checks the
@@ -521,7 +567,14 @@ func readUserScanRecord(path string) (UserScanRecord, error) {
 	if err := decoder.Decode(&record); err != nil {
 		return record, fmt.Errorf("parse record: %w", err)
 	}
-	if record.Version != UserScanRecordVersion {
+	switch record.Version {
+	case UserScanRecordVersion:
+	case userScanRecordVersionV1:
+		// A guardian from before the IDE inventory; its records carry none.
+		if record.Report.IDEInventory != nil {
+			return record, errors.New("a version 1 record carries no IDE inventory")
+		}
+	default:
 		return record, fmt.Errorf("unsupported record version %d", record.Version)
 	}
 	return record, nil
@@ -546,16 +599,7 @@ func userScanDetectorNames(detectorErrors map[string]string) string {
 // users' identical files stay distinct and no digest leaves the gateway in
 // the unkeyed form the worker computed.
 func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, user string) AISignal {
-	namespace := func(value string) string {
-		if value == "" {
-			return ""
-		}
-		input := "ai-discovery/user-scan/v1\x00" + uid + "\x00" + value
-		if key := currentPathHashKey(); len(key) > 0 {
-			return "hmac-sha256:" + keyedHashHex(key, input)
-		}
-		return "sha256:" + hashHex(input)
-	}
+	namespace := userScanNamespace(uid)
 	evidence := make([]AIEvidence, len(sig.Evidence))
 	for i, ev := range sig.Evidence {
 		ev.PathHash = namespace(ev.PathHash)

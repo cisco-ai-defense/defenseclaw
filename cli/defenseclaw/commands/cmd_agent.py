@@ -333,6 +333,126 @@ def usage(
     )
 
 
+_IDE_PLUGIN_ENABLED_LABELS = {
+    "enabled": "yes",
+    "disabled": "no",
+    "client_side_unknown": "client side",
+    "unknown": "unknown",
+}
+
+
+def ide_plugin_enabled_label(value: object) -> str:
+    """Short Enabled cell for an IDE plugin row (shared with the TUI)."""
+    text = str(value or "unknown")
+    return _IDE_PLUGIN_ENABLED_LABELS.get(text, text)
+
+
+def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
+    """User | IDE | Plugin | Version | Enabled | AI cells, sorted for reading."""
+    rows: list[list[str]] = []
+    for item in plugins:
+        if not isinstance(item, Mapping):
+            continue
+        plugin = str(item.get("plugin_id") or "")
+        name = str(item.get("display_name") or "")
+        if name and name.lower() != plugin.lower():
+            plugin = f"{plugin} ({name})" if plugin else name
+        rows.append([
+            str(item.get("user") or item.get("user_id") or "-"),
+            str(item.get("ide_product") or item.get("ide_family") or "-"),
+            plugin or "-",
+            str(item.get("version") or "-"),
+            ide_plugin_enabled_label(item.get("enabled")),
+            "yes" if item.get("is_ai") else "",
+        ])
+    rows.sort(key=lambda row: (row[0].lower(), row[1], row[2].lower()))
+    return rows
+
+
+@agent.command("ide-plugins")
+@click.option("--user", "user", default="", help="Show only this user's plugins (account name or id).")
+@click.option("--ide", "ide", default="", help="Show only this IDE product, for example vscode, cursor or pycharm.")
+@click.option("--ai-only", "ai_only", is_flag=True, help="Show only AI extensions and plugins.")
+@click.option("--json", "as_json", is_flag=True, help="Output the IDE plugin inventory as JSON.")
+@click.option("--gateway-host", default=None, help="Sidecar API host override.")
+@click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
+@click.option(
+    "--gateway-token-env",
+    default=None,
+    help="Environment variable containing the sidecar API token override.",
+)
+@pass_ctx
+def ide_plugins(
+    app: AppContext,
+    user: str,
+    ide: str,
+    ai_only: bool,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List the extensions and plugins installed in each user's IDEs.
+
+    Covers VS Code and its forks (Cursor, Windsurf, Kiro and others,
+    including remote SSH servers), JetBrains IDEs, Visual Studio, Zed,
+    Eclipse and Vim/Neovim, with each plugin's enabled state and an AI flag.
+    The running gateway collects the list during AI discovery.
+    """
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        payload = client.ai_usage_ide_plugins_all(user=user.strip(), ide=ide.strip().lower(), ai_only=ai_only)
+    except requests.ConnectionError as exc:
+        raise click.ClickException(_sidecar_unavailable(exc)) from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 404:
+            raise click.ClickException(
+                "this gateway does not list IDE plugins yet; upgrade it with: defenseclaw upgrade"
+            ) from exc
+        raise click.ClickException(f"sidecar rejected IDE plugins request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    if payload.get("enabled") is False:
+        click.echo(
+            "AI discovery is disabled, so there are no IDE plugins to show. "
+            "Enable it with: defenseclaw agent discovery enable"
+        )
+        return
+    if str(payload.get("scope") or "") == "off":
+        click.echo(
+            "The IDE plugin inventory is turned off (ai_discovery.ide_inventory: off). "
+            "Set it to all in the config file that 'defenseclaw config path' shows."
+        )
+        return
+    plugins = payload.get("plugins") or []
+    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [])
+    if not rows:
+        filtered = bool(user or ide or ai_only)
+        click.echo("No IDE plugins match these filters." if filtered else "No IDE plugins found yet.")
+        return
+    click.echo(_render_runtime_table(["User", "IDE", "Plugin", "Version", "Enabled", "AI"], rows).rstrip())
+    counts = _mapping_block(payload.get("counts"))
+    summary = f"{len(rows)} plugin(s)"
+    if counts:
+        summary += (
+            f" shown; {counts.get('total', 0)} in total, {counts.get('ai', 0)} AI, "
+            f"{counts.get('disabled', 0)} disabled, {counts.get('users', 0)} user(s)"
+        )
+    if payload.get("scope") == "ai_only":
+        summary += " (the inventory keeps AI plugins only)"
+    click.echo(summary)
+
+
 # ---------------------------------------------------------------------------
 # agent processes / agent components — high-fidelity views over the
 # enriched AI inventory the sidecar now collects.

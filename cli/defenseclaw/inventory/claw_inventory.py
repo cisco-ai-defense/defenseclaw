@@ -81,7 +81,7 @@ _OPENCODE_ASSET_INVENTORY_MAX_FILES = 16_384
 _OPENCODE_ASSET_FILE_MAX_BYTES = 2 * 1024 * 1024
 
 ALL_CATEGORIES: frozenset[str] = frozenset(
-    ["skills", "plugins", "mcp", "agents", "rules", "tools", "models", "memory"]
+    ["skills", "plugins", "mcp", "agents", "rules", "tools", "models", "memory", "ide_plugins"]
 )
 
 _CATEGORY_ALIASES: dict[str, str] = {
@@ -94,6 +94,9 @@ _CATEGORY_ALIASES: dict[str, str] = {
     "rule": "rules",
     "tool": "tools",
     "model": "models",
+    "ide": "ide_plugins",
+    "ide_plugin": "ide_plugins",
+    "ide-plugins": "ide_plugins",
 }
 
 _COMMANDS: dict[str, tuple[str, ...]] = {
@@ -231,9 +234,96 @@ def build_claw_aibom(
     }
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
+    _stamp_local_user(out)
     out["summary"] = _build_summary(out)
     _mark_collected_categories(out, cats)
     return out
+
+
+def local_user_identity() -> tuple[str, str]:
+    """The account this scan runs as: (name, uid or SID); either may be ""."""
+    import getpass
+
+    try:
+        name = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name is not an inventory error.
+        name = ""
+    user_id = ""
+    if hasattr(os, "getuid"):
+        user_id = str(os.getuid())
+    elif os.name == "nt":
+        try:
+            from defenseclaw.file_permissions import _windows_current_user_sid
+
+            user_id = _windows_current_user_sid()
+        except Exception:  # noqa: BLE001 - the SID is best effort.
+            user_id = ""
+    return name, user_id
+
+
+def _stamp_local_user(out: dict[str, Any]) -> None:
+    """Tie connector plugins and MCP servers to the account that owns them.
+
+    A local scan reads only the current account's connector files, so every
+    row it finds belongs to that account. Rows that already name a user keep it.
+    """
+    name, user_id = local_user_identity()
+    if not name and not user_id:
+        return
+    for key in ("plugins", "mcp"):
+        for item in out.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            if name:
+                item.setdefault("user", name)
+            if user_id:
+                item.setdefault("user_id", user_id)
+
+
+def attach_ide_plugins(inv: dict[str, Any], payload: dict[str, Any] | None, note: str = "") -> None:
+    """Add the gateway's IDE plugin inventory as the ``ide_plugins`` category.
+
+    *payload* is the ``/api/v1/ai-usage/ide-plugins`` response (all pages);
+    ``None`` with a *note* records why the list is unavailable, so an empty
+    list never reads as "no IDE plugins".
+    """
+    raw = (payload or {}).get("plugins") or []
+    plugins = [dict(item) for item in raw if isinstance(item, dict)]
+    inv["ide_plugins"] = plugins
+    users = {str(p.get("user_id") or p.get("user") or "") for p in plugins} - {""}
+    entry: dict[str, Any] = {
+        "count": len(plugins),
+        "ai": sum(1 for p in plugins if p.get("is_ai")),
+        "disabled": sum(1 for p in plugins if p.get("enabled") == "disabled"),
+        "users": len(users),
+        "scope": str((payload or {}).get("scope") or ""),
+    }
+    if payload is None or payload.get("enabled") is False:
+        entry["collected"] = False
+    if note:
+        inv["ide_plugins_note"] = note
+    summary = inv.get("summary")
+    if isinstance(summary, dict):
+        summary["ide_plugins"] = entry
+
+
+def format_ide_plugins_human(inv: dict[str, Any]) -> None:
+    """One summary line for the IDE plugin category (the full list is long)."""
+    from rich.console import Console
+    from rich.markup import escape
+
+    console = Console(stderr=False)
+    note = str(inv.get("ide_plugins_note") or "")
+    entry = (inv.get("summary") or {}).get("ide_plugins") or {}
+    if note:
+        console.print(f"[dim]IDE plugins: {escape(note)}[/dim]")
+    elif entry:
+        console.print(
+            f"IDE plugins: {entry.get('count', 0)} ({entry.get('ai', 0)} AI, "
+            f"{entry.get('disabled', 0)} disabled) for {entry.get('users', 0)} user(s). "
+            "List them with: defenseclaw agent ide-plugins"
+        )
+    console.print()
 
 
 def _aibom_telemetry_description(payload: Any) -> str:
@@ -4745,6 +4835,7 @@ def _build_aibom_from_filesystem(
         out["profile_scope"] = "default-single-profile"
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
+    _stamp_local_user(out)
     out["summary"] = _build_summary(out)
     _mark_collected_categories(out, cats)
     return out

@@ -100,6 +100,11 @@ class AISignature:
     application_names: tuple[str, ...] = ()
     config_paths: tuple[str, ...] = ()
     extension_ids: tuple[str, ...] = ()
+    # IDE inventory AI flags (JetBrains plugin.xml ids, Zed extension ids,
+    # Vim/Neovim plugin folder names). Mirrors ai_catalog.go.
+    jetbrains_plugin_ids: tuple[str, ...] = ()
+    zed_extension_ids: tuple[str, ...] = ()
+    vim_plugins: tuple[str, ...] = ()
     mcp_paths: tuple[str, ...] = ()
     # SkillPaths / RulePaths / PluginPaths are directory globs whose
     # per-user existence + non-emptiness produce SignalSkill / SignalRule /
@@ -274,6 +279,9 @@ def _signature_from_raw(raw: Any, *, source: str) -> AISignature:
         application_names=_tuple(raw.get("application_names", [])),
         config_paths=_tuple(raw.get("config_paths", [])),
         extension_ids=_tuple(raw.get("extension_ids", [])),
+        jetbrains_plugin_ids=_tuple(raw.get("jetbrains_plugin_ids", [])),
+        zed_extension_ids=_tuple(raw.get("zed_extension_ids", [])),
+        vim_plugins=_tuple(raw.get("vim_plugins", [])),
         mcp_paths=_tuple(raw.get("mcp_paths", [])),
         skill_paths=_tuple(raw.get("skill_paths", [])),
         rule_paths=_tuple(raw.get("rule_paths", [])),
@@ -334,6 +342,9 @@ def _validate_signature(sig: AISignature) -> None:
         "application_names",
         "config_paths",
         "extension_ids",
+        "jetbrains_plugin_ids",
+        "zed_extension_ids",
+        "vim_plugins",
         "mcp_paths",
         "skill_paths",
         "rule_paths",

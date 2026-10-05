@@ -460,6 +460,67 @@ var inventoryMigrations = []invMigration{
 			return nil
 		},
 	},
+	{
+		// v4 attributes signals to accounts and adds the IDE inventory
+		// and the agent identity ledger. ide_installations and
+		// ide_plugins hang off ai_scans like ai_signals, so retention
+		// pruning (PruneScanHistory) bounds them through ON DELETE
+		// CASCADE. agent_identities is one row per agent, not per scan.
+		description: "v4: signal accounts, IDE inventory, agent identities",
+		apply: func(ex invDBExecer) error {
+			stmts := []string{
+				`ALTER TABLE ai_signals ADD COLUMN user_id TEXT`,
+				`ALTER TABLE ai_signals ADD COLUMN user_name TEXT`,
+				`CREATE TABLE IF NOT EXISTS ide_installations (
+					scan_id TEXT NOT NULL REFERENCES ai_scans(scan_id) ON DELETE CASCADE,
+					install_id TEXT NOT NULL,
+					user_id TEXT,
+					user_name TEXT,
+					ide_family TEXT NOT NULL,
+					ide_product TEXT NOT NULL,
+					channel TEXT,
+					remote_kind TEXT,
+					version TEXT,
+					path_hash TEXT,
+					last_seen DATETIME NOT NULL,
+					PRIMARY KEY (scan_id, install_id)
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_ide_installations_last_seen ON ide_installations(last_seen)`,
+				`CREATE TABLE IF NOT EXISTS ide_plugins (
+					scan_id TEXT NOT NULL REFERENCES ai_scans(scan_id) ON DELETE CASCADE,
+					fingerprint TEXT NOT NULL,
+					user_id TEXT,
+					user_name TEXT,
+					install_id TEXT NOT NULL,
+					ide_product TEXT NOT NULL,
+					plugin_id TEXT NOT NULL,
+					display_name TEXT,
+					publisher TEXT,
+					version TEXT,
+					enabled TEXT NOT NULL,
+					enabled_source TEXT,
+					scope TEXT,
+					is_ai INTEGER NOT NULL DEFAULT 0,
+					ai_signature_id TEXT,
+					path_hash TEXT,
+					installed_at DATETIME,
+					last_seen DATETIME NOT NULL,
+					PRIMARY KEY (scan_id, fingerprint)
+				)`,
+				`CREATE INDEX IF NOT EXISTS idx_ide_plugins_user_id ON ide_plugins(user_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_ide_plugins_plugin_id ON ide_plugins(plugin_id)`,
+				`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
+				`CREATE INDEX IF NOT EXISTS idx_agent_identities_user_id ON agent_identities(user_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
+			}
+			for _, q := range stmts {
+				if _, err := ex.Exec(q); err != nil {
+					return fmt.Errorf("ai inventory: v4 migration: %w (stmt: %s)", err, firstLine(q))
+				}
+			}
+			return nil
+		},
+	},
 }
 
 type invMigration struct {
@@ -624,8 +685,9 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
 			 category, detector, state, confidence,
 			 component_ecosystem, component_name, component_framework, component_version,
-			 last_seen, last_active_at, evidence_json, runtime_json, model_json)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 last_seen, last_active_at, evidence_json, runtime_json, model_json,
+			 user_id, user_name)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			report.Summary.ScanID,
 			sig.Fingerprint,
 			sig.SignalID,
@@ -643,6 +705,8 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			string(evidenceJSON),
 			nullStringFromBytes(runtimeJSON),
 			nullStringFromBytes(modelJSON),
+			nullString(sig.UserID),
+			nullString(sig.UserName),
 		); err != nil {
 			return fmt.Errorf("inventory store: insert signal %s: %w", sig.SignalID, err)
 		}
@@ -686,10 +750,106 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 		}
 	}
 
+	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried {
+		if err := recordIDEInventory(ctx, tx, report.Summary.ScanID, inv); err != nil {
+			return err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("inventory store: commit scan %s: %w", report.Summary.ScanID, err)
 	}
 	return nil
+}
+
+// recordIDEInventory writes a scan's IDE installations and plugins.
+func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDEInventory) error {
+	for _, inst := range inv.Installations {
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ide_installations
+			(scan_id, install_id, user_id, user_name, ide_family, ide_product,
+			 channel, remote_kind, version, path_hash, last_seen)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			scanID, inst.InstallID, nullString(inst.UserID), nullString(inst.UserName),
+			inst.Family, inst.Product, nullString(inst.Channel), nullString(inst.RemoteKind),
+			nullString(inst.Version), nullString(inst.PathHash), inst.LastSeen.UTC(),
+		); err != nil {
+			return fmt.Errorf("inventory store: insert ide installation: %w", err)
+		}
+	}
+	for _, p := range inv.Plugins {
+		var installed sql.NullTime
+		if p.InstalledAt != nil {
+			installed = sql.NullTime{Time: p.InstalledAt.UTC(), Valid: true}
+		}
+		isAI := 0
+		if p.IsAI {
+			isAI = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ide_plugins
+			(scan_id, fingerprint, user_id, user_name, install_id, ide_product,
+			 plugin_id, display_name, publisher, version, enabled, enabled_source,
+			 scope, is_ai, ai_signature_id, path_hash, installed_at, last_seen)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			scanID, p.Fingerprint, nullString(p.UserID), nullString(p.UserName), p.InstallID, p.Product,
+			p.PluginID, nullString(p.DisplayName), nullString(p.Publisher), nullString(p.Version),
+			p.Enabled, nullString(p.EnabledSource), nullString(p.Scope), isAI,
+			nullString(p.AISignatureID), nullString(p.PathHash), installed, p.LastSeen.UTC(),
+		); err != nil {
+			return fmt.Errorf("inventory store: insert ide plugin: %w", err)
+		}
+	}
+	return nil
+}
+
+// LatestIDEPlugins returns the plugins of the most recently recorded IDE
+// inventory.
+func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, error) {
+	if s == nil || s.db == nil {
+		return nil, nil
+	}
+	rows, err := s.queryDB(ctx, "inventory_ide_plugins", `
+		SELECT p.fingerprint, p.user_id, p.user_name, p.install_id, i.ide_family, p.ide_product,
+		       p.plugin_id, p.display_name, p.publisher, p.version, p.enabled, p.enabled_source,
+		       p.scope, p.is_ai, p.ai_signature_id, p.path_hash, p.installed_at, p.last_seen
+		FROM ide_plugins p
+		LEFT JOIN ide_installations i ON i.scan_id = p.scan_id AND i.install_id = p.install_id
+		WHERE p.scan_id = (SELECT scan_id FROM ide_installations ORDER BY last_seen DESC, scan_id DESC LIMIT 1)`)
+	if err != nil {
+		return nil, fmt.Errorf("inventory store: list ide plugins: %w", err)
+	}
+	defer rows.Close()
+	var out []IDEPlugin
+	for rows.Next() {
+		var (
+			p                                                     IDEPlugin
+			userID, userName, family, display, publisher, version sql.NullString
+			source, scope, signature, pathHash                    sql.NullString
+			isAI                                                  int
+			installed                                             sql.NullTime
+		)
+		if err := rows.Scan(&p.Fingerprint, &userID, &userName, &p.InstallID, &family, &p.Product,
+			&p.PluginID, &display, &publisher, &version, &p.Enabled, &source,
+			&scope, &isAI, &signature, &pathHash, &installed, &p.LastSeen); err != nil {
+			return nil, fmt.Errorf("inventory store: scan ide plugin: %w", err)
+		}
+		p.UserID, p.UserName, p.Family = userID.String, userName.String, family.String
+		p.DisplayName, p.Publisher, p.Version = display.String, publisher.String, version.String
+		p.EnabledSource, p.Scope, p.AISignatureID, p.PathHash = source.String, scope.String, signature.String, pathHash.String
+		p.IsAI = isAI != 0
+		if installed.Valid {
+			t := installed.Time
+			p.InstalledAt = &t
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func nullString(value string) sql.NullString {
+	if value == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: value, Valid: true}
 }
 
 // ComponentLocationRow is one row for the locations endpoint /

@@ -794,6 +794,66 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def ai_usage_ide_plugins(
+        self,
+        *,
+        user: str = "",
+        ide: str = "",
+        ai_only: bool = False,
+        cursor: str = "",
+        limit: int = 0,
+    ) -> dict[str, Any]:
+        """Fetch one page of the IDE extension and plugin inventory."""
+        params: dict[str, str] = {}
+        if user:
+            params["user"] = user
+        if ide:
+            params["ide"] = ide
+        if ai_only:
+            params["ai_only"] = "true"
+        if cursor:
+            params["cursor"] = cursor
+        if limit > 0:
+            params["limit"] = str(limit)
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/ide-plugins",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_ide_plugins_all(
+        self,
+        *,
+        user: str = "",
+        ide: str = "",
+        ai_only: bool = False,
+        max_pages: int = 64,
+    ) -> dict[str, Any]:
+        """Fetch every page of the IDE plugin inventory into one payload.
+
+        The first page carries the scope, counts and installations; later
+        pages only add plugins. A repeated or missing cursor ends the walk,
+        and ``max_pages`` bounds it.
+        """
+        payload = self.ai_usage_ide_plugins(user=user, ide=ide, ai_only=ai_only)
+        plugins = list(payload.get("plugins") or [])
+        cursor = str(payload.get("next_cursor") or "")
+        seen: set[str] = set()
+        pages = 1
+        while cursor and cursor not in seen and pages < max_pages:
+            seen.add(cursor)
+            page = self.ai_usage_ide_plugins(user=user, ide=ide, ai_only=ai_only, cursor=cursor)
+            plugins.extend(page.get("plugins") or [])
+            cursor = str(page.get("next_cursor") or "")
+            pages += 1
+        out = dict(payload)
+        out["plugins"] = plugins
+        out["next_cursor"] = cursor if pages >= max_pages else ""
+        return out
+
     def ai_usage_component_locations(self, ecosystem: str, name: str) -> dict[str, Any]:
         """Fetch the locations detail for one component (the rows
         from ``ai_signals`` for the latest scan).

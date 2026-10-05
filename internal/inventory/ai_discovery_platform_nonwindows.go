@@ -73,6 +73,12 @@ func platformInstalledApplicationNames(home string) []string {
 	return out
 }
 
+// platformIDEAppData returns the current user's %APPDATA% and
+// %LOCALAPPDATA%; only Windows has them.
+func platformIDEAppData() (string, string) {
+	return "", ""
+}
+
 func platformEditorExtensionRoots(string) []string {
 	// POSIX editor roots are already the portable baseline in
 	// detectEditorExtensions; this hook adds AppData-only Windows roots.

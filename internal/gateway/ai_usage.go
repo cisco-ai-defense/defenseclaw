@@ -22,9 +22,11 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
@@ -48,7 +50,8 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 			"summary": map[string]any{
 				"result": "disabled",
 			},
-			"signals": []any{},
+			"signals":     []any{},
+			"ide_plugins": (*inventory.IDEInventory)(nil).Counts(),
 		})
 		return
 	}
@@ -67,7 +70,115 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 		"lookup_model_provenance_online": discovery.LookupModelProvenanceOnline(),
 		"summary":                        report.Summary,
 		"signals":                        report.Signals,
+		"ide_plugins":                    discovery.IDEInventory().Counts(),
 	})
+}
+
+const (
+	idePluginsDefaultLimit = 500
+	idePluginsMaxLimit     = 1000
+)
+
+// handleAIUsageIDEPlugins serves GET /api/v1/ai-usage/ide-plugins: the
+// last full scan's IDE extensions and plugins, filtered by user (account
+// name or id), IDE product or family, and ai_only, a page at a time
+// (cursor is the opaque next_cursor of the previous page). Paths appear
+// only as hashes.
+func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	limit := idePluginsDefaultLimit
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = min(n, idePluginsMaxLimit)
+	}
+	offset := 0
+	if raw := strings.TrimSpace(q.Get("cursor")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
+			return
+		}
+		offset = n
+	}
+	aiOnly := false
+	if raw := strings.TrimSpace(q.Get("ai_only")); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ai_only must be true or false"})
+			return
+		}
+		aiOnly = v
+	}
+	user := strings.TrimSpace(q.Get("user"))
+	ide := strings.ToLower(strings.TrimSpace(q.Get("ide")))
+
+	discovery, releaseDiscovery := a.leaseAIDiscovery()
+	defer releaseDiscovery()
+	scope := config.IDEInventoryAll
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		scope = cfg.AIDiscovery.EffectiveIDEInventory()
+	}
+	var inv *inventory.IDEInventory
+	if discovery != nil {
+		inv = discovery.IDEInventory()
+	}
+	resp := map[string]any{
+		"enabled":       discovery != nil,
+		"scope":         scope,
+		"total":         0,
+		"next_cursor":   "",
+		"counts":        inv.Counts(),
+		"installations": []inventory.IDEInstallation{},
+		"plugins":       []inventory.IDEPlugin{},
+	}
+	if inv == nil {
+		a.writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	resp["scope"] = inv.Scope
+	resp["scan_id"] = ""
+	resp["scanned_at"] = inv.ScannedAt
+	matchUser := func(id, name string) bool {
+		return user == "" || strings.EqualFold(user, name) || user == id
+	}
+	matchIDE := func(family, product string) bool {
+		return ide == "" || ide == product || ide == family
+	}
+	installs := []inventory.IDEInstallation{}
+	for _, inst := range inv.Installations {
+		if matchUser(inst.UserID, inst.UserName) && matchIDE(inst.Family, inst.Product) {
+			installs = append(installs, inst)
+		}
+	}
+	plugins := []inventory.IDEPlugin{}
+	for _, p := range inv.Plugins {
+		if matchUser(p.UserID, p.UserName) && matchIDE(p.Family, p.Product) && (!aiOnly || p.IsAI) {
+			plugins = append(plugins, p)
+		}
+	}
+	total := len(plugins)
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	if end < total {
+		resp["next_cursor"] = strconv.Itoa(end)
+	}
+	resp["total"] = total
+	resp["installations"] = installs
+	resp["plugins"] = plugins[offset:end]
+	if snap := discovery.Snapshot(); snap.Summary.ScanID != "" {
+		resp["scan_id"] = snap.Summary.ScanID
+	}
+	a.writeJSON(w, http.StatusOK, resp)
 }
 
 func (a *APIServer) handleAIUsageScan(w http.ResponseWriter, r *http.Request) {

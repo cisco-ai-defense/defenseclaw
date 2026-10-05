@@ -142,6 +142,17 @@ def snapshot_app(tmp_path, *, setup_config: object | None = None) -> DefenseClaw
                 "agents": [{"id": "default", "model": "gpt-5", "source": "openclaw", "is_default": True}],
                 "model_providers": [{"id": "openai", "default_model": "gpt-5", "status": "ready"}],
                 "memory": [{"id": "mem", "backend": "sqlite", "files": 1, "chunks": 3}],
+                "ide_plugins": [
+                    {
+                        "fingerprint": "fp1",
+                        "user": "dev",
+                        "ide_product": "vscode",
+                        "plugin_id": "github.copilot",
+                        "version": "1.250.0",
+                        "enabled": "enabled",
+                        "is_ai": True,
+                    },
+                ],
                 "summary": {"total_items": 6, "skills": {"count": 1}, "plugins": {"count": 1}, "mcp": {"count": 1}},
             }
         )
