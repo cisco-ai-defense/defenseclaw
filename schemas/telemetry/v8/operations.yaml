@@ -4436,6 +4436,90 @@ attributes:
     overrides: {max_utf8_bytes: 16384, max_item_utf8_bytes: 1024, max_items: 64}
     notes: Relative to the project root and bounded to 64 entries; file names can disclose project content, so each destination's redaction profile governs them
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.product
+  type: string
+  brief: IDE or editor product an extension or plugin is installed in
+  examples:
+  - vscode
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'
+    notes: bounded lowercase product token such as vscode, vscode_insiders, cursor, windsurf, kiro, intellij_idea, pycharm, android_studio, visual_studio, zed, eclipse, neovim or a connector name for connector plugins
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.id
+  type: string
+  brief: Stable identifier of an IDE extension or plugin
+  examples:
+  - anthropic.claude-code
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 256
+      pattern: '^[A-Za-z0-9@][A-Za-z0-9._@/:+-]*$'
+    notes: marketplace or manifest identifier as the IDE records it; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.version
+  type: string
+  brief: Installed version of an IDE extension or plugin
+  examples:
+  - 2.0.14
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._+~-]*$'
+    notes: manifest version string; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.enabled
+  type: string
+  brief: Enabled state of an IDE extension or plugin
+  examples:
+  - enabled
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - enabled
+      - disabled
+      - client_side_unknown
+      - unknown
+    notes: client_side_unknown marks a remote IDE server whose enabled state lives on the client machine
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.ide.plugin.ai
+  type: boolean
+  brief: Whether the IDE extension or plugin matches an AI signature
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: true when the plugin id matches ai_signatures.json
+  introduced_in: telemetry-registry-v2
 groups:
 - id: resource.core
   type: resource
@@ -4848,6 +4932,16 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.name
     requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
   - ref: defenseclaw.user.email
     requirement_level: recommended
   - ref: defenseclaw.inventory.connector.source
@@ -4887,6 +4981,64 @@ groups:
   - ref: defenseclaw.agent.discovery.probe_status
     requirement_level: recommended
   - ref: defenseclaw.agent.discovery.scanned_at
+    requirement_level: recommended
+- id: body.ide.plugin
+  type: body_group
+  brief: One IDE extension or connector plugin installed for one user, with its enabled state and AI flag.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ide.product
+    requirement_level: required
+  - ref: defenseclaw.ide.plugin.id
+    requirement_level: required
+  - ref: defenseclaw.ide.plugin.version
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.enabled
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.ai
+    requirement_level: recommended
+  - ref: defenseclaw.ai.discovery.scan_id
+    requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+- id: body.identity.observed
+  type: body_group
+  brief: Low-rate end-user identity observation, once per user per cache TTL; carries group counts, never group names.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: user.id
+    requirement_level: required
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: required
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.tenant_id
+    requirement_level: recommended
+  - ref: defenseclaw.user.identity.source
+    requirement_level: recommended
+  - ref: defenseclaw.user.group_count
+    requirement_level: recommended
+  - ref: defenseclaw.session.kind
     requirement_level: recommended
 - id: body.ai.runtime.coverage
   type: body_group
@@ -6113,6 +6265,16 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.name
     requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
   log:
     event_name: ai_component.changed
   x-defenseclaw:
@@ -6184,6 +6346,16 @@ groups:
   - ref: defenseclaw.user.id_kind
     requirement_level: recommended
   - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
     requirement_level: recommended
   log:
     event_name: ai_component.discovered
@@ -6277,6 +6449,16 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.user.name
     requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
   log:
     event_name: ai_component.removed
   x-defenseclaw:
@@ -6291,6 +6473,86 @@ groups:
     legacy_bindings:
     - source: internal/observability/event_registry.go
       disposition: preserved
+- id: log.ide.plugin.discovered
+  type: log
+  brief: Canonical ide.plugin.discovered log identity; one record when an IDE plugin first appears for a user.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ide.plugin
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ide.plugin.discovered
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ide.plugin.changed
+  type: log
+  brief: Canonical ide.plugin.changed log identity; one record when an IDE plugin's version, enabled state or AI flag changes.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ide.plugin
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ide.plugin.changed
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ide.plugin.removed
+  type: log
+  brief: Canonical ide.plugin.removed log identity; one record when an IDE plugin is no longer installed for a user.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.ide.plugin
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ide.plugin.removed
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.identity.observed
+  type: log
+  brief: Canonical identity.observed log identity; at most once per user per identity-cache TTL.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.identity.observed
+  attributes: []
+  body_fields: []
+  log:
+    event_name: identity.observed
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.agent.discovery.completed
   type: log
   brief: Canonical accepted connector installation discovery summary.
@@ -7607,6 +7869,42 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.inventory.ide_plugins
+  type: metric
+  brief: IDE extensions and plugins installed as of the last inventory scan, per IDE product, AI flag and enabled state.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.ide.product
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.ai
+    requirement_level: recommended
+  - ref: defenseclaw.ide.plugin.enabled
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.inventory.ide_plugins
+    instrument_type: gauge
+    value_type: int64
+    unit: '{plugin}'
+    description: IDE extensions and plugins installed as of the last inventory scan, per IDE product, AI flag and enabled state.
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.ide.product
+        label: ide
+      - ref: defenseclaw.ide.plugin.ai
+        label: ai
+      - ref: defenseclaw.ide.plugin.enabled
+        label: enabled
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.ai.components.observations
   type: metric
   brief: Per-(ecosystem,name) confidence emissions; one increment per scan that produced a component rollup.
@@ -10288,6 +10586,15 @@ producer_identity_sets:
   - event_name: ai_component.removed
     bucket: ai.discovery
     family: log.ai_component.removed
+  - event_name: ide.plugin.changed
+    bucket: ai.discovery
+    family: log.ide.plugin.changed
+  - event_name: ide.plugin.discovered
+    bucket: ai.discovery
+    family: log.ide.plugin.discovered
+  - event_name: ide.plugin.removed
+    bucket: ai.discovery
+    family: log.ide.plugin.removed
 - id: identity_set.asset_lifecycle
   identities:
   - event_name: asset.activated
@@ -10390,6 +10697,9 @@ producer_identity_sets:
     family: log.scan.started
 - id: identity_set.compliance_activity
   identities:
+  - event_name: identity.observed
+    bucket: compliance.activity
+    family: log.identity.observed
   - event_name: alert.acknowledgement.requested
     bucket: compliance.activity
     family: log.alert.acknowledgement.requested
