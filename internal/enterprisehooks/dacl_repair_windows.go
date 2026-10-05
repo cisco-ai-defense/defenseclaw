@@ -235,16 +235,21 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 	if err != nil {
 		return err
 	}
-	// Include OWNER_SECURITY_INFORMATION with the target SID so the bulldoze
-	// path above (which accepts admin ownership on the leaf) transfers the
-	// admin orphan ownership back to the target user. For files already
-	// owned by the target, this is idempotent. SeRestorePrivilege permits
-	// the owner write even when the DACL does not grant it.
+	// DACL-only repair. The handle was opened with WRITE_DAC +
+	// FILE_READ_ATTRIBUTES; it does not hold WRITE_OWNER, so this call
+	// MUST NOT pass OWNER_SECURITY_INFORMATION (SetSecurityInfo returns
+	// ERROR_ACCESS_DENIED otherwise, even for a target-owned leaf that
+	// only needs DACL repair). The round-1 bulldoze refactor removed
+	// the admin-ownership-transfer branch from validateWindowsGuardian-
+	// ACLHandle, so this function is only reachable when the final
+	// element is already target-owned. Guardian-side ownership transfer
+	// runs through a different code path (repairWindowsTargetOwnedPath-
+	// DACL) with its own WRITE_OWNER-capable handle.
 	if err := windows.SetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		target,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
 		nil,
 		acl,
 		nil,
