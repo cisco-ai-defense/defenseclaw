@@ -282,8 +282,8 @@ func trustStrictAncestors() bool {
 	return TrustStrictAncestors()
 }
 
-// TrustStrictAncestors reports whether DEFENSECLAW_MANAGED_TRUST_STRICT_
-// ANCESTORS is set to a truthy value. Exported so callers outside this
+// TrustStrictAncestors reports whether the TrustStrictAncestorsEnv env
+// var is set to a truthy value. Exported so callers outside this
 // package (enterprisehooks reclaim paths, Windows filelock trust checks)
 // can honor the same strict/non-strict toggle without duplicating the
 // env-var parse, and so a future rename of the env var only has to
