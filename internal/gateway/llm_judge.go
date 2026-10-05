@@ -738,7 +738,7 @@ func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind str
 	}
 	// The pinned Apple FM bridge ignores max tokens and temperature and
 	// the provider rejects a request that sets them.
-	if j == nil || !isAppleFMProvider(j.providerName, j.model) {
+	if !isAppleFMProvider(j.providerName, j.model) {
 		temperature := 0.0
 		req.MaxTokens = intPtr(maxTok)
 		req.Temperature = &temperature
