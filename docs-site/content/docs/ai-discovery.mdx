@@ -91,7 +91,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 | `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, Kiro, OmniGent |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
-| `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |
+| `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |
 | `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
 | `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
 | `rule` | Rule packs and ruleset files referenced by config |
@@ -337,6 +337,62 @@ account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 such as the profile root that `scan_roots: ["~"]` names, are skipped
 without failing the scan.
 
+### IDE plugin inventory
+
+Every full scan also lists each IDE installation in the scanned homes and
+every extension or plugin it has, AI or not, with its enabled state. AI
+plugins are flagged from the signature catalog. Nothing is executed: the scan
+reads small, bounded metadata files only.
+
+| IDE family | Products | Plugin list | Enabled state from |
+| --- | --- | --- | --- |
+| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop, Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including profiles) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
+| VS Code remote servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers | The server's `extensions` folder | `client_side_unknown`: the client keeps that state |
+| JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside, Android Studio, and JetBrains remote development | Each plugin's `META-INF/plugin.xml` | `disabled_plugins.txt`; enabled when not listed |
+| Visual Studio (Windows) | Visual Studio, per edition | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`) |
+| Zed | Zed | `extensions/installed/*/extension.toml` | Always enabled |
+| Eclipse | Eclipse | `bundles.info`, best effort | Enabled |
+| Vim and Neovim | Vim, Neovim | `lazy-lock.json` and `pack/*/{start,opt}` | `start` is enabled and `opt` is disabled; lazy.nvim and plugin folders are `unknown` |
+
+The enabled state is one of `enabled`, `disabled`, `client_side_unknown` or
+`unknown`. Connector plugins (Claude Code, Codex, OpenCode, Amp, Copilot CLI,
+Hermes and the others) stay in the AIBOM `plugins` category, stamped with
+their user.
+
+Each row carries its user: the home's owner, or on a managed host the account
+the guardian scanned. The standalone enterprise per-user scans include the
+IDE inventory on Linux and macOS; on Windows the gateway reads each enrolled
+profile's IDE folders, and Visual Studio installs under Program Files. A
+per-user install inventories only its own user's home.
+
+Set the scope with `ai_discovery.ide_inventory`:
+
+| Value | Effect |
+| --- | --- |
+| `all` (default) | Every plugin, AI or not |
+| `ai_only` | Only plugins flagged as AI |
+| `off` | No IDE inventory; AI editor-extension signals still appear in `agent usage` |
+
+Read the inventory with the CLI, the API, AIBOM or the TUI:
+
+```bash
+defenseclaw agent ide-plugins
+defenseclaw agent ide-plugins --user alice --ai-only
+defenseclaw agent ide-plugins --ide cursor --json
+defenseclaw aibom scan --only ide_plugins
+```
+
+- `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's plugins,
+  filtered by `user` (account name or ID), `ide` (product or family) and
+  `ai_only`, a page at a time (`limit`, at most 1000, and `cursor` from the
+  previous page's `next_cursor`). Paths appear only as hashes.
+  `GET /api/v1/ai-usage` adds the plugin counts.
+- AIBOM reports the list in its `ide_plugins` category.
+- The TUI shows it under Inventory → **IDE plugins**.
+- Each change is exported as an `ide.plugin.discovered`, `ide.plugin.changed`
+  or `ide.plugin.removed` record, and the `defenseclaw.inventory.ide_plugins`
+  gauge counts plugins per IDE, AI flag and enabled state.
+
 ### Tunable knobs
 
 `agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:
@@ -529,7 +585,7 @@ Useful flags:
 | --- | --- |
 | `--json` | Machine-readable output (default is a human table) |
 | `--summary` | Counts only — useful for CI gates |
-| `--only` | Comma-separated categories to collect: `skills,plugins,mcp,agents,rules,tools,models,memory`. The others are left out, and the JSON marks them `"collected": false` |
+| `--only` | Comma-separated categories to collect: `skills,plugins,mcp,agents,rules,tools,models,memory,ide_plugins`. The others are left out, and the JSON marks them `"collected": false` |
 | `--connector` | Inventory one connector instead of every active one |
 
 <Callout type="info">
@@ -579,11 +635,20 @@ The dashboard reads from the `defenseclaw_demo_ai_discovery_events` macro and br
 
 ### Grafana
 
-The local observability stack ships `defenseclaw-ai-discovery.json` with parallel panels:
+The local observability stack ships the **AI Agent Usage & Detection** board
+(`defenseclaw-ai-discovery`), built on:
 
-- Prometheus counters: `defenseclaw_ai_discovery_signals_total{state, category}`
-- Loki queries: `{event_type="ai_discovery"}`
-- OTel logs: `defenseclaw.ai.discovery.*`
+- Prometheus: `defenseclaw_ai_discovery_signals_total` (labels `state`,
+  `signal_category`, `ai_vendor`, `ai_product`, `detector`), the active-signal
+  gauge and the IDE plugin gauge `defenseclaw_inventory_ide_plugins` (labels
+  `ide`, `ai`, `enabled`).
+- Loki: the `ai.discovery.completed`, `ai_component.*` and `ide.plugin.*`
+  records.
+- Tempo: the discovery scan traces.
+
+Its **IDE plugins** section shows the plugin count by IDE, AI against other
+plugins, disabled plugins and a per-user table. The `$user` box narrows the
+Loki panels to one `user.id`.
 
 It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
 

@@ -403,6 +403,22 @@ guardrail:
     claudecode:
       mode: observe            # only logs; everything else inherits the global default
 
+  # Identity-based guardrail profiles (see "Guardrail profiles and identity
+  # keys" below). Assignments are ordered: the first match wins.
+  profiles:
+    contractors:
+      mode: action
+      block_at: MEDIUM
+      hilt: {enabled: true, min_severity: HIGH}
+  profile_assignments:
+    - profile: contractors
+      match: {groups: ["CORP\\Contractors"]}
+  default_profile: ""          # "" keeps the guardrail.* settings above
+
+ai_discovery:
+  ide_inventory: all           # all | ai_only | off
+  include_user_principal: false
+
 # Notifier webhooks remain separate from telemetry routing.
 webhooks:
   - name: oncall-slack
@@ -423,6 +439,27 @@ the literal `localhost`): the management API inherits `guardrail.host` until
 
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 [OpenShell sandbox settings](#openshell-sandbox-settings) below.
+
+### Guardrail profiles and identity keys
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `guardrail.profiles.<name>` | none | A named set of guardrail overrides. `<name>` is lower case, at most 64 characters. Allowed keys: `description`, `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack_dir`, `block_message` and `connectors`. Each `connectors.<connector>` entry allows `mode`, `hilt`, `block_message`, `rule_pack_dir`, `block_at` and `alert_at`. `enabled` and `hook_fail_mode` are rejected at both levels. |
+| `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. |
+| `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
+| `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. |
+| `ai_discovery.include_user_principal` | `false` | Add the user's directory principal to AI discovery inventory records. |
+
+Within a profile, the precedence for one connector is the profile's
+`connectors.<connector>` entry, then the profile field, then
+`guardrail.connectors.<connector>`, then the application protection overlay,
+then the global `guardrail.*` value. `hilt.min_severity` is stored in upper
+case (`HIGH`). Only verified users and groups select a profile, and the Secure
+Client profile rejects all three guardrail keys. `defenseclaw config validate`
+reports an unknown profile name, an empty `match` or a malformed agent
+identity. See
+[Identity and authentication](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale)
+for examples and auditing.
 
 ### OpenClaw fleet link
 

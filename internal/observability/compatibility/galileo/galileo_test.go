@@ -1580,13 +1580,20 @@ func resultAttributes(t *testing.T, result Result) map[string]any {
 }
 
 // GAP-1904: allowed tool calls and agent turns name their user in Galileo's
-// user_metadata too, not only blocked calls.
+// user_metadata too, not only blocked calls, with the user's principal and
+// domain, the agent identity and the guardrail profile.
 func TestProjectAllowedToolAndAgentSpansNameTheirUser(t *testing.T) {
 	t.Parallel()
-	user := map[string]any{"user.id": "S-1-5-21-1-2-3-1017", "defenseclaw.user.name": "dcw-std1"}
+	user := map[string]any{
+		"user.id": "S-1-5-21-1-2-3-1017", "defenseclaw.user.name": "dcw-std1",
+		"defenseclaw.user.principal": "alice@CORP.EXAMPLE.COM", "defenseclaw.user.domain": "CORP.EXAMPLE.COM",
+		"defenseclaw.agent.identity.id": "agt-0123456789abcdef",
+	}
 	tool := map[string]any{
 		"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "apply_patch",
 		"gen_ai.tool.call.arguments": map[string]any{"path": "index.html"}, "gen_ai.tool.call.result": "ok",
+		// The guardrail profile rides tool and model spans, not agent spans.
+		"defenseclaw.guardrail.profile.name": "contractors",
 	}
 	agent := map[string]any{
 		"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "copilot", "gen_ai.provider.name": "github",
@@ -1618,6 +1625,9 @@ func TestProjectAllowedToolAndAgentSpansNameTheirUser(t *testing.T) {
 			if metadata[key] != value {
 				t.Fatalf("%s: metadata = %v, want %s=%v", test.family, metadata, key, value)
 			}
+		}
+		if test.family == "span.tool.execute" && metadata["defenseclaw.guardrail.profile.name"] != "contractors" {
+			t.Fatalf("%s: metadata = %v, want the guardrail profile", test.family, metadata)
 		}
 		if metadata["deployment.environment.name"] == "" || metadata["defenseclaw.guardrail.action"] != "" {
 			t.Fatalf("%s: metadata = %v, want the deployment and no guardrail decision", test.family, metadata)

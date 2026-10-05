@@ -1196,8 +1196,14 @@ var guardrailMetadataKeys = []string{
 	"defenseclaw.guardrail.action", "defenseclaw.guardrail.rule_id", "defenseclaw.guardrail.severity",
 }
 
-// userMetadataKeys name the user a span belongs to.
-var userMetadataKeys = []string{"user.id", "defenseclaw.user.name"}
+// userMetadataKeys name the user a span belongs to, with the directory
+// principal and domain the gateway resolved, the stable agent identity and
+// the guardrail profile that decided it. They ride the agent, model and tool
+// spans, so a Galileo user can filter traces by person, agent or profile.
+var userMetadataKeys = []string{
+	"user.id", "defenseclaw.user.name", "defenseclaw.user.principal", "defenseclaw.user.domain",
+	"defenseclaw.agent.identity.id", "defenseclaw.guardrail.profile.name",
+}
 
 // resourceMetadataKeys are the resource attributes that tell gateways apart.
 // Galileo's OTLP ingest drops the resource, so a fleet whose hosts share a
