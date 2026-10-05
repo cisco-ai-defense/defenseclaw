@@ -104,6 +104,10 @@ func TestACPEvaluateBlockUsesAgentWordingAndEmitsGuardrailSpan(t *testing.T) {
 	if user := useridentity.Current(); user.ID != "" && attributes["user.id"] != user.ID {
 		t.Fatalf("invoke_agent user.id=%q, want the gateway's user %q", attributes["user.id"], user.ID)
 	}
+	// GAP-0010: the agent span names the driven connector's agent identity.
+	if id := attributes["defenseclaw.agent.identity.id"]; !agentIdentityIDPattern.MatchString(id) {
+		t.Fatalf("invoke_agent agent.identity.id=%q, want the connector's agt- identity", id)
+	}
 }
 
 // A block of the agent's own output (a session/update the agent sends after
