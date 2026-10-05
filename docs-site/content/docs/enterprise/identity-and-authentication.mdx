@@ -180,6 +180,21 @@ defenseclaw guardrail profile show contractors
 defenseclaw guardrail profile explain --user alice --connector codex
 ```
 
+A managed install (the enterprise package, MDM or Setup) has no `defenseclaw`
+Python CLI, so these commands and `defenseclaw agent identities` are not
+there. As root on a managed Linux or macOS host, read the same answers from
+the managed gateway, as JSON:
+
+```bash
+defenseclaw-gateway enterprise linux profile-explain --user alice --connector codex
+defenseclaw-gateway enterprise linux agent-identities --user alice
+defenseclaw-gateway enterprise linux ide-plugins --user alice --ai-only
+```
+
+Use `enterprise macos` on a Mac. `profile-explain` also lists every
+configured profile with its digest under `profiles`, in place of `profile
+list` and `profile show`.
+
 ### How a profile is chosen
 
 - Assignments are tried in order and the first match wins.

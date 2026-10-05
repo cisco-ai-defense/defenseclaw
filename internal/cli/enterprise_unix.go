@@ -117,6 +117,7 @@ arguments, 75 another lifecycle run holds the lock.`,
 		group.AddCommand(newUnixLifecycleCommand(name, action, summaries[action]))
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
+	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
 	return group
 }
 
