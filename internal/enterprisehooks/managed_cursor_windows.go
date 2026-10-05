@@ -19,6 +19,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -37,14 +38,14 @@ const (
 
 var windowsCursorManagedRootResolver = defaultWindowsCursorManagedRoot
 
-// windowsCursorManagedTrustStrictAncestors mirrors the semantics of
-// managed.TrustStrictAncestorsEnv but kept inline here so this file does
-// not take a new import on the managed package (and so a future refactor
-// of the trust package cannot regress a Cursor-only reclaim path).
-// Returns true when the strict-mode env knob is explicitly set.
+// windowsCursorManagedTrustStrictAncestors returns true when the strict-
+// mode env knob is explicitly set, matching the semantics of the trust
+// package's package-private helper. The env var name is sourced from the
+// exported managed.TrustStrictAncestorsEnv constant so a rename there
+// propagates automatically.
 func windowsCursorManagedTrustStrictAncestors() bool {
 	switch strings.ToLower(strings.TrimSpace(
-		os.Getenv("DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS"),
+		os.Getenv(managed.TrustStrictAncestorsEnv),
 	)) {
 	case "1", "true", "yes", "on":
 		return true
@@ -588,18 +589,20 @@ func validateWindowsCursorManagedPublicArtifacts(
 				// or from a manual clean-up that wiped only the
 				// sidecars. The entries are DefenseClaw's by
 				// adapter-path match, so overwrite hooks.json with
-				// the cleaned bytes and continue. The caller is
-				// already inside withWindowsCursorManagedTransaction,
-				// so this write is lock-serialized against other
-				// managed Cursor operations.
+				// the cleaned bytes and continue. Route through the
+				// metadata-preserving writer that every other
+				// hooks.json write uses so the file's security
+				// descriptor and attributes stay intact. The caller
+				// is already inside withWindowsCursorManagedTransaction
+				// so this write is lock-serialized.
 				fmt.Fprintf(os.Stderr,
 					"[enterprise-hooks] reclaiming orphan Cursor hook "+
 						"refs at %s (state ownership metadata absent)\n",
 					artifacts.hooks.path)
-				if writeErr := os.WriteFile(
-					artifacts.hooks.path,
+				if writeErr := writeWindowsCursorManagedFilePreservingMetadata(
+					artifacts.hooks,
+					artifacts.hooksMetadata,
 					cleaned,
-					0o644,
 				); writeErr != nil {
 					return artifacts, fmt.Errorf(
 						"enterprise hooks: reclaim orphan Cursor hook refs: %w",

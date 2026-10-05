@@ -144,6 +144,11 @@ $script:TrustAdvisoryMarker = 'managed_trust_ancestor_advisory'
 # it". Alert on this one: a host that emits it repeatedly has AVC and
 # DefenseClaw fighting over the same DACL.
 $script:AclSelfHealMarker = 'managed_acl_self_heal'
+# Nuclear --purge uninstall tags residual-state warnings (service row still
+# present, worker process still alive, path couldn't be deleted) with their
+# own marker. Previously these shared the ACL self-heal marker, which was
+# misleading when triaging logs - nuclear teardown isn't a DACL repair.
+$script:NuclearUninstallMarker = 'managed_nuclear_uninstall'
 $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
@@ -17582,21 +17587,22 @@ function Get-DefenseClawLifecycleSources {
                 -AllowUnsigned:$AllowUnsigned
         }
         catch {
-            # provider_library is deliberately optional at install time.
-            # A full XDR deployment installs Cloud Management last, and
-            # a CM upgrade can race with DefenseClaw install: discovery
-            # at Setup-EXE preflight walks the newest CM\<ver>\CMID\
-            # <ver>\<arch>\cmidapi.dll but the file may have moved by
-            # the time this validation runs. The broker already
-            # discovers the library at runtime via the deferred
-            # provider pattern (see cmd/defenseclaw-cmid-broker/
-            # main_windows.go), so dropping the stale discovery here is
-            # safe - it defers the lookup to the broker's runtime walk
-            # and the CMID lane activates when the file lands.
-            if ($name -eq 'provider_library') {
+            # provider_library is deliberately optional at install time
+            # ONLY for the specific case of the discovered path having
+            # disappeared between Setup-EXE preflight discovery and this
+            # validator (a CM upgrade race). The broker rediscovers the
+            # library at runtime via the deferred-provider pattern
+            # (see cmd/defenseclaw-cmid-broker/main_windows.go), so a
+            # missing file here is safe to defer. Any OTHER failure
+            # (Authenticode signature invalid, path not on a trusted
+            # NTFS volume, DACL untrusted, etc.) must still fail install
+            # - a tampered cmidapi.dll is a security event, not a
+            # deferral trigger.
+            if ($name -eq 'provider_library' -and
+                $_.Exception.Message -match '^required path is missing: ') {
                 Microsoft.PowerShell.Utility\Write-Warning (
-                    'managed credential provider library at {0} failed preflight ({1}); deferring to broker-time discovery' `
-                        -f ([string]$entry[1]), $_.Exception.Message
+                    'managed credential provider library at {0} is absent at preflight; deferring to broker-time discovery' `
+                        -f ([string]$entry[1])
                 )
                 continue
             }
@@ -23775,7 +23781,7 @@ function Invoke-DefenseClawNuclearUninstall {
 
     foreach ($warning in $warnings) {
         Microsoft.PowerShell.Utility\Write-Warning -Message (
-            '{0}: {1}' -f $script:AclSelfHealMarker, $warning
+            '{0}: {1}' -f $script:NuclearUninstallMarker, $warning
         )
     }
 
@@ -23813,17 +23819,12 @@ function Invoke-DefenseClawUninstallLifecycle {
         [hashtable]$NativeCleanupSource,
         [int]$SelfUninstallCallerPID
     )
-    # Managed-mode bulldoze shortcut: --purge means "clean slate", not
-    # "forensic-grade authenticated teardown". Skip the entire validator
-    # pipeline when the strict-mode knob is off (default). This is the
-    # single-switch escape from the "we keep hitting new identity gates"
-    # loop.
-    if ($Purge -and -not (Test-DefenseClawTrustStrictAncestors)) {
-        return Invoke-DefenseClawNuclearUninstall `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
-    }
+    # Note: the --purge nuclear shortcut lives in Invoke-DefenseClawEnterprise-
+    # Lifecycle, before pre-layout recovery. Any --purge non-strict uninstall
+    # returns from there without reaching this function, so no gate is needed
+    # here. Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1) and
+    # non-purge uninstalls fall through to the forensic validator pipeline
+    # below.
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
     Assert-DefenseClawMetadataIdentity `
         -Metadata $metadata `
