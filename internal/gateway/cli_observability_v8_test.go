@@ -550,3 +550,40 @@ func TestCLIObservabilityV8RecordsContextRequiredSetupActions(t *testing.T) {
 		t.Fatalf("recorded setup actions=%d, want 2", count)
 	}
 }
+
+// GAP-2644: model spans the CLI submits (plugin and skill scans) carry the
+// calling user and the CLI run id, like the gateway's own model and judge
+// spans, so per-user attribution in Tempo and Galileo includes them.
+func TestCLIObservabilityV8ModelSpanCarriesUserAndRunID(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"traces"})
+	body := `{"kind":"llm_bridge","run_id":"python-scan-run","llm_bridge":{"model":"openai/gpt-5","provider":"openai","status":"success","duration_ms":12,"input_tokens":3,"output_tokens":2}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
+	}
+	var spans []*tracepb.Span
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline) && len(spans) == 0; {
+		traceRequests, _ := capture.snapshot()
+		spans = hookModelV8CapturedSpans(traceRequests)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("spans=%d", len(spans))
+	}
+	wantID, wantName := localProcessUser()
+	if wantName == "" {
+		t.Skip("no local process user to attribute")
+	}
+	attrs := spans[0].Attributes
+	if got := gatewayProtoAttribute(attrs, "defenseclaw.user.name"); got != wantName {
+		t.Errorf("defenseclaw.user.name=%q want %q", got, wantName)
+	}
+	if got := gatewayProtoAttribute(attrs, "user.id"); got != wantID {
+		t.Errorf("user.id=%q want %q", got, wantID)
+	}
+	if got := gatewayProtoAttribute(attrs, "defenseclaw.run.id"); got != "python-scan-run" {
+		t.Errorf("defenseclaw.run.id=%q", got)
+	}
+}
