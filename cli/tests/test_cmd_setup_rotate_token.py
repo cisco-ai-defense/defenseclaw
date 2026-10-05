@@ -328,6 +328,15 @@ with locked_file_update(lock_base):
             raise SystemExit("timed out waiting for release")
         time.sleep(0.01)
 """
+            # The holder imports the defenseclaw under test, which need not be
+            # installed in this interpreter (a fresh checkout runs from cli/).
+            import defenseclaw
+
+            package_root = os.fspath(Path(defenseclaw.__file__).resolve().parents[1])
+            holder_env = dict(os.environ)
+            holder_env["PYTHONPATH"] = os.pathsep.join(
+                entry for entry in (package_root, holder_env.get("PYTHONPATH", "")) if entry
+            )
             holder = subprocess.Popen(
                 [
                     sys.executable,
@@ -338,6 +347,7 @@ with locked_file_update(lock_base):
                     os.fspath(holder_release),
                 ],
                 cwd=Path(__file__).resolve().parents[2],
+                env=holder_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
