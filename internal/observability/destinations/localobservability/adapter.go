@@ -245,16 +245,18 @@ func (wire projectedWire) otlp(destination string) (
 	if !ok {
 		return nil, nil, nil, "", "", false
 	}
-	return &resourcepb.Resource{
-			Attributes: resourceAttributes, DroppedAttributesCount: uint32(resourceDropped),
-		}, &tracepb.Span{
-			TraceId: traceID, SpanId: spanID, ParentSpanId: parent, Name: wire.SpanName,
-			Kind: kind, StartTimeUnixNano: start, EndTimeUnixNano: end,
-			TraceState: wire.Body.TraceState, Flags: uint32(flags), Attributes: spanAttributes,
-			DroppedAttributesCount: uint32(droppedAttributes), Events: spanEvents,
-			DroppedEventsCount: uint32(droppedEvents), Links: spanLinks,
-			DroppedLinksCount: uint32(droppedLinks), Status: spanStatus,
-		}, scope, wire.Body.Resource.SchemaURL, wire.Body.Scope.SchemaURL, true
+	resource := &resourcepb.Resource{
+		Attributes: resourceAttributes, DroppedAttributesCount: uint32(resourceDropped),
+	}
+	span := &tracepb.Span{
+		TraceId: traceID, SpanId: spanID, ParentSpanId: parent, Name: wire.SpanName,
+		Kind: kind, StartTimeUnixNano: start, EndTimeUnixNano: end,
+		TraceState: wire.Body.TraceState, Flags: uint32(flags), Attributes: spanAttributes,
+		DroppedAttributesCount: uint32(droppedAttributes), Events: spanEvents,
+		DroppedEventsCount: uint32(droppedEvents), Links: spanLinks,
+		DroppedLinksCount: uint32(droppedLinks), Status: spanStatus,
+	}
+	return resource, span, scope, wire.Body.Resource.SchemaURL, wire.Body.Scope.SchemaURL, true
 }
 
 func canonicalEndedIdentity(wire projectedWire) bool {
