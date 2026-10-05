@@ -386,6 +386,8 @@ A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
 or macOS host, `defenseclaw-gateway enterprise linux ide-plugins` (or
 `enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the same `--user`, `--ide`, `--ai-only` and `--cursor` filters.
+On a managed Windows computer, `defenseclaw.exe enterprise windows
+ide-plugins` does the same from an elevated prompt.
 
 - `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's plugins,
   filtered by `user` (account name or ID), `ide` (product or family) and

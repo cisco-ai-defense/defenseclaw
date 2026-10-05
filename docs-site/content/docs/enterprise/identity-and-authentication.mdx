@@ -191,9 +191,17 @@ defenseclaw-gateway enterprise linux agent-identities --user alice
 defenseclaw-gateway enterprise linux ide-plugins --user alice --ai-only
 ```
 
-Use `enterprise macos` on a Mac. `profile-explain` also lists every
-configured profile with its digest under `profiles`, in place of `profile
-list` and `profile show`.
+Use `enterprise macos` on a Mac. On a managed Windows computer, run them from
+an elevated PowerShell prompt (or as LocalSystem from an MDM script):
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user CORP\alice --connector codex
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows agent-identities
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows ide-plugins --user alice
+```
+
+`profile-explain` also lists every configured profile with its digest under
+`profiles`, in place of `profile list` and `profile show`.
 
 ### How a profile is chosen
 

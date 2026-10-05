@@ -16,12 +16,20 @@ import "github.com/spf13/cobra"
 
 func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsDiscoveryCommand())
+	enterpriseWindowsCmd.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
 }
 
 // pinEnterpriseDiscoveryEnv points an elevated administrator's (or
 // LocalSystem's) discovery view at the standalone managed deployment; a
 // standard account cannot read its config or gateway token.
 func pinEnterpriseDiscoveryEnv() error {
+	if runtimeCommand != nil && runtimeCommand.Name() != "discovery" {
+		// An identity view (enterprise_identity_views.go).
+		view := "enterprise windows " + runtimeCommand.Name()
+		return pinManagedAdministratorEnvironment(view, func() string {
+			return windowsManagedStandardUserViewAnswer("the identity views", view)
+		})
+	}
 	return pinManagedAdministratorEnvironment("enterprise windows discovery", func() string {
 		return windowsManagedStandardUserViewAnswer("the AI Discovery inventory",
 			"enterprise windows discovery --user "+managedHostCurrentAccountName())
