@@ -682,13 +682,19 @@ func (manager *Manager) Reload(ctx context.Context, candidate Config) (ReloadRes
 	}
 	if err := ctx.Err(); err != nil {
 		bounded := &Error{code: ErrorInitialization, contextCause: contextIdentity(err)}
-		manager.addRejected(&reports, old, bounded, "")
 		return finish(ReloadResult{active: old, status: ReloadRejected}, bounded)
 	}
 
 	newGraph, err := manager.build(ctx, candidate, old.generation+1, old, &reports)
 	if err != nil {
-		manager.addRejected(&reports, old, err, err.ComponentName())
+		// A reload the gateway's own stop or restart cancelled changed
+		// nothing: the old graph stays until the restart applies the new
+		// config. It is not a rejected change, so it records nothing; a
+		// "config.reload.rejected" next to every successful setup --restart
+		// read as a failure (GAP-1698; GAP-1295 dropped its health alert).
+		if ctx.Err() == nil {
+			manager.addRejected(&reports, old, err, err.ComponentName())
+		}
 		return finish(ReloadResult{active: old, status: ReloadRejected}, err)
 	}
 

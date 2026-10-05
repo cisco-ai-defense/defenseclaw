@@ -129,7 +129,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		suppressFallback: func(actionfacts.Facts) bool { return true },
 	},
 	"PATH-SSH-DIR": {
-		prerequisite:     sshAuthorizedKeysStructuredPrerequisite,
+		prerequisite:     sshDirectoryPrerequisite,
 		suppressFallback: sshAuthorizedKeysPathSafeNegative,
 	},
 	"privilege.container_runtime_socket_access": {
@@ -1408,6 +1408,72 @@ func sshAuthorizedKeysStructuredPrerequisite(
 	facts actionfacts.Facts,
 ) bool {
 	return sshAuthorizedKeysPrerequisite(facts, true)
+}
+
+// sshDirectoryPrerequisite is PATH-SSH-DIR's: a structured write or delete
+// of authorized_keys, or any write, append or delete of the active user's
+// SSH private key (touch, sed -i, echo >> ~/.ssh/id_ed25519), which had no
+// finding at all (GAP-1666). ssh-keygen creating the key is routine.
+func sshDirectoryPrerequisite(facts actionfacts.Facts) bool {
+	return sshAuthorizedKeysStructuredPrerequisite(facts) || sshPrivateKeyMutationPrerequisite(facts)
+}
+
+// sshPrivateKeyMutationPrerequisite reports a write, append or delete of the
+// active user's SSH private key by anything but ssh-keygen.
+func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if ok && !strings.EqualFold(command.Program, "ssh-keygen") &&
+			matchesActiveSSHPrivateKey(facts, candidate) &&
+			integrityCommandMutatesPath(command, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendTrustedHomeResolvedSSHKeyWriteFinding adds PATH-SSH-DIR when the
+// home-resolved twin of a partial action writes, appends or deletes the
+// active user's SSH private key: `echo x >> "$HOME/.ssh/id_rsa"`, `printf x |
+// tee ~/.ssh/id_ed25519`, `mkdir -p ~/.ssh && touch ~/.ssh/id_ed25519`. The
+// shell expands those paths at run time, so neither the action's analysis
+// nor its views had a path fact for the key, and the write had no finding
+// while the absolute path alerted (GAP-1832, GAP-1716). findings are the
+// finalized findings; the added one alerts, as the absolute form does, and
+// never blocks: the twin assumes the shell's HOME is the caller's.
+func appendTrustedHomeResolvedSSHKeyWriteFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	input := request.Input
+	for _, finding := range findings {
+		if finding.RuleID == "PATH-SSH-DIR" || finding.RuleID == "persistence.ssh_authorized_keys_command" {
+			return findings
+		}
+	}
+	if !homeResolvedTwinProves(input, facts, sshPrivateKeyMutationPrerequisite) {
+		return findings
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, "PATH-SSH-DIR")
+	if !ok {
+		return findings
+	}
+	enforcement := findingEnforcementAlertOnly
+	if !request.EnforcementCapable {
+		enforcement = findingEnforcementDetectionOnly
+	}
+	return append(findings, adjustConfidence(input.Tool, RuleFinding{
+		RuleID:      rule.ID,
+		Title:       rule.Title,
+		Severity:    rule.Severity,
+		Confidence:  rule.Confidence,
+		Evidence:    trustedActionInputText(input, ""),
+		Tags:        append([]string(nil), rule.Tags...),
+		LineNumber:  1,
+		enforcement: enforcement,
+	}))
 }
 
 func sshAuthorizedKeysPrerequisite(

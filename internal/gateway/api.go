@@ -77,6 +77,9 @@ type APIServer struct {
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
+	// copilotDedupe answers the second delivery of one Copilot tool call
+	// with the first delivery's verdict.
+	copilotDedupe copilotHookDedupe
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -87,6 +90,7 @@ type APIServer struct {
 	scannerCfg        *config.Config
 	hilt              *HILTApprovalManager
 	notifier          *notifier.Dispatcher
+	webhookSource     func() *WebhookDispatcher
 	aiDiscoveryMu     sync.RWMutex
 	aiDiscovery       *inventory.ContinuousDiscoveryService
 	aiRuntimeMu       sync.RWMutex
@@ -216,9 +220,12 @@ type APIServer struct {
 	// codexAdditionalContextMu protects the bounded, process-local cache used
 	// only to suppress repeated in-chat Observe warnings. Canonical detection,
 	// audit, and notification emission happen before this cache is consulted.
-	codexAdditionalContextMu          sync.Mutex
-	codexAdditionalContextSeen        map[[sha256.Size]byte]time.Time
-	codexAdditionalContextOrder       []codexAdditionalContextEntry
+	codexAdditionalContextMu    sync.Mutex
+	codexAdditionalContextSeen  map[[sha256.Size]byte]time.Time
+	codexAdditionalContextOrder []codexAdditionalContextEntry
+	// claudeCodePreActionEvals lets a Claude Code PermissionRequest reuse
+	// the evaluation of its PreToolUse instead of alerting twice.
+	claudeCodePreActionEvals          claudeCodePreActionEvalCache
 	rawTelemetryMu                    sync.RWMutex
 	rawTelemetryDedupe                *rawTelemetryDeduper
 	llmPromptMu                       sync.Mutex
@@ -683,6 +690,67 @@ func (a *APIServer) leaseAIDiscovery() (*inventory.ContinuousDiscoveryService, f
 // circuit on nil so callers do not need to guard each emission site.
 func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
 	a.notifier = n
+}
+
+// SetWebhookSource wires the gateway's current webhook dispatcher into the
+// connector-hook handlers. A func is stored because a config reload swaps
+// the dispatcher.
+func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
+	a.webhookSource = source
+}
+
+// dispatchHookBlockWebhook sends an enforced connector-hook block to the
+// configured webhooks. Only the LLM proxy, watcher and health paths used to
+// dispatch, so blocks on the per-user hook connectors reached no webhook
+// (GAP-1145). Dispatch redacts the reason and applies severity, event and
+// cooldown filters. The redacted reason alone did not say which rule fired
+// (GAP-1351), so the details also carry rule=<ids> and the generic payload
+// names the rules the way the agent message does ("rule ID: Title", titles
+// only from the compiled-in catalog or a loaded rule pack). A managed
+// deployment keeps the historical payload.
+func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
+	if a == nil || a.webhookSource == nil {
+		return
+	}
+	webhooks := a.webhookSource()
+	if webhooks == nil {
+		return
+	}
+	target := strings.TrimSpace(toolName)
+	if target == "" {
+		target = hookEvent
+	}
+	event := audit.Event{
+		Timestamp: time.Now().UTC(),
+		Action:    string(audit.ActionBlock),
+		Target:    target,
+		Actor:     "defenseclaw-hook",
+		Details:   fmt.Sprintf("connector=%s event=%s reason=%s", connectorName, hookEvent, reason),
+		Severity:  severity,
+		Connector: connectorName,
+	}
+	if !managedEnterpriseActive.Load() {
+		if ids := webhookRuleIDs(ruleIDs); ids != "" {
+			event.Details = fmt.Sprintf("connector=%s event=%s rule=%s reason=%s", connectorName, hookEvent, ids, reason)
+		}
+		if rules := agentMatchedRules(reason); rules != "" {
+			event.Structured = map[string]any{webhookRuleKey: rules}
+		}
+	}
+	webhooks.Dispatch(event)
+}
+
+// webhookRuleIDs joins the rule IDs of a hook verdict for the webhook
+// details; anything that is not a plain rule identifier is dropped.
+func webhookRuleIDs(ruleIDs []string) string {
+	var ids []string
+	for _, id := range ruleIDs {
+		id = strings.TrimSpace(id)
+		if agentRuleIDPattern.MatchString(id) && len(ids) < 5 {
+			ids = append(ids, id)
+		}
+	}
+	return strings.Join(ids, ",")
 }
 
 func (a *APIServer) connectorName() string {
@@ -2287,9 +2355,30 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "data": out})
 }
 
+// refuseOpenClawInventoryOnStandalone answers an OpenClaw-backed inventory
+// route on a managed standalone deployment, which runs no OpenClaw gateway:
+// /skills failed with 502 "gateway: not connected" and /mcps answered an
+// empty list (GAP-1142). There AI Discovery inventories each enrolled
+// account's skills and MCP servers instead.
+func (a *APIServer) refuseOpenClawInventoryOnStandalone(w http.ResponseWriter, route string) bool {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return false
+	}
+	a.writeJSON(w, http.StatusNotImplemented, map[string]string{
+		"error": route + " reads the OpenClaw gateway, which a managed enterprise deployment does not run; " +
+			"AI Discovery inventories each enrolled account's skills and MCP servers " +
+			"(defenseclaw-gateway enterprise linux|macos discovery)",
+	})
+	return true
+}
+
 func (a *APIServer) handleSkills(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseOpenClawInventoryOnStandalone(w, "/skills") {
 		return
 	}
 
@@ -2317,6 +2406,9 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if a.refuseOpenClawInventoryOnStandalone(w, "/mcps") {
+		return
+	}
 
 	if a.scannerCfg == nil {
 		a.writeJSON(w, http.StatusOK, []config.MCPServerEntry{})
@@ -2335,6 +2427,9 @@ func (a *APIServer) handleMCPs(w http.ResponseWriter, r *http.Request) {
 func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseOpenClawInventoryOnStandalone(w, "/tools/catalog") {
 		return
 	}
 
@@ -2694,8 +2789,8 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if !rootOK {
 		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch-rejected", req.Target,
-				"reason=outside-skill-roots (F-3287)")
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillFetch), req.Target,
+				"result=rejected reason=outside-skill-roots (F-3287)")
 		}
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "target is not under a configured skill or plugin root (F-3287)",
@@ -3578,6 +3673,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
 			if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+				if a.refuseUnverifiedSurface(w, r, route, hookScope) {
+					return
+				}
 				a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
 					return withAuthenticatedHookConnector(ctx, hookScope)
 				})
@@ -3610,6 +3708,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			if registered {
 				if identity, ok := a.lookupUserScopedCredential(connector.UserScopedHookCredential, hookScope, token); ok {
+					if a.refuseUnverifiedSurface(w, r, route, hookScope) {
+						return
+					}
 					a.serveUserScoped(w, r, route, identity, next, func(ctx context.Context) context.Context {
 						return withAuthenticatedInspectConnector(ctx, hookScope)
 					})
@@ -3630,7 +3731,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if !constantTimeStringMatch(token, expected) {
+		if !constantTimeStringMatch(token, expected) && !a.matchesRefreshedGatewayToken(token) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -3645,6 +3746,16 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		r = r.WithContext(ctx)
 		next.ServeHTTP(w, r)
 	})
+}
+
+// matchesRefreshedGatewayToken accepts the gateway token the OpenClaw
+// client adopted from openclaw.json after boot. Auth repair persists that
+// token to .env and hooks/.token, so the CLI (for example the graceful
+// shutdown during 'setup openclaw') presents it before this process
+// restarts (GAP-2259). The boot token stays valid until the restart.
+func (a *APIServer) matchesRefreshedGatewayToken(token string) bool {
+	refreshed := a.client.RefreshedToken()
+	return refreshed != "" && constantTimeStringMatch(token, refreshed)
 }
 
 // constantTimeStringMatch returns true iff a == b without leaking

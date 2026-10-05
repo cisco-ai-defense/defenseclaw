@@ -30,7 +30,8 @@ def _active_connector_docs() -> dict[str, Path]:
     return {
         connector_id: connectors_dir / f"{connector_id}.mdx"
         for connector_id in navigation["pages"]
-        if connector_id not in {"index", "compatibility"}
+        if connector_id not in {"index", "compatibility", "capability-matrix", "openclaw-integration"}
+        and not connector_id.startswith("---")
     }
 
 
@@ -80,7 +81,7 @@ def test_windows_release_metadata_is_exact() -> None:
 def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples() -> None:
     guide_dir = ROOT / "docs-site/content/docs/get-started/windows"
     enterprise_deployment = (
-        ROOT / "docs-site/content/docs/setup/enterprise-deployment.mdx"
+        ROOT / "docs-site/content/docs/enterprise/secure-client.mdx"
     ).read_text(encoding="utf-8")
     raw_text = "\n".join(
         page.read_text(encoding="utf-8") for page in sorted(guide_dir.glob("*.mdx"))
@@ -88,7 +89,7 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
     text = " ".join(raw_text.split())
     assert "WSL is not supported" in text
     assert "Windows x64" in text and "`amd64`" in text
-    assert "Windows ARM64" in text and "Not certified" in text
+    assert "Windows ARM64" in text and "ARM64 is not certified" in text
     assert "local observability" in text
     assert "Local Splunk" in text
     assert "Hyper-V backend" in text
@@ -134,14 +135,10 @@ def test_connector_pages_are_the_canonical_cross_platform_support_source() -> No
         ROOT / "docs-site/content/docs/connectors/index.mdx"
     ).read_text(encoding="utf-8")
     assert connectors_index.count("## Platform support") == 1
-    for connector_id, expected_windows_status in expected_windows_statuses.items():
-        row = re.findall(
-            rf"^\|\s*\[[^]]+\]\(/docs/connectors/{re.escape(connector_id)}\)"
-            rf"\s*\|\s*\*\*([^*]+)\*\*\s*\|\s*\*\*([^*]+)\*\*\s*\|",
-            connectors_index,
-            re.MULTILINE,
-        )
-        assert row == [("Supported", expected_windows_status)], connector_id
+    # The index renders the shared support matrix (data/support-matrix.ts)
+    # instead of a hand-written table; the connector pages above stay the
+    # per-connector source.
+    assert "<ConnectorOsMatrix />" in connectors_index
 
     docs_content = ROOT / "docs-site/content"
     public_docs = "\n".join(
@@ -296,7 +293,7 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
     ).read_text(encoding="utf-8")
 
     assert "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/" in repository_pointer
-    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/capability-matrix/" in repository_pointer
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/capability-matrix/" in repository_pointer
     assert "not current support matrices" in " ".join(repository_pointer.split())
     for connector_id in (
         "codex",
@@ -342,7 +339,7 @@ def test_public_docs_expose_devin_and_no_retired_desktop_setup_surface() -> None
     # vendor documentation until a live run is recorded, and never for Cascade.
     devin_page = (docs_root / "content/docs/connectors/devin.mdx").read_text(encoding="utf-8")
     assert "**Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation**" in devin_page
-    assert "legacy **Cascade** agent | **No**" in devin_page
+    assert "before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile**" in devin_page
 
 
 def test_codex_compatibility_docs_list_current_versioned_contracts() -> None:
@@ -489,10 +486,10 @@ def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
     assert "<workspace>/.agents/hooks.json" in config_reference
     assert "only hard-blocking claim for the connector" in connector_page_text
     assert "does not document non-zero hook exit status as enforcement" in connector_page_text
-    assert "CLI v1.1.10" in connector_page
     assert "CLI v1.1.10" in research_contract
     assert "`>=1.1.8`" in compatibility
-    assert "pins official CLI `1.1.10`" in compatibility
+    # The sandbox image pin follows the harness DefaultVersion.
+    assert "installs agy `1.2.12`" in " ".join(compatibility.split())
     assert validated["live"] is False
     assert validated["os"]["windows"]["last_validated_version"] == ""
     assert "availability metadata only" in validated["notes"]

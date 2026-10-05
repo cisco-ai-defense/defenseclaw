@@ -1288,7 +1288,7 @@ func HookRuntimeRegistrationCurrent(
 		return false, nil
 	}
 	if _, supersedes := supersedingCodexSetupSelection(opts.DataDir, stored); supersedes {
-		return false, errors.New("newer explicit Codex setup selection supersedes the active registration owner")
+		return false, ErrSetupSelectionSuperseded
 	}
 	expected := NewHookContractLockEntry(opts, conn, defenseClawVersion)
 	expectedShared := takeSharedHookScriptDigests(expected.HookScriptDigests)
@@ -1543,21 +1543,41 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 }
 
 // HookContractChangedByDefenseClawRelease reports whether the only
-// compatibility drift is a ContractID that a different DefenseClaw release
-// resolved for the same agent version. A lock with no writer version predates
-// DefenseClawVersion and counts as a different release. Admission refreshes
-// such a lock instead of refusing it; any agent version change still drifts.
+// compatibility drift is a ContractID that DefenseClaw itself now resolves
+// differently for the same agent version. Admission refreshes such a lock
+// instead of refusing it; any agent version change still drifts.
+//
+// The writer's DefenseClawVersion is deliberately not compared: a release
+// binary always resolves the same contract for the same agent version, so a
+// changed contract with an unchanged agent comes from a different contract
+// table. A source build (make all) carries the checked-in development version,
+// which equals the last release (GAP-1467), so the version string cannot tell
+// the two tables apart.
 func HookContractChangedByDefenseClawRelease(previous, current HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" || previous.ContractID == "" ||
 		current.ContractID == "" || previous.ContractID == current.ContractID {
 		return false
 	}
-	if previous.DefenseClawVersion != "" && previous.DefenseClawVersion == current.DefenseClawVersion {
-		return false
-	}
 	previousRaw := stableRawAgentVersionForContract(previous)
 	return previousRaw != "" && previousRaw == stableRawAgentVersionForContract(current) &&
 		previous.NormalizedAgentVersion == current.NormalizedAgentVersion
+}
+
+// HookContractAgentUpdateAdmitted reports whether drift is an agent update to
+// a version that still resolves to a hook contract (tested, or an untested
+// newer version with no known problems). Admission refreshes the lock for it
+// instead of refusing. A contract change without an agent version change is
+// not an update, and Secure Client (strict resolution) refuses every agent
+// change as before.
+func HookContractAgentUpdateAdmitted(previous, current HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" || StrictHookContractResolution() {
+		return false
+	}
+	if stableRawAgentVersionForContract(previous) == stableRawAgentVersionForContract(current) &&
+		previous.NormalizedAgentVersion == current.NormalizedAgentVersion {
+		return false
+	}
+	return current.CompatibilityStatus == HookCompatibilityKnown && strings.TrimSpace(current.ContractID) != ""
 }
 
 // AgentUnchangedSinceLock reports whether rawAgentVersion is the agent version
@@ -2113,6 +2133,11 @@ func loadProtectedHookContractEntry(dataDir, connectorName string) (HookContract
 // tick with different evidence. Matching evidence never displaces a freshly
 // persisted lock, which hands authority back to hook_contract_lock.json as soon
 // as Setup succeeds.
+// ErrSetupSelectionSuperseded reports that an explicit setup action recorded a
+// newer agent selection than the running gateway's registration owner. A
+// setup command that restarts the gateway writes it just before the handoff.
+var ErrSetupSelectionSuperseded = errors.New("newer explicit Codex setup selection supersedes the active registration owner")
+
 func supersedingCodexSetupSelection(
 	dataDir string,
 	entry HookContractLockEntry,

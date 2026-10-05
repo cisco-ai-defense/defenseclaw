@@ -7,6 +7,8 @@ keywords:
   - Hermes agent runtime
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The Hermes connector wires DefenseClaw into the Hermes agent runtime through
 the effective default-profile `HERMES_HOME/config.yaml`
 (`%LOCALAPPDATA%\hermes\config.yaml` on native Windows when `HERMES_HOME` is
@@ -14,24 +16,12 @@ unset) and exact approvals in `shell-hooks-allowlist.json`.
 
 ## Platform support
 
+<ConnectorSupport id="hermes" />
+
 | Platform | Status | Connector path |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Default-profile configuration and the portable Hermes command hook. Reload every affected Hermes host after lifecycle changes. |
-| Native Windows x64 | **Supported** | Direct, absolute `defenseclaw-hook.exe` argv launched with `shell=False`; no DefenseClaw shell bridge. Running-client state remains pending reload, validation metadata remains empty, and `live=false`. |
-
-<Callout type="warning" title="Hermes terminal commands still use Git Bash on Windows">
-Hermes itself officially runs its terminal tool through installer-managed
-PortableGit/Git Bash. DefenseClaw does not install, find, configure, invoke, or
-test that dependency. Its Windows hook is a separately registered, directly
-quoted absolute `defenseclaw-hook.exe` argv launched by Hermes with
-`shell=False`; there is no DefenseClaw PowerShell, Bash, WSL, Docker, VM, MSYS,
-or Cygwin bridge.
-</Callout>
-
-<Video
-  src="hermes"
-  caption="Three commands against one Hermes Agent session in observe mode: (1) `echo hello` flows through as action=allow / severity=NONE; (2) `chmod 777 /tmp/dc_test` matches CMD-CHMOD-WORLD HIGH; (3) `cat /etc/shadow` appears as a CRITICAL sensitive-file read in this historical recording. Current builds cap an ordinary sensitive-file read at MEDIUM and keep it detection-only unless the same action proves a mutation or external egress. Observe mode logs without blocking, and supported tool, LLM, session, and subagent events appear in connector activity."
-/>
+| Native Windows x64 | **Supported** | Hermes starts the protected `defenseclaw-hook.exe` directly (`shell=False`), with no DefenseClaw shell bridge. Hermes' own terminal tool still uses its bundled Git Bash, which DefenseClaw neither needs nor manages. Reload every affected Hermes host after lifecycle changes. |
 
 ## Setup
 
@@ -96,38 +86,18 @@ an exact direct-native disabled tombstone so stale cached callbacks safely
 no-op while revocation is pending.
 </Callout>
 
-<Callout type="warning" title="One default profile only">
-The connector rejects named-profile homes, a non-default `active_profile`, and
-multiplex gateways because one `HERMES_HOME` cannot cover them. Project plugins
-and other launch-directory-conditional sources remain unverified. Enterprise,
-managed, Team, ProgramData, cloud-dashboard, and MDM surfaces are outside this
-connector contract.
-</Callout>
+**One default profile only.** The connector rejects named-profile homes, a
+non-default `active_profile`, and multiplex gateways, because one
+`HERMES_HOME` cannot cover them. Project plugins and other sources that depend
+on the launch directory are reported as unverified.
 
-<Callout type="info" title="Standalone enterprise profile: other hooks in config.yaml">
-Hermes runs every hook registered for an event, in order, and a
-`pre_tool_call` hook can rewrite the tool input, so a hook added after
-DefenseClaw's could change a command DefenseClaw already checked. Hermes has
-no way to lock or order hooks. On Linux and macOS hosts with the standalone
-enterprise profile, DefenseClaw's Hermes hook runs the
-[foreign-hook guard](/docs/enterprise/foreign-hook-guard) before each tool
-call: while `config.yaml`, or the managed-scope `config.yaml` in the folder
-`HERMES_MANAGED_DIR` names, has a hook entry that is not DefenseClaw's and
-that your organization has not approved, tool calls are blocked with a
-message that names the file and the digest to approve, and the guardian
-removes the entry (with a backup). A Hermes process that started with the
-entry keeps running it, so it stays blocked until Hermes restarts. The
-`output_spill` and `outbound` settings under `hooks` are not hooks; the
-guard leaves them alone.
-</Callout>
-
-#### What `setup hermes` actually does
+### What `setup hermes` actually does
 
 The table highlights convenience options rather than the complete alias
 surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
 approval, block-message, add/replace, workspace, and rule-pack-directory
-options. See the [quick-alias reference](/docs/setup/guardrail/aliases); use
-[full guardrail setup](/docs/setup/guardrail) for scanner, detection-strategy,
+options. See the [quick-alias reference](/docs/guardrail/aliases); use
+[full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
 and judge-provider configuration.
 
 | Flag | Default | What it does |
@@ -136,9 +106,9 @@ and judge-provider configuration.
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes. This does not reload Hermes; reload each Hermes host separately. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
 
-The alias defaults Hermes to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Hermes after install, keep using [`defenseclaw setup guardrail --connector hermes`](/docs/setup/guardrail) — see the variations below.
+The alias defaults Hermes to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Hermes after install, keep using [`defenseclaw setup guardrail --connector hermes`](/docs/guardrail) — see the variations below.
 
-#### Common variations — pick the recipe that fits your phase
+### Common variations — pick the recipe that fits your phase
 
 <Tabs items={['Standard', 'Local stack', 'Add scanning rigor', 'Hook-side enforcement']}>
 
@@ -184,7 +154,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The alias selects Hermes; the follow-up `setup guardrail --connector hermes` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
+The alias selects Hermes; the follow-up `setup guardrail --connector hermes` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/guardrail), which validates its endpoint and API-key environment variable.
 
 </Tab>
 
@@ -192,17 +162,15 @@ The alias selects Hermes; the follow-up `setup guardrail --connector hermes` swa
 
 Hermes has no proxy enforcement, but its pre-tool hook can enforce directly:
 
-```yaml
-connector_hooks:
-  hermes:
-    enabled: true
-    mode: action          # observe (default) | action
-    fail_mode: open       # Hermes is always fail-open at the host boundary
+```bash
+defenseclaw setup hermes --mode action
 ```
 
-Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`,
-Hermes's pre-tool-call hook blocks only when DefenseClaw returns valid
-synchronous Hermes block JSON. A `confirm` result is recorded and alerted but
+On a host that guards several connectors,
+`defenseclaw setup guardrail --connector hermes --mode action` switches only
+Hermes. Reload each Hermes host afterwards. In action mode, Hermes's
+pre-tool-call hook blocks only when DefenseClaw returns valid synchronous
+Hermes block JSON. A `confirm` result is recorded and alerted but
 returns no hook output because Hermes has no native ask/approve or general
 message response; the TUI can review the audit event but cannot resume the
 call. The standalone enterprise profile blocks it instead (see above). A requested global/per-connector
@@ -214,17 +182,17 @@ remains fail-open.
 
 </Tabs>
 
-#### Decision aids — should I turn this on?
+### Decision aids — should I turn this on?
 
 <Cards>
   <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes has no native ask/approve response; confirm is audit/alert-only and returns no hook output." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector hermes` when tuning Hermes." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
+  <Card href="/docs/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector hermes`." />
+  <Card href="/docs/policies/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
+  <Card href="/docs/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -324,15 +292,15 @@ only in the image; nothing on your host changes.
   starts. `/etc/hermes/.env`, which Hermes applies last, pins safe mode and
   project plugins off. The refusal names the file; remove it and start Hermes
   again.
-- **Fail closed.** Hermes ignores a hook's exit status and treats a timeout as
-  no opinion, so the sandbox hook prints a Hermes block directive on every
+- **Fail closed.** Hermes 0.19, the version the image installs, ignores a
+  hook's exit status and treats a timeout as no opinion, so the sandbox hook prints a Hermes block directive on every
   failure: missing token, ingress down, or a bad reply. It does so well inside
   the 30-second hook timeout.
 - **Blocks on screen.** Hermes 0.19 shows nothing for a tool call a hook
   blocked: the reason goes to the model as the tool's error, and the terminal
   shows only `preparing terminal…`. A root-owned module in the image prints
   the reason under that line, the way Hermes prints its own tool lines, for
-  example `┊ ✗ terminal blocked by DefenseClaw rule <ID>: <title>. …`. It
+  example `┊ ✗ terminal blocked: DefenseClaw policy blocked this action (rule <ID>: <title>). …`. It
   prints only to a terminal, and what the model gets is unchanged.
 - **Known gaps.** An agent can still start a second Hermes from a tool call,
   for example by running the pinned binary directly. That start skips the
@@ -438,14 +406,43 @@ What reduces it:
   `--ignore-user-config`.
 - Use EDR process protection so users cannot stop or kill the hook process.
 
+**Other hooks in `config.yaml`.** Hermes runs every hook registered for an event, in order, and a
+`pre_tool_call` hook can rewrite the tool input, so a hook added after
+DefenseClaw's could change a command DefenseClaw already checked. Hermes has
+no way to lock or order hooks. On Linux and macOS hosts with the standalone
+enterprise profile, DefenseClaw's Hermes hook runs the
+[foreign-hook guard](/docs/enterprise/foreign-hook-guard) before each tool
+call: while `config.yaml`, or the managed-scope `config.yaml` in the folder
+`HERMES_MANAGED_DIR` names, has a hook entry that is not DefenseClaw's and
+that your organization has not approved, tool calls are blocked with a
+message that names the file and the digest to approve, and the guardian
+removes the entry (with a backup). A Hermes process that started with the
+entry keeps running it, so it stays blocked until Hermes restarts. The
+`output_spill` and `outbound` settings under `hooks` are not hooks; the
+guard leaves them alone.
+
 See R1, R5 and R18 in the
 [enterprise threat model](/docs/enterprise/threat-model#residual-risks).
 
 ## Disable
 
+If Hermes is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off Hermes alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector hermes --yes
 ```
+
+Both keep Hermes's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop Hermes from the configured
+connectors instead, run `defenseclaw setup remove hermes --yes`; add `--force`
+when it is the last connector.
 
 Disabling removes only DefenseClaw's entries: its hooks from `config.yaml`,
 which keeps every byte outside the `hooks` mapping (comments included), and

@@ -450,9 +450,13 @@ export function buildCommand(
     }
   }
 
+  // The rule pack applies in both modes: setup guardrail writes
+  // guardrail.rule_pack_dir whatever the mode, and observe mode logs the
+  // findings of that pack.
+  lines.push(`--rule-pack ${s.rulePack}`);
+
   // Action-mode-only enforcement knobs.
   if (s.mode === 'action') {
-    lines.push(`--rule-pack ${s.rulePack}`);
     if (s.blockMessage.trim()) {
       lines.push(`--block-message ${quote(s.blockMessage)}`);
     }
@@ -463,7 +467,7 @@ export function buildCommand(
       lines.push('--no-human-approval');
     }
   } else {
-    // Observe mode silently ignores HITL / rule-pack / block-message
+    // Observe mode silently ignores HITL / block-message
     // server-side. Warn here so the operator notices.
     if (s.humanApproval) {
       warnings.push(
@@ -961,8 +965,8 @@ export function CommandGenerator() {
           title="Rule pack"
           subtitle={
             state.mode === 'action'
-              ? 'Bundled rule-pack profile. Picks the directory under ~/.defenseclaw/policies/guardrail/.'
-              : 'Rule packs only apply when --mode is action.'
+              ? 'Bundled rule-pack profile under ~/.defenseclaw/policies/guardrail/. In action mode it decides what blocks and what alerts.'
+              : 'Bundled rule-pack profile under ~/.defenseclaw/policies/guardrail/. In observe mode it decides what gets logged.'
           }
         >
           <SegmentedControl<RulePack>
@@ -974,7 +978,6 @@ export function CommandGenerator() {
             ]}
             value={state.rulePack}
             onChange={(v) => update('rulePack', v)}
-            disabled={state.mode !== 'action'}
           />
         </Section>
 
@@ -1293,8 +1296,8 @@ function SegmentedControl<T extends string>({
             className={[
               'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
               isActive
-                ? 'bg-[var(--brand-cisco)]/15 text-[var(--brand-cisco-strong)]'
-                : 'text-fd-muted-foreground hover:text-fd-foreground',
+                ? 'border border-[var(--brand-cisco)] bg-[var(--brand-cisco)]/15 text-[var(--brand-cisco-strong)]'
+                : 'border border-transparent text-fd-muted-foreground hover:text-fd-foreground',
               disabled ? 'cursor-not-allowed' : '',
             ].join(' ')}
           >
@@ -1406,7 +1409,7 @@ function Field({
         inputMode={inputMode}
         onChange={(e) => onChange(e.target.value)}
         className={[
-          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
           'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
           disabled ? 'cursor-not-allowed opacity-60' : '',
         ].join(' ')}
@@ -1474,7 +1477,7 @@ function TextArea({
         rows={3}
         onChange={(e) => onChange(e.target.value)}
         className={[
-          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+          'rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
           'focus:border-[var(--brand-cisco)] focus:outline-none focus:ring-1 focus:ring-[var(--brand-cisco)]',
         ].join(' ')}
       />

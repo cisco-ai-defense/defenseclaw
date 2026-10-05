@@ -383,7 +383,7 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
         code: 'SUPP_OVER_BROAD',
         message: `Suppression "${supp.id || '(unnamed)'}" matches every finding. This will silence real signals.`,
         location: `suppressions.finding.${supp.id}`,
-        fix: 'Scope the pattern to a finding ID prefix (e.g. ^SEC-AWS-) or specific judge category.',
+        fix: 'Scope the pattern to one PII-judge finding ID (e.g. JUDGE-PII-PHONE) and a narrow entity pattern.',
       });
     }
   }

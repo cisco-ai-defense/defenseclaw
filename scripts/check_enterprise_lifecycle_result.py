@@ -157,6 +157,10 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         problems.append("security_complete is true, want false")
     # The warning texts follow the problems in the failure output.
     allowed = set(args.allow_warning)
+    # security_incomplete explains a false security_complete, which
+    # --complete and --security-incomplete check on their own.
+    if document["security_complete"] is False:
+        allowed.add("security_incomplete")
     for message in document.get("warnings") or []:
         if message["code"] not in allowed:
             problems.append(f"unexpected warning {message['code']}")

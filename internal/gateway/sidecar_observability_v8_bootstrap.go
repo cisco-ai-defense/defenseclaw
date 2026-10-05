@@ -48,7 +48,14 @@ import (
 )
 
 const (
-	sidecarObservabilityV8CloseTimeout      = 30 * time.Second
+	sidecarObservabilityV8CloseTimeout = 30 * time.Second
+	// sidecarObservabilityV8ShutdownTimeout bounds each telemetry flush when
+	// the gateway stops. Run may try twice (the normal close, then its deferred
+	// retry), and both must fit in the 10s that `defenseclaw-gateway stop`
+	// waits before it escalates to signals: a down or refusing collector
+	// otherwise held the stop for about 20s and the process was killed
+	// (GAP-2100).
+	sidecarObservabilityV8ShutdownTimeout   = 4 * time.Second
 	sidecarDeliveryHealthPersistenceTimeout = 2 * time.Second
 	sidecarDeliveryHealthAction             = "telemetry-destination"
 )
@@ -296,8 +303,9 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		Secrets:  sidecarObservabilityV8SecretResolver{credentialsDir: s.currentConfig().ObservabilityCredentialsDir()},
 		CALoader: destinations.CAFileLoaderFunc(sidecarLoadObservabilityV8CA),
 		// Exporters check each destination, then connect through the
-		// standalone enterprise.network proxy when one is set.
-		Resolver: net.DefaultResolver, Dialer: enterpriseEgressDialer{direct: &net.Dialer{}},
+		// standalone enterprise.network proxy when one is set, otherwise
+		// through HTTPS_PROXY (NO_PROXY and loopback connect directly).
+		Resolver: net.DefaultResolver, Dialer: telemetryEgressDialer{direct: &net.Dialer{}},
 		Warnings: push.WarningObserverFunc(func(warning push.Warning) {
 			s.observeObservabilityV8Warning(warning)
 		}),
@@ -322,7 +330,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		ServiceInstanceID:     gatewaylog.SidecarInstanceID(),
 		DefenseClawInstanceID: gatewaylog.SidecarInstanceID(),
 		TenantID:              cfg.TenantID, WorkspaceID: cfg.WorkspaceID,
-		DeploymentMode: cfg.DeploymentMode, ConnectorMode: string(cfg.Claw.Mode),
+		DeploymentMode: cfg.DeploymentMode, ConnectorMode: observabilityClawMode(cfg),
 		DiscoverySource: cfg.DiscoverySource, DeviceKeyFile: cfg.Gateway.DeviceKeyFile,
 		GenerationPipelines: destinationFactory.GenerationPipelineFactory(prometheus.Options{}),
 	})
@@ -712,7 +720,11 @@ func (owner *sidecarOwnedObservabilityV8Runtime) reload(
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) closeWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), sidecarObservabilityV8CloseTimeout)
+	return owner.closeWithin(sidecarObservabilityV8CloseTimeout)
+}
+
+func (owner *sidecarOwnedObservabilityV8Runtime) closeWithin(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return owner.close(ctx)
 }
@@ -764,7 +776,7 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 		s.bindObservabilityV8ConsumersLocked()
 	}
 	s.observabilityV8Mu.Unlock()
-	if err := owner.closeWithTimeout(); err != nil {
+	if err := owner.closeWithin(sidecarObservabilityV8ShutdownTimeout); err != nil {
 		return err
 	}
 	if s.health != nil {
@@ -777,6 +789,16 @@ func (s *Sidecar) closeOwnedObservabilityV8Runtime() error {
 	}
 	s.observabilityV8Mu.Unlock()
 	return nil
+}
+
+// observabilityV8ShutdownFlushWarning is the gateway.log line written when the
+// telemetry runtime cannot finish its flush within the shutdown bound. The stop
+// itself succeeded, so it is a warning, not an "Error:" line (GAP-2166).
+func observabilityV8ShutdownFlushWarning() string {
+	return fmt.Sprintf("[sidecar] WARNING: telemetry flush on shutdown did not finish within %s; "+
+		"unsent telemetry was dropped. A telemetry destination is probably unreachable: "+
+		"check it with 'defenseclaw setup observability test <name>'. The gateway stopped normally.\n",
+		sidecarObservabilityV8ShutdownTimeout)
 }
 
 // observabilityV8ActivePlanDigest returns the plan identity actually owned by
@@ -1156,3 +1178,15 @@ var (
 	_ config.ObservabilityV8SecretResolver       = sidecarObservabilityV8SecretResolver{}
 	_ config.ObservabilityV8CredentialResolver   = sidecarObservabilityV8SecretResolver{}
 )
+
+// observabilityClawMode is the gateway-wide defenseclaw.claw.mode resource
+// attribute. With several connectors active, the configured claw mode is only
+// the roster's first connector, and stamping it on every record showed one
+// agent's traffic as another's; each record already names its own agent, so
+// the attribute is left out then.
+func observabilityClawMode(cfg *config.Config) string {
+	if cfg == nil || len(cfg.ActiveConnectors()) > 1 {
+		return ""
+	}
+	return string(cfg.Claw.Mode)
+}

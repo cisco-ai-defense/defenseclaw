@@ -45,6 +45,9 @@ func TestTrustedHomeTildeLeavesOtherShapesPartial(t *testing.T) {
 		{"other expansion", "cat ~/.ssh/id_rsa $EXTRA", "/sandbox"},
 		{"tilde command name", "~/bin/tool --flag", "/sandbox"},
 		{"background", "cat ~/.ssh/id_rsa &", "/sandbox"},
+		{"redirect after a list", "true; echo x >> ~/.ssh/id_rsa", "/sandbox"},
+		{"redirect to another user", "echo x >> ~alice/.ssh/id_rsa", "/sandbox"},
+		{"redirect with a prefix assignment", "HOME=/tmp echo x >> ~/.ssh/id_rsa", "/sandbox"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{
@@ -75,6 +78,37 @@ func TestRewriteTrustedPOSIXHomeTilde(t *testing.T) {
 	for _, source := range []string{"cat /etc/hosts", "cat '~/a'", "a; cat ~/b", "cat ~/a | wc -l"} {
 		if got, ok := rewriteTrustedPOSIXHomeTilde(source, "/sandbox"); ok {
 			t.Fatalf("%q rewritten to %q", source, got.source)
+		}
+	}
+}
+
+// GAP-1666: a "~/" redirect target of a lone command resolves in the
+// trusted home, as its "~/" operands do.
+func TestTrustedHomeTildeRedirectTarget(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		access  PathAccess
+		want    string
+	}{
+		{"echo dccert-block-marker >> ~/.ssh/id_ed25519", PathAccessAppend, "~/.ssh/id_ed25519"},
+		{"echo dccert-block-marker > ~/.ssh/id_rsa", PathAccessWrite, "~/.ssh/id_rsa"},
+		{"cat ~/.ssh/config > ~/.ssh/id_ed25519", PathAccessWrite, "~/.ssh/id_ed25519"},
+	} {
+		facts := Analyze(Input{
+			Tool: "shell", Command: tc.command, CWD: "/work/app",
+			ActiveHome: "/sandbox", DialectHint: DialectPOSIX,
+		})
+		if !facts.Authoritative() {
+			t.Fatalf("%q is partial: %+v", tc.command, facts.Parse)
+		}
+		found := false
+		for _, path := range facts.Paths {
+			if path.Access == tc.access && path.Value == tc.want && path.Resolved == "/sandbox"+tc.want[1:] {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%q paths = %+v, want %s %s in the active home", tc.command, facts.Paths, tc.access, tc.want)
 		}
 	}
 }

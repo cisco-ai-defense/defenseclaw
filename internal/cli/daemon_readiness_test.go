@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -48,8 +49,16 @@ func (fn readinessRoundTripFunc) RoundTrip(request *http.Request) (*http.Respons
 }
 
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
-	if defaultStartReadinessTimeout != 60*time.Second {
-		t.Fatalf("default start readiness timeout = %s, want 60s", defaultStartReadinessTimeout)
+	// A loaded Windows host took 142 s before the API listened (GAP-1206).
+	want := 60 * time.Second
+	if runtime.GOOS == "windows" {
+		want = 600 * time.Second
+	}
+	if defaultStartReadinessTimeout != want {
+		t.Fatalf("default start readiness timeout = %s, want %s", defaultStartReadinessTimeout, want)
+	}
+	if gatewayStartLockWait <= defaultStartReadinessTimeout {
+		t.Fatalf("start lock wait %s must exceed the readiness timeout %s", gatewayStartLockWait, defaultStartReadinessTimeout)
 	}
 }
 
@@ -380,6 +389,9 @@ func TestGatewaySnapshotReadyRetriesUnavailableTelemetryHealth(t *testing.T) {
 }
 
 func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *testing.T) {
+	previous := startupRetriesSQLiteIO
+	t.Cleanup(func() { startupRetriesSQLiteIO = previous })
+	startupRetriesSQLiteIO = false
 	for _, primary := range []float64{5, 6} {
 		t.Run(fmt.Sprintf("sqlite-primary-%v", primary), func(t *testing.T) {
 			snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
@@ -465,6 +477,64 @@ func TestGatewaySnapshotReadyRetriesOnlyRecoverableEventHistoryContention(t *tes
 	}
 }
 
+// GAP-1519: on Windows an event-history SQLite I/O error during startup (an
+// antivirus scan holding a large audit.db) is waited out, not fatal.
+func TestGatewaySnapshotReadyRetriesEventHistoryIOWhenThePlatformDoes(t *testing.T) {
+	previous := startupRetriesSQLiteIO
+	t.Cleanup(func() { startupRetriesSQLiteIO = previous })
+	startupRetriesSQLiteIO = true
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	snap.Telemetry = gateway.SubsystemHealth{
+		State: gateway.StateError,
+		Details: map[string]interface{}{
+			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
+			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+		},
+	}
+	ready, err := gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if ready || err != nil {
+		t.Fatalf("io readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+	// GAP-1796: health omits a zero primary code (-1 = absent here).
+	for _, primary := range []float64{0, 9, -1} {
+		snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+		snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = primary
+		if primary < 0 {
+			delete(snap.Telemetry.Details, "event_history_last_sqlite_primary_code")
+		}
+		ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+		if ready || err != nil {
+			t.Fatalf("deadline/%v readiness = %v, error = %v; want retryable not-ready", primary, ready, err)
+		}
+	}
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "full"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(13)
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil {
+		t.Fatal("a full disk must still fail at once")
+	}
+	// GAP-1603: the failure names the cause in plain words.
+	if !strings.Contains(err.Error(), "event_history=sqlite_write_failed/full): audit events cannot be written because the disk holding the audit database is full") {
+		t.Fatalf("error = %v, want the plain cause and SQLite class", err)
+	}
+	// GAP-1790: a write that timed out on a large audit.db is waited out on
+	// every OS (a macOS start failed this way, the next start worked); an
+	// I/O error stays fatal outside Windows.
+	startupRetriesSQLiteIO = false
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "deadline"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(9)
+	ready, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if ready || err != nil {
+		t.Fatalf("deadline elsewhere readiness = %v, error = %v; want retryable not-ready", ready, err)
+	}
+	snap.Telemetry.Details["event_history_last_sqlite_class"] = "io"
+	snap.Telemetry.Details["event_history_last_sqlite_primary_code"] = float64(10)
+	_, err = gatewaySnapshotReady(snap, daemonReadinessRequirements{guardrailEnabled: true, telemetryEnabled: true})
+	if err == nil || !strings.Contains(err.Error(), "event_history=sqlite_write_failed/io") {
+		t.Fatalf("io elsewhere = %v; want an immediate failure naming the class", err)
+	}
+}
+
 func telemetryReadinessFatalError(t *testing.T, details map[string]interface{}) string {
 	t.Helper()
 	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
@@ -527,9 +597,11 @@ func TestGatewaySnapshotReadyReportsBoundedTelemetryFailureBranches(t *testing.T
 	t.Run("event history", func(t *testing.T) {
 		got := telemetryReadinessFatalError(t, map[string]interface{}{
 			"generation": float64(9), "event_history_failure": "sqlite_write_failed",
-			"event_history_last_sqlite_class": "io", "event_history_last_sqlite_primary_code": float64(10),
+			"event_history_last_sqlite_class": "full", "event_history_last_sqlite_primary_code": float64(13),
 		})
-		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed)"
+		want := "gateway telemetry failed during startup: error (generation=9; event_history=sqlite_write_failed/full): " +
+			"audit events cannot be written because the disk holding the audit database is full; " +
+			"free space on that disk (the gateway resumes writing once there is room)"
 		if got != want {
 			t.Fatalf("telemetry event-history diagnostic = %q, want %q", got, want)
 		}
@@ -824,6 +896,36 @@ func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testi
 		if seen[name] != want {
 			t.Fatalf("%s auth probes = %d, want %d", name, seen[name], want)
 		}
+	}
+}
+
+func TestVerifyRotationConnectorOTLPAuthenticationSkipsOpenHandsWithoutExporter(t *testing.T) {
+	// GAP-1513: OpenHands has no native OTLP exporter off macOS, so setup
+	// mints no scoped credential and rotation must not require one.
+	originalLoader := loadRotationOTLPPathToken
+	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
+	codexToken := strings.Repeat("c", 64)
+	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
+		if scope == connector.OTLPScopeCodex {
+			return codexToken, nil
+		}
+		return "", nil
+	}
+	seen := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.Header.Get("X-DefenseClaw-Source")]++
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	err := verifyRotationConnectorOTLPAuthentication(
+		srv.Client(), srv.URL+"/status", t.TempDir(), []string{"codex", "openhands"},
+	)
+	if err != nil {
+		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v, want OpenHands skipped", err)
+	}
+	if seen["codex"] != 1 || seen["openhands"] != 0 {
+		t.Fatalf("probes = %v, want one codex probe and none for openhands", seen)
 	}
 }
 
@@ -1673,8 +1775,9 @@ func TestPrintDaemonStartResultOnlyRendersReadySuccess(t *testing.T) {
 	out := captureStdout(t, func() {
 		printDaemonStartResult(42, readinessSnapshot(gateway.StateRunning, gateway.StateDisabled))
 	})
-	if !strings.Contains(out, "OK (PID 42)") || !strings.Contains(out, "routing:off") || strings.Contains(out, "STARTING") {
-		t.Fatalf("output = %q, want READY-only success rendering", out)
+	// A disabled subsystem is not in use, so it is not listed as "off".
+	if !strings.Contains(out, "OK (PID 42)") || strings.Contains(out, "routing") || strings.Contains(out, "STARTING") {
+		t.Fatalf("output = %q, want READY-only success rendering without unused subsystems", out)
 	}
 }
 

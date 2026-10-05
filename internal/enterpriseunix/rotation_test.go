@@ -14,6 +14,8 @@ package enterpriseunix
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,10 +55,14 @@ type rotationHost struct {
 	keyA       string
 	rendered   map[string]string // user -> key fingerprint of their hooks
 	failStaged bool              // bob fails whenever a key is staged
+	// holdBack keeps a user on the key their hooks carry while no key is
+	// staged (a guardian that cannot move them back yet).
+	holdBack bool
 	// failed are targets every reconcile reports failed, beside the users.
 	failed     []enterprisehooks.CredentialAttestationTarget
 	reconciles int
 	events     []string
+	onProof    func() // runs on every listener proof
 }
 
 func newRotationHost(t *testing.T) *rotationHost {
@@ -83,6 +89,9 @@ func newRotationHost(t *testing.T) *rotationHost {
 		return 200, body, nil
 	}
 	h.env.ListenerProof = func(_ context.Context, name, keyID, nonce string) (string, error) {
+		if h.onProof != nil {
+			h.onProof()
+		}
 		for _, key := range h.liveKeys() {
 			for _, uid := range []string{"1001", "1002"} {
 				credential, _ := connector.UserScopedHookAPIToken(key, name, uid)
@@ -116,9 +125,11 @@ func (h *rotationHost) reconcileLockHeld() bool {
 	return false
 }
 
+// liveKeys are the keys the gateway accepts: the committed, staged and
+// retiring keys on disk.
 func (h *rotationHost) liveKeys() []string {
 	var keys []string
-	for _, path := range []string{h.env.committedUserKeyPath(), h.env.stagedUserKeyPath()} {
+	for _, path := range []string{h.env.committedUserKeyPath(), h.env.stagedUserKeyPath(), h.env.retiringUserKeyPath()} {
 		if data, err := os.ReadFile(path); err == nil {
 			keys = append(keys, strings.TrimSpace(string(data)))
 		}
@@ -134,24 +145,46 @@ func (h *rotationHost) liveKeyIDs() []string {
 	return ids
 }
 
-// reconcile renders both users from the current key, as the guardian does:
-// a user already on it is verified, anyone else is repaired.
+// reconcile renders both users from the staged key while the guardian's
+// prepare record names it, else from the committed one, as the guardian
+// does: a user already on it is verified, anyone else is repaired. A user
+// whose key the gateway no longer accepts is recorded as refused.
 func (h *rotationHost) reconcile() {
-	keys := h.liveKeys()
-	keyID := connector.UserScopedTokenKeyFingerprint(keys[len(keys)-1])
+	key := h.committedKey()
+	var transaction enterprisehooks.CredentialTransaction
+	if data, err := os.ReadFile(h.env.transactionPath()); err == nil {
+		if transaction, err = enterprisehooks.ParseCredentialTransaction(data); err != nil {
+			h.t.Fatal(err)
+		}
+		if staged, err := os.ReadFile(h.env.stagedUserKeyPath()); err == nil &&
+			transaction.RendersNext(connector.UserScopedTokenKeyFingerprint(key), connector.UserScopedTokenKeyFingerprint(strings.TrimSpace(string(staged)))) {
+			key = strings.TrimSpace(string(staged))
+		}
+	}
+	keyID := connector.UserScopedTokenKeyFingerprint(key)
+	for _, user := range []string{"alice", "bob"} {
+		if !slices.Contains(h.liveKeyIDs(), h.rendered[user]) {
+			h.events = append(h.events, "refused "+user)
+		}
+	}
 	h.reconciles++
 	attestation := enterprisehooks.CredentialAttestation{
 		Version: enterprisehooks.CredentialAttestationVersion, ID: fmt.Sprintf("%032x", h.reconciles),
 		UpdatedAt: "2026-09-29T00:00:00Z", ManifestSHA256: strings.Repeat("d", 64), KeyID: keyID,
+		OperationID: transaction.OperationID, Phase: transaction.Phase,
 		Targets: []enterprisehooks.CredentialAttestationTarget{},
 	}
 	for index, user := range []string{"alice", "bob"} {
 		target := enterprisehooks.CredentialAttestationTarget{Connector: "codex", User: user, UID: 1001 + index, State: enterprisehooks.CredentialTargetCurrent}
+		credential, _ := connector.UserScopedHookAPIToken(key, "codex", fmt.Sprint(target.UID))
+		target.CredentialID = connector.UserScopedCredentialKeyID(credential)
 		switch {
-		case user == "bob" && h.failStaged && len(keys) == 2:
-			target.State, target.UID = enterprisehooks.CredentialTargetFailed, -1
+		case user == "bob" && h.failStaged && exists(h.env.stagedUserKeyPath()):
+			target.State, target.UID, target.CredentialID = enterprisehooks.CredentialTargetFailed, -1, ""
 		case h.rendered[user] == keyID:
 			target.Credentials, target.Verified = true, true
+		case h.holdBack && !exists(h.env.stagedUserKeyPath()):
+			target.Credentials = true
 		default:
 			h.rendered[user] = keyID
 			target.Credentials = true
@@ -160,6 +193,10 @@ func (h *rotationHost) reconcile() {
 		attestation.Targets = append(attestation.Targets, target)
 	}
 	attestation.Targets = append(attestation.Targets, h.failed...)
+	if ledger, err := os.ReadFile(filepath.Join(h.env.P(h.env.Layout.GuardianAuthDir), managed.HookGuardianAuthorizationFile)); err == nil {
+		sum := sha256.Sum256(ledger)
+		attestation.AuthorizationSHA256 = hex.EncodeToString(sum[:])
+	}
 	data, _ := json.Marshal(attestation)
 	if err := os.WriteFile(h.env.attestationPath(), data, 0o600); err != nil {
 		h.t.Fatal(err)
@@ -176,7 +213,7 @@ func (h *rotationHost) committedKey() string {
 
 func (h *rotationHost) requireNoRotationLeft() {
 	h.t.Helper()
-	for _, path := range []string{h.env.stagedUserKeyPath(), h.env.rotationIntentPath()} {
+	for _, path := range []string{h.env.stagedUserKeyPath(), h.env.retiringUserKeyPath(), h.env.transactionPath(), h.env.rotationIntentPath()} {
 		if exists(path) {
 			h.t.Fatalf("%s is left behind", path)
 		}
@@ -240,6 +277,30 @@ func TestRotateCredentialsMovesEveryUserBeforeTheKeyCommits(t *testing.T) {
 	if !strings.Contains(result.Errors[0].Message, "codex for user bob") {
 		t.Fatalf("the failure does not name the user: %+v", result.Errors)
 	}
+	// Alice was already on the new key; the rollback kept accepting it
+	// until the guardian had moved her back.
+	if slices.Contains(h.events, "refused alice") {
+		t.Fatalf("the rollback refused a user who had moved: %v", h.events)
+	}
+
+	// A rollback that cannot move alice back keeps accepting the new key
+	// and keeps the rotation record; the next run finishes the rollback
+	// once the guardian has moved her.
+	h = newRotationHost(t)
+	h.failStaged, h.holdBack = true, true
+	requireError(t, h.run(Options{Action: ActionRotateCredentials}), codeRollbackFailed)
+	if len(h.liveKeyIDs()) != 2 || !exists(h.env.rotationIntentPath()) {
+		t.Fatalf("an unfinished rollback stopped accepting the new key: keys=%v", h.liveKeyIDs())
+	}
+	if result := h.run(Options{Action: ActionReconcile}); !hasWarning(result, codeRotationRecovered) || len(h.liveKeyIDs()) != 2 {
+		t.Fatalf("recovery retired the new key before alice was back: %+v keys=%v", result.Warnings, h.liveKeyIDs())
+	}
+	h.holdBack = false
+	requireOK(t, h.run(Options{Action: ActionReconcile}))
+	h.requireNoRotationLeft()
+	if h.committedKey() != h.keyA || h.rendered["alice"] != idA || slices.Contains(h.events, "refused alice") {
+		t.Fatalf("the rollback did not finish on key A: users=%v events=%v", h.rendered, h.events)
+	}
 }
 
 // One account's agent that the guardian could not protect (an agent
@@ -290,16 +351,32 @@ func TestRotateCredentialsSkipsTargetsWithoutACredential(t *testing.T) {
 	}
 }
 
-// status reports a rotation that did not finish. The next lifecycle run
-// rolls back one interrupted before its commit and completes one
-// interrupted after the rename.
+// An interrupt (Ctrl+C) rolls the rotation back before the run ends, so one
+// key stays accepted. status reports a rotation that was killed instead.
+// The next lifecycle run rolls back one killed before its commit and
+// completes one killed after the rename, and an uninstall removes the
+// staged key.
 func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	h := newRotationHost(t)
 	idA := connector.UserScopedTokenKeyFingerprint(h.keyA)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.onProof = cancel
+	result := Run(ctx, h.env, Options{Action: ActionRotateCredentials})
+	h.onProof = nil
+	requireError(t, result, codeRotation)
+	h.requireNoRotationLeft()
+	if h.committedKey() != h.keyA || h.rendered["alice"] != idA || !slices.Equal(h.liveKeyIDs(), []string{idA}) || slices.Contains(h.events, "refused alice") {
+		t.Fatalf("an interrupted rotation did not settle on key A: users=%v events=%v", h.rendered, h.events)
+	}
+
 	keyB := strings.Repeat("b2", 32)
 	idB := connector.UserScopedTokenKeyFingerprint(keyB)
 	interrupt := func() {
-		if err := h.env.saveRotationIntent(rotationIntent{SchemaVersion: rotationSchemaVersion, OperationID: strings.Repeat("0", 32), PreviousKeyID: idA, NextKeyID: idB}); err != nil {
+		intent := rotationIntent{SchemaVersion: rotationSchemaVersion, OperationID: strings.Repeat("0", 32), PreviousKeyID: idA, NextKeyID: idB}
+		if err := h.env.saveRotationIntent(intent); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.env.saveTransaction(intent, enterprisehooks.CredentialPhasePrepare, strings.Repeat("d", 64)); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(h.env.stagedUserKeyPath(), []byte(keyB+"\n"), 0o600); err != nil {
@@ -311,10 +388,10 @@ func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, codeRotationIncomplete) {
 		t.Fatalf("status does not report the unfinished rotation: %+v", status.Warnings)
 	}
-	result := h.run(Options{Action: ActionReconcile})
+	result = h.run(Options{Action: ActionReconcile})
 	requireOK(t, result)
 	h.requireNoRotationLeft()
-	if !hasWarning(result, codeRotationRecovered) || h.committedKey() != h.keyA || h.rendered["alice"] != idA {
+	if !hasWarning(result, codeRotationRecovered) || h.committedKey() != h.keyA || h.rendered["alice"] != idA || slices.Contains(h.events, "refused alice") {
 		t.Fatalf("an uncommitted rotation was not rolled back: warnings=%+v users=%v", result.Warnings, h.rendered)
 	}
 
@@ -327,5 +404,46 @@ func TestInterruptedRotationIsSettledByTheNextRun(t *testing.T) {
 	h.requireNoRotationLeft()
 	if !hasWarning(result, codeRotationRecovered) || h.committedKey() != keyB {
 		t.Fatalf("a committed rotation was not completed: warnings=%+v", result.Warnings)
+	}
+
+	interrupt()
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	h.requireNoRotationLeft()
+}
+
+// A rotation takes a reconcile as proof only when it ran under the
+// rotation's own operation and phase, attests each credential the key
+// derives for that account, and names the account the rotation began with.
+func TestOnKeyTakesOnlyThisPhasesBoundProof(t *testing.T) {
+	key, manifest := strings.Repeat("a1", 32), strings.Repeat("d", 64)
+	attest := func(uid, credentialUID int) enterprisehooks.CredentialAttestation {
+		credential, err := connector.UserScopedHookAPIToken(key, "codex", fmt.Sprint(credentialUID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return enterprisehooks.CredentialAttestation{
+			Version: enterprisehooks.CredentialAttestationVersion, ManifestSHA256: manifest,
+			KeyID: connector.UserScopedTokenKeyFingerprint(key), OperationID: "op1", Phase: enterprisehooks.CredentialPhaseRollback,
+			Targets: []enterprisehooks.CredentialAttestationTarget{{
+				Connector: "codex", User: "alice", UID: uid, State: enterprisehooks.CredentialTargetCurrent,
+				Credentials: true, Verified: true, CredentialID: connector.UserScopedCredentialKeyID(credential),
+			}},
+		}
+	}
+	want := credentialTargets(attest(1001, 1001))
+	if done, fatal := onKey(attest(1001, 1001), key, "op1", enterprisehooks.CredentialPhaseRollback, manifest, want); !done || fatal != "" {
+		t.Fatalf("bound proof refused: done=%v fatal=%q", done, fatal)
+	}
+	prepare, other := attest(1001, 1001), attest(1001, 1001)
+	prepare.Phase, other.OperationID = enterprisehooks.CredentialPhasePrepare, "op2"
+	for name, attestation := range map[string]enterprisehooks.CredentialAttestation{
+		"prepare phase":        prepare,
+		"other operation":      other,
+		"unbound credential":   attest(1001, 1002),
+		"moved to another uid": attest(1002, 1002),
+	} {
+		if done, fatal := onKey(attestation, key, "op1", enterprisehooks.CredentialPhaseRollback, manifest, want); done || fatal == "" {
+			t.Errorf("%s: accepted as proof (done=%v)", name, done)
+		}
 	}
 }

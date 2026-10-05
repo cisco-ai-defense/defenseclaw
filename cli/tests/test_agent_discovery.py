@@ -113,12 +113,20 @@ def test_devin_windows_version_probes_exact_cli_for_supported_version(monkeypatc
     ]
 
 
+def test_devin_version_probe_accepts_the_longer_linux_revision(monkeypatch) -> None:
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_version_for_binary", lambda *_a, **_k: ("devin 3000.11.3 (9c803229faa4)", ""))
+
+    assert ad._version_for_agent_binary("devin", "/opt/devin/bin/devin", ("--version",)) == ("3000.11.3", "")
+
+
 @pytest.mark.parametrize(
     "output",
     (
         "Devin 3000.4.25 (7e8e528a)",
         "devin 03000.4.25 (7e8e528a)",
         "devin 3000.4.25 (7e8e528g)",
+        "devin 3000.11.3 (abcdefa)",
         "devin 3000.4.25 (7e8e528a) extra",
         "prefix devin 3000.4.25 (7e8e528a)",
         "devin 3000.4.25 runtime 1.2.3",
@@ -264,6 +272,28 @@ def test_discovery_trust_config_honors_config_override(monkeypatch, tmp_path):
 
     assert required is True
     assert prefixes == ("/opt/enterprise/bin",)
+
+
+def test_shared_fresh_scans_probe_once_until_trust_changes(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    calls: list[str] = []
+    trust = [(False, ())]
+
+    def fake_scan(name: str, **_kwargs) -> ad.AgentSignal:
+        calls.append(name)
+        return _signal(name, name == "codex")
+
+    monkeypatch.setattr(ad, "_scan_agent", fake_scan)
+    monkeypatch.setattr(ad, "_ai_discovery_trust_config", lambda _data_dir=None: trust[0])
+    with ad.share_fresh_scans():
+        first = ad.discover_agents(use_cache=False, refresh=True)
+        assert ad.discover_agents(use_cache=False, refresh=True) is first
+        assert len(calls) == len(ad.DISCOVERABLE_CONNECTORS)
+        trust[0] = (False, ("/opt/agents/bin",))
+        assert ad.discover_agents(use_cache=False, refresh=True) is not first
+    assert len(calls) == 2 * len(ad.DISCOVERABLE_CONNECTORS)
+    ad.discover_agents(use_cache=False, refresh=True)
+    assert len(calls) == 3 * len(ad.DISCOVERABLE_CONNECTORS)
 
 
 def test_cache_miss_hit_and_ttl_expiry(monkeypatch, tmp_path):
@@ -580,6 +610,8 @@ def test_devin_canonical_user_mcp_file_is_configuration_evidence(
         ("cursor", (".cursor", "hooks.json")),
         ("devin", (".devin", "hooks.v1.json")),
         ("copilot", (".copilot", "mcp-config.json")),
+        # GAP-1481: the user-level hooks file DefenseClaw writes for Copilot.
+        ("copilot", (".copilot", "hooks", "defenseclaw.json")),
         ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
         ("opencode", (".config", "opencode", "opencode.json")),
@@ -2006,7 +2038,7 @@ def test_cursor_windows_discovery_uses_official_token_bound_agent_root(
     assert signal.version == "2026.07.23-e383d2b"
 
 
-def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
+def test_timeout_keeps_a_slow_agent_installed_with_an_unknown_version(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/codex")
     # M-4: bypass the trusted-prefix file-existence check so we can
@@ -2023,7 +2055,7 @@ def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, t
 
     assert signal.binary_path == os.path.abspath("/usr/local/bin/codex")
     assert signal.config_path == ""
-    assert signal.installed is False
+    assert (signal.installed, signal.version) == (True, "")
     assert "timed out" in signal.error
 
 
@@ -2049,7 +2081,7 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     args, kwargs = calls[0]
     assert args == [os.path.abspath("/opt/bin/codex"), "--version"]
     assert kwargs["shell"] is False
-    assert kwargs["timeout"] == 2.0
+    assert kwargs["timeout"] == ad.VERSION_TIMEOUT_SECONDS
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is False
 
@@ -2079,7 +2111,7 @@ OpenHands CLI 1.16.0
     assert signal.version == "OpenHands CLI 1.16.0"
     args, kwargs = calls[0]
     assert args == [os.path.abspath("/opt/bin/openhands"), "--version"]
-    assert kwargs["timeout"] == 8.0
+    assert kwargs["timeout"] == 30.0
     assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
@@ -2104,7 +2136,8 @@ def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
     assert error == ""
     assert version == "Hermes Agent v0.20.0 (2026.8.3)"
     _, kwargs = calls[0]
-    assert kwargs["timeout"] == 8.0
+    # GAP-1604: its --version runs an update check (17.5 s on Windows).
+    assert kwargs["timeout"] == 30.0
 
 
 @pytest.mark.parametrize(
@@ -2221,7 +2254,7 @@ def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeyp
 
     assert error == ""
     assert version == "OpenHands CLI 1.16.0"
-    assert calls[0][1]["timeout"] == 8.0
+    assert calls[0][1]["timeout"] == 30.0
     assert calls[0][1]["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
@@ -2685,3 +2718,59 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "cached" in rendered
     assert "codex" in rendered
     assert "yes" in rendered
+
+
+def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path):
+    """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
+    so the gateway refused that peer in action mode and setup of another
+    connector did not converge."""
+    binary = tmp_path / "amp"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+
+    def scan(version: str, error: str):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "amp":
+                return _signal(name)
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version=version, error=error,
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan("", f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}"))
+    slow = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    assert (slow.agents["amp"].version, slow.agents["amp"].error) == ("amp 0.0.1", "")
+    assert ad._read_cache(data_dir=tmp_path).agents["amp"].version == "amp 0.0.1"
+
+    os.utime(binary, None)  # replaced after the earlier scan: no stale version
+    changed = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+    assert changed.agents["amp"].version == ""
+
+
+def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):
+    """GAP-1627: setup / setup remove change hook files after the cache was written."""
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: _signal(name, name == "copilot"))
+    hooks = tmp_path / ".copilot" / "hooks" / "defenseclaw.json"
+
+    ad.discover_agents()
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n")
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_kwargs: (_ for _ in ()).throw(AssertionError(name)))
+
+    cached = ad.discover_agents()
+    assert cached.cache_hit is True
+    assert cached.agents["copilot"].configured is True
+    assert Path(cached.agents["copilot"].config_path) == hooks
+
+    hooks.unlink()
+    removed = ad.discover_agents()
+    assert removed.agents["copilot"].configured is False
+    assert removed.agents["copilot"].config_path == ""

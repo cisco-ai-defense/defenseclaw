@@ -2664,6 +2664,7 @@ groups:
   extends:
   - span.core
   - correlation.agent
+  - correlation.interaction
   - correlation.security
   - security.guardrail
   - genai.model

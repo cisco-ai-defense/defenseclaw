@@ -2123,17 +2123,6 @@ func TestHermesSetupRejectsNamedAndMultiplexProfilesBeforeMutation(t *testing.T)
 			}
 			return filepath.Join(root, "config.yaml")
 		}},
-		{"multiplex config", func(t *testing.T, root string) string {
-			path := filepath.Join(root, "config.yaml")
-			if err := os.WriteFile(path, []byte("gateway:\n  multiplex_profiles: true\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return path
-		}},
-		{"multiplex environment", func(t *testing.T, root string) string {
-			t.Setenv("GATEWAY_MULTIPLEX_PROFILES", "yes")
-			return filepath.Join(root, "config.yaml")
-		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := testenv.PrivateTempDir(t)
@@ -2146,10 +2135,43 @@ func TestHermesSetupRejectsNamedAndMultiplexProfilesBeforeMutation(t *testing.T)
 			if err == nil || !strings.Contains(err.Error(), "unsupported by the single-HERMES_HOME connector") {
 				t.Fatalf("Setup error = %v, want unsupported profile topology", err)
 			}
+			// The gateway keeps an earlier setup's hooks after this refusal
+			// instead of rolling them back (GAP-1851).
+			if !errors.Is(err, ErrSetupRefusedUnchanged) {
+				t.Fatalf("Setup error = %v, want ErrSetupRefusedUnchanged", err)
+			}
+			if !strings.Contains(err.Error(), "hermes profile") {
+				t.Fatalf("Setup error = %v, want a hint naming the Hermes command that fixes it", err)
+			}
 			if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
 				t.Fatalf("Setup mutated data dir before rejecting profile topology: %v", statErr)
 			}
 		})
+	}
+}
+
+// Hermes writes its default gateway.multiplex_profiles: true into config.yaml
+// by itself (hermes mcp add, for one). With no named profile under profiles/
+// a multiplexing gateway serves only the default HERMES_HOME, so the
+// single-profile connector admits it (GAP-1844).
+func TestHermesSingleProfileAdmitsDefaultMultiplexWithoutNamedProfiles(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("gateway:\n  multiplex_profiles: true\n  auto_multiplex_migration: true\n  profile_routes: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "profiles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GATEWAY_MULTIPLEX_PROFILES", "true")
+	if err := validateHermesSingleProfile(configPath); err != nil {
+		t.Fatalf("validateHermesSingleProfile = %v, want nil for a default-only multiplex config", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "coder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHermesSingleProfile(configPath); err == nil || !strings.Contains(err.Error(), "hermes profile delete coder") {
+		t.Fatalf("validateHermesSingleProfile = %v, want a named-profile refusal with its fix", err)
 	}
 }
 

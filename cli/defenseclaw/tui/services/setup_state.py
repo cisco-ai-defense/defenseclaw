@@ -71,6 +71,9 @@ class SetupCommandIntent:
     # ``sandbox setup`` may run the OpenShell installer under sudo and builds
     # images for minutes, which need a real terminal.
     terminal: bool = False
+    # What running it breaks, shown in the confirm modal (e.g. "keys
+    # remove" of a key the current config REQUIRES, GAP-2254).
+    consequence: str = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -230,10 +233,91 @@ def missing_credential_rows(rows: Sequence[CredentialRow]) -> tuple[CredentialRo
     return tuple(row for row in rows if row.requirement.lower() == "required" and not row.set)
 
 
+def credential_reload_summary(snapshot: CredentialSnapshot) -> str:
+    """Status line for a finished ``r`` reload of the API keys (GAP-2255).
+
+    "Credentials reloaded: 6, 1 required, all set", or the missing names, or
+    why the list could not be read.
+    """
+
+    if snapshot.error:
+        return f"Could not reload credentials: {snapshot.error}"
+    rows = snapshot.rows
+    required = sum(1 for row in rows if row.requirement.lower() == "required")
+    missing = [row.env_name for row in missing_credential_rows(rows)]
+    text = f"Credentials reloaded: {len(rows)}, {required} required"
+    return f"{text}, missing: {', '.join(missing)}" if missing else f"{text}, all set"
+
+
 # Maps a regional provider id to its config sub-block name. ``vertex_ai`` is
 # the provider id but the persisted block is ``llm.vertex`` (see config.py
 # ``LLMConfig.vertex``); Azure carries an endpoint instead of a region.
 _REGIONAL_BLOCK: dict[str, str] = {"bedrock": "bedrock", "vertex_ai": "vertex", "azure": "azure"}
+
+
+def _all_hook_enforced(connectors: Sequence[str]) -> bool:
+    from defenseclaw.tui.services.overview_state import _HOOK_ENFORCED_CONNECTORS
+
+    return all(str(name).strip().lower() in _HOOK_ENFORCED_CONNECTORS for name in connectors)
+
+
+_EXPORT_TELEMETRY_TASK = "0 Setup → Alerts & telemetry → Export telemetry"
+
+
+def failing_exports(observability: object | None, health: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Names of the enabled exports the live gateway reports as failing.
+
+    Overview said "sf3r9-dead (failing)" and doctor failed it while Setup
+    said "3 exports + local" and readiness passed (GAP-2394).
+    """
+
+    if observability is None or health is None:
+        return ()
+    from defenseclaw.observability.v8_status import destination_health_from_gateway
+
+    details = _get_path(health, "telemetry.details", None)
+    live = destination_health_from_gateway({"details": details}) if isinstance(details, Mapping) else {}
+    return tuple(
+        name
+        for destination in getattr(observability, "destinations", ()) or ()
+        if getattr(destination, "enabled", False)
+        and not getattr(destination, "generated", False)
+        and (name := str(getattr(destination, "name", "") or ""))
+        and (state := live.get(name)) is not None
+        and (state.state == "failing" or state.circuit_state == "open")
+    )
+
+
+def telemetry_readiness_detail(observability: object | None = None, failing: Sequence[str] = ()) -> str:
+    """The readiness Telemetry row: the local log plus the configured exports.
+
+    It said "export destinations are set in the Observability task", a task
+    Setup does not have, and never counted the exports (GAP-2351). A failing
+    export leads, with the next step (GAP-2394).
+    """
+
+    if observability is not None and failing:
+        exports = [
+            destination
+            for destination in getattr(observability, "destinations", ()) or ()
+            if getattr(destination, "enabled", False) and not getattr(destination, "generated", False)
+        ]
+        noun = "export" if len(exports) == 1 else "exports"
+        return (
+            f"{len(failing)} of {len(exports)} {noun} failing: {', '.join(failing)}. "
+            f"Run defenseclaw setup observability test {failing[0]}, or turn it off in {_EXPORT_TELEMETRY_TASK}."
+        )
+    if observability is None:
+        return f"Local audit log is always on; exports are set in {_EXPORT_TELEMETRY_TASK}."
+    exports = [
+        destination
+        for destination in getattr(observability, "destinations", ()) or ()
+        if getattr(destination, "enabled", False) and not getattr(destination, "generated", False)
+    ]
+    if not exports:
+        return f"Local audit log is always on; no exports yet (add one in {_EXPORT_TELEMETRY_TASK})."
+    noun = "export" if len(exports) == 1 else "exports"
+    return f"Local audit log is always on; {len(exports)} {noun} set in {_EXPORT_TELEMETRY_TASK}."
 
 
 def build_readiness_checks(
@@ -243,6 +327,8 @@ def build_readiness_checks(
     credentials: Sequence[CredentialRow],
     queue: RestartQueue = RestartQueue(),
     gateway_status: object | Mapping[str, Any] | None = None,
+    *,
+    observability: object | None = None,
 ) -> tuple[ReadinessCheck, ...]:
     """Build Setup readiness rows using the same status/fix contract as Go."""
 
@@ -258,25 +344,20 @@ def build_readiness_checks(
     connectors = _active_connector_names(cfg)
     if connectors:
         for connector in connectors:
-            checks.append(ReadinessCheck(f"Active Connector: {connector}", "configured", "pass"))
+            # "Connector: claudecode" fits the detail modal's label column;
+            # "Active Connector: claudecode" put the name on a second line
+            # (GAP-2059).
+            checks.append(ReadinessCheck(f"Connector: {connector}", "configured", "pass"))
     else:
         checks.append(
             ReadinessCheck(
-                "Active Connector",
-                "No connector mode is configured.",
+                "Connector",
+                # No fix command: "setup openclaw --yes" told every user to
+                # set up OpenClaw, hook-connector users too (GAP-2134). The
+                # user picks the agent in the Setup form.
+                "No agent is protected yet — Protect an agent → Add or configure a connector, "
+                "or run defenseclaw setup <connector>.",
                 "fail",
-                # Default to OpenClaw with ``--yes`` so anyone that wires this
-                # readiness fix to a quick-action keybinding never accidentally
-                # launches the interactive picker (which blocks on stdin and
-                # is impossible to drive cleanly from the embedded TUI). The
-                # Setup panel's wizard form is still the preferred entry point
-                # — this is the safe fallback if the fix runs unattended.
-                _intent(
-                    "defenseclaw",
-                    ("setup", "openclaw", "--yes"),
-                    "setup openclaw",
-                    "setup",
-                ),
             ),
         )
 
@@ -338,15 +419,22 @@ def build_readiness_checks(
                 "Guardrail",
                 "Guardrail is disabled or config is unavailable.",
                 "warn",
-                _intent("defenseclaw", ("setup", "guardrail"), "setup guardrail", "setup"),
+                _intent(
+                    "defenseclaw",
+                    ("setup", "guardrail", "--non-interactive"),
+                    "setup guardrail",
+                    "setup",
+                ),
             ),
         )
     else:
-        mode = str(_get_path(cfg, "guardrail.mode", "") or "observe")
-        checks.append(ReadinessCheck("Guardrail", f"enabled in {mode} mode", "pass"))
+        checks.append(ReadinessCheck("Guardrail", f"enabled in {guardrail_mode_label(cfg)} mode", "pass"))
 
     missing = list(missing_credential_rows(credentials))
-    if not missing:
+    # The doctor result is only a fallback before the keys list has loaded;
+    # an older doctor run kept "1 required credential(s) missing" after
+    # keys check said every key is set (GAP-1805).
+    if not missing and not credentials:
         missing.extend(
             CredentialRow(env_name=env, requirement="required") for env in _doctor_missing_credentials(doctor)
         )
@@ -374,9 +462,16 @@ def build_readiness_checks(
     # A custom-provider instance overlay supplies base_url/model/keys at
     # resolve time, so binding one is a complete config even when the
     # inline llm.model is blank.
+    judge_on = bool(_get_path(cfg, "guardrail.judge.enabled", False))
     if provider and (model or instance_name):
         detail = f"{provider}/{model}" if model else f"{provider} (via instance {instance_name})"
         checks.append(ReadinessCheck("LLM Config", detail, "pass"))
+    elif not judge_on and connectors and _all_hook_enforced(connectors):
+        # Rules-only install: hook enforcement needs no LLM while the judge
+        # is off (doctor says the same), so this is not a problem (GAP-1160).
+        checks.append(
+            ReadinessCheck("LLM Config", "not required while the LLM judge is disabled", "pass")
+        )
     else:
         checks.append(
             ReadinessCheck(
@@ -458,11 +553,14 @@ def build_readiness_checks(
             ),
         )
 
+    failing = failing_exports(observability, health)
     checks.append(
         ReadinessCheck(
-            "Observability v8",
-            "Canonical routing is active; local SQLite collection is mandatory.",
-            "pass",
+            "Telemetry",
+            # Users only ever see one routing plan, so "canonical" and "v8"
+            # explained nothing (GAP-2221).
+            telemetry_readiness_detail(observability, failing),
+            "warn" if failing else "pass",
         )
     )
 
@@ -701,8 +799,10 @@ def looks_like_secret_value(value: str) -> bool:
     if not stripped:
         return False
     lower = stripped.lower()
+    from defenseclaw.llm_keys import looks_like_key_shape  # noqa: PLC0415
+
     if (
-        stripped.startswith(("sk-", "ghp_", "gho_", "ghs_", "AIza", "AKIA", "ASIA", "eyJ"))
+        looks_like_key_shape(stripped)  # GAP-2594: shapes, shared with the CLI
         or "bearer " in lower
         or "-----BEGIN " in stripped
     ):
@@ -714,6 +814,33 @@ def looks_like_secret_value(value: str) -> bool:
 
 def get_config_value(cfg: object | Mapping[str, Any] | None, key: str, default: Any = "") -> Any:
     return _get_path(cfg, key, default)
+
+
+def guardrail_mode_overrides(cfg: object | Mapping[str, Any] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """The global guardrail mode and the connectors whose own mode differs."""
+
+    mode = str(_get_path(cfg, "guardrail.mode", "") or "").strip() or "observe"
+    overrides: list[tuple[str, str]] = []
+    connectors = _get_path(cfg, "guardrail.connectors", None)
+    if isinstance(connectors, Mapping):
+        for name in sorted(connectors, key=lambda key: str(key).lower()):
+            own = str(_get_path(connectors[name], "mode", "") or "").strip()
+            if own and own != mode:
+                overrides.append((str(name), own))
+    return mode, tuple(overrides)
+
+
+def guardrail_mode_label(cfg: object | Mapping[str, Any] | None) -> str:
+    """The guardrail mode with per-connector overrides: ``action (opencode observe)``.
+
+    Setup said only "action" after ``setup guardrail --connector opencode
+    --mode observe`` (GAP-2325).
+    """
+
+    mode, overrides = guardrail_mode_overrides(cfg)
+    if not overrides:
+        return mode
+    return f"{mode} ({', '.join(f'{name} {own}' for name, own in overrides)})"
 
 
 def set_config_value(cfg: object | dict[str, Any], key: str, value: Any) -> None:

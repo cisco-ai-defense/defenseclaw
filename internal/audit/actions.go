@@ -241,6 +241,18 @@ const (
 	ActionInspectToolBlock            Action = "inspect-tool-block"
 	ActionInspectToolAlert            Action = "inspect-tool-alert"
 	ActionInspectToolAllow            Action = "inspect-tool-allow"
+	ActionInspectRequestConfirm       Action = "inspect-request-confirm"
+	ActionInspectRequestBlock         Action = "inspect-request-block"
+	ActionInspectRequestAlert         Action = "inspect-request-alert"
+	ActionInspectRequestAllow         Action = "inspect-request-allow"
+	ActionInspectResponseConfirm      Action = "inspect-response-confirm"
+	ActionInspectResponseBlock        Action = "inspect-response-block"
+	ActionInspectResponseAlert        Action = "inspect-response-alert"
+	ActionInspectResponseAllow        Action = "inspect-response-allow"
+	ActionInspectToolResponseConfirm  Action = "inspect-tool-response-confirm"
+	ActionInspectToolResponseBlock    Action = "inspect-tool-response-block"
+	ActionInspectToolResponseAlert    Action = "inspect-tool-response-alert"
+	ActionInspectToolResponseAllow    Action = "inspect-tool-response-allow"
 	ActionInspectReveal               Action = "inspect-reveal"
 
 	// Setup, operator, API, and sink instrumentation. These actions
@@ -288,6 +300,10 @@ const (
 	ActionRegistryAdd              Action = "registry-add"
 	ActionRegistryEdit             Action = "registry-edit"
 	ActionRegistryRemove           Action = "registry-remove"
+	ActionRegistrySync             Action = "registry-sync"
+	ActionRegistryRequire          Action = "registry-require"
+	ActionRegistryApprove          Action = "registry-approve"
+	ActionRegistryReject           Action = "registry-reject"
 	ActionScanEnforced             Action = "scan-enforced"
 	ActionScanFinding              Action = "scan-finding"
 	ActionDismissAlert             Action = "dismiss-alert"
@@ -306,6 +322,7 @@ const (
 	ActionPluginEnable             Action = "plugin-enable"
 	ActionPluginQuarantine         Action = "plugin-quarantine"
 	ActionPluginRestore            Action = "plugin-restore"
+	ActionPluginUnblock            Action = "plugin-unblock"
 	ActionBlockMCP                 Action = "block-mcp"
 	ActionAllowMCP                 Action = "allow-mcp"
 	ActionMCPUnblock               Action = "mcp-unblock"
@@ -449,6 +466,18 @@ func AllActions() []Action {
 		ActionInspectToolBlock,
 		ActionInspectToolAlert,
 		ActionInspectToolAllow,
+		ActionInspectRequestConfirm,
+		ActionInspectRequestBlock,
+		ActionInspectRequestAlert,
+		ActionInspectRequestAllow,
+		ActionInspectResponseConfirm,
+		ActionInspectResponseBlock,
+		ActionInspectResponseAlert,
+		ActionInspectResponseAllow,
+		ActionInspectToolResponseConfirm,
+		ActionInspectToolResponseBlock,
+		ActionInspectToolResponseAlert,
+		ActionInspectToolResponseAllow,
 		ActionInspectReveal,
 		ActionAPIAuthFailure,
 		ActionAPIConfigPatch,
@@ -491,6 +520,10 @@ func AllActions() []Action {
 		ActionRegistryAdd,
 		ActionRegistryEdit,
 		ActionRegistryRemove,
+		ActionRegistrySync,
+		ActionRegistryRequire,
+		ActionRegistryApprove,
+		ActionRegistryReject,
 		ActionScanEnforced,
 		ActionScanFinding,
 		ActionDismissAlert,
@@ -509,6 +542,7 @@ func AllActions() []Action {
 		ActionPluginEnable,
 		ActionPluginQuarantine,
 		ActionPluginRestore,
+		ActionPluginUnblock,
 		ActionBlockMCP,
 		ActionAllowMCP,
 		ActionMCPUnblock,

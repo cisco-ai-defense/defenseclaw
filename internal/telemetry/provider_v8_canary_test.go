@@ -73,7 +73,7 @@ func generatedCanaryPair(spans []V8CanonicalEndedSpan, traceID string) bool {
 	}
 	if root == nil || child == nil || root.Record().Bucket() != observability.BucketAgentLifecycle ||
 		child.Record().Bucket() != observability.BucketModelIO || root.Name() != "invoke_agent diagnostic" ||
-		child.Name() != "chat gpt-4o-mini" {
+		child.Name() != "chat defenseclaw-diagnostic" {
 		return false
 	}
 	if _, hasParent := root.ParentSpanID(); hasParent {

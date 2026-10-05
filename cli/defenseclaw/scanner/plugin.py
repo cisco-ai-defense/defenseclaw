@@ -85,6 +85,20 @@ class PluginScannerWrapper:
     def name(self) -> str:
         return "plugin-scanner"
 
+    def batch_workers(self, *, use_llm: bool | None = None, llm_model: str = "", **_rest) -> int:
+        """Items ``plugin scan --all`` may scan at once (GAP-2643).
+
+        The LLM lane waits on the network for each plugin, so those scans
+        overlap; with the lane off (``--no-llm`` or no model) they stay one at
+        a time.
+        """
+        from defenseclaw.commands._scan_ui import LLM_SCAN_WORKERS
+
+        if use_llm is False:
+            return 1
+        model = llm_model or (litellm_model(self._llm) if self._llm else "")
+        return LLM_SCAN_WORKERS if model else 1
+
     def scan(
         self,
         target: str,

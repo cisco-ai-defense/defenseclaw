@@ -1403,3 +1403,27 @@ func quoteJSON(value string) string {
 	raw, _ := json.Marshal(value)
 	return string(raw)
 }
+
+// GAP-2318: DefenseClaw's own data dir (~/.defenseclaw with its .venv,
+// uv cache and the bundled magika model) is not a user model store.
+func TestModelScanSkipsDefenseClawOwnDataDirs(t *testing.T) {
+	home := t.TempDir()
+	writeModelTestFile(t, filepath.Join(home, ".defenseclaw", ".uv", "cache", "archive-v0", "abc",
+		"magika", "models", "standard_v3_3", "model.onnx"), "own")
+	customData := filepath.Join(home, "dc-data")
+	writeModelTestFile(t, filepath.Join(customData, "models", "own-data-model", "model.onnx"), "own")
+	writeModelTestFile(t, filepath.Join(home, "work", "models", "speech-recognizer", "model.onnx"), "user")
+
+	svc := newModelFileTestService(t, home, home, 100, false)
+	svc.opts.DataDir = customData
+	signals, _, err := svc.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("detectModelFiles: %v", err)
+	}
+	findLocalModelSignal(t, signals, "speech-recognizer")
+	for _, signal := range signals {
+		if signal.Model != nil && (signal.Model.ID == "standard_v3_3" || signal.Model.ID == "own-data-model") {
+			t.Fatalf("scan reported a DefenseClaw-owned model: %+v", signal.Model)
+		}
+	}
+}

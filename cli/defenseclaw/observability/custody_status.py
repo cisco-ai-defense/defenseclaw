@@ -32,7 +32,7 @@ import os
 import re
 import sqlite3
 import stat
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -43,6 +43,12 @@ _CUSTODY_VALUES = frozenset(("defenseclaw", "external", "hook_only"))
 _CONNECTOR_TOKEN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SIGNALS = frozenset(("logs", "traces", "metrics"))
+# Drop reasons that only mean "DefenseClaw has no mapping for this record
+# type": agents send vendor telemetry the catalog does not cover, and the
+# gateway skips it by design. Anything else (invalid records, ambiguous
+# identity, persistence failures) is a real drop worth a warning.
+_UNMAPPED_DROP_REASONS = frozenset(("unsupported_identity",))
+_SIGNAL_NOUNS = {"logs": "log", "metrics": "metric", "traces": "trace"}
 _EVENT_NAMES = (
     "telemetry.authentication.failed",
     "telemetry.batch.normalized",
@@ -73,9 +79,18 @@ class ConnectorCustodyStatus:
     credential_state: str = "no_recent_failure"
     last_native_activity: str = ""
     last_authentication_failure: str = ""
+    drop_only_signals: tuple[str, ...] = ()
+    drop_only_reasons: tuple[str, ...] = ()
+    # Drop-only batches that held only records DefenseClaw does not map.
+    unmapped_drop_only_batches: int = 0
+    last_lost_drop: str = ""
 
     def as_json(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        # Lists, so the JSON round trip (plan --json) compares equal.
+        data["drop_only_signals"] = list(self.drop_only_signals)
+        data["drop_only_reasons"] = list(self.drop_only_reasons)
+        return data
 
 
 @dataclass(frozen=True)
@@ -142,6 +157,55 @@ class NativeDeliverySummary:
         }
 
 
+def native_evidence_row_limit() -> int:
+    """How many recent evidence events the custody report reads."""
+
+    return _MAX_EVENT_ROWS
+
+
+def native_evidence_scope(hours: int, truncated: bool) -> str:
+    """Scope text for the delivery line: "bounded 24h[, newest N events]"."""
+
+    scope = f"bounded {hours}h"
+    if truncated:
+        scope += f", newest {_MAX_EVENT_ROWS} events"
+    return scope
+
+
+def native_delivery_display_rows(
+    connectors: tuple[NativeDeliveryStatus, ...] | list[NativeDeliveryStatus],
+) -> list[tuple[str, NativeDeliveryStatus]]:
+    """``(instance label, row)`` pairs for the text renderers (GAP-2065).
+
+    Additional (non-default) instances, such as one per OpenShell sandbox
+    run, never get evidence of their own and outlive the sandbox. Listing each
+    one as an anonymous "no evidence" line buried the real rows, so idle ones
+    fold into one line per connector. JSON output keeps every instance.
+    """
+
+    rows: list[tuple[str, NativeDeliveryStatus]] = []
+    idle: dict[str, int] = {}
+    for item in connectors:
+        if not item.default and item.state == "no_evidence":
+            idle[item.connector] = idle.get(item.connector, 0) + 1
+            continue
+        rows.append(("" if item.default else "additional instance", item))
+    for connector, count in idle.items():
+        noun = "instance" if count == 1 else "instances"
+        folded = NativeDeliveryStatus(
+            connector=connector,
+            default=False,
+            state="no_evidence",
+            normalized_batches=0,
+            drop_only_batches=0,
+            detail="inactive (for example past sandbox runs); no recent native delivery evidence, nothing to do",
+        )
+        # Keep the folded line next to that connector's other rows.
+        at = max((i + 1 for i, (_label, row) in enumerate(rows) if row.connector == connector), default=len(rows))
+        rows.insert(at, (f"{count} additional {noun}", folded))
+    return rows
+
+
 def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliverySummary:
     """Classify accepted versus drop-only native OTLP evidence.
 
@@ -165,17 +229,48 @@ def summarize_native_delivery(report: ConnectorCustodyReport) -> NativeDeliveryS
             continue
         normalized = max(item.normalized_batches, 0)
         drop_only = min(max(item.drop_only_batches, 0), normalized)
+        unmapped_only = bool(item.drop_only_reasons) and set(item.drop_only_reasons) <= _UNMAPPED_DROP_REASONS
         if normalized == 0:
             state = "no_evidence"
             detail = "no recent native delivery evidence"
+        elif drop_only == normalized and unmapped_only:
+            # Every batch so far held only record types DefenseClaw does not
+            # map (an agent whose model calls failed, for example): skipped
+            # by design, not data loss (GAP-1664).
+            state = "unmapped_only"
+            detail = (
+                f"no mapped native records yet ({drop_only}/{normalized} batches held only "
+                f"{_unmapped_signal_phrase(item.drop_only_signals)} records that DefenseClaw does not map, "
+                "skipped by design)"
+            )
         elif drop_only == normalized:
             state = "all_drop_only"
             detail = f"drop-only native stream ({drop_only}/{normalized} batches); no accepted native delivery observed"
+        elif drop_only and unmapped_only:
+            # Every dropped batch held only record types DefenseClaw does
+            # not map. That is normal for a healthy agent, not data loss.
+            state = "accepted"
+            detail = (
+                f"accepted native delivery observed ({normalized} batches; {drop_only} held only "
+                f"{_unmapped_signal_phrase(item.drop_only_signals)} records that DefenseClaw does not map, "
+                "skipped by design)"
+            )
         elif drop_only:
             state = "partial_drop_only"
+            signals = ", ".join(item.drop_only_signals)
+            reasons = ", ".join(reason.replace("_", " ") for reason in item.drop_only_reasons)
+            unmapped = min(max(item.unmapped_drop_only_batches, 0), drop_only)
             detail = (
-                f"partial drop-only evidence ({drop_only}/{normalized} batches); "
-                "accepted native delivery observed in remaining batches"
+                f"partial drop-only evidence ({drop_only - unmapped}/{normalized} batches dropped whole"
+                + (f"; dropped signals: {signals}" if signals else "")
+                + (f"; reason: {reasons}" if reasons else "")
+                + (f"; last at {item.last_lost_drop}" if item.last_lost_drop else "")
+                + (
+                    f"; {unmapped} more held only records DefenseClaw does not map, skipped by design"
+                    if unmapped
+                    else ""
+                )
+                + "); accepted native delivery observed in remaining batches"
             )
         else:
             state = "accepted"
@@ -209,6 +304,8 @@ class _Evidence:
     unattributed_auth_count: int = 0
     last_unattributed_auth: datetime | None = None
     truncated: bool = False
+    drop_reasons: dict[tuple[str, str, str], set[str]] = field(default_factory=dict)
+    last_drop: dict[tuple[str, str, str], datetime] = field(default_factory=dict)
 
 
 def inspect_connector_custody(
@@ -216,8 +313,13 @@ def inspect_connector_custody(
     data_dir: str | os.PathLike[str],
     *,
     now: datetime | None = None,
+    api_addr: str = "",
 ) -> ConnectorCustodyReport:
     """Read custody and recent ingest evidence without initializing SQLite.
+
+    ``api_addr`` is the gateway REST listener (``host:port``, see
+    :func:`gateway_api_addr`). When given, a DefenseClaw-managed exporter
+    that points anywhere else is drift (GAP-2345).
 
     Absence is a bounded status, not an exception: ``observability plan`` must
     remain usable before the gateway has created its database, and doctor
@@ -263,7 +365,7 @@ def inspect_connector_custody(
                 return ConnectorCustodyReport("unavailable", "invalid_ledger", window_hours)
             connector_id, connector, custody, profile_version, is_default = item
             managed_state, managed_files = _managed_config_state(
-                Path(data_dir), connector, custody, is_default
+                Path(data_dir), connector, custody, is_default, api_addr
             )
             # The current inbound endpoint resolves one implicit/default
             # instance per authenticated connector source. Never smear that
@@ -271,6 +373,13 @@ def inspect_connector_custody(
             # they share a connector name.
             evidence_connector = connector if is_default else ""
             normalized, drop_only = _batch_counts(evidence, evidence_connector)
+            lost_keys, unmapped_keys = _drop_only_keys(evidence, evidence_connector)
+            reported_keys = lost_keys or unmapped_keys
+            drop_signals = tuple(sorted({key[2] for key in reported_keys}))
+            drop_reasons = tuple(
+                sorted(set().union(*(evidence.drop_reasons.get(key, {"unknown"}) for key in reported_keys)))
+            )
+            last_lost = max((evidence.last_drop[key] for key in lost_keys if key in evidence.last_drop), default=None)
             last_native = evidence.last_native.get(evidence_connector)
             last_auth = evidence.last_auth.get(evidence_connector)
             instances.append(
@@ -284,6 +393,10 @@ def inspect_connector_custody(
                     managed_config_files=managed_files,
                     normalized_batches=normalized,
                     drop_only_batches=drop_only,
+                    drop_only_signals=drop_signals,
+                    drop_only_reasons=drop_reasons,
+                    unmapped_drop_only_batches=len(unmapped_keys) if lost_keys else 0,
+                    last_lost_drop=_format_time(last_lost),
                     authentication_failures=evidence.auth_count.get(evidence_connector, 0),
                     credential_state=_credential_state(last_auth, last_native),
                     last_native_activity=_format_time(last_native),
@@ -394,6 +507,9 @@ def _load_recent_evidence(db: sqlite3.Connection, now: datetime) -> _Evidence:
             evidence.last_native[connector] = max(when, evidence.last_native.get(connector, when))
         elif event_name == "telemetry.records.dropped":
             evidence.dropped[key] = evidence.dropped.get(key, 0) + count
+            reason = facts.get("reason", "")
+            evidence.drop_reasons.setdefault(key, set()).add(reason or "unknown")
+            evidence.last_drop[key] = max(when, evidence.last_drop.get(key, when))
     return evidence
 
 
@@ -411,6 +527,8 @@ def _telemetry_facts(raw: Any) -> dict[str, Any]:
         return {}
     count = attributes.get("defenseclaw.telemetry.record_count")
     signal = attributes.get("defenseclaw.telemetry.signal")
+    reason = attributes.get("defenseclaw.telemetry.rejection_reason_class")
+    reason = reason if isinstance(reason, str) and _CONNECTOR_TOKEN.fullmatch(reason) else ""
     if (
         isinstance(count, bool)
         or not isinstance(count, (int, float))
@@ -421,7 +539,11 @@ def _telemetry_facts(raw: Any) -> dict[str, Any]:
         count = 0
     else:
         count = int(count)
-    return {"record_count": count, "signal": signal if isinstance(signal, str) else ""}
+    return {
+        "record_count": count,
+        "signal": signal if isinstance(signal, str) else "",
+        "reason": reason,
+    }
 
 
 def _batch_counts(evidence: _Evidence, connector: str) -> tuple[int, int]:
@@ -436,6 +558,37 @@ def _batch_counts(evidence: _Evidence, connector: str) -> tuple[int, int]:
     return batches, drop_only
 
 
+def _drop_only_keys(
+    evidence: _Evidence, connector: str
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Split drop-only batches into lost ones and ones skipped by design.
+
+    Signals and reasons describe the lost batches when there are any, so a
+    few old real drops do not turn many by-design skips into "dropped
+    whole" (GAP-2035).
+    """
+    lost: list[tuple[str, str, str]] = []
+    unmapped: list[tuple[str, str, str]] = []
+    for key, count in evidence.normalized.items():
+        if key[0] != connector or count <= 0 or evidence.dropped.get(key, 0) < count:
+            continue
+        if evidence.drop_reasons.get(key, {"unknown"}) <= _UNMAPPED_DROP_REASONS:
+            unmapped.append(key)
+        else:
+            lost.append(key)
+    return lost, unmapped
+
+
+def _unmapped_signal_phrase(signals: tuple[str, ...]) -> str:
+    """Name the unmapped record types as one adjective, for example "log/metric".
+
+    A comma list ("logs, metrics records") read as two separate clauses in
+    status, doctor and the TUI Overview (GAP-2093).
+    """
+
+    return "/".join(_SIGNAL_NOUNS.get(signal, signal) for signal in signals) or "native"
+
+
 def _credential_state(last_auth: datetime | None, last_native: datetime | None) -> str:
     if last_auth is None:
         return "no_recent_failure"
@@ -445,7 +598,7 @@ def _credential_state(last_auth: datetime | None, last_native: datetime | None) 
 
 
 def _managed_config_state(
-    data_dir: Path, connector: str, custody: str, is_default: bool
+    data_dir: Path, connector: str, custody: str, is_default: bool, api_addr: str = ""
 ) -> tuple[str, int]:
     if custody != "defenseclaw" or not is_default:
         return "not_applicable", 0
@@ -469,7 +622,7 @@ def _managed_config_state(
         return "unverifiable", len(backups)
     verified = 0
     for backup in backups:
-        state = _verify_managed_backup(backup, connector)
+        state = _verify_managed_backup(backup, connector, api_addr)
         if state == "drifted":
             return "drifted", len(backups)
         if state != "verified":
@@ -478,7 +631,7 @@ def _managed_config_state(
     return "verified", verified
 
 
-def _verify_managed_backup(path: Path, connector: str) -> str:
+def _verify_managed_backup(path: Path, connector: str, api_addr: str = "") -> str:
     try:
         info = path.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -515,7 +668,84 @@ def _verify_managed_backup(path: Path, connector: str) -> str:
         actual = _sha256_file(target)
         if not actual:
             return "unverifiable"
-    return "verified" if actual == expected else "drifted"
+    if actual == expected:
+        return "verified"
+    if actual != "missing" and _managed_otel_block_intact(target, connector, api_addr):
+        # Codex itself writes to config.toml (a folder-trust decision adds
+        # [projects."<dir>"]). Only DefenseClaw's exporter block matters
+        # here, and it still has the shape DefenseClaw writes (GAP-1330).
+        return "verified"
+    return "drifted"
+
+
+_OTEL_EXPORTERS = {"exporter": "logs", "trace_exporter": "traces", "metrics_exporter": "metrics"}
+
+
+def gateway_api_addr(cfg: Any) -> str:
+    """The gateway REST listener as ``host:port``, or "" when unknown.
+
+    Mirrors ``apiListenAddr`` in internal/gateway/sidecar.go, which is the
+    base of every managed native OTLP endpoint.
+    """
+    try:
+        from defenseclaw.config import api_bind_host
+
+        port = int(getattr(getattr(cfg, "gateway", None), "api_port", 0) or 0)
+        host = api_bind_host(cfg)
+    except Exception:  # noqa: BLE001 - an unknown listener only skips the port check.
+        return ""
+    return f"{host}:{port}" if host and port > 0 else ""
+
+
+def _managed_otel_block_intact(target: Path, connector: str, api_addr: str = "") -> bool:
+    """Whether a TOML agent config still holds DefenseClaw's [otel] exporters.
+
+    Codex may rewrite the file, so this checks what DefenseClaw wrote rather
+    than the file hash: every exporter carries this connector's source
+    header, ends in its own ``/v1/<signal>`` path, and shares one base URL
+    and one header set. With ``api_addr`` the base must also be the gateway
+    listener. A hand-edited endpoint (another port, GAP-2345) or header is
+    drift, because Codex would send its OTLP credential there.
+    """
+    if target.suffix.lower() != ".toml":
+        return False
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10
+        import tomli as tomllib  # type: ignore[no-redef]
+    try:
+        document = tomllib.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    otel = document.get("otel")
+    if not isinstance(otel, dict):
+        return False
+    bases: set[str] = set()
+    header_sets: list[dict[str, Any]] = []
+    for name, signal in _OTEL_EXPORTERS.items():
+        exporter = otel.get(name)
+        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
+        headers = http.get("headers") if isinstance(http, dict) else None
+        if not isinstance(headers, dict) or headers.get("x-defenseclaw-source") != connector:
+            return False
+        endpoint = str(http.get("endpoint") or "").strip()
+        suffix = f"/v1/{signal}"
+        if not endpoint.endswith(suffix):
+            return False
+        bases.add(endpoint[: -len(suffix)].rstrip("/"))
+        header_sets.append(headers)
+    if len(bases) != 1 or any(headers != header_sets[0] for headers in header_sets):
+        return False
+    if api_addr:
+        from urllib.parse import urlsplit
+
+        try:
+            netloc = urlsplit(next(iter(bases))).netloc
+        except ValueError:
+            return False
+        if netloc.lower() != api_addr.lower():
+            return False
+    return True
 
 
 def _sha256_file(path: Path) -> str:
@@ -556,6 +786,7 @@ __all__ = [
     "ConnectorCustodyStatus",
     "NativeDeliveryStatus",
     "NativeDeliverySummary",
+    "gateway_api_addr",
     "inspect_connector_custody",
     "summarize_native_delivery",
 ]

@@ -57,29 +57,42 @@ import (
 //     contract, or an account that no longer exists) is skipped and named:
 //     the guardian renders it from whichever key is committed once it can
 //     protect it.
-//  2. Stage: record the intent in the root-only lifecycle directory, then
-//     write key B beside A (connector.PendingUserScopedTokenKeyPath) under
-//     the guardian's reconcile lock. The gateway now accepts the credentials
-//     of both keys. Still holding the lock, so no reconcile moves a user
+//  2. Stage: record the intent in the root-only lifecycle directory, then,
+//     under the guardian's reconcile lock, write the guardian's prepare
+//     record (enterprisehooks.CredentialTransaction: operation, roster, A
+//     and B by fingerprint) and key B beside A
+//     (connector.PendingUserScopedTokenKeyPath). The guardian renders from
+//     a staged key only while a prepare record names it. The gateway now
+//     accepts the credentials of both keys. Still holding the lock, so no reconcile moves a user
 //     yet, the rotation waits until /health names A and B and has the
 //     gateway prove, for every user, that it accepts that user's B
 //     credential.
 //  3. Prepare: the guardian renders every target from B, and a further
 //     reconcile verifies the installed hooks. Every target must be attested
-//     current, verified and on B in the same roster (manifest digest), and
-//     the gateway must prove B again for each user.
-//  4. Commit: rename B over A under the reconcile lock, wait until /health
-//     names only B (A's credentials are refused from then on), clear the
-//     intent.
+//     current, verified and on B in the same roster (manifest digest), by a
+//     reconcile that names this operation's prepare phase, each with the
+//     credential B derives for its connector and uid; and the gateway must
+//     prove B again for each user.
+//  4. Commit: rename B over A under the reconcile lock and remove the
+//     guardian's record, wait until /health names only B (A's credentials
+//     are refused from then on), clear the intent.
 //
-// A failure before the commit removes B, waits until only A is live and
-// reconciles every user back to A. Credentials derive from the key, so
-// restoring A restores each user's A credentials exactly. A run that is
-// interrupted is settled by the next lifecycle run
+// A failure before the commit turns the guardian's record to rollback and
+// moves B aside as the retiring key (connector.RetiringUserScopedTokenKeyPath),
+// which the gateway still accepts but the guardian no longer renders from,
+// reconciles every user back to A (proved by rollback-phase attestations
+// whose credentials A derives), then removes B and the record and waits
+// until only A is live. Users already on
+// B are therefore not refused while they move back. Credentials derive from
+// the key, so restoring A restores each user's A credentials exactly. An
+// interrupt (Ctrl+C, SIGTERM) cancels the run's context, which takes the
+// same rollback. A run that is killed is settled by the next lifecycle run
 // (recoverInterruptedRotation): the rename is the commit point, so a
 // committed key equal to B completes the rotation and anything else restores
-// A. Keys leave this process only as files with the committed key's custody,
-// and results name them only by fingerprint.
+// A. Until then the gateway and the guardian honor a staged or retiring key
+// only for connector.RotationKeyMaxAge, so a killed rotation stops widening
+// the accepted keys on its own. Keys leave this process only as files with
+// the committed key's custody, and results name them only by fingerprint.
 
 // ActionRotateCredentials rotates the per-user credential key.
 const ActionRotateCredentials = "rotate-credentials"
@@ -130,8 +143,35 @@ func (e *Env) stagedUserKeyPath() string {
 	return path
 }
 
+func (e *Env) retiringUserKeyPath() string {
+	path, _ := connector.RetiringUserScopedTokenKeyPath(e.P(e.Layout.DataDir))
+	return path
+}
+
 func (e *Env) attestationPath() string {
 	return filepath.Join(e.P(e.Layout.GuardianAuthDir), managed.HookGuardianCredentialAttestationFile)
+}
+
+func (e *Env) transactionPath() string {
+	return filepath.Join(e.P(e.Layout.GuardianAuthDir), managed.HookGuardianCredentialTransactionFile)
+}
+
+// saveTransaction writes the guardian's root-only record of the rotation
+// (enterprisehooks.CredentialTransaction). Call it under the reconcile lock.
+func (e *Env) saveTransaction(intent rotationIntent, phase, manifestSHA256 string) error {
+	data, err := json.MarshalIndent(enterprisehooks.CredentialTransaction{
+		Version:        enterprisehooks.CredentialTransactionVersion,
+		OperationID:    intent.OperationID,
+		Phase:          phase,
+		StartedAt:      intent.StartedAt,
+		ManifestSHA256: manifestSHA256,
+		PreviousKeyID:  intent.PreviousKeyID,
+		NextKeyID:      intent.NextKeyID,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return e.writeFileAtomic(e.transactionPath(), append(data, '\n'), 0o600, rootOwner())
 }
 
 func (e *Env) loadRotationIntent() (*rotationIntent, error) {
@@ -238,9 +278,26 @@ func (e *Env) withReconcileLock(ctx context.Context, fn func() error) error {
 	return fn()
 }
 
-// removeStagedKey removes a staged key (a no-op when there is none).
-func (e *Env) removeStagedKey() error {
-	err := removeFile(e.stagedUserKeyPath())
+// removeRotationKeys removes a staged and a retiring key and the
+// guardian's transaction record (a no-op when there are none).
+func (e *Env) removeRotationKeys() error {
+	err := errors.Join(removeFile(e.stagedUserKeyPath()), removeFile(e.retiringUserKeyPath()))
+	syncDir(filepath.Dir(e.stagedUserKeyPath()))
+	if txErr := removeFile(e.transactionPath()); txErr != nil {
+		err = errors.Join(err, txErr)
+	}
+	syncDir(filepath.Dir(e.transactionPath()))
+	return err
+}
+
+// retireStagedKey moves a staged key aside as the retiring key: the gateway
+// keeps accepting its credentials while the guardian renders from the
+// committed key again. Without a staged key it is a no-op.
+func (e *Env) retireStagedKey() error {
+	err := os.Rename(e.stagedUserKeyPath(), e.retiringUserKeyPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	syncDir(filepath.Dir(e.stagedUserKeyPath()))
 	return err
 }
@@ -256,6 +313,100 @@ func (e *Env) readAttestation() (enterprisehooks.CredentialAttestation, error) {
 		return enterprisehooks.CredentialAttestation{}, err
 	}
 	return enterprisehooks.ParseCredentialAttestation(data)
+}
+
+// attestationProblem checks the guardian's credential attestation against
+// ledger, the authorization ledger bytes just read: it must be in the
+// current format, from the reconcile that published them, for the current
+// targets.yaml, list each target it enables exactly once, and bind every
+// credential-bearing target to the credential a key the gateway holds
+// derives for it. torn is set when it is from another reconcile or another
+// roster, which a read between the guardian's writes (or between the
+// enumerator's rewrite and the guardian's next reconcile) also sees. A
+// missing attestation is torn too: the guardian's first reconcile publishes
+// its ledger and target report before the attestation, so a package install
+// that read in between saw the guardian as not ready (GAP-2577).
+func (e *Env) attestationProblem(ledger []byte) (problem string, torn bool) {
+	if _, err := os.Lstat(e.attestationPath()); errors.Is(err, os.ErrNotExist) {
+		return "the hook guardian has not published its credential attestation yet", true
+	}
+	attestation, err := e.readAttestation()
+	if err != nil {
+		return "guardian credential attestation: " + err.Error(), false
+	}
+	if !attestation.Current() {
+		return fmt.Sprintf("the hook guardian's credential attestation is in the older format %d, which does not bind each target; the next guardian reconcile rewrites it", attestation.Version), false
+	}
+	if !attestation.BoundTo(ledger) {
+		return "the hook guardian's authorization ledger does not match its last credential attestation; the next guardian reconcile publishes both", true
+	}
+	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(e.P(e.Layout.ManifestPath))
+	if err != nil {
+		return "guardian targets: " + err.Error(), false
+	}
+	if attestation.ManifestSHA256 != manifestSHA256 {
+		return "the hook guardian has not reconciled the current targets.yaml yet; its next reconcile does", true
+	}
+	if problem := rosterProblem(manifest, attestation); problem != "" {
+		return problem, false
+	}
+	if attestation.KeyID == "" {
+		return "", false
+	}
+	for _, path := range []string{e.committedUserKeyPath(), e.stagedUserKeyPath()} {
+		data, err := readBounded(path, userKeyMaxBytes)
+		if key := strings.TrimSpace(string(data)); err == nil && connector.UserScopedTokenKeyFingerprint(key) == attestation.KeyID {
+			if unbound := unboundCredentials(attestation, key); len(unbound) > 0 {
+				return fmt.Sprintf("the hook guardian attested %d target(s) whose credentials are not the ones key %s derives for their account: %s; the next guardian reconcile renders them again",
+					len(unbound), shortKeyID(attestation.KeyID), listLabels(unbound)), false
+			}
+			return "", false
+		}
+	}
+	return fmt.Sprintf("the hook guardian's last reconcile rendered per-user credentials from key %s, which the gateway no longer holds; the next guardian reconcile renders them again", shortKeyID(attestation.KeyID)), false
+}
+
+// rosterProblem checks that attestation has exactly one row per target
+// manifest enables, in manifest order (the guardian writes one row per
+// enabled target), each naming that target's connector and account.
+func rosterProblem(manifest enterprisehooks.Manifest, attestation enterprisehooks.CredentialAttestation) string {
+	var enabled []enterprisehooks.ManifestTarget
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() {
+			enabled = append(enabled, target)
+		}
+	}
+	if len(enabled) != len(attestation.Targets) {
+		return fmt.Sprintf("the hook guardian's credential attestation lists %d target(s), but targets.yaml enables %d; the next guardian reconcile publishes it again", len(attestation.Targets), len(enabled))
+	}
+	for index, want := range enabled {
+		got := attestation.Targets[index]
+		sameHome := strings.TrimSpace(want.UserHome) == "" || filepath.Clean(strings.TrimSpace(want.UserHome)) == filepath.Clean(got.UserHome)
+		sameUID := want.UID == nil || got.UID < 0 || *want.UID == got.UID
+		if !strings.EqualFold(strings.TrimSpace(want.Connector), strings.TrimSpace(got.Connector)) ||
+			strings.TrimSpace(want.User) != got.User || !sameHome || !sameUID {
+			return fmt.Sprintf("the hook guardian's credential attestation names %s where targets.yaml enables another target; the next guardian reconcile publishes it again", got.Label())
+		}
+	}
+	return ""
+}
+
+// unboundCredentials lists the credential-bearing targets of attestation
+// whose credential fingerprint is not that of the hook credential key
+// derives for the target's connector and uid.
+func unboundCredentials(attestation enterprisehooks.CredentialAttestation, key string) []string {
+	var unbound []string
+	for _, target := range attestation.Targets {
+		if !target.Credentials {
+			continue
+		}
+		credential, err := connector.UserScopedHookAPIToken(key, strings.ToLower(strings.TrimSpace(target.Connector)), strconv.Itoa(target.UID))
+		if err != nil || connector.UserScopedCredentialKeyID(credential) != target.CredentialID {
+			unbound = append(unbound, target.Label())
+		}
+	}
+	slices.Sort(unbound)
+	return unbound
 }
 
 func (e *Env) attestationID() string {
@@ -408,19 +559,39 @@ func listLabels(labels []string) string {
 	return strings.Join(labels, ", ")
 }
 
-// onKey reports whether attestation shows every target of want current and
-// verified on keyID, and every other credential-bearing target verified
-// too. fatal is set for a state no further reconcile fixes. A target
-// outside want that is not current held no credential when the rotation
-// began (targetsNotMoved), so it does not stop the rotation.
-func onKey(attestation enterprisehooks.CredentialAttestation, keyID, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (done bool, fatal string) {
+// onKey reports whether attestation, from a reconcile that acted under
+// phase of operation, shows every target of want current and verified on
+// key, each with the credential key derives for its connector and uid, and
+// every other credential-bearing target verified too. fatal is set for a
+// state no further reconcile fixes. A target outside want that is not
+// current held no credential when the rotation began (targetsNotMoved), so
+// it does not stop the rotation.
+func onKey(attestation enterprisehooks.CredentialAttestation, key, operation, phase, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (done bool, fatal string) {
+	keyID := connector.UserScopedTokenKeyFingerprint(key)
 	switch {
+	case !attestation.Current():
+		return false, fmt.Sprintf("the hook guardian published a format %d credential attestation, which does not bind each target", attestation.Version)
+	case attestation.OperationID != operation || attestation.Phase != phase:
+		return false, fmt.Sprintf("the hook guardian's reconcile did not act under the %s phase of rotation %s", phase, operation)
 	case attestation.ManifestSHA256 != manifestSHA256:
 		return false, "the guardian's target roster changed during the rotation (targets.yaml was rewritten)"
 	case attestation.KeyID != keyID:
 		return false, fmt.Sprintf("the guardian rendered from key %s, not %s", shortKeyID(attestation.KeyID), shortKeyID(keyID))
 	}
+	if unbound := unboundCredentials(attestation, key); len(unbound) > 0 {
+		return false, fmt.Sprintf("the guardian attested %d target(s) whose credentials key %s does not derive for their account: %s", len(unbound), shortKeyID(keyID), listLabels(unbound))
+	}
 	have := credentialTargets(attestation)
+	var moved []string
+	for key, target := range want {
+		if got, ok := have[key]; ok && got.UID != target.UID {
+			moved = append(moved, target.Label())
+		}
+	}
+	if len(moved) > 0 {
+		slices.Sort(moved)
+		return false, fmt.Sprintf("%d target(s) resolved to another account during the rotation: %s", len(moved), listLabels(moved))
+	}
 	failed := map[string]bool{}
 	for _, target := range attestation.Targets {
 		failed[target.Key()] = target.State == enterprisehooks.CredentialTargetFailed
@@ -577,7 +748,8 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 		r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
 		return 0
 	}
-	defer l.describe(ctx, record, false)
+	// An interrupt cancels ctx; the result still describes the host.
+	defer l.describe(context.WithoutCancel(ctx), record, false)
 	refuse := func(format string, args ...any) int {
 		r.AddError(codeRotation, fmt.Sprintf(format, args...)+"; nothing was changed")
 		return 0
@@ -593,10 +765,13 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	case !present:
 		return refuse("there is no per-user credential key to rotate yet; the hook guardian creates it when it enrolls the first user")
 	}
-	if exists(env.stagedUserKeyPath()) {
+	if intent, err := env.loadRotationIntent(); err != nil || intent != nil {
+		return refuse("an earlier credential rotation is still rolling back; rotate again once `enterprise %s status` no longer reports it", platformName(env.GOOS))
+	}
+	if exists(env.stagedUserKeyPath()) || exists(env.retiringUserKeyPath()) || exists(env.transactionPath()) {
 		// No rotation owns it (recoverInterruptedRotation settled any
 		// recorded one), so nothing authorized it: remove it.
-		if err := env.withReconcileLock(ctx, env.removeStagedKey); err != nil {
+		if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
 			return refuse("an unrecorded staged key could not be removed: %v", err)
 		}
 		r.AddWarning(codeRotationRecovered, "removed a staged per-user credential key that no rotation recorded")
@@ -613,8 +788,16 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	if err != nil {
 		return refuse("%v", err)
 	}
-	if preflight.KeyID != idA {
+	switch {
+	case !preflight.Current():
+		return refuse("the hook guardian published a format %d credential attestation, which does not bind each target; run `enterprise %s repair`, then rotate again", preflight.Version, platformName(env.GOOS))
+	case preflight.OperationID != "":
+		return refuse("the hook guardian is acting under another credential rotation (%s)", preflight.OperationID)
+	case preflight.KeyID != idA:
 		return refuse("the hook guardian rendered from key %s, not the committed key %s", shortKeyID(preflight.KeyID), shortKeyID(idA))
+	}
+	if unbound := unboundCredentials(preflight, keyA); len(unbound) > 0 {
+		return refuse("the hook guardian attested %d target(s) whose credentials the committed key does not derive for their account: %s", len(unbound), listLabels(unbound))
 	}
 	held, skipped, err := l.targetsNotMoved(ctx, preflight)
 	switch {
@@ -652,6 +835,9 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 		// every user, so neither this rotation nor the guardian's own watch
 		// and interval passes move a user to B before then.
 		if err := env.withReconcileLock(ctx, func() error {
+			if err := env.saveTransaction(intent, enterprisehooks.CredentialPhasePrepare, preflight.ManifestSHA256); err != nil {
+				return fmt.Errorf("record the rotation for the hook guardian: %w", err)
+			}
 			owner := fileOwner{UID: record.ServiceUID, GID: record.ServiceGID}
 			if err := env.writeFileAtomic(env.stagedUserKeyPath(), []byte(keyB+"\n"), 0o600, owner); err != nil {
 				return fmt.Errorf("stage the new key: %w", err)
@@ -670,7 +856,7 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 				return err
 			}
 			lastID = attestation.ID
-			done, fatal := onKey(attestation, idB, preflight.ManifestSHA256, selected)
+			done, fatal := onKey(attestation, keyB, operation, enterprisehooks.CredentialPhasePrepare, preflight.ManifestSHA256, selected)
 			switch {
 			case fatal != "":
 				return errors.New(fatal)
@@ -681,9 +867,13 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 			}
 		}
 	}()
+	if prepareErr == nil && ctx.Err() != nil {
+		// An interrupt rolls back even when every user is ready to commit.
+		prepareErr = errors.New("the run was interrupted")
+	}
 	if prepareErr != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, prepareErr, shortKeyID(idA)))
-		if err := l.abortRotation(ctx, gateway, record, keyA, selected, preflight.ManifestSHA256); err != nil {
+		if err := l.abortRotation(ctx, gateway, record, keyA, intent, selected, preflight.ManifestSHA256); err != nil {
 			r.AddError(codeRollbackFailed, err.Error())
 		}
 		return 0
@@ -699,10 +889,18 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 			return err
 		}
 		syncDir(filepath.Dir(committed))
+		// Committed: the guardian's record retires with the old key. A
+		// record left behind names a staged key that no longer exists, so
+		// the guardian renders from the committed key either way, and the
+		// next lifecycle run removes it.
+		if err := removeFile(env.transactionPath()); err != nil {
+			r.AddWarning(codeRotationIncomplete, "the hook guardian's record of the completed rotation could not be removed: "+err.Error())
+		}
+		syncDir(filepath.Dir(env.transactionPath()))
 		return nil
 	}); err != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, err, shortKeyID(idA)))
-		if err := l.abortRotation(ctx, gateway, record, keyA, selected, preflight.ManifestSHA256); err != nil {
+		if err := l.abortRotation(ctx, gateway, record, keyA, intent, selected, preflight.ManifestSHA256); err != nil {
 			r.AddError(codeRollbackFailed, err.Error())
 		}
 		return 0
@@ -720,7 +918,9 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	}
 	r.Changes = append(r.Changes,
 		"agents that were already running send telemetry with the old key's credentials, which the gateway now refuses; ask users to restart their agents")
-	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idB}); err != nil {
+	// An interrupt after the commit does not cut this wait short: the
+	// rotation is done, and the result should say whether A is retired.
+	if err := l.waitGatewayKeys(context.WithoutCancel(ctx), gateway, record.ServiceUID, []string{idB}); err != nil {
 		r.AddError(codeRotation, fmt.Sprintf("rotation %s committed key %s, but the gateway has not retired key %s: %v; run verify", operation, shortKeyID(idB), shortKeyID(idA), err))
 	}
 	if err := env.clearRotationIntent(); err != nil {
@@ -729,46 +929,101 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	return 0
 }
 
-// abortRotation restores key A: it removes the staged key, waits until the
-// gateway accepts only A and reconciles every user back to A.
-func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Deployment, keyA string, selected map[string]enterprisehooks.CredentialAttestationTarget, manifestSHA256 string) error {
+// abortRotation restores key A: it retires the staged key, reconciles every
+// user back to A while the gateway still accepts both keys, then removes the
+// new key and waits until the gateway accepts only A.
+func (l *lifecycle) abortRotation(ctx context.Context, gateway Unit, record *Deployment, keyA string, intent rotationIntent, selected map[string]enterprisehooks.CredentialAttestationTarget, manifestSHA256 string) error {
 	env := l.env
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rotationRollbackTimeout)
 	defer cancel()
-	if err := env.withReconcileLock(ctx, env.removeStagedKey); err != nil {
-		return fmt.Errorf("the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
-	}
 	var problems []string
+	if err := env.withReconcileLock(ctx, func() error {
+		if err := env.saveTransaction(intent, enterprisehooks.CredentialPhaseRollback, manifestSHA256); err != nil {
+			// The guardian then renders from A without naming the
+			// rollback, which the checks below report.
+			problems = append(problems, "the hook guardian's record could not be turned to rollback: "+err.Error())
+		}
+		return env.retireStagedKey()
+	}); err != nil {
+		if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
+			return fmt.Errorf("the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
+		}
+	}
 	idA := connector.UserScopedTokenKeyFingerprint(keyA)
+	restored, moveProblems := l.moveUsersBack(ctx, keyA, intent.OperationID, enterprisehooks.CredentialPhaseRollback, manifestSHA256, selected)
+	problems = append(problems, moveProblems...)
+	if !restored && env.retiringKeyHonored() {
+		// Removing the new key now would refuse every user still on it.
+		// The gateway keeps accepting it only until
+		// connector.RotationKeyMaxAge after the rotation staged it, and the
+		// rotation record stays, so the next lifecycle run finishes the
+		// rollback once the guardian has moved them back.
+		problems = append(problems, "not every user is back on the previous key yet; "+rollbackPendingNote)
+		return errors.New("rollback: " + strings.Join(problems, "; "))
+	}
+	// Every user is back on A, or the gateway no longer honors the new key
+	// anyway: it goes, so the rollback never leaves both keys accepted.
+	if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
+		return fmt.Errorf("rollback: the new key could not be removed (%v); the next lifecycle run retries the rollback", err)
+	}
 	if err := l.waitGatewayKeys(ctx, gateway, record.ServiceUID, []string{idA}); err != nil {
 		problems = append(problems, err.Error())
-	}
-	restored := false
-	lastID := env.attestationID()
-	for attempt := 0; attempt < rotationAttempts && !restored; attempt++ {
-		attestation, err := l.freshAttestation(ctx, lastID)
-		if err != nil {
-			problems = append(problems, err.Error())
-			break
-		}
-		lastID = attestation.ID
-		done, fatal := onKey(attestation, idA, manifestSHA256, selected)
-		if fatal != "" {
-			problems = append(problems, fatal)
-			break
-		}
-		restored = done
 	}
 	if err := env.clearRotationIntent(); err != nil {
 		problems = append(problems, "the rotation record could not be removed: "+err.Error())
 	}
 	if !restored {
-		problems = append(problems, "not every user is back on the previous key yet; the hook guardian re-renders them on its next reconcile")
+		problems = append(problems, "not every user is back on the previous key; the hook guardian re-renders them on its next reconcile")
 	}
 	if len(problems) > 0 {
 		return errors.New("rollback: " + strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// rollbackPendingNote explains a rollback that keeps the retiring key.
+var rollbackPendingNote = fmt.Sprintf("the new key stays accepted for at most %d minutes after the rotation began while the hook guardian moves them back, and the next lifecycle run finishes the rollback", int(connector.RotationKeyMaxAge/time.Minute))
+
+// moveUsersBack reconciles, at most rotationAttempts times, until a
+// reconcile under phase of operation shows every target of want current and
+// verified on key (onKey). A nil want takes the credential-bearing targets
+// of each attestation, and then also requires that no failed target still
+// holds a credential (targetsNotMoved).
+func (l *lifecycle) moveUsersBack(ctx context.Context, key, operation, phase, manifestSHA256 string, want map[string]enterprisehooks.CredentialAttestationTarget) (bool, []string) {
+	lastID := l.env.attestationID()
+	for attempt := 0; attempt < rotationAttempts; attempt++ {
+		attestation, err := l.freshAttestation(ctx, lastID)
+		if err != nil {
+			return false, []string{err.Error()}
+		}
+		lastID = attestation.ID
+		manifest, targets := manifestSHA256, want
+		if want == nil {
+			manifest, targets = attestation.ManifestSHA256, credentialTargets(attestation)
+			if held, _, err := l.targetsNotMoved(ctx, attestation); err != nil || len(held) > 0 {
+				continue
+			}
+		}
+		done, fatal := onKey(attestation, key, operation, phase, manifest, targets)
+		if fatal != "" {
+			return false, []string{fatal}
+		}
+		if done {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// retiringKeyHonored reports whether the gateway still accepts the retiring
+// key: it exists and is younger than connector.RotationKeyMaxAge.
+func (e *Env) retiringKeyHonored() bool {
+	info, err := os.Lstat(e.retiringUserKeyPath())
+	if err != nil {
+		return false
+	}
+	age := time.Since(info.ModTime())
+	return age <= connector.RotationKeyMaxAge && age >= -connector.RotationKeyMaxAge
 }
 
 // recoverInterruptedRotation settles a rotation an earlier run did not
@@ -780,11 +1035,15 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 	if err == nil && intent == nil {
 		return
 	}
-	committedID := ""
+	committedKey, committedID := "", ""
 	if key, present, keyErr := env.readUserKey(env.committedUserKeyPath(), record.ServiceUID); keyErr == nil && present {
-		committedID = connector.UserScopedTokenKeyFingerprint(key)
+		committedKey, committedID = key, connector.UserScopedTokenKeyFingerprint(key)
 	}
 	if err == nil && committedID != "" && committedID == intent.NextKeyID {
+		if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
+			r.AddWarning(codeRotationRecovered, "the completed rotation's guardian record could not be removed: "+err.Error())
+			return
+		}
 		if err := env.clearRotationIntent(); err != nil {
 			r.AddWarning(codeRotationRecovered, "the completed rotation's record could not be removed: "+err.Error())
 			return
@@ -792,7 +1051,38 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 		r.AddWarning(codeRotationRecovered, fmt.Sprintf("completed an interrupted credential rotation that had committed key %s", shortKeyID(committedID)))
 		return
 	}
-	if err := env.withReconcileLock(ctx, env.removeStagedKey); err != nil {
+	// Users the interrupted run had already moved go back to the committed
+	// key while the gateway still accepts the retired key; it goes once a
+	// fresh attestation under the rollback phase shows every user back, or
+	// once the gateway no longer honors it.
+	var problems []string
+	if err := env.withReconcileLock(ctx, func() error {
+		if intent != nil {
+			_, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(env.P(env.Layout.ManifestPath))
+			if err == nil {
+				err = env.saveTransaction(*intent, enterprisehooks.CredentialPhaseRollback, manifestSHA256)
+			}
+			if err != nil {
+				// No rollback-phase reconcile can then prove the users
+				// back, so the retiring key stays while it is honored.
+				problems = append(problems, "the hook guardian's record could not be turned to rollback: "+err.Error())
+			}
+		}
+		return env.retireStagedKey()
+	}); err == nil {
+		if intent == nil || committedID == "" || !env.retiringKeyHonored() {
+			_ = l.triggerGuardianReconcile(ctx)
+		} else if restored, moveProblems := l.moveUsersBack(ctx, committedKey, intent.OperationID, enterprisehooks.CredentialPhaseRollback, "", nil); !restored {
+			problems = append(problems, moveProblems...)
+			note := "an interrupted credential rotation is still rolling back: not every user is back on key " + shortKeyID(committedID) + " yet"
+			if len(problems) > 0 {
+				note += " (" + strings.Join(problems, "; ") + ")"
+			}
+			r.AddWarning(codeRotationRecovered, note+"; "+rollbackPendingNote)
+			return
+		}
+	}
+	if err := env.withReconcileLock(ctx, env.removeRotationKeys); err != nil {
 		r.AddWarning(codeRotationRecovered, fmt.Sprintf("an interrupted credential rotation could not be rolled back yet: %v", err))
 		return
 	}
@@ -800,9 +1090,6 @@ func (l *lifecycle) recoverInterruptedRotation(ctx context.Context, record *Depl
 		r.AddWarning(codeRotationRecovered, "the interrupted rotation's record could not be removed: "+err.Error())
 		return
 	}
-	// Users the interrupted run had already moved go back to the committed
-	// key on this reconcile.
-	_ = l.triggerGuardianReconcile(ctx)
 	kept := "the committed key"
 	if committedID != "" {
 		kept = "key " + shortKeyID(committedID)

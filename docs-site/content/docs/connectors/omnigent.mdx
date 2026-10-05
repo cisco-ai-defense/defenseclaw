@@ -8,14 +8,18 @@ keywords:
   - OmniGent OpenTelemetry
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The OmniGent connector uses OmniGent's documented custom Python policy API. It does not proxy OmniGent's model traffic. A small in-process policy bridge sends each policy event to the local DefenseClaw gateway, then maps the result back to OmniGent `ALLOW`, `ASK`, or `DENY`.
 
 ## Platform support
 
+<ConnectorSupport id="omnigent" />
+
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | The reviewed OmniGent (`>=0.7.0,<0.14.0`) custom-policy bridge maps all six awaited phases to DefenseClaw decisions; native OTLP remains an explicit launch-time opt-in. |
-| Native Windows x64 | **Supported — native degraded** | Support is limited to the reviewed OmniGent range (`>=0.7.0,<0.14.0`) `server` and SDK-based harnesses using the official same-user `uv tool` layout. Native terminal wrappers, filesystem/network sandboxing, and L7 egress proxy parity are unavailable; DefenseClaw does not emulate them through WSL or a shell compatibility layer. |
+| macOS and Linux | **Supported** | The custom-policy bridge maps all six awaited policy phases to DefenseClaw decisions. Native OTLP is an opt-in you set when you start OmniGent. |
+| Native Windows x64 | **Supported — native degraded** | Not verified live in this release. Covers OmniGent `server` and SDK-based harnesses installed with the official same-user `uv tool` layout. OmniGent's native terminal wrappers, filesystem and network sandboxing and egress proxy are not available on Windows, and DefenseClaw does not emulate them through WSL or a shell layer. |
 
 ## Setup
 
@@ -55,8 +59,8 @@ Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
 - enables the `defenseclaw_guardrail` server-wide policy.
 
 `setup omnigent` is the dedicated OmniGent alias. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for its common setup
-options and [full guardrail setup](/docs/setup/guardrail) for advanced scanner
+[quick-alias reference](/docs/guardrail/aliases) for its common setup
+options and [full guardrail setup](/docs/guardrail) for advanced scanner
 and judge configuration.
 
 DefenseClaw patches the explicit `OMNIGENT_CONFIG` path when set, then
@@ -77,15 +81,9 @@ and later reconciliation bind the exact `omnigent.exe` digest to the connector
 lock. Direct `uv.exe` and tool-Python metadata probes have connector-owned
 deadlines; setup does not fall back to a shell or an unbounded child process.
 
-The native Windows Setup executable accepts the explicit
-`CONNECTOR=omnigent` selection. Its transaction ledger records the
-exact previous and current `OMNIGENT_CONFIG_HOME`, carries that binding through
-repair and upgrade, reconciles all three managed backup identities, and retains
-failed teardown evidence for retry or deferred uninstall. This implemented
-lifecycle remains supported while validation metadata stays empty and
-`live=false`. Connector setup and teardown share a
-process-local plus owned cross-process lifecycle lock; scoped credentials are
-refreshed inside that transaction and revoked only after clean teardown.
+Setup and teardown take a lifecycle lock, so two runs cannot interleave.
+Setup refreshes the connector's scoped credentials, and teardown revokes them
+only after it finishes cleanly.
 
 All three managed files are backed up. Teardown restores unchanged files byte-for-byte and removes only DefenseClaw-owned YAML entries when the operator has edited the config.
 
@@ -121,8 +119,9 @@ For `llm_request`, the bridge inspects both separately labeled
 `system_prompt_preview` and `last_user_message` fields within fixed bounds.
 It also forwards bounded cumulative token usage and cost, model, harness,
 actor client ID, and label metadata. Oversized or invalid label projections are
-marked partial. OmniGent v0.7 policy callbacks expose no session identifier, so
-the bridge records that field as unavailable rather than inventing correlation.
+marked partial. OmniGent policy callbacks (0.7 through at least 0.16) expose no
+session identifier, so the bridge records that field as unavailable rather than
+inventing correlation.
 
 The official extension is an awaited in-process Python function. It does not
 read policy events from stdin, write verdicts to stdout, or communicate an
@@ -134,12 +133,47 @@ governs transport and invalid-response handling inside the bridge.
 
 Policy evaluations always produce DefenseClaw hook logs, counters, and spans. When OmniGent has an active OpenTelemetry span, the bridge forwards its W3C `traceparent`; otherwise the gateway starts a new trace.
 
+Because policy events carry no session identifier, the gateway does not build
+an `invoke_agent omnigent` root span for them, unlike the other connectors.
+With the policy bridge alone, each tool call is its own root
+`execute_tool <tool>` trace (for example `execute_tool sys_os_shell`), and a
+block is its own trace. With a native harness such as `--harness claude`,
+the agent's turns appear under that harness's connector (`invoke_agent
+claudecode`) when that connector is also set up. OmniGent's own
+`invoke_agent` spans reach DefenseClaw only through native OTLP (below). With
+native OTLP on, OmniGent has an active span, so the bridge forwards its
+`traceparent` and the hook spans join OmniGent's trace.
+
 OmniGent also supports native OTLP through standard process environment
 variables. This channel is **not active after setup**: DefenseClaw does not
 edit shell startup files or the OmniGent launcher. Export the variables in the
 process that starts OmniGent. Native OTLP uses its own connector-scoped token;
 it does not reuse the policy-hook token or the gateway master credential.
 Setup creates the owner-only token and successful teardown revokes it.
+
+Point the endpoint at your gateway's API port: `18970` unless you changed it
+with `defenseclaw setup gateway --api-port`.
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
+
+```bash
+otlp_token=$(cat ~/.defenseclaw/hooks/.otlp-omnigent.token)
+export OMNIGENT_TELEMETRY_ENABLED=true
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:18970
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer%20${otlp_token},x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel%2F1.0"
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_TRACES_EXPORTER=otlp
+export OMNIGENT_OTEL_CAPTURE_CONTENT=false
+omnigent server --config "${OMNIGENT_CONFIG_HOME}/config.yaml"
+```
+
+</Tab>
+
+<Tab value="Windows">
 
 ```powershell
 $tokenPath = Join-Path $env:USERPROFILE '.defenseclaw\hooks\.otlp-omnigent.token'
@@ -154,6 +188,13 @@ $env:OTEL_TRACES_EXPORTER = 'otlp'
 $env:OMNIGENT_OTEL_CAPTURE_CONTENT = 'false'
 omnigent server --config (Join-Path $env:OMNIGENT_CONFIG_HOME 'config.yaml')
 ```
+
+</Tab>
+
+</Tabs>
+
+The token file is owner-only; read it into the variable as shown and do not
+print it.
 
 Logs, metrics, and traces use OpenTelemetry packages present in OmniGent's
 base/default dependency set; no separate tracing extra is required. The status
@@ -323,8 +364,22 @@ exist only in the image; nothing on your host changes.
 
 ## Disable
 
+If OmniGent is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off OmniGent alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector omnigent --yes
 ```
+
+Both keep OmniGent's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop OmniGent from the configured
+connectors instead, run `defenseclaw setup remove omnigent --yes`; add `--force`
+when it is the last connector.
 
 Restart OmniGent after teardown so its running server drops the removed policy module.

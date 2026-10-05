@@ -687,6 +687,40 @@ func TestInitializationFailureReverseCleansPartialResourcesAndReportsOldGraph(t 
 	}
 }
 
+// GAP-1295, GAP-1698: a config-file reload that the gateway's own shutdown
+// cancels (a restart racing the watcher) keeps the old graph and records
+// neither a degraded-health alert nor a config.reload.rejected entry; a real
+// build failure still does.
+func TestCancelledReloadIsComplianceOnlyNotDegradedHealth(t *testing.T) {
+	log := &lifecycleLog{}
+	initial := testConfig(t, "shared", 90, true)
+	manager, reporter, _ := newTestManager(t, initial, []ComponentFactory{successfulFactory("alpha", log)})
+	old := manager.Active()
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	result, err := manager.Reload(cancelled, testConfig(t, "shared", 45, true))
+	if err == nil || err.Code() != ErrorInitialization || !errors.Is(err, context.Canceled) ||
+		result.ActiveGraph() != old || manager.Active() != old {
+		t.Fatalf("cancelled reload result=%v err=%v", result.Status(), err)
+	}
+	flushReports(t, manager)
+	var health, compliance int
+	for _, report := range reporter.snapshot() {
+		if report.value.Code != ReportInitializationFail {
+			continue
+		}
+		if report.kind == "health" {
+			health++
+		} else if report.kind == "compliance" {
+			compliance++
+		}
+	}
+	if health != 0 || compliance != 0 {
+		t.Fatalf("cancelled reload reports health=%d compliance=%d", health, compliance)
+	}
+}
+
 func TestQueuedProjectionRemainsOnOldGraphDuringAtomicSwap(t *testing.T) {
 	log := &lifecycleLog{}
 	factory := successfulFactory("exporter", log)

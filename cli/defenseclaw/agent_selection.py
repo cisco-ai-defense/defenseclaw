@@ -44,6 +44,9 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 SELECTION_FILENAME = "agent_selection.json"
+#: Connectors whose executable the last setup run could not verify. The gateway
+#: keeps their previously sealed version, so Doctor reports them (GAP-1711).
+UNVERIFIED_FILENAME = "agent_selection_unverified.json"
 SELECTION_SCHEMA_VERSION = 1
 SELECTION_LIFETIME = timedelta(minutes=15)
 _CODEX_WINDOWS_PLATFORM_VARIANTS = (
@@ -96,6 +99,26 @@ def setup_agent_selection_connectors(connectors: Iterable[str]) -> tuple[str, ..
     )
 
 
+def setup_agent_selection_problems(
+    data_dir: str | os.PathLike[str],
+    connectors: Iterable[str],
+) -> dict[str, str]:
+    """Return why each protected connector has no selectable executable.
+
+    Read-only: nothing is recorded. Batch callers use it to leave out a
+    connector that setup would refuse before the protected transaction starts.
+    """
+
+    target_dir = os.path.abspath(os.fspath(data_dir))
+    problems: dict[str, str] = {}
+    for connector in setup_agent_selection_connectors(connectors):
+        try:
+            _select_agent_executable(target_dir, connector)
+        except OSError as exc:
+            problems[connector] = str(exc)
+    return problems
+
+
 def record_setup_agent_selections(
     data_dir: str | os.PathLike[str],
     connectors: Iterable[str],
@@ -123,6 +146,22 @@ def record_setup_agent_selections(
         # touched connector roster, mode, locks, or desired/applied state.
         return selections, errors
 
+    publish_setup_agent_selections(target_dir, selections)
+    return selections, errors
+
+
+def publish_setup_agent_selections(
+    data_dir: str | os.PathLike[str],
+    selections: dict[str, SetupAgentSelection],
+) -> None:
+    """Write a fresh receipt that covers exactly ``selections``.
+
+    Callers that decided to continue without some peers (their probe failed)
+    publish the verified subset; the gateway keeps an omitted peer's existing
+    sealed lock as its authority.
+    """
+
+    target_dir = os.path.abspath(os.fspath(data_dir))
     now = datetime.now(timezone.utc)
     expires = now + SELECTION_LIFETIME
     # This receipt authorizes only the current transaction's full protected
@@ -147,20 +186,83 @@ def record_setup_agent_selections(
     }
     body = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     atomic_write_private_bytes(os.path.join(target_dir, SELECTION_FILENAME), body)
-    return selections, errors
+
+
+def record_unverified_setup_agents(
+    data_dir: str | os.PathLike[str],
+    errors: dict[str, str],
+    verified: Iterable[str],
+) -> None:
+    """Remember which connectors setup could not verify, and forget verified ones."""
+
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), UNVERIFIED_FILENAME)
+    current = unverified_setup_agents(data_dir)
+    for name in verified:
+        current.pop(name, None)
+    now = _format_rfc3339(datetime.now(timezone.utc))
+    for name, detail in errors.items():
+        current[name] = {"detail": str(detail)[:300], "at": now}
+    if not current:
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        return
+    body = (json.dumps({"unverified": current}, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    atomic_write_private_bytes(path, body)
+
+
+def unverified_setup_agents(data_dir: str | os.PathLike[str]) -> dict[str, dict[str, str]]:
+    """Connectors the last setup could not verify: ``{name: {"detail", "at"}}``."""
+
+    path = os.path.join(os.path.abspath(os.fspath(data_dir)), UNVERIFIED_FILENAME)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            entries = json.load(fh).get("unverified")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        str(name): {"detail": str(entry.get("detail") or ""), "at": str(entry.get("at") or "")}
+        for name, entry in entries.items()
+        if isinstance(entry, dict)
+    }
+
+
+# Setup's protected selection probes the agent once more right after
+# discovery; on a loaded Windows host `claude --version` took about 43 s, so
+# the 8 s discovery budget refused an agent setup had just verified
+# (GAP-1620).
+SELECTION_VERSION_TIMEOUT_SECONDS = 90.0
+
+_WINDOWS_NATIVE_INSTALL_HINTS = {
+    "claudecode": "install the native Claude Code build with `claude install`",
+}
 
 
 def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelection:
     spec = agent_discovery._SPECS[connector]
     if connector == "opencode" and os.name == "nt":
-        rejection = "the exact official SST WinGet opencode.exe image was not found or was not trusted"
+        rejection = (
+            "neither the official SST WinGet opencode.exe nor the npm opencode-ai package's opencode.exe "
+            "was found or trusted for this user; install one with 'winget install SST.opencode' or "
+            "'npm install -g opencode-ai'"
+        )
     else:
         rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
+    untrusted_found = ""
     for candidate in _setup_agent_candidates(connector, spec, data_dir):
         protected_windows_opencode = connector == "opencode" and os.name == "nt"
         protected_darwin_openhands = connector == "openhands" and sys.platform == "darwin"
         identity = _stable_selection_identity(candidate) if protected_darwin_openhands else None
         if protected_darwin_openhands and identity is None:
+            # A uv-tool install puts a symlink on PATH (~/.local/bin/openhands
+            # -> ~/.local/share/uv/tools/openhands/bin/openhands). Name the
+            # real file so the refusal gives the trusted-paths command for it.
+            target = os.path.realpath(os.path.abspath(candidate))
+            if not untrusted_found and os.path.isfile(target):
+                untrusted_found = target
             continue
         if protected_windows_opencode:
             trusted = _is_windows_opencode_setup_binary(candidate)
@@ -169,6 +271,8 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         else:
             trusted = is_setup_trusted_binary(candidate, data_dir)
         if not trusted or (protected_darwin_openhands and _stable_selection_identity(candidate) != identity):
+            if not trusted and not untrusted_found:
+                untrusted_found = os.path.realpath(os.path.abspath(candidate))
             continue
         executable = os.path.realpath(os.path.abspath(candidate))
         digest = ""
@@ -194,7 +298,14 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
                 # environment and must not override that stronger setup decision.
                 require_trusted_binary_paths=False,
                 data_dir=data_dir,
+                timeout_override=SELECTION_VERSION_TIMEOUT_SECONDS,
             )
+        if probe_error == agent_discovery.VERSION_PROBE_TIMED_OUT:
+            rejection = (
+                f"{executable} did not answer its version probe within "
+                f"{SELECTION_VERSION_TIMEOUT_SECONDS:.0f} s (the host may be busy); re-run setup"
+            )
+            continue
         if probe_error or not raw_version:
             rejection = probe_error or "version probe returned no version"
             continue
@@ -231,7 +342,58 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             normalized_version=normalized,
             sha256=digest,
         )
+    if (
+        untrusted_found
+        and rejection.startswith("no installed executable")
+        and os.name == "nt"
+        and os.path.splitext(untrusted_found)[1].casefold() != ".exe"
+    ):
+        # A .cmd/.bat/.ps1 shim (npm's claude.cmd) is refused wherever it
+        # lives, so trusted-paths add cannot help (GAP-1612): name the real
+        # reason and the native install instead.
+        native = _WINDOWS_NATIVE_INSTALL_HINTS.get(connector, "install the agent's native Windows (.exe) build")
+        rejection = (
+            f"{untrusted_found} is a script wrapper, not a native .exe that setup can verify; "
+            f"{native} and re-run setup"
+        )
+    elif untrusted_found and rejection.startswith("no installed executable"):
+        # Name what was found and the one command that admits it; a bare
+        # "no installed executable" reads as if the agent were missing.
+        rejection = (
+            f"{untrusted_found} is not in a built-in or operator-approved trusted prefix; "
+            "if you installed it, run `defenseclaw setup trusted-paths add "
+            f"{os.path.dirname(untrusted_found)}` and re-run setup"
+        )
     raise OSError(f"cannot select {connector} executable: {rejection}")
+
+
+def untrusted_setup_executable(data_dir: str | os.PathLike[str], connector: str) -> str:
+    """Return the real path of an installed agent that setup would refuse as untrusted.
+
+    Empty when a candidate is already trusted or none is installed. Only the
+    macOS OpenHands selection is covered (a ``uv tool`` install puts an
+    untrusted symlink on PATH); interactive init uses this to offer its
+    trusted-paths prompt before the selection skips the agent.
+    """
+
+    if connector != "openhands":
+        return ""
+    spec = agent_discovery._SPECS.get(connector)
+    if spec is None:
+        return ""
+    target_dir = os.path.abspath(os.fspath(data_dir))
+    untrusted = ""
+    for candidate in _setup_agent_candidates(connector, spec, target_dir):
+        if _stable_selection_identity(candidate) is None:
+            target = os.path.realpath(os.path.abspath(candidate))
+            if not untrusted and os.path.isfile(target):
+                untrusted = target
+            continue
+        if is_setup_trusted_binary(candidate, target_dir, connector=connector):
+            return ""
+        if not untrusted:
+            untrusted = os.path.realpath(os.path.abspath(candidate))
+    return untrusted
 
 
 def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
@@ -382,12 +544,17 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     """Enumerate PATH candidates plus exact names under trusted API roots."""
 
     if connector == "opencode" and os.name == "nt":
-        # Protected native setup has one executable authority. Passive
-        # inventory may still display aliases and other installations, but
-        # PATH, WinGet Links, generic roots, and configured prefixes never
-        # participate in the mutation-authorizing selection.
-        candidate = _windows_opencode_winget_executable()
-        return (candidate,) if candidate and os.path.isfile(candidate) else ()
+        # Protected native setup admits exactly two images, the same ones the
+        # gateway admits (opencode_admission_windows.go): the official SST
+        # WinGet image, then the native image of the npm opencode-ai package.
+        # Passive inventory may still display aliases and other
+        # installations, but PATH, WinGet Links, generic roots, and configured
+        # prefixes never participate in the mutation-authorizing selection.
+        return tuple(
+            candidate
+            for candidate in (_windows_opencode_winget_executable(), _windows_opencode_npm_executable())
+            if candidate and os.path.isfile(candidate)
+        )
 
     discovered = list(agent_discovery._binary_candidates_for_agent(connector, spec))
     _require, configured = agent_discovery._ai_discovery_trust_config(data_dir)
@@ -454,6 +621,14 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                 pass
         if connector == "codex" and os.path.normcase(os.path.abspath(root)) != paired_codex_root:
             candidates.extend(_codex_npm_native_candidates(root))
+        if connector == "amp" and os.name == "nt":
+            # npm puts only amp.cmd/amp.ps1 shims on PATH; the native image
+            # they launch sits at one of these fixed package-relative paths,
+            # the same ones the per-user admission table names.
+            for relative in _AMP_NPM_NATIVE_RELATIVES:
+                candidate = os.path.join(root, *relative)
+                if os.path.isfile(candidate):
+                    candidates.append(candidate)
 
     # Prefer a native image over a script wrapper. This both avoids shell
     # interpretation and binds the protected digest to the process that
@@ -471,6 +646,14 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
             seen.add(key)
             result.append(candidate)
     return tuple(result)
+
+
+_AMP_NPM_NATIVE_RELATIVES = (
+    ("node_modules", "@ampcode", "cli", "bin", "amp.exe"),
+    # `npm i -g @sourcegraph/amp` nests the same native package (GAP-1437).
+    ("node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe"),
+)
+_OPENCODE_NPM_NATIVE_RELATIVE = ("npm", "node_modules", "opencode-ai", "bin", "opencode.exe")
 
 
 def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
@@ -679,6 +862,7 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
                 os.path.join(local, "OpenAI", "Codex", "bin"),
                 os.path.join(local, "OpenAI", "Codex", "runtimes"),
                 os.path.join(local, "hermes", "hermes-agent", "venv", "Scripts"),
+                os.path.join(local, "hermes", "bin"),
                 os.path.join(local, "Microsoft", "WinGet", "Links"),
                 os.path.join(local, "pnpm"),
             )
@@ -740,18 +924,46 @@ def _windows_opencode_winget_executable(local_app_data: str = "") -> str:
     )
 
 
-def _is_windows_opencode_setup_binary(candidate: str) -> bool:
-    """Admit only the exact official SST image with its protected chain."""
+def _windows_opencode_npm_executable(roaming_app_data: str = "") -> str:
+    """Return the current-token npm opencode-ai native image path."""
 
-    local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
-    expected = _windows_opencode_winget_executable(local)
-    if not local or not expected:
+    roaming = roaming_app_data or _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
+    if not roaming:
+        return ""
+    return os.path.abspath(os.path.join(roaming, *_OPENCODE_NPM_NATIVE_RELATIVE))
+
+
+def _opencode_npm_package_identity_verified(executable: str) -> bool:
+    """Mirror the gateway: the package.json beside bin\\ names opencode-ai."""
+
+    manifest = os.path.join(os.path.dirname(os.path.dirname(executable)), "package.json")
+    try:
+        if os.path.islink(manifest) or not os.path.isfile(manifest) or os.path.getsize(manifest) > 256 << 10:
+            return False
+        with open(manifest, encoding="utf-8") as handle:
+            parsed = json.load(handle)
+    except (OSError, ValueError):
         return False
+    return isinstance(parsed, dict) and parsed.get("name") == "opencode-ai"
+
+
+def _is_windows_opencode_setup_binary(candidate: str) -> bool:
+    """Admit only the exact SST WinGet or npm opencode-ai image with its protected chain."""
+
+    lexical = os.path.abspath(candidate)
+    local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
+    expected = _windows_opencode_winget_executable(local) if local else ""
+    if not expected or os.path.normcase(lexical) != os.path.normcase(expected):
+        local = _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")
+        expected = _windows_opencode_npm_executable(local) if local else ""
+        if (
+            not expected
+            or os.path.normcase(lexical) != os.path.normcase(expected)
+            or not _opencode_npm_package_identity_verified(lexical)
+        ):
+            return False
     try:
         local = os.path.abspath(local)
-        lexical = os.path.abspath(candidate)
-        if os.path.normcase(lexical) != os.path.normcase(expected):
-            return False
         if not os.path.isfile(lexical):
             return False
         if not agent_discovery._windows_path_chain_has_no_reparse_points(lexical, local):
@@ -768,12 +980,17 @@ def _is_windows_opencode_setup_binary(candidate: str) -> bool:
 
 
 def _windows_managed_hermes_prefixes() -> tuple[str, ...]:
-    """Return only the official updater-managed Hermes executable directory."""
+    """Return only the official updater-managed Hermes executable directory.
+
+    The same single image the gateway admits (internal/hermespath): the
+    hermes-agent venv image, else the bootstrap installer's bin launcher.
+    """
 
     local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
     if not local:
         return ()
-    return (os.path.abspath(os.path.join(local, "hermes", "hermes-agent", "venv", "Scripts")),)
+    executable = agent_discovery._windows_hermes_managed_executable(local)
+    return (os.path.abspath(os.path.dirname(executable)),)
 
 
 def _windows_known_folder(identifier: str) -> str:
@@ -885,6 +1102,7 @@ def _stable_windows_executable_version_and_sha256(
             version_args,
             require_trusted_binary_paths=False,
             data_dir=data_dir,
+            timeout_override=SELECTION_VERSION_TIMEOUT_SECONDS,
         )
         after_probe = os.fstat(descriptor)
         path_after_probe = os.lstat(path)

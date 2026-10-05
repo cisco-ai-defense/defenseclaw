@@ -11,6 +11,7 @@
 package agentprocess
 
 import (
+	"bytes"
 	"errors"
 	"time"
 
@@ -46,4 +47,18 @@ func lookupSysctl(pid int) (Process, error) {
 		Start:  int64(start.Sec)*1_000_000 + int64(start.Usec),
 		Exited: info.Proc.P_stat == darwinZombie,
 	}, nil
+}
+
+// executablePath reads the executable path kern.procargs2 records after its
+// 4-byte argument count.
+func executablePath(pid int) string {
+	data, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil || len(data) <= 4 {
+		return ""
+	}
+	path := data[4:]
+	if end := bytes.IndexByte(path, 0); end >= 0 {
+		path = path[:end]
+	}
+	return string(path)
 }

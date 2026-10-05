@@ -511,6 +511,27 @@ def _parse_json_object(raw: str, *, description: str) -> dict[str, object]:
     return value
 
 
+def _is_windows_server() -> bool:
+    try:
+        return "server" in (platform.win32_edition() or "").lower()
+    except (AttributeError, OSError):  # not Windows, or no edition in the registry
+        return False
+
+
+def docker_cli_missing_message(os_name: str) -> str:
+    """Say what to install when there is no Docker CLI (GAP-1368)."""
+
+    if os_name == "windows" and _is_windows_server():
+        # The bundled stack needs Docker Desktop with Linux containers, which
+        # runs on Windows Pro, Enterprise and Education only.
+        return (
+            "Docker CLI was not found on PATH. The bundled stack needs Docker Desktop with Linux "
+            "containers, which does not run on Windows Server. Send telemetry to an existing "
+            "collector instead: defenseclaw setup observability add otlp"
+        )
+    return "Docker CLI was not found on PATH. Install Docker Desktop and retry."
+
+
 def resolve_native_docker_executable(
     docker_path: str | os.PathLike[str] | None = None,
     *,
@@ -615,6 +636,20 @@ def _validate_windows_docker_certification(
         )
 
 
+def _docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
+    """Say why ``docker info`` failed and what to do on this OS (GAP-1335)."""
+
+    if os_name.startswith("win") or os_name == "darwin":
+        return "Docker daemon is not reachable. Start Docker Desktop and retry"
+    if "permission denied" in detail.lower():
+        return (
+            "This account cannot use the Docker daemon socket (permission denied). Add it to the "
+            "docker group (sudo usermod -aG docker $USER, then sign out and back in) or use "
+            "rootless Docker, and retry"
+        )
+    return "Docker daemon is not reachable. Start it (sudo systemctl start docker) and retry"
+
+
 def validate_native_docker_preflight(
     docker_path: str,
     runner: CommandRunner,
@@ -626,7 +661,7 @@ def validate_native_docker_preflight(
     """Validate Compose v2, the daemon, Linux containers, and Windows policy."""
 
     if not docker_path:
-        raise LocalStackError("Docker CLI was not found on PATH. Install Docker Desktop and retry.")
+        raise LocalStackError(docker_cli_missing_message(os_name))
     compose = runner.run([docker_path, "compose", "version"], timeout=10, env=environment)
     if compose.returncode != 0:
         raise LocalStackError("Docker Compose v2 is unavailable. Install/enable the 'docker compose' plugin.")
@@ -638,7 +673,7 @@ def validate_native_docker_preflight(
     if info_result.returncode != 0:
         detail = (info_result.stderr or info_result.stdout).strip()
         suffix = f" ({detail.splitlines()[0]})" if detail else ""
-        raise LocalStackError("Docker daemon is not reachable. Start Docker Desktop and retry" + suffix)
+        raise LocalStackError(_docker_daemon_unreachable_message(detail, os_name) + suffix)
     info = _parse_json_object(info_result.stdout.strip(), description="info")
     if str(info.get("OSType", "")).lower() != "linux":
         raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
@@ -671,6 +706,10 @@ class LocalStackController:
         self.docker_path = resolve_native_docker_executable(docker_path, os_name=self.os_name)
         self.runner = runner or CommandRunner()
         self.environment = dict(os.environ if environment is None else environment)
+        # Set by status(): every readiness probe passed and no foreign copy was found.
+        self.status_ready = False
+        # Set by status(): the containers belong to another copy of the stack.
+        self.status_foreign = False
         # The managed lifecycle always uses the Compose file's loopback default.
         # Intentional HOST_BIND overrides are confined to the documented manual
         # `docker compose` path, where the operator owns the exposure decision.
@@ -698,7 +737,7 @@ class LocalStackController:
         grafana_access_mode: str | None = None,
     ) -> list[str]:
         if not self.docker_path:
-            raise LocalStackError("Docker CLI was not found on PATH. Install Docker Desktop and retry.")
+            raise LocalStackError(docker_cli_missing_message(self.os_name))
         if grafana_access_mode is not None and grafana_access_mode not in GRAFANA_ACCESS_MODES:
             raise ValueError(f"unknown Grafana access mode: {grafana_access_mode!r}")
         command = [
@@ -822,10 +861,17 @@ class LocalStackController:
                 or not config_matches
                 or not working_dir_matches
             ):
+                # GAP-1335: a copy of this stack started from another directory
+                # (another account or install) carries the same labels.
+                origin = (
+                    f"belongs to another copy of the {COMPOSE_PROJECT} stack, started from "
+                    f"{working_dir}, not to this one ({self.stack_dir})"
+                    if actual_project == COMPOSE_PROJECT and actual_service == service and working_dir
+                    else f"is not owned by the {COMPOSE_PROJECT}/{service} Compose service"
+                )
                 raise LocalStackError(
-                    f"container name collision: {container} is not owned by the "
-                    f"{COMPOSE_PROJECT}/{service} Compose service. DefenseClaw will not "
-                    "delete it; rename or remove the foreign container and retry."
+                    f"container name collision: {container} {origin}. DefenseClaw will not "
+                    "delete it; stop that stack (or rename or remove the container) and retry."
                 )
         return existing_names.intersection(SERVICE_CONTAINERS)
 
@@ -1269,12 +1315,22 @@ class LocalStackController:
         )
 
     def status(self) -> str:
+        """Compose ps plus readiness; ``status_ready`` says whether all of it is healthy."""
         self.preflight()
         compose = self._checked(self._run_compose("ps", timeout=30), "docker compose ps")
         lines = [compose.stdout.rstrip(), "", "Readiness:"]
-        for probe in self.probe_all():
+        probes = self.probe_all()
+        for probe in probes:
             state = "ready" if probe.ready else "fail"
             lines.append(f"  {probe.label:<10} {state:<7} {probe.target}")
+        self.status_ready = bool(probes) and all(probe.ready for probe in probes)
+        # GAP-1335: say when the containers listed belong to another copy.
+        try:
+            self.verify_container_ownership()
+        except LocalStackError as exc:
+            self.status_ready = False
+            self.status_foreign = "belongs to another copy" in str(exc)
+            lines.extend(("", f"Note: {exc}"))
         return "\n".join(lines).rstrip() + "\n"
 
     def logs(self, *, service: str | None = None, follow: bool = False) -> str:
@@ -1353,7 +1409,7 @@ class LocalStackController:
             "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4317",
             "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
             "OTEL_SERVICE_NAME": "defenseclaw",
-            "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment=local-dev"),
+            "OTEL_RESOURCE_ATTRIBUTES": ("service.namespace=defenseclaw,deployment.environment.name=local-dev"),
         }
 
 

@@ -16,4 +16,4 @@
 
 """DefenseClaw — Enterprise governance layer for OpenClaw."""
 
-__version__ = "0.8.10"
+__version__ = "1.0.0"

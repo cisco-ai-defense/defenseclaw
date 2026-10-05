@@ -35,8 +35,12 @@ import (
 // the guardian selects; anything else stays unmanaged and is reported, rather
 // than failing the reconcile for every other user.
 var windowsStandaloneManagedExecutableRelative = map[string][][]string{
-	// npm's amp.cmd launches this native image.
-	"amp": {{"AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli", "bin", "amp.exe"}},
+	// npm's amp.cmd launches this native image; `npm i -g @sourcegraph/amp`
+	// nests the same package one level down.
+	"amp": {
+		{"AppData", "Roaming", "npm", "node_modules", "@ampcode", "cli", "bin", "amp.exe"},
+		{"AppData", "Roaming", "npm", "node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli", "bin", "amp.exe"},
+	},
 	// The connector's executable admission accepts the official SST WinGet
 	// image and the native image npm's opencode.cmd launches from the
 	// opencode-ai package. WinGet wins when both exist.
@@ -153,8 +157,8 @@ func windowsStandaloneUnreadableExecutable(candidate string) string {
 // that user instead of failing the reconcile, and withholding enrollment
 // publication, for everyone.
 func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (bool, string) {
-	if resolution := connector.ResolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
-		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
+	if ok, reason := windowsStandaloneHookContractAdmitted(connectorName, version); !ok {
+		return false, reason
 	}
 	if minimum := windowsEnterpriseStandaloneAgentMinimum(connectorName); minimum != "" {
 		normalized := connector.NormalizeAgentVersion(connectorName, version)
@@ -163,6 +167,25 @@ func windowsStandaloneRowAdmission(profileHome, connectorName, version string) (
 		}
 	}
 	return windowsStandalonePerUserAdmission(profileHome, connectorName, version)
+}
+
+// windowsStandaloneHookContractAdmitted reports whether version resolves to
+// a hook contract the guardian can install: a known contract or, for a
+// connector whose contract is not version-gated, a version at or above its
+// standalone floor (standaloneNotGatedAgentFloors). Kiro resolves against
+// its managed Windows contracts, whose floors name the refused version.
+func windowsStandaloneHookContractAdmitted(connectorName, version string) (bool, string) {
+	resolution := resolveHookContract(connectorName, version)
+	if standaloneNotGatedAgentFloor(connectorName) != "" && resolution.Status == connector.HookCompatibilityNotGated {
+		return standaloneNotGatedVersionAdmitted(resolution)
+	}
+	if resolution.Status != connector.HookCompatibilityKnown {
+		if standaloneNotGatedAgentFloor(connectorName) != "" && resolution.NormalizedVersion != "" {
+			return false, resolution.Reason
+		}
+		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
+	}
+	return true, ""
 }
 
 // windowsStandalonePerUserAdmission reports whether the guardian can manage a
@@ -174,8 +197,8 @@ func windowsStandalonePerUserAdmission(profileHome, connectorName, version strin
 	if _, perUser := windowsStandalonePerUserConnector(connectorName); !perUser {
 		return true, ""
 	}
-	if resolution := connector.ResolveHookContract(connectorName, version); resolution.Status != connector.HookCompatibilityKnown {
-		return false, fmt.Sprintf("version %s is not verified against a known hook contract", version)
+	if ok, reason := windowsStandaloneHookContractAdmitted(connectorName, version); !ok {
+		return false, reason
 	}
 	if _, reason := windowsStandalonePerUserManagedExecutable(profileHome, connectorName); reason != "" {
 		return false, reason

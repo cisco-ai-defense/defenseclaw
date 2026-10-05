@@ -1,7 +1,6 @@
 {
   "title": "Stories",
   "pages": [
-    "index",
     "observe-claude-code",
     "prompt-injection-codex",
     "cursor-secret-exfil",

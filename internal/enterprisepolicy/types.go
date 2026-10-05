@@ -92,6 +92,16 @@ type Options struct {
 	// ClaudeVersionFloor is enterprise.machine_policy.connectors.claudecode.version_floor
 	// (enforce, report or off); "" means the default, enforce.
 	ClaudeVersionFloor string
+	// ClaudeMachineHookContract is the Claude Code hook contract the
+	// machine-wide hook drop-in is rendered from when another lifecycle
+	// renders it (standalone Windows: the oldest enrolled contract). The
+	// version floor rises to that contract's lowest version, so no build the
+	// floor lets start finds hook events in the drop-in it does not know
+	// (GAP-1555). Empty: the floor is ClaudeVersionFloor().
+	ClaudeMachineHookContract string
+	// WSL is enterprise.machine_policy.windows_wsl (Windows only); empty
+	// knobs take their defaults.
+	WSL config.EnterpriseWindowsWSLPolicy
 	// Now is injectable for tests.
 	Now func() time.Time
 	// OpenCodePluginPath is the absolute path of the administrator-owned
@@ -104,6 +114,17 @@ type Options struct {
 	// the deployment's files), so planning puts OpenCode on machine policy
 	// before the file exists. Reconcile still requires the installed file.
 	OpenCodePluginPlanned bool
+	// CopilotHarnessPreference and CopilotLocalHarness are
+	// enterprise.machine_policy.connectors.copilot harness_preference (sdk
+	// or unmanaged) and local_harness (govern or retire); "" takes the
+	// default (sdk, govern).
+	CopilotHarnessPreference string
+	CopilotLocalHarness      string
+	// CopilotUserHomes are the enrolled accounts' homes (from the
+	// administrator's eligible-accounts record, never a user's
+	// environment). The VS Code managed-hooks lock is written only when
+	// every one of them holds DefenseClaw's current Copilot plugin.
+	CopilotUserHomes []string
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
 }
@@ -191,8 +212,12 @@ type State struct {
 	// through, a Claude Code floor drop-in it must withdraw). A conflict
 	// says what; VerifyAll does not report the connector in place, so the
 	// lifecycle's ensure re-applies.
-	Drift          bool   `json:"drift,omitempty"`
-	LiveVerifiedAt string `json:"live_verified_at,omitempty"`
+	Drift bool `json:"drift,omitempty"`
+	// UserFileDrift names enrolled users' DefenseClaw-owned files that are
+	// missing or not current (Copilot's VS Code Local hook file). The hook
+	// guardian rewrites them as the user; until it has, verify fails.
+	UserFileDrift  []string `json:"user_file_drift,omitempty"`
+	LiveVerifiedAt string   `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
@@ -251,9 +276,14 @@ var targets = map[string]Target{
 	ConnectorOpenCode:   opencodeTarget{},
 }
 
-// TargetFor returns the machine policy target for connector.
+// TargetFor returns the machine policy target for connector or companion
+// (companionTargets).
 func TargetFor(connector string) (Target, bool) {
-	target, ok := targets[strings.ToLower(strings.TrimSpace(connector))]
+	connector = strings.ToLower(strings.TrimSpace(connector))
+	if companion, ok := companionTargets[connector]; ok {
+		return companion.target, true
+	}
+	target, ok := targets[connector]
 	return target, ok
 }
 
@@ -261,22 +291,16 @@ func TargetFor(connector string) (Target, bool) {
 func RouteFor(connector, goos string) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	switch connector {
-	case ConnectorCodex, ConnectorClaudeCode, ConnectorCursor, ConnectorCopilot:
+	case ConnectorCodex, ConnectorClaudeCode, ConnectorCursor, ConnectorCopilot, ConnectorDevinCascade:
 		return RouteMachinePolicy
 	case "kiro":
 		// Kiro has no vendor mechanism that delivers hooks from a machine
 		// location (its managed-settings.json carries permission rules
-		// only), so on Linux and macOS the standalone guardian registers
-		// the hook in each enrolled user's global ~/.kiro/hooks, which Kiro
-		// IDE and kiro-cli --v3 merge with every other scope, plus the CLI
-		// 2.x agent. The Windows guardian does not enroll Kiro: kiro-cli.exe
-		// records its version nowhere DefenseClaw can read without running
-		// it, and Windows discovery runs nothing. Kiro there is protected
-		// through `defenseclaw-gateway enterprise acp`, which stays
-		// available on every OS for editors that start Kiro over ACP.
-		if goos == "windows" {
-			return RouteACP
-		}
+		// only), so the standalone guardian registers the hook in each
+		// enrolled user's global ~/.kiro/hooks, which Kiro IDE and kiro-cli
+		// --v3 merge with every other scope, plus the CLI 2.x agent.
+		// `defenseclaw-gateway enterprise acp` stays available on every OS
+		// for editors that start Kiro over ACP.
 		return RoutePerUser
 	case "openclaw", "zeptoclaw":
 		return RouteUnsupported

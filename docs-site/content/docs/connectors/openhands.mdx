@@ -8,13 +8,17 @@ keywords:
   - OpenHands guardrail
 ---
 
+import { ConnectorSupport } from '@/components/support-matrix';
+
 The OpenHands connector wires DefenseClaw into [OpenHands lifecycle hooks](https://docs.openhands.dev/openhands/usage/customization/hooks). DefenseClaw installs the hook globally at `~/.openhands/hooks.json` by default so local OpenHands sessions across repositories report into the same DefenseClaw gateway, while OpenHands still talks directly to its configured upstream model provider.
 
 ## Platform support
 
+<ConnectorSupport id="openhands" />
+
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | DefenseClaw installs the POSIX hook runtime and supports the OpenHands CLI `>=1.12.0` hook contract. macOS can additionally use the protected launch-command trace-only native OTLP path; Linux remains hook-only. |
+| macOS and Linux | **Supported** | DefenseClaw installs the POSIX hook runtime and supports the OpenHands CLI `>=1.12.0` hook contract. On macOS you can also export OpenHands' own traces to DefenseClaw ([native traces on macOS](#native-traces-on-macos)); Linux is hook-only. |
 | Native Windows x64 | **Unsupported** | OpenHands CLI requires WSL, and DefenseClaw does not implement a WSL connector path. |
 
 ## Setup
@@ -49,9 +53,9 @@ By default this is **global/user-scoped**: DefenseClaw writes native OpenHands h
 The OpenHands connector is **hook-only**. `defenseclaw setup openhands` defaults to observability-only `mode=observe`, and `defenseclaw setup openhands --mode action` enables hook-native blocking. OpenHands still talks directly to its configured upstream model provider in both modes; DefenseClaw never inserts an LLM proxy.
 </Callout>
 
-#### What `setup openhands` actually does
+### What `setup openhands` actually does
 
-The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/policies/defaults).
 
 | Flag | Default | What it does |
 | --- | --- | --- |
@@ -65,17 +69,37 @@ The wrapper accepts the same hook-alias flags as the other hook connectors. The 
 guardrail setup backend, defaults to observe mode, and can join an existing
 hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared
 for global setup and set only when `--workspace` is supplied. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for common options and
-[full guardrail setup](/docs/setup/guardrail) for advanced scanner and judge
+[quick-alias reference](/docs/guardrail/aliases) for common options and
+[full guardrail setup](/docs/guardrail) for advanced scanner and judge
 configuration.
 
-#### Version contract
+### Version contract
 
 DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The supported POSIX contract starts at `OpenHands CLI 1.12.0`, the first version that loads user-global `~/.openhands/hooks.json`. It is source-reviewed against `OpenHands CLI 1.16.0` with no maximum version currently declared.
 
 <Callout type="warning">
 Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. OpenHands 1.16.0 loads a repository-local `.openhands/hooks.json` instead of the global file, not next to it: in a project that has its own file, none of DefenseClaw's global hooks run, so tool calls there are not inspected or logged. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly. In an enterprise deployment the guardian writes only the global file, and the foreign-hook guard does not cover OpenHands; see the [enterprise residual risks](/docs/enterprise/threat-model#residual-risks).
 </Callout>
+
+### Native traces on macOS
+
+On macOS, start OpenHands through DefenseClaw to send OpenHands' own
+OpenTelemetry traces to the gateway as well:
+
+```bash
+defenseclaw-gateway connector launch --connector openhands
+```
+
+Put OpenHands' own flags after `--`, for example
+`defenseclaw-gateway connector launch --connector openhands -- --headless --exit-without-confirmation -t "TEXT"`.
+
+The command checks that the OpenHands executable and hook registration are
+the ones setup recorded, then starts OpenHands with the trace exporter pointed
+at the gateway and a connector-scoped OTLP credential set only in that child
+process; the credential is never printed or put on the command line. It
+exports traces only, not logs or metrics, and DefenseClaw does not write these
+variables into shell startup files. On Linux there is no native exporter path,
+so OpenHands telemetry comes from its hooks alone.
 
 ## Hook schema
 
@@ -142,7 +166,7 @@ The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` unde
 <HookEventsList connector="openhands" />
 
 <Callout>
-OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `PreToolUse` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
+OpenHands can block supported hook events but has no native human-approval surface. Confirm verdicts become an `additionalContext` alert with `raw_action: "confirm"` preserved; the TUI and audit log are review-only. In the standalone enterprise profile, a confirm verdict on `pre_tool_use` is blocked instead, and the message says the organization's rule needs a confirmation that OpenHands cannot ask for.
 </Callout>
 
 ## OpenShell sandbox
@@ -181,7 +205,7 @@ exist only in the image; nothing on your host changes.
   at 70 characters, which left `Status: BLOCKED - Blocked by DefenseCla...`.
   The same module starts a DefenseClaw block's rendering with the block, so
   the collapsed line reads
-  `BLOCKED by DefenseClaw rule <ID>: <title>...`; Ctrl+O still expands it to
+  `BLOCKED: DefenseClaw policy blocked this action (rule <ID>: <title>)...`; Ctrl+O still expands it to
   the full reason and OpenHands' own details. The reason the model gets is
   unchanged.
 - **Screen updates.** OpenHands 1.16 sometimes does not scroll to a new
@@ -291,8 +315,22 @@ See R1, R15, R18 and R30 in the
 
 ## Disable
 
+If OpenHands is the only connector DefenseClaw guards, turn the guardrail off:
+
+```bash
+defenseclaw guardrail disable --yes
+```
+
+If other connectors are configured too, turn off OpenHands alone and keep the
+rest running:
+
 ```bash
 defenseclaw guardrail disable --connector openhands --yes
 ```
+
+Both keep OpenHands's settings, so `defenseclaw guardrail enable` (with the same
+`--connector`) turns it back on. To drop OpenHands from the configured
+connectors instead, run `defenseclaw setup remove openhands --yes`; add `--force`
+when it is the last connector.
 
 Teardown removes DefenseClaw-owned hook entries from `~/.openhands/hooks.json` or the pinned workspace hook file and leaves unrelated OpenHands hooks untouched.

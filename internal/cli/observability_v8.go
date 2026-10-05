@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 )
@@ -115,6 +116,12 @@ var (
 	errObservabilityV8GatewayAccessAuth   = errors.New("observability-v8 gateway authentication is unavailable")
 )
 
+// observabilityV8ForeignListenerError means the API port is held by a
+// process that is not this account's gateway, so the bearer was not sent.
+type observabilityV8ForeignListenerError struct{ problem, fix string }
+
+func (e *observabilityV8ForeignListenerError) Error() string { return e.problem }
+
 type traceCanaryHelperResult struct {
 	Destination  string `json:"destination,omitempty"`
 	TraceID      string `json:"trace_id,omitempty"`
@@ -164,6 +171,9 @@ func recordDestinationTestActivity(
 	payload, err := json.Marshal(activity)
 	if err != nil {
 		return errors.New("destination-test compliance activity is invalid")
+	}
+	if gatewayListenerOfAnotherAccount(access.host, access.port, dataDir) {
+		return errors.New("destination-test compliance recorder is unavailable")
 	}
 	address := net.JoinHostPort(access.host, strconv.Itoa(access.port))
 	requestURL := (&url.URL{Scheme: "http", Host: address, Path: destinationtest.EndpointPath}).String()
@@ -261,8 +271,12 @@ func requestTraceCanary(
 	}
 	access, err := observabilityV8GatewayAccessForConfig(loaded)
 	if err != nil {
-		if errors.Is(err, errObservabilityV8GatewayAccessAuth) {
+		var foreign *observabilityV8ForeignListenerError
+		switch {
+		case errors.Is(err, errObservabilityV8GatewayAccessAuth):
 			return traceCanaryFailure(destination, "authentication_unavailable")
+		case errors.As(err, &foreign):
+			return traceCanaryFailure(destination, "gateway_not_this_account")
 		}
 		return traceCanaryFailure(destination, "configuration_unavailable")
 	}
@@ -271,6 +285,9 @@ func requestTraceCanary(
 	}{Destination: destination})
 	if err != nil {
 		return traceCanaryFailure(destination, "invalid_request")
+	}
+	if gatewayListenerOfAnotherAccount(access.host, access.port, dataDir) {
+		return traceCanaryFailure(destination, "gateway_unavailable")
 	}
 	address := net.JoinHostPort(access.host, strconv.Itoa(access.port))
 	requestURL := (&url.URL{Scheme: "http", Host: address, Path: "/api/v1/telemetry/canary"}).String()
@@ -306,6 +323,12 @@ func requestTraceCanary(
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, traceCanaryMaxResponseBytes))
+		if response.StatusCode == http.StatusBadGateway {
+			// handleTelemetryCanary answers 502 when the gateway accepted the
+			// request but its own export to the destination failed or was not
+			// acknowledged. That is a delivery failure, not a refusal.
+			return traceCanaryFailure(destination, "delivery_failed")
+		}
 		return traceCanaryFailure(destination, "gateway_rejected")
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, traceCanaryMaxResponseBytes+1))
@@ -367,6 +390,14 @@ func observabilityV8GatewayAccessForConfig(loaded *loadedConfigV8File) (observab
 	if token == "" {
 		return observabilityV8GatewayAccess{}, errObservabilityV8GatewayAccessAuth
 	}
+	// The bearer goes only to this account's gateway: another account's
+	// process on the API port would collect it (GAP-1563, as GAP-1260 for
+	// the Python client and the hooks).
+	if problem := foreignGatewayListenerAt(loaded.runtime, dialHost, loaded.gatewayAPIPort); problem != "" {
+		return observabilityV8GatewayAccess{}, &observabilityV8ForeignListenerError{
+			problem: problem, fix: foreignGatewayListenerFixAt(dialHost, loaded.gatewayAPIPort),
+		}
+	}
 	return observabilityV8GatewayAccess{host: dialHost, port: loaded.gatewayAPIPort, token: token}, nil
 }
 
@@ -401,6 +432,13 @@ func observabilityV8LoopbackDialHost(bind string) (string, bool) {
 
 func destinationTestAccess(loaded *loadedConfigV8File) (observabilityV8GatewayAccess, error) {
 	access, err := observabilityV8GatewayAccessForConfig(loaded)
+	var foreign *observabilityV8ForeignListenerError
+	if errors.As(err, &foreign) {
+		return observabilityV8GatewayAccess{}, errors.New(
+			"destination-test compliance recorder is unavailable: " + foreign.problem +
+				"; the gateway token was not sent. " + foreign.fix,
+		)
+	}
 	if errors.Is(err, errObservabilityV8GatewayAccessAuth) {
 		return observabilityV8GatewayAccess{}, errors.New(
 			"destination-test compliance authentication is unavailable; set DEFENSECLAW_GATEWAY_TOKEN or run defenseclaw setup gateway",
@@ -410,4 +448,14 @@ func destinationTestAccess(loaded *loadedConfigV8File) (observabilityV8GatewayAc
 		return observabilityV8GatewayAccess{}, errors.New("destination-test compliance configuration is invalid")
 	}
 	return access, nil
+}
+
+// gatewayListenerOfAnotherAccount reports that another account's process
+// holds this account's gateway port, so no gateway token may be sent to it
+// (GAP-1343; Windows only, see daemon.ForeignListenerPID).
+func gatewayListenerOfAnotherAccount(host string, port int, dataDir string) bool {
+	if strings.TrimSpace(dataDir) == "" {
+		dataDir = config.DefaultDataPath()
+	}
+	return daemon.ForeignListenerPID(host, port, dataDir) > 0
 }

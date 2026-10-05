@@ -5,10 +5,13 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const standaloneGatewayCheckConfig = `config_version: 8
@@ -74,5 +77,32 @@ func TestStandaloneGatewayConfigCheckNamesTheFileAndTheReason(t *testing.T) {
 	err = validateStandaloneGatewayConfig(noPack, dataDir, "")
 	if err == nil || !strings.Contains(err.Error(), missingPack) || !strings.Contains(err.Error(), "directory_not_found") {
 		t.Fatalf("config naming a missing rule pack = %v, want the directory and directory_not_found", err)
+	}
+}
+
+// GAP-0095: the gateway service account's own read access is checked with
+// the account the preflight pins, and its refusal (which names the account
+// and the icacls fix) comes before the pack is loaded as an administrator.
+func TestStandaloneGatewayConfigCheckAsksTheServiceAccount(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "pack")
+	if err := os.MkdirAll(pack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeStandaloneGatewayCheckConfig(t, strings.Replace(standaloneGatewayCheckConfig,
+		`  rule_pack_dir: ""`, "  rule_pack_dir: '"+pack+"'", 1))
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGateway`)
+	restore := standaloneServiceCanReadTree
+	t.Cleanup(func() { standaloneServiceCanReadTree = restore })
+	var asked []string
+	standaloneServiceCanReadTree = func(root, label, account string) error {
+		asked = append(asked, label+"|"+root+"|"+account)
+		return errors.New(label + " " + root + ": the gateway service account " + account + " cannot read it; grant it Read & execute, for example: icacls")
+	}
+	err := validateStandaloneGatewayConfig(configPath, t.TempDir(), "")
+	if err == nil || !strings.Contains(err.Error(), `NT SERVICE\DefenseClawGateway`) || !strings.Contains(err.Error(), "icacls") {
+		t.Fatalf("service-unreadable pack = %v, want the account and the icacls fix", err)
+	}
+	if len(asked) != 1 || asked[0] != "guardrail.rule_pack_dir|"+pack+`|NT SERVICE\DefenseClawGateway` {
+		t.Fatalf("service read check calls = %q", asked)
 	}
 }

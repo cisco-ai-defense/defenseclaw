@@ -74,7 +74,7 @@ export function ChipsField({
                   type="button"
                   onClick={() => remove(i)}
                   aria-label={`Remove ${v}`}
-                  className="text-fd-muted-foreground hover:text-red-500"
+                  className="text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   ×
                 </button>
@@ -100,7 +100,7 @@ export function ChipsField({
           }}
           onBlur={commit}
           className={[
-            'w-full bg-transparent px-1 py-1 text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60 focus:outline-none',
+            'w-full bg-transparent px-1 py-1 text-xs text-fd-foreground placeholder:text-fd-muted-foreground focus:outline-none',
             monospace ? 'font-mono' : '',
           ].join(' ')}
         />

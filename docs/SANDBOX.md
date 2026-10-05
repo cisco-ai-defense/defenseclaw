@@ -8,8 +8,8 @@ behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
 The operator guide for the sandbox commands is the
-[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
-(`docs-site/content/docs/setup/sandbox.mdx`): setup, running a harness, the
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
+(`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
 servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
 Telemetry details are in
@@ -623,18 +623,21 @@ Hook handlers then treat a sandbox request differently from a host request
 - Nothing runs git or a subprocess scanner against the agent-writable tree on
   the host.
 - A verdict that is not a plain allow carries a plain reason
-  (`internal/gateway/sandbox_verdict_reason.go`), for example
-  `Blocked by DefenseClaw rule <ID>: <title>. <what to do instead>`. It is
+  (`internal/gateway/sandbox_verdict_reason.go`) in the words a host hook
+  uses for the same rule, for example `DefenseClaw policy blocked this action
+  (rule <ID>: <title>). Do not retry it in another form.` or `DefenseClaw
+  policy needs your confirmation for this action (rule <ID>: <title>).` It is
   built only from the static metadata of the deciding rules, looked up by rule
   ID in the connector's guardrail catalog and the built-in CodeGuard rules:
-  the ID, the title, and a remediation for the rule's category (CodeGuard
-  rules carry their own). A rule-pack title that its own rule or a secret
-  rule would match is left out, and so are IDs no catalog knows. The reason
-  never quotes matched content, whatever the redaction policy, so the agent
-  can adapt instead of seeing `<redacted len=… sha=…>`. The same text becomes
-  the sandbox's `last_blocked` and its `tool.blocked` activity entry; the
-  audit sinks keep the source reason and redact it as before. Finding labels
-  are left out of the response body; the rule IDs travel in `rule_ids`.
+  the ID and the title. A rule-pack title that its own rule or a secret rule
+  would match is left out, and so are IDs no catalog knows. The reason never
+  quotes matched content, whatever the redaction policy, so the agent can
+  adapt instead of seeing `<redacted len=… sha=…>`. The same text becomes the
+  sandbox's `last_blocked` and the reason of its `tool.blocked` activity
+  entry, whose line names the rule only (`✗ Bash blocked by DefenseClaw:
+  <ID> (<title>)`); the audit sinks keep the source reason and redact it as
+  before. Finding labels are left out of the response body; the rule IDs
+  travel in `rule_ids`.
 - An unblock also lifts DefenseClaw's destination rules for that host
   (`internal/gateway/sandbox_egress_unblock.go`, #954). The egress proxy and
   these rules are two controls over one destination: the feed refuses
@@ -2062,30 +2065,30 @@ shows:
   connections, and Codex shows a built-in tip. OpenShell's denials of the
   download are audited but neither counted as blocked sites nor shown on
   the feed; the rejection's one line explains it.
-- On Amazon Bedrock (`--llm bedrock`) the run pins `openai.gpt-oss-20b` in
-  the managed config, because Mantle does not serve Codex's own default
-  model (its requests fail with `validation_error: Invalid 'input'`). The
-  banner's Model line names the model; `-- -m MODEL` picks another (a
-  `-c model=` override does not, because the managed config wins over it).
-  Mantle serves only function tools (`Invalid tools: unknown variant
-  namespace` otherwise), so the managed config also pins
+- On Amazon Bedrock (`--llm bedrock`) the Codex custom provider uses
+  Mantle's OpenAI route (`https://bedrock-mantle.<region>.api.aws/openai/v1`,
+  the one Codex's own `amazon-bedrock` provider uses), and the run pins
+  `openai.gpt-5.5` in the managed config, because Mantle does not serve
+  Codex's own default model (its requests fail with `validation_error:
+  Invalid 'input'`). The banner's Model line names the model; `-- -m MODEL`
+  picks another the route serves (a `-c model=` override does not, because
+  the managed config wins over it). The managed config also pins
   `features.multi_agent = false` and `web_search = "disabled"`
   (`SandboxModelProvider.FunctionToolsOnly`): a Codex typed in `sandbox
   connect --shell` or started by the in-sandbox shim gets them too, not only
   the launches that carry the session flags.
-  Mantle's Responses route rejects every turn after the first of a Codex
-  conversation: Codex replays its earlier replies as assistant `message`
-  items with `output_text` content, Mantle drops their `id` and `status`
-  and then fails its own validation of them (`invalid_prompt`, 219
-  validation errors, sent as an SSE `error` event after
-  `response.in_progress`), which Codex reports as `stream disconnected
-  before completion: stream closed before response.completed`. The same
-  request with the reply as plain string content completes, so this is a
-  Mantle limitation no provider setting avoids (Codex 0.146 has only
-  `wire_api = "responses"` and no setting for how it serializes history).
-  Start each task with `/new` in the TUI (or one `codex exec` per task);
-  tool calls within one turn work. The launch banner of an interactive
-  Codex session on Bedrock says so (`harness.CredentialProfile.Caveat`).
+  Mantle's older `/v1` Responses route, with `openai.gpt-oss-20b`, rejected
+  every turn after the first of a Codex conversation
+  ([#949](https://github.com/cisco-ai-defense/defenseclaw/issues/949)):
+  Codex replays its earlier replies as assistant `message` items with
+  `output_text` content, and that route drops their `id` and `status` and
+  then fails its own validation of them (`invalid_prompt`, sent as an SSE
+  `error` event after `response.in_progress`), which Codex reports as
+  `stream disconnected before completion`. The `/openai/v1` route accepts
+  the replayed history, tool calls and their outputs included, so
+  conversations need no `/new`. That route does not serve the open-weight
+  `openai.gpt-oss-*` models (`does not support the '/openai/v1/responses'
+  API`).
 
 ### Per-sandbox managed configuration
 
@@ -2120,7 +2123,7 @@ start compares the render with the image's digest instead of rewriting.
   verifier. `managed_config.toml` pins the run's model provider
   (`model_provider`, plus `openai_base_url` or a `model_providers` table),
   the provider's default `model` when it does not serve Codex's own
-  (Bedrock Mantle: `openai.gpt-oss-20b`; only `-m` at launch overrides it),
+  (Bedrock Mantle: `openai.gpt-5.5`; only `-m` at launch overrides it),
   and defines the imported servers with `cwd` and `env_vars` pinned.
   `requirements.toml` gets `allowed_approval_policies` without `never`
   (`untrusted` first; Codex falls back to the first entry) and
@@ -2410,46 +2413,33 @@ These were measured on the pinned releases inside the community base image
   silences the npm launcher, and the sandbox's `NODE_NO_WARNINGS=1` does the
   same for it and for Copilot's tool commands. Those inherit the
   `NODE_OPTIONS` too (a Node older than 20.11 would refuse the flag).
-  In the interactive TUI every hook waits out Copilot's 30-second hook
-  timeout ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)),
-  on the Docker driver and in the macOS MicroVM alike: the sandbox's seccomp
-  filter makes `pidfd_open` fail with ENOSYS (in the MicroVM too, although
-  its 6.12 kernel has the call), so the CLI's native runtime (tokio, in a
-  Node.js addon inside Copilot's process) falls back to a `SIGCHLD` handler
-  to learn that a hook exited, and in the TUI Copilot's Node.js side
-  (libuv) resets `SIGCHLD` to its default after its own child processes.
-  The exited hook stays a zombie until the timeout; its verdict is still
-  applied. Headless runs keep the handler and are not slowed. The launch
-  banner of an interactive Copilot session says so
-  (`harness.Spec.InteractiveCaveat`). The fix is upstream: OpenShell
-  allowing `pidfd_open` in the workload's seccomp filter, or Copilot not
-  relying on `SIGCHLD` alone for its hook processes. What DefenseClaw cannot
-  do about it:
-  - Copilot's HTTP hooks (`"type": "http"`, which start no process) fail
-    open: GitHub's hook reference says a network error, a timeout or a
-    non-2xx status of an HTTP `preToolUse` or `permissionRequest` hook falls
-    through to the normal permission flow (with `--yolo`, an allow). A command
-    hook bounds its own requests and exits 2 on every failure. HTTP hooks
-    also refuse plain `http://` for those two events unless
-    `COPILOT_HOOK_ALLOW_HTTP_AUTH_HOOKS=1`, a variable the workload can drop
-    for a Copilot it starts itself, and expand a header variable
-    (`allowedEnvVars`) only over `https://` or to `localhost` with
-    `COPILOT_HOOK_ALLOW_LOCALHOST=1`; the ingress is plain HTTP at
-    `host.openshell.internal`, and the token's placeholder is scoped to a
-    policy revision, so it cannot be written into the image's policy
-    document either. The ingress route (`/api/v1/copilot/hook`) would also
-    have to answer with Copilot's bare hook output instead of its
-    `action`/`hook_output` envelope.
-  - A shorter `timeoutSec` lets the tool call run: a timed-out command hook
-    fails open, even a policy hook.
-  - The launcher cannot keep a handler in place: a caught signal's handler
-    does not survive `exec`, an inherited `SIG_IGN` lasts only until tokio
-    or libuv installs its own handler (and libuv's reset restores the
-    default, not `SIG_IGN`), and the single-executable CLI ignores
-    `NODE_OPTIONS` (measured with 1.0.86 on macOS: neither an unknown
-    option nor a `--require` preload took effect), so no preload can hold
-    the `SIGCHLD` listener that would keep libuv from resetting it.
-  - The hook cannot reap itself: only Copilot, its parent, can.
+  The sandbox's seccomp filter makes `pidfd_open` fail with ENOSYS, on the
+  Docker driver and in the macOS MicroVM alike (in the MicroVM too, although
+  its 6.12 kernel has the call). The CLI's native runtime (tokio, in a
+  Node.js addon inside Copilot's process) then falls back to a `SIGCHLD`
+  handler to learn that a hook exited, and in the TUI Copilot's Node.js side
+  (libuv) resets `SIGCHLD` to its default after its own child processes, so
+  without a fix every exited hook would stay a zombie until Copilot's
+  30-second hook timeout
+  ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)). The
+  image therefore compiles a small root-owned preload library
+  (`/opt/defenseclaw-harness/copilot/lib/defenseclaw-pidfd.so`, from the
+  source in `internal/openshell/harness/copilot_pidfd.go`) that the launcher
+  sets in `LD_PRELOAD` after its loader scrub. It acts only in the pinned
+  native executable, whose resolved path is compiled in, and removes
+  `LD_PRELOAD` from that process's environment at load, so hooks, tools and
+  everything else Copilot starts run without it. When the kernel refuses
+  `pidfd_open` for a child of the process, it returns an eventfd that a
+  thread makes readable once the child exits (`waitid` with `WNOWAIT`, so
+  Copilot still reaps the child itself); every other call, and a
+  `pidfd_open` the kernel serves, is passed through. Hooks then run in
+  milliseconds in the TUI as in headless runs. The command hooks and their
+  30-second timeout stay: Copilot's HTTP hooks fail open (a network error,
+  a timeout or a non-2xx status of an HTTP `preToolUse` or
+  `permissionRequest` hook falls through to the normal permission flow),
+  and a timed-out command hook fails open too. The lasting fix is
+  upstream: OpenShell allowing `pidfd_open` in the workload's seccomp
+  filter, or Copilot not relying on `SIGCHLD` alone for its hook processes.
 - **Amp 0.0.1785334225-g9abe75.** Amp loads plugins only from
   `~/.config/amp/plugins` and a project's `.amp/plugins`.
   `/etc/ampcode/managed-settings.json` cannot register one, so the tier is
@@ -2912,7 +2902,7 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | Docker Desktop's LinuxKit VM kernel (6.12.65-linuxkit) runs only the capability and bpf security modules: `/sys/kernel/security/lsm` reads `capability,bpf`, and the kernel command line sets no `lsm=`. OpenShell's supervisor fails its Landlock allow/deny probe (the probe child exits 1), and the sandbox goes to its error state. | The supervisor refuses to start without Landlock whatever the policy says: OpenShell's default policy and a `landlock.compatibility: best_effort` policy fail the same probe. So no Docker-driver sandbox can start on Docker Desktop, and DefenseClaw's `hard_requirement` changes nothing there. A Mac runs the vm driver instead; the doctor still checks the Docker VM kernel for a gateway on the Docker driver. `sandbox run` on a Mac whose gateway runs the Docker driver on Docker Desktop (one `docker info`, no probe) refuses before it builds an image or makes a sandbox, and names the switch on a line of its own; a run that fails the probe on another Docker VM names it too. |
 | OpenShell's MicroVM driver (`OPENSHELL_COMPUTE_DRIVER=vm` or `compute_driver = "vm"`; Apple Hypervisor, so Apple silicon and a driver binary signed with `com.apple.security.hypervisor`; `e2fsprogs` from Homebrew's keg paths for the VM disks) boots each sandbox with its own kernel (6.12.76), passes the Landlock probe and runs the sandbox. It reads its image from the local Docker image store (`docker export`) and falls back to a registry pull of the same name when the lookup fails. | DefenseClaw drives it on a Mac (see [compute drivers](#compute-drivers)). Harness images are still built into local Docker; every name sent to the driver is under `defenseclaw.invalid/`, so the registry fallback cannot fetch anything. The doctor checks `e2fsprogs`, the signature and the images' architecture (a mismatch also falls back to a registry). |
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. |
-| Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Interactive Copilot CLI waits out its 30-second hook timeout on every hook on both drivers (see GitHub Copilot CLI under [harness facts](#harness-facts)); the launch banner says so. |
+| Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Without a fix interactive Copilot CLI would wait out its 30-second hook timeout on every hook on both drivers; its image preloads a `pidfd_open` fallback into the pinned CLI (see GitHub Copilot CLI under [harness facts](#harness-facts)). |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
 | In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost. With only a loopback interface `nss-myhostname` does not answer `_gateway` and `_outbound`, so they go on to DNS; in a real MicroVM the `127.0.0.53` relay answers them, like every name but localhost and even nonexistent ones, with a synthetic `198.18.x.x` address (`_gateway` `198.18.0.3`, `_outbound` `198.18.0.4`, `nonexistent-zz9.invalid` `198.18.0.6`), and the egress proxy refuses a connection to one as an invalid destination. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw starts and restarts only the Homebrew service's gateway. It finds an `openshell` installed another way on `PATH` (`DoctorReport.GatewayUnmanaged`; on Linux, one without the `openshell-gateway` user unit) and uses its gateway while it answers: the doctor does not fail it (`vm-driver` passes on the driver the gateway reports, found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`; `gateway-service` warns, saying how it runs, from the launchd label in `launchctl list` or started by hand, and that DefenseClaw cannot restart it), and setup goes on, marking it `⚠` and writing any gateway change it needs with `GatewayConfigurator.Write` (no flush, no restart, no pending-restart mark) for the user to restart the gateway on. As nothing flushes the MicroVM sandboxes before that restart, the `Manual` plan text and setup's last line say that it stops every sandbox on the gateway and, on the vm driver, to stop the running ones first with `defenseclaw sandbox stop NAME` (the daemon's graceful stop runs `sync`), naming them when the gateway lists them; teardown's plan says the same for the files it restores. Whether that gateway loaded them is judged from the start of the user's `openshell-gateway` process, which no service reports (`gatewayStartedAt`: on macOS the process `ps` lists, on Linux the first `pgrep -u <euid> -f '^([^ ]*/)?openshell-gateway( |$)'` finds, whose age `ps -o etime=` gives), against the files' mtimes; with no such process, `bind-mounts`, `telemetry` and `vm-identity` warn that DefenseClaw cannot tell whether the gateway was restarted on them rather than pass. Teardown's `Rollback` restores those files and returns `ErrNoGatewayService` rather than restart. With no gateway answering, `gateway-service` and `gateway` fail and setup stops on their fix: start that gateway yourself, or stop it and remove that OpenShell (the installer would find that CLI and install nothing), then `setup --install-openshell` installs the formula. `vm-driver` then checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The TUI's machine check follows setup. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
@@ -3025,7 +3015,7 @@ defenseclaw sandbox legacy-cleanup
 Cleanup stops the systemd units itself but changes nothing else while any part
 of the legacy sandbox still runs. Stop the non-systemd launcher first with
 `sudo <data_dir>/scripts/run-sandbox.sh stop`. The
-[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/sandbox/)
+[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
 lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
 and the follow-up commands.
 

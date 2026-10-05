@@ -28,6 +28,7 @@ from defenseclaw.tui.app import (
     _DEFENSECLAW_LOGO,
     DefenseClawTUI,
     _activity_refresh_bucket,
+    _agents_summary,
     _enforcement_label,
     _event_histogram,
     _fetch_v8_operator_status,
@@ -811,9 +812,15 @@ def test_enforcement_label_multi_connector() -> None:
     multi = OverviewConfig(
         guardrail_connector="codex",
         guardrail_mode="action",
+        guardrail_enabled=True,
         connector_modes=(("codex", "action"), ("claudecode", "action")),
     )
     assert _enforcement_label(multi) == "2 connectors (per-connector modes)"
+    # GAP-1561: after "defenseclaw uninstall" turned the guardrail off.
+    off = OverviewConfig(connector_modes=multi.connector_modes)
+    assert _enforcement_label(off) == "off - guardrail disabled, nothing is guarded"
+    assert _agents_summary(off, 2) == "2 configured, guardrail off (nothing is guarded)"
+    assert _agents_summary(multi, 2) == "2 active"
 
     single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
     assert _enforcement_label(single) == "codex hook enforcement (action)"
@@ -880,7 +887,7 @@ def test_overview_reuses_hook_event_snapshot_within_one_render() -> None:
 def test_cursor_disclosure_renders_for_enabled_and_disabled_rows_only() -> None:
     from rich.console import Console
 
-    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    disclosure = "DefenseClaw can't tell whether an Enterprise, Team or Projec"
     for disabled in (False, True):
         cfg = OverviewConfig(
             claw_mode="codex",
@@ -913,10 +920,9 @@ def test_cursor_disclosure_renders_for_enabled_and_disabled_rows_only() -> None:
         assert rows["cursor"].status == ("disabled" if disabled else "running")
         assert rich_text.count(disclosure) == 1
         assert fallback_text.count(disclosure) == 1
-        assert f"Cursor (cursor): {disclosure}" in rich_text
-        assert f"Cursor (cursor): {disclosure}" in fallback_text
-        assert f"Codex (codex): {disclosure}" not in rich_text
-        assert f"Codex (codex): {disclosure}" not in fallback_text
+        assert f"Cursor: {disclosure}" in rich_text
+        assert f"Cursor: {disclosure}" in fallback_text
+        assert "priority-conflict-detection" not in rich_text + fallback_text
 
 
 def test_overview_connector_rows_degrade_only_unverified_opencode_runtime() -> None:
@@ -1165,3 +1171,83 @@ def test_overview_body_renders_scanner_override_summary() -> None:
 
     assert "overrides" in body
     assert "secrets: HIGH file=block" in body
+
+
+def test_overview_findings_and_connector_alerts_match_the_alerts_view() -> None:
+    """GAP-2088/2089: one count per alert, the same numbers as the Alerts panel."""
+
+    from defenseclaw.tui.panels.alerts import AlertEvent, AlertsPanelModel
+
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="claudecode",
+        guardrail_connector="claudecode",
+        connector_modes=(("claudecode", "action"), ("codex", "action")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    # Each claudecode block is a hook row plus the finding row that explains it.
+    hooks = [
+        Event(
+            id=f"hook-{i}",
+            timestamp=now,
+            action="connector-hook",
+            target="PreToolUse",
+            severity="INFO",
+            details="connector=claudecode action=block severity=CRITICAL",
+        )
+        for i in range(2)
+    ]
+
+    class HookStore:
+        def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
+            return list(hooks[:limit])
+
+        def count_scan_results_since(self, _since: datetime | None) -> int:
+            return 0
+
+    store = HookStore()
+    alerts = AlertsPanelModel(store=store)
+    alerts.set_events(
+        [
+            *(
+                AlertEvent(
+                    id=f"finding-{i}",
+                    severity="CRITICAL",
+                    action="scan-finding",
+                    target="PreToolUse",
+                    timestamp=now,
+                    connector="claudecode",
+                )
+                for i in range(2)
+            ),
+            AlertEvent(
+                id="degraded-1",
+                severity="HIGH",
+                action="guardrail-degraded",
+                target="codex",
+                timestamp=now,
+                connector="codex",
+            ),
+            # A connector-less alert still counts under scope All, as in the
+            # Alerts panel (GAP-2088 r4x reopen).
+            AlertEvent(
+                id="export-1",
+                severity="HIGH",
+                action="otel-export-failed",
+                target="galileo/traces",
+                timestamp=now,
+            ),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel(store), alerts_model=alerts)
+
+    with app._connector_hook_event_render_cache():
+        metrics = {metric.key: metric.value for metric in app._overview_metric_data()}
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+
+    assert metrics["findings"] == 4
+    assert rows["claudecode"].blocks == 2
+    assert rows["claudecode"].alerts == 2
+    assert rows["codex"].alerts == 1

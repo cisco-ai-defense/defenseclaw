@@ -18,7 +18,10 @@ package inventory
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 )
 
 func managedInventoryReport() AIDiscoveryReport {
@@ -188,4 +191,101 @@ func TestFanoutReport_LiveTransitionsGateNonFullTick(t *testing.T) {
 			t.Fatalf("after live managed clear, hook must not fire, got %d calls", hookCalls)
 		}
 	})
+}
+
+func lifecycleTestSignal(fingerprint, user string) AISignal {
+	return AISignal{
+		Fingerprint: fingerprint, Category: SignalActiveProcess, Detector: "process",
+		SignatureID: "claudecode", EvidenceHash: "h1", UserID: user, UserName: user,
+	}
+}
+
+func lifecycleStates(t *testing.T, report AIDiscoveryReport) map[string]string {
+	t.Helper()
+	if detail := report.Summary.DetectorErrors["state_store"]; detail != "" {
+		if runtime.GOOS == "windows" {
+			// An elevated Windows run owns its temp folder as
+			// Administrators, which the state store refuses.
+			t.Skipf("state store unavailable here: %s", detail)
+		}
+		t.Fatalf("state store: %s", detail)
+	}
+	states := map[string]string{}
+	for _, signal := range report.Signals {
+		states[signal.Fingerprint] = signal.State
+	}
+	return states
+}
+
+// GAP-1738: in managed mode a process-only tick publishes nothing, so it must
+// not persist what it classified; the next full scan reports the process as
+// new (one discovered record) instead of seen.
+func TestManagedProcessTickLeavesLifecycleToTheFullScan(t *testing.T) {
+	service := &ContinuousDiscoveryService{
+		opts:  AIDiscoveryOptions{Mode: "passive", ManagedEnterprise: true},
+		store: NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),
+	}
+	service.SetManagedInventoryEmitHook(func(context.Context) {})
+	stats := func() scanStats {
+		return scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
+	}
+	load := func() aiStateFile {
+		prev, err := service.store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prev
+	}
+	service.classifyAndPersist("full-1", "test", time.Now(), nil, stats(), load(), true)
+	tick := service.classifyAndPersist("tick", "test", time.Now(),
+		[]AISignal{lifecycleTestSignal("fp-claude", "dcw-std2")}, stats(), load(), false)
+	if lifecycleStates(t, tick)["fp-claude"] != AIStateNew {
+		t.Fatalf("tick states = %v", lifecycleStates(t, tick))
+	}
+	full := service.classifyAndPersist("full-2", "test", time.Now(),
+		[]AISignal{lifecycleTestSignal("fp-claude", "dcw-std2")}, stats(), load(), true)
+	if got := lifecycleStates(t, full)["fp-claude"]; got != AIStateNew || full.Summary.NewSignals != 1 {
+		t.Fatalf("full scan after a managed process tick: state %q new %d", got, full.Summary.NewSignals)
+	}
+
+	// Without the managed hook the tick publishes and persists as before.
+	service.SetManagedInventoryEmitHook(nil)
+	service.classifyAndPersist("tick-2", "test", time.Now(),
+		[]AISignal{lifecycleTestSignal("fp-claude", "dcw-std2"), lifecycleTestSignal("fp-hermes", "dcw-std1")}, stats(), load(), false)
+	full = service.classifyAndPersist("full-3", "test", time.Now(),
+		[]AISignal{lifecycleTestSignal("fp-claude", "dcw-std2"), lifecycleTestSignal("fp-hermes", "dcw-std1")}, stats(), load(), true)
+	if got := lifecycleStates(t, full)["fp-hermes"]; got != AIStateSeen {
+		t.Fatalf("unmanaged tick was not persisted: state %q", got)
+	}
+}
+
+// GAP-1739: a signal stored without an account by a build from before
+// per-user attribution is reported once as new when it gains its user, then
+// seen.
+func TestSignalGainingItsAccountIsReportedOnceAsNew(t *testing.T) {
+	service := &ContinuousDiscoveryService{
+		opts:  AIDiscoveryOptions{Mode: "passive"},
+		store: NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),
+	}
+	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
+	firstSeen := time.Now().Add(-48 * time.Hour).UTC()
+	legacy := lifecycleTestSignal("fp-copilot", "")
+	legacy.FirstSeen = firstSeen
+	prev := aiStateFile{Signals: map[string]aiStoredSignal{"fp-copilot": {AISignal: legacy}}}
+	report := service.classifyAndPersist("full-1", "test", time.Now(),
+		[]AISignal{lifecycleTestSignal("fp-copilot", "dcw-std1")}, stats, prev, true)
+	if len(report.Signals) != 1 || report.Signals[0].State != AIStateNew || report.Signals[0].UserName != "dcw-std1" ||
+		!report.Signals[0].FirstSeen.Equal(firstSeen) {
+		t.Fatalf("signals = %+v", report.Signals)
+	}
+	lifecycleStates(t, report)
+	next, err := service.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = service.classifyAndPersist("full-2", "test", time.Now(),
+		[]AISignal{lifecycleTestSignal("fp-copilot", "dcw-std1")}, stats, next, true)
+	if report.Signals[0].State != AIStateSeen {
+		t.Fatalf("second scan state = %q", report.Signals[0].State)
+	}
 }

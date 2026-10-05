@@ -68,10 +68,9 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
     from defenseclaw.commands.cmd_config import validate_config
 
     remediation = (
-        "Run `defenseclaw config validate` for the complete raw-source report, "
-        "repair or upgrade the configuration, then rerun `defenseclaw doctor`."
+        "Fix config.yaml (`defenseclaw config validate` shows each problem with its line), "
+        "then rerun `defenseclaw doctor`."
     )
-    loader_type = type(load_error).__name__
     loader_detail = _bounded_detail(load_error)
     checks: list[DoctorStartupCheck] = []
 
@@ -82,15 +81,15 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
             DoctorStartupCheck(
                 "fail",
                 "Config load",
-                f"runtime loader failed ({loader_type}: {loader_detail}); {remediation}",
+                f"config.yaml could not be loaded ({loader_detail}); {remediation}",
             )
         )
         checks.append(
             DoctorStartupCheck(
                 "warn",
                 "Raw config validation",
-                "canonical validation was unavailable "
-                f"({type(validation_error).__name__}); no startup mutation was attempted",
+                "config validation could not run "
+                f"({_bounded_detail(validation_error)}); nothing was changed",
             )
         )
         return DoctorStartupDiagnostics(tuple(checks), remediation)
@@ -118,13 +117,26 @@ def inspect_doctor_config_load_failure(load_error: BaseException) -> DoctorStart
 
     if bool(getattr(validation, "ok", False)):
         detail = (
-            f"canonical raw-source validation passed, but the runtime loader failed "
-            f"({loader_type}: {loader_detail}); {remediation}"
+            f"config validate passes, but config.yaml still could not be loaded "
+            f"({loader_detail}); nothing was changed. {remediation}"
         )
-    else:
-        detail = (
-            f"runtime loader rejected the configuration ({loader_type}); "
-            f"no startup mutation or automatic repair was attempted. {remediation}"
+        checks.append(DoctorStartupCheck("fail", "Config load", detail))
+        return DoctorStartupDiagnostics(tuple(checks), remediation)
+    if parse_error or getattr(validation, "errors", None):
+        # The rows above already name the problem and its fix; this row only
+        # says why the other checks did not run, and counts no second failure
+        # (GAP-1692).
+        checks.append(
+            DoctorStartupCheck(
+                "skip",
+                "Config load",
+                "not loaded, so doctor stopped at the config checks; nothing was changed or repaired",
+            )
         )
+        return DoctorStartupDiagnostics(tuple(checks), "Fix the config problem above, then rerun 'defenseclaw doctor'.")
+    detail = (
+        "config.yaml could not be loaded, so doctor stopped at the config "
+        f"checks; nothing was changed or repaired. {remediation}"
+    )
     checks.append(DoctorStartupCheck("fail", "Config load", detail))
     return DoctorStartupDiagnostics(tuple(checks), remediation)

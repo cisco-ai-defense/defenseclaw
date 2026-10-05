@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -45,6 +47,7 @@ func (l *Logger) emitScanV8(
 	if observedAt.IsZero() {
 		observedAt = time.Now().UTC()
 	}
+	verdict = scanV8Verdict(result, verdict)
 	operations := make([]RuntimeV8LogOperation, 0, len(result.Findings)+1)
 	for index := range result.Findings {
 		finding := result.Findings[index]
@@ -156,7 +159,7 @@ func newAssetScanRuntimeV8TraceInput(
 		DefenseClawScanLowCount:      observability.Present(counts[scanner.SeverityLow]),
 		DefenseClawScanInfoCount:     observability.Present(counts[scanner.SeverityInfo]),
 		DefenseClawScanSeverityMax:   optionalScanV8Text(string(result.MaxSeverity())),
-		DefenseClawScanVerdict:       optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict)),
+		DefenseClawScanVerdict:       scanV8VerdictEnum(verdict),
 		DefenseClawScanExitCode:      observability.Present(int64(result.ExitCode)),
 		DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
 		ErrorType:                    errorType,
@@ -230,7 +233,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingCategory:            optionalScanV8Text(finding.Category),
 			DefenseClawSecuritySeverity:           string(finding.Severity),
 			DefenseClawFindingConfidence:          confidence,
-			DefenseClawFindingTargetRef:           optionalScanV8Identifier(result.Target),
+			DefenseClawFindingTargetRef:           scanV8ResultTargetRef(result),
 			DefenseClawGuardrailEvidenceSummary:   scanFindingV8EvidenceSummary(finding, result),
 			DefenseClawFindingTitle:               optionalScanV8Text(finding.Title),
 			DefenseClawFindingDescription:         optionalScanV8Text(finding.Description),
@@ -243,7 +246,7 @@ func scanFindingV8Operation(
 			DefenseClawFindingExternalEndpoint:    optionalScanV8Text(finding.ExternalEndpoint),
 			DefenseClawFindingDecisionPath:        optionalScanV8DecisionPath(finding.DecisionPath),
 			DefenseClawFindingContentFingerprint:  optionalScanV8Identifier(finding.ContentFingerprint),
-			DefenseClawScanScanner:                optionalScanV8Text(result.Scanner),
+			DefenseClawScanScanner:                optionalScanV8Text(scanFindingV8Scanner(finding, result)),
 			UserID:                                optionalScanV8Identifier(correlation.UserID),
 			DefenseClawUserIDKind:                 optionalNetworkUserIDKind(correlation.UserIDKind),
 			DefenseClawUserName:                   optionalScanV8Identifier(correlation.UserName),
@@ -253,6 +256,28 @@ func scanFindingV8Operation(
 	return RuntimeV8LogOperation{
 		ctx: contextWithLegacyEventProjection(ctx, event), metadata: metadata, build: build,
 	}, nil
+}
+
+// scanFindingV8Scanner names the detector of one finding. A hook or inspect
+// verdict merges the LLM-judge and AI Defense lanes into its own scan and tags
+// each lane finding with the lane (gateway mergeWithLaneVerdict), so the
+// exported record names that lane, as `defenseclaw alerts` does, instead of
+// the regex scan it rode in on (GAP-2000).
+func scanFindingV8Scanner(finding scanner.Finding, result *scanner.ScanResult) string {
+	if result.Scanner != "hook-rules" && result.Scanner != "inspect-http" {
+		return result.Scanner
+	}
+	for _, tag := range finding.Tags {
+		switch lane := strings.ToLower(strings.TrimSpace(tag)); lane {
+		case "llm-judge", "ai-defense":
+			return lane
+		}
+	}
+	// A PII judge finding's tags are rewritten when it is stored.
+	if strings.HasPrefix(strings.ToUpper(finding.RuleID), "JUDGE-") {
+		return "llm-judge"
+	}
+	return result.Scanner
 }
 
 // scanFindingV8EvidenceSummary follows the deterministic source order in the
@@ -348,7 +373,7 @@ func scanSummaryV8Operation(
 			Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 			DefenseClawEvaluationID: optionalScanV8Identifier(correlation.EvaluationID),
 			DefenseClawScanID:       scanID, DefenseClawScanScanner: result.Scanner,
-			DefenseClawScanTargetRef:     optionalScanV8Identifier(result.Target),
+			DefenseClawScanTargetRef:     scanV8ResultTargetRef(result),
 			DefenseClawScanTargetType:    optionalScanV8Text(scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType())),
 			DefenseClawScanDurationMs:    observability.Present(result.Duration.Milliseconds()),
 			DefenseClawScanFindingCount:  observability.Present(int64(len(result.Findings))),
@@ -358,7 +383,7 @@ func scanSummaryV8Operation(
 			DefenseClawScanLowCount:      observability.Present(counts[scanner.SeverityLow]),
 			DefenseClawScanInfoCount:     observability.Present(counts[scanner.SeverityInfo]),
 			DefenseClawScanSeverityMax:   optionalScanV8Text(string(result.MaxSeverity())),
-			DefenseClawScanVerdict:       optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict)),
+			DefenseClawScanVerdict:       scanV8VerdictEnum(verdict),
 			DefenseClawScanExitCode:      observability.Present(int64(result.ExitCode)),
 			DefenseClawScanErrorSummary:  optionalScanV8Text(result.ScanError),
 			UserID:                       optionalScanV8Identifier(correlation.UserID),
@@ -549,6 +574,127 @@ func scanV8SeverityCounts(result *scanner.ScanResult) map[scanner.Severity]int64
 		counts[result.Findings[index].Severity]++
 	}
 	return counts
+}
+
+// scanV8TargetRef names the scanned asset. Skill, plugin and file scans
+// target a filesystem path ("/home/u/.claude/skills/notes",
+// `C:\Users\u\...\notes`), which is not a valid identifier, so the
+// ref used to be dropped and the record never said what was scanned
+// (GAP-1381). Fall back to the last path element: the skill, plugin or file
+// name, without the account's home path. A name the identifier grammar
+// rejects ("__pycache__", "My Plugin") is qualified with its parent folder
+// and its rejected characters become "_", so a scan row always names its
+// target (GAP-2338).
+func scanV8TargetRef(target string) observability.Optional[string] {
+	if ref := optionalScanV8Identifier(target); ref.IsPresent() {
+		return ref
+	}
+	parts := strings.FieldsFunc(strings.TrimSpace(target), func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(parts) == 0 {
+		return observability.Absent[string]()
+	}
+	name := parts[len(parts)-1]
+	if ref := optionalScanV8Identifier(name); ref.IsPresent() {
+		return ref
+	}
+	if len(parts) > 1 {
+		name = parts[len(parts)-2] + "/" + name
+	}
+	name = strings.Map(func(r rune) rune {
+		if r < utf8.RuneSelf && (r == '.' || r == '_' || r == ':' || r == '/' || r == '-' ||
+			(r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+			return r
+		}
+		return '_'
+	}, name)
+	name = strings.TrimLeft(name, "._:/-")
+	if len(name) > 256 {
+		name = name[:256]
+	}
+	return optionalScanV8Identifier(name)
+}
+
+// scanV8ResultTargetRef is scanV8TargetRef for a scan result. A plugin in a
+// category folder under a plugins root keeps the path below that root, so
+// Hermes's bundled browser/firecrawl and web/firecrawl stay distinct in audit
+// instead of both reading "firecrawl" (GAP-2440).
+func scanV8ResultTargetRef(result *scanner.ScanResult) observability.Optional[string] {
+	if scanner.NormalizeTargetTypeEnum(result.EffectiveTargetType()) == "plugin" {
+		parts := strings.FieldsFunc(strings.TrimSpace(result.Target), func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		for i := len(parts) - 3; i >= 0; i-- {
+			if strings.EqualFold(parts[i], "plugins") {
+				rel := parts[i+1:]
+				if len(rel) == 2 && hermesBundledPlatforms(result.Target, parts, i) {
+					rel = rel[1:]
+				}
+				if ref := optionalScanV8Identifier(strings.Join(rel, "/")); ref.IsPresent() {
+					return ref
+				}
+				break
+			}
+		}
+	}
+	return scanV8TargetRef(result.Target)
+}
+
+// hermesBundledPlatforms reports whether target is a plugin in Hermes's
+// bundled platforms folder (hermes-agent/plugins/platforms/<x>, or the
+// HERMES_BUNDLED_PLUGINS root). Hermes lists those by the bare folder name
+// ("discord"), so the audit target does too, while user-root and other
+// category plugins keep category/name (GAP-2453; the watcher names them the
+// same way, GAP-2439).
+func hermesBundledPlatforms(target string, parts []string, pluginsIdx int) bool {
+	if !strings.EqualFold(parts[pluginsIdx+1], "platforms") {
+		return false
+	}
+	if pluginsIdx > 0 && parts[pluginsIdx-1] == "hermes-agent" {
+		return true
+	}
+	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
+	return bundled != "" &&
+		filepath.Clean(bundled) == filepath.Dir(filepath.Dir(filepath.Clean(strings.TrimSpace(target))))
+}
+
+// scanV8Verdict keeps an explicit admission verdict. Without one (CLI and
+// hook-time scans), a scan with findings is "warn", never "clean": the
+// enum's default made scan.completed say clean for a skill the CLI counted
+// as having findings (GAP-1381). A failed scan never reads "clean"
+// (GAP-1987): its scan.count metric says "error" and its scan.failed log and
+// asset.scan span carry no verdict, so clean counts cover only scans that ran.
+func scanV8Verdict(result *scanner.ScanResult, verdict string) string {
+	if result == nil {
+		return verdict
+	}
+	failed := strings.TrimSpace(result.ScanError) != "" || result.ExitCode != 0
+	if strings.TrimSpace(verdict) != "" {
+		if failed && scanner.NormalizeVerdictEnum(verdict) == "clean" {
+			return scanV8ErrorVerdict
+		}
+		return verdict
+	}
+	if len(result.Findings) > 0 {
+		return "warn"
+	}
+	if failed {
+		return scanV8ErrorVerdict
+	}
+	return "clean"
+}
+
+// scanV8ErrorVerdict is the metric verdict of a scan that did not run to
+// completion. The log and span verdict enum (clean/warn/block) has no such
+// value, so scanV8VerdictEnum leaves the attribute absent for it.
+const scanV8ErrorVerdict = "error"
+
+func scanV8VerdictEnum(verdict string) observability.Optional[string] {
+	if verdict == scanV8ErrorVerdict {
+		return observability.Absent[string]()
+	}
+	return optionalScanV8Text(scanner.NormalizeVerdictEnum(verdict))
 }
 
 func optionalScanV8Identifier(value string) observability.Optional[string] {

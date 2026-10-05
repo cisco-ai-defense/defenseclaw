@@ -233,8 +233,8 @@ func TestSidecarCanonicalLifecyclePersistsExactlyOnceWithGraphProvenance(t *test
 		"sidecar-stop":  "subsystem.lifecycle",
 	}
 	wantDetails := map[string]string{
-		"sidecar-start": "subsystem.lifecycle",
-		"sidecar-stop":  "subsystem.lifecycle",
+		"sidecar-start": "sidecar starting",
+		"sidecar-stop":  "sidecar stopped",
 	}
 	for _, row := range rows {
 		if row.bucket != string(observability.BucketPlatformHealth) ||

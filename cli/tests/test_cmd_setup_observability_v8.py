@@ -152,6 +152,195 @@ def test_setup_v8_accepts_observability_token_from_environment(
     assert dotenv_values(tmp_path / ".env").get("DD_API_KEY") == secret
 
 
+def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # WIN-R1-18: the schema error named a YAML key that add could not set.
+    _stub_canonical_v8_gateway(monkeypatch)
+    args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
+    args += ["--protocol", "grpc"]
+
+    refused = CliRunner().invoke(observability, args, obj=_setup_app(tmp_path))
+    assert refused.exit_code != 0
+    assert "--allow-private-networks" in refused.output
+    assert "$.observability" not in refused.output  # GAP-1643: one plain line
+
+    result = CliRunner().invoke(
+        observability, [*args, "--allow-private-networks"], obj=_setup_app(tmp_path), catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert source["observability"]["destinations"][0]["network_safety"] == {"allow_private_networks": True}
+    assert "add --plaintext" in result.output
+    assert "Generic OTLP: added" in result.output  # WIN2-U3-13: a new destination is not "updated"
+
+    # MAC-U2-10: a local collector without TLS needs tls.insecure, which add could not write.
+    result = CliRunner().invoke(
+        observability,
+        [*args, "--allow-private-networks", "--plaintext"],
+        obj=_setup_app(tmp_path),
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
+
+
+def test_setup_v8_interactive_loopback_otlp_asks_instead_of_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1643: the wizard asks about a private endpoint and keeps the answers.
+    _stub_canonical_v8_gateway(monkeypatch)
+    args = ["add", "otlp", "--name", "local"]
+    # endpoint, protocol, "collector you run yourself?" yes, "uses TLS?" no
+    result = CliRunner().invoke(
+        observability, args, obj=_setup_app(tmp_path), input="127.0.0.1:14318\n\ny\nn\n", catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    assert "is on this computer or a private network" in result.output
+    destination = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source["observability"]["destinations"][0]
+    assert destination["network_safety"] == {"allow_private_networks": True}
+    assert destination["tls"] == {"insecure": True}
+
+    refused = CliRunner().invoke(observability, args, obj=_setup_app(tmp_path), input="10.0.0.5:4317\n\nn\n")
+    assert refused.exit_code == 1
+    assert "Not saved." in refused.output
+    assert "$.observability" not in refused.output
+
+
+def test_setup_v8_add_environment_tags_gateway_telemetry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # BENIGN-WIN2-01: a cloned host shares host.name with its source, and the
+    # only way to tag it apart was a hand edit of config.yaml.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 8\nobservability:\n  resource:\n    attributes:\n"
+        "      deployment.environment: old\n"
+    )
+    args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
+    args += ["--protocol", "grpc", "--allow-private-networks", "--environment", " lab-win2 "]
+
+    result = CliRunner().invoke(observability, args, obj=app, catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert source["observability"]["resource"]["attributes"] == {
+        "deployment.environment": "lab-win2",
+        "deployment.environment.name": "lab-win2",
+    }
+    blank = CliRunner().invoke(observability, [*args[:-1], "  "], obj=app)
+    assert blank.exit_code != 0 and "nonblank" in blank.output
+
+
+def test_setup_v8_add_with_gateway_down_says_so_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # WIN2-U2-12: a failed auto-restart left the gateway down and add ended in a traceback.
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    app.logger = SimpleNamespace(
+        log_action=lambda *_a, **_k: (_ for _ in ()).throw(CanonicalObservabilityUnavailableError("down"))
+    )
+    args = ["add", "otlp", "--non-interactive", "--name", "local", "--endpoint", "127.0.0.1:14317"]
+    result = CliRunner().invoke(observability, [*args, "--protocol", "grpc", "--allow-private-networks"], obj=app)
+
+    # GAP-1202: the destination is saved and loads on the next start, so exit 0 with a note.
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output and not isinstance(result.exception, CanonicalObservabilityUnavailableError)
+    assert "The gateway isn't running" in result.output
+    assert "loads this destination when it starts" in result.output
+    assert "run the command again" not in result.output
+    # GAP-1336: add names the destination and the command that tests it.
+    assert "Generic OTLP: added as destination 'local'" in result.output
+    assert "defenseclaw setup observability test local" in result.output
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+    assert [d["name"] for d in source["observability"]["destinations"]] == ["local"]
+
+
+def test_setup_v8_add_audit_details_name_the_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-2144: the row read "action=add-v8 preset=otlp", an internal tag
+    # with no destination, so two adds could not be told apart.
+    from defenseclaw.commands.cmd_setup_observability import _setup_observability_add_details
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    logged: list[tuple] = []
+    app.logger = SimpleNamespace(log_action=lambda *args, **_k: logged.append(args))
+    args = ["add", "otlp", "--non-interactive", "--name", "manual-o11y", "--endpoint", "127.0.0.1:14317"]
+    result = CliRunner().invoke(observability, [*args, "--protocol", "grpc", "--allow-private-networks"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert logged == [("setup-observability", "config", "action=add name=manual-o11y preset=otlp endpoint=127.0.0.1:14317")]
+    assert _setup_observability_add_details(
+        "hec", "splunk-hec", "https://user:pw@splunk.example.test:8088/services/collector?x=1", updated=True
+    ) == "action=update name=hec preset=splunk-hec endpoint=https://splunk.example.test:8088/services/collector"
+
+
+def test_offline_setup_note_is_not_repeated_by_the_setup_callback(tmp_path: Path) -> None:
+    # GAP-1369: the offline note already says the gateway is stopped, so the
+    # setup result callback must not print a second "not running" notice.
+    import click
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    app = _setup_app(tmp_path)
+    app.logger = SimpleNamespace(
+        log_action=lambda *_a, **_k: (_ for _ in ()).throw(CanonicalObservabilityUnavailableError("down"))
+    )
+
+    def run(*, offline_note: bool) -> str:
+        @click.command()
+        @click.pass_context
+        def probe(ctx: click.Context) -> None:
+            if offline_note:
+                cmd_setup._log_setup_action(app, "setup-observability", "x", allow_offline=True, offline_note="  noted (defenseclaw-gateway start)")
+            ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+            (tmp_path / "config.yaml").write_text("x: 1\n")
+            cmd_setup._auto_restart_sidecar_after_setup()
+
+        result = CliRunner().invoke(probe, [], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    assert "Gateway is not running" in run(offline_note=False)
+    noted = run(offline_note=True)
+    assert "noted" in noted and "Gateway is not running" not in noted
+
+
+def test_failed_setup_auto_restart_exits_non_zero(tmp_path: Path) -> None:
+    # GAP-1573: a restart that fails after a config change (for example a new
+    # API port the running gateway cannot move to) used to exit 0.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+
+    @click.command()
+    @click.pass_context
+    def probe(ctx: click.Context) -> None:
+        ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+        (tmp_path / "config.yaml").write_text("x: 1\n")
+        cmd_setup._auto_restart_sidecar_after_setup()
+
+    with (
+        patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=False),
+    ):
+        result = CliRunner().invoke(probe, [], obj=app)
+    assert result.exit_code == 1, result.output
+    assert "the agents may not be" in result.output and "defenseclaw-gateway start" in result.output
+
+
 def test_setup_v8_explicit_token_takes_precedence_over_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -314,6 +503,35 @@ def test_v8_secret_dotenv_preserves_owner_xattrs_and_tightens_read_mode(
         assert os.getxattr(dotenv, attribute) == b"preserve"
     assert dotenv_values(dotenv).get("EXISTING") == "keep"
     assert dotenv_values(dotenv).get(preset.token_env) == "replacement-secret"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="SELinux label regression")
+def test_v8_secret_first_dotenv_write_keeps_kernel_selinux_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GAP-1221: on SELinux every new file gets security.selinux, which a user cannot strip."""
+    preset = PRESETS["datadog"]
+    dotenv = tmp_path / ".env"
+    label = ("security.selinux", b"unconfined_u:object_r:user_home_t:s0\x00")
+    real_read = v8_activation_module._read_xattrs
+
+    def labelled_read(descriptor, path):
+        return tuple(sorted({*real_read(descriptor, path), label}))
+
+    def refuse_label_removal(descriptor, name):
+        if name == label[0]:
+            raise PermissionError(errno.EACCES, "Permission denied", descriptor)
+        raise AssertionError(f"unexpected removexattr {name}")
+
+    monkeypatch.setattr(v8_activation_module, "_read_xattrs", labelled_read)
+    monkeypatch.setattr(os, "removexattr", refuse_label_removal)
+    monkeypatch.delenv(preset.token_env, raising=False)
+
+    apply_secret(str(tmp_path), preset, "first-secret", dry_run=False)
+
+    assert stat.S_IMODE(dotenv.stat().st_mode) == 0o600
+    assert dotenv_values(dotenv).get(preset.token_env) == "first-secret"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX read-permission regression")
@@ -1181,3 +1399,238 @@ def test_setup_v8_destination_test_uses_canonical_local_evidence_path() -> None:
     )
     assert run.call_args.kwargs["write_probe"] is True
     assert run.call_args.kwargs["compliance"] == "recorder"
+
+
+def test_setup_v8_destination_test_unknown_name_lists_configured_names() -> None:
+    # GAP-1336: 'test otlp' said only "not_found" when add had named it otlp-127-0-0-1.
+    from defenseclaw.observability.destination_test import DestinationTestError
+
+    inspected = SimpleNamespace(
+        effective={"destinations": [{"name": "otlp-127-0-0-1"}, {"name": "terminal"}]},
+        source="/tmp/dc/config.yaml",
+        data_dir="/tmp/dc",
+    )
+    with (
+        patch("defenseclaw.config_inspect.inspect_v8_config", return_value=inspected),
+        patch("defenseclaw.observability.destination_test.canonical_local_compliance_recorder"),
+        patch(
+            "defenseclaw.observability.destination_test.run_destination_test",
+            side_effect=DestinationTestError("not_found", "the named destination does not exist"),
+        ),
+        pytest.raises(click.ClickException) as raised,
+    ):
+        _test_v8_destination("/tmp/dc", "otlp", 3.0, write_probe=False)
+    message = raised.value.message
+    assert "no observability destination is named 'otlp'" in message
+    assert "configured: otlp-127-0-0-1, terminal" in message
+
+
+def test_setup_v8_destination_test_network_failure_names_the_network_path() -> None:
+    # GAP-2344: 'observability destination test' printed this note on a connection failure; setup did not.
+    from defenseclaw.observability.destination_test import NETWORK_PATH_NOTE, DestinationTestError
+
+    inspected = SimpleNamespace(effective={"destinations": []}, source="/tmp/dc/config.yaml", data_dir="/tmp/dc")
+    with (
+        patch("defenseclaw.config_inspect.inspect_v8_config", return_value=inspected),
+        patch("defenseclaw.observability.destination_test.canonical_local_compliance_recorder"),
+        patch(
+            "defenseclaw.observability.destination_test.run_destination_test",
+            side_effect=DestinationTestError("connection_failed", "the destination connection failed"),
+        ),
+        pytest.raises(click.ClickException) as raised,
+    ):
+        _test_v8_destination("/tmp/dc", "dead", 3.0, write_probe=False)
+    assert raised.value.message == (
+        "destination test failed (connection_failed): the destination connection failed\n" + NETWORK_PATH_NOTE
+    )
+
+
+def test_v8_remove_unknown_destination_fails_before_the_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1707: an unknown name asked "Remove destination ...?" and "Aborted." exited 0.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    (tmp_path / "config.yaml").write_text(_source())
+    result = CliRunner().invoke(observability, ["remove", "nosuchdest"], obj=app, input="n\n")
+    assert result.exit_code == 1, result.output
+    assert "Remove destination" not in result.output
+    # GAP-1928: the shared not-found shape, no "v8" jargon.
+    assert "Error: observability destination 'nosuchdest' not found. Available: " in result.output
+    assert "Run `defenseclaw setup observability list` for details." in result.output
+    assert "v8" not in result.output
+
+
+def test_setup_v8_dry_run_validates_with_the_token_and_names_a_missing_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1890: --dry-run validated without the --token value and crashed with a traceback.
+    from defenseclaw.config_inspect import ConfigInspectError
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.delenv("DD_API_KEY", raising=False)
+
+    def validate(_operation, *, config_path, data_dir=None, environment_overrides=None):
+        if "DD_API_KEY" not in (environment_overrides or {}) and "DD_API_KEY" not in os.environ:
+            raise ConfigInspectError(
+                "candidate field=$.observability.destinations[0].headers; reason=[secret_reference_unresolved] x",
+                reason="[secret_reference_unresolved] required environment-backed secret is unavailable",
+            )
+        return SimpleNamespace(valid=True)
+
+    monkeypatch.setattr("defenseclaw.observability.v8_writer.inspect_v8_config", validate)
+    args = ["add", "datadog", "--non-interactive", "--name", "dd", "--dry-run", "--site", "us5"]
+    app = _setup_app(tmp_path)
+    before = (tmp_path / "config.yaml").read_bytes()
+
+    result = CliRunner().invoke(observability, [*args, "--token", "dummy-key"], obj=app)
+    assert result.exit_code == 0, result.output
+    assert "DRY-RUN Datadog: added as destination 'dd'" in result.output
+    assert not (tmp_path / ".env").exists()
+    assert (tmp_path / "config.yaml").read_bytes() == before
+
+    missing = CliRunner().invoke(observability, args, obj=app)
+    assert missing.exit_code == 1, missing.output
+    assert missing.exception is None or isinstance(missing.exception, SystemExit)
+    assert "DD_API_KEY is not set. Pass --token <value>" in missing.output
+    assert "Traceback" not in missing.output
+
+
+def test_setup_v8_remove_says_the_key_stays_in_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-1892: remove said only "removed" and left DD_API_KEY in .env without a word.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setenv("DD_API_KEY", "")  # recorded, so add's os.environ write is undone
+    monkeypatch.delenv("DD_API_KEY")
+    app = _setup_app(tmp_path)
+    add = ["add", "datadog", "--non-interactive", "--site", "us5", "--token", "dummy-key"]
+    assert CliRunner().invoke(observability, [*add, "--name", "dd1"], obj=app).exit_code == 0
+    assert CliRunner().invoke(observability, [*add, "--name", "dd2"], obj=app).exit_code == 0
+    monkeypatch.delenv("DD_API_KEY", raising=False)
+
+    shared = CliRunner().invoke(observability, ["remove", "dd1", "--yes"], obj=app)
+    assert shared.exit_code == 0, shared.output
+    assert "dd1: removed" in shared.output
+    assert "still stored" not in shared.output  # dd2 still uses the key
+
+    last = CliRunner().invoke(observability, ["remove", "dd2", "--yes"], obj=app)
+    assert last.exit_code == 0, last.output
+    assert "DD_API_KEY is still stored in" in last.output
+    assert "defenseclaw keys remove DD_API_KEY" in last.output
+    assert dotenv_values(tmp_path / ".env").get("DD_API_KEY") == "dummy-key"
+
+
+@pytest.mark.parametrize(
+    ("preset", "flag", "value", "where"),
+    [
+        ("otlp", "--endpoint", "https://user:pw@127.0.0.1:14318/v1/traces", "headers:"),
+        ("otlp", "--endpoint", "user@collector.example.com:4317", "headers:"),
+        ("splunk-enterprise", "--endpoint", "https://u:p@splunk.example.com:8088/services/collector", "--token"),
+    ],
+)
+def test_setup_v8_add_refuses_endpoint_credentials_in_plain_words(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preset: str,
+    flag: str,
+    value: str,
+    where: str,
+) -> None:
+    # GAP-2205: the schema said "destinations[2] (oneOf)" and blamed config.yaml.
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    before = (tmp_path / "config.yaml").read_text()
+    args = ["add", preset, "--non-interactive", "--name", "x", flag, value, "--allow-private-networks"]
+    if preset == "otlp":
+        args += ["--protocol", "http"]
+
+    result = CliRunner().invoke(observability, args, obj=app)
+
+    assert result.exit_code == 1, result.output
+    assert f"{flag} must not contain a user name or password" in result.output
+    assert where in result.output
+    for jargon in ("oneOf", "v8", "$.observability", "config.yaml:", "pw@"):
+        assert jargon not in result.output
+    assert (tmp_path / "config.yaml").read_text() == before
+
+
+def test_help_names_galileo_and_add_help_lists_every_preset_id() -> None:
+    """GAP-2304: the group help names Galileo and 'add --help' lists the preset ids."""
+    from defenseclaw.observability.presets import preset_choices
+
+    group = CliRunner().invoke(observability, ["--help"])
+    assert group.exit_code == 0, group.output
+    flat = " ".join(group.output.split())
+    assert "Galileo" in flat
+    assert "Splunk Enterprise HEC" in flat
+
+    add = CliRunner().invoke(observability, ["add", "--help"])
+    assert add.exit_code == 0, add.output
+    flat = " ".join(add.output.split())
+    listed = flat.split("Presets:", 1)[1].split("Examples:", 1)[0]
+    assert {item.strip() for item in listed.split(",")} == set(preset_choices())
+
+
+def test_observability_help_uses_plain_wording() -> None:
+    # GAP-2376: the command list must not show the internal "canonical" term.
+    result = CliRunner().invoke(observability, ["--help"])
+    assert result.exit_code == 0, result.output
+    assert "canonical" not in result.output.lower()
+    assert "Turn a disabled destination back on." in result.output
+    assert "Delete a destination you added." in result.output
+
+
+def test_setup_v8_add_with_only_a_new_key_restarts_the_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-2356: re-adding a destination with a new key said "already
+    # configured" and skipped the restart (config.yaml was unchanged), so the
+    # running gateway kept exporting with the old, rejected key.
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.context import SETUP_SECRET_CHANGED_META_KEY
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    app = _setup_app(tmp_path)
+    app.logger = SimpleNamespace(log_action=lambda *_a, **_k: None)
+    seen: list[bool] = []
+
+    @click.group()
+    def probe() -> None:
+        pass
+
+    probe.add_command(observability)
+
+    @probe.result_callback()
+    @click.pass_context
+    def done(ctx: click.Context, *_a, **_k) -> None:
+        seen.append(bool(ctx.meta.get(SETUP_SECRET_CHANGED_META_KEY)))
+
+    args = ["observability", "add", "datadog", "--non-interactive", "--site", "us5", "--signals", "traces", "--token"]
+    outputs = []
+    for key in ("first-dd-key", "first-dd-key", "second-dd-key"):
+        result = CliRunner().invoke(probe, [*args, key], obj=app, catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        outputs.append(result.output)
+    assert seen == [True, False, True]
+    assert "Datadog: already configured as destination" in outputs[1]
+    assert "Datadog: key updated, already configured as destination" in outputs[2]
+
+    @click.command()
+    @click.pass_context
+    def key_only(ctx: click.Context) -> None:
+        ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = cmd_setup._safe_mtime(str(tmp_path / "config.yaml"))
+        ctx.meta[SETUP_SECRET_CHANGED_META_KEY] = True
+        cmd_setup._auto_restart_sidecar_after_setup()
+
+    with (
+        patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True) as restart,
+    ):
+        result = CliRunner().invoke(key_only, [], obj=app)
+    assert result.exit_code == 0, result.output
+    assert restart.called and "Auto-restarting defenseclaw-gateway" in result.output

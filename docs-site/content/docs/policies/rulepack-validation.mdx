@@ -31,10 +31,60 @@ If the authoritative helper is missing, cannot run, times out, or returns an
 incompatible response, the command exits `2` and reports that validation is
 unavailable. Exit `2` does not determine whether the pack itself is valid.
 
+A valid copy of the bundled default pack prints:
+
+```text title="defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/default"
+Rule pack valid: "/home/you/.defenseclaw/policies/guardrail/default"
+  rules: 239/243 enabled across 7 files
+  components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+  digest: c447c505a65bf39ecaf5b58f685cb9f7746c63a640cf722191b4b92817f3b5d9
+```
+
+`judges=4` counts the compiled-in exfil judge as well as the three judge files.
+An invalid pack names the component and the error code. A file the loader
+doesn't recognize, such as a `correlation-patterns.yaml`, fails the whole pack:
+
+```text title="Invalid pack (exit 1)"
+Rule pack invalid: "/home/you/.defenseclaw/policies/guardrail/my-org"
+  inventory_unexpected at correlation-patterns.yaml: unexpected YAML component
+```
+
 For CI or scripts, request the versioned JSON result:
 
 ```bash
 defenseclaw guardrail validate-pack /path/to/rule-pack --json
+```
+
+```json title="Valid pack (formatted; the command prints one line)"
+{
+  "kind": "validation",
+  "summary": {
+    "digest": "c447c505…",
+    "enabled_rule_count": 239,
+    "judge_category_count": 23,
+    "judge_count": 4,
+    "local_pattern_count": 11,
+    "rule_count": 243,
+    "rule_file_count": 7,
+    "sensitive_tool_count": 6,
+    "suppression_count": 9
+  },
+  "valid": true,
+  "wire_version": 1
+}
+```
+
+```json title="Invalid pack (formatted)"
+{
+  "error": {
+    "code": "inventory_unexpected",
+    "path": "correlation-patterns.yaml",
+    "reason": "unexpected YAML component"
+  },
+  "kind": "validation_error",
+  "valid": false,
+  "wire_version": 1
+}
 ```
 
 <Callout type="warn" title="Validation is fail-closed for files you provide">

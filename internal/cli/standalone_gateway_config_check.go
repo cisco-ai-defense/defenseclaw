@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // validateStandaloneGatewayConfig proves the gateway service can load
@@ -45,38 +46,62 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	if runtime == nil || !runtime.Guardrail.Enabled {
 		return nil
 	}
-	for _, dir := range standaloneGatewayRulePackDirs(runtime) {
-		if _, err := guardrail.LoadRulePack(dir); err != nil {
-			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v", dir, configPath, err)
+	serviceAccount := strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))
+	for _, pack := range standaloneGatewayRulePackDirs(runtime) {
+		// The check runs as an administrator or LocalSystem, who read any
+		// folder, so the gateway service account's own access is checked
+		// first: a pack with an explicit Deny for it loaded here, and the
+		// install then failed with only "Failed to start service" (GAP-0095).
+		if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
+			return fmt.Errorf("the gateway service cannot read the guardrail rule pack that %s names: %v", configPath, err)
+		}
+		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
+			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v", pack.dir, configPath, err)
 		}
 	}
 	return nil
 }
 
+// standaloneServiceCanReadTree checks that the gateway service account can
+// read a rule pack (a no-op off Windows and without an account). Before a
+// first install the service, and so its account, does not exist yet; the
+// install checks again once it does. A seam for tests.
+var standaloneServiceCanReadTree = func(root, label, serviceAccount string) error {
+	err := managed.ValidateServiceCanReadTree(root, label, serviceAccount)
+	if managed.IsServiceAccountUnresolved(err) {
+		return nil
+	}
+	return err
+}
+
+// standaloneRulePack is a rule pack directory and the config key that
+// selects it.
+type standaloneRulePack struct{ label, dir string }
+
 // standaloneGatewayRulePackDirs lists the distinct rule pack directories the
 // gateway loads for cfg: the global one and every connector's. An empty
 // directory selects the embedded packs and is always loadable.
-func standaloneGatewayRulePackDirs(cfg *config.Config) []string {
+func standaloneGatewayRulePackDirs(cfg *config.Config) []standaloneRulePack {
 	seen := map[string]bool{}
-	dirs := []string{}
-	add := func(dir string) {
+	packs := []standaloneRulePack{}
+	add := func(label, dir string) {
 		dir = strings.TrimSpace(dir)
 		if dir == "" || seen[dir] {
 			return
 		}
 		seen[dir] = true
-		dirs = append(dirs, dir)
+		packs = append(packs, standaloneRulePack{label: label, dir: dir})
 	}
-	add(cfg.Guardrail.RulePackDir)
+	add("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir)
 	names := make([]string, 0, len(cfg.Guardrail.Connectors))
 	for name := range cfg.Guardrail.Connectors {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		add(cfg.EffectiveRulePackDirForConnector(name))
+		add("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name))
 	}
-	return dirs
+	return packs
 }
 
 // snapshotProcessEnvironment returns a function that restores the process

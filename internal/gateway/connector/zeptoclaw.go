@@ -671,6 +671,12 @@ func (c *ZeptoClawConnector) patchZeptoClawConfig(opts SetupOpts) error {
 
 func (c *ZeptoClawConnector) restoreZeptoClawConfig(opts SetupOpts) error {
 	backup, err := c.loadBackup(opts.DataDir)
+	if os.IsNotExist(err) {
+		// Nothing to restore: setup never patched the config, or an earlier
+		// teardown of the same rollback already restored it (GAP-2477).
+		// VerifyClean still reports any proxy api_base left behind.
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("load zeptoclaw backup: %w", err)
 	}

@@ -73,17 +73,21 @@ type unixAgentProbe struct {
 }
 
 var unixAgentProbes = map[string]unixAgentProbe{
-	"codex":       {npmPackages: []string{"@openai/codex"}, binaries: []string{"codex"}},
-	"claudecode":  {npmPackages: []string{"@anthropic-ai/claude-code"}, versionDirs: []string{".local/share/claude/versions", "Library/Application Support/Claude/claude-code"}, binaries: []string{"claude"}},
-	"cursor":      {versionDirs: []string{".local/share/cursor-agent/versions"}, binaries: []string{"cursor-agent", "agent"}},
-	"copilot":     {npmPackages: []string{"@github/copilot"}, binaries: []string{"copilot"}},
-	"opencode":    {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
-	"amp":         {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
-	"devin":       {binaries: []string{"devin"}},
-	"hermes":      {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME"},
-	"openhands":   {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
-	"omnigent":    {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
-	"antigravity": {binaries: []string{"agy", "antigravity"}},
+	"codex": {npmPackages: []string{"@openai/codex"}, binaries: []string{"codex"}},
+	// Claude Desktop's embedded build is a desktop surface
+	// (DiscoverUnixAgentSurfaces), not the CLI.
+	"claudecode": {npmPackages: []string{"@anthropic-ai/claude-code"}, versionDirs: []string{".local/share/claude/versions"}, binaries: []string{"claude"}},
+	"cursor":     {versionDirs: []string{".local/share/cursor-agent/versions"}, binaries: []string{"cursor-agent", "agent"}},
+	"copilot":    {npmPackages: []string{"@github/copilot"}, binaries: []string{"copilot"}},
+	"opencode":   {npmPackages: []string{"opencode-ai"}, binaries: []string{"opencode"}},
+	"amp":        {npmPackages: []string{"@ampcode/cli"}, binaries: []string{"amp"}},
+	"devin":      {binaries: []string{"devin"}},
+	"hermes":     {binaries: []string{"hermes"}, stateEnv: "HERMES_HOME"},
+	"openhands":  {binaries: []string{"openhands"}, uvTool: [2]string{"openhands", "openhands"}},
+	"omnigent":   {binaries: []string{"omnigent"}, uvTool: [2]string{"omnigent", "omnigent"}},
+	// "antigravity" is the IDE launcher, a desktop surface that is never
+	// run (DiscoverUnixAgentSurfaces).
+	"antigravity": {binaries: []string{"agy"}},
 	"kiro":        {binaries: []string{"kiro-cli"}},
 }
 
@@ -364,6 +368,39 @@ func DiscoverUnixAgentVersionStatically(ctx context.Context, home, connector str
 func unixAgentExecutablePresent(candidate string) bool {
 	info, err := os.Stat(candidate)
 	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+// unixAdminPrefixRoots hold administrator install prefixes
+// (<root>/<name>/bin/<cli>) that discovery searches only when
+// enrollment.agent_prefixes names them; tests replace it.
+var unixAdminPrefixRoots = []string{"/opt"}
+
+// UnixAgentOutsideDiscovery returns connector's CLI when it is installed in
+// an administrator prefix under /opt that discovery does not search, and
+// that prefix. The enumerator reports such an agent as unprotected and names
+// the setting that adds the prefix, instead of saying nothing while users
+// run it without DefenseClaw hooks. Nothing is executed. Safe as root.
+func UnixAgentOutsideDiscovery(connector string) (binary, prefix string) {
+	probe, ok := unixAgentProbes[strings.ToLower(strings.TrimSpace(connector))]
+	if !ok || len(probe.binaries) == 0 {
+		return "", ""
+	}
+	searched := map[string]bool{}
+	for _, known := range machinePrefixes() {
+		searched[filepath.Clean(known)] = true
+	}
+	for _, root := range unixAdminPrefixRoots {
+		matches, _ := filepath.Glob(filepath.Join(root, "*", "bin", probe.binaries[0]))
+		sort.Strings(matches)
+		for _, match := range matches {
+			candidatePrefix := filepath.Dir(filepath.Dir(match))
+			if searched[candidatePrefix] || !unixAgentExecutablePresent(match) {
+				continue
+			}
+			return match, candidatePrefix
+		}
+	}
+	return "", ""
 }
 
 // DiscoverUnixMachineAgentVersion reads only root-owned, non-writable
@@ -823,8 +860,16 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	return c.buf.Write(p)
 }
 
+// unixAgentVersionAttemptTimeout bounds one `--version` run; tests shorten
+// it.
+var unixAgentVersionAttemptTimeout = unixAgentVersionTimeout
+
 // execUnixAgentVersion runs candidate --version with a minimal environment
-// and a timeout. The caller must already run as the target user.
+// and a timeout. The caller must already run as the target user. A run that
+// times out is retried once at once: a cold start right after install, when
+// the enumerator probes every connector for every user together, can take
+// most of the timeout (agy took 4.85 s cold and 0.15 s warm), and the next
+// cycle is five minutes away.
 func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string) string {
 	info, err := os.Stat(candidate)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
@@ -833,7 +878,19 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, unixAgentVersionTimeout)
+	for attempt := 0; attempt < 2; attempt++ {
+		version, timedOut := runUnixAgentVersion(ctx, candidate, home, stateEnv)
+		if version != "" || !timedOut || ctx.Err() != nil {
+			return version
+		}
+	}
+	return ""
+}
+
+// runUnixAgentVersion is one `--version` run; timedOut reports that it hit
+// its own timeout.
+func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv string) (version string, timedOut bool) {
+	ctx, cancel := context.WithTimeout(parent, unixAgentVersionAttemptTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, candidate, "--version")
 	cmd.Dir = home
@@ -848,7 +905,7 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	if stateEnv != "" {
 		scratch, err := os.MkdirTemp("", "dc-agent-probe-")
 		if err != nil {
-			return ""
+			return "", false
 		}
 		defer os.RemoveAll(scratch)
 		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
@@ -864,8 +921,8 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	_ = cmd.Run()
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
 	if version := ExtractUnixAgentVersion(first); version != "" {
-		return version
+		return version, false
 	}
 	first, _, _ = strings.Cut(errOut.buf.String(), "\n")
-	return ExtractUnixAgentVersion(first)
+	return ExtractUnixAgentVersion(first), errors.Is(ctx.Err(), context.DeadlineExceeded)
 }

@@ -945,3 +945,39 @@ func TestGuardScansClaudeFormatFilesOtherAgentsLoad(t *testing.T) {
 }
 
 const foreignClaudeSettings = `{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "./rewrite.sh"}]}]}}`
+
+// GAP-2218: one hook file blocking several hook events is summarized with
+// a count per event, not under the first event's name.
+func TestForeignHookBlockSummaryCountsEachEvent(t *testing.T) {
+	home := t.TempDir()
+	decision := GuardDecision{Deny: true, Findings: []Finding{{Connector: "cursor", Scope: ScopeProject, Path: "/r/.cursor/hooks.json", Digest: "aa"}}}
+	now := time.Date(2026, 10, 3, 4, 20, 44, 0, time.UTC)
+	events := []string{"workspaceOpen", "sessionStart", "preToolUse", "preToolUse", "stop", "stop", "stop", "stop"}
+	for i, event := range events {
+		if err := RecordForeignHookBlock(home, "cursor", event, decision, now.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	blocks, _, err := CollectForeignHookBlocks(home, now)
+	if err != nil || len(blocks) != 1 {
+		t.Fatalf("collect: %+v %v", blocks, err)
+	}
+	got := blocks[0].String()
+	want := "blocked 8 cursor hook call(s) (workspaceOpen 1, sessionStart 1, preToolUse 2, stop 4) between 2026-10-03T04:20:44Z and 2026-10-03T04:20:51Z: project file /r/.cursor/hooks.json (sha256:aa)"
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("summary:\n got %q\nwant prefix %q", got, want)
+	}
+
+	single := BlockSummary{BlockRecord: BlockRecord{Time: "t1", Connector: "cursor", Event: "preToolUse"}, Count: 1, Last: "t1"}
+	if s := single.String(); !strings.HasPrefix(s, "blocked 1 cursor hook call(s) (preToolUse 1) at t1:") {
+		t.Fatalf("single summary: %q", s)
+	}
+
+	var many BlockSummary
+	for i := 0; i < blockEventLimit+3; i++ {
+		many.addEvent(fmt.Sprintf("e%d", i))
+	}
+	if len(many.Events) != blockEventLimit || many.Events[blockEventLimit-1] != (EventCount{Event: "other", Count: 4}) {
+		t.Fatalf("event list must stay bounded: %+v", many.Events)
+	}
+}

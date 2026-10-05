@@ -254,7 +254,9 @@ func TestLogActionControlPlaneV8GeneratedFamiliesPersistOnceAndPreserveV7(t *tes
 			}
 
 			legacy := rows[0]
-			if legacy.Action != string(test.action) || legacy.Actor != "audit_logger" ||
+			// GAP-2143: the actor column names who made the change
+			// (defenseclaw.admin.actor_ref), not the record producer.
+			if legacy.Action != string(test.action) || legacy.Actor != "defenseclaw" ||
 				legacy.Details != string(test.eventName) ||
 				legacy.Structured["defenseclaw.admin.target_ref"] != "control-plane-target" {
 				t.Fatalf("canonical SQLite projection changed: %#v", legacy)
@@ -405,7 +407,7 @@ func TestLogActivityControlPlaneV8PersistsOneActivityAndOneCanonicalAuditRow(t *
 		fmt.Sprint(metricValue(t, metrics[2])) != "2" {
 		t.Fatalf("activity metric values = %v/%v/%v", metricValue(t, metrics[0]), metricValue(t, metrics[1]), metricValue(t, metrics[2]))
 	}
-	if metadata[0].Source() != observability.SourceWatcher || rows[0].Actor != "audit_logger" ||
+	if metadata[0].Source() != observability.SourceWatcher || rows[0].Actor != "watcher" ||
 		rows[0].Structured["defenseclaw.admin.target_ref"] != "policy:default" {
 		t.Fatalf("activity canonical/source = source:%q row:%#v", metadata[0].Source(), rows[0])
 	}

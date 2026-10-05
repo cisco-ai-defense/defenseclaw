@@ -102,14 +102,16 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &report); err != nil {
 		t.Fatalf("verify --json: %v\n%s", err, out)
 	}
-	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors) {
+	// devin brings its Cascade companion.
+	if !report.Complete || report.Profile != "standalone" || len(report.Result.States) != len(ctx.connectors)+1 {
 		t.Fatalf("report: %+v", report)
 	}
 	routes := map[string]string{}
 	for _, state := range report.Result.States {
 		routes[state.Connector] = state.Route
 	}
-	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser {
+	if routes["codex"] != enterprisepolicy.RouteMachinePolicy || routes["devin"] != enterprisepolicy.RoutePerUser ||
+		routes[enterprisepolicy.ConnectorDevinCascade] != enterprisepolicy.RouteMachinePolicy {
 		t.Fatalf("routes: %v", routes)
 	}
 	if !report.Guard["cursor"].Guard || !report.Guard["devin"].Guard || report.Guard["codex"].Guard {
@@ -127,6 +129,10 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	out, err = runPolicyCommand(t, runEnterprisePolicyExport)
 	if err != nil || strings.Count(strings.TrimSpace(out), "\n") != 0 || !strings.Contains(out, "allowManagedHooksOnly") {
 		t.Fatalf("claude HKLM export must be one line: %v\n%s", err, out)
+	}
+	enterprisePolicyFormat, enterprisePolicyConnector = "", "kiro"
+	if _, err = runPolicyCommand(t, runEnterprisePolicyExport); err == nil || !strings.Contains(err.Error(), "protected per user") {
+		t.Fatalf("kiro export must say it is per user: %v", err)
 	}
 
 	enterprisePolicyFormat, enterprisePolicyConnector = "", ""
@@ -158,6 +164,28 @@ func TestEnterprisePolicyVerifyShowAndExport(t *testing.T) {
 	out, err = runPolicyCommand(t, runEnterprisePolicyShow)
 	if err != nil || !strings.Contains(out, "hook_contract_unverified: cursor 4.1.0 for user alice is not protected") {
 		t.Fatalf("show must name the unprotected agent: %v\n%s", err, out)
+	}
+
+	// The wsl row is Windows only; there an uncovered row fails verify.
+	enterprisePolicyConnector = enterprisepolicy.ConnectorWSL
+	if _, err := runPolicyCommand(t, runEnterprisePolicyVerify); err == nil || !strings.Contains(err.Error(), "only to Windows") {
+		t.Fatalf("the wsl row must be refused off Windows, got %v", err)
+	}
+	out, err = runPolicyCommand(t, runEnterprisePolicyExport)
+	if err != nil || !strings.Contains(out, `"disableWslSessions"="true"`) {
+		t.Fatalf("wsl export: %v\n%s", err, out)
+	}
+	windowsCtx := ctx
+	windowsCtx.opts.GOOS = "windows"
+	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return windowsCtx, nil }
+	previousWSL := enterprisePolicyWSLState
+	t.Cleanup(func() { enterprisePolicyWSLState = previousWSL })
+	enterprisePolicyWSLState = func(enterprisePolicyContext) (enterprisepolicy.State, error) {
+		return enterprisepolicy.State{Connector: enterprisepolicy.ConnectorWSL, Route: enterprisepolicy.RouteMachinePolicy, Conflicts: []string{"disableWslSessions is not set"}}, nil
+	}
+	out, err = runPolicyCommand(t, runEnterprisePolicyVerify)
+	if err == nil || !strings.Contains(out, "disableWslSessions is not set") {
+		t.Fatalf("an uncovered wsl row must fail verify: %v\n%s", err, out)
 	}
 }
 
@@ -311,5 +339,58 @@ func TestEnterprisePolicyUserReportListsConnectorsInOrder(t *testing.T) {
 		if len(listed) != len(names) || !sort.StringsAreSorted(listed) {
 			t.Fatalf("connectors must be listed in name order: %v", listed)
 		}
+	}
+}
+
+// verify printed "openhands per_user n/a lock=- foreign_hooks=remove
+// owned=0 foreign=0" for agents no foreign-hook guard covers, as if their
+// foreign hooks were counted and removed (GAP-1472). A guarded per-user
+// agent keeps its setting and its guard line.
+func TestEnterprisePolicyRowOfAnUnguardedAgentSaysNoGuard(t *testing.T) {
+	resetEnterprisePolicyFlags(t)
+	report := enterprisePolicyReport{goos: "linux",
+		Result: enterprisepolicy.Result{States: []enterprisepolicy.State{
+			{Connector: "openhands", Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove},
+			{Connector: "amp", Route: enterprisepolicy.RoutePerUser, ForeignHooks: config.ForeignHooksRemove, ForeignEntries: 1},
+		}},
+		Guard: map[string]enterprisepolicy.PublicConnectorPolicy{
+			"openhands": {ForeignHooks: config.ForeignHooksRemove},
+			"amp":       {ForeignHooks: config.ForeignHooksRemove, Guard: true},
+		},
+	}
+	var out bytes.Buffer
+	if err := writeEnterprisePolicyReport(&out, report); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	if !strings.Contains(text, "foreign_hooks=n/a     owned=0 foreign=-") ||
+		!strings.Contains(text, "no foreign-hook guard for openhands") ||
+		!strings.Contains(text, "foreign_hooks=remove  owned=0 foreign=1") ||
+		!strings.Contains(text, "guard:     foreign hooks remove") || strings.Contains(text, "no foreign-hook guard for amp") {
+		t.Fatalf("policy rows:\n%s", text)
+	}
+}
+
+// show listed Claude Code's base managed-settings.json, which DefenseClaw
+// never writes, as if it held the policy (GAP-1445): a listed source that
+// does not exist is marked.
+func TestEnterprisePolicyMarksAPolicyFileThatIsNotPresent(t *testing.T) {
+	resetEnterprisePolicyFlags(t)
+	dir := t.TempDir()
+	present := filepath.Join(dir, "90-defenseclaw.json")
+	if err := os.WriteFile(present, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "managed-settings.json")
+	report := enterprisePolicyReport{goos: "darwin", Result: enterprisepolicy.Result{States: []enterprisepolicy.State{
+		{Connector: "claudecode", Route: enterprisepolicy.RouteMachinePolicy, Covered: true, Paths: []string{missing, present}},
+	}}}
+	var out bytes.Buffer
+	if err := writeEnterprisePolicyReport(&out, report); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "file:      "+missing+" (not present)\n") ||
+		!strings.Contains(out.String(), "file:      "+present+"\n") {
+		t.Fatalf("policy files:\n%s", out.String())
 	}
 }

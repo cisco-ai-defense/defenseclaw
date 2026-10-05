@@ -115,8 +115,14 @@ const (
 // since the last baseline. Unchanged targets are skipped entirely, which keeps
 // the periodic loop cheap and stops scan_results from growing on every cycle.
 func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
+	defer func() { w.startupRescanDone = true }()
+	if !w.startupRescanDone {
+		w.startupAdmitRoots = w.baselinedWatchRoots()
+		defer func() { w.startupAdmitRoots = nil }()
+	}
 	targets := w.enumerateTargets()
 	if len(targets) == 0 {
+		w.markWatchRoots()
 		return
 	}
 
@@ -140,11 +146,88 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			w.recordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 		}
 	}
+	w.markWatchRoots()
 
 	fmt.Fprintf(os.Stderr, "[rescan] cycle complete: targets=%d scanned=%d skipped=%d\n",
 		len(targets), scanned, skipped)
 	_ = w.logger.LogAction(string(audit.ActionRescan), "",
 		fmt.Sprintf("targets=%d scanned=%d skipped=%d", len(targets), scanned, skipped))
+}
+
+// watchRootMarkerType is the target_snapshots type of the marker row saying
+// a skill or plugin root was covered by a completed rescan cycle.
+func watchRootMarkerType(typ InstallType) string { return string(typ) + "_root" }
+
+// baselinedWatchRoots lists, per type, the skill and plugin roots that a
+// completed rescan cycle covered in an earlier run: a root with a marker row,
+// or one holding baselines from a build without markers. A target without a
+// baseline under one of them arrived while the gateway was stopped (GAP-2475),
+// even when the root was empty before. On a first start nothing is listed, so
+// the startup rescan only records baselines, as before.
+func (w *InstallWatcher) baselinedWatchRoots() map[InstallType][]string {
+	roots := make(map[InstallType][]string)
+	for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
+		if len(dirs) == 0 {
+			continue
+		}
+		paths, err := w.store.ListTargetSnapshotPaths(string(typ))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] list %s baselines: %v\n", typ, err)
+			continue
+		}
+		markers, err := w.store.ListTargetSnapshotPaths(watchRootMarkerType(typ))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[rescan] list %s root markers: %v\n", typ, err)
+		}
+		paths = append(paths, markers...)
+		for _, dir := range dirs {
+			for _, path := range paths {
+				if watcherPathAtOrBelow(path, dir) {
+					roots[typ] = append(roots[typ], dir)
+					break
+				}
+			}
+		}
+	}
+	return roots
+}
+
+// markWatchRoots records, after a completed rescan cycle, that every existing
+// skill and plugin root was covered, so a target added to it while the gateway
+// is stopped is admitted at the next start even if the root was empty.
+func (w *InstallWatcher) markWatchRoots() {
+	if w.markedWatchRoots == nil {
+		w.markedWatchRoots = make(map[string]bool)
+	}
+	for typ, dirs := range map[InstallType][]string{InstallSkill: w.skillDirs, InstallPlugin: w.pluginDirs} {
+		markerType := watchRootMarkerType(typ)
+		for _, dir := range dirs {
+			key := markerType + "\x00" + dir
+			if w.markedWatchRoots[key] {
+				continue
+			}
+			if _, err := os.Lstat(dir); err != nil {
+				continue
+			}
+			if err := w.store.SetTargetSnapshot(markerType, dir, "", "{}", "{}", "[]", "", ""); err != nil {
+				fmt.Fprintf(os.Stderr, "[rescan] mark %s root %s: %v\n", typ, dir, err)
+				continue
+			}
+			w.markedWatchRoots[key] = true
+		}
+	}
+}
+
+// admitsAtStartup reports whether the startup rescan must run install
+// admission for evt, a skill or plugin without a baseline under a root that
+// was baselined before.
+func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
+	for _, root := range w.startupAdmitRoots[evt.Type] {
+		if watcherPathAtOrBelow(evt.Path, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // enumerateTargets lists all direct child directories under watched roots plus
@@ -153,6 +236,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	var targets []InstallEvent
 
 	for _, dir := range w.skillDirs {
+		// A watch folder the agent has not created yet is deferred by the
+		// watcher; there is nothing in it to rescan (GAP-2384).
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if hermesskills.IsRoot(dir) {
 			entries, err := hermesskills.Discover(dir, hermesskills.DefaultDirectoryLimit)
 			if err == nil {
@@ -188,6 +276,17 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if isBundledSkillWatchPath(path) {
 				continue
 			}
+			if synced, ok := claudeSyncedSkillDirs(path); ok {
+				for _, skill := range synced {
+					targets = append(targets, InstallEvent{
+						Type:      InstallSkill,
+						Name:      filepath.Base(skill),
+						Path:      skill,
+						Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
 			if watcherConnectorName(w.cfg) == "claudecode" &&
 				isClaudeSkillsPlugin(path) {
 				continue
@@ -204,6 +303,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	for _, dir := range w.pluginDirs {
 		if watcherConnectorName(w.cfg) == "claudecode" {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
+				if w.isOwnPlugin(plugin) {
+					continue
+				}
 				targets = append(targets, InstallEvent{
 					Type:      InstallPlugin,
 					Name:      claudeWatcherPluginIdentity(dir, plugin),
@@ -216,17 +318,51 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
+			// Deferred until the agent creates it, as for skills above.
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
+			}
 			continue
 		}
 		for _, e := range entries {
-			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			if !e.IsDir() || skipPluginChildDir(e.Name()) {
 				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			if w.isOwnPlugin(path) {
+				continue
+			}
+			// A folder of plugins (Hermes hermes-agent/plugins/browser,
+			// memory, platforms, ...) is not a plugin: the plugin scanner
+			// refuses it (GAP-1580). Rescan the plugins inside it instead,
+			// keyed by the category/name id 'plugin list' shows (GAP-2411).
+			if children := pluginFolderChildren(path); len(children) > 0 {
+				bare := w.hermesBareCategory(dir, e.Name())
+				for _, child := range children {
+					childPath := filepath.Join(path, child)
+					if w.isOwnPlugin(childPath) {
+						continue
+					}
+					name := e.Name() + "/" + child
+					if bare {
+						name = child
+					}
+					targets = append(targets, InstallEvent{
+						Type:      InstallPlugin,
+						Name:      name,
+						Path:      childPath,
+						Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
+			if w.hermesCategoryFolder(path) {
+				continue // a Hermes category folder with no plugins yet (GAP-2471)
 			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallPlugin,
 				Name:      e.Name(),
-				Path:      filepath.Join(dir, e.Name()),
+				Path:      path,
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -234,7 +370,10 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 
 	servers, err := w.cfg.ReadMCPServers()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[rescan] enumerate mcp servers: %v\n", err)
+		// No agent config yet means no MCP servers to rescan.
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate mcp servers: %v\n", err)
+		}
 		return targets
 	}
 	for _, server := range servers {
@@ -250,6 +389,87 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	return targets
+}
+
+// skipPluginChildDir reports whether a child of a plugin root is not a
+// plugin: a dot-dir, a Python bytecode cache or an npm dependency tree.
+// Hermes' plugins folder is a Python package, so it holds __pycache__; the
+// CLI inventory skips these too (GAP-1086), while the gateway scanned it and
+// raised a MANIFEST-MISSING finding on every start (GAP-2338).
+// hermesBareCategory reports whether the plugins in the category folder of
+// plugin root dir go by their bare folder name. Hermes lists its bundled
+// platforms/* plugins (hermes-agent/plugins/platforms/a2a) as "a2a": that is
+// the id "plugin list" shows and "plugin scan" accepts, so the rescan log
+// names them the same way (GAP-2439). The user plugin root (~/.hermes/plugins)
+// keeps category/name, as "plugin list" does.
+func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
+	if category != "platforms" || watcherConnectorName(w.cfg) != "hermes" {
+		return false
+	}
+	dir = filepath.Clean(dir)
+	if filepath.Base(dir) == "plugins" && filepath.Base(filepath.Dir(dir)) == "hermes-agent" {
+		return true
+	}
+	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
+	return bundled != "" && filepath.Clean(bundled) == dir
+}
+
+func skipPluginChildDir(name string) bool {
+	if strings.HasPrefix(name, ".") {
+		return true
+	}
+	switch strings.ToLower(name) {
+	case "__pycache__", "node_modules":
+		return true
+	}
+	return false
+}
+
+// pluginManifestNames mirrors the plugin scanner's manifest candidates
+// (cli/defenseclaw/scanner/plugin_scanner/scanner.py _MANIFEST_CANDIDATES).
+var pluginManifestNames = []string{
+	"package.json",
+	"manifest.json",
+	"plugin.json",
+	"openclaw.plugin.json",
+	filepath.Join(".claude-plugin", "plugin.json"),
+	filepath.Join(".codex-plugin", "plugin.json"),
+	filepath.Join(".cursor-plugin", "plugin.json"),
+	"plugin.yaml",
+	"plugin.yml",
+}
+
+func hasPluginManifest(path string) bool {
+	for _, name := range pluginManifestNames {
+		if info, err := os.Stat(filepath.Join(path, name)); err == nil && info.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginFolderChildren returns the sub-folders of path that hold a plugin
+// manifest when path itself has none: the same test the CLI plugin scanner
+// uses to refuse a folder of plugins (cmd_plugin._plugin_folder_children).
+func pluginFolderChildren(path string) []string {
+	if hasPluginManifest(path) {
+		return nil
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		if hasPluginManifest(filepath.Join(path, name)) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func isClaudeSkillsPlugin(path string) bool {
@@ -378,6 +598,22 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
 		return rescanSkipped
 	}
+	if evt.Type == InstallPlugin {
+		// Re-check here: the connector may have restored its own plugin
+		// since enumerateTargets ran (GAP-1525).
+		if w.isOwnPlugin(evt.Path) {
+			return rescanSkipped
+		}
+		// At gateway start the connector's Setup rewrites its own plugin
+		// dir, so an old (upgrade) or drifted copy there is about to be
+		// replaced by the bundled one. Leave it to admission, which sees
+		// the rewrite, and to the next cycle, which scans it if it still
+		// differs.
+		if !w.startupRescanDone && w.isBundledPluginDir(evt.Path) {
+			fmt.Fprintf(os.Stderr, "[rescan] deferring %s: connector setup refreshes DefenseClaw's own plugin at start\n", evt.Path)
+			return rescanSkipped
+		}
+	}
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
 		return rescanSkipped
@@ -392,6 +628,21 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if w.admitsAtStartup(evt) {
+				// Added while the gateway was stopped: admit it as the live
+				// watcher would (scan, verdict, block/quarantine; GAP-2475).
+				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
+				res := w.runAdmission(ctx, evt)
+				if w.onAdmit != nil {
+					w.onAdmit(res)
+				}
+				if _, statErr := os.Lstat(evt.Path); statErr == nil {
+					// The admission scan is the baseline scan, so the next
+					// start skips the unchanged target (GAP-2507).
+					w.persistSnapshot(evt, currentSnap, res.ScanID, fingerprint)
+				}
+				return rescanScanned
+			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
 			result, scanID := w.scanAndEmit(ctx, evt)
@@ -500,6 +751,37 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 		return nil, ""
 	}
 	return result, w.emitRescanResult(scanCtx, result)
+}
+
+// admissionSnapshot hashes a live-watcher target before admission scans it,
+// so the baseline describes the content that was scanned. It returns nil
+// when periodic rescan is off or the target can't be snapshotted.
+func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
+	if w.store == nil || !w.cfg.Watch.RescanEnabled ||
+		(evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return nil
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil {
+		return nil
+	}
+	return snap
+}
+
+// recordAdmissionBaseline writes the rescan baseline for a target the live
+// watcher admitted with a logged scan. Without it the next gateway start
+// re-admitted the unchanged target as new, and the start after that scanned
+// it again for lack of a baseline scan: three scans and three scan-finding
+// alerts for one install (GAP-2507). A target admission moved away gets no
+// baseline.
+func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, scanID string) {
+	if snap == nil || scanID == "" {
+		return
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		return
+	}
+	w.persistSnapshot(evt, snap, scanID, w.scannerFingerprint(evt))
 }
 
 // persistSnapshot upserts the baseline snapshot (content/dep/config/endpoint

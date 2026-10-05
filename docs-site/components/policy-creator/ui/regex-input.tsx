@@ -54,7 +54,7 @@ export function RegexInput({
           onChange={(e) => onChange(e.target.value)}
           spellCheck={false}
           className={[
-            'rounded-md border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground/60',
+            'rounded-md border bg-fd-background px-2 py-1.5 font-mono text-xs text-fd-foreground placeholder:text-fd-muted-foreground',
             'focus:outline-none focus:ring-1',
             errorCount > 0
               ? 'border-red-500 focus:border-red-500 focus:ring-red-500'
@@ -161,7 +161,7 @@ function ExampleList({
             }
           }}
           placeholder={kind === 'match' ? 'add an example that should match…' : 'add an example that should NOT match…'}
-          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2 py-1 font-mono text-[11px] text-fd-foreground placeholder:text-fd-muted-foreground/60 focus:border-[var(--brand-cisco)] focus:outline-none"
+          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2 py-1 font-mono text-[11px] text-fd-foreground placeholder:text-fd-muted-foreground focus:border-[var(--brand-cisco)] focus:outline-none"
         />
         <button
           type="button"
@@ -197,7 +197,7 @@ function ExampleList({
                     type="button"
                     onClick={() => remove(idx)}
                     aria-label={`Remove ${item}`}
-                    className="text-fd-muted-foreground hover:text-red-500"
+                    className="text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                   >
                     ×
                   </button>

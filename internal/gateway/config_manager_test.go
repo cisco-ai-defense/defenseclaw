@@ -1220,3 +1220,21 @@ func TestKiroConnectorModeIsHooksOnly(t *testing.T) {
 		t.Errorf("kiro telemetry = %#v, want at least hooks", row["telemetry"])
 	}
 }
+
+func TestDiffConfigsRegistrySourcesHotReloadAssetPolicyNeedsRestart(t *testing.T) {
+	// GAP-2422: the gateway never reads registry sources, so adding one must
+	// not make every later reload fail; asset_policy still needs a restart
+	// (the CLI restarts a running gateway for it).
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Registries.Sources = append(newCfg.Registries.Sources, config.RegistrySource{ID: "corp", Kind: "file"})
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "registries") || slices.Contains(diff.RestartRequired, "registries") {
+		t.Fatalf("changed=%v restart_required=%v, registries must hot reload", diff.Changed, diff.RestartRequired)
+	}
+	newCfg.AssetPolicy.Enabled = !oldCfg.AssetPolicy.Enabled
+	diff = diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.RestartRequired, "asset_policy") {
+		t.Fatalf("restart_required=%v, missing asset_policy", diff.RestartRequired)
+	}
+}

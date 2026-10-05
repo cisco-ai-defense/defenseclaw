@@ -118,7 +118,11 @@ func observeWindowsEnterpriseStandaloneResult(result *enterprisestatus.Result, o
 		// AddWarning does not change OK; restore the computed exit code.
 	}
 	event := writeWindowsEnterpriseEvent(result)
-	path, err := appendWindowsEnterpriseLifecycleLog(result, event)
+	var diagnostics []string
+	if opts != nil {
+		diagnostics = opts.diagnostics
+	}
+	path, err := appendWindowsEnterpriseLifecycleLog(result, event, diagnostics)
 	if err != nil {
 		result.AddWarning("lifecycle_log_failed", err.Error())
 		return ""
@@ -318,9 +322,12 @@ func releaseWindowsEnterpriseSelfUpdatePolicy() error {
 		}
 	}
 	policy.Close()
-	// The lifecycle created the key for the value it owned; with nothing
-	// else in it, it goes too.
-	return removeEmptyWindowsRegistryKey(windowsEnterprisePolicyKey)
+	// The lifecycle created the key, and its Cisco parent, for the value it
+	// owned; with nothing else in them, they go too.
+	if err := removeEmptyWindowsRegistryKey(windowsEnterprisePolicyKey); err != nil {
+		return err
+	}
+	return removeEmptyWindowsRegistryKey(filepath.Dir(windowsEnterprisePolicyKey))
 }
 
 // ensureWindowsEnterpriseEventLog registers the DefenseClaw event log and
@@ -395,9 +402,11 @@ func removeWindowsEnterpriseRegistration() error {
 			failures = append(failures, fmt.Errorf("remove %s: %w", key, err))
 		}
 	}
-	// The marker's parent, created with the marker, goes once empty.
-	if err := removeEmptyWindowsRegistryKey(filepath.Dir(WindowsEnterpriseMarkerKey)); err != nil {
-		failures = append(failures, err)
+	// The marker's parents, created with the marker, go once empty.
+	for _, key := range []string{filepath.Dir(WindowsEnterpriseMarkerKey), filepath.Dir(filepath.Dir(WindowsEnterpriseMarkerKey))} {
+		if err := removeEmptyWindowsRegistryKey(key); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	return errors.Join(failures...)
 }
@@ -703,8 +712,9 @@ func ensureWindowsEnterpriseLogDirectory(directory string) error {
 
 // appendWindowsEnterpriseLifecycleLog appends one JSON line per run, keeps
 // five 5 MiB generations, and replaces last-result.json with the full
-// result.
-func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result, event *windowsEnterpriseEventRecord) (string, error) {
+// result. The line also keeps the run's diagnostics, which a JSON run does
+// not print.
+func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result, event *windowsEnterpriseEventRecord, diagnostics []string) (string, error) {
 	directory, err := windowsEnterpriseLogDirectory()
 	if err != nil {
 		return "", err
@@ -712,10 +722,10 @@ func appendWindowsEnterpriseLifecycleLog(result *enterprisestatus.Result, event 
 	if err := ensureWindowsEnterpriseLogDirectory(directory); err != nil {
 		return "", err
 	}
-	return writeWindowsEnterpriseLifecycleLog(directory, result, event)
+	return writeWindowsEnterpriseLifecycleLog(directory, result, event, diagnostics)
 }
 
-func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestatus.Result, event *windowsEnterpriseEventRecord) (string, error) {
+func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestatus.Result, event *windowsEnterpriseEventRecord, diagnostics []string) (string, error) {
 	path := filepath.Join(directory, windowsEnterpriseLogName)
 	result.LogPath = path
 	document, err := json.Marshal(result)
@@ -723,10 +733,11 @@ func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestat
 		return "", err
 	}
 	line, err := json.Marshal(struct {
-		Time   string                        `json:"time"`
-		Event  *windowsEnterpriseEventRecord `json:"event,omitempty"`
-		Result *enterprisestatus.Result      `json:"result"`
-	}{Time: windowsEnterpriseNow().UTC().Format(time.RFC3339Nano), Event: event, Result: result})
+		Time        string                        `json:"time"`
+		Event       *windowsEnterpriseEventRecord `json:"event,omitempty"`
+		Result      *enterprisestatus.Result      `json:"result"`
+		Diagnostics []string                      `json:"diagnostics,omitempty"`
+	}{Time: windowsEnterpriseNow().UTC().Format(time.RFC3339Nano), Event: event, Result: result, Diagnostics: diagnostics})
 	if err != nil {
 		return "", err
 	}

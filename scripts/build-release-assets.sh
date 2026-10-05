@@ -36,6 +36,10 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The scratch copy has no .git, so read the commit here. `defenseclaw version`
+# then names the build instead of "commit=unknown, built=unknown".
+COMMIT="$(git -C "${ROOT}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 mkdir -p "${OUT}"
 OUT="$(cd "${OUT}" && pwd)"
 WORK="$(mktemp -d)"
@@ -57,7 +61,7 @@ for target in "${TARGETS[@]}"; do
     mkdir -p "${stage}"
     exe=""
     [[ "${goos}" == windows ]] && exe=".exe"
-    ldflags="-s -w -X main.version=${VERSION}"
+    ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILT}"
     GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \
         -o "${stage}/defenseclaw-gateway${exe}" ./cmd/defenseclaw
     GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build -trimpath -ldflags "${ldflags}" \

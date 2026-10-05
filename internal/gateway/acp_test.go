@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestACPEvaluateDeniedMethodHonorsProfileMode(t *testing.T) {
@@ -728,4 +729,75 @@ func TestACPProfileForPairPrecedence(t *testing.T) {
 	if got := cfg.ACPProfileForPair("ZED", "Kiro"); got != "pair" {
 		t.Errorf("case-insensitive lookup failed, got %q", got)
 	}
+}
+
+// GAP-1302: a blocked ACP prompt is a finding of the agent's connector, so
+// it is an alert as a hook block is.
+func TestACPEvaluateBlockRecordsConnectorFinding(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	ruleCategoriesMu.Lock()
+	allRuleCategories = []ruleCategory{{
+		Name: "secrets",
+		Rules: []PatternRule{{
+			ID: "TEST-ACP-KEY", Pattern: regexp.MustCompile(`\bDCACPKEY[0-9]{4}\b`),
+			Title: "Test key", Severity: "CRITICAL", Confidence: 0.95,
+		}},
+	}}
+	allRuleGeneration = nil
+	ruleCategoriesMu.Unlock()
+
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.ACP = config.ACPConfig{
+		Enabled: true, Mode: "action", DefaultProfile: "default",
+		Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "default"}},
+		Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "default"}},
+		Profiles: map[string]config.ACPProfile{"default": {
+			Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+		}},
+	}
+	frame := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"s",` +
+		`"prompt":[{"type":"text","text":"Run echo DCACPKEY1234 > key.txt"}]}}`
+	body, err := json.Marshal(acp.Evaluation{
+		Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+		Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+		Payload: json.RawMessage(frame),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	api.handleACPEvaluate(response, httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body)))
+	var verdict acp.Verdict
+	if err := json.Unmarshal(response.Body.Bytes(), &verdict); err != nil || verdict.Action != "block" {
+		t.Fatalf("status=%d verdict=%+v err=%v, want block", response.Code, verdict, err)
+	}
+	events, err := api.store.ListEvents(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "scan-finding" {
+			target := auditStringValue(event.Structured["defenseclaw.finding.target_ref"])
+			if event.Connector != "kiro" || target != "kiro:acp" || event.Severity != "CRITICAL" {
+				t.Fatalf("scan-finding connector=%q target=%q severity=%q, want kiro, kiro:acp, CRITICAL",
+					event.Connector, target, event.Severity)
+			}
+			// The finding names the ACP session and the gateway's user, as a
+			// hook finding does (GAP-1946).
+			if event.SessionID != "s" {
+				t.Fatalf("scan-finding session_id=%q, want the ACP session s", event.SessionID)
+			}
+			if user := useridentity.Current(); user.ID != "" && auditStringValue(event.Structured["user.id"]) != user.ID {
+				t.Fatalf("scan-finding user.id=%q, want %q", auditStringValue(event.Structured["user.id"]), user.ID)
+			}
+			return
+		}
+	}
+	t.Fatal("blocked ACP prompt recorded no scan-finding")
+}
+
+// auditStringValue is shared by tests on every platform.
+func auditStringValue(value any) string {
+	text, _ := value.(string)
+	return text
 }

@@ -66,9 +66,10 @@ func Publish(opts Options, connectors []string) (Result, error) {
 		return Result{}, err
 	}
 	connectors = normalizeConnectors(connectors)
+	published := withCompanions(connectors)
 	result := Result{}
 	var errs []error
-	for _, name := range connectors {
+	for _, name := range published {
 		state, err := reconcileOne(opts, name)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
@@ -77,7 +78,7 @@ func Publish(opts Options, connectors []string) (Result, error) {
 		result.States = append(result.States, state)
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(result.States)
-	retired, err := retireUnpublished(opts, MachinePolicyConnectors(opts, connectors), targetNames())
+	retired, err := retireUnpublished(opts, MachinePolicyConnectors(opts, published), append(targetNames(), companionNames()...))
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -189,8 +190,6 @@ func kiroRouteDetail(route string, state *State) {
 	switch route {
 	case RoutePerUser:
 		state.detail("kiro: the guardian writes each enrolled user's ~/.kiro/hooks/defenseclaw.json (Kiro IDE, kiro-cli --v3) and the CLI 2.x defenseclaw agent; `defenseclaw-gateway enterprise acp` stays available for editors that start Kiro over ACP")
-	case RouteACP:
-		state.detail("kiro: the Windows guardian does not enroll Kiro; protect it with `defenseclaw-gateway enterprise acp`")
 	}
 }
 
@@ -199,7 +198,7 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	if err := opts.Validate(); err != nil {
 		return Result{}, err
 	}
-	connectors = normalizeConnectors(connectors)
+	connectors = withCompanions(normalizeConnectors(connectors))
 	result := Result{}
 	var errs []error
 	for _, name := range connectors {
@@ -245,11 +244,12 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 // machine policy target (whether or not it is still enabled) and deletes
 // the public summary.
 func RemoveAll(opts Options) (Result, error) {
-	names := targetNames()
+	names := append(targetNames(), companionNames()...)
 	result := Result{}
 	var errs []error
 	for _, name := range names {
-		state, err := targets[name].RemoveOwned(opts)
+		target, _ := TargetFor(name)
+		state, err := target.RemoveOwned(opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}

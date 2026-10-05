@@ -43,6 +43,7 @@ import {
 // Canonical provider config — single source of truth shared with the Go proxy.
 // Copied from internal/configs/providers.json by `make plugin`.
 import providersConfig from "./providers.json" with { type: "json" };
+import { logInfo } from "./log.js";
 const _require = createRequire(import.meta.url);
 // Use CommonJS require() for https/http — ESM module objects are frozen and
 // cannot have properties reassigned, but the CJS exports object is mutable.
@@ -310,6 +311,51 @@ export const DC_AUTH_HEADER = "X-DC-Auth";
  * the Ollama port rules so a relative URL to a local Ollama still
  * gets intercepted.
  */
+/**
+ * GAP-2428: what a model call shows when the DefenseClaw gateway is down.
+ * The proxy hop is refused, so the call fails closed; without this the
+ * agent only reported "connection refused by the provider endpoint". The
+ * wording avoids "refused", "timeout" and "unavailable" so OpenClaw shows
+ * it as is instead of mapping it to its generic transport copy.
+ */
+export const GATEWAY_DOWN_MESSAGE =
+  "[DefenseClaw] The DefenseClaw gateway is not running, so this request was blocked (fail-closed). " +
+  "Run: defenseclaw-gateway start";
+
+function isConnectionRefused(err: unknown): boolean {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
+  return e?.code === "ECONNREFUSED" || e?.cause?.code === "ECONNREFUSED";
+}
+
+/** A provider-shaped 503 for a refused fetch hop; OpenAI and Anthropic SDKs both surface its message. */
+export function gatewayDownResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      type: "error",
+      error: { type: "defenseclaw_gateway_down", message: GATEWAY_DOWN_MESSAGE },
+    }),
+    { status: 503, headers: { "Content-Type": "application/json", "x-should-retry": "false" } },
+  );
+}
+
+/**
+ * Name the DefenseClaw gateway in a refused node:http proxy hop's error,
+ * keeping its code so SDK retry logic is unchanged.
+ */
+export function explainRefusedProxyHop<T extends { emit: (event: string | symbol, ...args: unknown[]) => boolean }>(
+  req: T,
+): T {
+  const emit = req.emit;
+  if (typeof emit !== "function") return req;
+  req.emit = function (this: T, event: string | symbol, ...args: unknown[]): boolean {
+    if (event === "error" && isConnectionRefused(args[0]) && args[0] instanceof Error) {
+      args[0].message = GATEWAY_DOWN_MESSAGE;
+    }
+    return emit.call(this, event, ...args);
+  } as T["emit"];
+  return req;
+}
+
 function extractHost(urlStr: string): string {
   try {
     return new URL(urlStr).hostname.toLowerCase();
@@ -1163,6 +1209,7 @@ export function createFetchInterceptor(
   let egressReporter: EgressReporter | null = null;
   let chatgptCodexPassthroughWarned = false;
   let selfTestTimer: ReturnType<typeof setInterval> | null = null;
+  let lastSelfTestLine = "";
   const loggedInterceptHosts = new Set<string>();
   let lastUndiciProbeDestination = "";
 
@@ -1181,7 +1228,7 @@ export function createFetchInterceptor(
   }
 
   function logStartupBanner(layers: InterceptorLayers): void {
-    console.log(
+    logInfo(
       `[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
         `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
         `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`,
@@ -1198,7 +1245,7 @@ export function createFetchInterceptor(
     const key = `${layer}:${host}`;
     if (loggedInterceptHosts.has(key)) return;
     loggedInterceptHosts.add(key);
-    console.log(`[defenseclaw] intercept via=${layer} host=${host}`);
+    logInfo(`[defenseclaw] intercept via=${layer} host=${host}`);
   }
 
   // Extract { host, path } from a URL string without throwing. Missing
@@ -1245,8 +1292,12 @@ export function createFetchInterceptor(
     // (so our operator-added domains merge into the shared list) and
     // return without re-wrapping fetch/https/http/undici.
     if (_shared.installed) {
+      // Pass the sidecar token like the first instance does: the
+      // endpoint is authenticated, and an unauthenticated call is
+      // logged as an api-auth-failure security event.
       void bootstrapProviderOverlay(guardrailPort, {
         fetchImpl: globalThis.fetch,
+        token: loadSidecarConfig().token,
       });
       return;
     }
@@ -1397,16 +1448,22 @@ export function createFetchInterceptor(
       };
 
       if (shapeBranch === "shape") {
-        console.log(
+        logInfo(
           `[defenseclaw] intercepted LLM-shaped call → ${scrubUrlForLog(urlStr)} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
         );
       } else {
-        console.log(
+        logInfo(
           `[defenseclaw] intercepted LLM call → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`,
         );
       }
 
-      const response = await originalFetch!(proxied, newInit);
+      let response: Response;
+      try {
+        response = await originalFetch!(proxied, newInit);
+      } catch (err) {
+        if (!isConnectionRefused(err)) throw err;
+        return gatewayDownResponse();
+      }
 
       const blocked = response.headers.get("x-defenseclaw-blocked") === "true";
       if (blocked) {
@@ -1680,9 +1737,9 @@ export function createFetchInterceptor(
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
+          logInfo(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
         } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
+          logInfo(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
         }
         // Egress telemetry for the https.request branches. body_shape
         // is intentionally "none" because req.write happens after we
@@ -1702,7 +1759,9 @@ export function createFetchInterceptor(
         // F-1586: now that http.request is also patched, the proxy
         // hop must use the captured original to avoid recursing
         // back into this branch.
-        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+        return explainRefusedProxyHop(
+          originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]),
+        );
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -1858,7 +1917,7 @@ export function createFetchInterceptor(
       undici.setGlobalDispatcher(proxyDispatcher);
     }
 
-    console.log(
+    logInfo(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
     const layers = describeLayers();
@@ -1977,10 +2036,15 @@ export function createFetchInterceptor(
 
   async function runSelfTest(): Promise<InterceptionSelfTest> {
     const result = await verifyInterception();
-    console.log(
+    const line =
       `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
-        `reason=${result.reason}`,
-    );
+      `reason=${result.reason}`;
+    // GAP-1454: the self-test repeats every interval; print only a change.
+    if (line !== lastSelfTestLine) {
+      lastSelfTestLine = line;
+      if (result.ok) logInfo(line);
+      else console.warn(line);
+    }
     await publishSelfTest(result);
     return result;
   }
@@ -2032,7 +2096,7 @@ export function createFetchInterceptor(
     }
     _shared.installed = false;
     _shared.guardrailPort = null;
-    console.log("[defenseclaw] LLM fetch interceptor stopped");
+    logInfo("[defenseclaw] LLM fetch interceptor stopped");
   }
 
   return { start, stop, describeLayers, verifyInterception, runSelfTest };

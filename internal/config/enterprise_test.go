@@ -11,6 +11,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -207,6 +208,42 @@ enterprise:
 			if err := validate(name+".yaml", doc); err == nil {
 				t.Errorf("v8 schema accepted %s", name)
 			}
+		}
+	})
+
+	t.Run("copilot harness knobs", func(t *testing.T) {
+		const head = "config_version: 8\nenterprise:\n  machine_policy:\n"
+		for name, doc := range map[string]string{
+			"both":     head + "    connectors:\n      copilot:\n        harness_preference: unmanaged\n        local_harness: retire\n        ownership: merge\n",
+			"defaults": head + "    connectors:\n      copilot:\n        harness_preference: sdk\n        local_harness: govern\n",
+		} {
+			document, err := ParseV8YAML(name+".yaml", []byte(doc))
+			if err == nil {
+				err = validateV8Schema(name+".yaml", document)
+			}
+			if err != nil {
+				t.Fatalf("v8 schema rejected %s: %v", name, err)
+			}
+		}
+		for name, doc := range map[string]string{
+			"bad value":         head + "    connectors:\n      copilot:\n        local_harness: remove\n",
+			"another connector": head + "    connectors:\n      cursor:\n        harness_preference: sdk\n",
+			"the default block": head + "    default:\n      local_harness: govern\n",
+		} {
+			document, err := ParseV8YAML(name+".yaml", []byte(doc))
+			if err == nil {
+				err = validateV8Schema(name+".yaml", document)
+			}
+			if err == nil {
+				t.Errorf("v8 schema accepted %s", name)
+			}
+		}
+		if err := validateConnectorPolicy("enterprise.machine_policy.connectors.cursor", EnterpriseConnectorPolicy{LocalHarness: "govern"}); err == nil {
+			t.Error("validation accepted local_harness outside connectors.copilot")
+		}
+		m := EnterpriseMachinePolicyConfig{Connectors: map[string]EnterpriseConnectorPolicy{"copilot": {HarnessPreference: "Unmanaged"}}}
+		if m.CopilotHarnessPreference() != CopilotHarnessPreferenceUnmanaged || m.CopilotLocalHarness() != CopilotLocalHarnessGovern {
+			t.Errorf("effective knobs = %q, %q", m.CopilotHarnessPreference(), m.CopilotLocalHarness())
 		}
 	})
 }
@@ -496,6 +533,43 @@ func TestClaudeVersionFloorDefaultsToEnforce(t *testing.T) {
 	}
 }
 
+// enterprise.machine_policy.windows_wsl: defaults, the schema, the loader and
+// the standalone-only rule.
+func TestWindowsWSLPolicyValidation(t *testing.T) {
+	if got := (EnterpriseMachinePolicyConfig{}).WSL(); got != (EnterpriseWindowsWSLPolicy{AgentSessions: "block", Platform: "leave", EditorSettings: "repair", ClaudeDesktopKey: "merge"}) {
+		t.Fatalf("defaults: %+v", got)
+	}
+	const head = "config_version: 8\nenterprise:\n  machine_policy:\n    windows_wsl:\n"
+	for doc, ok := range map[string]bool{
+		head + "      agent_sessions: allow\n      platform: disable\n      editor_settings: report\n      claude_desktop_key: create\n": true,
+		head + "      platform: off\n":    false,
+		head + "      codex_app: block\n": false,
+	} {
+		document, err := ParseV8YAML("wsl.yaml", []byte(doc))
+		if err == nil {
+			err = validateV8Schema("wsl.yaml", document)
+		}
+		if (err == nil) != ok {
+			t.Errorf("schema on %q: %v", doc, err)
+		}
+	}
+	managedConfig := func(w EnterpriseWindowsWSLPolicy, profile string) Config {
+		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: profile, MachinePolicy: EnterpriseMachinePolicyConfig{WindowsWSL: w}}}
+	}
+	good := managedConfig(EnterpriseWindowsWSLPolicy{Platform: "disable"}, "standalone")
+	if err := resolveEnterpriseConfig(&good, "windows", ""); err != nil {
+		t.Fatalf("valid windows_wsl rejected: %v", err)
+	}
+	bad := managedConfig(EnterpriseWindowsWSLPolicy{EditorSettings: "delete"}, "standalone")
+	if err := resolveEnterpriseConfig(&bad, "windows", ""); err == nil || !strings.Contains(err.Error(), "enterprise.machine_policy.windows_wsl.editor_settings") {
+		t.Fatalf("a bad knob must be rejected by name, got %v", err)
+	}
+	secureClient := managedConfig(EnterpriseWindowsWSLPolicy{AgentSessions: "allow"}, "secure_client")
+	if err := resolveEnterpriseConfig(&secureClient, "windows", ""); err == nil || !strings.Contains(err.Error(), "apply only to the standalone profile") {
+		t.Fatalf("secure_client accepted windows_wsl: %v", err)
+	}
+}
+
 func TestClaudeVersionFloorValidation(t *testing.T) {
 	managedConfig := func(m EnterpriseMachinePolicyConfig) Config {
 		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: m}}
@@ -531,5 +605,90 @@ func TestClaudeVersionFloorValidation(t *testing.T) {
 	unmanaged := Config{Enterprise: EnterpriseConfig{MachinePolicy: claudeFloorPolicy("off")}}
 	if err := resolveEnterpriseConfig(&unmanaged, "linux", ""); err == nil || !strings.Contains(err.Error(), "requires deployment_mode") {
 		t.Fatalf("an unmanaged config accepted version_floor: %v", err)
+	}
+}
+
+// unverified_versions defaults to report, a per-connector override wins,
+// both are validated, and Secure Client refuses the knob.
+func TestEnterpriseUnverifiedVersions(t *testing.T) {
+	en := EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse", UnverifiedVersionsByConnector: map[string]string{"devin": "report"}}
+	if got := (EnterpriseEnrollmentConfig{}).UnverifiedVersionsFor("codex"); got != EnterpriseUnverifiedReport {
+		t.Fatalf("default = %q, want report", got)
+	}
+	if en.UnverifiedVersionsFor("codex") != EnterpriseUnverifiedRefuse || en.UnverifiedVersionsFor("Devin") != EnterpriseUnverifiedReport {
+		t.Fatalf("override not applied: %+v", en)
+	}
+	for _, tc := range []struct {
+		en      EnterpriseEnrollmentConfig
+		profile string
+		ok      bool
+	}{
+		{en, "", true},
+		{EnterpriseEnrollmentConfig{UnverifiedVersions: "block"}, "", false},
+		{EnterpriseEnrollmentConfig{UnverifiedVersionsByConnector: map[string]string{"codex": "allow"}}, "", false},
+		{EnterpriseEnrollmentConfig{UnverifiedVersions: "report"}, "secure_client", false},
+	} {
+		goos := "linux"
+		if tc.profile == "secure_client" {
+			goos = "windows"
+		}
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: tc.profile, Enrollment: tc.en}}
+		if err := resolveEnterpriseConfig(&cfg, goos, ""); (err == nil) != tc.ok {
+			t.Fatalf("%+v (%q): err = %v, want ok=%v", tc.en, tc.profile, err, tc.ok)
+		}
+	}
+	for doc, ok := range map[string]bool{
+		"    unverified_versions: refuse\n    unverified_versions_by_connector:\n      codex: report\n": true,
+		"    unverified_versions: block\n": false,
+	} {
+		document, err := ParseV8YAML("unverified.yaml", []byte("config_version: 8\nenterprise:\n  enrollment:\n"+doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateV8Schema("unverified.yaml", document); (err == nil) != ok {
+			t.Fatalf("schema on %q: err = %v, want ok=%v", doc, err, ok)
+		}
+	}
+}
+
+// The Windows managed-hook lifecycle snapshot reads only listener settings
+// from the protected config, also while a rollback restores the previous
+// deployment under a new config whose rule pack the gateway service cannot
+// read. Refusing that config there failed the rollback and left every
+// service stopped (GAP-1291). Root-only: managed config trust needs a
+// root-owned path.
+func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		t.Skip("needs root on Linux: a managed config must sit on a root-owned path")
+	}
+	root, err := os.MkdirTemp("/var/lib", "dc-config-recovery-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pack := filepath.Join(root, "pack")
+	if err := os.Mkdir(pack, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(pack, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.yaml")
+	body := fmt.Sprintf("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFromFile(path); err == nil || !strings.Contains(err.Error(), "rule_pack_dir") {
+		t.Fatalf("strict load of a user-owned rule pack: err = %v, want the policy-input refusal", err)
+	}
+	cfg, err := LoadManagedFileForLifecycleRecovery(path)
+	if err != nil {
+		t.Fatalf("lifecycle recovery load: %v", err)
+	}
+	if cfg.Gateway.APIPort == 0 {
+		t.Fatal("lifecycle recovery load has no gateway API port")
 	}
 }

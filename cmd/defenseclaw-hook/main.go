@@ -43,7 +43,14 @@ func main() {
 	// Identity inspection must not depend on mutable per-user hook state. Setup
 	// invokes this exact mode before signing and after installation so archived
 	// hook bytes are bound to the payload manifest's source commit.
+	// A person checking the hook binary types --version (GAP-1415).
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		useParentConsoleForStdout()
+		fmt.Printf("defenseclaw-hook version %s (commit=%s, built=%s)\n", version, commit, date)
+		return
+	}
 	if isIdentityEntrypoint(os.Args[1:]) {
+		useParentConsoleForStdout()
 		if err := writeMachineIdentity(os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "defenseclaw-hook: write identity: %v\n", err)
 			os.Exit(1)

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -336,6 +337,20 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 			_, err := LoadRulePack(dir)
 			requireRulePackError(t, err, test.code)
 		})
+	}
+}
+
+func TestLoadRulePackInvalidRegexNamesRuleAndReason(t *testing.T) {
+	// GAP-1225: name the rule by id and give the RE2 reason, but never echo the pattern.
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '(unclosed['", 1))
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "regex")
+	if !strings.Contains(packErr.Reason, "rule R-1 (entry 1) pattern") || !strings.Contains(packErr.Reason, "missing closing ]") {
+		t.Fatalf("reason = %q, want the rule id and the RE2 reason", packErr.Reason)
+	}
+	if strings.Contains(packErr.Reason, "unclosed") {
+		t.Fatalf("reason echoes the pattern: %q", packErr.Reason)
 	}
 }
 
@@ -879,5 +894,31 @@ func TestLoadRulePackExplainsTheSemanticCostLimits(t *testing.T) {
 	packErr = requireRulePackError(t, err, "semantic_catalog_cost_limit")
 	if !strings.Contains(packErr.Reason, fmt.Sprintf("%d", semantic.MaxEnabledCatalogStaticCost)) {
 		t.Errorf("catalog reason = %q, want the limit", packErr.Reason)
+	}
+}
+
+func TestRulePackDirectoryUnreadableNamesTheReason(t *testing.T) {
+	denied := rulePackDirectoryUnreadable(&fs.PathError{Op: "lstat", Path: `C:\packs`, Err: fs.ErrPermission})
+	if denied.Code != "directory_unreadable" || !strings.Contains(denied.Reason, "access denied") ||
+		!strings.Contains(denied.Reason, "parent folders") || strings.Contains(denied.Reason, `C:\packs`) {
+		t.Fatalf("permission error = %+v", denied)
+	}
+	if other := rulePackDirectoryUnreadable(errors.New("boom")); other.Reason != "rule-pack directory cannot be inspected" {
+		t.Fatalf("unknown error = %+v", other)
+	}
+}
+
+// GAP-1898: a refused expression names the rule by id and entry and says
+// what is wrong, without echoing the expression.
+func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(validRulesYAML("custom", "R4-MARKER-BLOCK"), "    title:",
+		"    tool_call_only: true\n    expression: 'f.commands.exists(c, dccert-block-marker in c.argv)'\n    title:", 1)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	_, err := LoadRulePack(dir)
+	packErr := requireRulePackError(t, err, "semantic_type")
+	if !strings.HasPrefix(packErr.Reason, "rule R4-MARKER-BLOCK (entry 1) expression is invalid: it does not type-check") ||
+		!strings.Contains(packErr.Reason, "quote string literals") || strings.Contains(packErr.Reason, "dccert") {
+		t.Fatalf("reason = %q", packErr.Reason)
 	}
 }

@@ -208,6 +208,18 @@ ACTION_INSPECT_TOOL_CONFIRM: Final[str] = "inspect-tool-confirm"
 ACTION_INSPECT_TOOL_BLOCK: Final[str] = "inspect-tool-block"
 ACTION_INSPECT_TOOL_ALERT: Final[str] = "inspect-tool-alert"
 ACTION_INSPECT_TOOL_ALLOW: Final[str] = "inspect-tool-allow"
+ACTION_INSPECT_REQUEST_CONFIRM: Final[str] = "inspect-request-confirm"
+ACTION_INSPECT_REQUEST_BLOCK: Final[str] = "inspect-request-block"
+ACTION_INSPECT_REQUEST_ALERT: Final[str] = "inspect-request-alert"
+ACTION_INSPECT_REQUEST_ALLOW: Final[str] = "inspect-request-allow"
+ACTION_INSPECT_RESPONSE_CONFIRM: Final[str] = "inspect-response-confirm"
+ACTION_INSPECT_RESPONSE_BLOCK: Final[str] = "inspect-response-block"
+ACTION_INSPECT_RESPONSE_ALERT: Final[str] = "inspect-response-alert"
+ACTION_INSPECT_RESPONSE_ALLOW: Final[str] = "inspect-response-allow"
+ACTION_INSPECT_TOOL_RESPONSE_CONFIRM: Final[str] = "inspect-tool-response-confirm"
+ACTION_INSPECT_TOOL_RESPONSE_BLOCK: Final[str] = "inspect-tool-response-block"
+ACTION_INSPECT_TOOL_RESPONSE_ALERT: Final[str] = "inspect-tool-response-alert"
+ACTION_INSPECT_TOOL_RESPONSE_ALLOW: Final[str] = "inspect-tool-response-allow"
 ACTION_INSPECT_REVEAL: Final[str] = "inspect-reveal"
 
 # Setup, operator, API, and sink instrumentation.
@@ -252,6 +264,10 @@ ACTION_POLICY_DELETE: Final[str] = "policy-delete"
 ACTION_REGISTRY_ADD: Final[str] = "registry-add"
 ACTION_REGISTRY_EDIT: Final[str] = "registry-edit"
 ACTION_REGISTRY_REMOVE: Final[str] = "registry-remove"
+ACTION_REGISTRY_SYNC: Final[str] = "registry-sync"
+ACTION_REGISTRY_REQUIRE: Final[str] = "registry-require"
+ACTION_REGISTRY_APPROVE: Final[str] = "registry-approve"
+ACTION_REGISTRY_REJECT: Final[str] = "registry-reject"
 ACTION_SCAN_ENFORCED: Final[str] = "scan-enforced"
 ACTION_SCAN_FINDING: Final[str] = "scan-finding"
 ACTION_DISMISS_ALERT: Final[str] = "dismiss-alert"
@@ -270,6 +286,7 @@ ACTION_PLUGIN_DISABLE: Final[str] = "plugin-disable"
 ACTION_PLUGIN_ENABLE: Final[str] = "plugin-enable"
 ACTION_PLUGIN_QUARANTINE: Final[str] = "plugin-quarantine"
 ACTION_PLUGIN_RESTORE: Final[str] = "plugin-restore"
+ACTION_PLUGIN_UNBLOCK: Final[str] = "plugin-unblock"
 ACTION_BLOCK_MCP: Final[str] = "block-mcp"
 ACTION_ALLOW_MCP: Final[str] = "allow-mcp"
 ACTION_MCP_UNBLOCK: Final[str] = "mcp-unblock"
@@ -409,6 +426,18 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_INSPECT_TOOL_BLOCK,
     ACTION_INSPECT_TOOL_ALERT,
     ACTION_INSPECT_TOOL_ALLOW,
+    ACTION_INSPECT_REQUEST_CONFIRM,
+    ACTION_INSPECT_REQUEST_BLOCK,
+    ACTION_INSPECT_REQUEST_ALERT,
+    ACTION_INSPECT_REQUEST_ALLOW,
+    ACTION_INSPECT_RESPONSE_CONFIRM,
+    ACTION_INSPECT_RESPONSE_BLOCK,
+    ACTION_INSPECT_RESPONSE_ALERT,
+    ACTION_INSPECT_RESPONSE_ALLOW,
+    ACTION_INSPECT_TOOL_RESPONSE_CONFIRM,
+    ACTION_INSPECT_TOOL_RESPONSE_BLOCK,
+    ACTION_INSPECT_TOOL_RESPONSE_ALERT,
+    ACTION_INSPECT_TOOL_RESPONSE_ALLOW,
     ACTION_INSPECT_REVEAL,
     ACTION_API_AUTH_FAILURE,
     ACTION_API_CONFIG_PATCH,
@@ -451,6 +480,10 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_REGISTRY_ADD,
     ACTION_REGISTRY_EDIT,
     ACTION_REGISTRY_REMOVE,
+    ACTION_REGISTRY_SYNC,
+    ACTION_REGISTRY_REQUIRE,
+    ACTION_REGISTRY_APPROVE,
+    ACTION_REGISTRY_REJECT,
     ACTION_SCAN_ENFORCED,
     ACTION_SCAN_FINDING,
     ACTION_DISMISS_ALERT,
@@ -469,6 +502,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_PLUGIN_ENABLE,
     ACTION_PLUGIN_QUARANTINE,
     ACTION_PLUGIN_RESTORE,
+    ACTION_PLUGIN_UNBLOCK,
     ACTION_BLOCK_MCP,
     ACTION_ALLOW_MCP,
     ACTION_MCP_UNBLOCK,

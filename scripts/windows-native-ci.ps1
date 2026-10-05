@@ -1613,6 +1613,7 @@ function Stage-PackageData(
     }
     Copy-Item -LiteralPath (Join-Path $WorkspaceRoot 'policies\guardrail\tool-chains.json') -Destination (Join-Path $data 'policies\guardrail') -Force
     Copy-Tree (Join-Path $WorkspaceRoot 'policies\guardrail-use-cases') (Join-Path $data 'policies\guardrail-use-cases')
+    Copy-Tree (Join-Path $WorkspaceRoot 'policies\yara\mcp-tools') (Join-Path $data 'policies\yara\mcp-tools')
     [IO.Directory]::CreateDirectory((Join-Path $data 'envvars')) | Out-Null
     $generatedRegistry = Join-Path $WorkspaceRoot 'cli\defenseclaw\_data\envvars\registry.json'
     $targetRegistry = Join-Path $data 'envvars\registry.json'
@@ -1855,6 +1856,7 @@ function Invoke-BuildArtifacts {
             'defenseclaw/_data/policies/guardrail-use-cases/kubernetes-production-protection/rules/kubernetes-production.yaml',
             'defenseclaw/_data/policies/guardrail-use-cases/privacy-high-assurance/rules/enterprise-data.yaml',
             'defenseclaw/_data/policies/guardrail-use-cases/ssh-authorized-keys-protection/README.md',
+            'defenseclaw/_data/policies/yara/mcp-tools/description_injection.yara',
             'defenseclaw/_data/config/v8/defenseclaw-config.schema.json',
             'defenseclaw/_data/config/v8/observability.yaml',
             'defenseclaw/_data/config/v8/observability.md',
@@ -4248,7 +4250,7 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
     $definitions = [ordered]@{
         codex = @{
             HookScript = 'codex-hook.sh'
-            ConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
+            ConfigPath = Join-Path $UserProfile '.codex\config.toml'
             DoctorLabel = 'Codex hooks'
             DoctorRuntimePattern = 'healthy Windows-native executable registration'
         }
@@ -6764,7 +6766,7 @@ function Assert-WindowsReleaseDoctorRows(
         },
         [pscustomobject]@{
             Label = 'OpenCode hooks'
-            Detail = 'managed plugin digest current'
+            Detail = 'digest current'
             Target = ''
         }
     )) {
@@ -7575,15 +7577,21 @@ function Get-PackagedRotationConnectorPosture([object]$Status) {
 
 function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
     foreach ($row in $Posture) {
+        # status is passive (GAP-1466): it does not start the Codex app-server
+        # to check the effective hook policy, so Codex reports exactly
+        # policy-unverified (and so not current) and nothing else.
+        $drift = @($row.fail_drift | ForEach-Object { [string]$_ })
+        $passiveCodex = [string]$row.name -ceq 'codex' -and
+            $drift.Count -eq 1 -and $drift[0] -ceq 'policy-unverified'
         if ([string]$row.mode -cne 'action' -or -not [bool]$row.enabled -or
             [string]$row.source -cne 'manual' -or
             [string]$row.fail_effective -cne 'closed' -or
             [string]$row.fail_configured -cne 'closed' -or
             [string]$row.fail_desired -cne 'closed' -or
             [string]$row.fail_runtime -cne 'closed' -or
-            -not [bool]$row.fail_current -or
-            @($row.fail_drift).Count -ne 0) {
-            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift"
+            (-not $passiveCodex -and (-not [bool]$row.fail_current -or $drift.Count -ne 0))) {
+            $postureDetail = ([pscustomobject]$row) | ConvertTo-Json -Compress -Depth 4
+            throw "packaged token rotation connector '$([string]$row.name)' is not exact action/closed without drift: $postureDetail"
         }
     }
 }

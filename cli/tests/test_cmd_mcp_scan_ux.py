@@ -100,7 +100,7 @@ class TestSingleTargetUX(_MCPScanUXBase):
         result = self.invoke(["scan", "http://localhost:3000"])
         self.assertEqual(result.exit_code, 0, result.output)
         # Singular label.
-        self.assertIn("Scanning 1 MCP server on ", result.output)
+        self.assertIn("Scanning 1 MCP server at a direct URL", result.output)
         # Default MCP categories from _scan_ui._DEFAULT_CATEGORIES.
         self.assertIn("untrusted command paths", result.output)
         self.assertIn("outbound URL allow-listing", result.output)

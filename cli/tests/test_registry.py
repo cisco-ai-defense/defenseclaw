@@ -65,7 +65,7 @@ class TestDetectSource:
         assert detect_source("my-plugin") == SourceType.NPM
 
     def test_npm_scoped(self):
-        assert detect_source("@openclasw/voice-call") == SourceType.NPM
+        assert detect_source("@openclaw/voice-call") == SourceType.NPM
 
     def test_clawhub(self):
         assert detect_source("clawhub://voice-call") == SourceType.CLAWHUB
@@ -188,10 +188,10 @@ class TestFetchNpmPackage:
 
         dest = str(tmp_path / "work")
         os.makedirs(dest)
-        fetch_npm_package("@openclasw/voice-call", dest, resolver=_public_resolver)
+        fetch_npm_package("@openclaw/voice-call", dest, resolver=_public_resolver)
 
         first_url = mock_requests.get.call_args_list[0][0][0]
-        assert "%40openclasw%2Fvoice-call" in first_url
+        assert "%40openclaw%2Fvoice-call" in first_url
 
     @patch("defenseclaw.registry.requests")
     def test_registry_404(self, mock_requests, tmp_path):

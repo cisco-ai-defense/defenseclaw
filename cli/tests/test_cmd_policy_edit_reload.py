@@ -98,7 +98,7 @@ def test_stopped_gateway_is_fine(app) -> None:
     # The autouse conftest stub makes reload_policy raise ConnectionError.
     result = _invoke(app, EDITS[0])
     assert result.exit_code == 0, result.output
-    assert "saved; the gateway isn't running, it loads this policy when it starts" in result.output
+    assert "The gateway isn't running; it loads this policy when it starts" in result.output
 
 
 def test_rejected_reload_exits_1(app, monkeypatch) -> None:
@@ -114,6 +114,29 @@ def test_rejected_reload_exits_1(app, monkeypatch) -> None:
     assert "defenseclaw policy validate" in result.output and "compilation failed" in result.output
 
 
+def test_skill_action_change_restarts_a_running_gateway(app, monkeypatch) -> None:
+    # GAP-1236: the gateway's config watcher refuses a skill_actions change
+    # ("requires gateway restart"), so a hot policy reload alone would claim
+    # an enforcement it does not have.
+    from defenseclaw.commands import cmd_policy, cmd_setup
+
+    restarts: list[str] = []
+
+    def _no_reload(self):
+        raise AssertionError("a restart replaces the hot reload")
+
+    monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _no_reload)
+    monkeypatch.setattr(cmd_policy, "_gateway_pid_alive", lambda _app: True)
+    monkeypatch.setattr(
+        cmd_setup, "_restart_defense_gateway", lambda data_dir, **_kw: restarts.append(data_dir) or True
+    )
+    result = _invoke(app, ["activate", "strict"])
+    assert result.exit_code == 0, result.output
+    assert restarts == [app.cfg.data_dir]
+    assert "Restarted the gateway; it is enforcing the policy now." in result.output
+    assert "Gateway reloaded the policy" not in result.output
+
+
 def test_no_change_does_not_reload(app, monkeypatch) -> None:
     def _boom(self):
         raise AssertionError("must not contact the gateway")
@@ -121,3 +144,23 @@ def test_no_change_does_not_reload(app, monkeypatch) -> None:
     monkeypatch.setattr(gateway.OrchestratorClient, "reload_policy", _boom)
     result = _invoke(app, ["edit", "guardrail"])
     assert result.exit_code == 0 and "No changes specified" in result.output
+
+
+def test_threshold_edit_points_hook_tool_calls_at_block_at(app, reloads) -> None:
+    result = _invoke(app, EDITS[0])
+    assert result.exit_code == 0, result.output
+    assert "guardrail proxy" in result.output
+    assert "defenseclaw guardrail block-at" in result.output
+    patterns = _invoke(app, ["edit", "guardrail", "--add-pattern", "injection", "dc-marker"])
+    assert "guardrail block-at" not in patterns.output
+
+
+def test_an_edit_names_the_policy_it_changed(app, reloads) -> None:
+    # GAP-1667: the result line said only 'Guardrail updated: block_threshold=3'.
+    result = _invoke(app, EDITS[0])
+    assert result.exit_code == 0, result.output
+    assert "Guardrail of policy 'default' (active) updated: block_threshold=HIGH (3), alert_threshold=LOW (1)" in (
+        result.output
+    )
+    draft = _invoke(app, ["edit", "firewall", "--add-domain", "example.org", "-p", "strict"])
+    assert "Firewall of policy 'strict' (draft) updated: +domain example.org" in draft.output

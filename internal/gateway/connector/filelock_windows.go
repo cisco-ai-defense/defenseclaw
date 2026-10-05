@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -33,7 +34,64 @@ import (
 var (
 	windowsManagedFileLockTimeout = 2 * time.Second
 	windowsManagedFileLockRetry   = 25 * time.Millisecond
+
+	// fileLockSentinels names the lock files this process opened, for
+	// RemoveIdleFileLockSentinels.
+	fileLockSentinelsMu sync.Mutex
+	fileLockSentinels   = map[string]struct{}{}
 )
+
+// RemoveIdleFileLockSentinels removes the empty lock files this process
+// locked (an agent config's settings.json.lock, say) that no process holds
+// open now. Windows locks never delete their file, so `connector teardown`
+// calls this last: the agent config it restored keeps no DefenseClaw lock
+// file beside it. A lock file another process has open stays; a later lock
+// creates it again.
+func RemoveIdleFileLockSentinels() {
+	fileLockSentinelsMu.Lock()
+	paths := make([]string, 0, len(fileLockSentinels))
+	for path := range fileLockSentinels {
+		paths = append(paths, path)
+	}
+	fileLockSentinels = map[string]struct{}{}
+	fileLockSentinelsMu.Unlock()
+	for _, path := range paths {
+		removeIdleWindowsLockSentinel(path)
+	}
+}
+
+// removeIdleWindowsLockSentinel deletes path when it is an empty regular
+// file with one link that it can open without sharing: no other handle, so no
+// lock holder, is open on it.
+func removeIdleWindowsLockSentinel(path string) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windows.DELETE|windows.FILE_READ_ATTRIBUTES,
+		0,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		info.NumberOfLinks != 1 || info.FileSizeHigh != 0 || info.FileSizeLow != 0 {
+		return
+	}
+	deleteFile := byte(1) // FILE_DISPOSITION_INFO.DeleteFile
+	_ = windows.SetFileInformationByHandle(handle, windows.FileDispositionInfo, &deleteFile, 1)
+}
 
 // withFileLock acquires an exclusive, blocking lock on path+".lock" before
 // running fn, and releases it when fn returns.
@@ -74,6 +132,11 @@ func withFileLockMode(path string, managedEnterprise bool, fn func() error) erro
 		return fmt.Errorf("open lock file %s: %w", lockPath, err)
 	}
 	defer lockFile.Close()
+	if !managedEnterprise {
+		fileLockSentinelsMu.Lock()
+		fileLockSentinels[lockPath] = struct{}{}
+		fileLockSentinelsMu.Unlock()
+	}
 	if lockParent != nil {
 		// The parent handle excludes delete sharing, so the target-controlled
 		// directory cannot be renamed away and replaced while the callback uses

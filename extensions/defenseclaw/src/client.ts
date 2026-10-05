@@ -66,7 +66,8 @@ interface ApiResponse<T> {
 
 export class DaemonClient {
   private readonly baseUrl: string;
-  private readonly token: string;
+  /** Explicit token; without one, each request reads the current sidecar token. */
+  private readonly tokenOverride?: string;
   private readonly timeoutMs: number;
   private readonly requestImpl: RequestImpl;
   private readonly getCorrelation: () => CorrelationContext | Promise<CorrelationContext>;
@@ -82,7 +83,7 @@ export class DaemonClient {
   constructor(opts?: DaemonClientOptions) {
     const cfg = loadSidecarConfig();
     this.baseUrl = opts?.baseUrl ?? cfg.baseUrl;
-    this.token = opts?.token ?? cfg.token;
+    this.tokenOverride = opts?.token;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.requestImpl = opts?.requestImpl ?? httpRequest;
     this.getCorrelation = opts?.getCorrelation ?? defaultCorrelation;
@@ -90,6 +91,15 @@ export class DaemonClient {
     this.identityReady = opts?.identityReady ?? Promise.resolve();
     this.logOutboundRequest = opts?.logOutboundRequest;
     this.onCorrelationContext = opts?.onCorrelationContext;
+  }
+
+  /**
+   * The sidecar token, read per request so a token that `setup openclaw`
+   * rewrites in ~/.defenseclaw/.env is picked up without restarting
+   * OpenClaw (GAP-2286).
+   */
+  private get token(): string {
+    return this.tokenOverride ?? loadSidecarConfig().token;
   }
 
   /**

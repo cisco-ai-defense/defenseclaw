@@ -57,8 +57,9 @@ that a numeric value is a trusted POSIX uid when `id_kind` is absent.
 
 ## Optional connector email
 
-Email collection is disabled by default. Enable it only after reviewing the
-privacy and destination impact:
+Email collection is disabled by default, and there is no CLI or TUI switch for
+it. Enable it only after reviewing the privacy and destination impact, by
+adding this to `~/.defenseclaw/config.yaml`:
 
 ```yaml
 config_version: 8
@@ -66,13 +67,25 @@ ai_discovery:
   include_user_email: true
 ```
 
+Then check the file:
+
+```bash
+defenseclaw config validate
+```
+
+A running gateway applies the change on its next configuration reload, with no
+restart in the default `hot` reload mode. On a managed enterprise deployment
+the administrator edits the
+[machine configuration](/docs/enterprise/configuration#where-the-config-lives)
+instead.
+
 DefenseClaw reads only explicit connector-account evidence:
 
-| Connector | Source | Emitted on |
-| --- | --- | --- |
-| Claude Code | `oauthAccount.emailAddress` in the profile's `.claude.json` | Per-profile `ai.discovery` inventory |
-| Codex | `email` claim in the profile's `.codex/auth.json` ID token | Per-profile `ai.discovery` inventory |
-| Cursor | `user_email` supplied by Cursor's hook payload | Hook activity |
+| Connector | Where the email comes from |
+| --- | --- |
+| Claude Code | `oauthAccount.emailAddress` in the profile's `.claude.json`, sent on per-profile `ai.discovery` inventory |
+| Codex | The `email` claim of the ID token in the profile's `.codex/auth.json`, sent on per-profile `ai.discovery` inventory |
+| Cursor | `user_email` in Cursor's hook payload, sent on hook activity |
 
 The Codex token claim is treated as inventory evidence, not as an authenticated
 assertion. DefenseClaw does not synthesize addresses from usernames, Git
@@ -92,5 +105,5 @@ with the same trusted `user.id` to obtain the connector email. The address is
 reported once per discovery cycle rather than copied onto every hook event.
 
 See [AI Discovery](/docs/ai-discovery) for profile inventory and runtime-plane
-coverage, and [Redaction](/docs/reference/redaction) for the identifier
+coverage, and [Redaction](/docs/observability/redaction) for the identifier
 preservation boundary.

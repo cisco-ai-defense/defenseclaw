@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -65,6 +66,23 @@ type Client struct {
 
 	// OnEvent is called for every non-connect event frame.
 	OnEvent func(EventFrame)
+
+	// refreshedToken is the gateway token tryAuthRepair adopted from
+	// openclaw.json after boot. The API server accepts it next to its
+	// boot token until the next restart (GAP-2259).
+	refreshedToken atomic.Pointer[string]
+}
+
+// RefreshedToken returns the gateway token adopted at runtime by auth
+// repair, or "" when none was adopted since boot.
+func (c *Client) RefreshedToken() string {
+	if c == nil {
+		return ""
+	}
+	if p := c.refreshedToken.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 const (
@@ -595,6 +613,7 @@ func (c *Client) tryAuthRepair(connectErr error) {
 	if newToken, ok := readOpenClawGatewayToken(home); ok && newToken != c.cfg.Token {
 		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
 		c.cfg.Token = newToken
+		c.refreshedToken.Store(&newToken)
 
 		// Persist the refreshed token to disk so hook scripts and
 		// operator shells see the same value. Without this, the in-

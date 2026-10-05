@@ -49,43 +49,36 @@ expose a separate policy endpoint.
 
 <Flow
   direction="TB"
-  caption="The connector contract establishes trust. CEL never trusts a payload to declare itself structured, and every candidate crosses a final same-rule proof gate before it can affect an action."
+  caption="How a CEL rule turns a tool call into an action. Static tool block and allow lists are checked before this. If a CEL expression errors or runs out of budget, that rule falls back to its regex pattern."
 >
-  <Node id="hook" kind="connector">Authenticated tool-action route</Node>
-  <Node id="contract" kind="gateway">Server-resolved action contract</Node>
-  <Node id="analyze" kind="gateway">Analyze tool arguments</Node>
-  <Node id="facts" kind="policy">Bounded ActionFacts</Node>
-  <Node id="cel" kind="policy">CEL Boolean owner</Node>
-  <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
-  <Node id="finding" kind="decision">Finding metadata</Node>
-  <Node id="proof" kind="decision">Complete same-rule proof?</Node>
-  <Node id="visible" kind="decision">Visible detection-only finding</Node>
-  <Node id="action" kind="decision">allow / alert / confirm / block</Node>
-  <Node id="reply" kind="connector">Caller or connector response</Node>
-  <Edge from="hook" to="contract" />
-  <Edge from="contract" to="analyze" />
-  <Edge from="analyze" to="facts" label="authoritative" />
-  <Edge from="analyze" to="fallback" label="unsupported or ambiguous" variant="dashed" />
-  <Edge from="facts" to="cel" />
-  <Edge from="cel" to="fallback" label="evaluation error" variant="dashed" />
+  <Node id="call" kind="connector">{`Tool call arrives\nfrom a connector hook or inspect call`}</Node>
+  <Node id="parse" kind="gateway">{`Gateway parses the arguments\ncommands, paths, network, data flow`}</Node>
+  <Node id="cel" kind="policy">{`CEL expression\nmatches the parsed facts`}</Node>
+  <Node id="regex" kind="policy">{`Rule's regex pattern\nmatches the raw text`}</Node>
+  <Node id="finding" kind="decision">{`Finding\ntitle and severity from the YAML`}</Node>
+  <Node id="proof" kind="decision">{`Fully proven for this rule?\nand the connector can block`}</Node>
+  <Node id="action" kind="decision">{`Severity picks the action\nallow · alert · confirm · block`}</Node>
+  <Node id="logged" kind="decision">{`Detection only\nrecorded, action unchanged`}</Node>
+  <Edge from="call" to="parse" label="sends" />
+  <Edge from="parse" to="cel" label="fully parsed" />
+  <Edge from="parse" to="regex" label="not fully parsed" variant="dashed" />
   <Edge from="cel" to="finding" label="true" />
-  <Edge from="fallback" to="finding" label="pattern matched" />
-  <Edge from="finding" to="proof" />
-  <Edge from="proof" to="action" label="complete exact proof" />
-  <Edge from="proof" to="visible" label="raw, partial, or unpinned" />
-  <Edge from="visible" to="action" label="no block authority" />
-  <Edge from="action" to="reply" />
+  <Edge from="regex" to="finding" label="matches" />
+  <Edge from="finding" to="proof" label="checked" />
+  <Edge from="proof" to="action" label="yes" />
+  <Edge from="proof" to="logged" label="no" />
 </Flow>
 
-The authenticated route and its server-resolved action contract establish the
-tool-call boundary. This includes trusted single-call inspection and supported
-native pre-tool hooks; only the latter can participate in durable ordered
-state. DefenseClaw normalizes the action into private `ActionFacts` and exposes
-one typed variable, `f`, to CEL. A semantic rule owner takes exactly one route:
-authoritative facts plus CEL, or that same owner's compatible regex fallback.
-A fallback pattern preserves visibility but does not itself mint trusted-action
-authority. Enforcement requires a complete code-owned proof pinned to the same
-rule ID at the final gate.
+The connector's authenticated hook route, or a trusted inspect call, decides
+that a request is a tool call; a payload cannot mark itself as structured.
+DefenseClaw parses the arguments into private `ActionFacts` and exposes them to
+CEL as one typed variable, `f`. Each rule takes exactly one route: its CEL
+expression when the arguments are fully parsed, or its own regex `pattern` when
+they are not. Both routes produce the finding defined in the YAML. A finding
+changes the action only when DefenseClaw's own code holds complete proof for
+that same rule ID and the connector can block; a regex match on its own is
+recorded as detection-only. Only native pre-tool hooks can advance durable
+ordered state.
 
 ## Start with a complete rule
 
@@ -124,19 +117,20 @@ rule to command, path, network, and data-flow cases.
 
 ## Validate and activate
 
-Compile the candidate with the same Go loader used by the gateway, then restart
-with the exact directory. Rule-pack files are not live-watched.
+Compile the candidate with the same Go loader used by the gateway, then switch
+to it. `use-pack` validates the pack again and restarts a running gateway so it
+loads the pack; rule-pack files are not watched for changes.
 
 ```bash
 defenseclaw guardrail validate-pack \
   ~/.defenseclaw/policies/guardrail/my-org
 
-defenseclaw setup guardrail \
-  --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
-  --restart
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
 
 defenseclaw doctor
 ```
+
+Add `--connector X` to `use-pack` to switch one connector only.
 
 Exit `0` means the candidate is valid, `1` means it is invalid, and `2` means
 the authoritative validator was unavailable. Validation proves that the pack

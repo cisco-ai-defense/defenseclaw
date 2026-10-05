@@ -14,6 +14,9 @@ package enterpriseunix
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -23,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
@@ -30,11 +34,13 @@ import (
 
 // fakeServices is an in-memory service manager.
 type fakeServices struct {
-	mu        sync.Mutex
-	goos      string
-	version   int
-	active    map[string]bool
-	enabled   map[string]bool
+	mu      sync.Mutex
+	goos    string
+	version int
+	active  map[string]bool
+	enabled map[string]bool
+	// disabled units carry launchd's disabled override; Enable clears it.
+	disabled  map[string]bool
 	calls     []string
 	failStart map[string]error
 	// failed units report systemd's failed state.
@@ -115,10 +121,17 @@ func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	return nil
 }
 
+func (f *fakeServices) Disabled(_ context.Context, u Unit) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.disabled[u.Name]
+}
+
 func (f *fakeServices) Enable(_ context.Context, u Unit) error {
 	f.record("enable " + u.Name)
 	f.mu.Lock()
 	f.enabled[u.Name] = true
+	delete(f.disabled, u.Name)
 	f.mu.Unlock()
 	return nil
 }
@@ -205,6 +218,7 @@ type fakeRunner struct {
 	mu       sync.Mutex
 	versions map[string]string // gateway path -> version
 	calls    []string
+	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
@@ -225,6 +239,8 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"schema_version":1,"name":"defenseclaw-gateway","version":%q}`, version))}, nil
 	}
 	switch name {
+	case "ps":
+		return CommandResult{Stdout: []byte(r.ps)}, nil
 	case "dpkg", "rpm":
 		return CommandResult{ExitCode: 1}, errors.New("not owned")
 	case "restorecon":
@@ -241,6 +257,41 @@ type testHost struct {
 	runner   *fakeRunner
 	healthy  bool
 	owners   map[string][2]int
+}
+
+// publishLedger publishes ledger as the guardian's authorization ledger
+// with a credential attestation of the same reconcile, for the targets.yaml
+// on disk, that reports targets (by default one current row per target the
+// manifest enables), as a guardian reconcile does.
+func (h *testHost) publishLedger(ledger []byte, targets ...enterprisehooks.CredentialAttestationTarget) {
+	h.t.Helper()
+	dir := h.env.P(h.env.Layout.GuardianAuthDir)
+	if err := os.WriteFile(filepath.Join(dir, managed.HookGuardianAuthorizationFile), ledger, 0o640); err != nil {
+		h.t.Fatal(err)
+	}
+	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(h.env.P(h.env.Layout.ManifestPath))
+	if err != nil {
+		manifestSHA256 = strings.Repeat("d", 64)
+	}
+	if len(targets) == 0 {
+		for _, target := range manifest.Targets {
+			if target.IsEnabled() {
+				row := enterprisehooks.CredentialAttestationTarget{Connector: target.Connector, User: target.User, UserHome: target.UserHome, UID: -1, State: enterprisehooks.CredentialTargetCurrent}
+				if target.UID != nil {
+					row.UID = *target.UID
+				}
+				targets = append(targets, row)
+			}
+		}
+	}
+	sum := sha256.Sum256(ledger)
+	data, _ := json.Marshal(enterprisehooks.CredentialAttestation{
+		Version: enterprisehooks.CredentialAttestationVersion, ID: strings.Repeat("e", 32), UpdatedAt: "2026-09-29T00:00:00Z",
+		ManifestSHA256: manifestSHA256, AuthorizationSHA256: hex.EncodeToString(sum[:]), Targets: append([]enterprisehooks.CredentialAttestationTarget{}, targets...),
+	})
+	if err := os.WriteFile(filepath.Join(dir, managed.HookGuardianCredentialAttestationFile), data, 0o600); err != nil {
+		h.t.Fatal(err)
+	}
 }
 
 func newTestHost(t *testing.T, goos string) *testHost {

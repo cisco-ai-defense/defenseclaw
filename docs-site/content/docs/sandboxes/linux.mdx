@@ -18,30 +18,25 @@ lets `defenseclaw sandbox undo` put the folder back.
 
 ## How it fits together
 
-<Flow direction="TB" compact caption="A sandbox on Linux. The workload has no network of its own: hooks reach DefenseClaw's ingress and web traffic leaves through its egress proxy, both at host.openshell.internal. Model calls go straight out through OpenShell, which swaps the credential placeholder for the real key. The main API is never reachable from a sandbox.">
-  <Zone id="host" label="Your machine (your user)" tone="trusted">
-    <Node id="api" kind="gateway">{`DefenseClaw API\n:18970, not exposed`}</Node>
-    <Node id="ingress" kind="gateway">{`Hook ingress\n:18971`}</Node>
-    <Node id="egress" kind="gateway">{`Egress proxy\n:18972`}</Node>
-    <Node id="gw" kind="connector">{`OpenShell gateway\nsystemd user service`}</Node>
-    <Node id="proj" kind="datastore">{`~/code/myapp\nsnapshot for undo`}</Node>
-  </Zone>
+<Flow direction="TB" caption="A sandbox on Linux. The container has no network of its own: OpenShell's supervisor passes hooks and web traffic to DefenseClaw and model calls to the provider. DefenseClaw's main API (port 18970) is never reachable from a sandbox.">
   <Zone id="box" label="Sandbox container (your uid)" tone="untrusted">
-    <Node id="sup" kind="policy">{`OpenShell supervisor\nLandlock · seccomp`}</Node>
-    <Node id="agent" kind="agent">{`Claude Code · Codex\nskip-permissions on`}</Node>
+    <Node id="agent" kind="agent">{`Claude Code or Codex\nskip-permissions on`}</Node>
+    <Node id="proj" kind="datastore">{`Your project folder\nlive at /work/myapp`}</Node>
+    <Node id="sup" kind="policy">{`OpenShell supervisor\nthe only way out`}</Node>
+  </Zone>
+  <Zone id="host" label="Your machine (your user)" tone="trusted">
+    <Node id="dc" kind="gateway">{`DefenseClaw daemon\nchecks hooks, proxies the web`}</Node>
+    <Node id="gw" kind="connector">{`OpenShell gateway\nsystemd user service`}</Node>
   </Zone>
   <Zone id="net" label="Internet" tone="external">
-    <Node id="llm" kind="generic">{`Model provider\napi.anthropic.com`}</Node>
-    <Node id="web" kind="generic">{`Allowed sites\nregistries, docs`}</Node>
+    <Node id="net1" kind="generic">{`The internet\nmodel provider, allowed sites`}</Node>
   </Zone>
-  <Edge from="api" to="gw" label="mTLS" />
-  <Edge from="gw" to="sup" label="creates, sets policy" />
-  <Edge from="proj" to="agent" label="bind mount /work/myapp" variant="bidirectional" />
-  <Edge from="agent" to="sup" label="every connection" />
-  <Edge from="sup" to="ingress" label="hooks" />
-  <Edge from="sup" to="egress" label="web" />
-  <Edge from="egress" to="web" label="allowed" />
-  <Edge from="sup" to="llm" label="real key added" />
+  <Edge from="agent" to="proj" label="edits" />
+  <Edge from="agent" to="sup" label="sends everything" />
+  <Edge from="sup" to="dc" label="hooks :18971 · web :18972" />
+  <Edge from="sup" to="net1" label="model calls, real key added" />
+  <Edge from="dc" to="gw" label="creates sandboxes" />
+  <Edge from="dc" to="net1" label="allowed requests" />
 </Flow>
 
 What is mounted, and how:
@@ -57,7 +52,7 @@ What is mounted, and how:
 
 For an untrusted repository, `defenseclaw sandbox run claude --copy` works
 on a copy instead, as every run on a Mac does. See
-[work on a copy](/docs/setup/sandbox#work-on-a-copy).
+[work on a copy](/docs/sandboxes/guide#work-on-a-copy).
 
 ## Before you start
 
@@ -157,7 +152,7 @@ Build the Claude Code image now? (the first build downloads about 3 GB; otherwis
 
 Setup is safe to run again. When sandboxes are running, it asks before it
 restarts the shared gateway. `defenseclaw sandbox teardown` undoes it (see
-[tear down](/docs/setup/sandbox#tear-down-and-uninstall)).
+[tear down](/docs/sandboxes/guide#tear-down-and-uninstall)).
 
 </Step>
 
@@ -168,8 +163,6 @@ restarts the shared gateway. `defenseclaw sandbox teardown` undoes it (see
 ```bash
 defenseclaw sandbox doctor
 ```
-
-{/* SCREENSHOT: terminal-doctor-linux.png — `defenseclaw sandbox doctor` on a Linux host after setup, ending with "✓ ready for sandboxes" */}
 
 ```text
   ✓ Platform                   linux/arm64
@@ -247,7 +240,7 @@ When a session on a mounted folder ends, DefenseClaw summarizes it, flags
 the changed files that can run code on your machine, and asks:
 
 ```text
-Keep changes? [Y] keep  [u] undo everything  [d] show diff
+Keep changes? [Y] keep  [u] undo everything  [d] show diff (then Enter)
 ```
 
 Keeping makes the changes the base of the next session. Undo, now or later,
@@ -262,7 +255,7 @@ staging area and the git files the agent could write. It first saves every
 tip the session created or moved, so an undo can be undone too. Files git
 ignores, such as `node_modules/` and `.venv/`, are not in the snapshot:
 undo names each one it cannot restore. See
-[undo the session](/docs/setup/sandbox#undo-the-session).
+[undo the session](/docs/sandboxes/guide#undo-the-session).
 
 ## Only one live mount per folder
 
@@ -280,13 +273,15 @@ defenseclaw sandbox run codex --copy --name docs
 | You see | Do this |
 | --- | --- |
 | The **Landlock** check fails | Boot a kernel 6.2 or newer with `landlock` in its `lsm=` list. |
-| The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). |
+| The **Docker** check says rootless Docker, or that Docker is older than 28 | Use a rootful Docker Engine 28 or newer and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log in again). With linger on, logging out does not restart your systemd user manager, so the OpenShell gateway service still lacks the group: see the next row. |
+| The **Gateway service** check says it runs under a user manager that started before you joined the docker group, or setup's gateway restart fails with `the restarted gateway is not healthy` and names `sudo systemctl restart user@<uid>.service` | Your systemd user manager keeps the groups it started with, and linger keeps it running when you log out. Restart it with `sudo systemctl restart user@$(id -u).service` (this stops your user services, which then start again), then run setup again. |
 | The **Docker BuildKit** check fails | Install the `docker-buildx-plugin` package from Docker's repository. |
 | **systemd linger** warns | `sudo loginctl enable-linger $USER`, so the gateway keeps running after you log out. |
 | **Gateway service** fails with `openshell-gateway is inactive` | `defenseclaw sandbox doctor --fix` starts it. |
 | **Gateway service** says `openshell-gateway is not installed`, yet a gateway answers | OpenShell was installed another way than NVIDIA's installer. Setup uses that gateway as it runs, but DefenseClaw cannot restart it: after a gateway change, restart it yourself, the way you started it. The fix line names how to switch to the `openshell-gateway` user service. |
 | `the DefenseClaw daemon is not running` | `defenseclaw-gateway start`. With the daemon down, sandbox hooks block every tool call. |
+| `the DefenseClaw daemon started before you joined the docker group`, or a run fails with `permission denied` on `/var/run/docker.sock` | The daemon keeps the groups it started with. Restart it so it picks up the `docker` group: `defenseclaw-gateway restart`. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. |
 
-The [troubleshooting table](/docs/setup/sandbox#troubleshooting) in the full
+The [troubleshooting table](/docs/sandboxes/guide#troubleshooting) in the complete
 guide covers the rest.

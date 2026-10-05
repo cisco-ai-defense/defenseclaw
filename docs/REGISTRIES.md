@@ -2,7 +2,7 @@
 
 Registry setup, source kinds, policy behavior, and operator workflows are
 maintained on the
-[published registries page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/registries/).
+[published registries page](https://cisco-ai-defense.github.io/defenseclaw/docs/scanning/registries/).
 
 The implementation is under
 [`../cli/defenseclaw/registries/`](../cli/defenseclaw/registries/), with CLI

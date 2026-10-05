@@ -1667,6 +1667,73 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # ...and the multi-only "manage via setup <connector>" steer is NOT.
         self.assertNotIn("Per-connector enforcement mode is managed via", result.output)
 
+    def test_interactive_mode_flag_preselects_mode_prompt(self):
+        """``setup guardrail --mode action`` without --non-interactive still
+        prompts, but the mode prompt defaults to the flag (SWEEP-18)."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connectors = {}
+        gc.connector = "codex"
+        gc.mode = "observe"
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--mode", "action", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Select mode (1, 2) [2]", result.output)
+        self.assertEqual(self.app.cfg.guardrail.mode, "action")
+
+    def test_interactive_human_approval_flag_preselects_hilt_prompts(self):
+        """GAP-1614: Enter at every prompt keeps --human-approval and
+        --hilt-min-severity instead of the stored HILT values."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connectors = {}
+        gc.connector = "codex"
+        gc.mode = "observe"
+        gc.hilt.enabled = False
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "guardrail", "--mode", "action", "--human-approval",
+                    "--hilt-min-severity", "MEDIUM", "--no-restart",
+                ],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("default to the flags you passed; add --yes to skip them", result.output)
+        self.assertIn("Human approval for risky actions? [Y/n]", result.output)
+        self.assertIn("Approval minimum severity", result.output)
+        self.assertTrue(self.app.cfg.guardrail.hilt.enabled)
+        self.assertEqual(self.app.cfg.guardrail.hilt.min_severity, "MEDIUM")
+
     def test_interactive_multi_connector_uses_per_connector_mode_picker(self):
         """Two configured connectors: the connector picker and singular
         observe/action prompt are skipped, but the wizard offers a
@@ -1885,12 +1952,19 @@ class TestRestartDefenseGateway(unittest.TestCase):
         from defenseclaw.observability.local_stack import CommandResult
 
         runner = runner_cls.return_value
-        runner.run.return_value = CommandResult(("gateway", "start"), 0, "", "")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir, "installed")
             python = root / "runtime" / "python" / "python.exe"
             gateway = root / "bin" / "defenseclaw-gateway.exe"
             hostile = Path(tmpdir, "hostile")
+
+            def run(argv, **_kwargs):
+                # The installed file is held until the lifecycle exits (#643).
+                with self.assertRaises(OSError):
+                    os.replace(hostile / "defenseclaw-gateway.exe", gateway)
+                return CommandResult(tuple(argv), 0, "", "")
+
+            runner.run.side_effect = run
             python.parent.mkdir(parents=True)
             gateway.parent.mkdir(parents=True)
             hostile.mkdir()
@@ -1984,6 +2058,40 @@ class TestRestartDefenseGateway(unittest.TestCase):
             mock_ready.assert_called_once()
             self.assertEqual(mock_ready.call_args.args, (tmpdir,))
             self.assertIsNotNone(mock_ready.call_args.kwargs["previous_generation"])
+
+    # GAP-2490: with stdout not a TTY the restart mark is ASCII like every other line.
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
+        return_value=True,
+    )
+    @patch("defenseclaw.commands.cmd_setup.run_pinned_executable")
+    def test_restart_mark_uses_ascii_fallback_when_redirected(self, mock_run, _mock_ready, _mock_identity):
+        import io
+        from contextlib import redirect_stdout
+
+        from defenseclaw import ux
+        from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+
+        mock_run.return_value = MagicMock(returncode=0)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "gateway.pid"), "w") as f:
+                f.write(str(os.getpid()))
+            with (
+                patch.object(ux, "_configured_unicode_output", False),
+                patch(
+                    "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+                    return_value=sys.executable,
+                ),
+                redirect_stdout(out),
+            ):
+                self.assertTrue(_restart_defense_gateway(tmpdir))
+        self.assertIn("defenseclaw-gateway: restarting... OK", out.getvalue())
+        self.assertNotIn("✓", out.getvalue())
 
     @patch(
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
@@ -2306,6 +2414,25 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup.ux.subhead")
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_multi_connector_restart_without_readiness_gate_names_only_omnigent(
+        self,
+        _mock_restart,
+        mock_subhead,
+    ):
+        # GAP-2630: `agent discovery enable` restarts without a readiness
+        # wait; the roster must not read "registration is not verified".
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="codex", connectors=["codex", "claudecode", "omnigent"])
+
+        messages = [call.args[0] for call in mock_subhead.call_args_list]
+        self.assertTrue(all("not verified" not in message for message in messages))
+        self.assertTrue(any("enforcement via" in message for message in messages))
+        self.assertTrue(any(m.startswith("OmniGent:") and "defenseclaw doctor" in m for m in messages))
+
+    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
     def test_omnigent_hint_without_readiness_gate_does_not_claim_gateway_ready(
         self,
         _mock_restart,
@@ -2364,7 +2491,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         self,
         config_files,
     ):
-        from defenseclaw.commands.cmd_setup import _restart_services
+        from defenseclaw.commands.cmd_setup import _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS, _restart_services
         from defenseclaw.cursor_contract import CURSOR_HOOK_EVENTS
 
         class Clock:
@@ -2488,7 +2615,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                                 wait_for_connector_ready=True,
                             )
 
-                    self.assertEqual(clock.now, 60.0)
+                    self.assertEqual(clock.now, _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS)
                     restart.assert_called_once()
 
     def test_malformed_or_mismatched_lock_churn_never_advances_readiness(self):
@@ -2723,6 +2850,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows native setup readiness")
     def test_multi_connector_validation_still_stops_at_absolute_cap(self):
+        from defenseclaw.commands import cmd_setup
         from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
 
         expected = [
@@ -2743,7 +2871,8 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
         def readiness(_cfg, name):
             visited.append(name)
-            clock.now = 301.0
+            # Past the absolute cap, which the per-connector budget below exceeds.
+            clock.now = cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS + 1.0
             return SimpleNamespace(connector=name, invariant="ready", detail="configured")
 
         def read_snapshot(path):
@@ -2758,12 +2887,12 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             patch("defenseclaw.commands.cmd_doctor.connector_setup_readiness", side_effect=readiness),
             patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=monotonic),
         ):
-            result = _wait_for_connector_runtime("unused", expected, None, None, timeout=60.0)
+            result = _wait_for_connector_runtime("unused", expected, None, None, timeout=180.0)
 
         self.assertFalse(result)
         self.assertEqual(result.invariant, "deadline")
         self.assertEqual(visited, [expected[0]])
-        self.assertEqual(clock.now, 301.0)
+        self.assertEqual(clock.now, cmd_setup._CONNECTOR_RUNTIME_READY_ABSOLUTE_CAP_SECONDS + 1.0)
 
     def test_new_generation_terminal_health_fails_but_running_health_never_satisfies(self):
         from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
@@ -3237,6 +3366,23 @@ class TestCheckOpenclawGateway(unittest.TestCase):
 
     @patch("time.sleep")
     @patch("time.monotonic")
+    @patch("defenseclaw.commands.cmd_setup._openclaw_gateway_healthy", return_value=False)
+    def test_not_running_names_the_openclaw_gateway_and_fails(self, mock_healthy, mock_monotonic, mock_sleep):
+        # GAP-1524: the hint was "defenseclaw-gateway start" and setup exited 0.
+        from defenseclaw.commands.cmd_setup import _check_openclaw_gateway
+
+        mock_monotonic.side_effect = self._fast_monotonic(step=5)
+        runner = CliRunner()
+        with runner.isolation() as (out, _err, *_):
+            ok = _check_openclaw_gateway("127.0.0.1", 19089)
+        text = out.getvalue().decode()
+        self.assertFalse(ok)
+        self.assertIn("OpenClaw gateway did not respond at 127.0.0.1:19089", text)
+        self.assertIn("openclaw gateway run", text)
+        self.assertNotIn("defenseclaw-gateway start", text)
+
+    @patch("time.sleep")
+    @patch("time.monotonic")
     @patch("defenseclaw.commands.cmd_setup._openclaw_gateway_healthy", side_effect=[False, False, True] + [True] * 20)
     def test_retries_until_healthy(self, mock_healthy, mock_monotonic, mock_sleep):
         from defenseclaw.commands.cmd_setup import _check_openclaw_gateway
@@ -3308,7 +3454,7 @@ class TestSetupGuardrailRestart(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("canonical setup audit event was not recorded", result.output)
+        self.assertIn("setup audit event was not recorded", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
     @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)

@@ -77,7 +77,7 @@ class _GatewayConfigRecorder:
                 token = token_resolver() if callable(token_resolver) else ""
         if not token:
             raise CanonicalObservabilityUnavailableError(
-                "gateway authentication is unavailable; start or reconfigure the v8 gateway"
+                "gateway authentication is unavailable"
             )
 
         try:
@@ -232,19 +232,37 @@ class Logger:
 
         return cls(_NoRuntimeRecorder())
 
-    def log_scan(self, result: ScanResult) -> None:
-        payload = {
-            "kind": "scan",
-            "run_id": _current_run_id(),
-            "scan": {
-                "scanner": result.scanner,
-                "target": result.target,
-                "timestamp": result.timestamp.isoformat(),
-                "findings": [finding.to_dict() for finding in result.findings],
-                "duration_ms": int(result.duration.total_seconds() * 1000),
-            },
+    def log_scan(self, result: ScanResult, *, error: str = "", connector: str | None = None) -> None:
+        scan: dict[str, Any] = {
+            "scanner": result.scanner,
+            "target": result.target,
+            "timestamp": result.timestamp.isoformat(),
+            "findings": [_scan_finding_wire(finding) for finding in result.findings],
+            "duration_ms": int(result.duration.total_seconds() * 1000),
         }
-        self._emit(payload)
+        if error:
+            # A scan that could not finish is recorded as scan.failed, so
+            # audit export, OTLP and alerts show it (GAP-1504).
+            scan["error"] = error.replace("\x00", "").encode("utf-8")[:4000].decode("utf-8", "ignore")
+        # Name the agent whose skill/plugin/MCP server was scanned, so the
+        # scan telemetry says which connector the asset belongs to (GAP-1381).
+        if connector:
+            scan["connector"] = connector
+        self._emit({"kind": "scan", "run_id": _current_run_id(), "scan": scan})
+
+    def log_scan_failed(self, scanner: str, target: str, error: str, *, duration_ms: int = 0) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        self.log_scan(
+            ScanResult(
+                scanner=scanner,
+                target=target,
+                timestamp=datetime.now(timezone.utc),
+                findings=[],
+                duration=timedelta(milliseconds=max(0, duration_ms)),
+            ),
+            error=error or "scan failed",
+        )
 
     def log_action(self, action: str, target: str, details: str) -> None:
         self._emit(
@@ -253,6 +271,44 @@ class Logger:
                 "run_id": _current_run_id(),
                 "action": {"name": action, "target": target, "details": details},
             }
+        )
+
+    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+        """Record a CLI setting change as an Activity mutation that names it.
+
+        ``log_action("config-update", "config", ...)`` reaches the v8 trail
+        without its details, so Activity -> Mutations read only "cli
+        config-update config" for ``guardrail mode`` or ``block-at``
+        (GAP-1217). ``details`` is ``key=value`` text: ``scope=`` names the
+        target, ``previous=`` is the old value of the first field, and that
+        field becomes the diff (``mode: observe -> action``).
+        """
+
+        fields: dict[str, str] = {}
+        for token in details.split():
+            key, sep, value = token.partition("=")
+            if sep and key:
+                fields[key] = value
+        scope = _target_token(fields.pop("scope", ""))
+        previous = fields.pop("previous", None)
+        target_id = f"{_target_token(operation)}:{scope}" if scope else _target_token(operation)
+        diff: list[dict[str, Any]] = []
+        before: dict[str, Any] | None = None
+        if fields:
+            key, value = next(iter(fields.items()))
+            entry: dict[str, Any] = {"path": key, "op": "replace", "after": value or "(unset)"}
+            if previous is not None:
+                entry["before"] = previous or "(unset)"
+                before = {key: previous}
+            diff.append(entry)
+        self.log_activity(
+            actor=actor,
+            action="config-update",
+            target_type="config",
+            target_id=target_id or "config",
+            before=before,
+            after=dict(fields) or None,
+            diff=diff,
         )
 
     def log_activity(
@@ -372,7 +428,57 @@ class Logger:
         except CanonicalObservabilityError:
             raise
         except Exception as exc:
-            raise CanonicalObservabilityError("canonical Observability v8 admission was not confirmed") from exc
+            raise CanonicalObservabilityError(_unconfirmed_audit_reason(exc)) from exc
+
+
+def _unconfirmed_audit_reason(exc: BaseException) -> str:
+    """Why the gateway did not confirm an audit event, in the user's words (GAP-2019).
+
+    The cause's own text (URLs, payload fragments) stays out of the message.
+    """
+    import requests
+
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (401, 403):
+        return (
+            "the gateway on this port refused this account's credentials; "
+            "check with 'defenseclaw doctor' that it is this account's gateway"
+        )
+    if isinstance(exc, requests.Timeout):
+        return (
+            "the gateway could not record it in time, likely because its audit database is busy "
+            "or slow; gateway.log has the cause. Try again in a minute"
+        )
+    if isinstance(status, int) and status >= 500:
+        # GAP-2381: a 5xx is not always a busy database; the gateway logs the cause.
+        return (
+            f"the gateway could not record it (HTTP {status}); gateway.log has the cause. "
+            "If it names a busy or locked audit database, try again in a minute"
+        )
+    return "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
+
+
+# Fields the gateway's canonical scan ingress accepts for one finding
+# (cliObservabilityV8Finding). Detector-internal fields such as confidence and
+# evidence stay in CLI output only; the gateway rejects unknown members, so
+# sending them would fail admission for every scan that reports a finding.
+_SCAN_FINDING_WIRE_FIELDS = (
+    "id",
+    "severity",
+    "title",
+    "description",
+    "location",
+    "remediation",
+    "scanner",
+    "tags",
+    "rule_id",
+    "line_number",
+)
+
+
+def _scan_finding_wire(finding: Any) -> dict[str, Any]:
+    data = finding.to_dict()
+    return {key: data[key] for key in _SCAN_FINDING_WIRE_FIELDS if key in data}
 
 
 def _gateway_api_host(cfg: Any) -> str:
@@ -419,3 +525,10 @@ def _is_definite_preconnect_failure(exc: requests.RequestException) -> bool:
 
 def _current_run_id() -> str:
     return os.environ.get("DEFENSECLAW_RUN_ID", "").strip()
+
+
+def _target_token(value: str) -> str:
+    """Keep only characters the gateway accepts in an admin target reference."""
+
+    cleaned = "".join(ch if ch.isalnum() or ch in "._:/-" else "-" for ch in value.strip())
+    return cleaned.lstrip("._:/-")

@@ -13,9 +13,11 @@ package cli
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/spf13/cobra"
 )
 
 func TestUnixEnterpriseCommandTree(t *testing.T) {
@@ -64,12 +66,19 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 				if parseErr == nil {
 					t.Fatalf("%s %s accepted %v", group, action, flags)
 				}
-				if got := commandExitCode(cmd.FlagErrorFunc()(cmd, parseErr)); got != want {
+				flagErr := cmd.FlagErrorFunc()(cmd, parseErr)
+				if got := commandExitCode(flagErr); got != want {
 					t.Fatalf("enterprise %s %s %v exits %d, want %d", group, action, flags, got, want)
+				}
+				// GAP-1943: the usage line and the --help pointer, as on every
+				// other gateway command.
+				if msg := flagErr.Error(); !strings.Contains(msg, "\nUsage: "+cmd.UseLine()) ||
+					!strings.HasSuffix(msg, "Try '"+cmd.CommandPath()+" --help' for help.") {
+					t.Fatalf("enterprise %s %s %v: %q", group, action, flags, msg)
 				}
 			}
 			argsErr := cmd.ValidateArgs([]string{"extra"})
-			if argsErr == nil || commandExitCode(argsErr) != want {
+			if argsErr == nil || commandExitCode(argsErr) != want || !strings.Contains(argsErr.Error(), cmd.CommandPath()+" --help") {
 				t.Fatalf("enterprise %s %s extra: %v exits %d, want %d", group, action, argsErr, commandExitCode(argsErr), want)
 			}
 		}
@@ -84,6 +93,53 @@ func TestUnixLifecycleInvalidArgumentsExitTwo(t *testing.T) {
 		var coded *exitCodeError
 		if !errors.As(runErr, &coded) || coded.ExitCode() != want {
 			t.Fatalf("enterprise %s bogus: %v", group, runErr)
+		}
+	}
+}
+
+// GAP-2095: enterprise secret reports a bad flag, a malformed --lock-wait, a
+// stray argument and a missing --name the way enterprise linux|macos do.
+func TestUnixEnterpriseSecretInvalidArgumentsExitTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps its own enterprise secret exit codes")
+	}
+	want := enterprisestatus.InvalidArgsExitCode(runtime.GOOS)
+	check := func(cmd *cobra.Command, what string, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("enterprise secret %s %s: no error", cmd.Name(), what)
+		}
+		msg := err.Error()
+		if got := commandExitCode(err); got != want ||
+			!strings.Contains(msg, "\nUsage: "+cmd.UseLine()) ||
+			!strings.HasSuffix(msg, "Try '"+cmd.CommandPath()+" --help' for help.") {
+			t.Fatalf("enterprise secret %s %s: exit %d, %q", cmd.Name(), what, commandExitCode(err), msg)
+		}
+	}
+	for _, action := range []string{"set", "status", "remove"} {
+		cmd, _, err := rootCmd.Find([]string{"enterprise", "secret", action})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := [][]string{{"--bogus"}, {"--json=maybe"}}
+		if action != "status" {
+			bad = append(bad, []string{"--lock-wait=banana"})
+		}
+		for _, flags := range bad {
+			parseErr := cmd.ParseFlags(flags)
+			if parseErr == nil {
+				t.Fatalf("enterprise secret %s accepted %v", action, flags)
+			}
+			check(cmd, strings.Join(flags, " "), cmd.FlagErrorFunc()(cmd, parseErr))
+		}
+		if action == "set" {
+			if !strings.HasPrefix(plainFlagValueError(cmd.ParseFlags([]string{"--lock-wait=banana"})), "--lock-wait takes a duration") {
+				t.Fatal("--lock-wait=banana lost its plain message")
+			}
+		}
+		check(cmd, "extra", cmd.ValidateArgs([]string{"extra"}))
+		if action != "status" {
+			check(cmd, "without --name", cmd.PreRunE(cmd, nil))
 		}
 	}
 }

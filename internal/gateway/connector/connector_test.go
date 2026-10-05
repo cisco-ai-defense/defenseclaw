@@ -3776,10 +3776,10 @@ func TestCodex_Setup(t *testing.T) {
 	}
 }
 
+// codexHookConfigPathForTest returns where per-user Setup registers the
+// matrix: config.toml on every platform (current Codex ignores
+// CODEX_HOME/managed_config.toml on Windows).
 func codexHookConfigPathForTest(configPath string) string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
-	}
 	return configPath
 }
 
@@ -3798,11 +3798,7 @@ func readCodexHookDocumentForTest(t *testing.T, configPath string) (string, []by
 }
 
 func verifyInstalledCodexHooksForTest(hooks map[string]interface{}, configPath, hooksDir string) error {
-	opts := SetupOpts{}
-	if runtime.GOOS == "windows" {
-		return verifyManagedCodexHookMatrix(hooks, configPath, hooksDir, opts)
-	}
-	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir, opts)
+	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir, SetupOpts{})
 }
 
 // TestCodex_Setup_DoesNotRewriteProvidersToProxy verifies hook-only Setup
@@ -3897,11 +3893,9 @@ env_key = "OPENAI_API_KEY"
 	if mode := info.Mode().Perm(); runtime.GOOS != "windows" && mode != 0o600 {
 		t.Errorf("config.toml mode = %#o, want 0o600", mode)
 	}
-	if runtime.GOOS == "windows" {
-		managedInfo, err := os.Stat(codexHookConfigPathForTest(configPath))
-		if err != nil || managedInfo.IsDir() {
-			t.Fatalf("managed_config.toml private file missing: info=%v err=%v", managedInfo, err)
-		}
+	managedPath := filepath.Join(filepath.Dir(configPath), codexManagedConfigLogicalName)
+	if _, err := os.Lstat(managedPath); !os.IsNotExist(err) {
+		t.Fatalf("per-user Setup created managed_config.toml, which current Codex ignores on Windows: %v", err)
 	}
 }
 
@@ -4762,25 +4756,11 @@ func TestCodexSetupPreservesUnrelatedStateAndUsesMergedPositions(t *testing.T) {
 		t.Fatalf("unrelated user state changed: got %#v want %#v", got, userState)
 	}
 	defenseClawKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
-	if runtime.GOOS == "windows" {
-		if _, ok := state[defenseClawKey]; ok {
-			t.Fatalf("Windows setup synthesized unsupported user trust state %q: %v", defenseClawKey, state)
-		}
-		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
-		managedHooks := managedDocument["hooks"].(map[string]interface{})
-		if _, exists := managedHooks["state"]; exists {
-			t.Fatalf("managed source contains private hooks.state: %#v", managedHooks["state"])
-		}
-		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("configured managed hooks are incomplete: %v", err)
-		}
-	} else {
-		if _, ok := state[defenseClawKey]; !ok {
-			t.Fatalf("merged position state key %q missing: %v", defenseClawKey, state)
-		}
-		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("configured hooks are not fully trusted: %v", err)
-		}
+	if _, ok := state[defenseClawKey]; !ok {
+		t.Fatalf("merged position state key %q missing: %v", defenseClawKey, state)
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
+		t.Fatalf("configured hooks are not fully trusted: %v", err)
 	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
@@ -4848,10 +4828,8 @@ func TestCodexRepairPreservesOwnedPositionBeforeLaterTrustedUserHook(t *testing.
 	}
 	userKey := codexHookStateKey(codexHookStateKeySource(registrationPath), "pre_tool_use", 1, 0)
 	userState := map[string]interface{}{"trusted_hash": userHash, "enabled": true, "note": "preserve"}
-	if runtime.GOOS != "windows" {
-		state := hooks["state"].(map[string]interface{})
-		state[userKey] = userState
-	}
+	state := hooks["state"].(map[string]interface{})
+	state[userKey] = userState
 	edited, err := toml.Marshal(cfg)
 	if err != nil {
 		t.Fatalf("marshal user edit: %v", err)
@@ -4884,13 +4862,9 @@ func TestCodexRepairPreservesOwnedPositionBeforeLaterTrustedUserHook(t *testing.
 	if got := secondHandlers[0].(map[string]interface{})["command"]; got != "user-policy.exe" {
 		t.Fatalf("trusted user hook moved or changed: got %#v", got)
 	}
-	if runtime.GOOS != "windows" {
-		repairedState := repairedHooks["state"].(map[string]interface{})
-		if got := repairedState[userKey]; !codexValueMatches(got, userState) {
-			t.Fatalf("trusted user state changed: got %#v want %#v", got, userState)
-		}
-	} else if _, exists := repairedHooks["state"]; exists {
-		t.Fatalf("managed repair synthesized hooks.state: %#v", repairedHooks["state"])
+	repairedState := repairedHooks["state"].(map[string]interface{})
+	if got := repairedState[userKey]; !codexValueMatches(got, userState) {
+		t.Fatalf("trusted user state changed: got %#v want %#v", got, userState)
 	}
 	if err := verifyInstalledCodexHooksForTest(repairedHooks, registrationPath, filepath.Join(dir, "hooks")); err != nil {
 		t.Fatalf("repaired DefenseClaw matrix is not source-trusted: %v", err)
@@ -5051,29 +5025,15 @@ func TestCodexSetupRefusesUnownedStateCollision(t *testing.T) {
 	t.Cleanup(func() { CodexConfigPathOverride = "" })
 
 	err = NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"})
-	if runtime.GOOS == "windows" {
-		if err != nil {
-			t.Fatalf("managed-source Setup was blocked by unrelated user trust state: %v", err)
-		}
-	} else if err == nil || !strings.Contains(err.Error(), "belongs to another hook") {
+	if err == nil || !strings.Contains(err.Error(), "belongs to another hook") {
 		t.Fatalf("Setup error = %v, want state-collision refusal", err)
 	}
 	after, readErr := os.ReadFile(configPath)
 	if readErr != nil {
 		t.Fatalf("read config after refusal: %v", readErr)
 	}
-	if runtime.GOOS != "windows" && string(after) != string(raw) {
+	if string(after) != string(raw) {
 		t.Fatalf("Setup rewrote config despite state collision\nbefore:\n%s\nafter:\n%s", raw, after)
-	}
-	if runtime.GOOS == "windows" {
-		parsed := map[string]interface{}{}
-		if err := toml.Unmarshal(after, &parsed); err != nil {
-			t.Fatal(err)
-		}
-		preserved := parsed["hooks"].(map[string]interface{})["state"].(map[string]interface{})
-		if _, exists := preserved[collisionKey]; !exists {
-			t.Fatalf("unrelated user state collision was not preserved: %#v", preserved)
-		}
 	}
 }
 
@@ -5114,15 +5074,6 @@ func TestVerifyTrustedCodexHookMatrixRejectsIncompleteOrModifiedRegistration(t *
 
 	t.Run("modified trust", func(t *testing.T) {
 		hooks := parseHooks(t)
-		if runtime.GOOS == "windows" {
-			if _, exists := hooks["state"]; exists {
-				t.Fatalf("managed hook config contains synthesized hooks.state: %#v", hooks["state"])
-			}
-			if err := verifyManagedCodexHookMatrix(hooks, registrationPath, hooksDir, opts); err != nil {
-				t.Fatalf("managed hook matrix is not source-trusted: %v", err)
-			}
-			return
-		}
 		state := hooks["state"].(map[string]interface{})
 		key := codexHookStateKey(codexHookStateKeySource(registrationPath), "stop", 0, 0)
 		state[key].(map[string]interface{})["trusted_hash"] = "sha256:modified"
@@ -5188,30 +5139,16 @@ timeout = 7
 		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
 	}
 	preToolUse, _ := hooks["PreToolUse"].([]interface{})
-	if runtime.GOOS == "windows" {
-		if len(preToolUse) != 1 {
-			t.Fatalf("Setup changed existing user hook table; got %d entries\n%s", len(preToolUse), raw)
-		}
-		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
-		managedHooks := managedDocument["hooks"].(map[string]interface{})
-		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("Setup managed hooks are incomplete: %v", err)
-		}
-		if _, exists := managedHooks["state"]; exists {
-			t.Fatalf("Setup manufactured trust state in managed config: %#v", managedHooks["state"])
-		}
-	} else {
-		if len(preToolUse) != 2 {
-			t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
-		}
-		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
-			t.Fatalf("Setup hooks are not fully trusted: %v", err)
-		}
-		state := hooks["state"].(map[string]interface{})
-		ownedKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
-		if _, ok := state[ownedKey]; !ok {
-			t.Fatalf("position-aware DefenseClaw state key %q missing: %v", ownedKey, state)
-		}
+	if len(preToolUse) != 2 {
+		t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
+		t.Fatalf("Setup hooks are not fully trusted: %v", err)
+	}
+	state := hooks["state"].(map[string]interface{})
+	ownedKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 1, 0)
+	if _, ok := state[ownedKey]; !ok {
+		t.Fatalf("position-aware DefenseClaw state key %q missing: %v", ownedKey, state)
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
@@ -7511,6 +7448,38 @@ func TestHookScripts_TokenedHooks_FailOpen_OnMissingToken(t *testing.T) {
 	}
 }
 
+func TestHookScripts_MissingTokenNamesTheFile(t *testing.T) {
+	// GAP-1425: the block line said ".token absent and DEFENSECLAW_GATEWAY_TOKEN
+	// unset" instead of naming the file to restore.
+	if runtime.GOOS == "windows" {
+		t.Skip("hook scripts are POSIX shell")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, ".token")); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"),
+		"--event", "UserPromptSubmit", "--hook-contract", "codex-hooks-v4")
+	env := []string{"DEFENSECLAW_HOME=" + t.TempDir(), "DEFENSECLAW_STRICT_AVAILABILITY=1"}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "DEFENSECLAW_") {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"UserPromptSubmit"}`)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	want := "missing gateway token: " + filepath.Join(dir, ".token") + " not found"
+	if got := stderr.String(); !strings.Contains(got, want) || strings.Contains(got, "DEFENSECLAW_GATEWAY_TOKEN") {
+		t.Fatalf("stderr = %q, want it to contain %q", got, want)
+	}
+}
+
 // runHookAndReturnCurlArgsWithHome is the sentinel-aware variant of
 // runHookAndReturnCurlArgs. It takes an explicit DEFENSECLAW_HOME so
 // tests can drive the .disabled / missing-home branches deterministically
@@ -8544,6 +8513,64 @@ func TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv(t *
 	}
 }
 
+// An earlier release's env block can be captured as pristine when a rollback
+// drops the restore metadata. Uninstall must not put its values back.
+func TestClaudeCode_TeardownDropsEarlierReleaseEnvCapturedAsPristine(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	pristine := map[string]interface{}{"env": map[string]interface{}{
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"DEFENSECLAW_FAIL_MODE":        "closed",
+		"OTEL_LOG_USER_PROMPTS":        "1",
+		"OTEL_SERVICE_NAME":            "operator-claude",
+		"PATH":                         "/operator/bin",
+	}}
+	data, err := json.Marshal(pristine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:       dir,
+		ProxyAddr:     "127.0.0.1:4000",
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "api-token",
+		OTLPPathToken: strings.Repeat("a", 64),
+	}
+	c := NewClaudeCodeConnector()
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := map[string]interface{}{}
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := restored["env"].(map[string]interface{})
+	for _, key := range []string{"CLAUDE_CODE_ENABLE_TELEMETRY", "DEFENSECLAW_FAIL_MODE", "OTEL_LOG_USER_PROMPTS"} {
+		if value, present := env[key]; present {
+			t.Errorf("earlier-release env[%s]=%v survived teardown", key, value)
+		}
+	}
+	for key, want := range map[string]string{"OTEL_SERVICE_NAME": "operator-claude", "PATH": "/operator/bin"} {
+		if env[key] != want {
+			t.Errorf("env[%s] = %v, want operator value %q", key, env[key], want)
+		}
+	}
+}
+
 func TestClaudeCode_TeardownExactSnapshotPreservesPristineBytes(t *testing.T) {
 	dir := t.TempDir()
 	settingsPath := filepath.Join(dir, "settings.json")
@@ -9011,6 +9038,9 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 			// Removing an overwritten key is also an operator change; teardown
 			// must not resurrect its pre-Setup value.
 			delete(env, key)
+		case "DEFENSECLAW_FAIL_MODE":
+			// DefenseClaw-only config: teardown removes it whatever its value.
+			env[key] = "closed"
 		default:
 			// Keep the old value as a prefix to prove ownership is exact-value
 			// based, not a broad marker/prefix heuristic.
@@ -9056,6 +9086,125 @@ func TestClaudeCode_Teardown_PreservesManagedEnvChangedAfterSetup(t *testing.T) 
 	}
 	if _, present := env["OTEL_EXPORTER_OTLP_PROTOCOL"]; present {
 		t.Errorf("operator-removed env was resurrected during teardown: %v", env)
+	}
+	if _, present := env["DEFENSECLAW_FAIL_MODE"]; present {
+		t.Errorf("DEFENSECLAW_FAIL_MODE survived teardown: %v", env)
+	}
+}
+
+// RHEL-U4-01: an operator snapshot that holds only an earlier release's
+// prompt-capture flag (an older teardown removed the rest of its block) must
+// not bring the flag back on uninstall. A flag next to the operator's own
+// telemetry settings stays.
+func TestClaudeCode_TeardownDropsOrphanedEarlierReleasePromptFlag(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pristine string
+		want     map[string]interface{}
+	}{
+		"orphaned flag": {
+			pristine: `{"env":{"AWS_REGION":"us-east-1","OTEL_LOG_USER_PROMPTS":"1"}}`,
+			want:     map[string]interface{}{"AWS_REGION": "us-east-1"},
+		},
+		"operator telemetry": {
+			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1","OTEL_LOG_USER_PROMPTS":"1"}}`,
+			want:     map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1", "OTEL_LOG_USER_PROMPTS": "1"},
+		},
+		// GAP-1107: what an earlier teardown left of a DefenseClaw block
+		// (loopback endpoints and the capture pins, telemetry not enabled).
+		"orphaned loopback block": {
+			pristine: `{"env":{"AWS_REGION":"us-east-1",` +
+				`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:18971",` +
+				`"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":"http://127.0.0.1:18971/v1/logs",` +
+				`"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT":"http://127.0.0.1:18971/v1/metrics",` +
+				`"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT":"http://127.0.0.1:18971/v1/traces",` +
+				`"OTEL_LOG_ASSISTANT_RESPONSES":"0","OTEL_LOG_RAW_API_BODIES":"0","OTEL_LOG_TOOL_CONTENT":"0",` +
+				`"OTEL_LOG_TOOL_DETAILS":"0","OTEL_LOG_USER_PROMPTS":"0"}}`,
+			want: map[string]interface{}{"AWS_REGION": "us-east-1"},
+		},
+		"operator loopback collector": {
+			pristine: `{"env":{"CLAUDE_CODE_ENABLE_TELEMETRY":"1",` +
+				`"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:4318","OTEL_LOG_TOOL_DETAILS":"0"}}`,
+			want: map[string]interface{}{"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+				"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318", "OTEL_LOG_TOOL_DETAILS": "0"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			settingsPath := filepath.Join(dir, "settings.json")
+			if err := os.WriteFile(settingsPath, []byte(tc.pristine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ClaudeCodeSettingsPathOverride = settingsPath
+			t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+			c := NewClaudeCodeConnector()
+			opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			if err := c.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			data, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings map[string]interface{}
+			if err := json.Unmarshal(data, &settings); err != nil {
+				t.Fatal(err)
+			}
+			if got := settings["env"]; !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("env after teardown = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// RHEL-U3-06 (uninstall env): a stale earlier-release block put back over a
+// pristine file must not leave its fail mode or prompt-capture value behind.
+func TestClaudeCode_TeardownRemovesStaleEarlierReleaseEnv(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{"env":{"AWS_REGION":"us-east-1"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env := settings["env"].(map[string]interface{})
+	env["DEFENSECLAW_FAIL_MODE"] = "closed"
+	env["OTEL_LOG_USER_PROMPTS"] = "1"
+	env["ANTHROPIC_MODEL"] = "operator-added"
+	out, _ := json.Marshal(settings)
+	if err := os.WriteFile(settingsPath, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	data, err = os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings = map[string]interface{}{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	env, _ = settings["env"].(map[string]interface{})
+	want := map[string]interface{}{"AWS_REGION": "us-east-1", "ANTHROPIC_MODEL": "operator-added"}
+	if !reflect.DeepEqual(env, want) {
+		t.Fatalf("env after teardown = %v, want %v", env, want)
 	}
 }
 
@@ -9459,6 +9608,44 @@ func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 	}
 }
 
+// TestHookScript_FailureLogWriteErrorStaysQuiet: when the failure log cannot
+// be written (full disk, unwritable home), the block reason the agent shows
+// holds only DefenseClaw's own sentence, never a shell diagnostic naming the
+// hook script and line (GAP-1974).
+func TestHookScript_FailureLogWriteErrorStaysQuiet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	dir := t.TempDir()
+	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:1", "tok-test"); err != nil {
+		t.Fatalf("WriteHookScriptsWithToken: %v", err)
+	}
+	dcHome := t.TempDir()
+	// A directory where the log file should be makes the append fail.
+	if err := os.MkdirAll(filepath.Join(dcHome, "logs", "hook-failures.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH"), "DEFENSECLAW_HOME="+dcHome)
+	err := cmd.Run()
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("hook should still fail closed (exit 2), got: %v", err)
+	}
+	out := stdout.String() + stderr.String()
+	for _, leak := range []string{"hook-failures.jsonl", "_hardening.sh", "Is a directory"} {
+		if strings.Contains(out, leak) {
+			t.Errorf("block output leaks %q:\n%s", leak, out)
+		}
+	}
+	if !strings.Contains(out, "defenseclaw") {
+		t.Errorf("block output lost DefenseClaw's own sentence:\n%s", out)
+	}
+}
+
 func TestHookScript_FailureLogEscapesFailMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -9583,6 +9770,10 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
 	}
 	dcHome := t.TempDir()
+	// This account's gateway is running, so a 401 means its token drifted.
+	if err := os.WriteFile(filepath.Join(dcHome, "gateway.pid"), []byte(fmt.Sprintf(`{"pid":%d}`, os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
@@ -9623,6 +9814,32 @@ func TestHookScript_FailMode_RespectedOnResponseFailure(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
 		}
+	}
+}
+
+// TestHookScript_401WithoutOwnGateway_NamesAnotherListener covers a shared
+// host (RHEL-U3-07): this account's gateway is stopped and another account's
+// gateway holds the default port, so the 401 is not token drift.
+func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	if err := writeHookScriptsCommonWithFailMode(dir, strings.TrimPrefix(srv.URL, "http://"), "tok-test", "closed", []string{"claude-code-hook.sh"}); err != nil {
+		t.Fatalf("writeHookScriptsCommonWithFailMode: %v", err)
+	}
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"test"}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+t.TempDir())
+	output, _ := cmd.CombinedOutput()
+	text := string(output)
+	if !strings.Contains(text, "this account's gateway is not running, so another account or program answered on its port") ||
+		!strings.Contains(text, "defenseclaw-gateway start") || strings.Contains(text, "token drift") {
+		t.Errorf("hook output should name another listener instead of token drift, got:\n%s", text)
 	}
 }
 
@@ -11680,4 +11897,99 @@ func TestZeptoClawHomeDir(t *testing.T) {
 			t.Errorf("zeptoClawHomeDir() = %q, want %q", got, want)
 		}
 	})
+}
+
+// GAP-1463: an edit the user makes to openclaw.json while enrolled survives
+// teardown, even after a later Setup (every gateway start) re-registers the
+// plugin; only DefenseClaw's own entries are removed.
+func TestOpenClaw_Teardown_KeepsUserEditsMadeWhileEnrolled(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	configPath := filepath.Join(ocHome, "openclaw.json")
+	os.WriteFile(configPath, []byte(`{"agents":{"defaults":{"model":{"primary":"first"}}}}`), 0o644)
+
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	var cfg map[string]interface{}
+	data, _ := os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["agents"] = map[string]interface{}{"defaults": map[string]interface{}{"model": map[string]interface{}{"primary": "second"}}}
+	edited, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(configPath, edited, 0o644)
+
+	// The gateway restarts (Setup again), then the user leaves OpenClaw mode.
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	cfg = map[string]interface{}{}
+	data, _ = os.ReadFile(configPath)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	agents, _ := cfg["agents"].(map[string]interface{})
+	defaults, _ := agents["defaults"].(map[string]interface{})
+	model, _ := defaults["model"].(map[string]interface{})
+	if model["primary"] != "second" {
+		t.Fatalf("teardown reverted the user's edit: primary = %v, want second", model["primary"])
+	}
+	if openClawConfigRegistersDefenseClaw(configPath) {
+		t.Fatalf("teardown left the DefenseClaw plugin registered: %s", data)
+	}
+	if _, err := os.Stat(filepath.Join(ocHome, "extensions", "defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("extension dir still present after Teardown: err=%v", err)
+	}
+}
+
+// GAP-1525: DefenseClaw's own OpenClaw plugin, as Setup writes it, is
+// recognized; a changed or added file makes it an ordinary plugin again.
+func TestOpenClaw_IsBundledPlugin(t *testing.T) {
+	requireOpenClawExtensionBundle(t)
+
+	dir := t.TempDir()
+	ocHome := filepath.Join(dir, "openclaw-home")
+	os.MkdirAll(ocHome, 0o755)
+	os.WriteFile(filepath.Join(ocHome, "openclaw.json"), []byte(`{}`), 0o644)
+	OpenClawHomeOverride = ocHome
+	defer func() { OpenClawHomeOverride = "" }()
+
+	c := NewOpenClawConnector()
+	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
+	if !c.IsBundledPlugin(extDir) {
+		t.Fatal("the plugin Setup wrote is not recognized as DefenseClaw's own")
+	}
+	other := filepath.Join(ocHome, "extensions", "other")
+	os.MkdirAll(other, 0o755)
+	if c.IsBundledPlugin(other) {
+		t.Fatal("another plugin directory was recognized as DefenseClaw's own")
+	}
+	extra := filepath.Join(extDir, "extra.js")
+	os.WriteFile(extra, []byte("module.exports = 1\n"), 0o644)
+	if c.IsBundledPlugin(extDir) {
+		t.Fatal("a plugin with an added file was recognized as DefenseClaw's own")
+	}
+	os.Remove(extra)
+	pkg := filepath.Join(extDir, "package.json")
+	data, _ := os.ReadFile(pkg)
+	os.WriteFile(pkg, append(data, ' '), 0o644)
+	if c.IsBundledPlugin(extDir) {
+		t.Fatal("a plugin with a changed file was recognized as DefenseClaw's own")
+	}
 }

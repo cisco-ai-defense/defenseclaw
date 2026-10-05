@@ -10,10 +10,7 @@ keywords:
 
 Prompt injection can arrive in a user message or in content an agent reads. DefenseClaw scans Codex lifecycle events at both boundaries: `UserPromptSubmit` for submitted prompts, `PreToolUse` before a proposed action, and `PostToolUse` after tool output returns.
 
-<Video
-  src="codex"
-  caption="Codex sends a synthetic injection prompt to DefenseClaw. The bundled CRITICAL trust rule blocks it at UserPromptSubmit; later tool-call gates remain available for actions proposed from untrusted content."
-/>
+## Try it
 
 <Steps>
 
@@ -50,14 +47,14 @@ defenseclaw setup guardrail \
   --connector codex \
   --mode action \
   --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-model "<provider/model>" \
   --judge-api-key-env DEFENSECLAW_LLM_KEY \
   --judge-hook-connectors codex \
   --restart \
   --non-interactive
 ```
 
-In `regex_judge`, a decisive `HIGH_SIGNAL` local result returns immediately. `NEEDS_REVIEW` goes to the judge, and a `NO_SIGNAL` prompt also goes to the judge when `judge_sweep` is enabled (the current default). `judge_first` runs local triage and the judge in parallel.
+Codex is a hook connector, so the judge runs in the gateway's hook lane. With `regex_judge`, a local result that already blocks or is CRITICAL returns without a judge call; every other prompt, tool call or tool output goes to the judge, and the stricter verdict wins. `judge_first` calls the judge on every eligible event. The triage levels and `judge_sweep` setting apply to the LLM proxy lane, not to Codex hooks.
 
 </Step>
 
@@ -79,15 +76,15 @@ The bundled `TRUST-IGNORE-PREVIOUS` rule is CRITICAL. The `UserPromptSubmit` hoo
 
 ```bash
 defenseclaw alerts --limit 10
-# or inspect the latest structured events from mandatory SQLite history:
-defenseclaw-gateway audit export --connector codex --output - \
-  | tail -n 200 \
-  | jq 'select(.connector == "codex" and .severity == "CRITICAL")'
+# or read the hook decisions from the last 30 minutes of audit history:
+defenseclaw-gateway audit export --connector codex --since 30m \
+  | jq 'select(.action == "connector-hook" and .structured.action == "block")
+        | {timestamp, severity, event: .structured.event, rule_ids: .structured.rule_ids}'
 ```
 
-Look for the matching rule, connector `codex`, event `UserPromptSubmit`, and an
-effective block action. Filter on stable top-level connector and severity fields
-before drilling into the canonical structured body.
+Look for event `UserPromptSubmit` with `structured.action` set to `block` and
+`TRUST-IGNORE-PREVIOUS` in `structured.rule_ids`. IDs and timestamps differ on
+every run.
 
 </Step>
 
@@ -97,23 +94,18 @@ before drilling into the canonical structured body.
 
 <Flow
   direction="TB"
-  caption="regex_judge uses local triage as a router: decisive signals return immediately, ambiguous signals are adjudicated, and NO_SIGNAL can take the judge-sweep path."
+  caption="What happens to a Codex prompt, tool call or tool output with regex_judge. The judge runs only when codex is listed in guardrail.judge.hook_connectors. If the local result already blocks or is CRITICAL, as TRUST-IGNORE-PREVIOUS is, the judge is skipped. Otherwise the judge reviews the content and the stricter of the two verdicts wins; if the judge fails or times out, the local verdict stands."
 >
-  <Node id="prompt" kind="generic">Prompt or tool content</Node>
-  <Node id="regex" kind="policy">Local triage</Node>
-  <Node id="level" kind="decision">Signal level</Node>
-  <Node id="local" kind="generic">Return decisive local verdict</Node>
-  <Node id="judge" kind="policy">LLM judge</Node>
-  <Node id="clean" kind="generic">Allow / normal tier</Node>
-  <Node id="verdict" kind="generic">Final policy verdict</Node>
-  <Edge from="prompt" to="regex" />
-  <Edge from="regex" to="level" />
-  <Edge from="level" to="local" label="HIGH_SIGNAL" />
-  <Edge from="level" to="judge" label="NEEDS_REVIEW" />
-  <Edge from="level" to="judge" label="NO_SIGNAL + sweep" />
-  <Edge from="level" to="clean" label="NO_SIGNAL, no sweep" />
-  <Edge from="local" to="verdict" />
-  <Edge from="judge" to="verdict" />
+  <Node id="prompt" kind="agent">{`Codex hook event\nprompt · tool call · output`}</Node>
+  <Node id="rules" kind="policy">{`Local rules check it\nplus Cisco AI Defense, if set`}</Node>
+  <Node id="level" kind="decision">{`Blocked or CRITICAL?`}</Node>
+  <Node id="judge" kind="policy">{`LLM judge reviews it\nstricter verdict wins`}</Node>
+  <Node id="verdict" kind="generic">{`Hook answers Codex\nblock, or continue with a warning`}</Node>
+  <Edge from="prompt" to="rules" label="sends" />
+  <Edge from="rules" to="level" />
+  <Edge from="level" to="judge" label="no" />
+  <Edge from="level" to="verdict" label="yes, skip judge" />
+  <Edge from="judge" to="verdict" label="returns" />
 </Flow>
 
 ## Prompt alerts versus tool-call enforcement
@@ -150,6 +142,6 @@ that finding as containment context for the next step.
 ## Next
 
 <Cards>
-  <Card title="Block secret exfiltration from Cursor" href="/docs/stories/cursor-secret-exfil" description="The companion story — a safe synthetic file and a pre-execution tool-call gate." />
+  <Card title="Detect secret-exfiltration intent from Cursor" href="/docs/stories/cursor-secret-exfil" description="The companion story — a safe synthetic file and a pre-execution tool-call gate." />
   <Card title="Connector compatibility" href="/docs/connectors/compatibility" description="Exact hook contracts, version ranges, and script generations." />
 </Cards>

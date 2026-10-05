@@ -1,6 +1,6 @@
 id: defenseclaw-codex-bedrock-mantle-us-west-2
 display_name: Amazon Bedrock Mantle (OpenAI-compatible route) for Codex (DefenseClaw)
-description: Binds a Bedrock API key to the Mantle Responses route (https://bedrock-mantle.us-west-2.api.aws/v1) as a bearer for a Codex custom model provider; only the Codex native binary may use it
+description: Binds a Bedrock API key to the Mantle OpenAI Responses route (https://bedrock-mantle.us-west-2.api.aws/openai/v1) as a bearer for a Codex custom model provider; only the Codex native binary may use it
 category: inference
 inference_capable: true
 credentials:

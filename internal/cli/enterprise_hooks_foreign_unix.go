@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The standalone Unix guardian removes unapproved foreign hooks from every
@@ -52,6 +53,14 @@ var enterpriseHookForeignCleanupInterval = 5 * time.Minute
 // trust checks need root-owned directories).
 var enterpriseHookLoadEligibleAccounts = enterprisehooks.LoadUnixEligibleAccounts
 
+// enterpriseHookLoadCopilotVSCodeAccounts and
+// enterpriseHookWriteCopilotVSCodeAccounts read and publish the record of the
+// accounts the guardian wrote VS Code Local hooks for; tests replace them.
+var (
+	enterpriseHookLoadCopilotVSCodeAccounts  = enterprisehooks.LoadUnixEligibleAccounts
+	enterpriseHookWriteCopilotVSCodeAccounts = enterprisehooks.WriteUnixEligibleAccounts
+)
+
 var enterpriseHookForeignCleanupState struct {
 	sync.Mutex
 	last        time.Time
@@ -60,23 +69,37 @@ var enterpriseHookForeignCleanupState struct {
 	// leftover registration, so a pass with nothing but leftovers to check
 	// runs again only when the accounts or routes change.
 	leftoversClean bool
+	// unrepaired names the accounts whose Copilot VS Code Local hook file
+	// the last pass could not rewrite: they wait for the interval, so only
+	// a newly drifted account makes the next pass due.
+	unrepaired map[string]bool
 }
 
 // enterpriseHookForeignCleanupConnectors resolves the connectors whose
 // policy removes foreign hooks, with the request each worker needs.
-func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignCleanup, error) {
+func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignCleanup, *enterpriseHookWorkerCopilotVSCode, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
-		return nil, nil
+		return nil, nil, nil
 	}
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	names := enterprisepolicy.StandaloneConnectors(cfg)
+	// The VS Code Local harness file and plugin follow the Copilot row:
+	// placed while Copilot is governed, removed when it is off or the
+	// Local harness is retired, untouched when Copilot is not deployed.
+	var vscode *enterpriseHookWorkerCopilotVSCode
+	for _, name := range names {
+		if name == enterprisepolicy.ConnectorCopilot {
+			hookFile, plugin := enterprisepolicy.CopilotVSCodeUserWant(opts)
+			vscode = &enterpriseHookWorkerCopilotVSCode{HookBinary: opts.HookBinary, HookFile: hookFile, Plugin: plugin}
+		}
+	}
 	summary := enterprisepolicy.BuildPublicPolicy(opts, names)
 	out := []enterpriseHookWorkerForeignCleanup{}
 	for _, name := range names {
@@ -86,7 +109,7 @@ func enterpriseHookForeignCleanupConnectors() ([]enterpriseHookWorkerForeignClea
 		}
 		out = append(out, enterpriseHookWorkerForeignCleanup{Connector: name, HookBinary: opts.HookBinary, Policy: policy})
 	}
-	return out, nil
+	return out, vscode, nil
 }
 
 // enterpriseHookPerUserEnrolled names, per user, the connectors the
@@ -119,7 +142,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
-	cleanups, err := enterpriseHookForeignCleanupConnectors()
+	cleanups, vscode, err := enterpriseHookForeignCleanupConnectors()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %v\n", err)
 		return 0
@@ -128,6 +151,39 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: eligible accounts: %v\n", err)
 		return 0
+	}
+	// Accounts the guardian wrote VS Code Local hooks for that are no
+	// longer eligible (excluded, removed from the groups): their files call
+	// the hook for an account DefenseClaw no longer covers, and remove-all
+	// would not reach them through the eligible accounts alone.
+	vscodeRecordPath, recorded, recordErr := loadEnterpriseHookCopilotVSCodeAccounts(enterpriseHookManifest)
+	if recordErr != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local accounts record: %v\n", recordErr)
+		recorded = nil
+	}
+	recordedDirs := copilotVSCodeCreatedDirs(recorded)
+	// vscodeFor is the account's VS Code Local request: what its home should
+	// hold, and the folders the guardian created there, which go once empty.
+	vscodeFor := func(want *enterpriseHookWorkerCopilotVSCode, uid int) *enterpriseHookWorkerCopilotVSCode {
+		if want == nil {
+			return nil
+		}
+		request := *want
+		request.RemoveDirs = recordedDirs[uid]
+		return &request
+	}
+	stale := staleCopilotVSCodeAccounts(recorded, accounts)
+	var staleRemoval *enterpriseHookWorkerCopilotVSCode
+	if len(stale) > 0 {
+		binary := ""
+		if vscode != nil {
+			binary = vscode.HookBinary
+		} else if removal, err := enterpriseHookCopilotVSCodeRemoval(); err == nil {
+			binary = removal.HookBinary
+		}
+		if strings.TrimSpace(binary) != "" {
+			staleRemoval = &enterpriseHookWorkerCopilotVSCode{HookBinary: binary}
+		}
 	}
 	vendor := enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS)
 	leftovers := func(user string) []string {
@@ -140,12 +196,41 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		return out
 	}
 	fingerprint := enterpriseHookForeignCleanupFingerprint(cleanups, accounts)
+	if vscode != nil {
+		fingerprint += fmt.Sprintf("copilot-vscode|%s|%t|%t;", vscode.HookBinary, vscode.HookFile, vscode.Plugin)
+	}
+	// A governed Local harness is re-checked every interval; a removal runs
+	// once per change. The Local hook file is the guardian's own, so one a
+	// user deleted or edited is rewritten on the next pass, like a per-user
+	// registration, not after the interval. One the last pass could not
+	// rewrite waits for the interval.
+	governed := vscode != nil && (vscode.HookFile || vscode.Plugin)
 	for _, account := range accounts {
 		fingerprint += account.User + "=" + strings.Join(leftovers(account.User), ",") + ";"
 	}
+	for _, account := range stale {
+		fingerprint += fmt.Sprintf("vscode-stale:%s:%d;", account.User, account.UID)
+	}
+	hookFileDrift := func() map[string]bool {
+		if vscode == nil || !vscode.HookFile {
+			return nil
+		}
+		return enterpriseHookCopilotVSCodeHookFileDrift(accounts, vscode.HookBinary)
+	}
+	drifted := hookFileDrift()
 	enterpriseHookForeignCleanupState.Lock()
-	due := fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
-		((len(cleanups) > 0 || !enterpriseHookForeignCleanupState.leftoversClean) &&
+	newDrift := false
+	stillUnrepaired := map[string]bool{}
+	for user := range drifted {
+		if enterpriseHookForeignCleanupState.unrepaired[user] {
+			stillUnrepaired[user] = true
+		} else {
+			newDrift = true
+		}
+	}
+	enterpriseHookForeignCleanupState.unrepaired = stillUnrepaired
+	due := newDrift || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
+		((len(cleanups) > 0 || governed || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
 		enterpriseHookForeignCleanupState.last = now
@@ -170,13 +255,13 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			clean = false
 			continue
 		}
-		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true}
+		request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscodeFor(vscode, account.UID)}
 		for _, cleanup := range cleanups {
 			cleanup.OwnedCommands = perUserOwnedHookCommands(cleanup.Connector, account.Home, filepath.Join(account.Home, ".defenseclaw"))
 			request.ForeignCleanup = append(request.ForeignCleanup, cleanup)
 		}
 		names := leftovers(account.User)
-		if len(cleanups) == 0 && len(names) == 0 {
+		if len(cleanups) == 0 && len(names) == 0 && vscode == nil {
 			continue
 		}
 		for index, name := range names {
@@ -197,6 +282,34 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			Request: request,
 		})
 	}
+	// Stale VS Code Local accounts dropped from the record: removed, or
+	// their home was recreated since the files were written.
+	dropped := map[int]bool{}
+	if staleRemoval == nil && len(stale) > 0 {
+		clean = false
+	}
+	for _, account := range stale {
+		if staleRemoval == nil {
+			break
+		}
+		check := enterpriseHookCheckHome(account.Home, account.UID)
+		if check.State != enterprisehooks.HomeAvailable {
+			clean = false
+			continue
+		}
+		if account.HomeInode != 0 && check.Inode != 0 && account.HomeInode != check.Inode {
+			dropped[account.UID] = true
+			continue
+		}
+		jobs = append(jobs, enterpriseHookWorkerJob{
+			Account: enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: account.Home},
+			Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpForeignCleanup, Standalone: true, CopilotVSCode: vscodeFor(staleRemoval, account.UID)},
+		})
+	}
+	staleUIDs := map[int]bool{}
+	for _, account := range stale {
+		staleUIDs[account.UID] = true
+	}
 	// Each account's removals are recorded for the gateway as soon as its
 	// worker ends, so its agent processes that started before them stay
 	// denied (recordEnterpriseForeignHookRemovals). Only the connectors the
@@ -210,6 +323,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 	}
 	removed := 0
+	createdDirs := map[int][]string{}
 	for _, outcome := range runEnterpriseHookWorkerPoolReporting(ctx, jobs, enterpriseHookWorkerParallelism, recordRemovals) {
 		user := outcome.Job.Account.User
 		if outcome.Err != nil {
@@ -237,6 +351,26 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
+		if report := outcome.Response.CopilotVSCode; report != nil {
+			if dirs := enterprisehooks.UnixCreatedDirsBelow(filepath.Clean(outcome.Job.Account.Home), report.Created); len(dirs) > 0 {
+				createdDirs[outcome.Job.Account.UID] = dirs
+			}
+			for _, path := range boundedStrings(report.Changed, 8) {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: wrote DefenseClaw's VS Code Local hooks for %s at %s\n", user, boundedString(path, 512))
+			}
+			for _, path := range boundedStrings(report.Removed, 8) {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: removed DefenseClaw's VS Code Local hooks for %s at %s\n", user, boundedString(path, 512))
+			}
+			for _, path := range boundedStrings(report.Kept, 8) {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: left %s for %s in place: it holds hooks DefenseClaw did not write\n", boundedString(path, 512), user)
+			}
+			if report.Error != "" {
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local hooks for %s: %s\n", user, boundedString(report.Error, 512))
+			} else if !governed || staleUIDs[outcome.Job.Account.UID] {
+				dropped[outcome.Job.Account.UID] = true
+			}
+		}
 		for _, name := range sortedCleanupConnectors(outcome.Response.Cleanup) {
 			report := outcome.Response.Cleanup[name]
 			for _, path := range boundedStrings(report.Removed, 32) {
@@ -252,10 +386,158 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			}
 		}
 	}
+	if recordErr == nil {
+		next := nextCopilotVSCodeAccounts(recorded, accounts, governed, dropped, createdDirs)
+		if !sameCopilotVSCodeAccounts(recorded, next) {
+			var err error
+			if len(next) == 0 {
+				err = removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, enterpriseHookManifest)
+			} else {
+				err = enterpriseHookWriteCopilotVSCodeAccounts(vscodeRecordPath, next)
+			}
+			if err != nil {
+				clean = false
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local accounts record: %v\n", err)
+			}
+		}
+	}
+	unrepaired := hookFileDrift()
 	enterpriseHookForeignCleanupState.Lock()
 	enterpriseHookForeignCleanupState.leftoversClean = clean
+	enterpriseHookForeignCleanupState.unrepaired = unrepaired
 	enterpriseHookForeignCleanupState.Unlock()
 	return removed
+}
+
+// staleCopilotVSCodeAccounts are the recorded accounts that are no longer
+// eligible.
+func staleCopilotVSCodeAccounts(recorded, eligible []enterprisehooks.UnixEligibleAccount) []enterprisehooks.UnixEligibleAccount {
+	current := map[int]bool{}
+	for _, account := range eligible {
+		current[account.UID] = true
+	}
+	out := []enterprisehooks.UnixEligibleAccount{}
+	for _, account := range recorded {
+		if !current[account.UID] {
+			out = append(out, account)
+		}
+	}
+	return out
+}
+
+// nextCopilotVSCodeAccounts is the record after a pass: while the Local
+// harness is governed every eligible account may hold its files; an account
+// is dropped once its files are removed (dropped). Each account keeps the
+// folders the guardian created in its home (the recorded ones plus this
+// pass's created), so the removal can take them out again.
+func nextCopilotVSCodeAccounts(recorded, eligible []enterprisehooks.UnixEligibleAccount, governed bool, dropped map[int]bool, created map[int][]string) []enterprisehooks.UnixEligibleAccount {
+	byUID := map[int]enterprisehooks.UnixEligibleAccount{}
+	for _, account := range recorded {
+		byUID[account.UID] = account
+	}
+	if governed {
+		for _, account := range eligible {
+			account.CreatedDirs = byUID[account.UID].CreatedDirs
+			byUID[account.UID] = account
+		}
+	}
+	out := []enterprisehooks.UnixEligibleAccount{}
+	for uid, account := range byUID {
+		if dropped[uid] {
+			continue
+		}
+		account.CreatedDirs = enterprisehooks.UnixCreatedDirsBelow(account.Home, append(append([]string(nil), account.CreatedDirs...), created[uid]...))
+		out = append(out, account)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
+	return out
+}
+
+func sameCopilotVSCodeAccounts(a, b []enterprisehooks.UnixEligibleAccount) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	key := func(accounts []enterprisehooks.UnixEligibleAccount) map[string]bool {
+		out := map[string]bool{}
+		for _, account := range accounts {
+			dirs := append([]string(nil), account.CreatedDirs...)
+			sort.Strings(dirs)
+			out[fmt.Sprintf("%s|%d|%d|%s|%d|%s", account.User, account.UID, account.GID, account.Home, account.HomeInode, strings.Join(dirs, "\x00"))] = true
+		}
+		return out
+	}
+	left, right := key(a), key(b)
+	for account := range left {
+		if !right[account] {
+			return false
+		}
+	}
+	return len(left) == len(right)
+}
+
+// copilotVSCodeCreatedDirs maps each recorded account's uid to the folders
+// the guardian created in its home.
+func copilotVSCodeCreatedDirs(recorded []enterprisehooks.UnixEligibleAccount) map[int][]string {
+	out := map[int][]string{}
+	for _, account := range recorded {
+		if len(account.CreatedDirs) > 0 {
+			out[account.UID] = account.CreatedDirs
+		}
+	}
+	return out
+}
+
+// enterpriseHookCopilotVSCodeAccountsPath is the guardian's VS Code Local
+// accounts record. It lives in the guardian's authorization directory
+// (/var/lib/defenseclaw-hook-guardian on Linux), which the guardian service
+// may write: the manifest folder is read-only to it (ReadOnlyPaths=
+// /etc/defenseclaw under ProtectSystem=strict), so a record there was never
+// written. Without a data directory it is the old place next to the manifest.
+func enterpriseHookCopilotVSCodeAccountsPath(manifestPath string) string {
+	if cfg != nil && strings.TrimSpace(cfg.DataDir) != "" {
+		if dir := managed.HookGuardianAuthorizationDir(cfg.DataDir); filepath.IsAbs(dir) {
+			return filepath.Join(dir, enterprisehooks.UnixCopilotVSCodeAccountsFileName)
+		}
+	}
+	return enterprisehooks.UnixCopilotVSCodeAccountsPath(manifestPath)
+}
+
+// loadEnterpriseHookCopilotVSCodeAccounts reads the VS Code Local accounts
+// record, merged with one an earlier build left next to the manifest, and
+// returns the path the record is written to.
+func loadEnterpriseHookCopilotVSCodeAccounts(manifestPath string) (string, []enterprisehooks.UnixEligibleAccount, error) {
+	path := enterpriseHookCopilotVSCodeAccountsPath(manifestPath)
+	accounts, err := enterpriseHookLoadCopilotVSCodeAccounts(path)
+	if err != nil {
+		return path, nil, err
+	}
+	if legacy := enterprisehooks.UnixCopilotVSCodeAccountsPath(manifestPath); legacy != path {
+		if old, legacyErr := enterpriseHookLoadCopilotVSCodeAccounts(legacy); legacyErr == nil {
+			known := map[int]bool{}
+			for _, account := range accounts {
+				known[account.UID] = true
+			}
+			for _, account := range old {
+				if !known[account.UID] {
+					accounts = append(accounts, account)
+				}
+			}
+		}
+	}
+	return path, accounts, nil
+}
+
+// removeEnterpriseHookCopilotVSCodeAccounts deletes the record at path and
+// the earlier build's copy next to the manifest (best effort: the guardian
+// service cannot write there).
+func removeEnterpriseHookCopilotVSCodeAccounts(path, manifestPath string) error {
+	if legacy := enterprisehooks.UnixCopilotVSCodeAccountsPath(manifestPath); legacy != path {
+		_ = os.Remove(legacy)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // enterpriseForeignHookUserEnvRedirects adds nothing on Unix: the per-user
@@ -302,6 +584,41 @@ func runEnterpriseHookWorkerForeignCleanup(request enterpriseHookWorkerRequest, 
 		out[name] = report
 	}
 	return out
+}
+
+// enterpriseHookCopilotVSCodeHookFileDrift names the available accounts
+// whose home lacks DefenseClaw's current VS Code Local hook file. It only
+// compares the file's bytes (CopilotVSCodeUserState, a bounded no-follow
+// read); the worker, running as the user, writes it.
+func enterpriseHookCopilotVSCodeHookFileDrift(accounts []enterprisehooks.UnixEligibleAccount, hookBinary string) map[string]bool {
+	drifted := map[string]bool{}
+	for _, account := range accounts {
+		if enterpriseHookCheckHome(account.Home, account.UID).State != enterprisehooks.HomeAvailable {
+			continue
+		}
+		if file, _ := enterprisepolicy.CopilotVSCodeUserState(account.Home, runtime.GOOS, hookBinary); !file {
+			drifted[account.User] = true
+		}
+	}
+	return drifted
+}
+
+// runEnterpriseHookWorkerCopilotVSCode runs inside the worker as the user.
+func runEnterpriseHookWorkerCopilotVSCode(request enterpriseHookWorkerRequest) *enterpriseHookWorkerCopilotVSCodeReport {
+	want := request.CopilotVSCode
+	result, err := enterprisepolicy.EnsureCopilotVSCodeUser(enterprisepolicy.CopilotVSCodeUserRequest{
+		Home:       filepath.Clean(request.Home),
+		GOOS:       runtime.GOOS,
+		HookBinary: want.HookBinary,
+		HookFile:   want.HookFile,
+		Plugin:     want.Plugin,
+		RemoveDirs: want.RemoveDirs,
+	})
+	report := &enterpriseHookWorkerCopilotVSCodeReport{Changed: result.Changed, Removed: result.Removed, Kept: result.Kept, Created: result.CreatedDirs}
+	if err != nil {
+		report.Error = err.Error()
+	}
+	return report
 }
 
 func enterpriseHookForeignCleanupFingerprint(cleanups []enterpriseHookWorkerForeignCleanup, accounts []enterprisehooks.UnixEligibleAccount) string {

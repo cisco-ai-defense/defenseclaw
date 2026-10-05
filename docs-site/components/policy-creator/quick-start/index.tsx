@@ -182,7 +182,7 @@ export function QuickStart({
         )}
       </section>
 
-      <footer className="sticky bottom-2 flex items-center gap-2 rounded-xl border border-fd-border bg-fd-card p-3 shadow-lg">
+      <footer className="flex items-center gap-2 rounded-xl border border-fd-border bg-fd-card p-3 shadow-lg">
         <button
           type="button"
           onClick={() => setStepIdx((n) => Math.max(0, n - 1))}
@@ -268,9 +268,9 @@ function Stepper({
                 className={[
                   'inline-flex size-5 items-center justify-center rounded-full text-[10px] font-mono',
                   state === 'active'
-                    ? 'bg-white/20'
+                    ? 'border border-current'
                     : state === 'done'
-                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
                       : 'bg-fd-card',
                 ].join(' ')}
                 aria-hidden
@@ -300,7 +300,7 @@ interface StepProps {
 
 function StepHeader({ title, subtitle }: { title: string; subtitle?: string }) {
   return (
-    <header className="mb-4">
+    <header className="not-prose mb-4">
       <h3 className="text-base font-semibold text-fd-foreground">{title}</h3>
       {subtitle && <p className="mt-0.5 text-[12px] text-fd-muted-foreground">{subtitle}</p>}
     </header>
@@ -358,7 +358,7 @@ function StepBlock({ answers, update }: StepProps) {
                 <h4 className="text-[12px] font-semibold uppercase tracking-wide text-fd-muted-foreground">
                   {cat.title}
                 </h4>
-                <span className="text-[11px] text-fd-muted-foreground/80">{cat.blurb}</span>
+                <span className="text-[11px] text-fd-muted-foreground">{cat.blurb}</span>
               </div>
               <div className="grid gap-2 md:grid-cols-2">
                 {cards.map((card) => (
@@ -388,7 +388,7 @@ function StepAllow({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="What should we allow even when flagged?"
-        subtitle="Reduce alert noise by letting known-safe tools / domains / first-party plugins through."
+        subtitle="Let your own plugins skip admission scans and your internal domains through the firewall."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {ALLOW_CARDS.map((card) => (
@@ -430,7 +430,7 @@ function StepResponse({ answers, update }: StepProps) {
     <>
       <StepHeader
         title="When something risky happens, what should we do?"
-        subtitle="Sets the block / alert thresholds and HILT (human-in-the-loop) configuration."
+        subtitle="Sets the block / alert thresholds and HITL (human-in-the-loop) configuration."
       />
       <div className="grid gap-2 md:grid-cols-2">
         {RESPONSES.map((r) => (
@@ -734,7 +734,7 @@ function AllowCheckCard({
             href={docsHref(card.cookbookHref)}
             target="_blank"
             rel="noopener noreferrer"
-            className="ml-auto text-[10px] text-emerald-600 hover:underline dark:text-emerald-400"
+            className="ml-auto text-[10px] text-emerald-700 hover:underline dark:text-emerald-400"
           >
             see cookbook →
           </a>
@@ -785,7 +785,7 @@ function FreeFormList({
             }
           }}
           placeholder={placeholder}
-          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-[11px] text-fd-foreground placeholder:text-fd-muted-foreground/60 focus:border-[var(--brand-cisco)] focus:outline-none"
+          className="flex-1 rounded-md border border-fd-border bg-fd-background px-2 py-1.5 font-mono text-[11px] text-fd-foreground placeholder:text-fd-muted-foreground focus:border-[var(--brand-cisco)] focus:outline-none"
         />
         <button
           type="button"
@@ -806,7 +806,7 @@ function FreeFormList({
               <button
                 type="button"
                 onClick={() => onChange(items.filter((_, idx) => idx !== i))}
-                className="text-fd-muted-foreground hover:text-red-500"
+                className="text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 aria-label={`Remove ${it}`}
               >
                 ×

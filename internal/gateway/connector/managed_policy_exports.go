@@ -127,6 +127,36 @@ func WindowsCodexStandaloneManagedHookCommand(hookBinary, event, hookContract st
 	return windowsCodexBoundManagedHookCommand(hookBinary, event, hookContract)
 }
 
+// CopilotVSCodeLocalManagedHookCommand renders the command DefenseClaw's
+// VS Code Local harness hook file and agent plugin register for event: the
+// administrator-owned hookBinary bound to the Local dialect. On Windows it
+// is the exit-code-preserving PowerShell boundary, which runs the same from
+// any shell VS Code or the Copilot CLI starts it in; elsewhere a POSIX
+// command line. The foreign-hook guard recognizes exactly these strings.
+func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string {
+	if goos == "windows" {
+		return windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
+			"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+	}
+	return shellSingleQuote(hookBinary) + " hook --connector copilot --enterprise-managed --event " +
+		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
+}
+
+// CopilotVSCodeLocalLegacyManagedHookCommand is the Windows Start-Process
+// bridge that builds before the awaited Process.Start statements rendered
+// for event (see legacyStartProcessWindowsNativePowerShellHookCommand). It is
+// never generated, but the hook file and plugin an earlier build wrote still
+// carry it, so it stays DefenseClaw's own: setup rewrites it and uninstall
+// removes it instead of the foreign-hook guard blocking it. It is empty
+// elsewhere, where the command did not change.
+func CopilotVSCodeLocalLegacyManagedHookCommand(goos, hookBinary, event string) string {
+	if goos != "windows" {
+		return ""
+	}
+	return legacyStartProcessWindowsNativePowerShellHookCommand("copilot", event, "", hookBinary,
+		"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+}
+
 // WindowsAwaitedHookStatements returns the PowerShell statements that start
 // the GUI-subsystem hook launcher, wait for it and exit with its status,
 // keeping the process handle from the start so a launcher that exits at once
@@ -146,6 +176,18 @@ func PowerShellQuoteLiteral(value string) string {
 // foreign-hook guard treats exactly these as DefenseClaw's registrations;
 // the guardian repairs the scripts they name when they drift.
 func PerUserOwnedHookCommands(connectorName, dataDir string) []string {
+	return perUserOwnedHookCommands(connectorName, dataDir, "")
+}
+
+// PerUserOwnedHookCommandsForBinary adds, on Windows, the commands the
+// per-user installer renders for the administrator's hookBinary. A hook
+// process runs the launcher rather than the installed gateway, so the
+// launcher it resolves for itself is not the one the guardian registered.
+func PerUserOwnedHookCommandsForBinary(connectorName, dataDir, hookBinary string) []string {
+	return perUserOwnedHookCommands(connectorName, dataDir, hookBinary)
+}
+
+func perUserOwnedHookCommands(connectorName, dataDir, hookBinary string) []string {
 	name := normalizeConnectorName(connectorName)
 	conn, ok := NewDefaultRegistry().Get(name)
 	if !ok || strings.TrimSpace(dataDir) == "" {
@@ -160,12 +202,24 @@ func PerUserOwnedHookCommands(connectorName, dataDir string) []string {
 		}
 	}
 	if runtime.GOOS == "windows" {
-		if owner, ok := conn.(HookScriptOwner); ok {
-			for _, script := range owner.HookScriptNames(opts) {
-				commands = append(commands, hookInvocationCommandFor("windows", name, filepath.Join(dataDir, "hooks", script)))
-			}
+		binaries := []string{defenseclawHookBinary()}
+		if published := strings.TrimSpace(hookBinary); published != "" && !strings.EqualFold(published, binaries[0]) {
+			binaries = append(binaries, published)
 		}
-		commands = append(commands, defenseclawHookBinary())
+		for _, binary := range binaries {
+			resolve := func() string { return binary }
+			if owner, ok := conn.(HookScriptOwner); ok {
+				for _, script := range owner.HookScriptNames(opts) {
+					commands = append(commands, hookInvocationCommandWith("windows", name, filepath.Join(dataDir, "hooks", script), resolve))
+				}
+			}
+			if name == "antigravity" {
+				for _, event := range antigravityLifecycleEvents {
+					commands = append(commands, windowsNativePowerShellHookCommandForEvent(name, event, binary))
+				}
+			}
+			commands = append(commands, binary)
+		}
 	}
 	return uniqueNonEmptyStrings(commands)
 }

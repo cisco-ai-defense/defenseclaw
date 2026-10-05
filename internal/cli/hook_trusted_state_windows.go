@@ -619,7 +619,7 @@ func windowsHookPathHasNoReparsePoints(path string) bool {
 // plugin (machine policy route) runs it for every event.
 func windowsStandalonePerUserHookConnector(name string) bool {
 	switch name {
-	case "copilot", "antigravity", "devin", "hermes", "opencode":
+	case "copilot", "antigravity", "devin", "hermes", "kiro", "opencode":
 		return true
 	default:
 		return false

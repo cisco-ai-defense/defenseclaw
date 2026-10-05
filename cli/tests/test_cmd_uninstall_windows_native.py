@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -19,6 +20,241 @@ import venv
 from pathlib import Path
 
 
+class DeferredInterpreterRemovalCommandTests(unittest.TestCase):
+    def test_after_exit_renames_the_uv_folder_before_removing_it(self) -> None:
+        # GAP-1647: rd /s of .uv in place ran for tens of seconds and deleted
+        # the uv Python and cache of an install started right afterwards.
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            windows_uninstall_helper._remove_after_exit([uv], [r"C:\Users\u\.defenseclaw"])  # noqa: SLF001
+
+        command = popen.call_args.args[0]
+        self.assertNotIn(f'rd /s /q "{uv}" &', command.split("else", 1)[0])
+        match = re.search(r'ren "([^"]+)" "(\.uv\.dc-removed-[0-9a-f]{8})"', command)
+        self.assertIsNotNone(match, command)
+        self.assertEqual(match.group(1), uv)
+        tombstone = ntpath.join(ntpath.dirname(uv), match.group(2))
+        self.assertLess(command.index("ren "), command.index(f'rd /s /q "{tombstone}"'))
+        self.assertLess(command.index(f'rd /s /q "{tombstone}"'), command.index(r'rd "C:\Users\u\.defenseclaw"'))
+        # GAP-1728: the data folder rd retries while a deleted file is still held open.
+        self.assertIn(
+            r'(for /l %i in (1,1,30) do if exist "C:\Users\u\.defenseclaw" (rd "C:\Users\u\.defenseclaw" 2>nul || ',
+            command,
+        )
+
+    def test_after_exit_writes_the_result_after_the_removal(self) -> None:
+        # GAP-1960: the result file said succeeded before cmd.exe removed .uv
+        # and the data folder, so it could not report that step.
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        data_dir = r"C:\Users\u\.defenseclaw"
+        status = r"C:\Users\u\AppData\Local\Temp\defenseclaw-uninstall-result-ab.json"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            writes = windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                [uv], [data_dir], status_path=status, gone=[data_dir]
+            )
+
+        self.assertTrue(writes)
+        command = popen.call_args.args[0]
+        result = command.index(f'(if exist "{uv}" (echo {{"status": "failed"')
+        self.assertLess(command.index(f'(for /l %i in (1,1,30) do if exist "{data_dir}"'), result)
+        self.assertIn("could not remove C:\\\\Users\\\\u\\\\.defenseclaw\\\\.uv; ", command)
+        self.assertTrue(command.endswith(f'(echo {{"status": "succeeded"}}>"{status}")' + ")" * 3 + '"'), command)
+        # A path cmd.exe would misparse keeps the result Python wrote.
+        with patch.object(windows_uninstall_helper.subprocess, "Popen"):
+            self.assertFalse(
+                windows_uninstall_helper._remove_after_exit([uv], [], status_path=r"C:\T&x\r.json")  # noqa: SLF001
+            )
+
+    def test_after_exit_result_says_superseded_when_a_new_install_owns_the_data_folder(self) -> None:
+        # GAP-2149: a release installer wrote into the data folder while the
+        # cleanup ran, and the result told the user to remove it by hand.
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        uv = r"C:\Users\u\.defenseclaw\.uv"
+        data_dir = r"C:\Users\u\.defenseclaw"
+        status = r"C:\Users\u\AppData\Local\Temp\defenseclaw-uninstall-result-ab.json"
+        with (
+            patch.object(windows_uninstall_helper.subprocess, "Popen") as popen,
+            patch.object(windows_uninstall_helper.os, "path", ntpath),
+        ):
+            windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                [uv], [data_dir], status_path=status, gone=[data_dir], data_dir=data_dir
+            )
+
+        command = popen.call_args.args[0]
+        result = command[command.index(f'(if exist "{data_dir}\\.install.lock"') :]
+        for name in (".install.lock", "installer", ".venv"):
+            self.assertIn(f'(if exist "{data_dir}\\{name}" (echo {{"status": "superseded"', result)
+        self.assertLess(result.index('"superseded"'), result.index('"failed"'))
+        self.assertIn("nothing needs to be removed by hand", result)
+        self.assertLess(command.index(f'(for /l %i in (1,1,30) do if exist "{data_dir}"'), command.index(result))
+
+    @unittest.skipUnless(sys.platform == "win32", "runs cmd.exe")
+    def test_after_exit_command_removes_the_folder_on_windows(self) -> None:
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            uv = data_dir / ".uv"
+            (uv / "python").mkdir(parents=True)
+            (uv / "python" / "python.exe").write_bytes(b"MZ")
+            status = Path(tmp) / "result.json"
+            with patch.object(windows_uninstall_helper.subprocess, "Popen") as popen:
+                windows_uninstall_helper._remove_after_exit(  # noqa: SLF001
+                    [str(uv)], [str(data_dir)], status_path=str(status), gone=[str(data_dir)]
+                )
+            subprocess.run(popen.call_args.args[0], timeout=60, check=False)
+            self.assertFalse(data_dir.exists(), list(Path(tmp).rglob("*")))
+            self.assertEqual(json.loads(status.read_text(encoding="utf-8")), {"status": "succeeded"})
+
+
+class DeferredHelperResultFileTests(unittest.TestCase):
+    """The deferred helper's result file, run through main() with the Win32 calls stubbed."""
+
+    def _run(self, tmp: Path, *, held: Path | None = None, on_wait=None) -> dict:
+        from unittest.mock import MagicMock, patch
+
+        from defenseclaw.commands import windows_uninstall_helper as helper
+
+        install_root = tmp / "bin"
+        data_dir = tmp / "data"
+        managed_venv = data_dir / ".venv"
+        (managed_venv / "Scripts").mkdir(parents=True)
+        install_root.mkdir()
+        shim = install_root / "defenseclaw.cmd"
+        shim.write_text(f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8")
+        (data_dir / ".env").write_text("KEY=x", encoding="utf-8")
+        (data_dir / "config.yaml").write_text("{}", encoding="utf-8")
+        temp = tmp / "temp"
+        temp.mkdir()
+        (temp / "defenseclaw-uninstall-result-old.json").write_text('{"status": "succeeded"}', encoding="utf-8")
+        status_path = temp / "defenseclaw-uninstall-result-new.json"
+        helper_dir = tmp / "helper"
+        helper_dir.mkdir()
+        (helper_dir / "helper.py").write_text("", encoding="utf-8")
+        manifest = helper_dir / "plan.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "parent_pid": 1,
+                    "parent_executable": sys.executable,
+                    "install_root": str(install_root),
+                    "data_dir": str(data_dir),
+                    "managed_venv": str(managed_venv),
+                    "protected_paths": [],
+                    "binary_targets": [str(shim)],
+                    "remove_data_dir": True,
+                    "remove_empty_install_root": True,
+                    "interpreter_dirs": [],
+                    "ready_path": str(helper_dir / "ready.json"),
+                    "status_path": str(status_path),
+                }
+            ),
+            encoding="utf-8",
+        )
+        real_unlink = os.unlink
+
+        def unlink(path, *args, **kwargs):
+            if held is not None and Path(path) == held:
+                raise PermissionError(13, "The process cannot access the file", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        kernel32 = MagicMock()
+        kernel32.WaitForSingleObject.side_effect = lambda *_args: (on_wait(status_path) if on_wait else None) or 0
+        with (
+            patch.object(helper.sys, "platform", "win32"),
+            patch.object(helper.sys, "argv", ["helper.py", str(manifest)]),
+            patch.object(helper, "__file__", str(helper_dir / "helper.py")),
+            patch.object(helper, "_open_parent", return_value=0),
+            patch.object(helper, "_open_launchers", return_value=[]),
+            patch.object(helper, "_kernel32", return_value=kernel32),
+            patch.object(helper.time, "sleep"),
+            patch.object(helper.os, "unlink", side_effect=unlink),
+        ):
+            helper.main()
+        return json.loads(status_path.read_text(encoding="utf-8"))
+
+    def test_result_file_exists_before_the_cli_prints_it(self) -> None:
+        # GAP-2054: the file the CLI names appeared only 25-35 s after it
+        # exited, and until then only the previous run's result was in TEMP.
+        seen: list[tuple[dict, list[str]]] = []
+
+        def on_wait(status_path: Path) -> None:
+            if not seen:
+                files = sorted(path.name for path in status_path.parent.iterdir())
+                seen.append((json.loads(status_path.read_text(encoding="utf-8")), files))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(Path(tmp), on_wait=on_wait)
+        self.assertEqual(seen[0][0]["status"], "scheduled")
+        self.assertEqual(seen[0][1], ["defenseclaw-uninstall-result-new.json"])
+        self.assertEqual(result, {"status": "succeeded"})
+
+    def test_held_file_keeps_the_launchers_and_names_the_next_step(self) -> None:
+        # GAP-2055: the result gave only the WinError, the launchers were
+        # already gone, and it did not say .env (API keys) was left.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            held = root / "data" / "hold.txt"
+            held.parent.mkdir()
+            held.write_text("x", encoding="utf-8")
+            result = self._run(root, held=held)
+            shim_kept = (root / "bin" / "defenseclaw.cmd").exists()
+        self.assertEqual(result["status"], "failed")
+        detail = result["detail"]
+        self.assertIn(f"{os.path.normcase(held)} is in use by another program. Close that program, then run ", detail)
+        # GAP-2082: pasted into PowerShell the bare quoted path was a ParserError.
+        self.assertIn(
+            f'run & "{root / "bin" / "defenseclaw.cmd"}" uninstall --all --binaries --yes again in PowerShell '
+            "(in Command Prompt, leave out the &)",
+            detail,
+        )
+        self.assertIn(".env (holds API keys)", detail)
+        self.assertIn("config.yaml", detail)
+        self.assertTrue(shim_kept)
+
+    def test_install_started_during_the_wait_stops_the_cleanup(self) -> None:
+        # GAP-2149: a release install.ps1 took its lock in the data folder
+        # while the cleanup waited; the cleanup must leave that install alone.
+        def on_wait(status_path: Path) -> None:
+            (status_path.parent.parent / "data" / ".install.lock").mkdir(exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run(root, on_wait=on_wait)
+            kept = [(root / "bin" / "defenseclaw.cmd").exists(), (root / "data" / "config.yaml").exists()]
+        self.assertEqual(result["status"], "superseded")
+        self.assertIn("nothing needs to be removed by hand", result["detail"])
+        self.assertEqual(kept, [True, True])
+
+    def test_leftover_install_lock_does_not_stop_the_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock = root / "data" / ".install.lock"
+            lock.mkdir(parents=True)
+            os.utime(lock, (time.time() - 3600, time.time() - 3600))
+            result = self._run(root)
+        self.assertEqual(result, {"status": "succeeded"})
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
 class WindowsManagedVenvResetTests(unittest.TestCase):
     def test_windows_process_access_mask_constants_preserve_required_rights(self) -> None:
@@ -30,6 +266,38 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
         )
 
         self.assertEqual(access_mask, 0x00101000)
+
+    def test_deferred_helper_waits_for_managed_runtime_launchers(self) -> None:
+        # A venv's Scripts/python.exe launcher starts the base interpreter and
+        # waits on it, as Scripts/defenseclaw.exe does beneath defenseclaw.cmd.
+        source = Path(__file__).resolve().parents[1] / "defenseclaw" / "commands" / "windows_uninstall_helper.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_venv = Path(tmp) / "data" / ".venv"
+            venv.EnvBuilder(with_pip=False).create(managed_venv)
+            # The helper is standard-library-only; load it without the package.
+            probe = textwrap.dedent(
+                f"""
+                import importlib.util, os
+                spec = importlib.util.spec_from_file_location("helper", {str(source)!r})
+                helper = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(helper)
+                plan = {{
+                    "managed_venv": {str(managed_venv)!r},
+                    "install_root": {str(Path(tmp) / "bin")!r},
+                    "parent_pid": os.getpid(),
+                }}
+                print([limit for _handle, limit in helper._open_launchers(plan)])
+                """
+            )
+            result = subprocess.run(
+                [str(managed_venv / "Scripts" / "python.exe"), "-I", "-c", probe],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            # The venv launcher only: the test runner above it is not cmd.exe.
+            self.assertEqual(result.stdout.strip(), "[15.0]", result.stderr)
 
     def test_deferred_helper_accepts_utf8_shim_for_non_ascii_profile(self) -> None:
         from defenseclaw.commands import windows_uninstall_helper
@@ -266,9 +534,16 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             self.assertIsNotNone(match, output)
             status_path = Path(match.group(1))
 
-            deadline = time.monotonic() + 15
+            def finished() -> bool:
+                try:
+                    status = json.loads(status_path.read_text(encoding="utf-8"))["status"]
+                    return status not in ("scheduled", "removing")
+                except (OSError, ValueError):
+                    return False
+
+            deadline = time.monotonic() + 30
             while time.monotonic() < deadline and (
-                data_dir.exists() or any(path.exists() for path in launchers) or not status_path.exists()
+                data_dir.exists() or any(path.exists() for path in launchers) or not finished()
             ):
                 time.sleep(0.1)
 
@@ -286,4 +561,5 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             )
             repeated_output = (repeated.stdout + repeated.stderr).decode("utf-8")
             self.assertEqual(repeated.returncode, 0, repeated_output)
-            self.assertIn("not installed", repeated_output)
+            # The plan lists only launchers that exist, so a repeat names none.
+            self.assertNotIn("defenseclaw.cmd", repeated_output)

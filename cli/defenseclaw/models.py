@@ -79,6 +79,8 @@ class ScanResult:
     timestamp: datetime
     findings: list[Finding] = field(default_factory=list)
     duration: timedelta = field(default_factory=timedelta)
+    # Short notes about analyzers that did not run (a partial scan).
+    notes: list[str] = field(default_factory=list)
 
     def has_severity(self, severity: str) -> bool:
         return any(f.severity == severity for f in self.findings)
@@ -203,6 +205,9 @@ class Event:
     severity: str = ""
     run_id: str = ""
     connector: str = ""
+    # audit_events.enforced: True when the gateway really blocked the call
+    # (None on rows that predate the column).
+    enforced: bool | None = None
 
 
 @dataclass
@@ -224,6 +229,7 @@ class Counts:
     allowed_skills: int = 0
     blocked_mcps: int = 0
     allowed_mcps: int = 0
-    alerts: int = 0
+    # None: not counted in time (see Store.get_counts).
+    alerts: int | None = 0
     total_scans: int = 0
     blocked_egress_calls: int = 0

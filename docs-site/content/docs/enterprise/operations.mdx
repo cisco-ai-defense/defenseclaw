@@ -58,6 +58,9 @@ from any shell.
 On Linux and macOS, `verify` first waits up to 5 seconds for another
 lifecycle run to finish, and holds no lock while it checks. If that run is
 still going, `verify` skips its checks and exits `75` with `lifecycle_busy`.
+`status` run as root waits the same way; if the run is still going, it
+reports the installed version but skips its checks, because that run may be
+restarting the services, and exits `75` with `lifecycle_busy`.
 The Linux verify unit accepts that exit, so a daily run that met an
 administrator's change is not left failed. On Windows, `verify` does not
 wait: while another run's transaction is pending, it fails (`1603`); run it
@@ -100,14 +103,17 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | --- | --- |
 | `status` | The gateway's health, its subsystems, and its connectors and their modes |
 | `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment` |
-| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output |
-| `audit findings` | The distinct scan findings that are current |
+| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote) |
+| `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
 On a standalone host, hook decisions, rejected connector hooks, direct
 inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names
 its route and reason. Each tool call the foreign-hook guard denies adds a
 `connector-hook` row with `event: foreign_hook_session` that names the file.
+Its trace spans (and their Galileo metadata) carry
+`defenseclaw.guardrail.rule_id` `ENTERPRISE-FOREIGN-HOOK-BLOCKED`, so a
+dashboard can count foreign-hook blocks apart from rule-pack blocks.
 Scan-finding and scan-verdict rows do not carry the account yet
 ([#921](https://github.com/cisco-ai-defense/defenseclaw/issues/921)); join
 them to the hook decision on `evaluation_id`.
@@ -134,10 +140,58 @@ The MDM wrapper scripts print the same document.
 | `coverage_complete` | The core services are ready (definition per OS below) |
 | `security_complete` | Everything `coverage_complete` needs, plus the extra conditions below |
 | `machine_policy.<connector>` | `ownership`, `lock`, `effective_lock`, `owned_entries`, `foreign_entries`, and any `higher_precedence` sources or `conflicts` |
-| `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table) |
+| `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table); on Windows standalone also `accounts`: each enrolled account (`account`, `sid`) with each connector's state from the guardian's last reconcile (`enrolled`, `pending` or `failed`), which status and verify also print one line per account |
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
 | `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
+
+A healthy `status` from a Linux host, trimmed to two of its eleven
+`services` entries and two of its `machine_policy` connectors:
+
+```json title="enterprise linux status --json (healthy, trimmed)"
+{
+  "schema_version": 2,
+  "ok": true,
+  "action": "status",
+  "profile": "standalone",
+  "platform": "linux",
+  "installed_version": "1.0.23",
+  "installed": true,
+  "transaction_pending": false,
+  "services": [
+    { "name": "defenseclaw-gateway.service", "kind": "gateway", "state": "active/running", "start_mode": "enabled", "pid": 422027, "required": true },
+    { "name": "defenseclaw-hook-guardian.service", "kind": "guardian", "state": "active/running", "start_mode": "enabled", "pid": 422080, "required": true }
+  ],
+  "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
+  "inspection": { "local": "active", "ai_defense": "disabled" },
+  "machine_policy": {
+    "claudecode": { "ownership": "merge", "lock": "enforce", "effective_lock": "enforce", "owned_entries": 28, "foreign_entries": 0 },
+    "copilot": { "ownership": "merge", "owned_entries": 14, "foreign_entries": 0 }
+  },
+  "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
+  "coverage_complete": true,
+  "security_complete": true,
+  "errors": [],
+  "exit_code": 0
+}
+```
+
+A failed run sets `ok` to `false` and names each problem in `errors[]`. This
+`verify` ran without root, so it checked nothing and exited `1`:
+
+```json title="enterprise linux verify --json (failed, trimmed)"
+{
+  "ok": false,
+  "action": "verify",
+  "installed": false,
+  "coverage_complete": false,
+  "security_complete": false,
+  "errors": [
+    { "code": "not_root", "message": "run this command as root (sudo or the MDM agent)" }
+  ],
+  "exit_code": 1
+}
+```
 
 The two summary fields are computed differently on each OS:
 
@@ -155,8 +209,11 @@ The two summary fields are computed differently on each OS:
   always `0`.
 - **Inspection.** On Windows, `inspection.ai_defense` is `ok` when AI Defense
   is enabled in the config and the gateway is ready. It does not test the key
-  or the network. On Linux and macOS the lifecycle reads both fields from the
-  gateway's `/health`: `local` is `active`, `disabled` or `unknown`, and
+  or the network. `inspection.local` is `active` when the gateway is ready,
+  `unknown` while it is not (for example while its service is stopped), and
+  `disabled` when no deployment is installed. On Linux and macOS the
+  lifecycle reads both fields from the gateway's `/health`: `local` is
+  `active`, `disabled` or `unknown`, and
   `ai_defense` is `disabled`, `ok`, `unavailable:<code>` or `unknown` (the
   gateway did not answer). The gateway's own
   `/health` guardrail detail carries `ai_defense_available` when AI Defense
@@ -188,27 +245,27 @@ returns to `false`.
 ## Machine policy status
 
 *Machine policy* is the vendor policy file (Codex requirements, Claude Code
-managed settings, Cursor enterprise hooks, Copilot `policy.d`) where the
+managed settings, Cursor enterprise hooks, Copilot `policy.d`, OpenCode's
+managed config) where the
 lifecycle places DefenseClaw's hooks for the connectors that support it. See
 [Machine policy](/docs/enterprise/machine-policy). The `machine_policy` block of
 the result summarizes it. The `enterprise policy` commands show each
 connector's route, lock, and coverage in detail. They never write.
 
-On this release, set `DEFENSECLAW_CONFIG` to the managed config path when you
-run these commands. Without it they read the calling user's
-`~/.defenseclaw/config.yaml` and refuse.
+Run them as root on Linux and macOS, or from an elevated prompt on Windows.
+They read the managed deployment's config themselves and need no
+environment variables.
 
 ```bash title="Linux"
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
 ```
 
 ```bash title="macOS"
-sudo DEFENSECLAW_CONFIG=/opt/cisco/defenseclaw/etc/config.yaml /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
 ```
 
 ```powershell title="Windows (elevated PowerShell)"
-$env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
 ```
 
@@ -219,18 +276,25 @@ $env:DEFENSECLAW_CONFIG = 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml'
 - `policy verify --live` runs the real client as a user and proves that it
   loads DefenseClaw's hooks. It needs `--user`, exactly one `--connector`
   (`codex` or `claudecode`), and `--agent-binary` with the client's absolute
-  path. The default timeout is 90 seconds (`--timeout`). On Windows, run it
-  from the target user's own session.
+  path. For Codex, pass the native executable, not the npm `codex` launcher
+  (`codex.js` needs `node`, which is not on the probe's minimal `PATH`): for
+  a global npm install it is
+  `node_modules/@openai/codex/node_modules/@openai/codex-<platform>/vendor/<target>/bin/codex`.
+  The default timeout is 90 seconds (`--timeout`). A managed Windows host
+  refuses `--live`: use the static `verify` and confirm with `audit export`
+  (see [Windows: Inspect machine policy](/docs/enterprise/windows#inspect-machine-policy)).
 
 ```bash title="Linux: live check for one user"
-sudo DEFENSECLAW_CONFIG=/etc/defenseclaw/config.yaml /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify \
-  --live --user alice --connector codex --agent-binary /usr/local/bin/codex --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify \
+  --live --user alice --connector codex --agent-binary /usr/local/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex --json
 ```
 
 ## Per-user connector state
 
 Connectors without a machine policy file, such as Devin, Antigravity,
-Hermes, OpenCode, and Amp, are wired into each user's own agent config by the
+Hermes, Amp and Kiro (and OpenCode while its
+[managed plugin](/docs/enterprise/machine-policy#managed-opencode-plugin) is
+not in force), are wired into each user's own agent config by the
 *guardian*. The *enumerator* decides which users to protect.
 
 1. The enumerator runs every 5 minutes on every OS. It writes the target
@@ -333,29 +397,43 @@ The rotation moves every user to the new key before the key takes effect:
    home that is not available yet. The rotation lists these targets in
    `changes` as skipped. The guardian gives them credentials from the new
    key once it can protect them.
-2. **Stage.** The new key is written next to the current one. From then on
-   the gateway accepts the credentials of both keys, and it must prove that
-   it accepts each user's new credentials before any user is moved.
+2. **Stage.** The rotation writes a root-only record of the rotation for the
+   guardian, then the new key next to the current one. The guardian renders
+   from a new key only while that record names it. From then on the gateway
+   accepts the credentials of both keys, and it must prove that it accepts
+   each user's new credentials before any user is moved.
 3. **Move.** The guardian re-renders every user from the new key. A second
    reconcile then re-reads each user's installed files and must find them
-   unchanged.
-4. **Commit.** The new key replaces the current one. The gateway refuses the
-   old key's credentials from then on.
+   unchanged. The rotation counts only reconciles that acted for this
+   rotation and report, for each user, the credential the new key derives
+   for that user.
+4. **Commit.** The new key replaces the current one and the record is
+   removed. The gateway refuses the old key's credentials from then on.
 
-If any step before the commit fails, the rotation removes the new key and
-the guardian moves every user back. The old key is never changed, so each
-user gets back exactly the credentials they had. The command exits `1` with
-`rotation_failed`, which names the step and the users. `rollback_failed`
-beside it means the rollback is not complete yet; its message says whether
-the next lifecycle run finishes it or the guardian re-renders the remaining
-users at its next reconcile, within a minute. If the command is interrupted, the
-next lifecycle action (for example `reconcile`) completes a rotation that had
-already committed or rolls back one that had not, and reports
-`rotation_recovered`. The result names keys only by a prefix of their
+If any step before the commit fails, the rotation turns the record to
+rollback and the guardian moves every user back to the old key while the
+gateway still accepts both keys, so users who had already moved are not
+refused. Then the rotation removes the new key and the record. The
+old key is never changed, so each user gets back exactly the credentials
+they had. The command exits `1` with `rotation_failed`, which names the step
+and the users. `rollback_failed` beside it means the rollback is not
+complete yet; its message says whether the next lifecycle run finishes it
+or the guardian re-renders the remaining users at its next reconcile,
+within a minute.
+
+Pressing Ctrl+C (or sending SIGTERM) rolls the rotation back the same way
+before the command exits, unless the new key has already replaced the old
+one. A second Ctrl+C stops at once and prints the `reconcile` command to
+run. After a rotation that was stopped or killed, the next lifecycle action
+(for example `reconcile`) completes a rotation that had already committed or
+rolls back one that had not, and reports `rotation_recovered`; `uninstall`
+removes the new key too. Until then the gateway accepts the new key for at
+most 30 minutes after the rotation wrote it, and the guardian stops
+rendering from it at the same time, so a stopped rotation never leaves both
+keys accepted for longer. The result names keys only by a prefix of their
 SHA-256. A rotation that committed lists in `changes` the new and the
 previous key, how many targets and users it moved, and the targets it
-skipped. If you interrupt the command, it prints the `reconcile` command to
-run.
+skipped.
 
 What users see:
 
@@ -397,7 +475,7 @@ only when it runs elevated.
 | 100 | Installed |
 | 101 | Upgraded |
 | 102 | Repaired, or a reconcile ran |
-| 110 | Uninstalled |
+| 110 | Uninstalled (Application log only, because uninstall removes the `DefenseClaw` log) |
 | 111 | `ensure` found nothing to change |
 | 112 | `ensure` applied a change |
 | 120 | `status` or `verify` found the deployment unhealthy (warning) |
@@ -449,16 +527,16 @@ To forward records to a SIEM, add `observability.destinations` to the managed
 config that you deploy. Destination kinds include OTLP, Splunk HEC, HTTP
 JSONL, and JSONL files. See [Observability](/docs/observability).
 
-Two limits apply on a managed host:
+Two rules apply on a managed host:
 
-- The lifecycle writes each service's environment itself. The only variables
-  you control are the proxy variables that Linux and macOS derive from
-  `enterprise.network`, and the lifecycle offers no supported way to set the
-  variable that a destination's `token_env`, `bearer_env` or `{env: NAME}`
-  header names. A reference that cannot be resolved fails config validation,
-  so `ensure` refuses the config. Splunk HEC always needs `token_env`. Use
-  destinations that need no credential from the environment, such as a JSONL
-  file that your log agent forwards.
+- **Credentials come from protected storage, not the environment.** The
+  lifecycle writes each service's environment itself, so a destination's
+  `token_env`, `bearer_env` or `{env: NAME}` header cannot be resolved, and
+  `ensure` refuses a config that uses one. Store the credential with
+  `enterprise secret set` and reference it by name: `token_credential` for
+  Splunk HEC, `bearer_credential` for HTTP JSONL, and `{credential: NAME}`
+  for a header. See
+  [Observability credentials](/docs/enterprise/configuration#observability-credentials).
 - The gateway runs in a sandbox. On Linux it can write only inside
   `/var/lib/defenseclaw` and `/var/log/defenseclaw`, so a `jsonl` file
   destination must use a path there. Your log agent can collect the file from

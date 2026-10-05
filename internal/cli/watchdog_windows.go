@@ -143,19 +143,26 @@ func watchdogProcessExecutableMatches(info watchdogPIDInfo) bool {
 	if err := windows.QueryFullProcessImageName(h, 0, &buffer[0], &size); err != nil || size == 0 {
 		return false
 	}
-	return pathidentity.Same(windows.UTF16ToString(buffer[:size]), info.Executable)
+	image := windows.UTF16ToString(buffer[:size])
+	return pathidentity.Same(image, info.Executable) || watchdogImageRenamedAside(image, info.Executable)
 }
 
-const watchdogControlPrefix = `Local\DefenseClaw-Watchdog-`
+// The control event lives in the Global namespace. Local\ is per Windows
+// session, so a watchdog started in a desktop (RDP or console) session was
+// invisible to a `watchdog stop` run from session 0 (SSH, a scheduled task,
+// a deployment agent running the uninstaller): OpenEvent failed with "The
+// system cannot find the file specified" and the stop, and with it the
+// per-user uninstall, failed (SWEEP-17). The random 256-bit name and the
+// private DACL remain the access control. A standard user may create an
+// event (unlike a file mapping) in Global\.
+const (
+	watchdogControlPrefix       = `Global\DefenseClaw-Watchdog-`
+	legacyWatchdogControlPrefix = `Local\DefenseClaw-Watchdog-`
+)
 
 func watchdogCreateControl() (string, <-chan struct{}, func(), error) {
 	capability := make([]byte, 32)
 	if _, err := rand.Read(capability); err != nil {
-		return "", nil, nil, err
-	}
-	name := watchdogControlPrefix + hex.EncodeToString(capability)
-	namePtr, err := windows.UTF16PtrFromString(name)
-	if err != nil {
 		return "", nil, nil, err
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -174,7 +181,7 @@ func watchdogCreateControl() (string, <-chan struct{}, func(), error) {
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}
-	handle, err := windows.CreateEvent(attrs, 1, 0, namePtr)
+	name, handle, err := createWatchdogControlEvent(attrs, hex.EncodeToString(capability))
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -200,11 +207,42 @@ func watchdogCreateControl() (string, <-chan struct{}, func(), error) {
 	return name, triggered, cleanup, nil
 }
 
+// createWatchdogControlEvent creates the named control event in Global\,
+// and in Local\ only where a policy denies the Global namespace.
+func createWatchdogControlEvent(attrs *windows.SecurityAttributes, capability string) (string, windows.Handle, error) {
+	var lastErr error
+	for _, prefix := range []string{watchdogControlPrefix, legacyWatchdogControlPrefix} {
+		name := prefix + capability
+		namePtr, err := windows.UTF16PtrFromString(name)
+		if err != nil {
+			return "", 0, err
+		}
+		handle, err := windows.CreateEvent(attrs, 1, 0, namePtr)
+		if err == nil {
+			return name, handle, nil
+		}
+		if handle != 0 {
+			// ERROR_ALREADY_EXISTS: never adopt an event someone else made.
+			_ = windows.CloseHandle(handle)
+		}
+		lastErr = err
+		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			break
+		}
+	}
+	return "", 0, lastErr
+}
+
 func validWatchdogControlName(name string) bool {
-	if !strings.HasPrefix(name, watchdogControlPrefix) {
+	var capability string
+	switch {
+	case strings.HasPrefix(name, watchdogControlPrefix):
+		capability = strings.TrimPrefix(name, watchdogControlPrefix)
+	case strings.HasPrefix(name, legacyWatchdogControlPrefix):
+		capability = strings.TrimPrefix(name, legacyWatchdogControlPrefix)
+	default:
 		return false
 	}
-	capability := strings.TrimPrefix(name, watchdogControlPrefix)
 	if len(capability) != 64 {
 		return false
 	}
@@ -226,6 +264,14 @@ func watchdogTerminate(info watchdogPIDInfo, proc *os.Process) error {
 		return err
 	}
 	handle, err := windows.OpenEvent(windows.EVENT_MODIFY_STATE, false, namePtr)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		// The event is not visible from here: a watchdog started before the
+		// Global\ control, in another Windows session (its Local\ name is
+		// per session), or one already closing its control. The caller has
+		// verified the process identity and proc holds that process's handle,
+		// so stop it the way watchdogs without a control channel are stopped.
+		return proc.Kill()
+	}
 	if err != nil {
 		return err
 	}

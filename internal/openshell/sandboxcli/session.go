@@ -105,6 +105,10 @@ type session struct {
 	// stopped a sandbox it had found running.
 	interrupted bool
 	undoStopped bool
+	// unmasked are the files that look like secrets the session left in
+	// the project and the sandbox does not mask: its next start refuses
+	// while they stay there (the review's UnmaskedSecrets).
+	unmasked []string
 	// pulled is the result of the pull a copy-mode session's end took, and
 	// handedOver is set once nothing of it is left to bring back: finish
 	// records both for a sandbox it stops (markStoppedCopy).
@@ -359,7 +363,7 @@ func (s *session) onActivity(ctx context.Context, ev sandboxapi.ActivityEvent) {
 		s.onUnblock(ev.Host)
 	case sandboxapi.ActivityEgressLargeUpload:
 		s.largeUploadNotice(ev)
-	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookFailed:
+	case sandboxapi.ActivityToolBlocked, sandboxapi.ActivityToolAsked, sandboxapi.ActivityHookBlocked, sandboxapi.ActivityHookFailed:
 		// A hook of the session reached DefenseClaw.
 		s.sawHooks.Store(true)
 	case sandboxapi.ActivityFinding:
@@ -790,6 +794,12 @@ func (s *session) end(ctx context.Context) error {
 		a.note(what + ": `" + CommandName + " review " + s.sb.Name + "`, `" + CommandName + " undo " + s.sb.Name + "`")
 		return s.finish(ctx, false)
 	}
+	if rev != nil && len(rev.UnmaskedSecrets) > 0 {
+		s.unmasked = rev.UnmaskedSecrets
+		a.warn(unmaskedText(s.unmasked) + ", and " + s.sb.Name + " does not mask " + itThem(s.unmasked) +
+			" (its masks are fixed when it is created): keeping " + itThem(s.unmasked) + " in the project means " + s.sb.Name +
+			" cannot be resumed → undo the session, or move " + itThem(s.unmasked) + " out of the project")
+	}
 	decision, accepted := s.onExit(changed)
 	for decision == "d" {
 		diff, err := s.api.Review(ctx, s.sb.Name, sandboxapi.ReviewRequest{Diff: true})
@@ -815,7 +825,7 @@ func (s *session) end(ctx context.Context) error {
 			a.printUnrestored(res.Result.Unrestored())
 		}
 		// The folder is back at its undo point; undo stopped the sandbox.
-		s.keepSnapshot = false
+		s.keepSnapshot, s.unmasked = false, nil
 		s.undoStopped = wasRunning && !s.started
 		return s.finish(ctx, true)
 	case decision == "i":
@@ -977,6 +987,11 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	if s.headless {
 		next += " --prompt TEXT"
 	}
+	if len(s.unmasked) > 0 {
+		// connect refuses while they are in the project.
+		next = "to resume, first move " + strings.Join(shownFiles(s.unmasked), ", ") + " out of the project, then: " +
+			strings.TrimPrefix(next, "resume: ")
+	}
 	kept := "Sandbox kept (stopped)"
 	if s.undoStopped {
 		kept = "Sandbox " + name + " is stopped now (undo stops it) and kept"
@@ -987,6 +1002,31 @@ func (s *session) finish(ctx context.Context, stopped bool) error {
 	a.note(kept + " → " + next + "   delete: " + CommandName + " delete " + name)
 	s.continueHint()
 	return nil
+}
+
+// shownFiles names at most five files, then how many more there are.
+func shownFiles(files []string) []string {
+	if len(files) <= 5 {
+		return files
+	}
+	return append(slices.Clip(files[:5]), fmt.Sprintf("and %d more", len(files)-5))
+}
+
+// unmaskedText is "blk2.txt looks like a secret".
+func unmaskedText(files []string) string {
+	verb := " looks like a secret"
+	if len(files) > 1 {
+		verb = " look like secrets"
+	}
+	return strings.Join(shownFiles(files), ", ") + verb
+}
+
+// itThem is "it" for one file, else "them".
+func itThem(files []string) string {
+	if len(files) == 1 {
+		return "it"
+	}
+	return "them"
 }
 
 // continueArgs are the harness arguments that continue its latest
@@ -1084,7 +1124,7 @@ func (s *session) settled(ctx context.Context) (*sandboxapi.Sandbox, error) {
 		same := next.Egress.Destinations == after.Egress.Destinations && next.Egress.Blocked == after.Egress.Blocked &&
 			next.Egress.BlockedRequests == after.Egress.BlockedRequests &&
 			next.Hooks.ToolCalls == after.Hooks.ToolCalls && next.Hooks.ToolBlocked == after.Hooks.ToolBlocked &&
-			next.Hooks.HookFailed == after.Hooks.HookFailed
+			next.Hooks.PromptBlocked == after.Hooks.PromptBlocked && next.Hooks.HookFailed == after.Hooks.HookFailed
 		after = next
 		if same {
 			break
@@ -1156,6 +1196,9 @@ func (s *session) summaryLine(after *sandboxapi.Sandbox, rev *sandboxapi.ReviewR
 		tools += fmt.Sprintf(" (%d asked)", asked)
 	}
 	parts = append(parts, tools)
+	if prompts := after.Hooks.PromptBlocked - hooksBefore.PromptBlocked; prompts > 0 {
+		parts = append(parts, plural(prompts, "prompt", "prompts")+" blocked")
+	}
 	// A hook call DefenseClaw answered with an error failed closed: the
 	// harness's action was blocked without a verdict.
 	if failed := after.Hooks.HookFailed - hooksBefore.HookFailed; failed > 0 {
@@ -1205,41 +1248,20 @@ func (s *session) startedBefore(daemonStarted time.Time) bool {
 // blockedReason is a blocked tool call's reason as the summary names it:
 // the deciding rule's title and ID ("E2E sandbox marker command
 // (E2E-SANDBOX-MARKER)"), taken from the reason DefenseClaw gave the
-// harness ("Blocked by DefenseClaw rule E2E-SANDBOX-MARKER: E2E sandbox
-// marker command. Try another approach…"), or the reason cut short.
+// harness ("DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER:
+// E2E sandbox marker command). Do not retry it in another form."), or the
+// reason cut short.
 func blockedReason(reason string) string {
-	r := strings.TrimSpace(reason)
-	for _, verb := range []string{"Blocked by ", "Held for approval by ", "Flagged by "} {
-		rest, ok := strings.CutPrefix(r, verb+"DefenseClaw rule ")
-		if !ok {
-			if strings.HasPrefix(r, verb+"DefenseClaw policy.") {
-				return "DefenseClaw policy"
-			}
-			continue
-		}
-		end := len(rest)
-		for _, sep := range []string{":", " (", ". "} {
-			if i := strings.Index(rest, sep); i >= 0 && i < end {
-				end = i
-			}
-		}
-		id := strings.TrimSuffix(rest[:end], ".")
-		title := ""
-		if strings.HasPrefix(rest[end:], ":") {
-			title = strings.TrimSpace(rest[end+1:])
-			for _, sep := range []string{" (also ", ". "} {
-				if i := strings.Index(title, sep); i >= 0 {
-					title = title[:i]
-				}
-			}
-			title = strings.TrimSuffix(title, ".")
-		}
-		if title == "" {
-			return truncate(id, 60)
-		}
-		return truncate(title, 60) + " (" + id + ")"
+	id, title, ok := sandboxapi.VerdictRule(reason)
+	switch {
+	case !ok:
+		return truncate(strings.TrimSpace(reason), 60)
+	case id == "":
+		return "DefenseClaw policy"
+	case title == "":
+		return truncate(id, 60)
 	}
-	return truncate(r, 60)
+	return truncate(title, 60) + " (" + id + ")"
 }
 
 // headMoved describes what a session did to HEAD: "switched main → fix",

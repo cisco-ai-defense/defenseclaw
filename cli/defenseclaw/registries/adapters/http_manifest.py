@@ -46,5 +46,5 @@ def fetch_http(
         allow_private=allow_private,
         resolver=resolver,
     )
-    manifest = parse_manifest(raw)
+    manifest = parse_manifest(raw, origin=url)
     return manifest, raw

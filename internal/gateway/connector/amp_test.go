@@ -650,3 +650,27 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+// GAP-1082: a built-in Amp mode (smart, rush, medium) is a setting of Amp,
+// not an agent, so the plugin keeps agent_name "amp" and reports the mode
+// in agent_mode; naming the agent after the mode set gen_ai.agent.name to
+// "medium" and hid Amp from every view grouped by agent name.
+func TestAMPPluginKeepsAgentNameAmpForBuiltInModes(t *testing.T) {
+	content, err := hookFS.ReadFile("hooks/amp-plugin.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	start := strings.Index(text, "const mode = stringID(definition.mode)")
+	if start < 0 {
+		t.Fatal("amp plugin no longer reads the built-in mode")
+	}
+	branch := text[start:]
+	branch = branch[:strings.Index(branch, "agents.set(threadID, facts)")]
+	if !strings.Contains(branch, `agent_name: "amp",`) || strings.Contains(branch, "agent_name: mode") {
+		t.Fatalf("built-in mode branch must name the agent amp:\n%s", branch)
+	}
+	if !strings.Contains(branch, "agent_mode: mode") {
+		t.Fatalf("built-in mode branch must keep the mode in agent_mode:\n%s", branch)
+	}
+}

@@ -19,7 +19,7 @@ imports an existing Setup install (see
 [Moving from the 0.8.x Setup package](#moving-from-the-08x-setup-package)). Administrator
 deployments use the separate [enterprise deployment](/docs/enterprise): the
 standalone [enterprise Setup](/docs/enterprise/windows) or the
-[Cisco Secure Client profile](/docs/setup/enterprise-deployment#windows-system-service-layout).
+[Cisco Secure Client profile](/docs/enterprise/secure-client#windows-system-service-layout).
 
 ## System requirements
 
@@ -47,24 +47,34 @@ Docker.
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-To choose options, run the script block with parameters:
+To choose options, download the script first and run it with parameters:
 
 ```powershell
-& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
+$release = 'https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download'
+$installer = irm "$release/install.ps1"
+& ([scriptblock]::Create($installer)) -Connector codex -Quickstart
 ```
 
 | Parameter | What it does |
 | --- | --- |
 | `-Yes` | Do not prompt |
-| `-Version X.Y.Z` | Install a specific release |
+| `-Version X.Y.Z` | Install a specific release (runs that release's installer) |
 | `-Local DIR` | Take every release file from a directory instead of GitHub |
 | `-Rollback` | Restore the install that the last upgrade replaced |
 | `-Connector NAME` | First install only: the agent to guard |
-| `-Quickstart` | First install only: run `defenseclaw quickstart` afterwards |
+| `-NoOpenclaw` | First install only: same as `-Connector none`, kept for older scripts |
+| `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet |
+| `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `-Quickstart`) |
 | `-NoPersistPath` | Do not add `%USERPROFILE%\.local\bin` to your user `PATH` |
+| `-CosignPath FILE` | The `cosign` to check the release signature with (default: `cosign` on `PATH`) |
+| `-Help` | Show the installer's help |
+
+`-Connector` takes `codex`, `claudecode`, `hermes`, `cursor`, `devin`,
+`copilot`, `antigravity`, `opencode`, `amp`, `omnigent`, `kiro`, or `none`.
 
 The installer checks every download against the release's `checksums.txt`
-(and its Sigstore signature when `cosign` 2.0 or later is installed), prepares the new
+(and its Sigstore signature when `cosign` 2.0 or later is on `PATH` or given
+with `-CosignPath`), prepares the new
 version before changing anything, and adds `%USERPROFILE%\.local\bin` to your
 user `PATH`. Open a new terminal afterwards so the `PATH` change applies, then
 check:
@@ -74,75 +84,63 @@ defenseclaw --version
 defenseclaw-gateway --version
 ```
 
+Run as a saved `.ps1` file, the installer exits `0` when it installed, `1`
+when it did not (a previous install is restored), `3` when it installed but a
+connector needs attention, and `4` when it installed but the first-run
+quickstart failed.
+
 ## Configure after installation
 
-For guided configuration:
+For guided configuration, which asks which agents to guard:
 
 ```powershell
 defenseclaw init
 ```
 
-For explicit supported connectors:
+For a zero-prompt setup of one agent:
+
+```powershell
+defenseclaw quickstart --connector codex
+```
+
+To add one agent directly, run its setup command, for example:
 
 ```powershell
 defenseclaw setup codex --mode observe
-defenseclaw setup claude-code --mode observe
-defenseclaw setup amp --mode observe
-defenseclaw setup cursor --mode observe
-defenseclaw setup devin --mode observe
-defenseclaw setup hermes --mode observe
-defenseclaw setup omnigent --mode observe
-defenseclaw setup opencode --mode observe
-defenseclaw setup copilot --mode observe
-defenseclaw setup antigravity --mode observe
-defenseclaw setup kiro --mode observe
 ```
 
-One local gateway can host all eleven native lifecycle connectors. Add connectors without removing the
-first:
+Each [connector page](/docs/connectors#platform-support) has the setup command
+for that agent. One local gateway can guard several agents. Running a second
+agent's setup asks whether to add it or switch to it; choose **Add** to keep
+the first.
+
+To set up several agents in one command, list them with `-c` (repeatable).
+The list becomes the full set of guarded agents, so include the ones you
+already have:
 
 ```powershell
-defenseclaw setup `
-  --connector codex `
-  --connector claudecode `
-  --connector amp `
-  --connector cursor `
-  --connector devin `
-  --connector hermes `
-  --connector omnigent `
-  --connector opencode `
-  --connector copilot `
-  --connector antigravity `
-  --connector kiro `
-  --mode observe `
-  --restart `
-  --yes
+defenseclaw setup -c codex -c claudecode -c cursor --mode observe --yes
 ```
 
-Setup records validated `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`,
-`OMNIGENT_CONFIG_HOME`, and `OPENCODE_CONFIG_DIR` values when they are used,
-plus `HERMES_HOME` when Hermes is selected. Antigravity uses the
-`%USERPROFILE%\.gemini\config` home. A predecessor custom path is retained only as
-internal custody long enough to restore its exact file and migrate the managed
-registration to the official path. Setup writes only
-`%USERPROFILE%\.gemini\config\hooks.json` and records that home as its own
-ownership boundary for repair, rollback, and teardown.
-Cursor publishes no configuration-home
-environment variable, so Setup records its exact configuration home
-internally. Devin setup records `%APPDATA%\devin` and the exact admitted CLI
-path for lifecycle custody. Repair and upgrade preserve all other
-recorded homes instead of following later profile or environment drift. The transaction retains both the
-current and previous recorded Hermes home until reconciliation, rollback, or
-teardown has finished, so an environment change cannot strand an owned
-`config.yaml` registration. Restart OpenCode after lifecycle changes so the running
-client loads the reconciled plugin state. The data root is the current profile's
-`.defenseclaw` unless `DEFENSECLAW_HOME` is set; see
-[Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
+The Windows connector names are `claudecode`, `codex`, `amp`, `cursor`,
+`devin`, `hermes`, `omnigent`, `opencode`, `copilot`, `antigravity`, and
+`kiro`. Instead of `-c`, `--detected` picks the agents installed on this
+computer and `--all` picks every supported one. To add newly installed agents
+without changing the others, run `defenseclaw setup --add-detected --yes`.
 
-Amp has no connector-home override: its system plugin uses
-`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. Fully exit and relaunch Amp
-after setup changes; headless execute mode must use `--plugin-ready-timeout 30`
-so the policy plugin is ready before the turn begins.
+Setup honors the agents' own home-folder variables (`CODEX_HOME`,
+`CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OMNIGENT_CONFIG_HOME`,
+`OPENCODE_CONFIG_DIR`, and `HERMES_HOME`) and remembers the folder it set up.
+Repair, upgrade, and uninstall use that remembered folder, even if the
+variable changes later; to move an agent's home, run its setup again. The data
+root is the current profile's `.defenseclaw` unless `DEFENSECLAW_HOME` is set;
+see [Supported path overrides](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
+Restart OpenCode after setup changes so it loads the updated plugin.
+
+Amp's plugin is always
+`%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. Fully exit and relaunch
+Amp after setup changes. For `amp -x`, add `--plugin-ready-timeout 30` so the
+plugin is loaded before the turn starts.
 
 ## Startup behavior
 
@@ -170,6 +168,11 @@ To undo the last upgrade:
 defenseclaw rollback
 ```
 
+In an SSH session there is no desktop to show that window, so
+`defenseclaw upgrade` and `defenseclaw rollback` change nothing, exit 1 and
+print the `powershell -File ... install.ps1` command that runs the installer
+in the same terminal, where it shows the result and sets the exit code.
+
 See [Upgrade DefenseClaw](/docs/get-started/upgrade) for every option.
 
 When an administrator sets the `DisableSelfUpdate` policy (a nonzero DWORD
@@ -192,17 +195,18 @@ keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the
 old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`.
 Connector hooks are rewritten to the new paths when the gateway starts.
 
-You do not need to run the old Setup to move. The published 0.8.x
-`DefenseClawSetup-x64.exe` files are not Authenticode signed, so their
-`/verify` exits `1` with `release setup lacks the required Cisco RFC3161
-Authenticode identity`. That is their signing state, not a sign of
-tampering: authenticate such a file only by matching its SHA-256
+`defenseclaw rollback` cannot bring the Setup package back; it refuses and
+changes nothing. To go back to it by hand, run `defenseclaw uninstall`, then
+download `DefenseClawSetup-x64.exe` from the release you had and run it in
+your desktop session. Your data from before the upgrade is in
+`%USERPROFILE%\.defenseclaw\previous`.
+
+You do not need the old Setup to move. To check an old
+`DefenseClawSetup-x64.exe` file, compare its SHA-256
 (`Get-FileHash -Algorithm SHA256`) with its entry in that release's
-`checksums.txt` after verifying the Sigstore signature of `checksums.txt`.
-A Setup built from the current source checks its embedded payload and
-reports an unsigned build as unsigned, with its SHA-256 for that comparison;
-its `/verify` fails only when the payload no longer matches its manifest or
-the file's signature does not match the signing state the manifest records.
+`checksums.txt`, after verifying the Sigstore signature of `checksums.txt`.
+The 0.8.x Setup files are not Authenticode-signed, so their own `/verify`
+check always fails; that does not mean the file was changed.
 
 ## Repair
 
@@ -220,5 +224,5 @@ defenseclaw uninstall --all --binaries --yes   # remove everything, including %U
 For a machine-wide deployment managed by Intune or another MDM, see
 [enterprise deployment](/docs/enterprise). The Cisco Secure Client profile is
 described in
-[Enterprise hardening and deployment](/docs/setup/enterprise-deployment).
+[Secure Client managed deployment](/docs/enterprise/secure-client).
 

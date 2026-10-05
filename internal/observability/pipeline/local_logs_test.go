@@ -243,7 +243,7 @@ func TestLocalLogPipelineUsesCustomBucketProfileForLocalProjection(t *testing.T)
 	}
 }
 
-func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
+func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 	source := &config.ObservabilityV8Source{Destinations: []config.ObservabilityV8DestinationSource{
 		{Name: "remote-a", Kind: config.ObservabilityV8DestinationConsole},
 		{Name: "remote-b", Kind: config.ObservabilityV8DestinationConsole},
@@ -301,18 +301,30 @@ func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
 		if strings.Contains(err.Error(), "bearer-value") {
 			t.Fatalf("write failure leaked persistence diagnostics: %v", err)
 		}
-		if outcome.LocalPersisted() || len(outcome.OptionalWork()) != 0 || len(appender.snapshot()) != 1 {
-			t.Fatalf("write failure leaked work: %+v calls:%d", outcome, len(appender.snapshot()))
+		// GAP-1536: a failed local write (disk full) still hands back the
+		// remote projections so the record is exported while SQLite is down.
+		if outcome.LocalPersisted() || len(outcome.OptionalWork()) != 2 || len(appender.snapshot()) != 1 {
+			t.Fatalf("write failure outcome: %+v calls:%d", outcome, len(appender.snapshot()))
+		}
+		local, localErr := pipeline.ProcessLocalOnly(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
+			return buildClassifiedLog(test, admission, "write-failure-local-only")
+		})
+		assertPipelineError(t, localErr, ErrorLocalWrite)
+		if len(local.OptionalWork()) != 0 {
+			t.Fatalf("local-only write failure produced remote work: %+v", local)
 		}
 	})
 
 	t.Run("cancel during write", func(t *testing.T) {
 		pipeline, appender := mustPipeline(t, source, mustEngine(t))
 		appender.err = context.Canceled
-		_, err := pipeline.Process(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
+		outcome, err := pipeline.Process(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
 			return buildClassifiedLog(test, admission, "cancelled-write")
 		})
 		assertPipelineError(t, err, ErrorLocalWrite)
+		if len(outcome.OptionalWork()) != 0 {
+			t.Fatalf("cancelled write produced remote work: %+v", outcome)
+		}
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("mid-write cancellation identity was lost: %v", err)
 		}

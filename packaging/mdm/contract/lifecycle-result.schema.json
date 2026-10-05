@@ -59,7 +59,24 @@
         "targets": { "type": "integer", "minimum": 0 },
         "pending": { "type": "integer", "minimum": 0 },
         "failed": { "type": "integer", "minimum": 0 },
-        "exempt": { "type": "integer", "minimum": 0 }
+        "exempt": { "type": "integer", "minimum": 0 },
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["account", "connectors"],
+            "properties": {
+              "account": { "type": "string" },
+              "sid": { "type": "string" },
+              "reason": { "type": "string", "description": "Why a connector of this account is pending or failed, and what happens next." },
+              "connectors": {
+                "type": "object",
+                "additionalProperties": { "enum": ["enrolled", "pending", "failed"] }
+              }
+            }
+          }
+        }
       }
     },
     "coverage_complete": { "type": "boolean" },

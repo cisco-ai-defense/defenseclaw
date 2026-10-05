@@ -284,8 +284,24 @@ observability:
     observability = yaml.safe_load(prepared.candidate)["observability"]
     assert observability["buckets"] == {}
     assert observability["destinations"] == []
-    assert "buckets:\n    {}" in prepared.candidate.decode()
-    assert "destinations:\n    []" in prepared.candidate.decode()
+    assert "  buckets: {}\n" in prepared.candidate.decode()
+    assert "  destinations: []\n" in prepared.candidate.decode()
+
+
+def test_deleting_last_item_of_indentless_block_list_stays_valid_yaml() -> None:
+    # PyYAML's safe_dump (the TUI config editor save) writes lists at their
+    # key's indent; deleting the last destination crashed with invalid_yaml
+    # (GAP-2194).
+    source = """config_version: 8
+observability:
+  destinations:
+  - name: only
+    kind: console
+  buckets: {}
+"""
+    prepared = prepare_v8_yaml_write(source, [V8YAMLMutation.delete(("observability", "destinations", 0))])
+
+    assert prepared.candidate.decode() == "config_version: 8\nobservability:\n  destinations: []\n  buckets: {}\n"
 
 
 def test_destination_append_and_delete_preserve_other_item_comments() -> None:
@@ -400,6 +416,39 @@ def test_prepared_write_is_deterministic_and_repr_is_content_safe() -> None:
     assert first.candidate_sha256 == hashlib.sha256(first.candidate).hexdigest()
     assert "do-not-print" not in repr(first)
     assert "30" not in repr(mutation)
+
+
+def test_first_destination_under_empty_flow_mapping_is_written_in_block_style() -> None:
+    # GAP-1652: a fresh init writes "observability: {}"; the first destination
+    # must not become one long flow-style line.
+    source = "config_version: 8\nobservability: {}\nafter: kept\n"
+    destination = {
+        "name": "galileo",
+        "kind": "otlp",
+        "headers": {"Galileo-API-Key": {"env": "GALILEO_API_KEY"}, "project": "p"},
+    }
+    prepared = prepare_v8_yaml_write(
+        source,
+        [V8YAMLMutation.set(("observability", "destinations", 0), destination)],
+    )
+    candidate = prepared.candidate.decode()
+
+    assert candidate.startswith("config_version: 8\nobservability:\n  destinations:\n    - name: galileo\n")
+    assert "{" not in candidate.split("after:")[0].replace("{env: GALILEO_API_KEY}", "")
+    assert max(len(line) for line in candidate.splitlines()) < 80
+    assert candidate.endswith("after: kept\n")
+    assert yaml.safe_load(candidate)["observability"]["destinations"] == [destination]
+
+
+def test_empty_flow_mapping_with_trailing_comment_keeps_flow_style() -> None:
+    source = "config_version: 8\nobservability: {} # operator note\n"
+    prepared = prepare_v8_yaml_write(
+        source,
+        [V8YAMLMutation.set(("observability", "destinations", 0), {"name": "c", "kind": "console"})],
+    )
+    candidate = prepared.candidate.decode()
+    assert "# operator note" in candidate
+    assert yaml.safe_load(candidate)["observability"]["destinations"] == [{"name": "c", "kind": "console"}]
 
 
 def test_sequence_insertion_must_be_contiguous() -> None:

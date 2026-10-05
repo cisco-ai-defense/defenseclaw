@@ -1,5 +1,5 @@
 ---
-title: Deploy with Configuration Manager
+title: Configuration Manager
 description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile on Windows with a Microsoft Configuration Manager application and compliance settings.
 keywords:
   - DefenseClaw Configuration Manager
@@ -57,10 +57,10 @@ location. Despite its name, the content does not depend on Intune:
 ```powershell
 ./packaging/mdm/intune/windows/New-DefenseClawIntunePackage.ps1 `
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
-  -Sha256 <SHA-256 from the cosign-verified checksums.txt> `
+  -Sha256 '<SHA-256 from the cosign-verified checksums.txt>' `
   -ConfigPath .\config.yaml `
-  -OutputDirectory \\server\sources\DefenseClaw\1.4.0 `
-  -ProductVersion 1.4.0
+  -OutputDirectory \\server\sources\DefenseClaw\1.0.0 `
+  -ProductVersion 1.0.0
 ```
 
 The `content` folder holds:
@@ -93,7 +93,7 @@ information**, and add a **Script Installer** deployment type
 
 | Page | Setting | Value |
 | --- | --- | --- |
-| Content | **Content location** | The `content` folder, such as `\\server\sources\DefenseClaw\1.4.0\content` |
+| Content | **Content location** | The `content` folder, such as `\\server\sources\DefenseClaw\<version>\content` |
 | | **Installation program** | `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\Install-DefenseClawIntune.ps1` |
 | | **Uninstall program** | `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` |
 | | **Run installation and uninstall program as 32-bit process on 64-bit clients** | Cleared |
@@ -102,7 +102,7 @@ information**, and add a **Script Installer** deployment type
 | | **Key** | `SOFTWARE\Cisco\DefenseClaw\Enterprise` |
 | | **Value** | `ProductVersion` |
 | | **Data Type** | **Version** |
-| | Rule | **This registry setting must satisfy the following rule**: **Greater than or equal to** `1.4.0` |
+| | Rule | **This registry setting must satisfy the following rule**: **Greater than or equal to** `<version>` |
 | | **This registry key is associated with a 32-bit application on 64-bit systems** | Cleared |
 | User Experience | **Installation behavior** | **Install for system** |
 | | **Logon requirement** | **Whether or not a user is logged on** |
@@ -231,8 +231,12 @@ See [Upgrades, rollback and config changes](/docs/enterprise/mdm#upgrades-rollba
 Deploy the application with the **Uninstall** action. The uninstall program,
 `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1`, stops and
 deletes the services, removes DefenseClaw's hooks and machine-policy entries
-while it keeps administrator entries, and removes the Add/Remove Programs
-entry and the registry marker. Remove the configuration baseline deployment
+while it keeps administrator entries, removes the Add/Remove Programs entry
+and the registry marker, and removes the config, the AI Defense key and the
+machine state. To also remove each enrolled account's
+`%USERPROFILE%\.defenseclaw` and per-user binaries, use
+`DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1 PURGE=1` as
+the uninstall program. Remove the configuration baseline deployment
 first, so remediation does not run against a removed deployment.
 
 ## Logs

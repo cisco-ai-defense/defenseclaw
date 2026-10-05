@@ -477,3 +477,40 @@ func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1536: when the correlation ledger cannot be written (disk full), the
+// verdict is still exported (log and metrics), so blocks stay visible
+// remotely while the local audit store is down.
+func TestHookDecisionV8IsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", SessionID: "session-full-disk", ToolName: "Bash",
+		SuppressCorrelationEmit: true, CorrelationUnavailable: true,
+	}
+	resp := agentHookResponse{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action"}
+	api.finalizeAgentHook(t.Context(), "claudecode", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+	eventuallyTrue(t, func() bool {
+		_, requests := capture.snapshot()
+		return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 1 &&
+			hookModelV8MetricPointCount(requests, observability.TelemetryInstrumentDefenseClawConnectorHookInvocations) >= 1
+	})
+}
+
+// GAP-1536: the prompt/tool/response event (Galileo's invoke_agent and
+// execute_tool spans) of a hook whose correlation ledger write failed is
+// still exported; only an exact replay stays unexported.
+func TestHookLLMEventIsExportedWhenCorrelationIsUnavailable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  agentHookRequest
+		want bool
+	}{
+		{"correlated", agentHookRequest{}, true},
+		{"correlation unavailable", agentHookRequest{SuppressCorrelationEmit: true, CorrelationUnavailable: true}, true},
+		{"exact replay", agentHookRequest{SuppressCorrelationEmit: true}, false},
+	} {
+		if got := hookLLMEventExportable(tc.req); got != tc.want {
+			t.Errorf("%s: hookLLMEventExportable = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}

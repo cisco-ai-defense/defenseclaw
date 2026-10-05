@@ -6691,7 +6691,13 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - body.compliance.activity
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields: []
   log:
     event_name: authentication.failed
@@ -10513,10 +10519,22 @@ producer_identity_sets:
   - event_name: legacy.audit.registry.add
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.approve
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.edit
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.reject
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.remove
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.require
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.sync
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.setup.connector.mode
@@ -10680,6 +10698,9 @@ producer_identity_sets:
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.plugin.restore
+    bucket: enforcement.action
+    compatibility_only: true
+  - event_name: legacy.audit.plugin.unblock
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.quarantine
@@ -10860,6 +10881,30 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.warn
     bucket: guardrail.evaluation
     compatibility_only: true
+  - event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
   - event_name: legacy.audit.inspect.tool.alert
     bucket: guardrail.evaluation
     compatibility_only: true
@@ -10870,6 +10915,18 @@ producer_identity_sets:
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.install.allowed
@@ -10915,6 +10972,9 @@ producer_identity_sets:
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.plugin.restore
+    bucket: enforcement.action
+    compatibility_only: true
+  - event_name: legacy.audit.plugin.unblock
     bucket: enforcement.action
     compatibility_only: true
   - event_name: legacy.audit.quarantine
@@ -11024,6 +11084,30 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.warn
     bucket: guardrail.evaluation
     compatibility_only: true
+  - event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
   - event_name: legacy.audit.inspect.tool.alert
     bucket: guardrail.evaluation
     compatibility_only: true
@@ -11034,6 +11118,18 @@ producer_identity_sets:
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.install.allowed
@@ -11269,10 +11365,22 @@ producer_identity_sets:
   - event_name: legacy.audit.registry.add
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.approve
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.edit
     bucket: compliance.activity
     compatibility_only: true
+  - event_name: legacy.audit.registry.reject
+    bucket: compliance.activity
+    compatibility_only: true
   - event_name: legacy.audit.registry.remove
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.require
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.registry.sync
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.setup.connector.mode
@@ -11974,6 +12082,30 @@ producer_identity_sets:
   - event_name: legacy.audit.guardrail.warn
     bucket: guardrail.evaluation
     compatibility_only: true
+  - event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
   - event_name: legacy.audit.inspect.tool.alert
     bucket: guardrail.evaluation
     compatibility_only: true
@@ -11984,6 +12116,18 @@ producer_identity_sets:
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+  - event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
   - event_name: legacy.audit.install.allowed
@@ -14060,6 +14204,142 @@ producer_mappings:
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action
+  key: inspect-request-alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-allow
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-block
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-request-confirm
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.request.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-allow
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-block
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-response-confirm
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.response.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
   key: inspect-reveal
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -14145,6 +14425,74 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.inspect.tool.confirm
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-alert
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.alert
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-allow
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.allow
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-block
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.block
+    bucket: guardrail.evaluation
+    compatibility_only: true
+- producer: audit_action
+  key: inspect-tool-response-confirm
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.guardrail_evaluation
+  severity_policy: evaluation
+  mandatory_rules: []
+  companion_rules:
+  - enforcement_when_enforced
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.inspect.tool.response.confirm
     bucket: guardrail.evaluation
     compatibility_only: true
 - producer: audit_action
@@ -14665,6 +15013,25 @@ producer_mappings:
     bucket: enforcement.action
     compatibility_only: true
 - producer: audit_action
+  key: plugin-unblock
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.enforcement_action
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  - enforcement_state_change
+  companion_rules:
+  - asset_lifecycle_on_state_change
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.plugin.unblock
+    bucket: enforcement.action
+    compatibility_only: true
+- producer: audit_action
   key: policy-activate
   source: internal/audit/actions.go
   event_name_policy: context_optional
@@ -14855,6 +15222,86 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.registry.remove
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-sync
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.sync
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-require
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.require
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-approve
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.approve
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: registry-reject
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v1
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.registry.reject
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action

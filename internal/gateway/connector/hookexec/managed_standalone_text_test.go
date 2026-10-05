@@ -4,6 +4,12 @@
 package hookexec
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -75,5 +81,56 @@ func TestHookEventSubject(t *testing.T) {
 		if got := hookEventSubject(event); got != want {
 			t.Fatalf("hookEventSubject(%q) = %q, want %q", event, got, want)
 		}
+	}
+}
+
+type notRunningRT struct{}
+
+func (notRunningRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("%w: %w (state=1 pid=0)", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+}
+
+// A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
+// service is stopped fails closed with the plain text and says the service
+// is not running, in the agent's denial and in hook-failures.jsonl
+// (GAP-0013). Secure Client keeps the peer-unverified reason and the
+// generic text.
+func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T) {
+	run := func(explain bool) (int, string, string, string) {
+		home := t.TempDir()
+		token := "managed-test-token"
+		var out, errb bytes.Buffer
+		code := Run(context.Background(), Options{
+			Connector:                 "codex",
+			Event:                     "PreToolUse",
+			HookContractID:            "codex-hooks-v4",
+			APIAddr:                   "127.0.0.1:1",
+			Home:                      home,
+			HookDir:                   filepath.Join(home, "hooks"),
+			FailMode:                  "open",
+			ManagedEnterprise:         true,
+			ExplainUnenrolledAccount:  explain,
+			AuthenticatedManagedToken: &token,
+			Stdin:                     strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
+			Stdout:                    &out,
+			Stderr:                    &errb,
+			HTTPClient:                &http.Client{Transport: notRunningRT{}},
+		})
+		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+		return code, out.String(), errb.String(), string(failures)
+	}
+	code, stdout, stderr, failures := run(true)
+	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
+		"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+		"(" + managedGatewayNotRunningReason + ")"
+	if code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) || !strings.Contains(stdout, mustJSONString(want)) {
+		t.Fatalf("windows standalone: code = %d stdout = %q stderr = %q, want a deny carrying %q", code, stdout, stderr, want)
+	}
+	if !strings.Contains(failures, managedGatewayNotRunningReason) {
+		t.Fatalf("hook-failures.jsonl = %q, want %s", failures, managedGatewayNotRunningReason)
+	}
+	_, stdout, _, failures = run(false)
+	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayPeerUnverifiedReason) {
+		t.Fatalf("secure client: stdout = %q failures = %q, want the unchanged text and reason", stdout, failures)
 	}
 }

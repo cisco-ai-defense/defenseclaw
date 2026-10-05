@@ -64,9 +64,20 @@ var (
 )
 
 const (
-	childPIDRegistrationTimeout = 5 * time.Second
-	childPIDRegistrationPoll    = 5 * time.Millisecond
-	forcedStopWait              = 2 * time.Second
+	// childPIDRegistrationTimeout bounds the wait for a Windows child to
+	// publish its PID record. A first launch of a new binary on a busy host
+	// (antivirus scans it before it runs) took longer than 5 seconds, so an
+	// upgrade rolled back a healthy gateway. Right after an upgrade on a host
+	// running several per-user gateways it took over 60 s, three starts in a
+	// row (GAP-1556), so it matches the 240 s Windows readiness wait. A child
+	// that exits ends the wait at once. Only Windows children register.
+	childPIDRegistrationTimeout = 240 * time.Second
+	// legacyStartIdentityWindow is how far the native start second of a
+	// darwin process may be from the start time recorded just before
+	// cmd.Start, for a PID record written by an older release.
+	legacyStartIdentityWindow = 5 * time.Second
+	childPIDRegistrationPoll  = 5 * time.Millisecond
+	forcedStopWait            = 2 * time.Second
 )
 
 // GracefulStopRequest asks the authenticated gateway control plane to stop the
@@ -80,6 +91,20 @@ type Daemon struct {
 	pidFile string
 	logFile string
 	started pidInfo
+	// progress, when set, is called every startProgressInterval while Start
+	// waits for the child to register its PID (GAP-1858).
+	progress func(elapsed time.Duration, step string)
+}
+
+// startProgressInterval is how often Start reports a slow child PID
+// registration, the same 30 s as the CLI's readiness progress lines.
+var startProgressInterval = 30 * time.Second
+
+// SetStartProgress makes Start call report every 30 s while it waits for the
+// gateway child to register, so an interactive start or restart does not
+// look hung (GAP-1858). nil turns it off.
+func (d *Daemon) SetStartProgress(report func(elapsed time.Duration, step string)) {
+	d.progress = report
 }
 
 func New(dataDir string) *Daemon {
@@ -198,7 +223,10 @@ func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
 	if err != nil || info.PID != pid {
 		return false
 	}
-	return d.verifyProcessForAuthenticatedMigration(info)
+	// A current record whose executable was replaced while it ran has the same
+	// standing: stop and restart may reach it only through the authenticated
+	// control plane.
+	return d.verifyProcessForAuthenticatedMigration(info) || d.verifyReplacedExecutable(info)
 }
 
 // verifyProcess verifies every identity signal present in a PID record. It
@@ -274,10 +302,46 @@ func (d *Daemon) verifyReplacedExecutable(info pidInfo) bool {
 		return false
 	}
 	executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
-	if err != nil || executable != info.Executable+" (deleted)" {
+	if err != nil || (executable != info.Executable+" (deleted)" && !IsRetiredInstallCopy(info.Executable, executable)) {
 		return false
 	}
 	return d.verifyStartIdentity(info)
+}
+
+// RunsReplacedExecutable reports whether this data directory's gateway is
+// alive on a file that was replaced or removed after it started (#1047). It
+// is still this account's gateway; a restart loads the installed binary.
+func (d *Daemon) RunsReplacedExecutable() bool {
+	info, err := d.readPIDInfo()
+	if err != nil || !processExists(info.PID) {
+		return false
+	}
+	return !d.verifyProcess(info) && d.verifyReplacedExecutable(info)
+}
+
+// IsRetiredInstallCopy reports whether live is the copy of the recorded
+// executable that a source install moved into its retirement custody beside
+// it (".defenseclaw-install-custody/retired-<sha256>") while the process ran.
+// The rename keeps the running inode, so Linux shows the custody path rather
+// than " (deleted)"; without this, `make all` over a running gateway lost
+// track of it and the next restart found the port held.
+func IsRetiredInstallCopy(recorded, live string) bool {
+	live = strings.TrimSuffix(live, " (deleted)")
+	custody := filepath.Dir(live)
+	if recorded == "" || filepath.Base(custody) != ".defenseclaw-install-custody" ||
+		filepath.Dir(custody) != filepath.Dir(recorded) {
+		return false
+	}
+	digest, ok := strings.CutPrefix(filepath.Base(live), "retired-")
+	if !ok || len(digest) != 64 {
+		return false
+	}
+	for _, c := range digest {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Daemon) verifyExecutableForAuthenticatedMigration(info pidInfo) bool {
@@ -306,7 +370,7 @@ func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool
 	// origin/main's `ps -o lstart=` token inherited locale and timezone, so
 	// it cannot always be reproduced after upgrade. Its StartTime was captured
 	// immediately before cmd.Start. Bind that launch lower bound to the native
-	// kernel start second within the same five-second registration window.
+	// kernel start second within a five-second window.
 	nativeIdentity, err := darwinProcessStartIdentity(info.PID)
 	if err != nil {
 		return false
@@ -320,7 +384,7 @@ func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool
 		return false
 	}
 	delta := nativeSeconds - info.StartTime
-	return delta >= 0 && delta <= int64(childPIDRegistrationTimeout/time.Second)
+	return delta >= 0 && delta <= int64(legacyStartIdentityWindow/time.Second)
 }
 
 func (d *Daemon) verifyExecutable(info pidInfo) bool {
@@ -495,7 +559,18 @@ func (d *Daemon) Start(args []string) (int, error) {
 	args = stripTokenArgs(args)
 
 	env := d.childEnv(os.Environ())
-	cmd := exec.Command(executable, args...)
+	// The child runs the file this process checked (pinDaemonLaunch) and
+	// keeps the install path as argv[0], which the process identity checks
+	// read.
+	pin, err := pinDaemonLaunch(executable)
+	if err != nil {
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
+	}
+	defer pin.close()
+	cmd := exec.Command(pin.path, args...)
+	cmd.Args[0] = executable
 	cmd.Env = env
 	cmd.Stdin = devNull
 	// Pass *os.File so os/exec dup2's these directly into the child (fd 1/2).
@@ -512,6 +587,13 @@ func (d *Daemon) Start(args []string) (int, error) {
 		devNull.Close()
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: start process: %w", err)
+	}
+	if err := pin.check(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		devNull.Close()
+		_ = logFile.Close()
+		return 0, err
 	}
 
 	pid := cmd.Process.Pid
@@ -615,9 +697,15 @@ func (d *Daemon) waitForChildPIDRegistration(
 	defer deadline.Stop()
 	ticker := time.NewTicker(childPIDRegistrationPoll)
 	defer ticker.Stop()
+	waitStarted := time.Now()
+	nextReport := waitStarted.Add(startProgressInterval)
 
 	var lastErr error
 	for {
+		if d.progress != nil && !time.Now().Before(nextReport) {
+			nextReport = time.Now().Add(startProgressInterval)
+			d.progress(time.Since(waitStarted), "waiting for the gateway process to register")
+		}
 		info, err := d.readPIDInfo()
 		if err == nil {
 			switch {
@@ -820,6 +908,13 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 			d.removePIDFileIfStarted(started)
 			return nil
 		}
+		// On Windows TerminateProcess returns ERROR_ACCESS_DENIED while an
+		// accepted shutdown request is still exiting. The retained original
+		// handle, not that return value, says whether the process is gone.
+		if waitForProcessExit(proc, pid, forcedStopWait) {
+			d.removePIDFileIfStarted(started)
+			return nil
+		}
 		return fmt.Errorf("daemon: send term signal: %w", err)
 	}
 
@@ -919,6 +1014,16 @@ func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 		}
 	}
 	return d.Start(args)
+}
+
+// RecordedExecutable returns the executable path recorded for the running
+// sidecar, or "" when no identity is recorded.
+func (d *Daemon) RecordedExecutable() string {
+	info, err := d.readPIDInfo()
+	if err != nil {
+		return ""
+	}
+	return info.Executable
 }
 
 func (d *Daemon) readPIDInfo() (pidInfo, error) {

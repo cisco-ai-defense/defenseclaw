@@ -59,9 +59,16 @@ func (a *APIServer) emitHookDecisionLogV8(
 	if !severity.Valid || !severity.Present {
 		return
 	}
-	logLevel := severity.LogLevel
-	if logLevel == "" {
-		logLevel = observability.LogLevelInfo
+	// A clean or INFO decision logs at INFO. A finding severity (LOW..CRITICAL)
+	// has no log level, so the record's severity_text follows the security
+	// severity, as scan findings do; forcing INFO hid MEDIUM alerts and
+	// CRITICAL blocks behind severity_text INFO in Loki (GAP-1774).
+	var logLevel observability.Optional[observability.LogLevel]
+	switch {
+	case severity.LogLevel != "":
+		logLevel = observability.Present(severity.LogLevel)
+	case severity.Severity == observability.SeverityInfo:
+		logLevel = observability.Present(observability.LogLevelInfo)
 	}
 	result := "ok"
 	if panicked || env.Result == "panic" {
@@ -119,7 +126,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		}
 		return builder.BuildLogCompatHookDecision(observability.LogCompatHookDecisionInput{
 			Envelope: envelope, Severity: observability.Present(severity.Severity),
-			LogLevel: observability.Present(logLevel), Outcome: hookDecisionV8Outcome(effectiveAction, result),
+			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
 			DefenseClawTurnID:                   hookV8OptionalIdentifier(meta.TurnID),
 			DefenseClawOperationID:              hookV8OptionalIdentifier(meta.OperationID),

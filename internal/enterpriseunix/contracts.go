@@ -13,9 +13,13 @@
 package enterpriseunix
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -65,10 +69,16 @@ var unverifiedVersionPattern = regexp.MustCompile(`agent version "([^"]*)"`)
 // deployment incomplete.
 func (l *lifecycle) describeHookContracts(ctx context.Context) {
 	env, r := l.env, l.result
-	data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20)
-	if err != nil {
-		return
-	}
+	// The guardian state is in DataDir, which the service account can
+	// replace, so a failure the root-only attestation reports is named even
+	// when that state leaves it out or reports it protected. The guardian
+	// writes the ledger, then the state, then the attestation, so a state
+	// read between one reconcile's ledger and the next one's is from the
+	// attestation's reconcile.
+	ledgerPath := env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
+	ledger, _ := readBounded(ledgerPath, 4<<20)
+	attestation, err := env.readAttestation()
+	attested := err == nil && attestation.BoundTo(ledger)
 	var state struct {
 		Results []struct {
 			User      string `json:"user"`
@@ -78,14 +88,19 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 			Error     string `json:"error"`
 		} `json:"results"`
 	}
-	if json.Unmarshal(data, &state) != nil {
-		return
+	if data, err := readBounded(env.P(filepath.Join(env.Layout.DataDir, guardianStateFile)), 4<<20); err == nil {
+		_ = json.Unmarshal(data, &state)
+	}
+	if again, err := readBounded(ledgerPath, 4<<20); err != nil || !bytes.Equal(again, ledger) {
+		attested = false
 	}
 	var unverified, failed, removed, userPaths []string
+	stateFailed := map[string]bool{}
 	for _, result := range state.Results {
 		if result.OK || strings.TrimSpace(result.Error) == "" {
 			continue
 		}
+		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
 		if targetAccountMissingError(result.Error) && l.accountAbsent(ctx, result.User) {
 			removed = append(removed, fmt.Sprintf(
 				"%s for user %s: the account no longer exists (the directory answers \"no such account\"); the enumerator removes this target after %d consecutive definitive misses, one per enumeration cycle",
@@ -109,6 +124,13 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 		unverified = append(unverified, fmt.Sprintf(
 			"%s %s for user %s has no verified DefenseClaw hook contract, so it runs without DefenseClaw hooks; pin a verified agent version or add a verified hook contract",
 			result.Connector, version, result.User))
+	}
+	if attested {
+		for _, target := range attestation.Targets {
+			if target.State == enterprisehooks.CredentialTargetFailed && !stateFailed[target.Key()] {
+				failed = append(failed, fmt.Sprintf("%s is not protected: the guardian's last reconcile failed it, and the guardian state does not say why; see the hook guardian's log", target.Label()))
+			}
+		}
 	}
 	sort.Strings(removed)
 	for _, message := range removed {
@@ -250,7 +272,9 @@ const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 // installed but could not enroll (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
 // account's agent, so it is a warning for that account, verify included; an
-// unreadable record hides which agents they are, so verify fails on it.
+// unreadable record hides which agents they are, so verify fails on it, as
+// on an app or extension surface enterprise.enrollment.unverified_versions:
+// refuse could not refuse.
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
@@ -269,6 +293,10 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		return
 	}
 	for _, agent := range agents {
+		if agent.Refusal == enterprisehooks.RefusalMissing && l.opts.Action == ActionVerify {
+			r.AddError(agent.Code, agent.Message())
+			continue
+		}
 		r.AddWarning(agent.Code, agent.Message())
 	}
 	if len(agents) > 0 {
@@ -308,6 +336,17 @@ func (l *lifecycle) describeGuardianCleanups() {
 		if account == "" {
 			account = strings.TrimSpace(entry.UserHome)
 		}
+		if home := strings.TrimSpace(entry.UserHome); home != "" {
+			if _, err := os.Lstat(env.P(home)); errors.Is(err, os.ErrNotExist) {
+				// A deleted account took its home and the registration with
+				// it; the guardian drops the entry once the directory no
+				// longer knows the account (GAP-1205).
+				r.AddWarning(codeGuardianCleanupPending, fmt.Sprintf(
+					"%s for user %s: the home %s no longer exists (the account was deleted), so no hook registration is left there; the hook guardian drops this entry on its next pass once the account lookup reports it gone",
+					entry.Connector, account, home))
+				continue
+			}
+		}
 		message := fmt.Sprintf("%s for user %s is no longer enrolled, but DefenseClaw's hook registration is still in %s and the gateway refuses its hooks; ",
 			entry.Connector, account, entry.UserHome)
 		if reason := strings.TrimSpace(entry.LastError); reason != "" {
@@ -316,6 +355,49 @@ func (l *lifecycle) describeGuardianCleanups() {
 			message += "the hook guardian removes it as that user once the home is available"
 		}
 		r.AddWarning(codeGuardianCleanupPending, message)
+	}
+}
+
+// codeEnrolledAccountDeleted names an account targets.yaml still enrolls
+// whose home no longer exists: the account was deleted, and its enrollment
+// lasts until the hook enumerator's next pass no longer finds the account.
+// It is a warning: verify and security_complete do not fail on it.
+const codeEnrolledAccountDeleted = "enrolled_account_deleted"
+
+// describeDeletedEnrolledAccounts names each enrolled account whose home is
+// gone. Until the enumerator's next pass drops it, status listed it among
+// the healthy targets with its agents pending and said nothing about the
+// deletion (GAP-1867).
+func (l *lifecycle) describeDeletedEnrolledAccounts() {
+	env, r := l.env, l.result
+	manifest, err := enterprisehooks.LoadManifest(env.P(env.Layout.ManifestPath))
+	if err != nil {
+		return
+	}
+	connectors := map[string][]string{}
+	var accounts []string
+	for _, target := range manifest.Targets {
+		home := strings.TrimSpace(target.UserHome)
+		if home == "" || (target.Enabled != nil && !*target.Enabled) {
+			continue
+		}
+		if _, err := os.Lstat(env.P(home)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		account := cmp.Or(strings.TrimSpace(target.User), home)
+		key := account + " (home " + home + ")"
+		if _, seen := connectors[key]; !seen {
+			accounts = append(accounts, key)
+		}
+		connectors[key] = append(connectors[key], strings.TrimSpace(target.Connector))
+	}
+	sort.Strings(accounts)
+	for _, account := range accounts {
+		names := connectors[account]
+		sort.Strings(names)
+		r.AddWarning(codeEnrolledAccountDeleted, fmt.Sprintf(
+			"user %s was deleted: its home no longer exists, but it is still enrolled for %s until the hook enumerator's next pass drops it (the hook guardian then removes it as well); nothing is left to protect in that home",
+			account, strings.Join(names, ", ")))
 	}
 }
 

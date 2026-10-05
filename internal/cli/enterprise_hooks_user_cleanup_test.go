@@ -24,7 +24,7 @@ const (
 
 func userCleanupPerUser(name string) bool {
 	switch name {
-	case "amp", "antigravity", "copilot", "devin", "hermes", "opencode":
+	case "amp", "antigravity", "copilot", "devin", "hermes", "kiro", "opencode":
 		return true
 	}
 	return false

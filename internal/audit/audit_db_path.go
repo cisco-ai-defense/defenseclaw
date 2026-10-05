@@ -23,6 +23,9 @@ type auditDBPathHooks struct {
 	chmodPath          func(string, os.FileMode) error
 	securePlatformFile func(*os.File, bool) error
 	beforeSQLiteOpen   func(string) error
+	// reopenSidecarForHardening reopens a pinned SQLite sidecar with the
+	// ACL-changing capability.
+	reopenSidecarForHardening func(string, *os.File) (*os.File, error)
 }
 
 func (hooks auditDBPathHooks) withDefaults() auditDBPathHooks {
@@ -35,6 +38,11 @@ func (hooks auditDBPathHooks) withDefaults() auditDBPathHooks {
 	if hooks.securePlatformFile == nil {
 		hooks.securePlatformFile = secureAuditDBPlatformFile
 	}
+	if hooks.reopenSidecarForHardening == nil {
+		hooks.reopenSidecarForHardening = func(path string, pinned *os.File) (*os.File, error) {
+			return reopenPinnedAuditDBLeaf(path, pinned, true)
+		}
+	}
 	return hooks
 }
 
@@ -42,12 +50,15 @@ func (hooks auditDBPathHooks) withDefaults() auditDBPathHooks {
 // SQLite name-based open. validateAfterOpen proves the pathname still names
 // that leaf and re-checks parents and auxiliary files before the pin is closed.
 type preparedAuditDatabasePath struct {
-	path        string
-	pinned      *os.File
-	sidecars    map[string]*os.File
-	securedMode os.FileMode
-	hooks       auditDBPathHooks
-	inMemory    bool
+	path     string
+	pinned   *os.File
+	sidecars map[string]*os.File
+	// retiredSidecars are pins of WAL/SHM files SQLite has since deleted and
+	// recreated. They stay open until the SQL pool closes, like live pins.
+	retiredSidecars []*os.File
+	securedMode     os.FileMode
+	hooks           auditDBPathHooks
+	inMemory        bool
 }
 
 func (prepared *preparedAuditDatabasePath) close() {
@@ -56,6 +67,10 @@ func (prepared *preparedAuditDatabasePath) close() {
 	}
 	closeAuditDBSQLiteSidecars(prepared.sidecars)
 	prepared.sidecars = nil
+	for _, retired := range prepared.retiredSidecars {
+		_ = retired.Close()
+	}
+	prepared.retiredSidecars = nil
 	if prepared.pinned == nil {
 		return
 	}
@@ -294,8 +309,11 @@ var auditDBSQLiteSidecarSuffixes = [...]string{"-wal", "-shm", "-journal"}
 // constructors before SQLite is allowed to recover/reuse their raw pages.
 // It must only run while no SQLite connection for databasePath is live.
 func secureAuditDBSQLiteSidecars(databasePath string, hooks auditDBPathHooks) error {
-	pinned, err := pinAndSecureAuditDBSQLiteSidecars(databasePath, hooks, nil)
+	pinned, retired, err := pinAndSecureAuditDBSQLiteSidecars(databasePath, hooks, nil)
 	closeAuditDBSQLiteSidecars(pinned)
+	for _, file := range retired {
+		_ = file.Close()
+	}
 	return err
 }
 
@@ -313,66 +331,114 @@ func closeAuditDBSQLiteSidecars(sidecars map[string]*os.File) {
 // must retain those descriptors until after the SQL pool closes: POSIX close
 // semantics would otherwise discard SQLite's process-wide locks for the same
 // WAL or SHM inode.
+//
+// SQLite deletes -wal and -shm when the last connection to the database
+// closes (for example a connection dropped after a timed-out startup check)
+// and creates new ones on the next open. A retained pin whose file is no
+// longer linked anywhere is that lifecycle, not a substitution: the pin is
+// retired and the new file gets every check a newly discovered sidecar gets.
+// A retained pin whose file still exists under another name stays a failure.
 func pinAndSecureAuditDBSQLiteSidecars(
 	databasePath string,
 	hooks auditDBPathHooks,
 	retained map[string]*os.File,
-) (map[string]*os.File, error) {
+) (map[string]*os.File, []*os.File, error) {
 	hooks = hooks.withDefaults()
 	if retained == nil {
 		retained = make(map[string]*os.File, len(auditDBSQLiteSidecarSuffixes))
+	}
+	var retired []*os.File
+	retire := func(suffix string) (bool, error) {
+		pinned := retained[suffix]
+		if pinned == nil {
+			return false, nil
+		}
+		deleted, err := auditDBPinnedFileDeleted(pinned)
+		if err != nil {
+			return false, fmt.Errorf("audit: inspect retained SQLite sidecar %s: %w", suffix, err)
+		}
+		if !deleted {
+			return false, nil
+		}
+		retired = append(retired, pinned)
+		delete(retained, suffix)
+		return true, nil
 	}
 	for _, suffix := range auditDBSQLiteSidecarSuffixes {
 		path := databasePath + suffix
 		before, err := os.Lstat(path)
 		if os.IsNotExist(err) {
 			if retained[suffix] != nil {
-				return retained, fmt.Errorf("audit: retained SQLite sidecar %s disappeared during secure open", suffix)
+				if ok, err := retire(suffix); err != nil {
+					return retained, retired, err
+				} else if !ok {
+					return retained, retired, fmt.Errorf("audit: retained SQLite sidecar %s disappeared during secure open", suffix)
+				}
 			}
 			continue
 		}
 		if err != nil {
-			return retained, fmt.Errorf("audit: inspect SQLite sidecar %s: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: inspect SQLite sidecar %s: %w", suffix, err)
 		}
 		if err := validateAuditDBLeaf(path, before); err != nil {
-			return retained, fmt.Errorf("audit: unsafe SQLite sidecar %s: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: unsafe SQLite sidecar %s: %w", suffix, err)
+		}
+		if pinned := retained[suffix]; pinned != nil {
+			pinnedInfo, err := pinned.Stat()
+			if err != nil {
+				return retained, retired, fmt.Errorf("audit: inspect pinned SQLite sidecar %s: %w", suffix, err)
+			}
+			if !os.SameFile(before, pinnedInfo) {
+				if ok, err := retire(suffix); err != nil {
+					return retained, retired, err
+				} else if !ok {
+					return retained, retired, fmt.Errorf("audit: SQLite sidecar %s changed before secure open", suffix)
+				}
+			}
 		}
 		pinned := retained[suffix]
 		if pinned == nil {
 			pinned, err = openAuditDBFileNoFollow(path, false, false)
 			if err != nil {
-				return retained, fmt.Errorf("audit: open SQLite sidecar %s safely: %w", suffix, err)
+				return retained, retired, fmt.Errorf("audit: open SQLite sidecar %s safely: %w", suffix, err)
 			}
 			retained[suffix] = pinned
+			if err := validateAuditDBSidecarLinkCount(pinned); err != nil {
+				return retained, retired, fmt.Errorf("audit: unsafe SQLite sidecar %s: %w", suffix, err)
+			}
 		}
 		pinnedBefore, err := pinned.Stat()
 		if err != nil {
-			return retained, fmt.Errorf("audit: inspect pinned SQLite sidecar %s: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: inspect pinned SQLite sidecar %s: %w", suffix, err)
 		}
 		if !os.SameFile(before, pinnedBefore) {
-			return retained, fmt.Errorf("audit: SQLite sidecar %s changed before secure open", suffix)
+			return retained, retired, fmt.Errorf("audit: SQLite sidecar %s changed before secure open", suffix)
 		}
 		if err := validateAuditDBLeaf(path, pinnedBefore); err != nil {
-			return retained, fmt.Errorf("audit: unsafe pinned SQLite sidecar %s: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: unsafe pinned SQLite sidecar %s: %w", suffix, err)
 		}
 
 		targetMode := tightenedAuditDBFileMode(pinnedBefore.Mode().Perm())
 		if targetMode != pinnedBefore.Mode().Perm() {
 			if err := hooks.chmodFile(pinned, targetMode); err != nil {
-				return retained, fmt.Errorf("audit: secure SQLite sidecar %s permissions: %w", suffix, err)
+				return retained, retired, fmt.Errorf("audit: secure SQLite sidecar %s permissions: %w", suffix, err)
 			}
 		}
 		needsHardening, err := auditDBPlatformSidecarNeedsHardening(pinned)
 		if err != nil {
-			return retained, fmt.Errorf("audit: inspect SQLite sidecar %s platform ACL: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: inspect SQLite sidecar %s platform ACL: %w", suffix, err)
 		}
 		if needsHardening {
 			hardening := pinned
 			closeHardening := false
 			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				hardening, err = reopenPinnedAuditDBLeaf(path, pinned, true)
+				hardening, err = hooks.reopenSidecarForHardening(path, pinned)
 				if err != nil {
-					return retained, fmt.Errorf("audit: reopen SQLite sidecar %s for ACL hardening: %w", suffix, err)
+					if errors.Is(err, os.ErrPermission) && discardIdleAuditDBSidecar(path, suffix, pinned) {
+						delete(retained, suffix)
+						continue
+					}
+					return retained, retired, fmt.Errorf("audit: reopen SQLite sidecar %s for ACL hardening: %w", suffix, err)
 				}
 				closeHardening = true
 			}
@@ -382,10 +448,10 @@ func pinAndSecureAuditDBSQLiteSidecars(
 				closeErr = hardening.Close()
 			}
 			if secureErr != nil {
-				return retained, fmt.Errorf("audit: secure SQLite sidecar %s platform ACL: %w", suffix, secureErr)
+				return retained, retired, fmt.Errorf("audit: secure SQLite sidecar %s platform ACL: %w", suffix, secureErr)
 			}
 			if closeErr != nil {
-				return retained, fmt.Errorf("audit: close SQLite sidecar %s ACL-hardening handle: %w", suffix, closeErr)
+				return retained, retired, fmt.Errorf("audit: close SQLite sidecar %s ACL-hardening handle: %w", suffix, closeErr)
 			}
 			if auditDBPlatformHardeningNeedsCapabilityReopen() {
 				// Match the sidecar-scoped predicate used above so the
@@ -393,34 +459,59 @@ func pinAndSecureAuditDBSQLiteSidecars(
 				// took, even if the sidecar rule ever diverges from
 				// the file rule.
 				if stillNeedsHardening, err := auditDBPlatformSidecarNeedsHardening(pinned); err != nil {
-					return retained, fmt.Errorf("audit: verify SQLite sidecar %s platform ACL: %w", suffix, err)
+					return retained, retired, fmt.Errorf("audit: verify SQLite sidecar %s platform ACL: %w", suffix, err)
 				} else if stillNeedsHardening {
-					return retained, fmt.Errorf("audit: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
+					return retained, retired, fmt.Errorf("audit: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
 				}
 			}
 		}
 		if err := safefile.ReclaimToDirectoryOwner(path); err != nil {
-			return retained, fmt.Errorf("audit: reclaim SQLite sidecar %s ownership: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: reclaim SQLite sidecar %s ownership: %w", suffix, err)
 		}
 		pinnedAfter, err := pinned.Stat()
 		if err != nil {
-			return retained, fmt.Errorf("audit: re-inspect pinned SQLite sidecar %s: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: re-inspect pinned SQLite sidecar %s: %w", suffix, err)
 		}
 		after, err := os.Lstat(path)
 		if err != nil {
-			return retained, fmt.Errorf("audit: re-inspect SQLite sidecar %s: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: re-inspect SQLite sidecar %s: %w", suffix, err)
 		}
 		if !os.SameFile(pinnedAfter, after) {
-			return retained, fmt.Errorf("audit: SQLite sidecar %s changed during secure open", suffix)
+			return retained, retired, fmt.Errorf("audit: SQLite sidecar %s changed during secure open", suffix)
 		}
 		if err := validateAuditDBLeaf(path, after); err != nil {
-			return retained, fmt.Errorf("audit: unsafe SQLite sidecar %s after securing: %w", suffix, err)
+			return retained, retired, fmt.Errorf("audit: unsafe SQLite sidecar %s after securing: %w", suffix, err)
 		}
 		if !auditDBModeMatches(pinnedAfter, targetMode) {
-			return retained, fmt.Errorf("audit: SQLite sidecar %s permissions could not be secured", suffix)
+			return retained, retired, fmt.Errorf("audit: SQLite sidecar %s permissions could not be secured", suffix)
 		}
 	}
-	return retained, nil
+	return retained, retired, nil
+}
+
+// discardIdleAuditDBSidecar removes a sidecar this process may not harden
+// because another account created it: a read-only reader that opens the
+// database while the gateway is stopped leaves an empty -wal and a -shm
+// that it cannot delete on close. Such a -wal holds no pages and a -shm is
+// rebuilt by SQLite, so removing them loses nothing. A -wal with pages or a
+// -journal is kept. This path runs only on Windows, where a sidecar another
+// process still has open cannot be deleted, so a live connection keeps it.
+func discardIdleAuditDBSidecar(path, suffix string, pinned *os.File) bool {
+	switch suffix {
+	case "-shm":
+	case "-wal":
+		info, err := pinned.Stat()
+		if err != nil || info.Size() != 0 {
+			return false
+		}
+	default:
+		return false
+	}
+	if err := os.Remove(path); err != nil {
+		return false
+	}
+	_ = pinned.Close()
+	return true
 }
 
 func openPinnedAuditDBLeaf(path string) (*os.File, bool, error) {
@@ -632,10 +723,11 @@ func (prepared *preparedAuditDatabasePath) validateAfterOpen() error {
 	if !auditDBModeMatches(info, prepared.securedMode) {
 		return errors.New("audit: database file permissions changed during secure open")
 	}
-	pinned, err := pinAndSecureAuditDBSQLiteSidecars(prepared.path, prepared.hooks, prepared.sidecars)
+	pinned, retired, err := pinAndSecureAuditDBSQLiteSidecars(prepared.path, prepared.hooks, prepared.sidecars)
 	// Retain handles even when validation fails. The open SQL pool must release
 	// its locks before any of these descriptors are closed.
 	prepared.sidecars = pinned
+	prepared.retiredSidecars = append(prepared.retiredSidecars, retired...)
 	return err
 }
 

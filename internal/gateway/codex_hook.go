@@ -369,7 +369,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 	}
 	resp.EvaluationID = evalCtx.EvaluationID
-	resp.RuleIDs = evalCtx.RuleIDs
+	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
@@ -382,6 +382,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
 func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+	if action == "block" {
+		a.dispatchHookBlockWebhook("codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+	}
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -487,6 +490,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 	}
 	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	safeReason = agentVerdictReason(action, reason, safeReason, notificationSinkPolicy(policy))
+	safeReason = agentObservedReason(action, reason, safeReason, notificationSinkPolicy(policy))
 	additional := codexAdditionalContext(rawAction, severity, safeReason, mode, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,
@@ -764,7 +768,7 @@ func codexToolArgs(req codexHookRequest) json.RawMessage {
 	if req.ToolInput == nil {
 		return json.RawMessage(`{}`)
 	}
-	b, err := json.Marshal(req.ToolInput)
+	b, err := connector.MarshalToolArgs(req.ToolInput)
 	if err != nil {
 		return json.RawMessage(`{}`)
 	}
@@ -3524,7 +3528,7 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	return &ToolInspectVerdict{
 		Action:   action,
 		Severity: string(maxSeverity),
-		Reason:   fmt.Sprintf("CodeGuard found %d finding(s) in Codex changed files", len(findings)),
+		Reason:   codeGuardHookReason(codeGuardPlaceCodexChanged, findings),
 		Findings: findings,
 	}
 }

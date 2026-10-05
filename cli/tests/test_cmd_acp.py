@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -216,6 +217,43 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
         result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert result.exit_code != 0
         assert "agent executable digest has drifted" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
+    """GAP-1534: doctor lists each binding and FAILs with the fix on drift."""
+    from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        empty = _DoctorResult()
+        _check_acp_bindings(app.cfg, empty)
+        assert empty.checks == []  # ACP is optional: no binding, no row
+
+        result = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        healthy = _DoctorResult()
+        _check_acp_bindings(app.cfg, healthy)
+        [row] = healthy.checks
+        assert row["label"] == "ACP binding [zed/kiro]"
+        assert row["status"] == "pass" and "healthy; profile default (observe)" in row["detail"]
+
+        agent_path.write_bytes(b"drifted-binary")
+        drifted = _DoctorResult()
+        _check_acp_bindings(app.cfg, drifted)
+        [row] = drifted.checks
+        assert row["status"] == "fail"
+        assert "agent executable digest has drifted" in row["detail"]
+        assert row["remediation"] == "defenseclaw acp setup --client zed --agent kiro"
     finally:
         cleanup_app(app, db_path, data_dir)
 
@@ -696,11 +734,179 @@ def test_verify_reports_profile_drift_after_a_hand_edit(tmp_path, monkeypatch):
 
         # status surfaces it too, so the operator does not need to guess which
         # binding to verify.
-        listed = CliRunner().invoke(acp_cmd, ["status"], obj=app)
+        listed = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
         assert listed.exit_code == 0, listed.output
         binding = json.loads(listed.output)["bindings"]["zed/kiro"]
         assert binding["healthy"] is False
         assert binding["profile"] == "watch"
         assert binding["profile_source"] == "binding"
+
+        # GAP-1501: without --json the posture is a readable summary.
+        human = CliRunner().invoke(acp_cmd, ["status"], obj=app)
+        assert human.exit_code == 0, human.output
+        # GAP-1732: the header holds only guard-wide facts; mode and
+        # profile live on each binding row.
+        assert human.output.startswith("ACP guard: on (1 binding)\n")
+        assert "default profile" not in human.output
+        assert "zed/kiro" in human.output and "NEEDS ATTENTION" in human.output
+        assert "acp status --json" in human.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_remove_without_entry_is_a_noop_and_last_remove_restores_no_file(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings = _zed_settings(tmp_path)
+    try:
+        runner = CliRunner()
+        result = runner.invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Nothing to remove" in result.output
+        assert not settings.exists()
+
+        result = runner.invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        result = runner.invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Removed the DefenseClaw kiro entry" in result.output
+        assert not settings.exists()
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_without_options_checks_every_binding(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    kiro = _binary(tmp_path / "kiro-cli")
+    try:
+        runner = CliRunner()
+        result = runner.invoke(acp_cmd, ["verify"], obj=app)
+        assert result.exit_code != 0
+        assert "No DefenseClaw ACP bindings are configured" in result.output
+        for client in ("zed", "jetbrains"):
+            result = runner.invoke(
+                acp_cmd,
+                ["setup", "--client", client, "--agent", "kiro", "--guard-binary", guard, "--agent-binary", kiro],
+                obj=app,
+            )
+            assert result.exit_code == 0, result.output
+        result = runner.invoke(acp_cmd, ["verify"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Verified jetbrains/kiro" in result.output and "Verified zed/kiro" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatch):
+    # GAP-1294: an upgrade replaces defenseclaw-acp, and every editor entry
+    # then failed closed on the stale guard digest until acp setup was rerun.
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard_path = tmp_path / "bin" / "defenseclaw-acp"
+    guard_path.parent.mkdir()
+    guard = _binary(guard_path)
+    agent_path = tmp_path / "kiro-cli"
+    agent = _binary(agent_path)
+    try:
+        setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+        assert CliRunner().invoke(acp_cmd, setup, obj=app).exit_code == 0
+        verify = ["verify", "--client", "zed", "--agent", "kiro"]
+
+        old_sha = hashlib.sha256(guard_path.read_bytes()).hexdigest()
+        guard_path.write_bytes(b"upgraded-guard")
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0 and "defenseclaw acp refresh" in result.output
+
+        # The installer names the guard it replaced; a lock pinned to another
+        # guard is left alone.
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--from-sha256", "0" * 64], obj=app)
+        assert result.exit_code == 0 and result.output == ""
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--from-sha256", old_sha], obj=app)
+        assert result.exit_code == 0 and "Re-pinned the DefenseClaw ACP guard for zed/kiro" in result.output
+        assert CliRunner().invoke(acp_cmd, verify, obj=app).exit_code == 0
+        assert CliRunner().invoke(acp_cmd, ["refresh"], obj=app).output == ""  # nothing left to do
+
+        # A changed agent binary is not re-pinned.
+        agent_path.write_bytes(b"other-agent")
+        CliRunner().invoke(acp_cmd, ["refresh"], obj=app)
+        result = CliRunner().invoke(acp_cmd, verify, obj=app)
+        assert result.exit_code != 0 and "agent executable digest has drifted" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_setup_and_remove_print_each_slow_step_and_keep_json_clean(tmp_path, monkeypatch):
+    """GAP-1835: setup and remove ran for minutes on Windows with no output at all."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        for step in ("checking the guard and agent executables", "Pinning the guard and agent executable digests",
+                     "Saving the ACP policy", "Recording the change with the gateway"):
+            assert step in result.stderr
+        assert result.stdout.startswith("Configured kiro through DefenseClaw in zed")
+
+        result = CliRunner().invoke(acp_cmd, [*setup, "--json-output"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.stdout)["agent"] == "kiro" and "Pinning" not in result.stderr
+
+        result = CliRunner().invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Removing the DefenseClaw kiro entry" in result.stderr
+        assert "Recording the change with the gateway" in result.stderr
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_setup_returns_once_the_gateway_has_loaded_the_guard(tmp_path, monkeypatch):
+    """GAP-2135: an editor started right after setup was refused with HTTP 503."""
+    from defenseclaw.gateway import OrchestratorClient
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    answers = [
+        {"enabled": False, "profiles": {}},
+        {"enabled": True, "profiles": {"r4x": {"mode": "observe"}}},
+        {"enabled": True, "profiles": {"r4x": {"mode": "action"}}},
+    ]
+    calls: list[int] = []
+
+    def acp_profiles(_self):
+        calls.append(1)
+        return answers[min(len(calls), len(answers)) - 1]
+
+    monkeypatch.setattr(OrchestratorClient, "acp_profiles", acp_profiles)
+    monkeypatch.setattr(cmd_acp_module.time, "sleep", lambda _seconds: None)
+    setup = ["setup", "--client", "zed", "--agent", "kiro", "--activate", "--profile", "r4x",
+             "--guard-binary", guard, "--agent-binary", agent]
+    try:
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 3
+        assert "Waiting for the gateway to load the ACP policy" in result.stderr
+        assert "has not loaded it yet" not in result.stderr
+
+        # A gateway that never loads it: setup still succeeds, and says so.
+        calls.clear()
+        answers[:] = [{"enabled": False, "profiles": {}}]
+        monkeypatch.setattr(cmd_acp_module, "_GATEWAY_ACP_APPLY_SECONDS", 0.0)
+        result = CliRunner().invoke(acp_cmd, setup, obj=app)
+        assert result.exit_code == 0, result.output
+        assert "the gateway has not loaded it yet" in result.stderr
+        assert result.stdout.startswith("Configured kiro through DefenseClaw in zed (action)")
     finally:
         cleanup_app(app, db_path, data_dir)

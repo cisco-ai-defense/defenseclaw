@@ -158,11 +158,15 @@ def large_upload_blocked_text(reason: str) -> str:
 
 
 # How a sandbox tool verdict's reason starts (gateway.sandboxVerdictReason):
-# "Blocked by DefenseClaw rule ID: Title." or "Blocked by DefenseClaw
-# policy.", then advice written for the agent ("... or ask the user to ..."),
-# which the feed leaves out.
+# "DefenseClaw policy blocked this action (rule ID: Title)." (the host hook's
+# wording, GAP-1885) or an older gateway's "Blocked by DefenseClaw rule ID:
+# Title.", then advice written for the agent ("Do not retry it in another
+# form."), which the feed leaves out.
 _VERDICT_REASON = re.compile(
-    r"^((?:Blocked|Held for approval|Flagged) by DefenseClaw (?:rule \S+.*?|policy))\.(?:\s|$)", re.DOTALL
+    r"^((?:Blocked|Held for approval|Flagged) by DefenseClaw (?:rule \S+.*?|policy)"
+    r"|DefenseClaw (?:policy )?(?:blocked this action|needs your confirmation for this action)"
+    r"(?: under your organization's policy)?(?: \(.*?\))?)\.(?:\s|$)",
+    re.DOTALL,
 )
 
 
@@ -171,6 +175,22 @@ def verdict_reason(text: str) -> str:
     text = text.strip()
     match = _VERDICT_REASON.match(text)
     return match.group(1) if match else text
+
+
+# A verdict_reason in the host hook's wording, with the rules it names.
+_VERDICT_SUBJECT = re.compile(
+    r"^DefenseClaw (?:policy )?(?:blocked this action|needs your confirmation for this action)"
+    r"(?: under your organization's policy)?(?: \((.*)\))?$",
+    re.DOTALL,
+)
+
+
+def verdict_subject(reason: str) -> str | None:
+    """The rules a verdict_reason names ("rule ID: Title"; "" for none), or None for another reason."""
+    match = _VERDICT_SUBJECT.match(reason)
+    if not match:
+        return None
+    return match.group(1) or ""
 
 
 _RUNNING_PHASES = frozenset({"ready", "running"})
@@ -599,6 +619,7 @@ class ActivityRow:
             "approval.resolved": "·",
             "tool.blocked": "⊘",
             "tool.asked": "?",
+            "hook.blocked": "⊘",
             "hook.failed": "✗",
             "finding": "⚠",
             "sandbox.lifecycle": "·",
@@ -648,11 +669,15 @@ class ActivityRow:
         if self.kind == "tool.blocked":
             tool = self.tool or "tool call"
             reason = verdict_reason(self.reason)
+            if (subject := verdict_subject(reason)) is not None:
+                return f"{tool} blocked by DefenseClaw" + (f" {subject}" if subject else "")
             if reason.startswith("Blocked by "):
                 return f"{tool} blocked by {reason.removeprefix('Blocked by ')}"
             return f"{tool} blocked" + (f": {reason}" if reason else "")
         if self.kind == "tool.asked":
             reason = verdict_reason(self.reason)
+            if (subject := verdict_subject(reason)) is not None:
+                reason = f"DefenseClaw {subject}" if subject else "DefenseClaw policy"
             return f"{self.tool or 'tool call'} asked for your confirmation" + (f": {reason}" if reason else "")
         if self.kind == "sandbox.lifecycle":
             return text or f"now {self.message or self.reason or 'changed'}"

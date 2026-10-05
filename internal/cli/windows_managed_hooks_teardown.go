@@ -107,6 +107,7 @@ type windowsManagedHooksTeardownReport struct {
 	UserRegistrationsPending     []string                            `json:"user_registrations_pending,omitempty"`
 	UserRegistrationsFailed      []string                            `json:"user_registrations_failed,omitempty"`
 	UserStateRemaining           []string                            `json:"user_state_remaining,omitempty"`
+	UserStatePurged              []string                            `json:"user_state_purged,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -114,6 +115,9 @@ type windowsManagedHooksTeardownReport struct {
 // windowsManagedHooksStandaloneUserRegistrationRemover is replaceable in
 // tests.
 var windowsManagedHooksStandaloneUserRegistrationRemover = removeWindowsManagedHooksStandalonePerUserRegistrations
+
+// windowsManagedHooksStandaloneInventoryACERevoker is replaceable in tests.
+var windowsManagedHooksStandaloneInventoryACERevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
 
 // completeWindowsManagedHooksTeardownUserCleanup runs after a successful
 // standalone finalize: the uninstall has committed, so DefenseClaw's own
@@ -128,19 +132,41 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	if !enterprisehooks.WindowsStandaloneProcess() {
 		return
 	}
+	// The gateway's AI-discovery read ACEs go first: on folders that are
+	// also on a managed hook path (~\.config, ~\.gemini) the removal trust
+	// check refuses a DACL that still carries them (GAP-1765).
+	revokeErr := windowsManagedHooksStandaloneInventoryACERevoker(manifest)
 	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
+	if revokeErr != nil {
+		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))
+	}
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
-	report.UserStateRemaining = windowsManagedHooksStandaloneUserState(manifest, purge)
+	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 		}
+		// The default uninstall keeps an allow-only Cursor hook tombstone for
+		// Cursor processes still running; the purge removes it (GAP-1567).
+		if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
+			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+				"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		}
 	}
 }
+
+// windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
+var windowsManagedHooksStandaloneCursorTombstonePurger = enterprisehooks.PurgeWindowsCursorManagedTombstone
+
+// windowsManagedHooksNotLocalSystemReason ends a user_state_remaining entry
+// whose folder a purge left because it did not run as LocalSystem; the
+// lifecycle result fails on it.
+const windowsManagedHooksNotLocalSystemReason = "the uninstall did not run as LocalSystem"
 
 // windowsManagedHooksPurgeUserStateEnv is set to 1 by the lifecycle for an
 // uninstall with purge (Setup PURGE=1, --purge). A flag would fail the
@@ -148,22 +174,55 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 // environment value and only names the per-user folders.
 const windowsManagedHooksPurgeUserStateEnv = "DEFENSECLAW_WINDOWS_UNINSTALL_PURGE_USER_STATE"
 
-// windowsManagedHooksStandaloneUserStatePurger is replaceable in tests.
-var windowsManagedHooksStandaloneUserStatePurger = enterprisehooks.PurgeWindowsUserState
+// windowsManagedHooksStandaloneUserStatePurger and
+// windowsManagedHooksStandaloneUserBinariesPurger are replaceable in tests.
+var (
+	windowsManagedHooksStandaloneUserStatePurger    = enterprisehooks.PurgeWindowsUserState
+	windowsManagedHooksStandaloneUserBinariesPurger = enterprisehooks.PurgeWindowsUserBinaries
+)
+
+// windowsManagedHooksAccountsKeepingRegistrations reports whether an
+// account's registrations may have stayed after cleanup: it is named in a
+// pending or failed entry ("connector/SID"), or a failure names no account.
+// Such an account's folder holds the connector_backups that restore its
+// agent configurations, so a purge keeps it.
+func windowsManagedHooksAccountsKeepingRegistrations(cleanup enterpriseHookUserCleanupResult) func(sid string) bool {
+	accounts := map[string]bool{}
+	unknown := false
+	for _, entry := range append(append([]string(nil), cleanup.Pending...), cleanup.Failed...) {
+		label, _, _ := strings.Cut(entry, ": ")
+		_, account, found := strings.Cut(label, "/")
+		if account = strings.TrimSpace(account); !found || account == "" {
+			unknown = true
+			continue
+		}
+		accounts[strings.ToLower(account)] = true
+	}
+	return func(sid string) bool { return unknown || accounts[strings.ToLower(strings.TrimSpace(sid))] }
+}
 
 // windowsManagedHooksStandaloneUserState handles the DefenseClaw per-user
 // folder of each enrolled account once the uninstall has removed the
-// registrations it could. With purge it removes each folder as LocalSystem,
-// signed-out accounts included, and lists each one it could not remove
-// ("user (SID): path: reason"). Without purge it lists each folder that
-// exists ("user (SID): path").
-func windowsManagedHooksStandaloneUserState(manifest enterprisehooks.Manifest, purge bool) []string {
+// registrations it could. With purge it removes, as LocalSystem and
+// signed-out accounts included, each folder (all of it, hook scripts and
+// foreign-hooks-backup included) and then the account's per-user binaries in
+// %USERPROFILE%\.local\bin with that folder's user Path entry. It returns
+// each account it could not purge ("user (SID): path: reason") and each one
+// it purged ("user (SID): path"), so the result names every account whose
+// data went. An account that keeps registrations (keepsRegistrations) keeps
+// its folder. Without purge it lists each folder that exists ("user (SID):
+// path") and purges nothing.
+func windowsManagedHooksStandaloneUserState(
+	manifest enterprisehooks.Manifest,
+	purge bool,
+	keepsRegistrations func(sid string) bool,
+) ([]string, []string) {
 	var identityErr error
 	if purge {
 		identityErr = enterpriseHookWindowsUserCleanupIdentity()
 	}
 	seen := map[string]bool{}
-	var remaining []string
+	var remaining, purged []string
 	for _, target := range manifest.Targets {
 		home, sid := strings.TrimSpace(target.UserHome), strings.TrimSpace(target.SID)
 		dataDir := strings.TrimSpace(target.DataDir)
@@ -192,14 +251,27 @@ func windowsManagedHooksStandaloneUserState(manifest enterprisehooks.Manifest, p
 			// profile, which is off the computer while the account is signed
 			// out and brings the folder back at its next sign-in.
 			if _, err := os.Lstat(home); home == "" || !errors.Is(err, os.ErrNotExist) || enterpriseHookWindowsUserProfileRemoved(sid) {
+				if home != "" && !errors.Is(err, os.ErrNotExist) && identityErr == nil && !keepsRegistrations(sid) {
+					// The folder is gone; the binaries may still be there.
+					if _, err := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); err != nil {
+						remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+					}
+				}
 				continue
 			}
 			reason = "the account's profile folder is not on this computer while it is signed out"
 		case identityErr != nil:
-			reason = "the uninstall did not run as LocalSystem"
+			reason = windowsManagedHooksNotLocalSystemReason
+		case keepsRegistrations(sid):
+			reason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
+			var binaries []string
 			if err == nil {
+				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
+			}
+			if err == nil {
+				purged = append(purged, windowsManagedHooksPurgedLabel(label, binaries))
 				continue
 			}
 			reason = boundedEnterpriseHookUserCleanupText(err.Error())
@@ -207,7 +279,8 @@ func windowsManagedHooksStandaloneUserState(manifest enterprisehooks.Manifest, p
 		remaining = append(remaining, label+": "+reason)
 	}
 	sort.Strings(remaining)
-	return remaining
+	sort.Strings(purged)
+	return remaining, purged
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {
@@ -515,9 +588,17 @@ func runWindowsManagedHooksTeardown(
 			report.SurvivingOwnedPathReferences = surviving
 		}
 		if err == nil {
+			// The users' registrations and, with purge, their per-user folders
+			// go before the journal records the phase finalized: a rerun of
+			// an uninstall interrupted while they were removed finds the
+			// phase still prepared and runs finalize, and so this cleanup,
+			// again. Once the phase is finalized, a rerun skips finalize.
 			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
 				journal,
 				report.JournalPath,
+				&report,
+				runtimeDir,
+				manifest,
 			)
 		}
 		if err == nil {
@@ -525,9 +606,6 @@ func runWindowsManagedHooksTeardown(
 			report.SafeToRemoveBinary = true
 			report.VerifiedCleanCount = report.TargetCount
 			report.SucceededCount = report.TargetCount
-		}
-		if err == nil {
-			completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
 		}
 	}
 	if err != nil {
@@ -1166,9 +1244,17 @@ func restoreWindowsManagedHooksRuntimeSelectors(
 	return nil
 }
 
+// finalizeWindowsManagedHooksTeardown retires the machine wiring the
+// prepared journal records, removes the users' registrations and, with
+// purge, their per-user folders, and only then records the phase finalized,
+// so a rerun after an interruption finds the phase prepared and retries
+// that cleanup.
 func finalizeWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
+	report *windowsManagedHooksTeardownReport,
+	runtimeDir string,
+	manifest enterprisehooks.Manifest,
 ) (int, error) {
 	collected := 0
 	for _, target := range journal.Targets {
@@ -1190,8 +1276,27 @@ func finalizeWindowsManagedHooksTeardown(
 		}
 		collected += removed
 	}
+	if err := windowsManagedHooksTeardownStandaloneMachineFinalizer(); err != nil {
+		return collected, err
+	}
+	completeWindowsManagedHooksTeardownUserCleanup(report, runtimeDir, manifest)
+	journal.Phase = "finalized"
+	if err := windowsManagedHooksTeardownJournalWriter(journalPath, journal); err != nil {
+		return collected, err
+	}
+	return collected, nil
+}
+
+// The standalone machine steps of finalize and the journal writer are
+// replaceable in tests.
+var (
+	windowsManagedHooksTeardownStandaloneMachineFinalizer = finalizeWindowsManagedHooksTeardownStandaloneMachineState
+	windowsManagedHooksTeardownJournalWriter              = writeWindowsManagedHooksTeardownJournal
+)
+
+func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
 	// Standalone: a local account deleted with its profile has left the
-	// manifest, so the teardown above never reached its selector entries.
+	// manifest, so the teardown never reached its selector entries.
 	// They go now, before the selector locks below. Failing to drop one only
 	// leaves that stale entry, so it does not fail the uninstall.
 	if err := enterprisehooks.RemoveWindowsStandaloneDeletedAccountSelectorTargets(); err != nil {
@@ -1201,18 +1306,14 @@ func finalizeWindowsManagedHooksTeardown(
 	// root hold only lock files by now (verification proved enrollments,
 	// selectors and the summary gone), so an uninstall leaves none behind.
 	if _, err := enterprisehooks.RemoveWindowsStandaloneHookRuntimeDirectories(); err != nil {
-		return collected, fmt.Errorf("finalize standalone hook runtime directories: %w", err)
+		return fmt.Errorf("finalize standalone hook runtime directories: %w", err)
 	}
-	// The garbage collection above was the last selector transaction, so the
+	// Finalize's garbage collection was the last selector transaction, so the
 	// selector locks in the vendor machine-policy directories can go too.
 	if err := enterprisehooks.RemoveWindowsStandaloneMachinePolicySelectorLocks(); err != nil {
-		return collected, fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
+		return fmt.Errorf("finalize standalone machine-policy selector locks: %w", err)
 	}
-	journal.Phase = "finalized"
-	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
-		return collected, err
-	}
-	return collected, nil
+	return nil
 }
 
 func windowsManagedHooksTeardownTargetForSelector(

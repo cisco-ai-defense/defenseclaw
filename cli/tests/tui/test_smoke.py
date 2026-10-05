@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-from defenseclaw.tui.app import PANELS, DefenseClawTUI
+from defenseclaw.tui.app import CASE_SENSITIVE_PANEL_KEYS, PANELS, DefenseClawTUI
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
@@ -220,7 +220,8 @@ async def test_every_panel_shortcut_switches_from_overview(tmp_path) -> None:
             app.action_switch_panel("overview")
             await pilot.pause()
             assert app.active_panel == "overview"
-            await pilot.press(key.lower())
+            # ``T`` (Tools) is case-sensitive: lowercase ``t`` is panel-local.
+            await pilot.press(key if key in CASE_SENSITIVE_PANEL_KEYS else key.lower())
             await pilot.pause()
             assert app.active_panel == name, f"shortcut {key!r} did not open {name}"
 

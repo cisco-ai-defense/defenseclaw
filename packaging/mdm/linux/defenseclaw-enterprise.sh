@@ -682,33 +682,35 @@ dc_main() {
         dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned"
     fi
 
-    set -- ensure --reason mdm
+    # The credential is stored first: a config that references it (the AI
+    # Defense key, an observability header) only applies once it exists.
+    # Before the first payload install the staged gateway stores it, and
+    # the install gives the gateway access. Both steps wait for an apply
+    # that the package's postinstall or the change itself started (the
+    # apply path unit) instead of failing busy.
+    if [ -n "$secret" ]; then
+        set +e
+        "$gateway" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json <"$secret" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err"
+        secret_status=$?
+        set -e
+        rm -f "$secret"
+        if [ "$secret_status" != 0 ]; then
+            detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
+            case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
+            dc_fail_result "$secret_status" mdm_secret_failed "storing credential '$DC_SECRET_NAME' failed, so the config was not applied: $detail"
+        fi
+        dc_log "stored credential $DC_SECRET_NAME"
+    fi
+
+    set -- ensure --reason mdm --lock-wait 10m
     [ -z "$DC_CHANNEL_FLAG" ] || set -- "$@" "$DC_CHANNEL_FLAG"
     [ -z "$config" ] || set -- "$@" "--config=$config"
     [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
     status=0
     dc_run_lifecycle "$gateway" "$@" || status=$?
     [ "$status" != 0 ] || dc_annotate_package_step
-    if [ "$status" != 0 ] || [ -z "$secret" ]; then
-        dc_emit_result
-        return "$status"
-    fi
-
-    dc_trusted_path "$DC_GATEWAY" ||
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "the deployment applied, but $DC_GATEWAY is missing or not root-owned, so credential '$DC_SECRET_NAME' was not stored"
-    set +e
-    "$DC_GATEWAY" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --json <"$secret" >"$DC_STAGE/secret.json" 2>"$DC_STAGE/secret.err"
-    secret_status=$?
-    set -e
-    rm -f "$secret"
-    if [ "$secret_status" != 0 ]; then
-        detail=$(head -c 1024 "$DC_STAGE/secret.err" 2>/dev/null || true)
-        case "$secret_status" in 1 | 2 | 75) ;; *) secret_status=$DC_EXIT_FAILURE ;; esac
-        dc_fail_result "$secret_status" mdm_secret_failed "the deployment applied, but storing credential '$DC_SECRET_NAME' failed: $detail"
-    fi
-    dc_log "stored credential $DC_SECRET_NAME"
     dc_emit_result
-    return 0
+    return "$status"
 }
 
 dc_main "$@"

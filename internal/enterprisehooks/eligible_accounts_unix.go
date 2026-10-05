@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -37,6 +38,19 @@ type unixEligibleAccountsFile struct {
 // UnixEligibleAccountsPath is the eligible-accounts record for manifestPath.
 func UnixEligibleAccountsPath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(filepath.Clean(manifestPath)), UnixEligibleAccountsFileName)
+}
+
+// UnixCopilotVSCodeAccountsFileName is the guardian's root-only record of
+// the accounts it wrote DefenseClaw's VS Code Local hook file or Copilot
+// plugin for, in the eligible-accounts format. An account that stops being
+// eligible keeps those files until the guardian or remove-all takes them out
+// through this record.
+const UnixCopilotVSCodeAccountsFileName = "copilot-vscode-accounts.json"
+
+// UnixCopilotVSCodeAccountsPath is the VS Code Local accounts record for
+// manifestPath.
+func UnixCopilotVSCodeAccountsPath(manifestPath string) string {
+	return filepath.Join(filepath.Dir(filepath.Clean(manifestPath)), UnixCopilotVSCodeAccountsFileName)
 }
 
 // WriteUnixEligibleAccounts publishes accounts at path: root-owned 0600
@@ -150,7 +164,30 @@ func LoadUnixEligibleAccounts(path string) ([]UnixEligibleAccount, error) {
 			continue
 		}
 		account.Home = home
+		account.CreatedDirs = UnixCreatedDirsBelow(home, account.CreatedDirs)
 		out = append(out, account)
 	}
 	return out, nil
+}
+
+// unixCreatedDirsLimit bounds the folders one account's record entry lists.
+const unixCreatedDirsLimit = 64
+
+// UnixCreatedDirsBelow keeps the absolute folders strictly below home, cleaned,
+// without duplicates.
+func UnixCreatedDirsBelow(home string, dirs []string) []string {
+	var out []string
+	for _, dir := range dirs {
+		dir = filepath.Clean(strings.TrimSpace(dir))
+		relative, err := filepath.Rel(home, dir)
+		if !filepath.IsAbs(dir) || err != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if !slices.Contains(out, dir) && len(out) < unixCreatedDirsLimit {
+			out = append(out, dir)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

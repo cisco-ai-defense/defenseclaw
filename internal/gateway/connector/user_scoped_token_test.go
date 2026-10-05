@@ -8,9 +8,11 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUserScopedTokenKeyIsMintedOnceAndReused(t *testing.T) {
@@ -37,6 +39,22 @@ func TestUserScopedTokenKeyIsMintedOnceAndReused(t *testing.T) {
 	// The key is not a connector token: no connector name maps to it.
 	if tokens, err := LoadHookAPITokens(dataDir, []string{"codex", "user-scoped-token"}); err != nil || len(tokens) != 0 {
 		t.Fatalf("key readable as a connector token: %v %v", tokens, err)
+	}
+	// A key a rotation staged is honored only for RotationKeyMaxAge, so a
+	// rotation killed before it settled stops widening the accepted keys.
+	staged, _ := PendingUserScopedTokenKeyPath(dataDir)
+	if err := os.WriteFile(staged, []byte(strings.Repeat("b2", 32)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := LoadPendingUserScopedTokenKey(dataDir); err != nil || key != strings.Repeat("b2", 32) {
+		t.Fatalf("fresh staged key: %v", err)
+	}
+	old := time.Now().Add(-RotationKeyMaxAge - time.Minute)
+	if err := os.Chtimes(staged, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := LoadPendingUserScopedTokenKey(dataDir); err != nil || key != "" {
+		t.Fatalf("an expired staged key is still honored: %v", err)
 	}
 }
 

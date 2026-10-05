@@ -30,6 +30,14 @@ interface DiagramLightboxProps {
   // width gate (scripts/check-diagram-widths.ts) skips its >1168px
   // check for this diagram. Use only when no smaller layout works.
   oversize?: boolean;
+  // Phone behaviour below 640px (see FlowMobile in flow.tsx):
+  // 'stack' swaps the drawing for `mobileFallback` inline, 'scroll'
+  // pans the drawing sideways under a hint, 'scale' shrinks it. The
+  // expanded view always shows the drawing.
+  mobile?: 'stack' | 'scale' | 'scroll';
+  // Inline-only phone render (Flow list view, Sequence timeline). It is
+  // never copied into the expanded view.
+  mobileFallback?: ReactNode;
 }
 
 // Thin, portal-free client wrapper around the SVG diagrams.
@@ -58,7 +66,10 @@ export function DiagramLightbox({
   ariaLabel,
   children,
   oversize,
+  mobile = 'scale',
+  mobileFallback,
 }: DiagramLightboxProps) {
+  const mobileMode = mobile === 'stack' && !mobileFallback ? 'scale' : mobile;
   const [open, setOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -165,9 +176,16 @@ export function DiagramLightbox({
       data-oversize={oversize ? 'true' : undefined}
       data-natural-width={naturalWidth}
       data-natural-height={naturalHeight}
+      data-mobile={mobileMode}
     >
-      <div className="diagram-canvas overflow-x-auto">
+      {mobileMode === 'scroll' && (
+        <p className="diagram-scroll-hint" aria-hidden>
+          Scroll sideways to see the whole diagram, or open it full size.
+        </p>
+      )}
+      <div className="diagram-canvas overflow-x-auto" data-mobile={mobileMode}>
         {children}
+        {mobileMode === 'stack' && mobileFallback}
       </div>
 
       {hydrated && (

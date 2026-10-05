@@ -31,9 +31,11 @@ command.
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import os
 import re
+import shutil
 import sys
 from dataclasses import asdict
 from typing import Any
@@ -169,13 +171,44 @@ def _validate_file_url(kind: str, url: str) -> None:
         )
 
 
+def _missing_file_warning(kind: str, url: str) -> str | None:
+    """Warn when a kind=file manifest path does not exist yet (GAP-2282).
+
+    The source is still registered (the file may be written later),
+    but the operator learns now instead of at the first sync.
+    """
+    if kind != "file":
+        return None
+    val = (url or "").strip()
+    bare = val[len("file://"):] if val.lower().startswith("file://") else val
+    path = os.path.expanduser(bare)
+    if not bare or os.path.isfile(path):
+        return None
+    # GAP-2306: an existing directory (or other non-file) is not "missing";
+    # say what sync will say instead.
+    if os.path.isdir(path):
+        return f"{path} is a directory, not a manifest file; sync will fail until --url points at a file."
+    if os.path.exists(path):
+        return f"{path} is not a regular file; sync will fail until it is."
+    return f"{path} does not exist yet; sync will fail until it does."
+
+
 def _find_source(cfg: Config, sid: str) -> RegistrySource:
     sid = sid.strip().lower()
     for s in cfg.registries.sources:
         if s.id == sid:
             return s
-    click.echo(f"error: no registry source named {sid!r}", err=True)
-    raise SystemExit(2)
+    # GAP-1928: the shared not-found shape, with the valid ids, and exit 1
+    # (exit 2 stays for usage errors).
+    message = ux.not_found_message(
+        "registry source",
+        sid,
+        (s.id for s in cfg.registries.sources),
+        "defenseclaw registry list",
+        empty_hint="Add one with: defenseclaw registry add <id> ... (or defenseclaw registry wizard).",
+    )
+    click.echo(f"Error: {message}", err=True)
+    raise SystemExit(1)
 
 
 def _require_cfg(app: AppContext) -> Config:
@@ -204,7 +237,44 @@ def _require_cfg(app: AppContext) -> Config:
 
 
 def _emit_json(payload: Any) -> None:
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.meta[_JSON_OUTPUT_KEY] = True
     click.echo(_json.dumps(payload, indent=2, sort_keys=True))
+
+
+# GAP-2422: the gateway reads asset_policy only when it starts (its config
+# reload refuses the change), so agent hooks kept the old registry rules until
+# a manual restart. A registry command that changed asset_policy restarts a
+# running gateway on its way out, as `policy activate` does.
+_JSON_OUTPUT_KEY = "defenseclaw.registry.json_output"
+
+
+def _asset_policy_fingerprint(cfg: Any) -> str | None:
+    policy = getattr(cfg, "asset_policy", None)
+    return None if policy is None else repr(policy)
+
+
+def _apply_asset_policy_to_gateway(ctx: click.Context, app: AppContext, before: str) -> None:
+    if _asset_policy_fingerprint(app.cfg) == before:
+        return
+    from defenseclaw.commands import cmd_policy, cmd_setup
+
+    if not cmd_policy._gateway_pid_alive(app):
+        return  # a stopped gateway loads the saved policy when it starts
+    quiet = bool(ctx.meta.get(_JSON_OUTPUT_KEY))
+    # --json keeps stdout a single JSON document; the restart progress goes to stderr.
+    with contextlib.redirect_stdout(sys.stderr) if quiet else contextlib.nullcontext():
+        restarted = cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False)
+    if restarted:
+        if not quiet:
+            ux.ok("Restarted the gateway; agent hooks use the new asset policy now.")
+        return
+    ux.echo(
+        "  \u26a0 The change is saved, but the gateway restart failed, so agent hooks "
+        "still use the old asset policy. Run: defenseclaw-gateway restart",
+        err=True,
+    )
 
 
 def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
@@ -227,31 +297,24 @@ def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @click.group("registry")
-def registry() -> None:
+@click.pass_context
+def registry(ctx: click.Context) -> None:
     """Manage external skill / MCP catalog sources.
 
-    A "registry source" is a fetchable manifest (corporate HTTPS YAML,
-    smithery.ai, a git repo containing ``defenseclaw-registry.yaml``,
-    etc.) that DefenseClaw ingests on demand. Synced entries are
-    scanned with the existing skill / MCP scanners and clean ones are
-    auto-promoted into ``asset_policy.{skill,mcp}.registry`` so
-    admission decisions can attribute the rule back to its source.
+    A registry source is a fetchable manifest (corporate HTTPS YAML,
+    smithery.ai, a git repo containing defenseclaw-registry.yaml, and
+    others) that DefenseClaw ingests on demand. Synced entries are
+    scanned with the skill / MCP scanners, and clean ones are promoted
+    into asset_policy.skill.registry or asset_policy.mcp.registry, so
+    admission decisions can name the source of each rule.
 
-    \b
-    Subcommands:
-      add       Register a new source (interactive or flag-only).
-      edit      Update an existing source.
-      list      Show every configured source (with entry counts).
-      show      Pretty-print a single source.
-      remove    Delete a source and its cache.
-      test      Dry-run fetch + parse — no cache or policy writes.
-      sync      Fetch + scan + promote one or all sources.
-      entries   Show cached entries (after sync).
-      approve   Mark an entry approved (forces promotion next sync).
-      reject    Mark an entry rejected (always blocked).
-      require   Toggle ``asset_policy.{type}.registry_required``.
-      wizard    First-run interactive add+sync convenience flow.
+    Start with 'defenseclaw registry wizard', or 'registry add' then
+    'registry sync'.
     """
+    app = ctx.find_object(AppContext)
+    before = _asset_policy_fingerprint(getattr(app, "cfg", None))
+    if app is not None and before is not None:
+        ctx.call_on_close(lambda: _apply_asset_policy_to_gateway(ctx, app, before))
 
 
 @registry.command("add")
@@ -264,14 +327,9 @@ def registry() -> None:
 @click.option("--auth-env", default=None,
               help="ENV VAR NAME holding a bearer token (never the literal token)")
 @click.option("--enabled/--disabled", default=True, help="Mark source enabled or disabled")
-@click.option("--auto-sync/--no-auto-sync", default=False,
-              help="RESERVED: scheduled sync is not implemented yet. "
-                   "The flag is persisted so a future release can pick it "
-                   "up without a config rewrite. Run `defenseclaw registry "
-                   "sync --all` (or schedule it via cron) for now.")
-@click.option("--sync-interval-hours", type=int, default=24,
-              help="RESERVED: paired with --auto-sync above; ignored at "
-                   "runtime today.")
+# Scheduled sync is not implemented: the options are hidden and refused (GAP-2209).
+@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
+@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True,
               help="Skip prompts; required flags must be present")
 @click.option("--json", "emit_json", is_flag=True, help="Emit JSON")
@@ -284,8 +342,8 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     content: str | None,
     auth_env: str | None,
     enabled: bool,
-    auto_sync: bool,
-    sync_interval_hours: int,
+    auto_sync: bool | None,
+    sync_interval_hours: int | None,
     non_interactive: bool,
     emit_json: bool,
 ) -> None:
@@ -311,6 +369,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     \b
       defenseclaw registry add clawhub --kind clawhub --content skill --non-interactive
     """
+    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
     cfg = _require_cfg(app)
 
     if not non_interactive:
@@ -332,8 +391,12 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
         # a bare view keyword (curated/all-time/trending/hot), or a
         # full https URL with query params are all accepted.
         if kind not in ("clawhub", "skills_sh") and not url:
-            url = click.prompt("Manifest URL", default="")
-        if not auth_env and click.confirm(
+            url = click.prompt(
+                "Manifest path (absolute)" if kind == "file" else "Manifest URL",
+                default="",
+            )
+        # A file source is read from disk, so no token is ever sent (GAP-2123).
+        if not auth_env and kind.strip().lower() != "file" and click.confirm(
             "Use an auth token (read from an env var)?", default=False,
         ):
             auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
@@ -366,22 +429,42 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
         content=content,
         auth_env=auth_env,
         enabled=enabled,
-        auto_sync=auto_sync,
-        sync_interval_hours=max(0, int(sync_interval_hours or 0)),
     )
     cfg.registries.sources.append(new_source)
     cfg.save()
+    missing_file = _missing_file_warning(kind, url)
 
-    if app.logger:
-        app.logger.log_action(
-            "registry-add", "config",
-            f"id={sid} kind={kind} content={content} url={url}",
-        )
-
+    add_details = f"id={sid} kind={kind} content={content} url={url}"
     if emit_json:
-        _emit_json({"action": "add", "source": _source_to_dict(new_source)})
+        _log_registry_action(app, "registry-add", sid, add_details)
+        payload: dict[str, Any] = {"action": "add", "source": _source_to_dict(new_source)}
+        if missing_file:
+            payload["warning"] = missing_file
+        _emit_json(payload)
         return
     ux.ok(f"Registered registry source {sid!r}.")
+    if missing_file:
+        ux.warn(missing_file)
+    # The success line first, then any stopped-gateway note (GAP-1718).
+    _log_registry_action(app, "registry-add", sid, add_details)
+    # The wizard offers the sync itself and prints this only on "n" (GAP-2075).
+    if not click.get_current_context().meta.get(_WIZARD_SYNC_PROMPT_KEY):
+        _print_sync_hint(sid)
+
+
+_WIZARD_SYNC_PROMPT_KEY = "defenseclaw.registry.wizard_offers_sync"
+
+
+def _refuse_scheduled_sync(auto_sync: bool | None, sync_interval_hours: int | None) -> None:
+    """Refuse --auto-sync / --sync-interval-hours: nothing runs a schedule yet (GAP-2209)."""
+    if auto_sync or sync_interval_hours is not None:
+        raise click.UsageError(
+            "scheduled sync is not available yet. Run 'defenseclaw registry sync "
+            "<id>' (or 'registry sync --all' from cron) to sync a source."
+        )
+
+
+def _print_sync_hint(sid: str) -> None:
     ux.subhead(
         f"Run `defenseclaw registry sync {sid}` to fetch + scan + promote entries."
     )
@@ -390,21 +473,19 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
 @registry.command("edit")
 @click.argument("source_id")
 @click.option("--kind", type=click.Choice(REGISTRY_KINDS, case_sensitive=False),
-              default=None)
-@click.option("--url", default=None)
+              default=None, help="Source kind (clawhub / smithery / http_yaml / ...)")
+@click.option("--url", default=None, help="Manifest URL or git repo URL")
 @click.option("--content", type=click.Choice(REGISTRY_CONTENT_TYPES, case_sensitive=False),
-              default=None)
+              default=None, help="What the source lists (skills, MCP servers, or both)")
 @click.option("--auth-env", default=None,
               help="Env var NAME (use --clear-auth-env to remove)")
 @click.option("--clear-auth-env", is_flag=True, help="Drop auth_env back to empty")
 @click.option("--enabled/--disabled", default=None,
               help="Toggle the enabled flag")
-@click.option("--auto-sync/--no-auto-sync", default=None,
-              help="RESERVED: scheduled sync is not implemented yet.")
-@click.option("--sync-interval-hours", type=int, default=None,
-              help="RESERVED: paired with --auto-sync; ignored today.")
-@click.option("--non-interactive", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
+@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
+@click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def edit_cmd(  # noqa: PLR0913
     app: AppContext,
@@ -427,14 +508,15 @@ def edit_cmd(  # noqa: PLR0913
     the default. As soon as **any** mutating flag is passed
     (``--kind`` / ``--url`` / ``--content`` / ``--auth-env`` /
     ``--clear-auth-env`` / ``--enabled`` / ``--disabled`` /
-    ``--auto-sync`` / ``--no-auto-sync`` / ``--sync-interval-hours``
-    / ``--non-interactive``), prompts are suppressed entirely so the
+    ``--non-interactive``), prompts are suppressed entirely so the
     docstring promise — "only the flags you pass are changed" —
     holds. Use the bare form (no flags) when you want to re-confirm
     every field.
     """
+    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
+    before = {field: getattr(source, field) for field in _EDIT_AUDIT_FIELDS}
 
     any_mutating = any(v is not None for v in (
         kind, content, url, auth_env, enabled, auto_sync, sync_interval_hours,
@@ -472,26 +554,62 @@ def edit_cmd(  # noqa: PLR0913
         source.auth_env = _validate_auth_env(auth_env)
     if enabled is not None:
         source.enabled = enabled
-    if auto_sync is not None:
-        source.auto_sync = auto_sync
-    if sync_interval_hours is not None:
-        source.sync_interval_hours = max(0, int(sync_interval_hours))
+    if auto_sync is False:
+        source.auto_sync = False
 
     # Validate the post-edit (kind, url) pair so flipping an
     # ``http_yaml`` source to ``kind=file`` without re-supplying the
     # ``--url`` (or vice versa) fails before the next sync.
     _validate_file_url(source.kind, source.url)
 
-    cfg.save()
-    if app.logger:
-        app.logger.log_action(
-            "registry-edit", "config", f"id={source.id}",
-        )
-
+    # A no-op edit says so instead of "Updated" (GAP-2339); the audit row
+    # still records it as "unchanged".
+    changed = any(before[field] != getattr(source, field) for field in _EDIT_AUDIT_FIELDS)
+    if changed:
+        cfg.save()
+    missing_file = _missing_file_warning(source.kind, source.url)
+    edit_details = _registry_edit_details(source, before)
     if emit_json:
-        _emit_json({"action": "edit", "source": _source_to_dict(source)})
+        _log_registry_action(app, "registry-edit", source.id, edit_details)
+        edit_payload: dict[str, Any] = {
+            "action": "edit", "changed": changed, "source": _source_to_dict(source),
+        }
+        if missing_file:
+            edit_payload["warning"] = missing_file
+        _emit_json(edit_payload)
         return
-    ux.ok(f"Updated registry source {source.id!r}.")
+    if changed:
+        ux.ok(f"Updated registry source {source.id!r}.")
+    else:
+        ux.ok(f"No changes: registry source {source.id!r} already has these settings.")
+    if missing_file:
+        ux.warn(missing_file)
+    _log_registry_action(app, "registry-edit", source.id, edit_details)
+
+
+# The fields `registry edit` can change, in the order its audit row names them.
+_EDIT_AUDIT_FIELDS = ("kind", "content", "url", "auth_env", "enabled", "auto_sync", "sync_interval_hours")
+
+
+def _registry_edit_details(source: RegistrySource, before: dict[str, Any]) -> str:
+    """Audit details of an edit: the id and each changed field as old->new.
+
+    Every edit row said only ``id=<source>``, so a disable could not be told
+    apart from any other edit (GAP-2211). auth_env is an env var name, not
+    its value.
+    """
+
+    def _fmt(value: Any) -> str:
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value) if value not in (None, "") else '""'
+
+    changes = [
+        f"{field}={_fmt(before[field])}->{_fmt(getattr(source, field))}"
+        for field in _EDIT_AUDIT_FIELDS
+        if before[field] != getattr(source, field)
+    ]
+    return " ".join([f"id={source.id}", *(changes or ["unchanged"])])
 
 
 # ---------------------------------------------------------------------------
@@ -499,14 +617,15 @@ def edit_cmd(  # noqa: PLR0913
 # ---------------------------------------------------------------------------
 
 @registry.command("list")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured registry sources.
 
     The ``ENTRIES`` column reports cached counts as
-    ``total (clean/warning/blocked)`` from the on-disk index — a
-    dash means the source has never been synced. Counts are
+    ``total (clean/warning/blocked/error/rejected)`` from the on-disk index — a
+    dash means the source has never been synced. A source whose last
+    sync failed is named below the table. Counts are
     deliberately read fresh from ``index.json`` rather than the
     config file so manual ``approve`` / ``reject`` calls (which
     rewrite the index) are reflected without forcing an additional
@@ -529,6 +648,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
                     "warning": idx.warning_count,
                     "blocked": idx.blocked_count,
                     "error": idx.error_count,
+                    "rejected": idx.rejected_count,
                 }
             out.append(d)
         _emit_json(out)
@@ -539,39 +659,54 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         return
     click.echo()
     ux.section("Registry sources")
+    # Size the ID column to the longest ID and give the URL the rest of the
+    # terminal, so a long ID never shifts the row (GAP-2405).
+    id_w = max([24] + [len(s.id) for s in sources])
+    fixed_w = 2 + id_w + 1 + 13 + 9 + 4 + 19 + 23
+    url_w = max(32, shutil.get_terminal_size((120, 24)).columns - fixed_w - 1)
+    longest_url = max([3] + [len(s.url or "") for s in sources])
     click.echo(
-        f"  {'ID':<24} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
+        f"  {'ID':<{id_w}} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
         f"{'ENTRIES':<18} {'LAST SYNC':<22} URL"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 12} {'-' * 8} {'-' * 3} "
-        f"{'-' * 18} {'-' * 22} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 12} {'-' * 8} {'-' * 3} "
+        f"{'-' * 18} {'-' * 22} {'-' * min(url_w, longest_url)}"
     )
     for s in sources:
         on = "yes" if s.enabled else "no"
         last = s.last_sync or "-"
         url = s.url or ""
-        if len(url) > 32:
-            url = url[:29] + "..."
+        if len(url) > url_w:
+            url = url[: url_w - 3] + "..."
         idx = indices.get(s.id)
         if idx is None or idx.entry_count == 0 and not s.last_sync:
             entries = "-"
         else:
             entries = (
                 f"{idx.entry_count} "
-                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count})"
+                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count}/{idx.error_count}"
+                f"/{idx.rejected_count})"
             )
         click.echo(
-            f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
+            f"  {s.id:<{id_w}} {s.kind:<12} {s.content:<8} {on:<3} "
             f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
-    ux.subhead("ENTRIES column: total (clean/warning/blocked)")
+    # GAP-2371: a reject only stops promotion, so it is not counted as blocked.
+    ux.subhead("ENTRIES column: total (clean/warning/blocked/error/rejected)")
+    # A failed last sync must not look like a healthy one (GAP-2210).
+    for s in sources:
+        if (s.last_status or "").startswith("error"):
+            ux.warn(
+                f"The last sync of {s.id} failed. "
+                f"Run 'defenseclaw registry show {s.id}' for the error."
+            )
 
 
 @registry.command("show")
 @click.argument("source_id")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     """Pretty-print a single source plus a quick verdict summary."""
@@ -596,17 +731,38 @@ def show_cmd(app: AppContext, source_id: str, emit_json: bool) -> None:
     click.echo(
         f"    {ux.dim('Verdicts:')}       "
         f"{idx.clean_count} clean, {idx.warning_count} warning, "
-        f"{idx.blocked_count} blocked, {idx.error_count} error",
+        f"{idx.blocked_count} blocked, {idx.error_count} error, {idx.rejected_count} rejected",
     )
     click.echo()
+
+
+def _log_registry_action(app: AppContext, action: str, target: str, details: str) -> None:
+    """Record a saved registry change; a stopped gateway only skips the audit event.
+
+    The config is already saved, so a stopped gateway prints one warning on
+    stderr instead of a traceback and rc=1 (like policy and setup webhook).
+    The target is the source id, entry or policy scope the change is about,
+    so audit filters find it without parsing details (GAP-2280).
+    """
+    if not app.logger:
+        return
+    from defenseclaw.logger import CanonicalObservabilityUnavailableError
+
+    try:
+        app.logger.log_action(action, target or "config", details)
+    except CanonicalObservabilityUnavailableError:
+        from defenseclaw.commands._audit_notice import NOT_RECORDED_WARNING
+
+        ux.echo(NOT_RECORDED_WARNING, err=True)
 
 
 @registry.command("remove")
 @click.argument("source_id")
 @click.option("--keep-cache", is_flag=True,
               help="Keep ~/.defenseclaw/registries/<id> on disk")
-@click.option("--non-interactive", is_flag=True)
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--non-interactive", "--yes", "-y", "non_interactive", is_flag=True,
+              help="Remove without the confirmation prompt (--yes and --non-interactive are the same).")
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def remove_cmd(
     app: AppContext,
@@ -644,13 +800,12 @@ def remove_cmd(
     if not keep_cache:
         remove_source_cache(cfg.data_dir, sid)
 
-    if app.logger:
-        app.logger.log_action("registry-remove", "config", f"id={sid}")
-
     if emit_json:
+        _log_registry_action(app, "registry-remove", sid, f"id={sid}")
         _emit_json({"action": "remove", "source_id": sid})
         return
     ux.ok(f"Removed registry source {sid!r}.")
+    _log_registry_action(app, "registry-remove", sid, f"id={sid}")
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +820,7 @@ def remove_cmd(
               help="Print every entry name + type instead of just summary")
 @click.option("--limit", type=int, default=20,
               help="With --show-entries, cap the row count (default 20)")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def test_cmd(
     app: AppContext,
@@ -693,7 +848,7 @@ def test_cmd(
     except (IngestError, ManifestError) as exc:
         # Mirror the wording of sync_source's report.errors so log
         # consumers don't have to special-case test-vs-sync.
-        msg = f"fetch failed: {exc}"
+        msg = str(exc) if isinstance(exc, ManifestError) else f"fetch failed: {exc}"
         if emit_json:
             _emit_json({
                 "ok": False,
@@ -750,7 +905,8 @@ def test_cmd(
     click.echo(f"  {ux.dim('Bytes fetched:')}  {len(raw):,}")
     click.echo(
         f"  {ux.dim('Entries:')}        {len(filtered)} "
-        f"({skill_count} skills, {mcp_count} mcps)"
+        f"({skill_count} {'skill' if skill_count == 1 else 'skills'}, "
+        f"{mcp_count} {'MCP server' if mcp_count == 1 else 'MCP servers'})"
     )
     if show_entries and filtered:
         click.echo()
@@ -785,7 +941,7 @@ def test_cmd(
               help="Permit RFC1918 / ULA destinations (off by default)")
 @click.option("--no-promote", is_flag=True,
               help="Don't append promoted rules to asset_policy")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def sync_cmd(  # noqa: PLR0913
     app: AppContext,
@@ -810,11 +966,10 @@ def sync_cmd(  # noqa: PLR0913
       defenseclaw registry sync corp-mcp --scan-stdio      # opt-in stdio scan
 
     \b
-    F-0541: scanning a stdio MCP entry inherently SPAWNS the
-    publisher-controlled package. Routine ``sync`` therefore does NOT
-    auto-scan stdio entries unless ``--scan-stdio`` is passed; skipped
-    entries emit a one-line notice so the coverage loss is not silent.
-    Remote/URL MCP entries (no local process spawn) are always scanned.
+    Scanning a stdio MCP entry starts the publisher's package on this
+    machine, so sync scans stdio entries only with --scan-stdio and
+    prints a one-line notice for each entry it skipped.
+    Remote (URL) MCP entries start no local process and are always scanned.
     """
     cfg = _require_cfg(app)
 
@@ -822,6 +977,11 @@ def sync_cmd(  # noqa: PLR0913
         _make_scan_callback(app, allow_private=allow_private, scan_stdio=scan_stdio)
         if scan else None
     )
+    # GAP-2327: a fetch plus a remote MCP scan can take 10 s or more; say
+    # what is running on an interactive stderr so the CLI does not look hung.
+    progress = not emit_json and _stderr_is_tty()
+    if progress and callback is not None:
+        callback = _with_scan_progress(callback, scan_stdio=scan_stdio)
 
     if sync_all_flag:
         if source_ids:
@@ -830,6 +990,8 @@ def sync_cmd(  # noqa: PLR0913
                 err=True,
             )
             raise SystemExit(2)
+        if progress:
+            click.echo("Syncing all enabled registry sources ...", err=True)
         reports = sync_all(
             cfg,
             cfg.data_dir,
@@ -848,6 +1010,8 @@ def sync_cmd(  # noqa: PLR0913
         reports = []
         for sid in source_ids:
             source = _find_source(cfg, sid)
+            if progress:
+                click.echo(f"Fetching {source.id} ...", err=True)
             reports.append(sync_source(
                 cfg,
                 cfg.data_dir,
@@ -859,10 +1023,84 @@ def sync_cmd(  # noqa: PLR0913
             ))
         cfg.save()
 
+    # A sync can promote entries into asset_policy.<type>.registry, which
+    # admission reads: audit every run with what it changed (GAP-1518), as its
+    # own registry-sync action on the source (GAP-2280). The config is already
+    # saved, so a stopped gateway only skips the events, with one warning
+    # (GAP-2236).
+    if app.logger:
+        from defenseclaw.commands._audit_notice import saved_change_audit
+
+        audit = saved_change_audit(app.logger)
+        for r in reports:
+            audit.log_action(
+                "registry-sync", r.source_id,
+                f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} "
+                f"promoted_skills={r.promoted_skills} promoted_mcps={r.promoted_mcps} "
+                f"blocked={r.blocked} errors={len(r.errors)} promote={'off' if no_promote else 'on'}",
+            )
+
     if emit_json:
         _emit_json([r.to_dict() for r in reports])
+    elif not reports:
+        _print_nothing_to_sync(cfg)
+    else:
+        _print_sync_reports(reports)
+    if any(not r.ok() for r in reports):
+        # A failed fetch or entry scan is not a successful sync (GAP-1357).
+        raise SystemExit(1)
+
+
+def _stderr_is_tty() -> bool:
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _with_scan_progress(callback: ScanCallback, *, scan_stdio: bool) -> ScanCallback:
+    """Print one stderr line before each entry scan (GAP-2327)."""
+
+    def _scan(source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
+        note = ""
+        if entry.is_mcp():
+            if (entry.transport or "stdio") != "stdio":
+                note = " (remote, can take up to a minute)"
+            elif not scan_stdio:
+                # The callback prints its own "skipping stdio MCP scan" notice.
+                return callback(source, entry)
+        click.echo(f"  scanning {entry.type}:{entry.name}{note} ...", err=True)
+        return callback(source, entry)
+
+    return _scan
+
+
+def _promoted_label(skills: int, mcps: int) -> str:
+    """Spell out promoted counts: ``0``, ``1 MCP``, ``2 skills, 1 MCP``."""
+    parts = []
+    if skills:
+        parts.append(f"{skills} skill" + ("" if skills == 1 else "s"))
+    if mcps:
+        parts.append(f"{mcps} MCP" + ("" if mcps == 1 else "s"))
+    return ", ".join(parts) or "0"
+
+
+def _print_nothing_to_sync(cfg: Config) -> None:
+    """Say why `sync --all` synced nothing: no sources, or all disabled (GAP-2425)."""
+    disabled = [s.id for s in cfg.registries.sources if not s.enabled]
+    if not cfg.registries.sources:
+        ux.subhead("Nothing to sync: no registry sources are configured.")
+        ux.subhead("Add one with: defenseclaw registry add <id> ... (or defenseclaw registry wizard).")
         return
-    _print_sync_reports(reports)
+    if disabled:
+        noun = "source is" if len(disabled) == 1 else "sources are"
+        ux.subhead(f"Nothing to sync: {len(disabled)} {noun} disabled ({', '.join(disabled)}).")
+        ux.subhead(
+            "Sync them with: defenseclaw registry sync --all --include-disabled, "
+            "or turn one on with: defenseclaw registry edit <id> --enabled"
+        )
+        return
+    ux.subhead("Nothing to sync.")
 
 
 def _print_sync_reports(reports: list[SyncReport]) -> None:
@@ -871,21 +1109,25 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
         return
     click.echo()
     ux.section("Sync results")
+    # Size SOURCE to the longest id so later columns stay under their headers (GAP-2424).
+    id_w = max([24] + [len(r.source_id) for r in reports])
     click.echo(
-        f"  {'SOURCE':<24} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<10} {'STATUS'}"
+        f"  {'SOURCE':<{id_w}} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<20} {'STATUS'}"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 8} {'-' * 8} {'-' * 10} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
     )
     for r in reports:
-        promoted = f"{r.promoted_skills}/{r.promoted_mcps}"
-        status = "ok" if r.ok() else "error"
+        promoted = _promoted_label(r.promoted_skills, r.promoted_mcps)
+        status = "error" if not r.ok() else ("partial" if getattr(r, "partial", ()) else "ok")
         click.echo(
-            f"  {r.source_id:<24} {r.fetched:<8} {r.scanned:<8} {promoted:<10} {status}"
+            f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
         )
     for r in reports:
         for err in r.errors:
             click.echo(f"  {ux.dim('!')} {r.source_id}: {err}")
+        for note in getattr(r, "partial", ()):
+            click.echo(f"  {ux.dim('!')} {r.source_id}: {note}")
     click.echo()
 
 
@@ -1090,7 +1332,7 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
         # coverage loss is visible, not silent. Remote/URL entries below
         # spawn no local process and are unaffected.
         if not scan_stdio:
-            click.echo(
+            ux.echo(
                 f"[registry] skipping stdio MCP scan (would spawn package): "
                 f"name={entry.name!r} command={entry.command!r} — pass "
                 f"`registry sync --scan-stdio` to scan it",
@@ -1133,13 +1375,13 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
         if scanner is None:
             return None
         try:
-            return scanner.scan(
-                entry.name, server_entry=server, allow_private=allow_private
+            return _scan_mcp_and_record(
+                app, scanner, entry.name, server_entry=server, allow_private=allow_private
             )
-        except SystemExit:
-            return None
-        except Exception:  # noqa: BLE001
-            return None
+        except Exception as exc:  # noqa: BLE001
+            # The sync engine marks the entry ``error`` and the source
+            # STATUS error instead of leaving it silently pending (GAP-1357).
+            raise RuntimeError(f"MCP scan failed for {entry.name}: {exc}") from exc
     if not entry.url:
         return None
     # F-0344: validate generic registry MCP URLs through the central
@@ -1148,7 +1390,7 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
     # missed the RFC 6598 CGNAT block. The scanner re-guards internally,
     # but failing closed here gives a precise operator-facing message.
     if not _registry_mcp_url_allowed(entry.url, allow_private=allow_private):
-        click.echo(
+        ux.echo(
             f"[registry] refusing to scan manifest MCP URL {entry.url!r} — "
             f"resolves to loopback/private/link-local/CGNAT. Use "
             f"`defenseclaw registry sync --allow-private` to opt in.",
@@ -1159,11 +1401,36 @@ def _run_mcp_scan(  # type: ignore[no-untyped-def]
     if scanner is None:
         return None
     try:
-        return scanner.scan(entry.url, allow_private=allow_private)
+        return _scan_mcp_and_record(app, scanner, entry.url, allow_private=allow_private)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"MCP scan failed for {entry.url}: {exc}") from exc
+
+
+def _scan_mcp_and_record(app: AppContext, scanner, target: str, **kwargs):  # type: ignore[no-untyped-def]
+    """Run one registry MCP scan and record it as 'mcp scan' does (GAP-1881).
+
+    Skill entries go through cmd_skill, which records its scans; the MCP
+    scanner does not, so registry sync left no scan.completed log, scan
+    metric or asset.scan trace. A failed record never fails the scan.
+    """
+    from defenseclaw.commands._scan_ui import record_scan
+
+    try:
+        result = scanner.scan(target, **kwargs)
     except SystemExit:
         return None
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as exc:
+        if app.logger:
+            try:
+                app.logger.log_scan_failed("mcp-scanner", target, f"scan failed: {exc}")
+            except Exception as log_exc:  # noqa: BLE001 - keep the scan error primary
+                click.echo(f"warning: could not record the failed scan: {log_exc}", err=True)
+        raise
+    try:
+        record_scan(app.logger, result)
+    except Exception as exc:  # noqa: BLE001 - the verdict still drives promotion
+        click.echo(f"warning: could not record the scan of {target}: {exc}", err=True)
+    return result
 
 
 def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
@@ -1191,16 +1458,17 @@ def _registry_mcp_url_allowed(url: str, *, allow_private: bool = False) -> bool:
 @click.argument("source_id")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp", "all"], case_sensitive=False),
-              default="all")
+              default="all", help="Show only skills or MCP servers")
 @click.option("--status",
-              type=click.Choice(["pending", "clean", "warning", "blocked", "error", "all"],
+              type=click.Choice(["pending", "clean", "warning", "blocked", "error", "rejected", "all"],
                                 case_sensitive=False),
-              default="all")
+              default="all",
+              help="Show only entries with this status (rejected: an operator reject, never promoted)")
 @click.option("--approved", is_flag=True,
               help="Show only operator-approved entries")
 @click.option("--rejected", is_flag=True,
               help="Show only operator-rejected entries")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def entries_cmd(
     app: AppContext,
@@ -1214,12 +1482,13 @@ def entries_cmd(
     """Show cached entries for a source. Run after ``registry sync``.
 
     The ``--approved`` / ``--rejected`` flags filter on the
-    operator-override bits stored alongside the scanner verdict;
-    these are independent of ``--status`` so combinations like
-    ``--rejected --status warning`` still work (operator rejected
-    an entry the scanner had only warned about). Both flags
-    together returns the empty set by definition because
-    ``approve`` clears ``rejected`` and vice versa.
+    operator-override bits. An approved entry keeps its scanner
+    verdict, so ``--approved --status warning`` lists entries an
+    operator approved although the scanner warned. A rejected
+    entry's status is ``rejected`` (the scanner verdict is not
+    kept), so ``--rejected`` already means ``--status rejected``.
+    Both flags together returns the empty set by definition
+    because ``approve`` clears ``rejected`` and vice versa.
     """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
@@ -1238,18 +1507,23 @@ def entries_cmd(
         if rejected:
             bits.append("rejected")
         ux.subhead(f"No matching entries ({', '.join(bits)}).")
+        if rejected and status.lower() not in ("all", "rejected"):
+            # GAP-2416: a rejected entry's status is always "rejected".
+            ux.subhead("A rejected entry's status is 'rejected'; drop --status to list them.")
         return
     click.echo()
     ux.section(f"Entries for {source.id}")
+    # A long entry name must not push the other columns out (GAP-2424).
+    name_w = max([32] + [len(v.name) for v in rows])
     click.echo(
-        f"  {'NAME':<32} {'TYPE':<6} {'STATUS':<10} {'SEV':<8} {'A/R'}"
+        f"  {'NAME':<{name_w}} {'TYPE':<6} {'STATUS':<10} {'SEV':<8} {'A/R'}"
     )
-    click.echo(f"  {'-' * 32} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 3}")
+    click.echo(f"  {'-' * name_w} {'-' * 6} {'-' * 10} {'-' * 8} {'-' * 3}")
     for v in rows:
         a = "A" if v.approved else "-"
         r = "R" if v.rejected else "-"
         click.echo(
-            f"  {v.name:<32} {v.type:<6} {v.status:<10} {(v.severity or '-'):<8} {a}{r}",
+            f"  {v.name:<{name_w}} {v.type:<6} {v.status:<10} {(v.severity or '-'):<8} {a}{r}",
         )
     click.echo()
 
@@ -1283,17 +1557,19 @@ def _filter_verdicts(
 @click.argument("entry_name")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True)
+              default=None,
+              help="Whether the entry is a skill or an MCP server. Optional when "
+                   "the source holds one content type or the name is unique.")
 @click.option("--repromote/--no-repromote", default=True,
               help="Re-run asset_policy promotion against the cached "
                    "manifest immediately (no network call).")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def approve_cmd(
     app: AppContext,
     source_id: str,
     entry_name: str,
-    entry_type: str,
+    entry_type: str | None,
     repromote: bool,
     emit_json: bool,
 ) -> None:
@@ -1317,17 +1593,19 @@ def approve_cmd(
 @click.argument("entry_name")
 @click.option("--type", "entry_type",
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True)
+              default=None,
+              help="Whether the entry is a skill or an MCP server. Optional when "
+                   "the source holds one content type or the name is unique.")
 @click.option("--repromote/--no-repromote", default=True,
               help="Re-run asset_policy promotion against the cached "
                    "manifest immediately (no network call).")
-@click.option("--json", "emit_json", is_flag=True)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def reject_cmd(
     app: AppContext,
     source_id: str,
     entry_name: str,
-    entry_type: str,
+    entry_type: str | None,
     repromote: bool,
     emit_json: bool,
 ) -> None:
@@ -1344,11 +1622,110 @@ def reject_cmd(
     )
 
 
+def _split_typed_name(
+    cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
+) -> tuple[str, str | None]:
+    """Accept the ``mcp:<name>`` / ``skill:<name>`` form sync and approve print (GAP-2450).
+
+    The prefix is stripped only when it agrees with ``--type`` (if given)
+    and no cached entry literally carries the prefixed name.
+    """
+    prefix, sep, bare = entry_name.partition(":")
+    prefix = prefix.lower()
+    if not sep or not bare or prefix not in ("skill", "mcp"):
+        return entry_name, entry_type
+    verdicts = load_index(cfg.data_dir, source.id).verdicts
+    if any(v.name == entry_name for v in verdicts):
+        return entry_name, entry_type
+    if entry_type and entry_type.lower() != prefix:
+        # GAP-2457: "skill:<name> --type mcp" contradicts itself; say so.
+        types = sorted({v.type for v in verdicts if v.name == bare})
+        hint = (
+            f"; it is {_with_article(types[0])} entry (use {_typed_forms(types[0], bare)})"
+            if len(types) == 1 else ""
+        )
+        raise click.UsageError(
+            f"the {prefix}: prefix in {entry_name!r} does not match "
+            f"--type {entry_type.lower()}{hint}",
+        )
+    return bare, prefix
+
+
+def _resolve_entry_type(
+    cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
+) -> str:
+    """Pick the entry type for approve/reject when ``--type`` is omitted.
+
+    A source that declares one content type (skill or mcp) implies it;
+    otherwise the cached index decides when the name exists under one
+    type only.
+    """
+    if entry_type:
+        return entry_type.lower()
+    content = (source.content or "").lower()
+    if content in ("skill", "mcp"):
+        return content
+    types = sorted({
+        v.type for v in load_index(cfg.data_dir, source.id).verdicts
+        if v.name == entry_name
+    })
+    if len(types) == 1:
+        return types[0]
+    if not types:
+        raise click.UsageError(_missing_entry_message(cfg, source, entry_name, None))
+    raise click.UsageError(
+        f"{entry_name!r} exists as both a skill and an MCP server in {source.id}; "
+        "pass --type skill or --type mcp",
+    )
+
+
+def _missing_entry_message(
+    cfg: Config, source: RegistrySource, entry_name: str, entry_type: str | None,
+) -> str:
+    """Explain why approve/reject found no entry (GAP-2281).
+
+    Only a never-synced source gets the "sync first" hint; a synced
+    source names the entries it does have.
+    """
+    idx = load_index(cfg.data_dir, source.id)
+    if not idx.fetched_at and not idx.verdicts:
+        return (
+            f"no cached entries for {source.id}; run "
+            f"`defenseclaw registry sync {source.id}` first"
+        )
+    label = f"{entry_type} " if entry_type else ""
+    # GAP-2307: the name exists, but under the other type; point at it.
+    other = sorted({
+        v.type for v in idx.verdicts
+        if v.name == entry_name and entry_type and v.type != entry_type
+    })
+    if other:
+        return (
+            f"{source.id} has no {label}entry {entry_name!r}; it is "
+            f"{_with_article(other[0])} entry (use {_typed_forms(other[0], entry_name)})"
+        )
+    names = sorted({v.name for v in idx.verdicts if not entry_type or v.type == entry_type})
+    shown = ", ".join(names[:10]) + (", ..." if len(names) > 10 else "")
+    return (
+        f"{source.id} has no {label}entry {entry_name!r} "
+        f"({label}entries: {shown or 'none'}; see 'defenseclaw registry entries {source.id}')"
+    )
+
+
+def _with_article(entry_type: str) -> str:
+    return f"an {entry_type}" if entry_type == "mcp" else f"a {entry_type}"
+
+
+def _typed_forms(entry_type: str, name: str) -> str:
+    """Both spellings approve/reject accept for an entry (GAP-2457)."""
+    return f"{entry_type}:{name} or {name} --type {entry_type}"
+
+
 def _do_manual_verdict(
     app: AppContext,
     source_id: str,
     entry_name: str,
-    entry_type: str,
+    entry_type: str | None,
     *,
     approved: bool,
     rejected: bool,
@@ -1366,14 +1743,15 @@ def _do_manual_verdict(
     """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
+    entry_name, entry_type = _split_typed_name(cfg, source, entry_name, entry_type)
+    entry_type = _resolve_entry_type(cfg, source, entry_name, entry_type)
     verdict = manual_set_verdict(
         cfg.data_dir, source.id, entry_type.lower(), entry_name,
         approved=approved, rejected=rejected,
     )
     if verdict is None:
         click.echo(
-            f"error: no cached entry {entry_type}:{entry_name} in {source.id} "
-            "(run `registry sync` first)",
+            "error: " + _missing_entry_message(cfg, source, entry_name, entry_type.lower()),
             err=True,
         )
         raise SystemExit(2)
@@ -1384,13 +1762,11 @@ def _do_manual_verdict(
             cfg, cfg.data_dir, source, save=True,
         )
 
-    if app.logger:
-        app.logger.log_action(
-            f"registry-{action_label}", "config",
-            f"id={source.id} {entry_type}:{entry_name}",
-        )
-
+    entry_details = f"{action_label} id={source.id} {entry_type}:{entry_name}"
+    entry_action = "registry-approve" if approved else "registry-reject"
+    entry_target = f"{entry_type}:{entry_name}"
     if emit_json:
+        _log_registry_action(app, entry_action, entry_target, entry_details)
         out: dict[str, Any] = {
             "action": action_label,
             "verdict": verdict.to_dict(),
@@ -1408,10 +1784,17 @@ def _do_manual_verdict(
 
     label = "Approved" if approved else "Rejected"
     ux.ok(f"{label} {entry_type}:{entry_name} from {source.id}.")
+    _log_registry_action(app, entry_action, entry_target, entry_details)
     if repromote and promoted is None:
         ux.subhead(
             "No cached manifest yet — run `defenseclaw registry sync "
             f"{source.id}` to fetch and promote.",
+        )
+    elif approved and verdict.status == "pending":
+        # GAP-1750: say what "pending" waits for and how to finish.
+        ux.subhead(
+            "Status stays pending until the next scan: run `defenseclaw registry sync "
+            f"{source.id}` (in the TUI Registries panel, press s).",
         )
 
 
@@ -1454,22 +1837,28 @@ def _registry_required_payload(result: RegistryRequiredResult) -> dict[str, Any]
               # round-trips through the loader; clearing it is the doctor
               # command's job (cmd_doctor.py), not this toggle.
               type=click.Choice(["skill", "mcp"], case_sensitive=False),
-              required=True)
+              required=True, help="Whether the entry is a skill or an MCP server")
 @click.option("--enabled/--disabled", required=True,
               help="Flip asset_policy.<type>.registry_required")
 @click.option(
     "--connector", "connector", default="", metavar="C",
-    help="Scope the toggle to asset_policy.connectors[C].<type>."
-         "registry_required (per-connector override, OTHER-7). Omit for the "
-         "global asset_policy.<type>.registry_required.",
+    help="Set the requirement for connector C only (its per-connector "
+         "override). Omit to set it for every connector.",
 )
-@click.option("--json", "emit_json", is_flag=True)
+@click.option(
+    "--enforce/--no-enforce", default=None,
+    help="--enforce also turns asset policy enforcement on (asset_policy.enabled=true, "
+         "mode=action); without it nothing is blocked while asset policy is off. "
+         "--no-enforce turns it back off (mode=observe: logged, not blocked).",
+)
+@click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def require_cmd(
     app: AppContext,
     asset_type: str,
     enabled: bool,
     connector: str,
+    enforce: bool | None,
     emit_json: bool,
 ) -> None:
     """Toggle ``asset_policy.<type>.registry_required``.
@@ -1480,19 +1869,24 @@ def require_cmd(
     the gateway: an empty registry list with require=on means "no
     asset is approved".
 
-    With ``--connector C`` only that connector's override is changed. Without
-    ``--connector``, the global default is changed and every active connector
-    is reconciled to inherit it, so a stale opposite override cannot defeat
-    broad operator intent. Inactive connector overrides are preserved for
-    future activation. Registry rule lists stay global and continue to be
-    filtered by ``rule.connector`` at match time.
+    With --connector C, only that connector's override changes. Without it,
+    the global default changes and every active connector is reset to inherit
+    it, so an older opposite override cannot undo the change. Overrides of
+    inactive connectors are kept. Registry rule lists stay global; each rule
+    still applies only to its own connector, if it names one.
+
+    The requirement is enforced only while asset policy is on
+    (``asset_policy.enabled=true`` and ``mode=action``). --enforce turns
+    both on in the same save; --no-enforce sets ``mode=observe`` again.
     """
     cfg = _require_cfg(app)
     asset = asset_type.lower()
     connector = (connector or "").strip()
+    if enforce and not enabled:
+        raise click.UsageError("--enforce needs --enabled")
 
     try:
-        result = set_registry_required(cfg, asset, enabled, connector=connector)
+        result = set_registry_required(cfg, asset, enabled, connector=connector, enforce=enforce)
     except RegistryRequiredUpdateError as exc:
         failed = [change.connector for change in exc.result.connectors]
         rollback_failed = "could not be restored" in str(exc.cause)
@@ -1523,10 +1917,23 @@ def require_cmd(
             f"registry policy update failed for {targets}; {rollback}: {exc.cause}"
         ) from exc
 
+    # GAP-2377: product noun for the asset type ("a mcp" read badly).
+    noun, article = ("MCP server", "an") if asset == "mcp" else (asset, "a")
     scope_label = (
         f"asset_policy.connectors.{result.storage_key}.{asset}"
         if result.storage_key is not None
         else f"asset_policy.{asset}"
+    )
+    # Turning the requirement on can block every asset at admission: audit
+    # each toggle like the other registry changes (GAP-1518), as its own
+    # registry-require action on the policy scope (GAP-2280). The change is
+    # already saved, so a stopped gateway only skips the event (GAP-2236).
+    affected = ",".join(f"{c.connector}:{c.status}" for c in result.connectors) or "-"
+    _log_registry_action(
+        app, "registry-require", f"{scope_label}.registry",
+        f"require scope={scope_label}.registry required={'true' if enabled else 'false'} "
+        f"connectors={affected}"
+        + ("" if enforce is None else f" enforce={'true' if enforce else 'false'}"),
     )
 
     # Messaging reads the *effective* per-type policy for the scope: rule
@@ -1539,6 +1946,11 @@ def require_cmd(
         effective = getattr(cfg.asset_policy, asset)
     empty_registry = len(effective.registry) == 0
     empty_action = getattr(effective, "registry_empty_action", "deny") or "deny"
+    # GAP-2119: registry_required only blocks while asset policy is on and in
+    # action mode; the per-user default is off/observe.
+    policy_on = bool(getattr(cfg.asset_policy, "enabled", False))
+    policy_mode = cfg.asset_policy.effective_mode(result.connector or "")
+    enforcing = policy_on and policy_mode == "action"
 
     if emit_json:
         payload = _registry_required_payload(result)
@@ -1546,6 +1958,9 @@ def require_cmd(
             "status": "ok",
             "registry_size": len(effective.registry),
             "registry_empty_action": empty_action,
+            "asset_policy_enabled": policy_on,
+            "asset_policy_mode": policy_mode,
+            "enforcing": enforcing,
         })
         _emit_json(payload)
         return
@@ -1564,8 +1979,32 @@ def require_cmd(
             + ", ".join(result.preserved_inactive_connectors)
             + "."
         )
+    if enforce is False:
+        ux.subhead(
+            f"Asset policy enforcement is off (mode={policy_mode}): "
+            "assets are logged, not blocked."
+        )
     if not enabled:
         return
+    if enforce:
+        ux.subhead("Asset policy enforcement is on (asset_policy.enabled=true, mode=action).")
+        # GAP-2266: repeat the scope; without --connector the undo resets every override.
+        scope_flag = f" --connector {result.connector}" if result.connector else ""
+        ux.subhead(
+            f"Turn it off with: defenseclaw registry require --type {asset} --disabled"
+            f"{scope_flag} --no-enforce"
+        )
+    if not policy_on:
+        ux.warn(
+            "Asset policy is off (asset_policy.enabled=false): nothing is blocked "
+            f"yet, and {article} {noun} that is not in the registry is still added. "
+            "Re-run with --enforce to turn it on (asset_policy.enabled=true, mode=action).",
+        )
+    elif policy_mode != "action":
+        ux.warn(
+            f"Asset policy mode is {policy_mode!r}: {article} {noun} that is not in the "
+            "registry is logged, not blocked. Re-run with --enforce to set mode=action.",
+        )
 
     # Operators routinely flip require=on without realising the
     # downstream gateway will deny every asset whose name isn't on
@@ -1575,28 +2014,31 @@ def require_cmd(
     # surface whichever value is live.
     if empty_registry:
         if empty_action == "deny":
+            when = "will be" if enforcing else "would be"
             ux.warn(
-                f"registries.{asset}.registry is EMPTY and "
-                f"registry_empty_action='deny' — every {asset} will be "
+                f"asset_policy.{asset}.registry is EMPTY and "
+                f"registry_empty_action='deny' — every {noun} {when} "
                 "blocked at admission until you `registry sync` (or add "
-                "manual rules).",
+                "manual rules)."
+                + ("" if enforcing else " Nothing is blocked while asset policy enforcement is off."),
             )
         elif empty_action == "warn":
             ux.warn(
-                f"registries.{asset}.registry is empty and "
+                f"asset_policy.{asset}.registry is empty and "
                 "registry_empty_action='warn' — assets will be allowed "
                 "but flagged in the audit log. Run `registry sync` to "
                 "populate the list.",
             )
         else:
             ux.subhead(
-                f"registries.{asset}.registry is empty and "
+                f"asset_policy.{asset}.registry is empty and "
                 f"registry_empty_action={empty_action!r} — admission "
                 "will fall back to the configured default action.",
             )
     else:
         ux.subhead(
-            f"registry has {len(effective.registry)} entries; "
+            f"registry has {len(effective.registry)} "
+            f"{'entry' if len(effective.registry) == 1 else 'entries'}; "
             f"registry_empty_action={empty_action!r} (only matters when "
             "the list is empty).",
         )
@@ -1625,17 +2067,25 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         f"Content ({'/'.join(REGISTRY_CONTENT_TYPES)})", default="skill",
     )
     url = ""
-    if kind == "skills_sh":
+    kind_key = kind.strip().lower()
+    if kind_key == "skills_sh":
         url = click.prompt(
             "Manifest URL or view (curated/all-time/trending/hot)",
             default="curated",
         )
-    elif kind != "clawhub":
+    elif kind_key == "file":
+        # A local file, not a URL (GAP-2075); store it with ~ expanded.
+        url = os.path.expanduser(click.prompt("Manifest file path (absolute or ~/...)").strip())
+    elif kind_key == "git":
+        url = click.prompt("Git repository URL")
+    elif kind_key != "clawhub":
         url = click.prompt("Manifest URL")
     auth_env = ""
-    if click.confirm("Use an auth token (read from an env var)?", default=False):
+    # Only sources fetched over the network send a token (GAP-2123).
+    if kind.strip().lower() != "file" and click.confirm("Use an auth token (read from an env var)?", default=False):
         auth_env = click.prompt("Env var name", default="DEFENSECLAW_REGISTRY_TOKEN")
 
+    ctx.meta[_WIZARD_SYNC_PROMPT_KEY] = True
     ctx.invoke(
         add_cmd,
         source_id=sid,
@@ -1644,24 +2094,26 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         content=content,
         auth_env=auth_env or None,
         enabled=True,
-        auto_sync=False,
-        sync_interval_hours=24,
+        auto_sync=None,
+        sync_interval_hours=None,
         non_interactive=True,
         emit_json=False,
     )
 
-    if click.confirm("Sync now?", default=True):
-        scan = click.confirm("Run scanners during sync?", default=True)
-        ctx.invoke(
-            sync_cmd,
-            source_ids=(sid,),
-            sync_all_flag=False,
-            include_disabled=False,
-            scan=scan,
-            allow_private=False,
-            no_promote=False,
-            emit_json=False,
-        )
+    if not click.confirm("Sync now?", default=True):
+        _print_sync_hint(sid)
+        return
+    scan = click.confirm("Run scanners during sync?", default=True)
+    ctx.invoke(
+        sync_cmd,
+        source_ids=(sid,),
+        sync_all_flag=False,
+        include_disabled=False,
+        scan=scan,
+        allow_private=False,
+        no_promote=False,
+        emit_json=False,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 ---
 name: codeguard
 description: "Security-aware code generation — teaches the agent CodeGuard rules to write secure code by default"
+license: Apache-2.0
+compatibility: "Optional self-check (main.py) calls the local DefenseClaw gateway over the loopback network"
 ---
 
 # CodeGuard: Secure Code Generation Rules

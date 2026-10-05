@@ -63,6 +63,9 @@ type EventRouter struct {
 	// Ended W3C model contexts are keyed by source-backed session/run facts.
 	// Contexts contain no live span or runtime-generation lease.
 	activeLLMContexts map[eventRouterModelContextKey]eventRouterModelContextEntry
+	// The user prompt of each session waits here for the assistant message
+	// that answers it, so that turn's spans carry it (GAP-2408).
+	pendingPrompts map[string]eventRouterPendingPrompt
 
 	toolObservationMu    sync.Mutex
 	toolObservations     map[string]eventRouterToolObservation
@@ -80,6 +83,11 @@ type EventRouter struct {
 	activeSessions   map[string]time.Time // sessionKey → last seen
 
 	contextTracker *ContextTracker
+
+	// promptScanEcho remembers the last id-less user prompt per session so
+	// its id-bearing copy is not counted twice (countPromptScanMetric).
+	promptScanEchoMu sync.Mutex
+	promptScanEcho   map[string]promptScanEchoEntry
 
 	// defaultAgentName is the fallback for agent_name when the
 	// incoming event doesn't supply one. Populated from
@@ -626,6 +634,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		case "user":
 			msgMeta.PromptID = promptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq, envelope.MessageID)
 			r.emitLLMPromptEventV8(msgCtx, msgMeta, contentStr, envelope.Message)
+			r.rememberEventRouterPrompt(envelope.SessionKey, openClawMessageText(contentStr), time.Now().UTC())
 		case "assistant":
 			msgMeta.PromptID = replyPromptIDForSessionMessage(envelope.SessionKey, envelope.MessageSeq)
 			msgMeta.ResponseID = stableLLMEventID("response", "openclaw", envelope.SessionKey, envelope.MessageID, intString(envelope.MessageSeq))
@@ -676,7 +685,8 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			meta.PromptID = modelEventMeta.PromptID
 			meta.ResponseID = modelEventMeta.ResponseID
 			llmCtx := r.emitEventRouterModelV8(
-				modelEventCtx, meta, msg.Provider, msg.Model, contentStr,
+				modelEventCtx, meta, msg.Provider, msg.Model,
+				r.takeEventRouterPrompt(envelope.SessionKey, time.Now().UTC()), contentStr,
 				promptTokens, completionTokens, toolCallCount, finishReasons, time.Now().UTC(),
 			)
 			r.rememberEventRouterModelContext(
@@ -822,12 +832,14 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		categories,
 		latencyMs,
 	)
-	meta := streamLLMEventMeta(r, sessionKey, "", "builtin", model, "")
-	meta.MessageID = messageID
-	r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
-		meta: meta, action: verdict.Action, severity: verdict.Severity,
-		alertType: "prompt-injection", alertSource: "local-pattern", observedAt: time.Now().UTC(),
-	})
+	if r.countPromptScanMetric(sessionKey, messageID, content) {
+		meta := streamLLMEventMeta(r, sessionKey, "", "builtin", model, "")
+		meta.MessageID = messageID
+		r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
+			meta: meta, action: verdict.Action, severity: verdict.Severity,
+			alertType: "prompt-injection", alertSource: "local-pattern", observedAt: time.Now().UTC(),
+		})
+	}
 
 	// Preserve the source reason for canonical per-destination redaction. The
 	// stderr summary below omits it; only log-injection controls are removed
@@ -1296,8 +1308,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		emitVerdict(vctx, gatewaylog.StageRegex, gatewaylog.DirectionToolCall, "",
 			"alert", findings[0].Title, deriveSeverity(severity), []string{flaggedPattern}, 0,
 			emitVerdictExtras{RuleIDs: []string{flaggedPattern}})
+		// Only the alert is counted here. This lane observes a call the
+		// OpenClaw plugin already sent to /api/v1/inspect/tool, which records
+		// the call's one inspect evaluation (block, alert or allow); a second
+		// action=alert evaluation counted one blocked call twice (GAP-2046).
 		r.recordEventRouterGuardrailMetricsV8(vctx, eventRouterGuardrailMetricObservation{
-			meta: toolObservation.meta, tool: payload.Tool, action: "alert", severity: severity,
+			meta: toolObservation.meta, severity: severity,
 			alertType: "tool-call-flagged", alertSource: "tool-inspect", observedAt: time.Now().UTC(),
 		})
 	}

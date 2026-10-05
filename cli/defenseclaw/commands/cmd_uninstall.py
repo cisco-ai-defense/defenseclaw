@@ -41,8 +41,13 @@ OpenClaw, never against the other adapters — calling
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import glob
 import json
+import ntpath
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -51,21 +56,46 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import click
 
 from defenseclaw import config as config_module
 from defenseclaw import legacy_connector, ux
+
+# Imported here, not where it is used: by then the data removal has deleted
+# the virtual environment this CLI runs from (GAP-1397).
+from defenseclaw.bootstrap import remove_own_api_port_claims
 from defenseclaw.commands import windows_native_uninstall
+from defenseclaw.file_lock import tui_lock_held
 
 # Connectors whose teardown the Python CLI knows how to perform locally
 # without going through ``defenseclaw-gateway connector teardown``. This
 # is the conservative fallback path used when the gateway binary is too
 # old to expose the connector subcommand.
 _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
-_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
+# .uv holds the Python the installer's venv runs on (scripts/install.sh).
+_RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv", ".uv")
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+# The installers (scripts/install.sh, scripts/install.ps1) write this record
+# beside the launchers when they install uv because it was missing: one
+# "<sha256>  <name>" line per file. `uninstall --binaries` removes the files
+# that still match it, and keeps a uv that was updated or replaced since.
+_UV_RECORD = "defenseclaw-uv.sha256"
+# `defenseclaw-gateway stop` itself waits up to about 25s (shutdown request,
+# 10s graceful exit, then a signal and 10s more, then a kill), so a shorter
+# wait here failed the whole uninstall while the stop was still working
+# (GAP-2100).
+_GATEWAY_STOP_TIMEOUT_SECONDS = 45
+_UV_NAMES = {"win32": ("uv.exe", "uvx.exe", "uvw.exe")}
+_UV_NAMES_POSIX = ("uv", "uvx")
+_UV_RECORD_MAX_BYTES = 4096
+# The folders DefenseClaw created because they were missing (the gateway's
+# install watcher, connector setup); see the Go connector package's
+# watcher_created_dirs.go. Uninstall removes the ones still empty.
+_CREATED_DIRS_RECORD = "watcher-created-dirs.json"
+_CREATED_DIRS_RECORD_MAX_BYTES = 1 << 20
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
@@ -143,6 +173,11 @@ class UninstallPlan:
     managed_venv: str = ""
     gateway_path: str = ""
     binary_targets: tuple[str, ...] = ()
+    # data_bound_launchers are the launchers in install_root that run the
+    # CLI's virtual environment in data_dir (links on Linux and macOS, .cmd
+    # shims on Windows). `--all` removes them with data_dir even without
+    # --binaries: they stop working once it is gone.
+    data_bound_launchers: tuple[str, ...] = ()
     # sandbox_teardown runs ``defenseclaw-gateway sandbox teardown --yes``
     # before the sidecar stops: DefenseClaw's OpenShell sandboxes,
     # providers, profiles and images go, the gateway config setup changed is
@@ -151,6 +186,31 @@ class UninstallPlan:
     # sandbox_teardown_skipped is set when there is sandbox state but
     # --skip-sandbox-teardown leaves it (Docker or OpenShell are gone, say).
     sandbox_teardown_skipped: bool = False
+    # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
+    # DefenseClaw Setup left after the installer replaced it (Windows,
+    # --binaries only).
+    setup_leftovers: tuple[str, ...] = ()
+    # observability_teardown removes the local observability stack
+    # (`defenseclaw setup local-observability`) and its data volumes before
+    # its Compose files in data_dir go (uninstall --all only).
+    observability_teardown: bool = False
+    # uv_leftovers are uv's download cache and the Python it fetched, which
+    # installers before 1.0.2 left outside data_dir (~/.cache/uv,
+    # ~/.local/share/uv/python; %LOCALAPPDATA%\uv\cache, %APPDATA%\uv\python)
+    # when they installed uv (--all --binaries only, and only when that uv
+    # goes too and no other uv is on PATH).
+    uv_leftovers: tuple[str, ...] = ()
+    # uv_cache_entries is uv's cache folder when it holds DefenseClaw entries
+    # an earlier installer's uv downloaded there; `uv cache clean defenseclaw`
+    # removes only those (--all --binaries; GAP-1411).
+    uv_cache_entries: str = ""
+    # hook_temp_dirs are the scratch folders (defenseclaw-hook.*) DefenseClaw's
+    # shell hooks left in the temp folders (--all; GAP-1411).
+    hook_temp_dirs: tuple[str, ...] = ()
+    # mac_app is DefenseClawMac.app when it is installed (macOS). Uninstall
+    # does not remove the app, its login item or its background service; the
+    # plan says how to.
+    mac_app: str = ""
 
 
 @dataclass(frozen=True)
@@ -218,6 +278,7 @@ def uninstall_cmd(
     """Uninstall DefenseClaw (reversibly by default)."""
     if _dispatch_native_windows_uninstall(
         wipe_data=wipe_data,
+        binaries=binaries,
         dry_run=dry_run,
         yes=yes,
     ):
@@ -234,6 +295,10 @@ def uninstall_cmd(
     _render_plan(plan, dry_run=dry_run)
 
     if dry_run:
+        refusal = _open_tui_refusal(plan)
+        if refusal:
+            # The real run stops at plan validation (GAP-2585).
+            ux.warn(f"a real run would stop before any change: {refusal}")
         ux.subhead("(dry-run — nothing modified)")
         return
 
@@ -242,6 +307,110 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+    _render_kept_and_next_steps(plan)
+
+
+def _render_kept_and_next_steps(plan: UninstallPlan) -> None:
+    """Say what a partial uninstall kept and how to resume or finish it.
+
+    The default uninstall keeps the data dir and the binaries, so the user
+    needs to know that the config, the audit log and the policies are still
+    there and which command turns protection back on.
+    """
+    if plan.remove_data_dir and plan.remove_binaries:
+        return
+    # --all without --binaries removed the defenseclaw launcher with the data
+    # dir it runs, so nothing below may name a defenseclaw command (GAP-1923).
+    launcher_gone = bool(plan.data_bound_launchers) and not plan.remove_binaries
+    left = [
+        target
+        for target in plan.binary_targets
+        if launcher_gone and target not in plan.data_bound_launchers and os.path.lexists(target)
+    ]
+    kept: list[str] = []
+    if not plan.remove_data_dir and plan.data_dir:
+        kept.append(f"{plan.data_dir}: config, audit log, policies and secrets")
+    if launcher_gone and left:
+        names = ", ".join(os.path.basename(target) for target in left)
+        kept.append(f"{plan.install_root}: {names} (the defenseclaw command went with the data)")
+    elif not plan.remove_binaries and plan.install_root and not launcher_gone:
+        kept.append(f"{plan.install_root}: the DefenseClaw commands")
+    if kept:
+        ux.subhead("Kept:")
+        for line in kept:
+            ux.echo(f"  • {line}")
+    if plan.remove_binaries:
+        _render_next_steps_without_commands(plan)
+        return
+    # A Windows `make all` developer install refuses --binaries, so naming
+    # that command sent the user to a refusal (GAP-1256).
+    developer = (
+        _windows_developer_files(plan.install_root)
+        if plan.platform_name == "win32" and not plan.remove_binaries
+        else []
+    )
+    if launcher_gone and not developer:
+        _render_next_steps_after_launcher_removal(plan, left)
+        return
+    ux.subhead("Next steps:")
+    if plan.remove_data_dir and not launcher_gone:
+        ux.echo("  • set DefenseClaw up again:  defenseclaw quickstart")
+    elif not plan.remove_data_dir:
+        ux.echo("  • turn protection back on:   defenseclaw setup guardrail")
+    if developer:
+        if not plan.remove_data_dir:
+            ux.echo("  • remove the data too:       defenseclaw uninstall --all")
+        ux.echo("  • remove the developer files (PowerShell):")
+        click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(developer)}")
+        return
+    ux.echo("  • remove everything:         defenseclaw uninstall --all --binaries")
+
+
+_INSTALL_URL = "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download"
+
+
+def _render_next_steps_after_launcher_removal(plan: UninstallPlan, left: list[str]) -> None:
+    """Next steps after --all removed the launcher with the data (GAP-1923)."""
+    ux.subhead("Next steps (the defenseclaw command was removed):")
+    if left and plan.platform_name == "win32":
+        ux.echo("  • remove the rest (PowerShell):")
+        click.echo(f"      Remove-Item -LiteralPath {_powershell_quoted_paths(left)}")
+    elif left:
+        import shlex
+
+        ux.echo(f"  • remove the rest:           rm -f {' '.join(shlex.quote(path) for path in left)}")
+    _render_reinstall_step(plan)
+
+
+def _render_next_steps_without_commands(plan: UninstallPlan) -> None:
+    """Next steps after --binaries kept the data: none may run defenseclaw (GAP-1745)."""
+    windows = plan.platform_name == "win32"
+    ux.subhead("Next steps (the defenseclaw command was removed):")
+    if plan.data_dir and windows:
+        ux.echo("  • remove the kept data (PowerShell):")
+        click.echo(f"      Remove-Item -Recurse -Force -LiteralPath {_powershell_quoted_paths([plan.data_dir])}")
+    elif plan.data_dir:
+        import shlex
+
+        ux.echo(f"  • remove the kept data:      rm -rf {shlex.quote(plan.data_dir)}")
+    _render_reinstall_step(plan)
+
+
+def _render_reinstall_step(plan: UninstallPlan) -> None:
+    """Say how to get DefenseClaw back once its command is gone."""
+    windows = plan.platform_name == "win32"
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    if managed_deployment():
+        # The organization's deployment installs DefenseClaw and guards the
+        # account; a per-user reinstall is not the way back.
+        return
+    then = "defenseclaw quickstart" if plan.remove_data_dir else "defenseclaw setup guardrail"
+    ux.echo(f"  • use DefenseClaw again:     reinstall it, then run '{then}'")
+    if windows:
+        click.echo(f"      irm {_INSTALL_URL}/install.ps1 | iex")
+    else:
+        click.echo(f"      curl -LsSf {_INSTALL_URL}/install.sh | bash")
 
 
 def _dispatch_native_windows_uninstall(
@@ -249,9 +418,16 @@ def _dispatch_native_windows_uninstall(
     wipe_data: bool,
     dry_run: bool,
     yes: bool,
+    binaries: bool = False,
     platform_name: str | None = None,
 ) -> bool:
-    """Prefer authenticated native Setup before consulting generic markers."""
+    """Prefer authenticated native Setup before consulting generic markers.
+
+    Setup removes its own program files either way. With binaries, what an
+    earlier script install left in %USERPROFILE%\\.local\\bin (and its user
+    Path entry) and the folders a replaced Setup left go too, once Setup is
+    done.
+    """
 
     try:
         request = windows_native_uninstall.prepare_native_windows_uninstall(
@@ -264,13 +440,18 @@ def _dispatch_native_windows_uninstall(
         return False
 
     ux.banner("DefenseClaw Uninstall")
-    click.echo(f"  {ux.dim('→')} authenticated native Windows installation")
-    click.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
+    ux.echo(f"  {ux.dim('→')} authenticated native Windows installation")
+    ux.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
     if wipe_data:
-        click.echo(f"  {ux.dim('→')} user data will be deleted")
+        ux.echo(f"  {ux.dim('→')} user data will be deleted")
     else:
-        click.echo(f"  {ux.dim('→')} user data will be preserved")
-    click.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
+        ux.echo(f"  {ux.dim('→')} user data will be preserved")
+    if binaries:
+        ux.echo(
+            f"  {ux.dim('→')} after Setup: DefenseClaw files left in %USERPROFILE%\\.local\\bin "
+            "and its user Path entry are removed too"
+        )
+    ux.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
 
     if dry_run:
         ux.subhead("(dry-run — nothing modified)")
@@ -285,6 +466,8 @@ def _dispatch_native_windows_uninstall(
         raise click.ClickException(str(exc)) from exc
     if outcome.returncode == 0:
         ux.ok("Native Windows uninstall completed.")
+        if binaries:
+            _remove_script_install_after_native_setup(request.platform_name)
         return True
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
@@ -294,6 +477,41 @@ def _dispatch_native_windows_uninstall(
         raise SystemExit(outcome.returncode)
     ux.err(f"Authenticated native Setup exited with Windows code {outcome.returncode}.")
     raise SystemExit(outcome.returncode)
+
+
+def _remove_script_install_after_native_setup(platform_name: str) -> None:
+    """Remove what install.ps1 left beside a native Setup install (--binaries).
+
+    The launchers go only when the plan validation proves them DefenseClaw's
+    (the installer's defenseclaw.cmd shim); a refusal is reported with what
+    stays, and the uninstall exits non-zero.
+    """
+    data_dir = str(config_module.default_data_path())
+    install_root, binary_targets = _owned_binary_targets(platform_name)
+    binary_targets += _installer_uv_targets(install_root, platform_name)
+    plan = UninstallPlan(
+        platform_name=platform_name,
+        install_root=install_root,
+        data_dir=data_dir,
+        managed_venv=os.path.join(data_dir, ".venv"),
+        gateway_path="",
+        binary_targets=binary_targets,
+        remove_binaries=True,
+    )
+    try:
+        if any(os.path.lexists(path) for path in binary_targets):
+            _remove_binaries(plan)
+        else:
+            _remove_install_bookkeeping(install_root, data_dir)
+            if _install_root_empties(plan):
+                with contextlib.suppress(OSError):
+                    os.rmdir(install_root)
+                _remove_user_path_entry(plan)
+        _remove_setup_leftovers(_windows_setup_leftovers(platform_name))
+    except (OSError, click.ClickException) as exc:
+        detail = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
+        ux.err(f"DefenseClaw files in {install_root} were not all removed: {detail}")
+        raise SystemExit(1) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +624,10 @@ def _build_plan(
     platform_name = platform_name or sys.platform
     data_dir = str(config_module.default_data_path())
     install_root, binary_targets = _owned_binary_targets(platform_name)
+    binary_targets += _installer_uv_targets(install_root, platform_name)
+    data_bound_launchers = (
+        _data_bound_launchers(binary_targets, data_dir, platform_name) if wipe_data and not binaries else ()
+    )
 
     # Config identifies active connectors. If it is missing or unreadable,
     # only durable rollback markers may authorize connector teardown.
@@ -454,6 +676,9 @@ def _build_plan(
     openclaw_home = openclaw_home_candidate if owns_openclaw else ""
 
     sandbox_state = _sandbox_state_present(cfg, data_dir, platform_name)
+    uv_leftovers = (
+        _installer_uv_leftovers(install_root, binary_targets, data_dir, platform_name) if wipe_data and binaries else ()
+    )
     return UninstallPlan(
         sandbox_teardown=sandbox_state and not skip_sandbox_teardown,
         sandbox_teardown_skipped=sandbox_state and skip_sandbox_teardown,
@@ -477,7 +702,592 @@ def _build_plan(
             else (shutil.which("defenseclaw-gateway") or os.path.join(install_root, "defenseclaw-gateway"))
         ),
         binary_targets=binary_targets,
+        data_bound_launchers=data_bound_launchers,
+        setup_leftovers=_windows_setup_leftovers(platform_name) if binaries else (),
+        observability_teardown=(
+            wipe_data and not preserve_data_entries and _local_observability_stack_file(data_dir) != ""
+        ),
+        mac_app=_installed_mac_app(platform_name) if wipe_data and binaries else "",
+        uv_leftovers=uv_leftovers,
+        uv_cache_entries=(
+            _uv_cache_with_defenseclaw(data_dir, platform_name, uv_leftovers)
+            if wipe_data and binaries and not preserve_data_entries
+            else ""
+        ),
+        hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
     )
+
+
+def _local_observability_stack_file(data_dir: str) -> str:
+    """Return the Compose file of the local observability stack in data_dir."""
+    path = os.path.join(data_dir, "observability-stack", "docker-compose.yml")
+    return path if os.path.isfile(path) and not os.path.islink(path) else ""
+
+
+# Where DefenseClawMac.app is installed (packaging/macos/app).
+_MAC_APP_NAME = "DefenseClawMac.app"
+
+
+def _installed_mac_app(platform_name: str) -> str:
+    if platform_name != "darwin":
+        return ""
+    for parent in ("/Applications", os.path.expanduser("~/Applications")):
+        path = os.path.join(parent, _MAC_APP_NAME)
+        if os.path.isdir(path):
+            return path
+    return ""
+
+
+# DefenseClaw Setup keeps its hook launcher and transaction log under
+# %LOCALAPPDATA%\DefenseClaw. When the installer replaces Setup it keeps the
+# launcher, because agent hooks that Setup wrote may still run it until each
+# connector is set up again (it moves the launcher's state file aside, which
+# turns the launcher off), so nothing else removes these folders.
+_WINDOWS_SETUP_LEFTOVERS = ("HookRuntime", "InstallerState")
+
+
+def _windows_setup_leftovers(platform_name: str) -> tuple[str, ...]:
+    if platform_name != "win32":
+        return ()
+    try:
+        local_app_data = windows_native_uninstall._known_folder_path(windows_native_uninstall._LOCAL_APP_DATA_FOLDER_ID)
+    except Exception:  # noqa: BLE001 - no Known Folder means nothing to clean.
+        return ()
+    root = os.path.join(local_app_data, "DefenseClaw") if local_app_data else ""
+    if (
+        not root
+        or os.path.lexists(os.path.join(local_app_data, "Programs", "DefenseClaw"))
+        or os.path.lexists(os.path.join(root, "InstallerCache"))
+        or os.path.lexists(os.path.join(root, "HookRuntime", "hook-runtime-state.json"))
+    ):
+        # A Setup install, or its cleanup after the next sign-in, still owns them.
+        return ()
+    return tuple(
+        path for path in (os.path.join(root, name) for name in _WINDOWS_SETUP_LEFTOVERS) if os.path.lexists(path)
+    )
+
+
+def _remove_setup_leftovers(paths: tuple[str, ...]) -> None:
+    for path in paths:
+        try:
+            if _is_reparse_path(path):
+                if os.path.isdir(path):
+                    os.rmdir(path)
+                else:
+                    os.unlink(path)
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
+    parents = {os.path.dirname(path) for path in paths}
+    for parent in parents:
+        with contextlib.suppress(OSError):
+            os.rmdir(parent)
+
+
+def _launcher_link_target(path: str) -> str:
+    """Return the absolute target of a launcher link, or "" for anything else."""
+    try:
+        if not os.path.islink(path):
+            return ""
+        target = os.readlink(path)
+    except OSError:
+        return ""
+    return os.path.normpath(os.path.join(os.path.dirname(path), target))
+
+
+# The installer's defenseclaw.exe is a copy of uv's console-script launcher
+# (about 50 KB); anything far larger is not that file.
+_WINDOWS_CLI_LAUNCHER_MAX_BYTES = 4 * 1024 * 1024
+# The Windows CLI launchers: defenseclaw.exe (what PowerShell and cmd.exe run)
+# and the defenseclaw.cmd shim. Either may be the one running this CLI.
+_WINDOWS_CLI_LAUNCHERS = ("defenseclaw.exe", "defenseclaw.cmd")
+
+
+def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> bool:
+    """Report whether the launcher at path runs the CLI's venv in data_dir.
+
+    Linux and macOS installs link ``~/.local/bin/defenseclaw`` (and the
+    scanner launchers) into ``<data_dir>/.venv``; Windows installs write
+    ``.cmd`` shims that call the venv's ``Scripts`` folder. Removing data_dir
+    leaves them dangling. A launcher that points anywhere else (a source
+    checkout's ``make install`` links into the repository) keeps working.
+    """
+    venv = _normalized(os.path.join(data_dir, ".venv"))
+    if platform_name != "win32":
+        link = _launcher_link_target(path)
+        return bool(link) and os.path.commonpath((_normalized(link), venv)) == venv
+    name = os.path.basename(path)
+    if not os.path.isfile(path) or _is_reparse_path(path):
+        return False
+    if name.lower().endswith(".cmd"):
+        expected = f'"{os.path.join(venv, "Scripts", name[:-4] + ".exe")}" %*'.lower()
+    elif name.lower() == "defenseclaw":
+        # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
+        expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
+    elif name.lower() == "defenseclaw.exe":
+        # The installer's copy of the venv's uv launcher names the venv's
+        # python.exe, which it starts (GAP-2237).
+        expected_bytes = os.path.join(venv, "Scripts", "python.exe").lower().encode("utf-8")
+        try:
+            with open(path, "rb") as stream:
+                data = stream.read(_WINDOWS_CLI_LAUNCHER_MAX_BYTES + 1)
+        except OSError:
+            return False
+        return len(data) <= _WINDOWS_CLI_LAUNCHER_MAX_BYTES and expected_bytes in data.lower()
+    else:
+        return False
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as stream:
+            contents = stream.read(16_385)
+    except OSError:
+        return False
+    return len(contents) <= 16_384 and expected in contents.lower()
+
+
+def _data_bound_launchers(binary_targets: tuple[str, ...], data_dir: str, platform_name: str) -> tuple[str, ...]:
+    """Name the launchers that stop working once data_dir is removed."""
+    bound = tuple(path for path in binary_targets if _is_data_bound_launcher(path, data_dir, platform_name))
+    # On Windows the deferred helper removes shims only beside the CLI shim
+    # it verifies, so the others go only when defenseclaw.cmd does.
+    if platform_name == "win32" and not any(os.path.basename(path).lower() == "defenseclaw.cmd" for path in bound):
+        return ()
+    return bound
+
+
+def _installer_uv_targets(install_root: str, platform_name: str) -> tuple[str, ...]:
+    """Return the uv files the installer put in install_root, and its record.
+
+    Only files that still match the digest the installer recorded are
+    listed; a uv updated or replaced since then belongs to the user.
+    """
+    record = os.path.join(install_root, _UV_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _UV_RECORD_MAX_BYTES:
+            return ()
+        with open(record, encoding="utf-8", errors="strict") as stream:
+            lines = stream.read(_UV_RECORD_MAX_BYTES).splitlines()
+    except (OSError, UnicodeError):
+        return ()
+    names = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)
+    targets: list[str] = []
+    for line in lines:
+        digest, _, name = line.strip().partition("  ")
+        if name not in names:
+            continue
+        path = os.path.join(install_root, name)
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode) or _sha256_file(path) != digest.lower():
+                continue
+        except OSError:
+            continue
+        targets.append(path)
+    targets.append(record)
+    return tuple(targets)
+
+
+def _uv_default_dirs(platform_name: str) -> tuple[str, str]:
+    """Return uv's default cache folder and managed-Python folder."""
+    if platform_name == "win32":
+        local = os.environ.get("LOCALAPPDATA", "")
+        roaming = os.environ.get("APPDATA", "")
+        return (
+            os.path.join(local, "uv", "cache") if os.path.isabs(local) else "",
+            os.path.join(roaming, "uv", "python") if os.path.isabs(roaming) else "",
+        )
+    home = os.path.expanduser("~")
+    cache = os.environ.get("XDG_CACHE_HOME", "")
+    data = os.environ.get("XDG_DATA_HOME", "")
+    cache = cache if os.path.isabs(cache) else os.path.join(home, ".cache")
+    data = data if os.path.isabs(data) else os.path.join(home, ".local", "share")
+    return os.path.join(cache, "uv"), os.path.join(data, "uv", "python")
+
+
+def _venv_base_python_dir(data_dir: str, python_root: str) -> str:
+    """Return the folder in python_root that the data dir's venv runs on, or ""."""
+    try:
+        with open(os.path.join(data_dir, ".venv", "pyvenv.cfg"), encoding="utf-8") as stream:
+            lines = stream.read(16_384).splitlines()
+    except (OSError, UnicodeError):
+        return ""
+    home = next(
+        (value.strip() for key, _, value in (line.partition("=") for line in lines) if key.strip() == "home"),
+        "",
+    )
+    if not home or not os.path.isabs(home):
+        return ""
+    root = _normalized(os.path.realpath(python_root))
+    base = _normalized(os.path.realpath(home))
+    try:
+        if os.path.commonpath((root, base)) != root or base == root:
+            return ""
+    except ValueError:
+        return ""
+    first = os.path.relpath(base, root).split(os.sep)[0]
+    return os.path.join(python_root, first)
+
+
+def _installer_uv_leftovers(
+    install_root: str, binary_targets: tuple[str, ...], data_dir: str, platform_name: str
+) -> tuple[str, ...]:
+    """Name the uv cache and Python an older installer left for DefenseClaw.
+
+    Only when uninstall removes the uv the installer installed (its digest
+    still matches), no other uv is on PATH, and uv's folders are the
+    defaults. The Python folder goes only when it holds nothing but the
+    Python the data dir's venv runs on (and uv's links and bookkeeping).
+    """
+    uv_name = _UV_NAMES.get(platform_name, _UV_NAMES_POSIX)[0]
+    if not any(os.path.basename(target) == uv_name for target in binary_targets):
+        return ()
+    # Current installers keep uv's cache and Python in data_dir/.uv, so uv's
+    # default folders then hold the user's own uv data, never DefenseClaw's.
+    if os.path.isdir(os.path.join(data_dir, ".uv")):
+        return ()
+    root = _normalized(install_root)
+    for directory in os.get_exec_path():
+        if directory and _normalized(directory) != root and os.path.isfile(os.path.join(directory, uv_name)):
+            return ()
+    cache, python_root = _uv_default_dirs(platform_name)
+    leftovers: list[str] = []
+    if cache and not os.environ.get("UV_CACHE_DIR") and _plain_owned_dir(cache):
+        leftovers.append(cache)
+    if python_root and not os.environ.get("UV_PYTHON_INSTALL_DIR") and _plain_owned_dir(python_root):
+        base = _venv_base_python_dir(data_dir, python_root)
+        if base and _only_python(python_root, base):
+            leftovers.append(python_root)
+    return tuple(leftovers)
+
+
+def _uv_cache_with_defenseclaw(data_dir: str, platform_name: str, uv_leftovers: tuple[str, ...]) -> str:
+    """Return uv's cache folder when it holds DefenseClaw entries, else "".
+
+    Installers before 1.0.2 had uv download DefenseClaw into uv's own cache,
+    one entry per install (GAP-1411). The cache is the account's, so only
+    those entries go (`uv cache clean defenseclaw`), unless the plan removes
+    the whole cache anyway (uv_leftovers).
+    """
+    cache = os.environ.get("UV_CACHE_DIR", "")
+    if not os.path.isabs(cache) or _normalized(cache) == _normalized(data_dir) or _below(data_dir, cache):
+        cache = _uv_default_dirs(platform_name)[0]
+    if not cache or cache in uv_leftovers or not _plain_owned_dir(cache):
+        return ""
+    patterns = (
+        "archive-v*/*/defenseclaw-*.dist-info",
+        "wheels-v*/*/defenseclaw",
+        "wheels-v*/*/*/defenseclaw",
+        "sdists-v*/editable/*/*/defenseclaw-*.whl",
+    )
+    if any(glob.glob(os.path.join(glob.escape(cache), pattern)) for pattern in patterns):
+        return cache
+    return ""
+
+
+def _uv_editable_leftovers(cache: str) -> list[str]:
+    """Return the uv cache entries of DefenseClaw editable builds (GAP-1873).
+
+    `uv cache clean defenseclaw` leaves the editable wheel a `make all` built
+    (sdists-v*/editable/<source>/) and the archive it unpacked into
+    (archive-v*/<id>/ with defenseclaw-<v>.dist-info and its .pth). Each
+    entry goes only when it holds nothing but DefenseClaw's build.
+    """
+    root = glob.escape(cache)
+    entries: list[str] = []
+    for source in sorted(glob.glob(os.path.join(root, "sdists-v*", "editable", "*"))):
+        wheels = glob.glob(os.path.join(glob.escape(source), "*", "*.whl"))
+        if wheels and all(os.path.basename(wheel).startswith("defenseclaw-") for wheel in wheels):
+            entries.append(source)
+    for archive in sorted(glob.glob(os.path.join(root, "archive-v*", "*"))):
+        infos = glob.glob(os.path.join(glob.escape(archive), "*.dist-info"))
+        if infos and all(os.path.basename(info).startswith("defenseclaw-") for info in infos):
+            entries.append(archive)
+    return [entry for entry in entries if os.path.isdir(entry) and not os.path.islink(entry)]
+
+
+def _clean_uv_cache_entries(plan: UninstallPlan) -> None:
+    """Remove DefenseClaw's entries from uv's cache; say how when that fails."""
+    cache = plan.uv_cache_entries
+    command = "uv cache clean defenseclaw"
+    uv_name = _UV_NAMES.get(plan.platform_name, _UV_NAMES_POSIX)[0]
+    candidates = (os.path.join(plan.install_root, uv_name), shutil.which(uv_name) or "")
+    uv = next((path for path in candidates if path and os.path.isfile(path) and os.access(path, os.X_OK)), "")
+    if not uv:
+        ux.warn(f"kept DefenseClaw's entries in uv's cache {cache}: no uv to remove them; run `{command}`")
+        return
+    env = dict(os.environ, UV_CACHE_DIR=cache)
+    try:
+        result = subprocess.run(
+            [uv, "cache", "clean", "defenseclaw"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.warn(f"kept DefenseClaw's entries in uv's cache {cache} ({exc}); run `{command}`")
+        return
+    if result.returncode != 0:
+        ux.warn(f"kept DefenseClaw's entries in uv's cache {cache} (uv exited {result.returncode}); run `{command}`")
+        return
+    # uv's clean does not reach editable builds; they go here (GAP-1873).
+    for entry in _uv_editable_leftovers(cache):
+        shutil.rmtree(entry, ignore_errors=True)
+    left = _uv_editable_leftovers(cache)
+    if left:
+        ux.warn(f"kept {len(left)} DefenseClaw entr{'y' if len(left) == 1 else 'ies'} in uv's cache: {', '.join(left)}")
+        return
+    ux.ok(f"removed DefenseClaw's entries from uv's cache {cache}")
+
+
+# mktemp -d -t defenseclaw-hook.XXXXXXXX (_hardening.sh); BSD mktemp, on
+# macOS, adds its own suffix to that template.
+_HOOK_TEMP_DIR_RE = re.compile(r"defenseclaw-hook\.[A-Za-z0-9]{8}(\.[A-Za-z0-9]+)?")
+
+
+def _hook_temp_roots() -> tuple[str, ...]:
+    """Return the temp folders mktemp -t uses: $TMPDIR, else /tmp."""
+    roots: list[str] = []
+    for root in (os.environ.get("TMPDIR", ""), tempfile.gettempdir(), "/tmp"):
+        if root and os.path.isabs(root) and all(_normalized(root) != _normalized(seen) for seen in roots):
+            roots.append(root)
+    return tuple(roots)
+
+
+def _hook_temp_dirs(platform_name: str) -> tuple[str, ...]:
+    """Name the scratch folders DefenseClaw's shell hooks left in the temp folders.
+
+    Each hook runs with a private HOME made by mktemp and removes it when it
+    exits; a hook that was killed, or one of an earlier release, left it
+    behind (GAP-1411). Only this account's real folders count.
+    """
+    if platform_name == "win32" or not hasattr(os, "getuid"):
+        return ()
+    found: list[str] = []
+    for root in _hook_temp_roots():
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            if not _HOOK_TEMP_DIR_RE.fullmatch(entry.name):
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+                found.append(entry.path)
+    return tuple(sorted(found))
+
+
+def _remove_hook_temp_dirs(paths: tuple[str, ...]) -> None:
+    removed = 0
+    for path in paths:
+        try:
+            _remove_tree_no_follow(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        removed += 1
+    if removed:
+        ux.ok(f"removed {removed} scratch folder(s) DefenseClaw hooks left (defenseclaw-hook.*)")
+
+
+def _plain_owned_dir(path: str) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(path):
+        return False
+    return not hasattr(os, "getuid") or info.st_uid == os.getuid()
+
+
+def _only_python(python_root: str, base: str) -> bool:
+    """Report whether python_root holds only base, links to it and uv's dot files."""
+    wanted = _normalized(os.path.realpath(base))
+    try:
+        entries = list(os.scandir(python_root))
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.name.startswith("."):
+            continue
+        if _normalized(entry.path) == _normalized(base) and not _is_reparse_path(entry.path):
+            continue
+        if _is_reparse_path(entry.path) and _normalized(os.path.realpath(entry.path)) == wanted:
+            continue
+        return False
+    return True
+
+
+def _running_base_python() -> str:
+    return os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
+
+
+def _holds_running_python(path: str) -> bool:
+    """Report whether path holds the Python this CLI runs on (Windows only matters)."""
+    if sys.platform != "win32":
+        return False
+    return _below(os.path.realpath(path), _running_base_python())
+
+
+def _deferred_interpreter_dirs(plan: UninstallPlan, base_python: str) -> list[str]:
+    """Name the folders holding base_python that the deferred helper removes after it exits.
+
+    The helper runs on base_python, so it cannot remove them while it runs:
+    the installer's <data_dir>/.uv (scripts/install.ps1), or a uv Python
+    folder the plan removes (uv_leftovers).
+    """
+    candidates = []
+    if plan.remove_data_dir and not plan.preserve_data_entries:
+        candidates.append(os.path.join(plan.data_dir, ".uv"))
+    candidates.extend(plan.uv_leftovers)
+    return [path for path in candidates if os.path.isdir(path) and _below(os.path.realpath(path), base_python)]
+
+
+def _remove_uv_leftovers(paths: tuple[str, ...]) -> None:
+    """Remove the uv folders the plan names, then their parents left empty."""
+    for path in paths:
+        try:
+            _remove_tree_no_follow(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
+        _remove_empty_parents(path)
+
+
+def _remove_tree_no_follow(path: str) -> None:
+    """Remove a folder tree; links and junctions inside go without being followed."""
+    if _is_reparse_path(path):
+        raise OSError(f"refusing link or reparse point {path}")
+    with os.scandir(path) as entries:
+        children = list(entries)
+    for entry in children:
+        if _is_reparse_path(entry.path):
+            if entry.is_dir(follow_symlinks=False) or (sys.platform == "win32" and os.path.isdir(entry.path)):
+                os.rmdir(entry.path)
+            else:
+                os.unlink(entry.path)
+        elif entry.is_dir(follow_symlinks=False):
+            _remove_tree_no_follow(entry.path)
+        else:
+            os.unlink(entry.path)
+    os.rmdir(path)
+
+
+def _remove_empty_parents(path: str) -> None:
+    """Remove the parents of path that are empty now, up to the home folder."""
+    home = _normalized(os.path.expanduser("~"))
+    parent = os.path.dirname(os.path.abspath(path))
+    while parent and _normalized(parent) != home and os.path.dirname(parent) != parent:
+        try:
+            if os.path.commonpath((home, _normalized(parent))) != home:
+                return
+            os.rmdir(parent)
+        except (OSError, ValueError):
+            return
+        parent = os.path.dirname(parent)
+
+
+def _remove_created_dirs(data_dir: str) -> None:
+    """Remove the folders DefenseClaw created in the home folder that are still empty.
+
+    The gateway records them (_CREATED_DIRS_RECORD): the folders its install
+    watcher created to watch, and the parents of the agent config files a
+    connector setup wrote. Deepest first, each goes only while it is an empty
+    real folder reached through real folders from the home folder; one with
+    content stays, and so does its record.
+    """
+    record = os.path.join(data_dir, _CREATED_DIRS_RECORD)
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _CREATED_DIRS_RECORD_MAX_BYTES:
+            return
+        with open(record, encoding="utf-8") as stream:
+            dirs = json.load(stream).get("dirs")
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(dirs, list):
+        return
+    home = os.path.abspath(os.path.expanduser("~"))
+    kept: list[str] = []
+    removed: list[str] = []
+    for path in sorted({d for d in dirs if isinstance(d, str)}, key=len, reverse=True):
+        if not os.path.isabs(path) or not _below(home, path):
+            kept.append(path)
+            continue
+        if not _real_dir_chain(home, path):
+            continue
+        try:
+            os.rmdir(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            kept.append(path)
+            continue
+        removed.append(path)
+    try:
+        if kept:
+            with open(record, "w", encoding="utf-8") as stream:
+                json.dump({"dirs": sorted(kept)}, stream)
+                stream.write("\n")
+        else:
+            os.unlink(record)
+    except OSError:
+        pass
+    if removed:
+        ux.ok(f"removed the empty folders DefenseClaw created: {', '.join(sorted(removed))}")
+
+
+def _below(root: str, path: str) -> bool:
+    root = _normalized(root)
+    candidate = _normalized(path)
+    try:
+        return candidate != root and os.path.commonpath((root, candidate)) == root
+    except ValueError:
+        return False
+
+
+def _real_dir_chain(root: str, path: str) -> bool:
+    """Report whether path and each folder up to root is a real folder."""
+    root = _normalized(root)
+    current = os.path.abspath(path)
+    while _normalized(current) != root:
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(current):
+            return False
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return True
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _sandbox_state_present(cfg, data_dir: str, platform_name: str) -> bool:
@@ -502,6 +1312,11 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         install_root = os.path.abspath(os.path.join(home, ".local", "bin"))
         names = (
             "defenseclaw.cmd",
+            # The installer's copy of the venv's native launcher, which
+            # PowerShell and cmd.exe run before defenseclaw.cmd (GAP-2237).
+            "defenseclaw.exe",
+            # The installer's extensionless launcher for Git Bash.
+            "defenseclaw",
             "defenseclaw-gateway.exe",
             "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
@@ -523,7 +1338,31 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "mcp-scanner-api",
             "litellm",
         )
-    return install_root, tuple(os.path.join(install_root, name) for name in names)
+    targets = tuple(os.path.join(install_root, name) for name in names)
+    return install_root, targets + _retired_source_install_copies(install_root, names)
+
+
+# install_publish renames a running binary aside to this name when `make all`
+# replaces it; a copy still mapped then stays until a later rebuild prunes it.
+_RETIRED_COPY_RE = re.compile(r"\.(?P<name>.+)\.source-install-old-[0-9a-f]+", re.IGNORECASE)
+
+
+def _is_retired_source_install_copy(name: str, owned: tuple[str, ...] | set[str]) -> bool:
+    match = _RETIRED_COPY_RE.fullmatch(name)
+    return bool(match) and match.group("name").lower() in {item.lower() for item in owned}
+
+
+def _retired_source_install_copies(install_root: str, names: tuple[str, ...]) -> tuple[str, ...]:
+    """Name the copies of DefenseClaw's binaries a source install renamed aside (GAP-1929)."""
+    try:
+        entries = sorted(os.scandir(install_root), key=lambda entry: entry.name)
+    except OSError:
+        return ()
+    return tuple(
+        entry.path
+        for entry in entries
+        if _is_retired_source_install_copy(entry.name, names) and entry.is_file(follow_symlinks=False)
+    )
 
 
 def _owned_openclaw_candidate(data_dir: str, default_candidate: str) -> tuple[str, bool]:
@@ -657,22 +1496,22 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     if len(plan.connectors) > 1:
         # Multi-connector installs serve N equal peers — there is no "primary",
         # so list them all without singling one out.
-        click.echo(f"  • {ux.bold('active connectors:')}   {', '.join(plan.connectors)}")
+        ux.echo(f"  • {ux.bold('active connectors:')}   {', '.join(plan.connectors)}")
     else:
-        click.echo(f"  • {ux.bold('active connector:')}    {plan.connector or 'none'}")
+        ux.echo(f"  • {ux.bold('active connector:')}    {plan.connector or 'none'}")
     display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
-    click.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
+    ux.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
     if plan.sandbox_teardown:
-        click.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
         # Teardown runs with --yes: work a copy-mode sandbox holds is gone
         # with it, so say where to see it before the confirmation.
-        click.echo(
+        ux.echo(
             f"      {ux.dim('·')} work a copy-mode sandbox holds that was never pulled back is deleted with it "
             "(`defenseclaw sandbox teardown --dry-run` names it)"
         )
     elif plan.sandbox_teardown_skipped:
-        click.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
         # What teardown needs to find DefenseClaw's sandboxes later lives in
         # the data dir and runs with the gateway binary.
         later = "`defenseclaw-gateway sandbox teardown` removes them later"
@@ -683,29 +1522,80 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             )
         elif plan.remove_binaries:
             later = "reinstall DefenseClaw and run `defenseclaw-gateway sandbox teardown` to remove them"
-        click.echo(
+        ux.echo(
             f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
             f"stay; {later}"
         )
-    click.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
+    ux.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
     if "openclaw" in display_connectors:
-        click.echo(
+        ux.echo(
             f"  • {ux.bold('revert openclaw.json:')} {'yes' if plan.revert_openclaw else 'no'} "
             f"({plan.openclaw_config_file})"
         )
-        click.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
-    click.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+        ux.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
+    ux.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.hook_temp_dirs:
+        roots = sorted({os.path.dirname(path) for path in plan.hook_temp_dirs})
+        ux.echo(
+            f"      {ux.dim('·')} {len(plan.hook_temp_dirs)} scratch folder(s) DefenseClaw hooks left "
+            f"(defenseclaw-hook.*) in {', '.join(roots)}"
+        )
+    if plan.uv_cache_entries:
+        ux.echo(
+            f"      {ux.dim('·')} DefenseClaw's entries in uv's cache {plan.uv_cache_entries} "
+            "(uv cache clean defenseclaw)"
+        )
     if plan.preserve_data_entries:
-        click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
-    click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
+        ux.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
+    ux.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
     if plan.remove_binaries:
         # Only the launchers that are there: the owned-name list also names
         # optional ones (scanner APIs, litellm) that most installs never had.
         for target in plan.binary_targets:
             if os.path.lexists(target):
-                click.echo(f"      {ux.dim('·')} {target}")
+                ux.echo(f"      {ux.dim('·')} {target}")
+        for path in plan.setup_leftovers:
+            ux.echo(f"      {ux.dim('·')} {path} (left by DefenseClaw Setup)")
+        for path in plan.uv_leftovers:
+            ux.echo(f"      {ux.dim('·')} {path} (what the installer's uv downloaded for DefenseClaw)")
+        if plan.platform_name == "win32":
+            ux.echo(
+                f"      {ux.dim('·')} the {plan.install_root} entry in your user Path, "
+                "once nothing else is left in that folder"
+            )
+    elif plan.remove_data_dir:
+        # The launchers into the data dir stop working with it, so they go
+        # too; the rest keep working and stay until --binaries.
+        for target in plan.data_bound_launchers:
+            ux.echo(f"      {ux.dim('·')} {target} (runs {plan.data_dir}, so it goes with it)")
+        kept = [
+            target
+            for target in plan.binary_targets
+            if os.path.lexists(target)
+            and target not in plan.data_bound_launchers
+            and os.path.basename(target) != _UV_RECORD
+        ]
+        developer = _windows_developer_files(plan.install_root) if plan.platform_name == "win32" else []
+        if developer:
+            ux.echo(f"      {ux.dim('·')} kept: {_windows_developer_removal(developer)}")
+        elif kept:
+            ux.echo(
+                f"      {ux.dim('·')} kept: {', '.join(os.path.basename(target) for target in kept)} "
+                f"in {plan.install_root} (add --binaries to remove them too)"
+            )
+    if plan.observability_teardown:
+        ux.echo(
+            f"  • {ux.bold('local observability:')} its containers and data volumes go (docker compose down --volumes)"
+        )
     if _requires_deferred_cleanup(plan):
-        click.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
+        ux.echo(f"  • {ux.bold('deferred cleanup:')}   after this managed CLI exits")
+    if plan.mac_app:
+        # Not removed here: the app owns its login item and background
+        # service, which it unregisters itself.
+        ux.echo(
+            f"  • {ux.bold('kept:')}                {plan.mac_app}: quit it, turn off its login item "
+            "(System Settings > General > Login Items), then move it to the Trash"
+        )
     click.echo()
 
 
@@ -723,7 +1613,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         try:
             action()
         except Exception as exc:
-            phases.append(ExecutionPhaseResult(name, "failed", str(exc)))
+            # The raised error below carries the full reason (and any recovery
+            # recipe); repeating it in the ledger printed long guidance twice.
+            phases.append(ExecutionPhaseResult(name, "failed", "see the error below"))
             _render_execution_result(ExecutionResult(tuple(phases)))
             if isinstance(exc, click.ClickException):
                 raise
@@ -738,12 +1630,35 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+        if not plan.remove_data_dir:
+            _turn_guardrail_off(plan.data_dir)
+    if plan.stop_gateway and plan.data_dir:
+        # The gateway is stopped, so its watcher no longer uses them.
+        _remove_created_dirs(plan.data_dir)
+    if "copilot" in plan.connectors or plan.remove_data_dir:
+        _remove_orphan_copilot_plugin()
+    if plan.remove_data_dir and plan.data_dir:
+        # Before the data dir (and the registry naming them) goes.
+        _remove_mcp_writer_backups(plan.data_dir)
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
         # scripts and config patches. This helper is idempotent and
-        # reports "not installed" when OpenClaw was never used.
+        # reports "already removed" when the teardown already removed it.
         run_phase("plugin removal", lambda: _remove_plugin(plan))
+    if plan.setup_leftovers:
+        # After connector teardown, so no agent hook still runs the launcher.
+        run_phase("Setup leftovers removal", lambda: _remove_setup_leftovers(plan.setup_leftovers))
+    if plan.hook_temp_dirs:
+        # After connector teardown: no hook runs in them any more.
+        _remove_hook_temp_dirs(plan.hook_temp_dirs)
+    if plan.uv_cache_entries:
+        # Before binary removal: the installer's uv may be the one that runs.
+        _clean_uv_cache_entries(plan)
+    if plan.observability_teardown:
+        # Before data removal: Compose needs the stack's files in data_dir.
+        # A stack Docker cannot reach stays, with the command that removes it.
+        _local_observability_teardown(plan.data_dir)
     deferred = _requires_deferred_cleanup(plan)
     if deferred:
         status: list[str] = []
@@ -755,7 +1670,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         phases[-1] = ExecutionPhaseResult(
             "deferred cleanup",
             "scheduled",
-            f"result: {status[0]}",
+            # The result file stays for the operator to read; the next
+            # uninstall's helper removes it.
+            f"result: {status[0]}, kept for you to read",
         )
     elif plan.remove_data_dir:
         run_phase(
@@ -765,12 +1682,193 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
                 preserve_entries=plan.preserve_data_entries,
             ),
         )
+        if plan.data_bound_launchers and not plan.remove_binaries:
+            run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
+    if plan.remove_data_dir and not plan.preserve_data_entries:
+        _remove_empty_plugin_cache()
+        remove_own_api_port_claims()
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
+    elif plan.remove_binaries:
+        # The helper removes the launchers once this CLI exits; the
+        # installer's bookkeeping is not in use, so it goes now, and so does
+        # the Path entry of a folder the helper leaves empty.
+        _remove_install_bookkeeping(plan.install_root, plan.data_dir)
+        if _install_root_empties(plan):
+            _remove_user_path_entry(plan)
+    if plan.uv_leftovers:
+        # Last: on Linux and macOS this CLI may run on the Python that goes.
+        # On Windows that one is in use until the deferred helper exits,
+        # which removes it then (_deferred_interpreter_dirs).
+        _remove_uv_leftovers(tuple(path for path in plan.uv_leftovers if not _holds_running_python(path)))
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
     return result
+
+
+def _turn_guardrail_off(data_dir: str) -> None:
+    """Record in the kept config that the connectors are torn down (GAP-1312).
+
+    The default uninstall keeps ~/.defenseclaw. With guardrail.enabled still
+    true, status listed every torn-down connector as active, and the next
+    gateway start set their hooks up again. Off is what
+    ``setup guardrail --disable`` writes; ``setup guardrail`` turns it back on
+    with the kept connectors and modes.
+    """
+    if not data_dir or not config_module.config_path_for_data_dir(data_dir).is_file():
+        return
+    try:
+        cfg = config_module.load(data_dir=data_dir)
+        if not cfg.guardrail.enabled:
+            return
+        cfg.guardrail.enabled = False
+        cfg.save()
+    except Exception as exc:  # noqa: BLE001 - the hooks are already gone
+        ux.warn(
+            f"could not turn the guardrail off in the kept config ({exc}); "
+            "run: defenseclaw setup guardrail --disable"
+        )
+        return
+    ux.ok("guardrail turned off in the kept config (guardrail.enabled = false)")
+
+
+def _remove_data_bound_launchers(plan: UninstallPlan) -> None:
+    """Remove the launchers into the removed data dir (see _data_bound_launchers).
+
+    Each one is checked again first: still an owned launcher name in the
+    install root that runs the data dir's virtual environment.
+    """
+    owned = set(plan.binary_targets)
+    failures: list[str] = []
+    for path in plan.data_bound_launchers:
+        if path not in owned or not _is_data_bound_launcher(path, plan.data_dir, plan.platform_name):
+            continue
+        try:
+            os.unlink(path)
+            ux.ok(f"removed {path}")
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            failures.append(f"{path}: {exc}")
+    if failures:
+        raise OSError("; ".join(failures))
+
+
+# The manifest of the Copilot plugin a managed deployment renders into each
+# account (~/.copilot/installed-plugins/defenseclaw/defenseclaw).
+_COPILOT_PLUGIN_MANIFEST = {
+    "name": "defenseclaw",
+    "description": "DefenseClaw guardrail hooks",
+    "version": "1.0.0",
+    "hooks": "hooks/hooks.json",
+}
+
+
+def _remove_mcp_writer_backups(data_dir: str) -> None:
+    """Remove the agent-config backups the MCP writer left next to each config (GAP-1699).
+
+    ``defenseclaw mcp set`` copies each agent config it edits to a
+    ``.defenseclaw-<name>.bak`` sibling and records it in
+    ``<data_dir>/connector_backups/mcp/registry.json``. Removing the data dir
+    drops that registry, so the full copies would stay behind with nothing
+    pointing at them. Only a regular file at exactly the name the writer
+    gives that recorded config is removed.
+    """
+    from defenseclaw.connector_paths import _managed_mcp_backup_path
+
+    registry = os.path.join(data_dir, "connector_backups", "mcp", "registry.json")
+    try:
+        with open(registry, encoding="utf-8") as handle:
+            entries = json.load(handle)
+    except (OSError, ValueError):
+        return
+    if not isinstance(entries, dict):
+        return
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            continue
+        target, backup = entry.get("path"), entry.get("backup")
+        if not isinstance(target, str) or not isinstance(backup, str):
+            continue
+        expected = os.path.abspath(_managed_mcp_backup_path(target))
+        if os.path.normcase(os.path.abspath(backup)) != os.path.normcase(expected):
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(expected).st_mode):
+                continue
+            os.unlink(expected)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not remove the MCP config backup {expected}: {exc}")
+            continue
+        ux.ok(f"removed {expected}")
+
+
+def _remove_orphan_copilot_plugin() -> None:
+    """Remove DefenseClaw's managed Copilot plugin once nothing manages it.
+
+    A managed deployment renders this plugin into each account and its own
+    uninstall removes it. On a host with no managed deployment a leftover
+    copy only names a hook binary that may be gone, so the per-user
+    uninstall removes it. The plugin must hold exactly DefenseClaw's
+    rendered manifest and managed Copilot hook commands; anything else is
+    the user's and stays.
+    """
+    from defenseclaw import upgrade_shim
+
+    if upgrade_shim.managed_deployment():
+        return
+    plugin = os.path.join(os.path.expanduser("~"), ".copilot", "installed-plugins", "defenseclaw", "defenseclaw")
+    hooks_dir = os.path.join(plugin, "hooks")
+    manifest = os.path.join(plugin, "plugin.json")
+    hooks_file = os.path.join(hooks_dir, "hooks.json")
+    try:
+        if _is_reparse_path(plugin) or _is_reparse_path(hooks_dir):
+            return
+        if sorted(os.listdir(plugin)) != ["hooks", "plugin.json"] or os.listdir(hooks_dir) != ["hooks.json"]:
+            return
+        if not all(stat.S_ISREG(os.lstat(path).st_mode) for path in (manifest, hooks_file)):
+            return
+        with open(manifest, encoding="utf-8") as handle:
+            if json.load(handle) != _COPILOT_PLUGIN_MANIFEST:
+                return
+        with open(hooks_file, encoding="utf-8") as handle:
+            events = json.load(handle).get("hooks")
+        handlers = [h for group in events.values() for h in group] if isinstance(events, dict) else []
+        if not handlers or not all(
+            isinstance(h, dict)
+            and "copilot" in str(h.get("command", ""))
+            and "enterprise-managed" in str(h.get("command", ""))
+            for h in handlers
+        ):
+            return
+        os.unlink(hooks_file)
+        os.unlink(manifest)
+        os.rmdir(hooks_dir)
+        os.rmdir(plugin)
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(plugin))
+        ux.ok(f"removed orphaned Copilot plugin {plugin}")
+    except (OSError, ValueError, AttributeError, TypeError):
+        return
+
+
+def _remove_empty_plugin_cache() -> None:
+    """Remove the gateway's plugin cache folder in TempDir while it is empty.
+
+    Current gateways create it only for a plugin they load; earlier ones
+    created it at every start. A folder with content, or anything that is
+    not a folder, stays.
+    """
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    path = os.path.join(tempfile.gettempdir(), f"defenseclaw-plugin-cache-{uid}")
+    try:
+        if stat.S_ISDIR(os.lstat(path).st_mode) and not _is_reparse_path(path):
+            os.rmdir(path)
+    except OSError:
+        pass
 
 
 def _render_execution_result(result: ExecutionResult) -> None:
@@ -804,6 +1902,54 @@ def _validate_windows_ancestor_chain(path: str, label: str) -> None:
         candidate = candidate.parent
 
 
+# What `make all` (Makefile _source-dev-install) publishes into the Windows
+# install root: regular-file copies plus the source ownership marker.
+_WINDOWS_DEVELOPER_FILES = (
+    "defenseclaw.exe",
+    "defenseclaw-gateway.exe",
+    "defenseclaw-acp.exe",
+    "defenseclaw-hook.exe",
+    "litellm.exe",
+    "skill-scanner.exe",
+    "skill-scanner-api.exe",
+    "skill-scanner-pre-commit.exe",
+    "mcp-scanner.exe",
+    "mcp-scanner-api.exe",
+    ".defenseclaw-source-root",
+)
+
+
+def _windows_developer_files(install_root: str) -> list[str]:
+    """Return the files a `make all` developer install published, if it is one.
+
+    A developer install has the source ownership marker and no installer
+    shim. Uninstall does not remove it (the CLI runs from one of these
+    copies); the plan and the refusal name the files instead.
+    """
+    if not install_root or os.path.lexists(os.path.join(install_root, "defenseclaw.cmd")):
+        return []
+    if not os.path.lexists(os.path.join(install_root, ".defenseclaw-source-root")):
+        return []
+    return [
+        os.path.join(install_root, name)
+        for name in _WINDOWS_DEVELOPER_FILES
+        if os.path.lexists(os.path.join(install_root, name))
+    ]
+
+
+def _powershell_quoted_paths(files: list[str]) -> str:
+    return ", ".join("'" + path.replace("'", "''") + "'" for path in files)
+
+
+def _windows_developer_removal(files: list[str]) -> str:
+    quoted = _powershell_quoted_paths(files)
+    return (
+        "this is a developer install from 'make all', which uninstall does not remove. "
+        "Run 'defenseclaw uninstall' without --binaries (add --all to remove data too), "
+        f"then remove the developer files from PowerShell:\n  Remove-Item -LiteralPath {quoted}"
+    )
+
+
 def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
     """Require the installer-authored CLI shim before removing paired artifacts."""
     existing = [path for path in plan.binary_targets if os.path.lexists(path)]
@@ -811,6 +1957,9 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         return
     shim = os.path.join(plan.install_root, "defenseclaw.cmd")
     if not os.path.isfile(shim) or _is_reparse_path(shim):
+        developer = _windows_developer_files(plan.install_root)
+        if developer:
+            raise click.ClickException(f"refusing Windows binary removal: {_windows_developer_removal(developer)}")
         raise click.ClickException("refusing Windows binary removal without the installer-owned defenseclaw.cmd shim")
     try:
         with open(shim, encoding="utf-8-sig", errors="strict") as stream:
@@ -825,9 +1974,40 @@ def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
         raise click.ClickException("refusing Windows binary removal: CLI shim targets an unrelated runtime")
 
 
+def _is_empty_dir(path: str) -> bool:
+    try:
+        with os.scandir(path) as entries:
+            return next(entries, None) is None
+    except OSError:
+        return False
+
+
+def _open_tui_refusal(plan: UninstallPlan) -> str:
+    """Why a data removal cannot run now because a TUI is open ('' when it can)."""
+    if not (plan.remove_data_dir and plan.data_dir and tui_lock_held(plan.data_dir)):
+        return ""
+    if plan.preserve_data_entries:
+        command = "defenseclaw reset"
+    elif plan.remove_binaries:
+        command = "defenseclaw uninstall --all --binaries"
+    else:
+        command = "defenseclaw uninstall --all"
+    # The TUI cannot run this itself, so name the terminal command (GAP-2585).
+    return (
+        "the DefenseClaw TUI (defenseclaw tui) is open for this account and keeps "
+        f"writing to {plan.data_dir}. Quit every open TUI (Ctrl+C), then run "
+        f"`{command}` in a terminal."
+    )
+
+
 def _validate_plan(plan: UninstallPlan) -> None:
     """Validate every destructive root and exact artifact before mutation."""
     if plan.remove_data_dir:
+        refusal = _open_tui_refusal(plan)
+        if refusal:
+            # An open TUI keeps writing audit.db and its state files, so the
+            # data removal failed half-done with "Directory not empty" (GAP-2576).
+            raise click.ClickException(refusal)
         resolved_data = _validate_owned_root(plan.data_dir, "data path")
         if plan.platform_name == "win32":
             _validate_windows_ancestor_chain(plan.data_dir, "data path")
@@ -841,10 +2021,16 @@ def _validate_plan(plan: UninstallPlan) -> None:
         if os.path.normcase(os.path.realpath(plan.data_dir)) in protected:
             raise click.ClickException(f"refusing protected data path: {plan.data_dir}")
         ownership_markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv")
-        if os.path.isdir(plan.data_dir) and not any(
-            os.path.exists(os.path.join(plan.data_dir, marker))
-            and not _is_reparse_path(os.path.join(plan.data_dir, marker))
-            for marker in ownership_markers
+        # An empty folder holds nothing to remove; it is what the data phase
+        # leaves when the data dir is a mount point (GAP-1980).
+        if (
+            os.path.isdir(plan.data_dir)
+            and not _is_empty_dir(plan.data_dir)
+            and not any(
+                os.path.exists(os.path.join(plan.data_dir, marker))
+                and not _is_reparse_path(os.path.join(plan.data_dir, marker))
+                for marker in ownership_markers
+            )
         ):
             raise click.ClickException(
                 f"refusing to remove {plan.data_dir}: path does not look like a DefenseClaw data directory"
@@ -886,12 +2072,16 @@ def _validate_plan(plan: UninstallPlan) -> None:
         allowed_names = (
             {
                 "defenseclaw.cmd",
+                "defenseclaw.exe",
+                "defenseclaw",
                 "defenseclaw-gateway.exe",
                 "defenseclaw-acp.exe",
                 "defenseclaw-hook.exe",
                 "skill-scanner.cmd",
                 "mcp-scanner.cmd",
                 "defenseclaw-hook-state.json",
+                _UV_RECORD,
+                *_UV_NAMES["win32"],
             }
             if plan.platform_name == "win32"
             else {
@@ -904,12 +2094,14 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "mcp-scanner",
                 "mcp-scanner-api",
                 "litellm",
+                _UV_RECORD,
+                *_UV_NAMES_POSIX,
             }
         )
         for target in plan.binary_targets:
-            if (
-                _normalized(os.path.dirname(target)) != install_root
-                or os.path.basename(target).lower() not in allowed_names
+            name = os.path.basename(target).lower()
+            if _normalized(os.path.dirname(target)) != install_root or (
+                name not in allowed_names and not _is_retired_source_install_copy(name, allowed_names)
             ):
                 raise click.ClickException(f"refusing unowned binary target: {target}")
             if plan.platform_name == "win32" and os.path.lexists(target) and _is_reparse_path(target):
@@ -931,12 +2123,14 @@ def _validate_plan(plan: UninstallPlan) -> None:
 
 
 def _requires_deferred_cleanup(plan: UninstallPlan) -> bool:
-    if (
-        plan.platform_name != "win32"
-        or not plan.remove_data_dir
-        or not plan.managed_venv
-        or ".venv" in plan.preserve_data_entries
-    ):
+    if not plan.remove_data_dir or ".venv" in plan.preserve_data_entries:
+        return False
+    return _running_from_managed_venv(plan)
+
+
+def _running_from_managed_venv(plan: UninstallPlan) -> bool:
+    """Whether this Windows CLI runs from the plan's managed runtime (so its shim may be running)."""
+    if plan.platform_name != "win32" or not plan.managed_venv:
         return False
     executable = _normalized(sys.executable)
     runtime = _normalized(plan.managed_venv)
@@ -950,11 +2144,21 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
     """Start the validated standalone helper and wait for its ready signal."""
     _validate_plan(plan)
     base_python = os.path.realpath(os.path.abspath(getattr(sys, "_base_executable", "") or ""))
+    interpreter_dirs = _deferred_interpreter_dirs(plan, base_python) if base_python else []
+    # The installer's Python is in <data_dir>\.uv (install.ps1); any other
+    # base Python inside the data dir is not trusted to run the helper.
+    uv_dir = os.path.join(plan.data_dir, ".uv")
     if (
         not base_python
         or not os.path.isfile(base_python)
         or _is_reparse_path(base_python)
-        or _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+        or (
+            _normalized(base_python).startswith(_normalized(plan.data_dir) + os.sep)
+            and not (
+                _normalized(base_python).startswith(_normalized(uv_dir) + os.sep)
+                and not _is_reparse_path(uv_dir)
+            )
+        )
     ):
         raise click.ClickException("no trusted base Python is available for deferred cleanup")
 
@@ -979,8 +2183,11 @@ def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
                 os.path.realpath(os.path.expanduser("~")),
                 str(Path(os.path.abspath(plan.data_dir)).anchor),
             ],
-            "binary_targets": list(plan.binary_targets) if plan.remove_binaries else [],
+            "binary_targets": list(plan.binary_targets if plan.remove_binaries else plan.data_bound_launchers),
             "remove_data_dir": plan.remove_data_dir,
+            "remove_empty_install_root": plan.remove_binaries,
+            # The folders holding the helper's own Python: they go once it exits.
+            "interpreter_dirs": interpreter_dirs,
             "ready_path": ready_path,
             "status_path": status_path,
         }
@@ -1201,7 +2408,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
         if watchdog.returncode != 0:
             detail = (watchdog.stderr or watchdog.stdout or "unknown error").strip()
@@ -1211,7 +2418,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=15,
+            timeout=_GATEWAY_STOP_TIMEOUT_SECONDS,
         )
         if proc.returncode != 0 and _managed_host_has_no_own_gateway(plan):
             # On a managed host `stop` refuses whenever this account's own
@@ -1282,7 +2489,7 @@ def _sandbox_teardown(plan: UninstallPlan) -> None:
         raise click.ClickException(f"sandbox teardown did not finish: {exc}") from exc
     for line in (proc.stdout or "").splitlines():
         if line.strip():
-            click.echo(f"  {ux.dim('·')} {line.strip()}")
+            ux.echo(f"  {ux.dim('·')} {line.strip()}")
     detail = (proc.stderr or proc.stdout or "").strip().splitlines()
     if proc.returncode == _SANDBOX_UNSUPPORTED_EXIT:
         reason = detail[-1].lstrip("✗ ").strip() if detail else "OpenShell sandboxes are not supported here"
@@ -1340,10 +2547,11 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
     for name in connectors:
         if gateway_supported:
+            errors: list[str] = []
             teardown_ok = (
-                _run_gateway_connector_teardown(name, plan=plan)
+                _run_gateway_connector_teardown(name, plan=plan, errors=errors)
                 if plan.gateway_path
-                else _run_gateway_connector_teardown(name)
+                else _run_gateway_connector_teardown(name, errors=errors)
             )
             if teardown_ok:
                 continue
@@ -1360,10 +2568,12 @@ def _connector_teardown(plan: UninstallPlan) -> None:
                 continue
             ux.warn(f"gateway connector teardown for {name} reported errors — see output above")
             if name != "openclaw":
+                reason = f" ({errors[-1]})" if errors else ""
                 raise click.ClickException(
-                    f"aborting uninstall: {name} teardown failed, so "
+                    f"aborting uninstall: {name} teardown failed{reason}, so "
                     "DefenseClaw will not remove data or binaries that may be "
-                    "needed to restore the agent configuration"
+                    "needed to restore the agent configuration. No data or binaries "
+                    "were removed; fix the error and run the same uninstall command again"
                 )
 
         if name in _PYTHON_FALLBACK_CONNECTORS:
@@ -1376,6 +2586,11 @@ def _connector_teardown(plan: UninstallPlan) -> None:
             "and re-run 'defenseclaw uninstall'."
         )
 
+
+# A connector teardown or verify runs the gateway's full config load, which
+# on a busy Windows host with remote observability destinations took 108 s;
+# the old fixed 60 s aborted every uninstall run there (GAP-1663).
+_CONNECTOR_COMMAND_TIMEOUT_S = 300
 
 # ``defenseclaw-gateway connector verify`` exits 2 for a connector name its
 # registry cannot resolve (a config error), distinct from 1 for residue.
@@ -1405,23 +2620,43 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == _GATEWAY_UNKNOWN_CONNECTOR_EXIT and "unknown connector" in (proc.stderr or "")
 
 
-def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | None = None) -> bool:
+def _run_gateway_connector_teardown(
+    connector: str,
+    *,
+    plan: UninstallPlan | None = None,
+    errors: list[str] | None = None,
+) -> bool:
     """Invoke ``defenseclaw-gateway connector teardown --connector <name>``.
 
     Returns True on success (rc == 0), False on any error. stdout/stderr
     is forwarded to the operator so they can see exactly what each
-    adapter restored.
+    adapter restored. On failure the one-line reason is appended to
+    *errors*, so the final abort message can name it.
     """
+
+    def failed(detail: str) -> bool:
+        if errors is not None and detail.strip():
+            errors.append(detail.strip())
+        return False
+
+    def last_line(*texts: str | None) -> str:
+        for text in texts:
+            lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+        return ""
+
     gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
     if gw is None:
         return False
+    ux.subhead(f"tearing down {connector} (on a busy host this can take a few minutes)...")
     try:
         proc = subprocess.run(
             [
@@ -1435,17 +2670,21 @@ def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | Non
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=60,
+            timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         ux.warn(f"gateway connector teardown failed to launch: {exc}")
-        return False
+        return failed(f"teardown did not run: {exc}")
     if proc.stdout:
         for line in proc.stdout.splitlines():
-            click.echo(f"  {ux.dim('·')} {line}")
+            # The gateway's own "✓ <connector> teardown complete" line would
+            # double the verified line printed below.
+            if _ANSI_ESCAPE.sub("", line).strip().endswith(f"{connector} teardown complete"):
+                continue
+            ux.echo(f"  {ux.dim('·')} {line.strip()}")
     if proc.stderr and proc.returncode != 0:
         for line in proc.stderr.splitlines():
-            click.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
+            ux.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
     if proc.returncode == 0:
         verify_args = [
             gw,
@@ -1461,18 +2700,18 @@ def _run_gateway_connector_teardown(connector: str, *, plan: UninstallPlan | Non
                 capture_output=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=60,
+                timeout=_CONNECTOR_COMMAND_TIMEOUT_S,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             ux.warn(f"gateway connector verification failed to launch: {exc}")
-            return False
+            return failed(f"verification did not run: {exc}")
         if verified.returncode != 0:
             detail = (verified.stderr or verified.stdout or "residual connector state").strip()
             ux.warn(f"{connector} teardown verification failed: {detail}")
-            return False
-        ux.ok(f"{connector} teardown via gateway sentinel")
+            return failed(last_line(detail))
+        ux.ok(f"{connector} teardown complete (verified)")
         return True
-    return False
+    return failed(last_line(proc.stderr, proc.stdout))
 
 
 def _revert_openclaw_python(plan: UninstallPlan) -> None:
@@ -1516,7 +2755,10 @@ def _remove_plugin(plan: UninstallPlan) -> None:
     elif result == "manual":
         ux.ok("plugin directory removed")
     elif result == "":
-        ux.subhead("plugin was not installed")
+        # This step runs right after the openclaw connector teardown, which
+        # normally removes the plugin itself; "not installed" read as if it
+        # never had been (GAP-2497).
+        ux.ok("DefenseClaw OpenClaw plugin already removed (nothing left to remove)")
     else:
         raise click.ClickException("plugin uninstall failed (check permissions)")
 
@@ -1604,7 +2846,7 @@ def _remove_data_dir(
         "quarantine",
         ".venv",
     )
-    if not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
+    if not _is_empty_dir(data_dir) and not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
         raise click.ClickException(
             f"refusing to remove {data_dir}: path does not look like a DefenseClaw data directory"
         )
@@ -1639,6 +2881,11 @@ def _remove_data_dir(
     try:
         os.rmdir(data_dir)
     except OSError as exc:
+        # A data dir on its own filesystem (GAP-1447) is a mount point: the
+        # contents are gone, and only an administrator can unmount the folder.
+        if exc.errno == errno.EBUSY or os.path.ismount(data_dir):
+            ux.ok(f"emptied {data_dir}; the empty folder stays because it is a mount point (unmount it to remove it)")
+            return
         raise OSError(f"could not remove data directory: {exc}") from exc
     ux.ok(f"removed {data_dir}")
 
@@ -1660,11 +2907,31 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
     _validate_plan(plan)
     failures: list[str] = []
     targets = list(plan.binary_targets)
-    if plan.platform_name == "win32":
-        targets.sort(key=lambda path: os.path.basename(path).lower() == "defenseclaw.cmd")
+    deferred_launchers: list[str] = []
+    launchers = [p for p in targets if ntpath.basename(p).lower() in _WINDOWS_CLI_LAUNCHERS and os.path.lexists(p)]
+    if (
+        plan.platform_name == "win32"
+        and any(ntpath.basename(path).lower() == "defenseclaw.cmd" for path in launchers)
+        and _running_from_managed_venv(plan)
+    ):
+        # The launcher running this CLI cannot go now: Windows keeps a running
+        # defenseclaw.exe, and cmd.exe reads defenseclaw.cmd again after this
+        # CLI exits (deleting it ends the command with "The batch file cannot
+        # be found." and exit 1). The helper removes both once they are done.
+        try:
+            _schedule_deferred_cleanup(replace(plan, binary_targets=tuple(launchers), remove_data_dir=False))
+        except click.ClickException:
+            # Without the helper the shim still goes last.
+            targets.sort(key=lambda path: ntpath.basename(path).lower() == "defenseclaw.cmd")
+        else:
+            deferred_launchers = launchers
+            targets = [path for path in targets if path not in launchers]
+    elif plan.platform_name == "win32":
+        targets.sort(key=lambda path: ntpath.basename(path).lower() == "defenseclaw.cmd")
     for path in targets:
         if not os.path.lexists(path):
-            click.echo(f"  {ux.dim('·')} {path} not installed")
+            # The plan lists only the launchers that exist; the owned-name
+            # list also names optional ones most installs never had.
             continue
         last_error: OSError | None = None
         attempts = 40 if plan.platform_name == "win32" else 1
@@ -1688,11 +2955,203 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
 
     if failures:
         raise OSError("; ".join(failures))
+    for path in deferred_launchers:
+        ux.ok(f"{path} is removed right after this command exits")
 
-    # Clean up the pip-installed Python package symlink if operators
-    # used ``pip install defenseclaw`` — we don't shell out to pip
-    # because we can't be sure which environment they used.
-    ux.subhead("if you installed the Python CLI via pip, run 'pip uninstall defenseclaw' manually")
+    _remove_install_bookkeeping(plan.install_root, plan.data_dir)
+    if plan.platform_name == "win32" and _install_root_empties(plan):
+        with contextlib.suppress(OSError):
+            os.rmdir(plan.install_root)
+        _remove_user_path_entry(plan)
+    elif plan.platform_name != "win32":
+        # An empty ~/.local/bin goes too, and so does ~/.local when that
+        # leaves it empty.
+        try:
+            if not os.listdir(plan.install_root):
+                os.rmdir(plan.install_root)
+                _remove_empty_parents(plan.install_root)
+        except OSError:
+            pass
+
+    # A pip-installed CLI is outside this plan; we don't shell out to pip
+    # because we can't be sure which environment was used. Mention it only
+    # when another defenseclaw is still on PATH.
+    remaining = shutil.which("defenseclaw")
+    if remaining and _normalized(remaining) not in {_normalized(path) for path in deferred_launchers}:
+        ux.subhead(
+            f"another defenseclaw remains at {remaining}; if you installed it with pip, run 'pip uninstall defenseclaw'"
+        )
+
+
+# Hidden files the installers keep next to the launchers: the source-install
+# marker and the publish custody directory. Neither is useful once the
+# launchers are gone.
+_INSTALL_BOOKKEEPING = (".defenseclaw-source-root", ".defenseclaw-install-custody")
+
+
+def _legacy_custody_parents() -> list[str]:
+    """Temp folders where pre-1.0 installers parked retired binaries."""
+    if sys.platform == "win32":
+        return []
+    return sorted({tempfile.gettempdir(), "/tmp"})
+
+
+def _legacy_home_custody_dirs(data_dir: str) -> list[str]:
+    """Custody folders pre-1.0 installers left beside DEFENSECLAW_HOME.
+
+    install.sh removes the same folders after a 1.0 install, but a source
+    install never runs it, so they pile up with each 0.8.x install.
+    """
+    if sys.platform == "win32" or not data_dir:
+        return []
+    parents = {os.path.expanduser("~"), os.path.dirname(os.path.abspath(os.path.expanduser(data_dir)))}
+    return [os.path.join(parent, ".defenseclaw-install-custody") for parent in sorted(parents)]
+
+
+def _remove_install_bookkeeping(install_root: str, data_dir: str = "") -> None:
+    paths = [os.path.join(install_root, name) for name in _INSTALL_BOOKKEEPING]
+    paths.extend(_legacy_home_custody_dirs(data_dir))
+    for parent in _legacy_custody_parents():
+        try:
+            names = os.listdir(parent)
+        except OSError:
+            continue
+        paths.extend(os.path.join(parent, name) for name in names if name.startswith(".defenseclaw-install-custody-"))
+    for path in paths:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            ux.warn(f"could not inspect {path}: {exc}")
+            continue
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            if os.path.dirname(path) == install_root:
+                ux.warn(f"left {path}: it is not owned by this account")
+            continue
+        try:
+            if stat.S_ISDIR(info.st_mode):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError as exc:
+            ux.warn(f"could not remove {path}: {exc}")
+            continue
+        ux.ok(f"removed {path}")
+
+
+def _install_root_empties(plan: UninstallPlan) -> bool:
+    """Report whether the install root holds nothing but what this plan removes.
+
+    install.ps1 added the folder to the user Path for DefenseClaw; once
+    nothing else is in it, the entry goes. A folder other tools still use
+    keeps its entry.
+    """
+    try:
+        names = os.listdir(plan.install_root)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    owned = {os.path.basename(path).lower() for path in plan.binary_targets}
+    owned.update(name.lower() for name in _INSTALL_BOOKKEEPING)
+    return all(name.lower() in owned for name in names)
+
+
+def _path_without_entry(raw: str, directory: str, expand: Callable[[str], str]) -> str:
+    """Return the Path value raw without its entries naming directory.
+
+    The other entries, their order and their unexpanded %VAR% text stay. An
+    entry names directory when it does after expand (and without quotes or a
+    trailing backslash), compared without case as Windows does.
+    """
+    wanted = directory.rstrip("\\/").lower()
+    kept = []
+    for entry in raw.split(";"):
+        candidate = expand(entry.strip().strip('"')).rstrip("\\/").lower() if entry.strip() else ""
+        if candidate and candidate == wanted:
+            continue
+        kept.append(entry)
+    return ";".join(kept)
+
+
+def _remove_user_path_entry(plan: UninstallPlan) -> None:
+    """Remove the install root from the user Path install.ps1 added it to (Windows)."""
+    if plan.platform_name != "win32" or sys.platform != "win32":
+        return
+    try:
+        changed = _edit_windows_user_path(plan.install_root)
+    except OSError as exc:
+        ux.warn(f"could not remove {plan.install_root} from your user Path: {exc}; remove it in Environment Variables")
+        return
+    if changed:
+        ux.ok(f"removed {plan.install_root} from your user Path (new terminals get the change)")
+
+
+def _edit_windows_user_path(directory: str) -> bool:
+    import ctypes
+    import winreg
+
+    access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, access) as key:
+        try:
+            raw, kind = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return False
+        if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) or not isinstance(raw, str):
+            return False
+        # winreg returns REG_EXPAND_SZ unexpanded; writing it back with its
+        # own kind keeps the %VAR% entries.
+        value = _path_without_entry(raw, directory, winreg.ExpandEnvironmentStrings)
+        if value == raw:
+            return False
+        winreg.SetValueEx(key, "Path", 0, kind, value)
+    # Tell Explorer, so terminals opened from now on get the new Path.
+    result = ctypes.c_size_t()
+    ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 2, 5000, ctypes.byref(result))
+    return True
+
+
+def _local_observability_teardown(data_dir: str) -> None:
+    """Remove the local observability stack's containers and data volumes.
+
+    Only when Docker is installed and holds the stack: a host that never ran
+    `defenseclaw setup local-observability` is not touched. A stack Docker
+    cannot reach stays, with the command that removes it.
+    """
+    compose_file = _local_observability_stack_file(data_dir)
+    if not compose_file or not shutil.which("docker"):
+        return
+    try:
+        from defenseclaw.observability import local_stack
+    except Exception:  # noqa: BLE001 - a broken bundle leaves nothing to drive.
+        return
+    manual = f"docker compose -p {local_stack.COMPOSE_PROJECT} down --volumes"
+    try:
+        controller = local_stack.LocalStackController(os.path.dirname(compose_file))
+        if not _local_observability_present(controller, local_stack.COMPOSE_PROJECT):
+            return
+        controller.reset(confirmed=True)
+    except Exception as exc:  # noqa: BLE001 - reported, the uninstall goes on.
+        ux.warn(f"the local observability stack and its data volumes stay: {exc}; remove them with: {manual}")
+        return
+    ux.ok("removed the local observability stack and its data volumes")
+
+
+def _local_observability_present(controller, project: str) -> bool:
+    """Report whether Docker holds a container or volume of the stack."""
+    label = f"label=com.docker.compose.project={project}"
+    for argv in (
+        [controller.docker_path, "ps", "--all", "--quiet", "--filter", label],
+        [controller.docker_path, "volume", "ls", "--quiet", "--filter", label],
+    ):
+        result = controller.runner.run(argv, timeout=15, env=controller.environment)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip().splitlines()
+            raise RuntimeError(f"Docker did not answer ({detail[0] if detail else f'exit {result.returncode}'})")
+        if result.stdout.strip():
+            return True
+    return False
 
 
 def _expand(p: str) -> str:

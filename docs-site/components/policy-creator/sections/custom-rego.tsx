@@ -187,7 +187,7 @@ function SnippetEditor({
         <button
           type="button"
           onClick={onRemove}
-          className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+          className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
         >
           Remove snippet
         </button>

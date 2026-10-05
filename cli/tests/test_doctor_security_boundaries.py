@@ -719,6 +719,32 @@ def test_selected_current_controller_is_revalidated_before_start(
     run.assert_not_called()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="refuses the binary through its POSIX mode")
+def test_restart_names_a_refused_gateway_instead_of_a_build_hint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An installed gateway the custody check refuses is named, not reported missing."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_bytes(b"synthetic executable")
+    os.chmod(gateway, 0o777)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    run = Mock()
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", run)
+
+    started = cmd_setup._restart_defense_gateway(os.fspath(data_dir), child_env={"PATH": os.fspath(bin_dir)})
+
+    output = capsys.readouterr().out
+    assert started is False
+    assert f"refusing to run {gateway.resolve()}" in output
+    assert "make gateway" not in output
+    run.assert_not_called()
+
+
 def test_lifecycle_launch_never_runs_a_controller_swapped_in_after_verification(tmp_path) -> None:
     """A controller swapped in at the verified path after the check is never launched."""
     controller = tmp_path / ("defenseclaw-gateway.exe" if os.name == "nt" else "defenseclaw-gateway")

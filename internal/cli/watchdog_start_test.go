@@ -71,6 +71,16 @@ func TestWaitForWatchdogStartRejectsDifferentOwner(t *testing.T) {
 	}
 }
 
+func TestWatchdogSpawnReadinessAllowsSlowFirstStart(t *testing.T) {
+	// GAP-1053: a just-upgraded watchdog on a busy Windows host took longer
+	// than 15s to take its ownership lock, so the upgrade reported a false
+	// auto-start failure. The post-spawn wait must allow for that.
+	if watchdogSpawnReadyTimeout < 45*time.Second || watchdogSpawnReadyTimeout <= watchdogStartTimeout {
+		t.Fatalf("watchdogSpawnReadyTimeout = %s, want >= 45s and above watchdogStartTimeout (%s)",
+			watchdogSpawnReadyTimeout, watchdogStartTimeout)
+	}
+}
+
 func mustWatchdogStartTestExecutable(t *testing.T) string {
 	t.Helper()
 	executable, err := os.Executable()

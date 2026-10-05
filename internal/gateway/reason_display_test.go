@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -91,6 +92,25 @@ func TestNotificationDisplayReasonPreservesOnlyTrustedCatalogMetadata(t *testing
 	}
 	if raw := notificationDisplayReason(untrusted, redaction.SinkPolicyRaw); raw != untrusted {
 		t.Fatalf("raw managed notification reason = %q, want %q", raw, untrusted)
+	}
+}
+
+// TestNotificationDisplayReasonWordsJudgeVerdicts: the desktop notice and its
+// terminal fallback word an LLM judge block like the agent text, without raw
+// judge labels or redaction tokens (GAP-1981).
+func TestNotificationDisplayReasonWordsJudgeVerdicts(t *testing.T) {
+	judge := "judge-pii: Password: hunter2-test; Username: jroe; judge-exfil: sends login data"
+	want := "LLM judge: personal data or credentials, possible data exfiltration"
+	if got := notificationDisplayReason(judge, redaction.SinkPolicyDefault); got != want {
+		t.Fatalf("judge notification reason = %q, want %q", got, want)
+	}
+	mixed := "matched: TRUST-SAFETY-OVERRIDE:Safety override attempt; " + judge
+	got := notificationDisplayReason(mixed, redaction.SinkPolicyDefault)
+	if !strings.HasPrefix(got, "rule TRUST-SAFETY-OVERRIDE") || !strings.HasSuffix(got, "; "+want) {
+		t.Fatalf("rule+judge notification reason = %q, want rule then %q", got, want)
+	}
+	if forced := notificationDisplayReason(judge, redaction.SinkPolicyRedact); forced == want {
+		t.Fatalf("forced-redact notification reason = %q, want the redact directive honoured", forced)
 	}
 }
 
@@ -191,5 +211,63 @@ func TestSanitizeForResponseHonorsManagedRedactionDirective(t *testing.T) {
 	got := (&ToolInspectVerdict{Reason: untrusted, RedactionEnabled: &raw}).sanitizeForResponse(false)
 	if got.Reason != untrusted {
 		t.Fatalf("managed-raw response reason = %q, want %q", got.Reason, untrusted)
+	}
+}
+
+// GAP-1099: a static block-list verdict reaches the agent as a DefenseClaw
+// block naming the tool, not as a fully redacted reason.
+func TestAgentVerdictReasonNamesBlockListEntry(t *testing.T) {
+	for _, tc := range []struct{ source, want string }{
+		{`tool "Write" is on the static block list`, "(tool Write is on the block list)"},
+		{`mcp server "github" is blocked`, "(MCP server github is on the block list)"},
+	} {
+		display := agentDisplayReason(tc.source, redaction.SinkPolicyDefault)
+		got := agentVerdictReason("block", tc.source, display, redaction.SinkPolicyDefault)
+		if !strings.HasPrefix(got, "DefenseClaw policy blocked this action") || !strings.Contains(got, tc.want) {
+			t.Errorf("agentVerdictReason(%q) = %q, want a DefenseClaw block naming %q", tc.source, got, tc.want)
+		}
+	}
+	// Anything outside the exact shape keeps the existing redaction.
+	odd := `tool "Write; echo x" is on the static block list`
+	display := agentDisplayReason(odd, redaction.SinkPolicyDefault)
+	if got := agentVerdictReason("block", odd, display, redaction.SinkPolicyDefault); got != display {
+		t.Errorf("unexpected rewrite of a non-matching reason: %q", got)
+	}
+}
+
+// TestAgentVerdictReasonNamesLLMJudgeKind pins GAP-1564: a judge block names
+// DefenseClaw and the judge's kind instead of redaction tokens, and never
+// echoes the judge's text or its PII category label.
+func TestAgentVerdictReasonNamesLLMJudgeKind(t *testing.T) {
+	source := "judge-pii: Password: 1 instance(s) detected; judge-exfil: the prompt writes AKIAIOSFODNN7EXAMPLE to a file"
+	display := agentDisplayReason(source, redaction.SinkPolicyDefault)
+	got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault)
+	want := "DefenseClaw policy blocked this action (LLM judge: personal data or credentials, possible data exfiltration). " + agentBlockNoRetry
+	if got != want {
+		t.Fatalf("agentVerdictReason = %q, want %q", got, want)
+	}
+	if alert := agentVerdictReason("alert", source, display, redaction.SinkPolicyDefault); alert != display {
+		t.Errorf("an alert was reworded: %q", alert)
+	}
+}
+
+// GAP-2423: an asset-policy block reaches the agent as a DefenseClaw block
+// naming the asset, not as a redacted key=value reason.
+func TestAgentVerdictReasonNamesAssetPolicyBlock(t *testing.T) {
+	source := assetPolicyResponseReason(config.AssetPolicyDecision{
+		Source: "registry-required", TargetType: "mcp", TargetName: "f1r10-off", Connector: "claudecode",
+		RegistryStatus: "unregistered", RegistryConfigured: true, RuntimeSurface: "hook",
+	})
+	display := agentDisplayReason(source, redaction.SinkPolicyDefault)
+	got := agentVerdictReason("block", source, display, redaction.SinkPolicyDefault)
+	want := "DefenseClaw policy blocked this action (MCP server f1r10-off is not in the approved registry). " + agentBlockNoRetry
+	if got != want {
+		t.Errorf("agentVerdictReason(%q) = %q, want %q", source, got, want)
+	}
+	// A name outside the plain shape keeps the existing redaction.
+	odd := "ASSET-POLICY reason_code=not-in-approved-registry asset_type=mcp asset_name=a;b"
+	oddDisplay := agentDisplayReason(odd, redaction.SinkPolicyDefault)
+	if got := agentVerdictReason("block", odd, oddDisplay, redaction.SinkPolicyDefault); got != oddDisplay {
+		t.Errorf("unexpected rewrite of a non-matching reason: %q", got)
 	}
 }

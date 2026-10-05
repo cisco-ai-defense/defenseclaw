@@ -1,5 +1,5 @@
 ---
-title: Deploy with Iru (formerly Kandji)
+title: Iru (formerly Kandji)
 description: Install, configure, detect, repair, upgrade and remove the standalone DefenseClaw enterprise profile on Macs with Iru Endpoint Management Custom Scripts and Custom Apps.
 keywords:
   - DefenseClaw Kandji
@@ -48,7 +48,7 @@ checksum list, then check the signature and the package's SHA-256. For the
 script-only route, that SHA-256 is the pin you paste into the script.
 
 ```bash
-VERSION=1.4.0   # the release you deploy
+VERSION=1.0.0   # the release you deploy
 BASE=https://github.com/cisco-ai-defense/defenseclaw/releases/download/$VERSION
 PKG=defenseclaw-enterprise-$VERSION-darwin-arm64.pkg
 curl -fsSL -O "$BASE/checksums.txt" -O "$BASE/checksums.txt.bundle" -O "$BASE/$PKG"
@@ -99,7 +99,7 @@ it to your Blueprints
 Paste `detect.sh` as the audit script and set its settings block:
 
 ```bash
-DC_MIN_VERSION="1.4.0"
+DC_MIN_VERSION="1.0.0"
 DC_FORMAT="exit"
 ```
 
@@ -207,10 +207,10 @@ settings block, together with the inline config shown above:
 
 ```bash
 DC_ACTION=ensure
-DC_SOURCE_URL="https://packages.example.com/defenseclaw/defenseclaw-enterprise-1.4.0-darwin-arm64.pkg"
+DC_SOURCE_URL="https://packages.example.com/defenseclaw/defenseclaw-enterprise-1.0.0-darwin-arm64.pkg"
 DC_SOURCE_SHA256="<the pin from checksums.txt>"
 DC_TRUST_MODE=hash_pinned
-DC_PRODUCT_VERSION="1.4.0"
+DC_PRODUCT_VERSION="1.0.0"
 ```
 
 Each run, the wrapper:
@@ -231,7 +231,7 @@ To report health between runs, add a Mac Custom Script named
 and no remediation:
 
 ```bash
-DC_MIN_VERSION="1.4.0"
+DC_MIN_VERSION="1.0.0"
 DC_REQUIRE_HEALTHY=1
 DC_FORMAT="exit"
 ```
@@ -282,11 +282,11 @@ rolls back if applying it fails. See
 
 Remove the DefenseClaw Library Items from the Blueprints first. Then run
 `uninstall.sh` once as a Mac Custom Script (**Install once per device**, or on
-demand from Self Service). Set `DC_PURGE=1` in its settings block only if you
-also want to remove the config, credentials, state and logs. It runs
-`enterprise macos uninstall`, which stops the services and removes
-DefenseClaw's hooks and machine-policy entries, and the lifecycle forgets the
-package receipt. On a Mac without the deployment it prints a no-op result and
+demand from Self Service). It runs `enterprise macos uninstall`, which stops
+the services, removes DefenseClaw's hooks and machine-policy entries, the
+binaries and the machine state (config, credentials, state and logs), and
+forgets the package receipt. Set `DC_PURGE=1` in its settings block to also
+remove each enrolled user's `~/.defenseclaw` and per-user binaries. On a Mac without the deployment it prints a no-op result and
 exits `0`.
 
 ## Logs

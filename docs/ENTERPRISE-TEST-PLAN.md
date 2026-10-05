@@ -186,7 +186,7 @@ Service accounts the lifecycle creates: `defenseclaw` (Linux), `_defenseclaw`
 
 | Item | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Service manager | systemd 239 or later as PID 1. Containers and WSL without systemd as PID 1 are refused (`service_manager_unavailable`); WSL with systemd is unsupported (L-29) but passes this check. Check `systemctl --version` and `ps -p 1 -o comm=` | launchd | Service Control Manager |
+| Service manager | systemd 239 or later as PID 1. Containers and WSL without systemd as PID 1 are refused (`service_manager_unavailable`); WSL with systemd passes this check, and the lifecycle then refuses a new install (`wsl_distribution`, L-29). Check `systemctl --version` and `ps -p 1 -o comm=` | launchd | Service Control Manager |
 | Privileges | Root for everything except `enterprise linux status` | Root for everything except `enterprise macos status` | An elevated administrator token or LocalSystem. Setup exits `1603` without elevation |
 | Platform | amd64 or arm64; SELinux enforcing is supported (the lifecycle relabels after each change) | macOS 13 or later, Apple silicon | Native x64 |
 | PowerShell | - | - | Stable PowerShell 7 x64 from Microsoft's MSI, registered under `HKLM\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions`, installed under Program Files, with a valid Microsoft signature on `pwsh.exe` (PATH is ignored; preview builds are refused). Use 7.4 or later: the MDM wrapper and Intune packager require it. FullLanguage mode (under WDAC or AppLocker, allow the DefenseClaw signer). Check with `Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\PowerShellCore\InstalledVersions\*' \| Select-Object SemanticVersion, InstallLocation` and `$ExecutionContext.SessionState.LanguageMode` |
@@ -218,7 +218,7 @@ inside these ranges, and one version outside a range as a negative test.
 | Hermes (`hermes`) | 0.19.0 up to 0.22.0 | Self-updating: do not update during a run. Configure a model provider with `hermes setup` |
 | OpenHands (`openhands`) | 1.12.0 and later; Linux and macOS only | `uv tool install openhands==<version>`; set the LLM in the user's OpenHands settings |
 | OmniGent (`omnigent`) | 0.7.0 up to 0.14.0; Linux and macOS only | `uv tool install --python 3.12 omnigent==0.13.0` (a default install gets a newer, unverified release) |
-| Kiro (`kiro`) | kiro-cli 2.24.1 and later in the standalone profile; Linux and macOS through the guardian, Windows through ACP only | Kiro sign-in (`kiro-cli login`) |
+| Kiro (`kiro`) | kiro-cli 2.24.1 or Kiro IDE 1.0.182 and later in the standalone profile, through the guardian on every OS | Kiro sign-in (`kiro-cli login`) |
 
 Where discovery looks: on Linux and macOS, each agent's usual per-user
 location, nvm, fnm, Volta, asdf, mise, pnpm and yarn globals, the npm prefix in
@@ -634,9 +634,7 @@ enterprise:
     disable_self_update: true
 ```
 
-OpenHands and OmniGent are not managed on Windows, and Kiro is covered there
-only through `defenseclaw-gateway enterprise acp` (see
-[Kiro](#per-connector-procedure)). Windows ignores `unenrolled_users`, `root` and the uid limits.
+OpenHands and OmniGent are not managed on Windows. Windows ignores `unenrolled_users`, `root` and the uid limits.
 On Linux and macOS, the machine-policy connectors (Claude Code, Codex, Cursor,
 Copilot, OpenCode) get per-user targets only with `unenrolled_users: deny`, so
 `enrollment.targets` counts per-user connectors; run once with
@@ -648,7 +646,7 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 | Change | Linux and macOS (`ensure --config <file> --json`) | Windows |
 | --- | --- | --- |
 | `data_dir: /tmp/x` | Exit `1`, `config_invalid`; installed config unchanged | N/A (leave `data_dir` unset) |
-| `guardrail.mode: blockall` | Exit `1`, `config_invalid` | Exit `1639` before any change: "the gateway cannot load `<file>` at `<path>`: `<reason>`; fix the config and run again (nothing was changed)" |
+| `guardrail.mode: blockall` | Exit `1`, `config_invalid` | Exit `1639` before any change: "the gateway cannot load `<file>` at `<path>`: `<reason>`; fix it and run again (nothing was changed)" |
 | `gateway.api_bind: 0.0.0.0` | Exit `1`, `config_invalid` | Refused; record whether Setup's preflight (`1639`) or the lifecycle (`1603`, rolled back) refuses it |
 | `enterprise.profile: secure_client` on a standalone host | Refused (`config_invalid` or `profile_conflict`); record which | Refused: the profile cannot change in place |
 | An inline `cisco_ai_defense.api_key` | Refused | Refused; the Intune packager also refuses a config with an `api_key:` line |
@@ -746,7 +744,7 @@ stops parsing at the first unknown argument, so put `JSON=1` early:
 | `ALLOWEDSIGNERS=<sha256>,...` | Signed Setup only |
 | `JSON=1` | Print the result document |
 | `NOSTART=1` | Services stopped and disabled; `/repair` starts them |
-| `PURGE=1` | With `/uninstall`: also remove `C:\ProgramData\Cisco\DefenseClaw` |
+| `PURGE=1` | With `/uninstall`: also remove each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries (`/uninstall` always removes `C:\ProgramData\Cisco\DefenseClaw`) |
 | `TIMEOUTSECONDS=<60..7200>` | Default 1800 |
 | `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the Claude Code attestation ([CLI-12](#admin-cli)) |
 | `/quiet`, `/norestart`, `/?`, `/help` | Accepted; the first two do nothing |
@@ -809,7 +807,7 @@ the INS-W-02 evidence.
 | LC-18 | Linux or macOS | Start `ensure` or `upgrade`, then run `verify` at once | `verify` waits up to 5 s, then exits `75` `lifecycle_busy` and skips its checks. `defenseclaw-enterprise-verify.service` accepts `75`, so a daily verify during a lifecycle run leaves no failed unit and no `unit_failed` warning; macOS writes `lifecycle_busy` to `verify.log` |
 | LC-19 | Windows | Run `verify` while another run's transaction is pending | `1603` while the transaction is pending (Windows `verify` does not wait); healthy when rerun after it finishes |
 | LC-20 | Linux or macOS | Write a new `config.yaml` while an `ensure` holds the lock | The follow-up run applies it (`input_changed`); it is not dropped or overwritten by older bytes |
-| LC-21 | Any | Argument errors: `ensure --bogus`; `ensure --lock-wait 16m`; `enterprise linux` on macOS (and the reverse); `--payload` with `--from-package`; `upgrade` with neither; a first `ensure` with neither; `--purge` on a non-uninstall action; `--remove-service-account` without `--purge`; `--no-start` on status/verify/uninstall; `--config` on `status`; relative `--config`; missing channel | Linux and macOS flag-parse errors exit `2` and print `Error: ...` on stderr without a JSON result, even with `--json`. Semantic checks (both channels, relative config, missing channel) return a document with `invalid_arguments`, exit `2`. Record the missing JSON document as UX. Windows argument errors exit `1639` |
+| LC-21 | Any | Argument errors: `ensure --bogus`; `ensure --lock-wait 16m`; `enterprise linux` on macOS (and the reverse); `--payload` with `--from-package`; `upgrade` with neither; a first `ensure` with neither; `--purge` on a non-uninstall action; `--keep-state` with `--purge`; `--no-start` on status/verify/uninstall; `--config` on `status`; relative `--config`; missing channel | Linux and macOS flag-parse errors exit `2` and print `Error: ...` on stderr without a JSON result, even with `--json`. Semantic checks (both channels, relative config, missing channel) return a document with `invalid_arguments`, exit `2`. Record the missing JSON document as UX. Windows argument errors exit `1639` |
 | LC-22 | Clean host (nothing installed) | `status --json` and `verify --json` | Linux and macOS: `status` exits `0` with `installed: false` (warning `unmanaged_leftovers` when state was left behind); `verify` exits `1` with `not_installed`. Windows: record the exit code and error of `status` (expected `not_installed`, `1603`); the MDM detection scripts handle this case themselves |
 
 ```bash
@@ -958,7 +956,7 @@ used; `setsid -w` drops the controlling terminal. The documented form is
 | Another apt or dnf holds the package lock | `mdm_package_manager_busy`, exit `75` |
 | `--action verify --source <file>` | Refused (status and verify take no source), exit `2` |
 | `ensure` with no source on a clean host | `mdm_not_installed`, exit `1` |
-| `--secret-file` writable by others | `mdm_untrusted_input`. A valid file whose `secret set` fails after apply: `mdm_secret_failed` with the `secret set` exit code |
+| `--secret-file` writable by others | `mdm_untrusted_input`. A valid file whose `secret set` fails (Linux and macOS store it before the config apply): `mdm_secret_failed` with the `secret set` exit code, config not applied |
 
 Wrapper options: `--action ensure|status|verify`, `--source FILE` or
 `--source-url https://...`, `--sha256 HEX`, `--trust-mode hash_pinned|signed`,
@@ -1451,7 +1449,7 @@ prompt literal; accept no model prose as evidence of a tool result.
 `openclaw` and `zeptoclaw` require the separate guardrail proxy and are
 refused here. `windsurf` is a retired id migrated to Devin; `geminicli` is
 removed. Record their migration or refusal under CON-14 and CON-15.
-Windows must refuse guardian rows for OpenHands, OmniGent and Kiro. Kiro ACP
+Windows must refuse guardian rows for OpenHands and OmniGent. Kiro ACP
 is a separate route and needs its own UI and [ACP guard](https://cisco-ai-defense.github.io/defenseclaw/docs/acp-guard)
 evidence if deployed.
 
@@ -1575,7 +1573,7 @@ For each row, install the verified version listed under [Agent CLIs and model ac
 | CON-11 | OmniGent (Linux/macOS): start `omnigent server --config ~/.omnigent/config.yaml`; if the team has no documented interactive client command, mark tool-call cases `NOT_RUN` with that reason | C1 change the `policy_modules` entry or bridge, restart, then wait for repair. C2 `omnigent server` without its managed config can be R1. C3 and C3b `OMNIGENT_CONFIG`/`OMNIGENT_CONFIG_HOME` alternate root is R1. C4 0.14+ is unverified. C5 no hook process exists; simulate gateway unavailability and record the policy decision. C6 no foreign-policy guard (R24). Windows `N/A` |
 | CON-12 | Kiro (Linux/macOS): `cd ~/dc-test-proj && kiro-cli` for CLI 2.x; separately `kiro-cli --v3`; use the DefenseClaw agent (`/agent swap defenseclaw` if necessary) | C1 change own `~/.kiro/hooks/defenseclaw.json`, `~/.kiro/agents/defenseclaw.json`, default-agent setting or `kiro-hook.sh`; guardian repairs. C2 `/agent swap` to an own agent or `kiro-cli chat --agent <own-agent>` bypasses the CLI 2.x hook (R22). C3 and C3b alternate `KIRO_HOME` is R22. C4 below 2.24.1 not enrolled. C5 a non-2 hook failure may let the call run. C6 project `.kiro/hooks` merges with global hooks on v3; no foreign guard. The v3 prompt marker reaches the model with a DefenseClaw result attached (R22). Windows guardian `N/A`; test the separate ACP route if configured |
 | CON-12W | Windows Kiro ACP route; managed `acp:` profile `kiro-only` and a supported editor | Admin: `enterprise acp enroll --user std1 --client zed --agent kiro --profile kiro-only --json`; record `token_file` and `next`, never the token. Run `next` in std1's editor session; verify and run allowed and blocked calls; revoke, retry a copied bearer, and re-enroll. Expected: allow and block are audited, revoke immediately rejects the old bearer, re-enroll mints a new one, and enroll without `--profile` fails. |
-| CON-13 | Windows managed config copies with `openhands: {}`, `omnigent: {}` and `kiro: {}` | Apply each unsupported connector separately with `ensure`, recording its exact `not supported on Windows managed_enterprise` refusal; after the three cycles `policy show` and targets contain none of them, and no Kiro guardian row appears. ACP is tested in CON-12W. |
+| CON-13 | Windows managed config copies with `openhands: {}` and `omnigent: {}` | Apply each unsupported connector separately with `ensure`, recording its exact `not supported on Windows managed_enterprise` refusal; after the two cycles `policy show` and targets contain neither of them. ACP is tested in CON-12W. |
 | CON-14 | Disposable config using retired `windsurf` ID | Apply with `ensure`; `policy show` and `hooks status` name Devin after migration and publish no `windsurf` target. Record the migration notice. |
 | CON-15 | Disposable config using removed `geminicli` ID | Run `ensure` and `policy show`; record the explicit unsupported-connector refusal and verify no target is published. |
 
@@ -1627,7 +1625,7 @@ and `audit export` row. Rule-pack edits in place need a gateway restart.
 | FM8 | Windows directory fixture available | Run repository identity tests and a controlled profile-list simulation | SID/profile binding stays eligible and isolated; do not label a simulation a real directory sign-in |
 | FM9 | Distinct desktop, IDE or ACP route available | Open that UI and repeat C0a/C0b | Same visible side effect and attributed audit, or named residual / `NOT_RUN` |
 
-The expected block message names DefenseClaw, the rule id and title, and tells the agent not to retry in another form. `~/`, `$HOME/` and wildcard redirect targets are covered only when the parsed command facts are complete. A command after `&&` or `||`, a variable target such as `$OUT`, and command substitution have documented detection limits (#923/#925); record the exact form and audit decision. Built-in rules with code prerequisites retain their regex fallback. Never classify a model's alternate command as the original marker call.
+The expected block message names DefenseClaw, the rule id and title, and tells the agent not to retry in another form. `~/`, `$HOME/` and wildcard redirect targets block for custom and built-in rules on POSIX shells (#925); PowerShell and cmd commands are not reduced this way. A command after `&&` or `||`, a variable target such as `$OUT`, and command substitution have documented detection limits (#923); record the exact form and audit decision. Never classify a model's alternate command as the original marker call.
 
 ## Foreign-hook guard
 
@@ -1723,12 +1721,12 @@ All changes in this section are administrator actions on disposable hosts. Use V
 | REP-04 | Windows signed-in Claude Code user | Admin removes only DefenseClaw's owned Claude drop-in, runs policy verify, then waits for guardian/repair | Coverage fails during drift and the managed file is restored with its expected owner and bytes |
 | REP-05 | Staged payload with one altered byte | Run repair against the invalid payload, then `repair --payload <root-owned-good-payload>` | First returns `payload_invalid`; second restores the trusted payload and healthy verify |
 | REP-06 | Linux package host | Run `sudo apt install --reinstall defenseclaw-enterprise` (Ubuntu) or `sudo dnf reinstall defenseclaw-enterprise` (RHEL); inspect package result | Reinstall runs ensure without erasing config, policy or audit; `status` and `verify` pass |
-| REM-01 | Healthy package or payload host | Linux `sudo "$G" enterprise linux uninstall --json`; macOS `sudo "$G" enterprise macos uninstall --json`; Windows `& $Setup /uninstall JSON=1` | Services and DefenseClaw vendor-policy entries removed; config, secrets, data, logs kept; unrelated admin policy hash unchanged. Close cached agent sessions |
-| REM-02 | REM-01 complete | Linux package: `sudo apt remove defenseclaw-enterprise` or `sudo dnf remove defenseclaw-enterprise`; macOS receipt: `pkgutil --pkg-info com.cisco.defenseclaw.enterprise`; Windows `Get-Service DefenseClaw*` and marker check | Package metadata and services absent; non-purge state remains protected. Second uninstall is a no-op |
-| REM-03 | REM-01, retained config | Reinstall V2 via package/payload or Setup `/ensure JSON=1`, then verify | Retained config used; policy and enrollment return; no `unmanaged_layout_present` |
+| REM-01 | Healthy package or payload host | Linux `sudo "$G" enterprise linux uninstall --json`; macOS `sudo "$G" enterprise macos uninstall --json`; Windows `& $Setup /uninstall JSON=1` | Services and DefenseClaw vendor-policy entries removed. Linux and macOS: config, secrets, data, logs and the service account removed too (`--keep-state` keeps them); each user's `~/.defenseclaw` kept. Windows: config, secrets, data, logs kept. Unrelated admin policy hash unchanged. Close cached agent sessions |
+| REM-02 | REM-01 complete | Linux package: `sudo apt remove defenseclaw-enterprise` or `sudo dnf remove defenseclaw-enterprise`; macOS receipt: `pkgutil --pkg-info com.cisco.defenseclaw.enterprise`; Windows `Get-Service DefenseClaw*` and marker check | Package metadata and services absent; Windows non-purge state remains protected. Second uninstall is a no-op |
+| REM-03 | REM-01 with `--keep-state` on Linux and macOS, retained config | Reinstall V2 via package/payload or Setup `/ensure JSON=1`, then verify | Retained config used; policy and enrollment return; no `unmanaged_layout_present` |
 | REM-W-01 | Windows; std1 and std2 signed in | Run Setup `/uninstall JSON=1` as LocalSystem after both accounts exercised Amp, Antigravity, Devin, Hermes, OpenCode and Copilot | Signed-in users' DefenseClaw entries removed; user files outside owned entries retained |
 | REM-W-02 | Same registrations on a separate snapshot | Run uninstall from an elevated Administrator prompt, and repeat with std2 signed out | `user_registrations_pending` lists connector and SID for deferred entries; signed-out user cleanup follows R17 |
-| PUR-01 | Decommission phase, evidence saved | Linux/macOS: `sudo "$G" enterprise <os> uninstall --purge --remove-service-account --json`; Windows: `& $Setup /uninstall JSON=1 PURGE=1`. Then query services, package metadata, account and data roots with the platform commands in [Paths and commands](#paths-and-commands) | DefenseClaw units, package receipt, service account and data root absent after the matching package removal; unrelated policy preserved. Windows HKLM marker and `C:\ProgramData\Cisco\DefenseClaw` absent, `%WINDIR%\Logs\DefenseClaw` retained. System journal not purged |
+| PUR-01 | Decommission phase, evidence saved | Linux/macOS: `sudo "$G" enterprise <os> uninstall --purge --json`; Windows: `& $Setup /uninstall JSON=1 PURGE=1`. Then query services, package metadata, account and data roots with the platform commands in [Paths and commands](#paths-and-commands) | DefenseClaw units, package receipt, service account and data root absent after the matching package removal; unrelated policy preserved. Windows HKLM marker and `C:\ProgramData\Cisco\DefenseClaw` absent, `%WINDIR%\Logs\DefenseClaw` retained. System journal not purged |
 
 For PUR-01, use `sudo apt purge defenseclaw-enterprise` on Ubuntu or
 `sudo dnf remove defenseclaw-enterprise` on RHEL, then run `systemctl list-unit-files
@@ -2342,8 +2340,8 @@ has found a regression.
 - **REG-1-7-37** **[L][M][W] `defenseclaw doctor` (per-user)** passes a global Kiro install that has
   `~/.kiro/hooks/defenseclaw.json`. Code.
 - **REG-1-7-38** **[W] (per-user) Kiro blocks on native Windows**: the hook accepts `--hook-surface` and the
-  PowerShell bridge returns exit 2. Code. (The managed profile covers Kiro on Windows only
-  through the ACP guard, R22.)
+  PowerShell bridge returns exit 2. Code. (The managed profile enrolls Kiro on Windows per
+  user, R22.)
 
 
 **OmniGent**
@@ -2484,8 +2482,8 @@ Per-user installs got these changes from the branch (CHANGELOG "Enterprise harde
 them on a normal install:
 
 - **REG-1-11-01** OpenHands terminal calls blocked (decoder); Antigravity `run_command` matches rules.
-- **REG-1-11-02** Redirect targets (`> ~/x`) and the first command of `&&`/`||` lists block for custom CEL rules
-  (built-in rules with a code prerequisite keep the regex fallback, #925).
+- **REG-1-11-02** Redirect targets (`> ~/x`) block for custom CEL rules and built-in rules (#925), and the first
+  command of `&&`/`||` lists blocks for custom CEL rules.
 - **REG-1-11-03** Block wording: "DefenseClaw policy blocked this action (rule <ID>)" plus "do not retry";
   confirm-as-alert names the rule.
 - **REG-1-11-04** OpenCode: visible block error and notice; confirm notice; restart hint after a failed
@@ -2523,11 +2521,11 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | Row(s) | What a tester will see | Where |
 | --- | --- | --- |
 | R1, L-34, M-26, Linux residual 7, macOS residual 1, Windows residual 20 | A per-user agent started with another config root or a mode that skips user configuration runs with no DefenseClaw hook and no audit row, while status/verify keep the user's target ready: Amp (`XDG_CONFIG_HOME`, `HOME`), Devin (`XDG_CONFIG_HOME`, `devin --config <copy>`), Antigravity (`HOME`), Hermes (`--safe-mode`, `HERMES_HOME`, a replacing `HERMES_MANAGED_DIR` config), OpenHands (`HOME`), OpenCode on the per-user route (`OPENCODE_CONFIG_DIR`). Hermes `--ignore-user-config` alone keeps the hooks; `DEFENSECLAW_*` overrides do not remove them. A path a user breaks in their own home is only the warning `guardian_target_user_path` | Per-user connectors, every OS |
-| R2 | Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip managed `SessionStart`/`UserPromptSubmit` hooks; `PreToolUse` still runs | Claude Code |
+| R2 | Claude Code `--bare` and `CLAUDE_CODE_SIMPLE=1` skip the managed `SessionStart` hook; in 2.1.287 `UserPromptSubmit` and `PreToolUse` still run (other releases may skip `UserPromptSubmit`) | Claude Code |
 | R3 | Amp: no machine plugin path, undefined handler order; another config dir loads no DefenseClaw plugin | Amp |
 | R4 | OpenCode: plugin order undefined on the per-user route; `--pure`, `OPENCODE_PURE=1`, `OPENCODE_TEST_MANAGED_CONFIG_DIR` start without any DefenseClaw plugin | OpenCode |
 | R5 | Hermes blocks only on a valid block answer (and exit 2 from 0.21); other failures and a timeout let the call run (some builds block on a stalled hook timeout, undocumented) | Hermes |
-| R6 | Copilot command hooks that time out fail open | Copilot CLI |
+| R6 | Copilot command hooks that time out: earlier releases ran the call, Copilot CLI 1.0.91 denies it ("hook errored"); record the version | Copilot CLI |
 | R7, L residual 3, macOS residual 6, Windows residual 5 | A user can hold the API port while the gateway restarts (every restart on macOS and Windows; on Linux only after an admin stops the socket unit): availability loss; hooks are unaffected (peer/PID check), but the native OTLP exporters of Codex, Claude Code, OpenHands and OmniGent send telemetry and the sender's per-user telemetry credential to the holder; the Windows Amp and per-user OpenCode listener proof is a separate request from the hook POST | Every OS |
 | R8, Windows residual 13, macOS residual 4 | Hash-pinned (unsigned) payloads do not satisfy publisher-signature application control or Gatekeeper | Windows, macOS |
 | Windows residual 4 | Application control and vendor MDM/GPO policy can add protection against old or copied clients, but are optional | Windows |
@@ -2547,14 +2545,14 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | R19, Linux residual 9, Windows residual 15 | Agents installed outside the known locations (custom `NVM_DIR`, `PNPM_HOME`, `--prefix`, arbitrary folders) are neither enrolled nor reported | Every OS |
 | R20, L-26, Linux residual 11 | `unprivileged_user_namespaces` warning on stock Ubuntu 24.04 and RHEL 9; the sysctl remedies also restrict agent sandboxes (Codex's bubblewrap already fails on stock Ubuntu 24.04) | Linux |
 | R21 | Admin-triggered windows: a hot reload just before the lifecycle rejects an in-place edit (`config_rejected`); an upgrade that changes a socket unit releases the listener | Linux, macOS |
-| R22 | Kiro is advisory: neither kiro-cli engine vetoes prompts (`--v3` sends a blocked prompt to the model with the reason attached; the audit records the block); another agent, a moved `KIRO_HOME` or cloud config sync run without the hook; on Windows Kiro is covered only through the ACP guard | Kiro |
+| R22 | Kiro is advisory: neither kiro-cli engine vetoes prompts (`--v3` sends a blocked prompt to the model with the reason attached; the audit records the block); another agent, a moved `KIRO_HOME` or cloud config sync run without the hook; on Windows a kiro-cli that has never run is enrolled at 2.24.1 until its first run names the version | Kiro |
 | R23 | Cursor applies enterprise `hooks.json` only on plans that support it | Cursor |
 | R24 | Antigravity, OpenHands, OmniGent (and Hermes on Windows) have no lock and no foreign-hook guard; Hermes gaps on Linux/macOS: hooks re-read on plugin reload, Python plugins, a session that never loads DefenseClaw's hook | Those connectors |
 | R25, W-57, L-27, M-18 | Desktop-app or editor-extension-only users are not enrolled (#912) | Every OS |
 | R26, W-58, L-28, M-19 | Copilot in VS Code (Local harness) is not governed (#913) | Every OS |
-| R27, W-59, L-29 | Agent sessions in WSL are outside Windows machine policy (#914); a Linux install inside WSL is unsupported | Windows |
-| R28, W-60, L-30, M-20 | Devin Desktop not enrolled; Cascade in builds 3.0.12 to before 3.9.19 not covered (#915) | Every OS |
-| R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Windows hook shell under `powershell -Command` reports exit 1 (#916) | Every OS |
+| R27, W-59, L-29 | Agent sessions in WSL are partly covered (#914): CLIs inside the distribution, Remote - WSL windows and the Codex app's agent environment stay open; a Linux install inside WSL is refused | Windows |
+| R28, W-60, L-30, M-20 | Devin Desktop enrolled at a bundled Devin CLI version from 3000.4.25 on that is not known broken; Cascade in builds 3.0.12 to before 3.9.19 refused through the machine-level Cascade hooks file, not inspected (#915) | Every OS |
+| R29, W-61, L-31, M-21 | Kiro IDE not discovered, no floor, global hooks not live-verified; Kiro IDE Windows hook shell not live-verified (#916) | Every OS |
 | R30, L-33, M-23 | A project `.openhands/hooks.json` replaces the user's, so none of DefenseClaw's OpenHands hooks run in that project (OpenHands shows "1 hook" instead of six) | OpenHands |
 | R31 | Per-account hook budget (60/s, burst 120, 32 in flight): under `hook_fail_mode: open` a user who floods their own budget makes their own hooks allow | Standalone |
 | Linux residual 1, macOS residual 1, Windows residual 1 | A user can delete or edit their own registration until the next repair (seconds with file watching, at most one reconcile interval) | Per-user connectors |
@@ -2579,8 +2577,8 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 ### Documented behaviors that look like bugs
 
 - A command after `&&` or `||` (including `cd /tmp && <marker>`) stays detection-only (#923).
-- Built-in rules with a code prerequisite keep the regex fallback for `> ~/x` and list forms
-  (#925); only custom rules without a prerequisite gain the new blocks.
+- `> ~/x`, `> "$HOME/x"` and `> out-*.txt` targets are reduced only for POSIX shell commands; a
+  PowerShell or cmd command with such a target keeps its legacy fallback (#925).
 - In-place edits of a rule pack or policy file need a gateway restart (lifecycle page); ensure
   does not reload them. Config changes, secrets and upgrades restart it on their own.
 - A change to `enterprise.network` needs a gateway restart on every OS.
@@ -2633,7 +2631,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 | #920 | Claude Code releases that do not read `managed-settings.d` run without DefenseClaw (also the 2.1.154 floor limit; old Copilot and OpenHands below their minimum are the same class) | R15 |
 | #921 | Attribute scan and inspect-route audit rows to the verified caller | Remainder: `scan-finding` and `scan` rows still have no user fields; connector-hook, inspect-tool and auth-failure rows are fixed |
 | #923 | Commands chained with `&&` or `\|\|`: later commands never block | First command now blocks; later ones stay detection-only |
-| #925 | Built-in rules with a code prerequisite still record a runtime-expanded redirect target as detection-only | Custom rules fixed |
+| #925 | Built-in rules with a code prerequisite still record a runtime-expanded redirect target as detection-only | Fixed on the branch: every corpus entry that blocks with an absolute target blocks with `~/`, `"$HOME/"` and pattern targets in all three profiles; POSIX only |
 | #927 | Windows: roll back a failed first install cleanly for accounts with per-user agents (Amp, Antigravity, Copilot, Devin, Hermes, OpenCode) | Fixed on the branch (cleanup contracts for every per-user connector); forced first-install failure not exercised live |
 | #928 | Windows: dedicated DefenseClaw event log only admins can write | Fixed on the branch: `DefenseClaw` log, source `DefenseClaw Lifecycle`; legacy Application-log copies continue for one transition. See CLI-13, REG-1-9-10 |
 | #929 | Windows: status names the process holding the gateway API port | Fixed on the branch: `api_port_held` and `api_port_holders` |
@@ -2643,8 +2641,8 @@ the build and OS, and does not file a bug unless the behavior differs from the r
 
 | Issue | Topic |
 | --- | --- |
-| #922 | Rule engine: runtime-expanded redirect target turns a command rule detection-only (fixed on this branch; open for `main`) |
-| #917, #918 | Managed Windows Cursor (Secure Client): per-user DefenseClaw entries left in `~/.cursor/hooks.json` / `~/.claude/settings.json` deny every tool call (fixed on the Secure Client follow-up branch) |
+| #922 | Rule engine: runtime-expanded redirect target turns a command rule detection-only |
+| #917, #918 | Managed Windows Cursor (Secure Client): per-user DefenseClaw entries left in `~/.cursor/hooks.json` / `~/.claude/settings.json` deny every tool call |
 | #894 to #909 | Secure Client (`main`) follow-ups: Windows Codex machine-policy hook binding (#909), transaction recovery and sensor helper (#907, #908), uninstall refusals (#906), guardian freshness and state paths (#895, #896, #905), device identity (#904), enrollment of signed-out users (#894), Claude HKLM policy (#899), Codex requirements merge (#898), self-upgrade guard (#897), stale Windows docs (#900) |
 | #932 to #942 | Secure Client hardening (gateway authentication for Unix hooks, per-user gateway coexistence, GUI socket peer, payload publishers, Codex requirements on macOS, Cursor hooks, Claude managed-hooks-only, inspection health and `unavailable_action`) |
 | #901 | `managed_enterprise` on `main`: Windows sensor helper logs/home dirs, Claude floor below the contract |
@@ -2681,7 +2679,7 @@ the build and OS, and does not file a bug unless the behavior differs from the r
   desktop session.
 - **Versions and auto-update.** Agents self-update mid-test (Claude Code, OpenCode, Codex,
   kiro-cli). A version outside its hook contract becomes `hook_contract_unverified` and
-  `security_complete: false`. Pin or turn off auto-update. Verified ranges on this branch
+  `security_complete: false`. Pin or turn off auto-update. Verified ranges
   (`cli/defenseclaw/inventory/hook_contracts.json`): Claude Code 2.1.154 and later; Codex 0.124
   and later (0.145 and later is the default contract); Copilot CLI 1.0.18 and later; Cursor
   2.4.0 to before 4.0.0 (plus one exact CLI build); OpenCode 1.18.10 to before 1.19.0; Hermes

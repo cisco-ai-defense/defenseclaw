@@ -258,7 +258,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+				a.note("→ " + c.Fix.Line())
 			}
 			return &Silent{Err: fmt.Errorf("the OpenShell gateway is not usable yet (%s); see `%s doctor`", c.Title, CommandName)}
 		}
@@ -344,6 +344,22 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			changes.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 		} else if !telemetryOff && !state.TelemetryEnabled() {
 			changes.UnsetEnv = []string{openshell.EnvTelemetryEnabled}
+		}
+	}
+	// A gateway on a compute driver DefenseClaw does not drive runs none of
+	// its sandboxes: offer the switch to docker in the same plan (GAP-1264).
+	if !microVM && a.GOOS != "darwin" {
+		if why := undrivenGatewayDriver(rep, state); why != "" {
+			yes, err := a.ask("Switch your local OpenShell gateway to the docker compute driver? ("+why+
+				"; sandboxes made on the current driver cannot start after the switch)", true, assume)
+			if err != nil {
+				return err
+			}
+			if yes {
+				changes.ComputeDriver = openshell.DriverDocker
+			} else {
+				skipped = append(skipped, "the switch to the docker compute driver (no sandbox starts until the OpenShell gateway runs docker)")
+			}
 		}
 	}
 	// Switching the driver strands the other driver's sandboxes. The
@@ -513,7 +529,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		}
 		if wrap {
 			for _, s := range wrappable {
-				if err := a.Enable(WrapperOptions{Harness: s.Name}); err != nil {
+				if err := a.enableWrapper(s, WrapperOptions{Harness: s.Name}); err != nil {
 					a.warn("wrapper for " + s.Command + ": " + err.Error())
 				}
 			}
@@ -568,7 +584,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if onMicroVMs {
 		driver = openshell.DriverVM
 	}
-	a.waitDaemon(ctx, driver)
+	ready, noDockerGroup := a.waitDaemon(ctx, driver)
 	for _, s := range skipped {
 		a.note("skipped: " + s)
 	}
@@ -586,6 +602,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	case stuck:
 		a.warn("not ready for sandboxes yet: restart the OpenShell gateway on the MicroVM driver (`" + CommandName + " setup --restart-gateway`), then `" +
 			CommandName + " run " + cmd + "`")
+		return nil
+	case noDockerGroup:
+		a.warn("not ready for sandboxes yet: the DefenseClaw daemon started before you joined the docker group, so it cannot reach Docker. " +
+			"Restart it so it picks up the group: `defenseclaw-gateway restart`; then `" + CommandName + " run " + cmd + "`")
+		return nil
+	case !ready:
+		a.warn("not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `" + CommandName +
+			" doctor --fix`, then `" + CommandName + " run " + cmd + "`")
 		return nil
 	case restartYourself:
 		// No flush comes first, as with a restart of DefenseClaw's
@@ -854,7 +878,7 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		if problems := rep.MicroVM.Problems(); len(problems) > 0 {
 			a.bad("MicroVM driver: " + strings.Join(problems, "; "))
 			if c := rep.Get(openshell.CheckIDVMDriver); c != nil && c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+				a.note("→ " + c.Fix.Line())
 			}
 			return nil, &Silent{Err: errors.New("this machine cannot run MicroVM sandboxes yet (MicroVM driver)")}
 		}
@@ -874,7 +898,7 @@ func (a *App) machineFailure(rep *openshell.DoctorReport, landlockLater bool) er
 		if c := rep.Get(id); c != nil && c.Status == openshell.StatusFail {
 			a.bad(c.Title + ": " + c.Detail)
 			if c.Fix != nil {
-				a.note("→ " + c.Fix.Summary + " " + c.Fix.Command)
+				a.note("→ " + c.Fix.Line())
 			}
 			return &Silent{Err: fmt.Errorf("this machine cannot run sandboxes yet (%s)", c.Title)}
 		}
@@ -1094,13 +1118,32 @@ func (a *App) importIngressProfile(ctx context.Context) {
 	}
 }
 
+// undrivenGatewayDriver says why the local gateway runs, or its
+// configuration selects, a compute driver DefenseClaw does not drive, or
+// returns "" when it does not.
+func undrivenGatewayDriver(rep *openshell.DoctorReport, state *openshell.GatewayConfigState) string {
+	if state != nil {
+		if _, ok := state.Driver(); !ok {
+			return fmt.Sprintf("its configuration selects the %q compute driver, which DefenseClaw does not drive", state.ComputeDriver)
+		}
+	}
+	if rep != nil {
+		if c := rep.Get(openshell.CheckIDGatewayDriver); c != nil && c.Status == openshell.StatusFail {
+			return c.Detail
+		}
+	}
+	return ""
+}
+
 // waitDaemon waits briefly for the daemon to turn sandboxes on and, when
 // driver is set, to drive the gateway on it: the daemon learns a driver
-// switch when it next asks the gateway.
-func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) {
+// switch when it next asks the gateway. It reports false when the daemon
+// answers but has not turned sandboxes on, and noDockerGroup when the
+// daemon started before its user joined the docker group (GAP-2137).
+func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (ready, noDockerGroup bool) {
 	api, err := a.api()
 	if err != nil {
-		return
+		return true, false
 	}
 	const wait, poll = 30 * time.Second, 2 * time.Second
 	deadline := a.Now().Add(wait)
@@ -1114,23 +1157,23 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) {
 		switch {
 		case err != nil:
 			a.warn("the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`")
-			return
+			return true, false
 		case st.Enabled && st.Available && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
-			return
+			return true, st.DockerGroupMissing
 		}
 		// The polls bound the wait when the clock does not move.
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
 			if st.Enabled && st.Available {
 				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
 					"if `%s doctor` says the same", drives, driver, CommandName))
-				return
+				return true, false
 			}
 			a.warn("the daemon has not turned sandboxes on yet: " + firstNonEmpty(st.Reason, "see `"+CommandName+" doctor`"))
-			return
+			return false, false
 		}
 		if a.Sleep(ctx, poll) != nil {
-			return
+			return true, false
 		}
 	}
 }

@@ -296,6 +296,20 @@ func TestSkillDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 }
 
+// Kiro has no skills or plugin folder of its own. It must not fall back to
+// OpenClaw's layout: the install watcher creates the folders it watches, and
+// a Kiro-only install left an empty ~/.openclaw tree behind.
+func TestKiroWatchDirsDoNotFallBackToOpenClaw(t *testing.T) {
+	cfg := &Config{}
+	cfg.Claw.HomeDir = filepath.Join(t.TempDir(), ".openclaw")
+	if dirs := cfg.SkillDirsForConnector("kiro"); len(dirs) != 0 {
+		t.Errorf("SkillDirsForConnector(kiro) = %v, want none", dirs)
+	}
+	if dirs := cfg.PluginDirsForConnector("kiro"); len(dirs) != 0 {
+		t.Errorf("PluginDirsForConnector(kiro) = %v, want none", dirs)
+	}
+}
+
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
@@ -1271,7 +1285,7 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	configYAML := []byte("mcp_servers:\n  native-windows:\n    command: hermes-mcp\nmcp:\n  servers:\n    legacy-dc:\n      command: legacy-mcp\n")
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1293,6 +1307,9 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	}
 	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
 		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
+	}
+	if got := mcpEntriesByName(entries)["legacy-dc"].Command; got != "legacy-mcp" {
+		t.Fatalf("legacy Hermes MCP command = %q, want legacy-mcp; entries=%+v", got, entries)
 	}
 }
 

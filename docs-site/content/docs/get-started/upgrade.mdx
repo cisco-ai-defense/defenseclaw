@@ -36,8 +36,10 @@ The installer:
 If any step fails, the installer puts the previous version back, restarts it,
 and keeps the failed attempt in `~/.defenseclaw/.failed-<time>` for
 troubleshooting. Your configuration (`config.yaml`, `.env`, policies), audit
-and inventory databases, device key, and connector setup are kept. Every run
-writes a log to `~/.defenseclaw/logs/`.
+and inventory databases, device key, and connector setup are kept (an upgrade
+from 0.x starts a new audit history; see
+[Upgrading from 0.x to 1.0](#upgrading-from-0x-to-10)). Every run writes a log
+to `~/.defenseclaw/logs/`.
 
 | Command | What it does |
 | --- | --- |
@@ -45,18 +47,12 @@ writes a log to `~/.defenseclaw/logs/`.
 | `defenseclaw upgrade --yes` | The same, without prompting. |
 | `defenseclaw upgrade --version 1.2.3` | Install a specific release, newer or older. |
 | `defenseclaw rollback` | Put back the install that the last upgrade replaced. Run it again to undo the rollback. |
-| `defenseclaw migrate --check` | Report pending config migrations without changing anything. |
+| `defenseclaw migrate --check` | List pending config migrations by name without changing anything. Exits 0 when they can be applied, 1 when they cannot, 2 when the config is from a newer release; `--json` lists them under `pending`. |
 
 If the `defenseclaw` command itself does not start, run the install command
 again. It repairs any install and keeps your data:
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
-```
-
-```powershell
-irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
-```
+<include>../../snippets/install-commands.mdx</include>
 
 ## Update notices
 
@@ -90,8 +86,26 @@ installed. Every path keeps your configuration and data.
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in
   `~/.defenseclaw/previous/legacy-setup`.
-- To go back to 0.8.x afterwards, run `defenseclaw rollback`. To return to 1.x
-  from there, run the install command again.
+- 1.0 starts a new audit history. The first time 1.0 opens the audit
+  database, it deletes the audit events, scan results and findings that 0.x
+  recorded (a one-time privacy cutover: 0.x history can hold unredacted
+  content). The installer says so before it upgrades and again in its summary.
+  Configuration, inventory and connector setup are kept. The 0.x database stays
+  in `~/.defenseclaw/previous/data/audit.db`, and `defenseclaw rollback` brings
+  it back. Your next upgrade moves it to
+  `~/.defenseclaw/backups/audit-history-<version>-<time>`; remove that folder
+  once you no longer need the old history. `make all` from a source checkout
+  over a 0.x install keeps a copy in
+  `~/.defenseclaw/backups/audit-history-<time>.db` and says so.
+- To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
+  rollback command, so to return to 1.x from there, run the command the
+  rollback prints:
+
+  ```bash
+  bash ~/.defenseclaw/previous/installer/install.sh --rollback
+  ```
+
+  Running the install command again also works.
 
 ## Rollback
 
@@ -101,7 +115,24 @@ were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
 One previous install is kept, and rolling back needs no network. Reinstalling
-the same version does not replace the rollback copy.
+the same version does not replace the rollback copy. Running it again rolls
+forward (its header then reads `Rolling forward to DefenseClaw <version>`).
+
+The rollback starts the restored gateway when it was running and waits for it.
+A 0.8.x gateway on a large audit database can take a few minutes to start, so
+the rollback waits up to 3 minutes for it. If the gateway does not come up,
+the rollback says so (`Now running DefenseClaw <version>, but its gateway is
+not up`) and exits `1`: the swap is done, but agent hooks are not guarded
+until `defenseclaw-gateway start` succeeds.
+
+When an upgrade's new gateway does not become healthy, the installer puts the
+previous install back and starts its gateway again. The first start of a 1.x
+gateway over a large audit database can take longer than its 60-second
+readiness check, so the installer waits up to 3 more minutes while that gateway
+is still starting. If the previous gateway does not start again after a failed
+upgrade, the installer says so (`Your previous install is back, but its gateway
+is not running`): agent hooks are not guarded until `defenseclaw-gateway start`
+succeeds.
 
 If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the
@@ -118,12 +149,30 @@ installer runs it after every swap; running it again is safe.
 | `1` | A step failed; the installer restores the previous install |
 | `2` | The configuration was written by a newer DefenseClaw than this one |
 
+## Troubleshooting
+
+| Message | What to do |
+| --- | --- |
+| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. Run `defenseclaw rollback`, or install the newer release again. |
+| `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
+| `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
+| `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |
+
 ## Renamed and removed connectors
 
-Two connectors changed in this release. One is migrated for you; the other
-needs a one-time manual cleanup.
+This applies only if you used Windsurf or Gemini CLI before 1.0:
 
-### Windsurf is now Devin
+- **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the
+  [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You
+  don't need to do anything.
+- **Gemini CLI was removed.** Use [Antigravity](/docs/connectors/antigravity)
+  instead. Remove DefenseClaw's hooks from Gemini CLI's settings once (the
+  steps are below). If Gemini CLI was your only connector, the upgrade stops
+  before it changes anything until you remove it.
+
+<Accordions type="multiple">
+
+<Accordion title="Windsurf is now Devin: what the upgrade changes" id="windsurf-is-now-devin">
 
 Windsurf was renamed **Devin Desktop** (Cognition). DefenseClaw now protects it
 with the [`devin` connector](/docs/connectors/devin), which covers Devin CLI and
@@ -160,14 +209,16 @@ you run `defenseclaw setup devin`:
   (listing each setting that moved) when the gateway made the rename itself, and `removed state left by the retired connector ID` when
   `defenseclaw upgrade` had already rewritten `config.yaml`.
 
-What is not protected: conversations in Devin Desktop's legacy **Cascade**
-agent. New Devin Desktop tabs start on Devin Local, which is protected;
-existing Cascade conversations keep running without DefenseClaw hooks.
+What is not protected: Devin Desktop builds before 3.9.19, which still run
+the legacy **Cascade** agent without DefenseClaw hooks. Devin Desktop 3.9.19
+removed Cascade; its tabs run Devin Local, which is protected.
 
 To confirm, run `defenseclaw doctor` and check that the Devin hook row passes,
 then open a new Devin Desktop tab or Devin CLI session.
 
-### Gemini CLI was removed
+</Accordion>
+
+<Accordion title="Gemini CLI was removed: cleanup steps" id="gemini-cli-was-removed">
 
 DefenseClaw no longer ships a Gemini CLI connector. For Google's agent, use
 [Antigravity](/docs/connectors/antigravity) instead.
@@ -271,7 +322,9 @@ error points to this section. Step 1 fixes that. If a plugin directory is
 configured and plugin discovery fails, the gateway keeps names it cannot
 resolve and retries their teardown later instead of dropping them.
 
-#### Native Windows installs from pre-release builds
+</Accordion>
+
+<Accordion title="Native Windows installs from pre-release builds" id="native-windows-installs-from-pre-release-builds">
 
 Native Windows Setup builds made after 0.8.10 and before this release could
 select Windsurf or Gemini CLI. This release's Setup and uninstaller still read
@@ -289,11 +342,6 @@ Telemetry schemas no longer accept `geminicli` as a connector value. Rows that
 an older release exported with that value do not validate against the current
 schemas if you re-export them.
 
-## Troubleshooting
+</Accordion>
 
-| Message | What to do |
-| --- | --- |
-| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. Run `defenseclaw rollback`, or install the newer release again. |
-| `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
-| `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
-| `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |
+</Accordions>

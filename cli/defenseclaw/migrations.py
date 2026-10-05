@@ -900,7 +900,7 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
         # version that never finished its first ``defenseclaw setup``.
         # Nothing to migrate; the new sidecar will bootstrap on
         # first boot via the same firstboot.go path.
-        click.echo(f"    (no data dir at {ctx.data_dir} — fresh install will bootstrap)")
+        ux.echo(f"    (no data dir at {ctx.data_dir} — fresh install will bootstrap)")
         return
 
     _migrate_0_4_0_token_bootstrap(ctx)
@@ -914,9 +914,9 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
     if ctx.changes:
         click.echo(f"    applied {len(ctx.changes)} change(s):")
         for c in ctx.changes:
-            click.echo(f"      • {c}")
+            ux.echo(f"      • {c}")
     else:
-        click.echo("    (already on connector-v3 layout — no changes needed)")
+        ux.echo("    (already on connector-v3 layout — no changes needed)")
 
 
 def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
@@ -3365,9 +3365,8 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         # deliberately omits this row until the release workflow stamps the
         # checkout to 0.8.5.
         "0.8.5",
-        "Convert the active observability configuration to schema v8, "
-        "validate it with the installed target gateway, and activate it "
-        "transactionally during defenseclaw upgrade",
+        "Convert the observability configuration to config v8, check it "
+        "with the installed gateway, and activate it (all or nothing)",
         _migrate_observability_v8,
     ),
 ]
@@ -3440,7 +3439,13 @@ def migrate(
     """
 
     from defenseclaw import __version__
-    from defenseclaw.config import CURRENT_CONFIG_VERSION, ConfigVersionError, source_config_version
+    from defenseclaw.config import (
+        CURRENT_CONFIG_VERSION,
+        ConfigVersionError,
+        config_is_empty,
+        empty_config_message,
+        source_config_version,
+    )
 
     data_dir = os.path.abspath(os.path.expanduser(data_dir))
     ctx = MigrationContext(
@@ -3456,6 +3461,9 @@ def migrate(
         raise MigrationError(str(exc)) from exc
     if version is None:
         return MigrateResult(None, CURRENT_CONFIG_VERSION)
+    if version == 0 and config_is_empty(config_path):
+        # An empty file is not a 0.x install to import (GAP-1633).
+        raise MigrationError(empty_config_message(config_path))
     if version > CURRENT_CONFIG_VERSION:
         raise ConfigTooNewError(
             f"{config_path} has config_version {version}, but DefenseClaw {__version__} "
@@ -3487,7 +3495,7 @@ def migrate(
     if steps:
         _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
     for name, step in steps:
-        click.echo(f"  {ux.dim('→')} {name}")
+        ux.echo(f"  {ux.dim('→')} {display_step_name(name)}")
         try:
             step(ctx)
         except Exception as exc:  # noqa: BLE001 - surfaced to the installer, which rolls back
@@ -3503,9 +3511,47 @@ def migrate(
             f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
         )
     _refresh_local_observability_bundle(data_dir, __version__)
-    if version < _FIRST_V8_CONFIG_VERSION:
+    _refresh_guardrail_profiles(data_dir, config_path)
+    # A 0.8.x release may already have written config_version 8 (GAP-1390), so
+    # the writer's version decides too: no 0.x release recorded the agents.
+    if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
     return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+
+
+def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
+    """Bring unedited seeded guardrail profiles to this release's rules.
+
+    Best effort: a failure keeps the previous profile, which still loads.
+    """
+
+    from defenseclaw.guardrail_profiles import refresh_stock_profiles
+
+    policy_dir = os.path.join(data_dir, "policies")
+    try:
+        raw = yaml.safe_load(_read_config_text(config_path) or "") or {}
+    except yaml.YAMLError:
+        raw = {}
+    configured = raw.get("policy_dir") if isinstance(raw, dict) else None
+    if isinstance(configured, str) and configured.strip():
+        policy_dir = os.path.expanduser(configured.strip())
+    result = refresh_stock_profiles(policy_dir, os.path.join(data_dir, "backups"))
+    if result.refreshed:
+        ux.ok(
+            f"Updated guardrail rule packs {', '.join(result.refreshed)} to this release "
+            f"(previous copies in {result.backup_dir})",
+            indent="    ",
+        )
+    if result.kept_modified:
+        guardrail_dir = os.path.join(policy_dir, "guardrail")
+        ux.warn(
+            f"kept edited guardrail rule packs {', '.join(result.kept_modified)} in {guardrail_dir}; "
+            "they do not get this release's rule changes. To use the new rules, move the folder "
+            "aside and run 'defenseclaw init' to seed it again",
+            indent="    ",
+        )
+    for error in result.errors:
+        ux.warn(f"guardrail rule pack was not updated ({error})", indent="    ")
 
 
 def _select_windows_agents(data_dir: str) -> None:
@@ -3567,6 +3613,20 @@ def _tighten_group_writable(ctx: MigrationContext, paths: list[str]) -> None:
         except OSError as exc:
             raise MigrationError(f"could not make {path} private: {exc}") from exc
         ctx.changes.append(f"made {os.path.basename(path)} private ({oct(stat.S_IMODE(info.st_mode))} → 0o600)")
+
+
+_LEGACY_STEP_PREFIX = re.compile(r"^0\.x import [^:]+: ")
+
+
+def display_step_name(name: str) -> str:
+    """Return a migration step name in user terms.
+
+    The "0.x import X.Y.Z: " prefix keys a step to the release that
+    introduced it, which reads as the wrong version when a newer 0.x
+    config is migrated (GAP-1500). Human output shows only the
+    description; JSON keeps the full step names.
+    """
+    return _LEGACY_STEP_PREFIX.sub("", name)
 
 
 def _pending_migration_steps(
@@ -3677,6 +3737,19 @@ def _refresh_local_observability_bundle(data_dir: str, bundle_version: str) -> N
         if result.installed:
             ux.ok("Refreshed the local observability bundle", indent="    ")
     except (LocalObservabilityUpgradeError, ObservabilityV8UpgradeMigrationError, OSError) as exc:
+        if getattr(exc, "code", "") == "docker_state_unknown":
+            # GAP-1367: plain words, and nothing at all for a stack this
+            # config no longer sends to.
+            from defenseclaw.commands.cmd_setup_local_observability import _local_destination_enabled
+
+            if not _local_destination_enabled(data_dir):
+                return
+            ux.warn(
+                "the local observability stack was not refreshed: Docker could not be queried from this "
+                "account (is it in the docker group?). Check it with: defenseclaw setup local-observability status",
+                indent="    ",
+            )
+            return
         ux.warn(
             f"local observability bundle was not refreshed ({exc}); "
             "run 'defenseclaw setup local-observability status' to check it",

@@ -172,13 +172,12 @@ struct InventoryView: View {
                 }
             }
         }
-        .inspector(isPresented: Binding(
+        .dcInspector(isPresented: Binding(
             get: { selectedItem != nil },
             set: { if !$0 { selectedID = nil } }
         )) {
             if let item = selectedItem {
                 inventoryInspector(item)
-                    .inspectorColumnWidth(min: 320, ideal: 400)
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search inventory")
@@ -515,13 +514,12 @@ struct AIDiscoveryView: View {
                 discoveryTable
             }
         }
-        .inspector(isPresented: Binding(
+        .dcInspector(isPresented: Binding(
             get: { selected != nil },
             set: { if !$0 { selected = nil } }
         )) {
             if let row = selected {
                 rowInspector(row)
-                    .inspectorColumnWidth(min: 320, ideal: 400)
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Filter products and models")
@@ -933,9 +931,8 @@ struct RegistriesView: View {
             registryContent
         }
         .searchable(text: $search, placement: .toolbar, prompt: tab == .sources ? "Search sources" : "Search entries")
-        .inspector(isPresented: inspectorPresented) {
+        .dcInspector(isPresented: inspectorPresented) {
             inspectorContent
-                .inspectorColumnWidth(min: 320, ideal: 400)
         }
         .toolbar {
             ToolbarItemGroup {

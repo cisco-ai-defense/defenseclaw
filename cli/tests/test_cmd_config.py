@@ -25,6 +25,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from click.testing import CliRunner
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands import cmd_config
@@ -149,7 +151,7 @@ class ValidateConfigTests(unittest.TestCase):
             self.assertFalse(res.ok)
             self.assertEqual(
                 res.errors,
-                ["candidate field=$.openshell.binary; reason=[semantic] use a command name on PATH or an absolute path"],
+                ["line 3: openshell.binary: use a command name on PATH or an absolute path."],
             )
 
             # Nothing the mirror finds: Go's own words.
@@ -158,16 +160,96 @@ class ValidateConfigTests(unittest.TestCase):
                 res = cmd_config.validate_config()
             self.assertEqual(res.errors, [str(generic)])
 
-            # A refusal Go placed is left as it is.
+            # A refusal Go placed keeps its field and reason, in plain words.
             placed = ConfigInspectError(
                 "candidate field=$.openshell.llm; reason=[config_schema_invalid] …",
                 field_path="$.openshell.llm",
-                reason="[config_schema_invalid] …",
+                reason="[config_schema_invalid] unknown field",
             )
             env.config_path.write_text("config_version: 8\nopenshell:\n  binary: bin/openshell\n", encoding="utf-8")
             with patch.object(cmd_config, "inspect_v8_config", side_effect=placed):
                 res = cmd_config.validate_config()
-            self.assertEqual(res.errors, [str(placed)])
+            self.assertEqual(res.errors, ["openshell.llm: unknown field. All fields: defenseclaw config reference --format json-schema"])
+
+    def test_enum_refusal_names_line_value_and_allowed_values(self):
+        # GAP-1499: no "candidate field=$...; reason=[config_schema_invalid]" record.
+        refusal = ConfigInspectError(
+            "candidate field=$.guardrail.mode; reason=...",
+            field_path="$.guardrail.mode",
+            reason='[config_schema_invalid] configuration violates the enum constraint; expected one of '
+            '["observe","action"]; inspect the canonical v8 schema or generated reference and correct this field',
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text(
+                "config_version: 8\nguardrail:\n  mode: enforce-everything\n", encoding="utf-8"
+            )
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                res = cmd_config.validate_config()
+        self.assertEqual(
+            res.errors,
+            [
+                'line 3: guardrail.mode is "enforce-everything"; allowed values: observe, action.'
+            ],
+        )
+
+    def test_reference_yaml_drops_generator_header_and_help_names_json_schema(self):
+        # GAP-1661: the YAML reference covers only observability; the help says
+        # where every field is, and the output carries no repository paths.
+        generated = (
+            "# DEFENSECLAW CONFIGURATION v8 \u2014 OBSERVABILITY REFERENCE\n#\n"
+            "# GENERATED FILE. DO NOT EDIT.\n"
+            "# Canonical schema: schemas/config/v8/defenseclaw-config.schema.json\n"
+            "# Generator: scripts/generate_observability_v8_reference.py\n#\n"
+            "# This is the complete source-config surface.\nconfig_version: 8\n"
+        )
+        runner = CliRunner()
+        with patch.object(cmd_config, "config_v8_reference", return_value=generated):
+            res = runner.invoke(cmd_config.config_reference, [])
+        self.assertEqual(res.exit_code, 0, res.output)
+        self.assertNotIn("DO NOT EDIT", res.output)
+        self.assertNotIn("schemas/config", res.output)
+        self.assertNotIn("#\n#\n", res.output)
+        self.assertIn("config_version: 8", res.output)
+        help_text = runner.invoke(cmd_config.config_reference, ["--help"]).output
+        self.assertIn("json-schema prints the schema of every", help_text)
+
+    def test_yaml_syntax_refusal_names_the_bad_line_and_parser_reason(self):
+        # GAP-1430: validate named line 119 and a generic list for a bad line 118.
+        generic = ConfigInspectError(
+            "candidate field=$; reason=[yaml_syntax_invalid] configuration source is not valid YAML",
+            field_path="$",
+            reason="[yaml_syntax_invalid] configuration source is not valid YAML",
+        )
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 8\na: 1\nguardrail: [unclosed\n", encoding="utf-8")
+            with patch.object(cmd_config, "inspect_v8_config", side_effect=generic):
+                res = cmd_config.validate_config()
+        self.assertEqual(len(res.errors), 1)
+        self.assertTrue(res.errors[0].startswith("line 3, column 12: invalid YAML (expected ',' or ']'"), res.errors)
+        self.assertNotIn("candidate field", res.errors[0])
+
+    def test_missing_secret_refusal_names_the_variable_and_keys_set(self):
+        # GAP-1442: name the way out instead of "doctor --fix".
+        refusal = ConfigInspectError(
+            "candidate field=...",
+            field_path='$.observability.destinations[0].headers["Galileo-API-Key"]',
+            reason="[secret_reference_unresolved] required environment-backed secret is unavailable",
+        )
+        # setup galileo writes the {env: NAME} mapping form.
+        for reference in ("${GALILEO_API_KEY}", "{env: GALILEO_API_KEY}"):
+            with self.subTest(reference=reference), _IsolatedHome() as env:
+                env.config_path.write_text(
+                    "config_version: 8\nobservability:\n  destinations:\n    - name: galileo\n"
+                    f"      headers:\n        Galileo-API-Key: {reference}\n",
+                    encoding="utf-8",
+                )
+                with patch.object(cmd_config, "inspect_v8_config", side_effect=refusal):
+                    res = cmd_config.validate_config()
+                self.assertEqual(len(res.errors), 1)
+                self.assertTrue(res.errors[0].startswith("line 6: "), res.errors)
+                self.assertIn("needs GALILEO_API_KEY", res.errors[0])
+                self.assertIn("defenseclaw keys set GALILEO_API_KEY", res.errors[0])
+                self.assertNotIn("<NAME>", res.errors[0])
 
     def test_gateway_port_clash_is_warning_not_error(self):
         with _IsolatedHome() as env:
@@ -214,6 +296,31 @@ class ConfigShowTests(unittest.TestCase):
         self.assertNotIn("_loaded_owned_nested_values", rendered)
         self.assertNotIn("_loaded_authoritative_dicts", blob)
         self.assertNotIn("_loaded_owned_nested_values", blob)
+
+
+class UndeclaredKeyWordingTests(unittest.TestCase):
+    # GAP-2235: the gateway's words for an undeclared key, at the key's line.
+    REASON = (
+        "[config_schema_invalid] configuration violates the additionalProperties constraint; "
+        "expected a declared field name; suggested field mode; "
+        "inspect the canonical v8 schema or generated reference and correct this field"
+    )
+
+    def test_typo_reads_unknown_field_with_suggestion(self):
+        raw = b"config_version: 8\nguardrail:\n  mdoe: observe\n"
+        self.assertEqual(
+            cmd_config._plain_v8_issue(raw, "$.guardrail.mdoe", self.REASON),
+            'line 3: guardrail.mdoe: unknown field (did you mean "mode"?). '
+            "All fields: defenseclaw config reference --format json-schema",
+        )
+
+    def test_unknown_section_names_its_own_line(self):
+        raw = b"config_version: 8\ngateway2:\n  a: 1\n"
+        reason = self.REASON.replace("suggested field mode; ", "")
+        self.assertEqual(
+            cmd_config._plain_v8_issue(raw, "$.gateway2", reason),
+            "line 2: gateway2: unknown field. All fields: defenseclaw config reference --format json-schema",
+        )
 
 
 if __name__ == "__main__":

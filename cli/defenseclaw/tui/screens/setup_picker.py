@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
-from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -30,6 +29,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
+from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.setup_catalog import PickerRow
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 

@@ -99,6 +99,31 @@ func TestKiroManagedSetupWritesOnlyTheUsersGlobalHooks(t *testing.T) {
 	}
 }
 
+// The guardian's per-user worker makes ~/.kiro/hooks before Setup runs, so
+// Setup finds it there; the folders it reports still go at teardown.
+func TestKiroTeardownRemovesHookFoldersTheInstallerCreated(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".kiro")
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	hooks := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	RecordHookConfigParentDirs("kiro", dataDir, []string{home, hooks})
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", ManagedEnterprise: true}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Lstat(home); !os.IsNotExist(err) {
+		t.Fatalf("teardown left the Kiro folder the installer created (err=%v)", err)
+	}
+}
+
 func TestKiroManagedTeardownDisablesCachedHookScript(t *testing.T) {
 	home := t.TempDir()
 	dataDir := t.TempDir()
@@ -118,6 +143,12 @@ func TestKiroManagedTeardownDisablesCachedHookScript(t *testing.T) {
 	}
 	if !strings.Contains(string(script), "disabled tombstone") || !strings.Contains(string(script), "exit 0") || strings.Contains(string(script), kiroHookAPIPath) {
 		t.Fatalf("Kiro teardown left an active hook script: %s", script)
+	}
+	// The folders Setup created in a home that never ran Kiro go too.
+	for _, sub := range []string{"agents", "hooks", "settings"} {
+		if _, err := os.Stat(filepath.Join(home, sub)); !os.IsNotExist(err) {
+			t.Fatalf("Kiro teardown left the empty %s folder it created (err=%v)", sub, err)
+		}
 	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup after teardown: %v", err)
@@ -224,9 +255,11 @@ func writeKiroCustomDefaultAgent(t *testing.T, home string) (custom, settings st
 // left in their agent.
 func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
+		// Managed Windows Setup refuses a profile that still has the
+		// .defenseclaw folder a per-user install left (users uninstall it
+		// first), and the managed locks refuse that install's lock files, so
 		// no managed Setup follows a per-user one there.
-		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
+		t.Skip("a per-user footprint is removed before a managed Windows install")
 	}
 	home := t.TempDir()
 	workspace := t.TempDir()
@@ -320,9 +353,11 @@ func TestKiroManagedSetupReclaimsAnEarlierPerUserFootprint(t *testing.T) {
 // agent, which must not stay the default without them.
 func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		// Windows enrolls Kiro through the ACP guard, not managed hooks, so
+		// Managed Windows Setup refuses a profile that still has the
+		// .defenseclaw folder a per-user install left (users uninstall it
+		// first), and the managed locks refuse that install's lock files, so
 		// no managed Setup follows a per-user one there.
-		t.Skip("managed Kiro hooks are enrolled on Linux and macOS only")
+		t.Skip("a per-user footprint is removed before a managed Windows install")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a read-only folder")
@@ -357,5 +392,41 @@ func TestKiroManagedSetupSwitchesTheDefaultAgentWhenTheReclaimFails(t *testing.T
 	assertKiroDefaultAgentSetting(t, settings)
 	if present, err := conn.ownedHookContractPresent(managed); err != nil || !present {
 		t.Fatalf("managed hook registration present = %v, %v", present, err)
+	}
+}
+
+// GAP-1932: a backup captured while the account still held DefenseClaw's
+// Kiro hook and agent files (an earlier enrollment whose own backup is gone)
+// put them back on restore, so teardown failed VerifyClean. The restored
+// files lose DefenseClaw's entries too, and files left with nothing else go.
+func TestKiroManagedTeardownRemovesHooksARestoredBackupPutBack(t *testing.T) {
+	home := t.TempDir()
+	dataDir := t.TempDir()
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	KiroHomeOverride = home
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", HookFailMode: "closed", ManagedEnterprise: true}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(dataDir, "connector_backups")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over the earlier registration: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(home, "hooks", kiroManagedHooksName),
+		filepath.Join(home, "agents", kiroManagedAgentName+".json"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("teardown left DefenseClaw's %s (err=%v)", path, err)
+		}
 	}
 }

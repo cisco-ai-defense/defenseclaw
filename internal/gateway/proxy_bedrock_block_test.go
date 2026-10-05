@@ -19,7 +19,13 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 
 	eventstream "github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
@@ -103,8 +109,8 @@ func TestWriteBlockedResponseBedrockConverse(t *testing.T) {
 	if len(resp.Output.Message.Content) != 1 || resp.Output.Message.Content[0].Text != "blocked by DefenseClaw" {
 		t.Errorf("content text = %+v; want [{Text: blocked by DefenseClaw}]", resp.Output.Message.Content)
 	}
-	if resp.StopReason != "guardrail_intervened" {
-		t.Errorf("stopReason = %q; want guardrail_intervened", resp.StopReason)
+	if resp.StopReason != "end_turn" {
+		t.Errorf("stopReason = %q; want end_turn (GAP-1894)", resp.StopReason)
 	}
 	if !resp.DefenseClawBlocked || resp.DefenseClawReason != "blocked by DefenseClaw" {
 		t.Errorf("missing defenseclaw metadata: %+v", resp)
@@ -192,8 +198,8 @@ func TestWriteBlockedStreamBedrockConverseRoundTrip(t *testing.T) {
 	if deltaText != "blocked by DefenseClaw" {
 		t.Errorf("deltaText = %q; want blocked by DefenseClaw", deltaText)
 	}
-	if stopReason != "guardrail_intervened" {
-		t.Errorf("stopReason = %q; want guardrail_intervened", stopReason)
+	if stopReason != "end_turn" {
+		t.Errorf("stopReason = %q; want end_turn (GAP-1894)", stopReason)
 	}
 	if blocked, _ := messageMeta["defenseclaw_blocked"].(bool); !blocked {
 		t.Errorf("messageStop missing defenseclaw_blocked=true: %+v", messageMeta)
@@ -227,5 +233,89 @@ func TestWriteBlockedPassthroughBedrockRoutes(t *testing.T) {
 				t.Fatalf("X-DefenseClaw-Blocked = %q; want true", got)
 			}
 		})
+	}
+}
+
+// GAP-1406: a refused private upstream names the CLI fix, and a Bedrock
+// client gets an error it can parse instead of "UnknownError".
+func TestPrivateUpstreamHintAndBedrockError(t *testing.T) {
+	host := "bedrock-runtime.us-east-1.amazonaws.com"
+	if hint := privateUpstreamHint(host, net.ParseIP("10.0.2.169")); !strings.Contains(hint, "defenseclaw guardrail allow-private-upstream "+host) {
+		t.Fatalf("private address hint = %q", hint)
+	}
+	for _, ip := range []string{"127.0.0.1", "169.254.169.254"} {
+		if hint := privateUpstreamHint(host, net.ParseIP(ip)); hint != "" {
+			t.Fatalf("%s must get no allow hint, got %q", ip, hint)
+		}
+	}
+	// GAP-1703: agent UIs truncate long errors, so the fix comes first and
+	// survives the url.Error wrapping the HTTP client adds.
+	wrapped := &url.Error{Op: "Post", URL: "https://" + host + "/model/x/converse-stream", Err: &privateUpstreamRefusal{host: host, ip: net.ParseIP("10.0.2.169")}}
+	if msg := upstreamErrorMessage("upstream error: ", wrapped); !strings.HasPrefix(msg, "DefenseClaw refused a private LLM endpoint; if you trust it, run: defenseclaw guardrail allow-private-upstream "+host+" ") {
+		t.Fatalf("refusal message = %q", msg)
+	}
+	if msg := upstreamErrorMessage("upstream error: ", errors.New("boom")); msg != "upstream error: boom" {
+		t.Fatalf("other error message = %q", msg)
+	}
+	rec := httptest.NewRecorder()
+	writeBedrockUpstreamError(rec, "upstream error: refused")
+	if rec.Code != http.StatusBadGateway || rec.Header().Get("X-Amzn-ErrorType") != "ServiceUnavailableException" {
+		t.Fatalf("status=%d header=%q", rec.Code, rec.Header().Get("X-Amzn-ErrorType"))
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["message"] != "upstream error: refused" {
+		t.Fatalf("body = %s (%v)", rec.Body.String(), err)
+	}
+}
+
+// GAP-1893: after a prompt block queues a security notification, the next
+// SigV4-signed Bedrock request is forwarded byte-for-byte (the proxy cannot
+// re-sign a changed body); an unsigned one still carries the notification.
+func TestPassthroughLeavesSigV4SignedBodyUnchanged(t *testing.T) {
+	allowRawForwardPrivateTargets(t)
+	var forwarded [][]byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		forwarded = append(forwarded, b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"message":{"role":"assistant","content":[{"text":"ready"}]}},"stopReason":"end_turn"}`))
+	}))
+	defer upstream.Close()
+	origDomains := providerDomains
+	host, _, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+	providerDomains = append(providerDomains, providerDomainEntry{host, "bedrock"})
+	defer func() { providerDomains = origDomains }()
+
+	insp := newMockInspector()
+	insp.setVerdict("prompt", &ScanVerdict{Action: "block", Severity: "CRITICAL",
+		Reason: "matched: R-PROMPT:marker", Findings: []string{"R-PROMPT:marker"}})
+	proxy := newTestProxy(t, &mockProvider{}, insp, "action")
+	proxy.notify = NewNotificationQueue()
+	send := func(auth, text string) []byte {
+		body := []byte(`{"messages":[{"role":"user","content":[{"text":"` + text + `"}]}]}`)
+		req := httptest.NewRequest(http.MethodPost, "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/converse", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DC-Target-URL", upstream.URL)
+		req.Header.Set("Authorization", auth)
+		req.RemoteAddr = "127.0.0.1:12345"
+		proxy.handlePassthrough(httptest.NewRecorder(), req)
+		return body
+	}
+	const sigv4 = "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261002/us-east-1/bedrock/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc"
+	send(sigv4, "dccert-prompt-marker")
+	if len(forwarded) != 0 {
+		t.Fatalf("blocked prompt reached the upstream: %q", forwarded)
+	}
+	insp.setVerdict("prompt", allowVerdict("mock"))
+	signed := send(sigv4, "Reply ready")
+	send("Bearer bedrock-api-key", "Reply again")
+	if len(forwarded) != 2 {
+		t.Fatalf("forwarded %d requests, want 2", len(forwarded))
+	}
+	if !bytes.Equal(forwarded[0], signed) {
+		t.Fatalf("signed body was rewritten:\n got %s\nwant %s", forwarded[0], signed)
+	}
+	if !strings.Contains(string(forwarded[1]), "DEFENSECLAW SECURITY ENFORCEMENT") {
+		t.Fatalf("unsigned request lost the pending notification: %s", forwarded[1])
 	}
 }

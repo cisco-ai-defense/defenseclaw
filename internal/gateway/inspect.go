@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -484,12 +485,23 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// across the AID / judge / regex lanes. Confidence stays at 0
 		// (lane doesn't self-report one); the emitter treats zero as
 		// "not computed" and omits it on the wire.
+		// A judge finding is titled by its category and keeps the
+		// severity of the judge that reported it, not the strictest one
+		// of the judges merged into the lane verdict (GAP-1886).
 		for _, f := range aid.Findings {
 			rf := RuleFinding{
 				RuleID:   f,
 				Title:    f,
 				Severity: aid.Severity,
 				Tags:     []string{strings.TrimSuffix(findingTag, ":")},
+			}
+			if s := aid.findingSeverity[f]; s != "" {
+				rf.Severity = s
+			}
+			if findingTag == "llm-judge:" {
+				if title := judgeFindingTitle(f); title != "" {
+					rf.Title = title
+				}
 			}
 			local.DetailedFindings = append(local.DetailedFindings, rf)
 		}
@@ -538,6 +550,17 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		Connector:          req.Connector,
 		EnforcementCapable: true,
 	}
+	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
+		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
+		// workdir, ...) next to the command. Left in the arguments they made
+		// the parse partial, so every command block rule was detection-only
+		// (GAP-1450). The directory is the command's working directory when
+		// it is absolute; the session's is not known here.
+		action.Input.Args = args
+		if filepath.IsAbs(dir) || strings.HasPrefix(dir, "/") {
+			action.Input.CWD = dir
+		}
+	}
 	if trustedShimArgvTool(req.Tool) {
 		// Authenticated PATH shims have one closed argv envelope. If that
 		// envelope is malformed, extended, or names another executable, raw
@@ -552,6 +575,15 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
 		action.EnforcementCapable = true
+		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
+	}
+	// An argument TrustedShellArgs leaves for the parser (OpenClaw's env,
+	// elevated, host, node) keeps the parse partial, so a CRITICAL command
+	// rule stayed detection-only and the command ran (GAP-1450). As for a
+	// sandbox's shell calls, the command is also judged on its own, and that
+	// verdict only ever adds to the call's.
+	if command, ok := connector.ShellCommandArgs(req.Connector, req.Tool, req.Args); ok {
+		return a.inspectSandboxShellToolPolicyCtx(ctx, req, action, command, action.Input.Tool)
 	}
 	return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 }
@@ -741,6 +773,14 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 				break
 			}
 			reasons = append(reasons, f.RuleID+":"+f.Title)
+		}
+		// A CodeGuard-only hit left the reason an empty "matched: ", which
+		// the agent notice showed as a redaction token (GAP-2029).
+		for _, cf := range cgFindings {
+			if len(reasons) >= 5 {
+				break
+			}
+			reasons = append(reasons, cf.RuleID+":"+cf.Title)
 		}
 
 		findingStrs := FindingStrings(ruleFindings)
@@ -1226,9 +1266,10 @@ const maxConcurrentHookJudges = 16
 // guardrail.judge.hook_timeout is unset. Hook scripts call the gateway
 // with curl --max-time 10 (see connector/hooks/*-hook.sh); the proxy
 // lane's 30s judge default would let the client sever the connection
-// before a verdict lands. 5s leaves headroom for the regex/AID phases
-// plus response rendering.
-const defaultHookJudgeTimeout = 5 * time.Second
+// before a verdict lands. 8s fits Bedrock-class judge latency (Haiku 4.5
+// injection calls measured at p90 4.2s, max 5.0s; GAP-1475/GAP-1488) and
+// still leaves 2s for the regex/AID phases plus response rendering.
+const defaultHookJudgeTimeout = 8 * time.Second
 
 // hookJudgeInspect runs the LLM judge on hook-lane message content for
 // connectors gated on via guardrail.judge.hook_connectors. It maps the
@@ -1294,10 +1335,13 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
-		// Mirror the proxy regex_judge semantics: a HIGH+ regex/AID
-		// verdict is already decisive, so the LLM round-trip is spent
-		// only on content the local lanes couldn't condemn.
-		if current != nil && severityRank[strings.ToUpper(current.Severity)] >= severityRank["HIGH"] {
+		// A regex/AID verdict that already blocks, or is CRITICAL, is
+		// decisive: the judge cannot raise it. A HIGH verdict that only
+		// alerts (block-at CRITICAL) is not, so the judge still runs and
+		// the stronger verdict wins; skipping it let a prompt with more
+		// sensitive data through where the judge blocked less (GAP-1677).
+		if current != nil && (strings.EqualFold(current.Action, "block") ||
+			severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]) {
 			return nil
 		}
 	default: // regex_only / unset
@@ -1442,6 +1486,16 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	verdict.applyMode(inspectMode(a.scannerCfg))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 
+	// Count the check against the authenticated connector so /health (and the
+	// TUI's "0 requests ... verify your agent is dialing the gateway port"
+	// notice) sees OpenClaw's exec checks, which arrive only here (GAP-1617).
+	if a.recordsConnectorHealth(r.Context()) {
+		a.health.RecordToolInspectionFor(serverConnector)
+		if verdict.Action == "block" {
+			a.health.RecordToolBlockFor(serverConnector)
+		}
+	}
+
 	elapsed := time.Since(t0)
 
 	// verdict.Reason is normally composed as "matched: <rule-id>:<title>".
@@ -1504,10 +1558,28 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 			targetType = "prompt"
 		}
 	}
-	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
-		"/api/v1/inspect/tool:"+req.Tool, targetType, verdict, elapsed,
+	// Findings name the connector the call was authenticated for, and the
+	// connector and tool as their target, as hook findings do: an OpenClaw
+	// block was an alert with no connector or target, so `alerts
+	// --connector openclaw` did not find it (GAP-1451).
+	findingCtx := r.Context()
+	if env := audit.EnvelopeFromContext(findingCtx); env.Connector == "" && req.Connector != "" {
+		env.Connector = req.Connector
+		findingCtx = audit.ContextWithEnvelope(findingCtx, env)
+	}
+	evalCtx := a.emitInspectVerdictFindings(findingCtx, "inspect-http",
+		hookEvaluationTarget(req.Connector, req.Tool), targetType, verdict, elapsed,
 		"emit_inspect_tool")
 	a.emitInspectTraceV8(r.Context(), req.Tool, targetType, verdict, elapsed, evalCtx)
+	if targetType == "tool_call" && strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") {
+		// The event router puts the decision on the call's tool span
+		// (GAP-1930).
+		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evalCtx.RuleIDs); ok {
+			meta := hookDecisionMetricMeta(r.Context(), connectorName)
+			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, req.Args, outcome,
+				AgentIdentityFromContext(r.Context()))
+		}
+	}
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
@@ -1516,7 +1588,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogEventCtx(r.Context(), a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails))
+	toolEvent := a.inspectToolAuditEvent(r, auditAction, req.Tool, auditDetails)
+	if verdict.Action != "allow" && verdict.Severity != "" && verdict.Severity != "NONE" {
+		// A block, confirm or alert row carries the verdict's severity.
+		toolEvent.Severity = verdict.Severity
+	}
+	_ = a.logger.LogEventCtx(r.Context(), toolEvent)
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 
@@ -1549,24 +1626,30 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
 
-// inspectToolAuditEvent is the inspect-tool-* audit row. It names the
-// connector the request was authenticated for (the configured connector when
-// the request carries none), the route, and the caller, so an administrator
-// can attribute direct inspect calls to the account that made them.
+// inspectToolAuditEvent is the inspect-tool-* audit row.
 func (a *APIServer) inspectToolAuditEvent(r *http.Request, action, tool, details string) audit.Event {
+	return a.inspectAuditEvent(r, "/api/v1/inspect/tool", action, tool, details)
+}
+
+// inspectAuditEvent is the audit row of a direct /api/v1/inspect/* call. It
+// names the connector the request was authenticated for (the configured
+// connector when the request carries none), the route, and the verified
+// caller, so an administrator can attribute direct inspect calls to the
+// account that made them.
+func (a *APIServer) inspectAuditEvent(r *http.Request, route, action, target, details string) audit.Event {
 	ctx := r.Context()
 	connectorName := authenticatedInspectConnector(ctx)
 	if connectorName == "" {
 		connectorName = a.connectorName()
 	}
-	structured := map[string]any{"route": "/api/v1/inspect/tool"}
+	structured := map[string]any{"route": route}
 	if connectorName != "" {
 		structured["connector"] = connectorName
 	}
 	auditCallerIdentity(ctx).addTo(structured)
 	return audit.Event{
 		Action:     action,
-		Target:     tool,
+		Target:     target,
 		Details:    details,
 		Severity:   "INFO",
 		Connector:  connectorName,

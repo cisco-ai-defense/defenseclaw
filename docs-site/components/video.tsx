@@ -29,7 +29,7 @@ export interface VideoProps {
   caption?: string;
   /** Width:height ratio for the poster placeholder. Defaults to
    *  16:9 which matches the Screen Studio raw exports. */
-  aspect?: '16/9' | '4/3' | '1/1';
+  aspect?: '16/9' | '16/10' | '4/3' | '1/1';
   /** Optional poster slug override. Defaults to `src`. */
   poster?: string;
   /** Loop the playback. Defaults to false. */
@@ -70,7 +70,13 @@ export function Video({
   const videoUrl = `${basePath}/videos/${src}.mp4`;
   const posterUrl = `${basePath}/images/posters/${poster ?? src}.jpg`;
   const aspectClass =
-    aspect === '4/3' ? 'aspect-[4/3]' : aspect === '1/1' ? 'aspect-square' : 'aspect-video';
+    aspect === '16/10'
+      ? 'aspect-[16/10]'
+      : aspect === '4/3'
+        ? 'aspect-[4/3]'
+        : aspect === '1/1'
+          ? 'aspect-square'
+          : 'aspect-video';
 
   return (
     <figure className="my-6 overflow-hidden rounded-xl border border-fd-border bg-black/60">

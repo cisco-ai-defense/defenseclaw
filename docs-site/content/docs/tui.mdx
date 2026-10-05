@@ -25,22 +25,33 @@ you do not have to memorize their syntax.
 defenseclaw tui
 ```
 
-That's it. The TUI opens full-screen in your terminal. Use a reasonably large
-window for the best layout. Run `defenseclaw init` first if you haven't yet, so
-the panels have data to show.
+The TUI opens full-screen in your terminal. Use a terminal of at least 80×24;
+wider terminals show more columns, and the detail pane beside tables instead
+of below them. Run `defenseclaw init` first if you haven't yet, so the panels
+have data to show.
 
-<Video
-  src="tui"
-  caption="A quick tour of the DefenseClaw terminal UI: the Overview panel, the tab bar, and the command palette."
-/>
+![DefenseClaw TUI Overview panel at 120×36: the tab bar, hook call, block, finding and guardrail cards, the connector scope, services and enforcement summaries, and the Restart Gateway, Run Doctor and Scan AI Agents buttons](/images/tui/overview.png)
 
 ## Panels
 
 Switch panels with the number/letter key shown, from any panel (only an open
-Setup form or the config editor types digits), or cycle with `Tab` /
+Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
 `Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
-terminal every tab stays on screen: the most-used tabs keep their names and
-the rest show only their key.
+terminal every tab stays on screen: Overview, Alerts and Policies keep their
+names first, then as many other tabs as fit get a short name (`Inv`, `Log`),
+and the rest show only their key. Which tabs keep a name depends only on the
+terminal width and the unread counts, so switching panels changes only the tab
+you leave and the tab you open. Unread counts stay ahead of names (`8⁶⁴`), and
+some room stays free for the longest panel name when you open it. Below 80
+columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
+of the other tabs' unread counts; the Alerts count stays. Below about 68
+columns every tab shows only its key, and the panel title names the panel.
+
+With two or more connectors set up, `m` filters Overview, Alerts, Audit, Logs,
+Skills, MCPs, Plugins, Tools and Inventory by connector. With one connector,
+`m` on Overview switches the active connector (it re-runs that connector's
+setup after a confirm), and on Alerts, Audit and Logs it says there is nothing
+to filter.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
@@ -48,12 +59,13 @@ the rest show only their key.
 | `2` | Alerts | Recent guardrail and hook alerts |
 | `3` | Skills | Scanned skill inventory |
 | `4` | MCPs | Scanned MCP servers |
-| `5` | Plugins | Scanned plugins |
+| `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others) |
+| `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
 | `6` | Inventory | Combined inventory view |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
-| `8` | Logs | Live gateway logs with filter presets |
-| `9` | Audit | Audit trail |
-| `A` | Activity | Live output from commands you run |
+| `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
+| `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
+| `A` | Activity | Live output from commands you run; `l` (Mutations; `h` goes back to Commands) lists config and policy changes with what changed (for example `/.env/NAME: unset -> set`) |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `N` | Runtime | What actually ran: the [runtime planes](/docs/ai-discovery#runtime-planes-what-actually-ran) and their findings |
 | `R` | Registries | Configured registries |
@@ -68,25 +80,45 @@ the detail view when the source reports them.
 
 ### Doctor status and cache
 
-The Overview panel reads `~/.defenseclaw/doctor_cache.json`; it does not rerun
-credential or network probes during rendering. Doctor schema v2 keeps health
-checks and repair attempts in separate ledgers, and the Overview derives the
-run outcome from both. A failed or dependency-blocked repair therefore cannot
-produce an all-green Doctor card.
+The Overview panel's Doctor card shows the result of the last
+`defenseclaw doctor` run, saved in `~/.defenseclaw/doctor_cache.json`; drawing
+the panel does not rerun credential or network checks. A failed repair keeps
+the card from turning all green, and a result DefenseClaw cannot read shows as
+a warning rather than as healthy. A result older than 15 minutes is marked
+stale: press `D` (or `d` on Overview) to run Doctor in the background and
+refresh it. Failed credential checks also feed the missing-credential notice,
+without showing any values. See the
+[Doctor cache reference](/docs/reference/configuration#doctor-cache) for the
+file format.
 
-Unknown or malformed schema-v2 state becomes a visible warning rather than
-being assumed healthy. Snapshots older than 15 minutes are marked stale, and
-pressing `D` runs Doctor in the background to refresh the view. Failed
-credential checks also feed the bounded missing-credential notice without
-exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
-for the on-disk format.
+## Handy keys
+
+| Key | Action |
+| --- | --- |
+| `?` | Toggle the help overlay (scroll it with `j`/`k` or `PgUp`/`PgDn`) |
+| `Ctrl+K` or `:` | Open the command palette (search-and-run any command; the Risk column marks what changes things) |
+| `Ctrl+P` | Jump to a panel by name |
+| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it; `Esc` on the list clears the filter) |
+| `/` on Alerts | Search the alerts: the text matches every column the table shows, including the rule id and title in Details (`Enter` applies, `Esc` clears) |
+| `Ctrl+\` | Theme picker |
+| `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
+| `Y` | Copy the last command's output (works on every panel) |
+| `Ctrl+S` | Save the last run to a log file |
+| `Ctrl+C` | Quit the TUI (it cancels a running command first) |
+| `q` | Close the open drawer or overlay; it does not quit |
+| `b` | On Overview and Logs: turn desktop notifications on or off |
+| `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type. Registry actions (sync, approve, reject, require) keep the Registries panel in front and report the result in the status bar; their full output is in Activity |
 
 ## Policies panel (protection center)
 
-Press `P` (or `p` on Overview) to open **Policies**. The header sums up your
+Press `P` (or `p` on Overview) to open **Policies**.
+
+![DefenseClaw TUI Policies panel on the Posture view: the views list on the left, the posture table with the global scope and the claudecode and codex connectors, and the detail pane with the CRITICAL, HIGH, MEDIUM and LOW actions](/images/tui/policies-posture.png)
+
+The header sums up your
 protection, for example `● default policy · default pack · 1 of 5 opt-in packs
 · 26 chains (4 can block)`. Pick a view from the list on the left (or press
-`1`-`7`); the pane on the right (below the table on narrower terminals, and on
+`←`/`→` or `[`/`]`); the pane on the right (below the table on narrower terminals, and on
 `i` at 80x24) explains the highlighted row and what you can do with it.
 
 | View | What it shows |
@@ -132,7 +164,11 @@ alert LOW+`, and the status line shows `policy <name> · <mode>`.
 
 ## Setup panel
 
-Press `0` for **Setup**. The list on the left groups the tasks by goal: **Get
+Press `0` for **Setup**.
+
+![DefenseClaw TUI Setup panel: the readiness line, the goal groups on the left, the Get protected tasks with their status, and the pane that explains the Protect an agent task](/images/tui/setup.png)
+
+The list on the left groups the tasks by goal: **Get
 protected**, **Guardrail & scanning**, **Alerts & telemetry** and **Gateway &
 advanced**, with a count and a `!` when something needs attention; on narrow
 terminals it becomes a one-line switcher (`←`/`→`). Each task shows its real
@@ -149,7 +185,11 @@ you enter for **API keys & secrets** reach `defenseclaw keys set --value-stdin`
 on standard input, never on the command line. Follow-up commands run only after
 the previous one succeeds.
 
-Press `c` for the **config editor**. On wide terminals its sections are listed
+A successful run's result card hides itself after 8 seconds (its footer says
+so) and leaves the result on the status line; `q` or **Dismiss** clears it
+sooner. A failed run's card stays until you dismiss it.
+
+Press `c` for the **config editor** (or `→` past the last group). On wide terminals its sections are listed
 on the left, grouped (Core, Protection, …), with the highlighted field's value
 and help beside the table:
 
@@ -160,7 +200,7 @@ and help beside the table:
 | `/` | Find a field by name or key in any section |
 | `Enter` | Edit the field (text box) or change a choice |
 | `S` | Review the changes and save |
-| `R` | Revert unsaved changes |
+| `r` | Revert unsaved changes (`R` opens Registries) |
 | `w` | Back to the task list |
 
 Keys the TUI can't save show as read-only rows; their hint says where to change
@@ -169,15 +209,19 @@ hooks). Only problems in fields you changed block a save.
 
 ## Sandboxes panel
 
+The rest of this page is the full reference for the TUI's OpenShell sandbox
+views. For a shorter, task-by-task summary, see
+[Sandboxes in the TUI and macOS app](/docs/sandboxes/apps).
+
 Press `7` for **Sandboxes**, the TUI's view of the NVIDIA OpenShell sandboxes
-the DefenseClaw daemon runs (see the [sandbox guide](/docs/setup/sandbox)). It
+the DefenseClaw daemon runs (see the [sandbox guide](/docs/sandboxes/guide)). It
 reads the daemon's `/api/v1/sandbox` API every 5 seconds while the panel is
 open, and every 15 seconds in the background once sandboxes are on, and it
 follows the daemon's live activity feed. When a refresh fails, the panel keeps
 the last good snapshot and says how old it is, so a daemon restart does not
 look like "no sandboxes". Sandboxes run on Linux, and on Apple-silicon Macs in
 OpenShell MicroVMs, where every run works on a copy (see
-[macOS](/docs/setup/sandbox#macos)); on Windows the panel says sandboxes are
+[sandboxes on macOS](/docs/sandboxes/macos)); on Windows the panel says sandboxes are
 not supported. The
 [macOS app](/docs/macos-app#openshell-sandboxes) shows the same sandboxes in
 its menu bar, notifications and Sandboxes panel.
@@ -241,7 +285,7 @@ what needs attention:
   where it watches the folder with inotify, and on its next scan (about every
   5 seconds, longer for a large project) on macOS or when the file-watch
   limit is reached. Until the rename, git on your machine could still read
-  the planted repository; see the [sandbox guide](/docs/setup/sandbox).
+  the planted repository; see the [sandbox guide](/docs/sandboxes/guide).
 - **hooks unreachable**: the harness's hooks cannot reach DefenseClaw, so they
   block every tool call. Run `defenseclaw sandbox doctor`.
 - **silent**: the harness is active, but no DefenseClaw hook has been heard.
@@ -344,20 +388,6 @@ the administrator owns `config.yaml`.
 | `locked` entry `profile`, `yolo`, `workdir.mode`, `workdir.unmask`, `mcp.import` or `mcp.host_ports` | The key of the same name |
 | `locked` entry `resources` | `resources.cpu`, `resources.memory` |
 
-The [policy packs and admin limits](/docs/setup/sandbox-policy) page explains
+The [policy packs and admin limits](/docs/sandboxes/policy-packs) page explains
 what each setting enforces. The macOS app's config editor applies the same
 rules.
-
-## Handy keys
-
-| Key | Action |
-| --- | --- |
-| `?` | Toggle the help overlay (scroll it with `j`/`k` or `PgUp`/`PgDn`) |
-| `Ctrl+K` or `:` | Open the command palette (search-and-run any command; the Risk column marks what changes things) |
-| `Ctrl+P` | Jump to a panel by name |
-| `/` | On Skills, MCPs, Plugins and Runtime: filter the list (`Enter`, `Esc` or `Down` returns to it) |
-| `Ctrl+\` | Theme picker |
-| `D` | Run `defenseclaw doctor` in the background and toast the result (works on every panel) |
-| `Y` | Copy the last command's output (works on every panel) |
-| `Ctrl+S` | Save the last run to a log file |
-| `Ctrl+C` | Quit the TUI |

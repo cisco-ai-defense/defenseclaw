@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,8 +31,11 @@ from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
 from defenseclaw.observability.custody_status import (
     ConnectorCustodyReport,
     inspect_connector_custody,
+    native_evidence_row_limit,
 )
 from defenseclaw.observability.destination_test import (
+    NETWORK_FAILURE_CLASSES,
+    NETWORK_PATH_NOTE,
     DestinationTestError,
     canonical_local_compliance_recorder,
     run_destination_test,
@@ -73,7 +77,12 @@ def observability_cmd() -> None:
 
 @observability_cmd.group("destination")
 def observability_destination() -> None:
-    """Inspect or explicitly test one configured destination."""
+    """Test one configured destination.
+
+    Delivery health for each destination (queue, last delivery, circuit
+    state) is in 'defenseclaw doctor'; 'defenseclaw observability plan'
+    shows which events are routed to each destination.
+    """
 
 
 @observability_destination.command("test")
@@ -93,11 +102,13 @@ def observability_destination() -> None:
 def observability_destination_test(name: str, write_probe: bool, timeout: float) -> None:
     """Test exactly NAME without ordinary collection, routing, or fan-out."""
 
+    started = time.monotonic()
     try:
         inspected = inspect_v8_config(
             "effective",
             config_path=str(config_module.config_path()),
         )
+        started = time.monotonic()
         result = run_destination_test(
             inspected.effective or {},
             name=name,
@@ -112,8 +123,14 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
     except DestinationTestError as exc:
-        raise click.ClickException(f"destination test failed ({exc.failure_class}): {exc.message}") from exc
+        message = f"destination test failed ({exc.failure_class}): {exc.message}"
+        if exc.failure_class in NETWORK_FAILURE_CLASSES:
+            message += f"\n{NETWORK_PATH_NOTE}"
+        raise click.ClickException(message) from exc
 
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    mode_label = "write probe" if result.mode == "write_probe" else "handshake"
+    click.echo(f"result: PASS - {mode_label} succeeded in {elapsed_ms} ms")
     click.echo(f"destination: {result.destination}")
     click.echo(f"kind: {result.kind}")
     click.echo(f"mode: {result.mode}")
@@ -122,13 +139,16 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     click.echo(f"probe ID: {result.probe_id}")
     if result.mode == "write_probe":
         click.echo("write probe: accepted by the named destination")
-    if result.authentication_verified:
+    if result.mode == "write_probe" and result.authentication_verified:
         click.echo("authentication: configured credential accepted with the synthetic write probe")
     elif result.mode == "write_probe":
         click.echo("authentication: no credential configured")
+    elif result.authentication_verified:
+        click.echo("authentication: configured credential accepted by an empty OTLP export (nothing written)")
     else:
         click.echo("authentication: resolved locally; not transmitted by the non-mutating handshake")
     click.echo("compliance activity: attempt and outcome recorded locally")
+    click.echo(NETWORK_PATH_NOTE)
 
 
 @observability_cmd.command("plan")
@@ -144,7 +164,9 @@ def observability_destination_test(name: str, write_probe: bool, timeout: float)
     default=None,
     help="Evaluate minimum-severity route constraints.",
 )
-@click.option("--format", "fmt", type=click.Choice(["table", "json"]), default="table", show_default=True)
+@click.option(
+    "--format", "fmt", type=click.Choice(["table", "json"]), default="table", show_default=True, help="Output format."
+)
 def observability_plan(
     buckets: tuple[str, ...],
     signals: tuple[str, ...],
@@ -560,7 +582,7 @@ def _render_custody_table(report: ConnectorCustodyReport) -> None:
             f"last={report.last_unattributed_authentication_failure or 'unknown'}"
         )
     if report.event_rows_truncated:
-        click.echo("  warning: recent ingest evidence reached the bounded read limit")
+        click.echo(f"  note: counts cover the newest {native_evidence_row_limit()} evidence events")
 
 
 def _table_compatibility(row: dict[str, Any]) -> str:

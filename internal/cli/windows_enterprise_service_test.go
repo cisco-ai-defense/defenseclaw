@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/spf13/cobra"
@@ -1360,6 +1361,30 @@ func TestWindowsEnterpriseExactDescriptorMatchIgnoresOnlyAutoInherited(t *testin
 	}
 }
 
+func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupAcceptsARemovedFolder(t *testing.T) {
+	validateCalls := 0
+	removeAllCalled := false
+	ops := deterministicWindowsEnterpriseTempOps(t)
+	ops.validate = func(path string) error {
+		validateCalls++
+		if validateCalls == 1 {
+			return nil
+		}
+		return errors.Join(errors.New("validation"), &os.PathError{Op: "GetFileAttributesEx", Path: path, Err: os.ErrNotExist})
+	}
+	ops.removeAll = func(string) error {
+		removeAllCalled = true
+		return nil
+	}
+	_, cleanup, err := prepareWindowsEnterprisePowerShellTempWithOps(ops)
+	if err != nil {
+		t.Fatalf("prepareWindowsEnterprisePowerShellTempWithOps: %v", err)
+	}
+	if err := cleanup(); err != nil || removeAllCalled {
+		t.Fatalf("cleanup of an already removed folder = %v (RemoveAll called: %t), want nil", err, removeAllCalled)
+	}
+}
+
 func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesValidationDrift(t *testing.T) {
 	validateCalls := 0
 	removeAllCalled := false
@@ -1720,5 +1745,117 @@ func TestWindowsEnterpriseEnsureAcceptsShorthandOnlyForStandalone(t *testing.T) 
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(nil, "status", status); err == nil {
 		t.Fatal("standalone status accepted the QA shorthand")
+	}
+}
+
+// GAP-1679: an uninstall run from an installed image other than
+// bin\defenseclaw.exe (the gateway) is refused before it changes anything.
+func TestWindowsEnterpriseInstalledNonCLIUninstallCaller(t *testing.T) {
+	installer := `C:\Program Files\Cisco\DefenseClaw\libexec\install-enterprise.ps1`
+	gateway := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`
+	for executable, want := range map[string]bool{
+		gateway: true,
+		`C:\PROGRAM FILES\Cisco\DefenseClaw\bin\DefenseClaw-Gateway.exe`:  true,
+		`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`:          false,
+		`C:\Program Files\Cisco\DefenseClaw2\bin\defenseclaw-gateway.exe`: false,
+		`C:\stage\defenseclaw-gateway.exe`:                                false,
+	} {
+		if got := windowsEnterpriseInstalledNonCLIUninstallCaller("uninstall", installer, executable); got != want {
+			t.Errorf("%s refused = %t, want %t", executable, got, want)
+		}
+	}
+	if windowsEnterpriseInstalledNonCLIUninstallCaller("repair", installer, gateway) {
+		t.Error("a repair from the gateway was refused")
+	}
+	if windowsEnterpriseInstalledNonCLIUninstallCaller("uninstall", `C:\stage\other.ps1`, gateway) {
+		t.Error("an uninstall with a staged installer was refused")
+	}
+}
+
+// GAP-1684: the CLI leaves a working directory inside InstallRoot before a
+// self-uninstall, which would otherwise keep InstallRoot from being retired.
+func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing.T) {
+	root := t.TempDir()
+	installRoot := filepath.Join(root, "DefenseClaw")
+	bin := filepath.Join(installRoot, "bin")
+	safe := filepath.Join(root, "System32")
+	for _, directory := range []string{bin, safe} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := windowsEnterpriseUninstallWorkingDirectory
+	t.Cleanup(func() { windowsEnterpriseUninstallWorkingDirectory = original })
+	windowsEnterpriseUninstallWorkingDirectory = func() (string, error) { return safe, nil }
+	workingDirectory := func() string {
+		t.Helper()
+		current, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return current
+	}
+
+	t.Chdir(root)
+	if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+		t.Fatal(err)
+	}
+	if current := workingDirectory(); !strings.EqualFold(current, root) {
+		t.Fatalf("a working directory outside InstallRoot moved to %s", current)
+	}
+	t.Chdir(bin)
+	if err := windowsEnterpriseLeaveInstallRoot(installRoot); err != nil {
+		t.Fatal(err)
+	}
+	if current := workingDirectory(); !strings.EqualFold(current, safe) {
+		t.Fatalf("working directory = %s, want %s", current, safe)
+	}
+}
+
+// GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
+// InstallRoot is refused before anything changes, and says how to proceed.
+func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testing.T) {
+	installRoot := t.TempDir()
+	bin := filepath.Join(installRoot, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if windowsDirectoryOpenWithoutDeleteSharing(bin) {
+		t.Fatal("a folder nobody uses was reported in use")
+	}
+	// An idle interactive prompt in bin, reading commands from a pipe.
+	prompt := exec.Command("cmd.exe", "/d", "/q", "/k")
+	prompt.Dir = bin
+	input, err := prompt.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prompt.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = input.Close()
+		_ = prompt.Process.Kill()
+		_ = prompt.Wait()
+	})
+	deadline := time.Now().Add(10 * time.Second)
+	for !windowsDirectoryOpenWithoutDeleteSharing(bin) {
+		if time.Now().After(deadline) {
+			t.Fatal("a prompt's working folder was not reported in use")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	err = windowsEnterpriseInstallRootStillInUse(installRoot, bin)
+	if !errors.Is(err, errWindowsEnterpriseInvalidArguments) ||
+		!strings.Contains(err.Error(), "is using "+bin+" as its working folder") ||
+		!strings.Contains(err.Error(), "Nothing was changed") ||
+		!strings.Contains(err.Error(), `cd /d C:\`) {
+		t.Fatalf("refusal = %v", err)
+	}
+	if err := windowsEnterpriseInstallRootStillInUse(installRoot, t.TempDir()); err != nil {
+		t.Fatalf("a run started outside InstallRoot was refused: %v", err)
+	}
+	if err := windowsEnterpriseInstallRootStillInUse(installRoot, ""); err != nil {
+		t.Fatalf("an unknown start folder was refused: %v", err)
 	}
 }

@@ -203,6 +203,35 @@ func TestSetupNonInteractive(t *testing.T) {
 		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
+// TestSetupSwitchesAnUndrivenGatewayToDocker: a gateway whose configuration
+// pins a driver DefenseClaw does not drive (podman, from its install) is
+// switched to docker in setup's one plan (GAP-1264).
+func TestSetupSwitchesAnUndrivenGatewayToDocker(t *testing.T) {
+	ta := setupApp(t, "\n", "", true) // the switch question: its default, yes
+	ta.gateway.state.ComputeDriver = "podman"
+	ta.gateway.applyRes = &openshell.GatewayApplyResult{Restarted: true}
+	useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	if p := ta.gateway.planned; len(p) != 1 || p[0].ComputeDriver != openshell.DriverDocker || ta.gateway.applied != 1 {
+		t.Fatalf("gateway plans = %+v, applied %d", p, ta.gateway.applied)
+	}
+	has(t, ta.output(), `Switch your local OpenShell gateway to the docker compute driver? (its configuration selects the "podman" compute driver`, "Done →")
+}
+
+// TestSetupIsNotDoneWhileSandboxesStayOff: setup does not end "Done" when the
+// daemon never turns sandboxes on (GAP-1264).
+func TestSetupIsNotDoneWhileSandboxesStayOff(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	useGateway(ta)
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = "the OpenShell gateway is not available"
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "the daemon has not turned sandboxes on yet: the OpenShell gateway is not available",
+		"not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `defenseclaw sandbox doctor --fix`")
+	lacks(t, ta.output(), "Done →")
+}
+
 // TestSetupShowsTheMachineCheckWhileItRuns pins that the machine check's
 // line is on screen while the checks run: on a Mac they took about 40 s
 // with nothing after the title (manual test M4).
@@ -331,7 +360,7 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	}
 	has(t, ta.output(), "✗ install OpenShell: Homebrew could not install the nvidia/openshell formula\n",
 		"Homebrew says why above; most often Xcode or the Command Line Tools are older than it wants",
-		"then run `defenseclaw sandbox setup` again", "docs/setup/sandbox/#troubleshooting")
+		"then run `defenseclaw sandbox setup` again", "docs/sandboxes/guide/#troubleshooting")
 
 	// "Your Xcode (26.2) at /Applications/Xcode.app is too outdated. Please
 	// update to Xcode 27.0 (or delete it).", with the Command Line Tools
@@ -425,7 +454,7 @@ func TestSetupOnAGatewayOfAnotherRelease(t *testing.T) {
 		}
 		wantErr(t, ta.Setup(bg, o), "the OpenShell gateway is not usable yet (Gateway); see `defenseclaw sandbox doctor`")
 		has(t, ta.output(), "✓ OpenShell 0.1.1", "✗ Gateway: OpenShell 0.0.40 is older than 0.1.1",
-			"→ "+fix+" systemctl --user restart openshell-gateway\n")
+			"→ "+fix+": systemctl --user restart openshell-gateway\n")
 		lacks(t, ta.output(), "Install OpenShell", "already installed", "is needed", "--install-openshell")
 		if inst.ran {
 			t.Fatalf("%+v: the installer ran", o)
@@ -463,7 +492,7 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 			c := r.Get(openshell.CheckIDGatewayVersion)
 			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
 			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
-		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway " + start + "\n"},
+		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway: " + start + "\n"},
 		// Something else answers: the service's own fix, which the doctor
 		// gives as the operator's (it does not start the unit over it).
 		{"service stopped, a gateway answers", func(r *openshell.DoctorReport) {
@@ -541,6 +570,32 @@ func TestSetupStopsOnHostFailure(t *testing.T) {
 	}
 }
 
+// TestSetupSaysHowToReachDocker: a failing machine check's next step reads
+// "<summary>: <command>", not the command run into the sentence (GAP-2136).
+func TestSetupSaysHowToReachDocker(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDDocker)
+		c.Status, c.Detail = openshell.StatusFail, "the Docker daemon is not reachable: permission denied"
+		c.Fix = &openshell.Fix{Summary: "add yourself to the docker group, then log out and back in", Command: "sudo usermod -aG docker dev"}
+	})
+	wantErr(t, ta.Setup(bg, SetupOptions{NonInteractive: true}), "Docker")
+	has(t, ta.output(), "→ add yourself to the docker group, then log out and back in: sudo usermod -aG docker dev")
+}
+
+// TestSetupSaysTheDaemonNeedsARestartForDocker: a daemon started before its
+// user joined the docker group cannot build or run sandbox images, so setup
+// is not done and names the restart (GAP-2137).
+func TestSetupSaysTheDaemonNeedsARestartForDocker(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	useGateway(ta)
+	ta.daemon.status.DockerGroupMissing = true
+	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "started before you joined the docker group", "`defenseclaw-gateway restart`")
+	lacks(t, ta.output(), "Done →")
+}
+
 // macHost is a doctor report of a Mac whose Docker Desktop VM's Landlock
 // check came out as landlock says, without OpenShell yet.
 func macHost(landlock openshell.Check) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
@@ -592,7 +647,7 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 			"Run sandboxes in OpenShell MicroVMs?",
 			"✗ Landlock: Docker Desktop's Linux VM (kernel 6.12.65-linuxkit) has no Landlock, and OpenShell sandboxes need it\n",
 			"→ macOS sandboxes cannot run on Docker Desktop's kernel: run them in OpenShell MicroVMs, which have their own "+
-				"(`defenseclaw sandbox setup` switches the gateway to them; details in the sandbox guide) "+openshell.TroubleshootingURL)
+				"(`defenseclaw sandbox setup` switches the gateway to them; details in the sandbox guide): "+openshell.TroubleshootingURL)
 		if inst.ran || len(ta.images.built) != 0 || len(ta.gateway.planned) != 0 {
 			t.Fatalf("setup went on: installed %v, built %v, gateway plans %v", inst.ran, ta.images.built, ta.gateway.planned)
 		}

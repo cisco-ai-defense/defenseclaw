@@ -113,7 +113,7 @@ async def test_activate_strict_from_the_policies_view(tmp_path, monkeypatch) -> 
         assert app.overview_model.active_policy is DEFAULT
         await pilot.press("P")
         assert app.active_panel == "policies"
-        await pilot.press("5", "down", "down", "enter")  # strict → picker
+        await pilot.press(*["right"] * 4, "down", "down", "enter")  # Policies view, strict → picker
         await pilot.press("enter")  # choose strict
         await pilot.press("enter")  # consequence: activate
         await until(pilot, lambda: bool(runs))
@@ -126,7 +126,7 @@ async def test_switch_one_connectors_rule_pack_to_strict(tmp_path, monkeypatch) 
     app, _reads, captured, runs = policies_app(tmp_path, monkeypatch)
     async with app.run_test(size=(80, 24)) as pilot:
         await until(pilot, lambda: app.policy_model.loaded)
-        await pilot.press("P", "6", "down", "enter")  # the codex row → scope preselected
+        await pilot.press("P", *["right"] * 5, "down", "enter")  # Rule packs, the codex row → scope preselected
         await pilot.press("enter")  # keep codex
         await pilot.press("2", "enter")  # strict → validate
         await until(pilot, lambda: bool(captured))
@@ -141,7 +141,7 @@ async def test_turn_on_an_optin_pack_for_one_connector(tmp_path, monkeypatch) ->
     app, reads, _captured, runs = policies_app(tmp_path, monkeypatch, multi_connector=True)
     async with app.run_test(size=(80, 24)) as pilot:
         await until(pilot, lambda: app.policy_model.loaded)
-        await pilot.press("P", "2", "s", "s")  # opt-in packs, scope claudecode
+        await pilot.press("P", "right", "s", "s")  # opt-in packs, scope claudecode
         assert app.policy_model.scope_name() == "claudecode"
         assert "Kubernetes production" in screen_text(app)  # the pack rows are on screen at 80x24
         await pilot.press("down", "space")  # Kubernetes production → consequence

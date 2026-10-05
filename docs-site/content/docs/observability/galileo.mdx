@@ -16,6 +16,20 @@ The projection retains root-agent/subagent topology, workflows, turns, model and
 tool operations, retrieval, guardrail/judge work, structural events/links, and
 stable lifecycle/execution correlation when those fields are present.
 
+The profile has six span families: agent invocation, workflow, model chat,
+tool execution, retrieval and guardrail judge. Per user, Galileo therefore shows
+which agent ran, its model and tool calls, and the rule that blocked a turn.
+A guardrail judge span (`chat <judge model>`) can be its own trace: for a
+connector hook, the judge call runs before the hook decision is recorded. It
+carries the same `user.id`, `defenseclaw.user.name`, `gen_ai.conversation.id`
+and `defenseclaw.turn.id` as the turn's agent spans, so filter on those to see
+a user's judge verdicts next to their turns.
+AI discovery, scanner, audit and other operational records are not in the
+profile, so Galileo never receives them. To see what AI discovery found, use
+the Grafana **AI Agent Usage & Detection** dashboard, Splunk, or another OTLP
+destination with logs; they receive the AI discovery and `ai_component.*`
+logs.
+
 ## Cloud setup
 
 ```bash
@@ -118,10 +132,16 @@ observability:
   destinations:
     - name: local-observability
       kind: otlp
-      protocol: grpc
+      enabled: true
       endpoint: 127.0.0.1:4317
+      protocol: grpc
+      tls:
+        insecure: true
       network_safety:
         allow_private_networks: true
+      send:
+        signals: [traces, metrics, logs]
+        buckets: ['*']
 
     - name: galileo
       kind: otlp
@@ -136,15 +156,19 @@ observability:
         logstream: production
 ```
 
-Omitted policy on `local-observability` selects all logs, traces, metrics, and
-buckets, unredacted. Omitted `send` and `routes` on `preset: galileo` have a more
-specific meaning: the compiler creates a traces-only `capability-default` route
-whose `event_names` are exactly the currently available families in the generated
-`galileo-rich-v2` compatibility profile. The setup command deliberately writes
-this omitted form. Do not add `send: {signals: [traces]}` merely to restate the
-default; that changes the policy from compiler-owned membership to operator intent.
+`local-observability` sends every signal and bucket, unredacted. The `galileo`
+destination has no `send` or `routes`, and for the Galileo preset that has a
+specific meaning:
 
-The capability-default Galileo projection is unredacted. To narrow one Galileo
+1. DefenseClaw sends Galileo only traces, and only the span types Galileo can
+   index: agent, workflow, model chat, LLM-judge, tool, and retrieval spans
+   from the `galileo-rich-v2` profile. That set is maintained by DefenseClaw and updated on upgrade.
+2. Leave `send` and `routes` unset unless you need to narrow it. Even adding
+   `send: {signals: [traces]}` replaces that maintained set with your own.
+3. Use `defenseclaw setup galileo status` to see how many spans were delivered,
+   rejected, or failed.
+
+This default route is unredacted. To narrow one Galileo
 destination by bucket and redact it, author an explicit policy:
 
 ```yaml
@@ -169,19 +193,17 @@ observability:
           redaction_profile: sensitive
 ```
 
-Explicit `send` or advanced `routes` replace the generated capability-default
-route. DefenseClaw treats them as operator intent and does not silently intersect
-them with compatibility membership. If an explicit selector admits a nonmember,
-the Galileo projector rejects it as `unsupported_shape`; destination failure
-accounting and runtime health report it. Use the effective configuration view to
+Explicit `send` or `routes` replace the default route. DefenseClaw sends what
+you selected and does not quietly drop span types Galileo cannot index: such a
+span is rejected as `unsupported_shape` and counted as a destination failure. Use the effective configuration view to
 read the generated profile's available families, then run `defenseclaw
 observability plan --signal traces --event-name NAME` to review each explicit
 family before activation. Recheck the effective membership after an upgrade if an
 advanced route enumerates event names.
 
-If the same redaction posture is acceptable for local history and every matching
-destination, a bucket-level `redaction_profile` can preserve Galileo's omitted
-capability-default route. Use destination policy, as above, when only Galileo must
+If the same redaction is acceptable for local history and every matching
+destination, set a bucket-level `redaction_profile` instead; that keeps Galileo's
+default route. Use destination policy, as above, when only Galileo must
 be narrowed or redacted.
 
 Each destination has its own bounded export queue. A Galileo outage does not
@@ -202,6 +224,15 @@ defenseclaw setup galileo disable
 defenseclaw setup galileo enable
 defenseclaw setup galileo remove --yes
 ```
+
+If the key is missing (for example, removed from `~/.defenseclaw/.env`), the
+gateway keeps running with the config it started with, but it cannot restart.
+`defenseclaw status` and `defenseclaw-gateway status` still show the gateway
+and name the missing key, and exit `1`. Every `setup` command, including
+`setup galileo disable` and `remove`, checks the whole file first and refuses.
+Save the key with `defenseclaw keys set GALILEO_API_KEY`, or delete the
+`galileo` destination from `config.yaml`, then run
+`defenseclaw-gateway restart`.
 
 Destination names are identities. A new name appends a route; the same name
 updates only that route. The dedicated Galileo command always manages the
@@ -226,11 +257,9 @@ defenseclaw setup observability add galileo \
 The inventory prints every v8 destination's kind, preset, enabled signal set,
 bucket coverage, and effective redaction profile.
 
-`test` uses an internal Go helper to resolve the gateway bearer and authenticate
-only to the loopback gateway API. The bearer is never placed in subprocess argv,
-helper stdout, or rendered output. The helper asks the running gateway to emit
-canonical agent/chat spans, flushes the real destination processor, and prints
-the trace ID only after the Galileo exporter records an OTLP acknowledgement.
+`test` asks the running gateway, over its loopback API, to emit a diagnostic
+trace through the real destination. It prints the trace ID only after Galileo
+acknowledges the export, and never prints the gateway token.
 This is an external write: each invocation creates one content-free, two-span
 diagnostic trace in the selected Galileo project and Log stream.
 
@@ -247,6 +276,11 @@ in compiled-plan order. If more than four are enabled, doctor leaves their
 runtime-health checks in place and emits a bounded coverage warning instead of
 adding unbounded sequential network latency. Every doctor invocation can
 therefore create up to four diagnostic traces in Galileo.
+Each diagnostic trace (from `doctor` or `defenseclaw setup galileo test`) is an
+`invoke_agent diagnostic` root with one `chat defenseclaw-diagnostic` span. It
+names no real vendor model, and its user_metadata carries
+`defenseclaw.telemetry.canary: "true"`. Filter on that key to leave these
+traces out of model, cost and latency views.
 
 ## What you see in Galileo
 
@@ -257,7 +291,7 @@ coherent session.
 
 ### Agent graph: understand delegation and dependencies
 
-![Galileo Agent graph showing root agents, delegated agents, models, MCP calls, and native tools](/images/galileo/agent-graph.png)
+![Galileo Agent graph for a Codex session: the root agent delegates to Researcher and explore subagents, with chat, MCP, apply_patch, and Read nodes, and edge analytics for the selected codex to Researcher edge](/images/galileo/agent-graph.png)
 
 The Agent graph turns span relationships into an execution map. Agent nodes
 show roots and delegated subagents, chat nodes show model calls, and tool nodes
@@ -271,7 +305,7 @@ identify a tool or subagent that policy should constrain more tightly.
 
 ### Session messages: reconstruct the lifecycle
 
-![Galileo session Messages view with invoke-agent lifecycle spans and tool calls](/images/galileo/session-lifecycle.png)
+![Galileo session Messages view: invoke_agent codex lifecycle rows on the left and the session_start input and output records on the right](/images/galileo/session-lifecycle.png)
 
 The session view reconstructs the conversation from correlated spans. The
 outer Session groups all activity with the same conversation identity;
@@ -284,9 +318,19 @@ Completed chat and tool operations carry their measured duration and are sent
 as soon as the connector exposes completion, so operators do not need to wait
 for a final Stop event to see a multi-hour agent's progress.
 
-### Model detail: inspect input, output, latency, and reported usage
+### Tool calls that end after their turn was sent
 
-![Galileo model span detail showing rendered input and assistant output inside a long-running agent session](/images/galileo/model-input-output.png)
+Galileo closes a trace when it ingests the request that carries the trace's
+root span, and drops spans of that trace that arrive in a later request. An
+OpenClaw turn's `invoke_agent openclaw` root is sent when the model message
+arrives, so a tool call that runs for more than a moment ends after Galileo
+closed its trace. The Galileo destination therefore sends such a span as the
+root of its own Galileo trace and adds the original trace ID to the span's
+metadata as `defenseclaw.trace.id`; filter on that key to find the rest of the
+turn. Local observability and other OTLP destinations keep the span in its
+original trace.
+
+### Model detail: inspect input, output, latency, and reported usage
 
 Open a chat row to compare the exact rendered input and assistant output,
 provider/model identity, latency, token usage, and cost when the connector
@@ -309,7 +353,9 @@ carries the decision on its tool span:
   user, and redacted reason.
 - The flat `defenseclaw.guardrail.action`, `defenseclaw.guardrail.rule_id`, and
   `defenseclaw.guardrail.severity` attributes, next to `user.id` and
-  `defenseclaw.user.name`, let you filter spans by one value.
+  `defenseclaw.user.name`, let you filter spans by one value. The tool span's
+  parent `invoke_agent` span carries the same three attributes, so a turn
+  blocked at a tool call shows its rule on the trace as well.
 
 Galileo does not read the OTLP span status or these attributes into its span
 record, so a blocked call's status code there stays `0`. The Galileo preset
@@ -320,7 +366,14 @@ and `status: ERROR` for a block. Filter Galileo spans on those metadata keys.
 Decisions that do not belong to a tool call, such as a blocked prompt, produce
 an `apply_guardrail` span with the same status, event, and attributes. Galileo
 has no span type for it, so it reaches local observability and other OTLP
-destinations but not Galileo.
+destinations but not Galileo. The turn's `invoke_agent` and `chat` spans
+instead carry the decision for Galileo: the outcome `blocked` and the same
+three flat `defenseclaw.guardrail.*` attributes, which Galileo shows in the
+span's metadata as `defenseclaw.outcome: blocked` next to the guardrail
+fields. A prompt block therefore shows its rule and severity on the turn, for
+OpenClaw and for the hook connectors (Claude Code, Codex and the others),
+whose blocked prompt ends its turn with the block message as the reply.
+Filter on `defenseclaw.outcome` to find every blocked turn.
 
 Galileo and Agent360 are complementary rather than competing views:
 
@@ -354,13 +407,24 @@ inference spans:
 Prompt, response, document, tool-argument, and tool-result values follow the
 Galileo destination's v8 profile. Fresh v8 configuration exports registered
 content unchanged under `none`; redacting profiles either replace detected
-sensitive substrings or transform/remove whole field classes.
+sensitive substrings or transform/remove whole field classes. Under `content`
+and `strict` the messages keep their structure for Galileo: each message keeps
+a role Galileo accepts (`user` for input, `assistant` or `tool` for output) and
+text parts, while their text is the redaction placeholder or is removed.
+The input of a Claude Code `tool_batch` span lists the calls of the batch by
+tool name and call ID. Those are identifiers, as on the span of each call, so
+`content` keeps them in clear.
+
+On Bedrock, a Claude Code chat span names the model ID
+(`chat anthropic.claude-haiku-4-5-20251001-v1:0`), not the cross-region
+inference profile from `ANTHROPIC_MODEL` (`us.anthropic...`). It names the same
+model before and after a gateway restart and on a resumed session.
 
 The Galileo preset binds the generated `galileo-rich-v2` compatibility profile.
 Eligibility, projected attributes, events, links, instrumentation scope, and
 content states come from the canonical telemetry registry rather than a
-hand-authored `span_filter`. Its omitted capability-default route selects only
-available profile members, so non-eligible operational spans still flow to local
+hand-authored `span_filter`. Its default route (no `send` or `routes`) selects only
+span types Galileo can index, so other operational spans still flow to local
 observability and other matching OTLP destinations without being offered to
 Galileo. Explicit `send` and advanced `routes` are not compatibility filters:
 when they select a nonmember, the projector rejects that span as
@@ -381,33 +445,26 @@ immediately during long-running turns. Correlation caches and content are
 bounded, duplicate completions are suppressed, and restart gaps use explicit
 unavailable-input placeholders.
 
-The one authoring source is `schemas/telemetry/v8/registry.yaml`. It generates
-the v8 telemetry schema/catalog, builders, fixtures, and the logical
-`galileo-rich-v2.json` compatibility profile. Git stores the reproducible
-runtime JSON as deterministic gzip under `schemas/telemetry/runtime/`; release
-staging restores the exact raw JSON resource names. Runtime contract tests
-compare real exports to those generated artifacts, including
-name, kind, attributes, events, links, scope, topology, and dropped-structure
-accounting.
-
 ### Read the routing and delivery funnel
 
-`defenseclaw.telemetry.destination.spans` counts every destination-profile
-decision with `destination`, `outcome`, and `reason` attributes. For Galileo:
+The `defenseclaw.telemetry.destination.spans` metric counts each span's path to
+a destination, with `destination`, `outcome`, and `reason` attributes. For
+Galileo the stages are:
 
 ```text
 observed → eligible → attempted → delivered | rejected | failed
 ```
 
-`eligible` means the operation-specific schema matched; it is not remote
-success. `collector_accepted` (and the compatibility `delivered` counter) is a
-batch-level span count inferred from OTLP responses and
-partial-success rejection counts; it is not per-span attribution. The runtime
-canary is stricter: its trace is isolated into its own export request and must
-appear in the destination's acknowledged trace-ID set. Indexing remains
-unverified until the trace appears in Galileo Logs. Protocol partial success
-increments `rejected`, while authentication, transport, TLS,
-timeout, and other exporter errors increment `failed`. `/health`, `setup
+- `eligible`: the span is a type Galileo can index. It says nothing about
+  delivery yet.
+- `delivered`: the OTLP response accepted the batch. The count is worked out
+  per batch from the response, not confirmed span by span.
+- `rejected`: Galileo returned a partial success that refused some spans.
+- `failed`: authentication, transport, TLS, timeout, or another exporter error.
+
+`setup galileo test` is stricter: it sends its trace in its own request and
+waits for that trace ID to be acknowledged. Even then, check Galileo Logs to
+confirm that the trace was indexed. `/health`, `setup
 galileo status`, and the TUI expose the same process-lifetime counters without
 headers or credentials. Local compatibility rejection such as
 `unsupported_shape` is also a reported destination failure; it is never counted
@@ -415,21 +472,8 @@ as a successful delivery or hidden as a policy drop.
 
 ## Upgrade from v7
 
-Run the ordinary upgrade command:
+Run `defenseclaw upgrade --yes`; it converts the v7 Galileo settings and keeps
+your project and Log stream. The v8 Galileo preset uses a 1-second batch delay
+unless your v7 config set one explicitly. See
+[Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
 
-```bash
-defenseclaw upgrade --yes
-```
-
-The required migration converts legacy `otel` and `audit_sinks` settings into
-the v8 `observability` graph, preserves Galileo project/logstream headers,
-endpoint, explicit batching, routing, signal selection, and effective
-redaction posture, and keeps every other destination. The v8 Galileo preset
-uses a deliberate 1-second batch delay; an explicit v7 value is preserved, and
-the upgrade summary discloses when the old inherited 5-second default becomes
-the preset value.
-
-No separate apply command is required. The v8 gateway is strict and does not
-rewrite v7 configuration on startup or operate both formats in parallel. A
-failed required conversion restores the backed-up source and does not start the
-v8 gateway against a v7 file.

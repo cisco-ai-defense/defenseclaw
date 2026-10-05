@@ -14,6 +14,7 @@
 package enterprisestatus
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 )
@@ -32,6 +33,9 @@ const (
 	WindowsExitBusy        = 1618 // ERROR_INSTALL_ALREADY_RUNNING: MDMs retry
 	WindowsExitInvalidArgs = 1639 // ERROR_INVALID_COMMAND_LINE
 	WindowsExitReboot      = 3010 // reserved: success, reboot required
+	// WindowsExitAccessDenied (ERROR_ACCESS_DENIED): a standard account ran
+	// status or verify, which only an elevated prompt can check.
+	WindowsExitAccessDenied = 5
 
 	UnixExitFailure     = 1
 	UnixExitInvalidArgs = 2
@@ -81,6 +85,21 @@ type Enrollment struct {
 	Pending int `json:"pending"`
 	Failed  int `json:"failed"`
 	Exempt  int `json:"exempt"`
+	// Accounts names each enrolled account and its connectors' states, where
+	// the platform reports them (Windows standalone).
+	Accounts []EnrollmentAccount `json:"accounts,omitempty"`
+}
+
+// EnrollmentAccount is one enrolled account and the state of each of its
+// connectors in the guardian's last reconcile: enrolled, pending (waiting
+// for the account's session) or failed.
+type EnrollmentAccount struct {
+	Account    string            `json:"account"`
+	SID        string            `json:"sid,omitempty"`
+	Connectors map[string]string `json:"connectors"`
+	// Reason says why a connector is pending or failed, and what happens
+	// next; empty when every connector is enrolled.
+	Reason string `json:"reason,omitempty"`
 }
 
 // PortHolder is a process, other than the DefenseClaw gateway, listening
@@ -207,5 +226,14 @@ func (r Result) MarshalJSON() ([]byte, error) {
 	if sorted.Errors == nil {
 		sorted.Errors = []Message{}
 	}
-	return json.Marshal(sorted)
+	// Encode without HTML escaping: messages carry PowerShell next steps
+	// ("& 'C:\\...\\defenseclaw.exe' ...") and a Marshaler's bytes are kept
+	// as-is by an outer encoder with SetEscapeHTML(false) (GAP-2504).
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(sorted); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

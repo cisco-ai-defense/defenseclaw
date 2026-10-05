@@ -6,12 +6,16 @@
 //
 //   1) pre_judge_strips     — chunks the gateway strips out of judge
 //                             input so noisy fixtures don't trigger.
-//   2) finding_suppressions — drops a finding if its id matches a
-//                             pattern AND a per-finding entity matches
+//   2) finding_suppressions — drops a PII-judge entity if its finding ID
+//                             matches a pattern AND the entity matches
 //                             a regex (with optional condition like
 //                             is_epoch / is_platform_id).
-//   3) tool_suppressions    — drops findings on tools whose name
-//                             matches a regex.
+//   3) tool_suppressions    — drops the listed PII-judge findings on
+//                             tools whose name matches a regex.
+//
+// Suppressions apply only to LLM-judge output (guardrail.FilterPIIEntities
+// and FilterToolFindings in internal/gateway/llm_judge.go); they never
+// silence regex or CEL rule findings.
 //
 // All three are RE2-compiled by the engine, so we re-use the same
 // regex tester from Phase 2.
@@ -199,7 +203,7 @@ function PreJudgeEditor({
                 <button
                   type="button"
                   onClick={() => remove(idx)}
-                  className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove this strip
                 </button>
@@ -306,17 +310,17 @@ function FindingEditor({
                   />
                 </div>
                 <RegexInput
-                  label="finding_pattern (matches the rule id)"
+                  label="finding_pattern (matches the PII-judge finding ID)"
                   pattern={item.finding_pattern}
                   onChange={(v) => update(idx, { finding_pattern: v })}
                   examples={ex.match}
                   counterexamples={ex.no}
                   onExamplesChange={(next) => setExFor(idx, { match: next })}
                   onCounterexamplesChange={(next) => setExFor(idx, { no: next })}
-                  hint="Anchor with ^ to scope to a specific id prefix (e.g. ^SEC-AWS-)."
+                  hint="Matched against the whole ID: JUDGE-PII-PHONE, or JUDGE-PII-.* for every PII-judge finding. Regex and CEL rule findings are never suppressed here."
                 />
                 <RegexInput
-                  label="entity_pattern (matches the matched substring)"
+                  label="entity_pattern (matches the entity the judge reported)"
                   pattern={item.entity_pattern}
                   onChange={(v) => update(idx, { entity_pattern: v })}
                   examples={[]}
@@ -327,7 +331,7 @@ function FindingEditor({
                 <button
                   type="button"
                   onClick={() => remove(idx)}
-                  className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove this suppression
                 </button>
@@ -389,8 +393,9 @@ function ToolEditor({
 
       {items.length === 0 ? (
         <p className="rounded-md border border-dashed border-fd-border bg-fd-background px-3 py-3 text-center text-[11px] text-fd-muted-foreground">
-          No tool suppressions. Use these to drop noisy verdicts from cosmetic shell commands
-          (git status, ls, pwd) while keeping write/destructive commands surfaced.
+          No tool suppressions. A tool suppression drops the listed PII-judge findings when the
+          tool name matches, for example JUDGE-PII-USER on status tools that return account
+          metadata. It doesn&apos;t silence regex or CEL rule findings.
         </p>
       ) : (
         <ul className="space-y-3">
@@ -415,7 +420,7 @@ function ToolEditor({
                   label="suppress_findings"
                   values={item.suppress_findings}
                   onChange={(next) => update(idx, { suppress_findings: next })}
-                  placeholder="JUDGE-INJ-DESTRUCTIVE"
+                  placeholder="JUDGE-PII-USER"
                   hint="One finding ID per chip. Press Enter or , to add."
                 />
                 <TextField
@@ -426,7 +431,7 @@ function ToolEditor({
                 <button
                   type="button"
                   onClick={() => remove(idx)}
-                  className="text-[11px] text-fd-muted-foreground hover:text-red-500"
+                  className="text-[11px] text-fd-muted-foreground hover:text-red-700 dark:hover:text-red-400"
                 >
                   Remove this suppression
                 </button>

@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/open-policy-agent/opa/v1/tester"
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -36,11 +38,16 @@ import (
 func init() {
 	rootCmd.AddCommand(policyCmd)
 	policyCmd.AddCommand(policyValidateCmd)
+	policyCmd.AddCommand(policyTestCmd)
 	policyCmd.AddCommand(policyShowCmd)
 	policyCmd.AddCommand(policyEvaluateCmd)
 	policyCmd.AddCommand(policyEvaluateFirewallCmd)
 	policyCmd.AddCommand(policyReloadCmd)
 	policyCmd.AddCommand(policyDomainsCmd)
+
+	policyValidateCmd.Flags().String("rego-dir", "", "Rego directory to validate (default: the configured policy directory)")
+	policyTestCmd.Flags().String("rego-dir", "", "Rego directory to test (default: the configured policy directory)")
+	policyTestCmd.Flags().BoolP("verbose", "v", false, "Print every test result")
 
 	policyEvaluateCmd.Flags().String("target-type", "skill", "Target type (skill, mcp, plugin)")
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
@@ -66,15 +73,15 @@ var policyCmd = &cobra.Command{
 var policyValidateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Compile-check all Rego modules and validate data.json",
-	RunE: func(_ *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
+			return err
 		}
 
-		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", paths.regoDir)
+		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
 
-		engine, err := policy.NewExact(paths.regoDir)
+		engine, err := policy.NewExact(regoDir)
 		if err != nil {
 			return fmt.Errorf("policy: load failed: %w", err)
 		}
@@ -85,7 +92,7 @@ var policyValidateCmd = &cobra.Command{
 
 		fmt.Println("All Rego modules compiled successfully.")
 
-		data, err := policy.LoadDataExact(paths.regoDir)
+		data, err := policy.LoadDataExact(regoDir)
 		if err != nil {
 			return fmt.Errorf("policy: load effective data: %w", err)
 		}
@@ -100,6 +107,92 @@ var policyValidateCmd = &cobra.Command{
 		fmt.Println("data.json schema: OK")
 		return nil
 	},
+}
+
+// ---------------------------------------------------------------------------
+// policy test — run the Rego unit tests with the embedded OPA test runner
+// ---------------------------------------------------------------------------
+
+// policyTestCmd runs the *_test.rego unit tests in-process, so `defenseclaw
+// policy test` works on installs without a separate `opa` binary (GAP-1091).
+// It loads the directory the same way `opa test <dir>` does.
+var policyTestCmd = &cobra.Command{
+	Use:   "test",
+	Short: "Run the Rego unit tests (*_test.rego) without an external opa binary",
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		regoDir, err := policyCommandRegoDir(cmd)
+		if err != nil {
+			return err
+		}
+		verbose, _ := cmd.Flags().GetBool("verbose")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		results, err := tester.Run(ctx, opaLoaderPath(regoDir))
+		if err != nil {
+			return fmt.Errorf("policy test: %w", err)
+		}
+		if len(results) == 0 {
+			// The installed policy directories ship no *_test.rego files, so
+			// "nothing to test" is the normal answer there, not a failure
+			// (GAP-1091).
+			fmt.Fprintln(cmd.OutOrStdout(), noRegoTestsMessage(regoDir))
+			return nil
+		}
+		ch := make(chan *tester.Result, len(results))
+		failed := false
+		for _, r := range results {
+			if r.Fail || r.Error != nil {
+				failed = true
+			}
+			ch <- r
+		}
+		close(ch)
+		reporter := tester.PrettyReporter{Output: cmd.OutOrStdout(), Verbose: verbose}
+		if err := reporter.Report(ch); err != nil {
+			return fmt.Errorf("policy test: report: %w", err)
+		}
+		if failed {
+			return fmt.Errorf("policy test: some Rego tests failed")
+		}
+		return nil
+	},
+}
+
+// noRegoTestsMessage explains a Rego directory without unit tests.
+func noRegoTestsMessage(regoDir string) string {
+	return fmt.Sprintf("No Rego unit tests (*_test.rego) in %s; nothing to run. "+
+		"Add <module>_test.rego files next to your policies to test them.", regoDir)
+}
+
+// opaLoaderPath keeps OPA from reading a Windows drive letter as its
+// "<data-prefix>:<path>" syntax: "C:\x" would load "\x" under data.C and
+// fail to find it. A file:// URL has no such prefix and OPA cleans it back
+// to "C:/x".
+func opaLoaderPath(dir string) string {
+	if !strings.Contains(filepath.VolumeName(dir), ":") {
+		return dir
+	}
+	return (&url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(dir)}).String()
+}
+
+// policyCommandRegoDir returns --rego-dir when given, else the configured
+// policy layout's Rego directory.
+func policyCommandRegoDir(cmd *cobra.Command) (string, error) {
+	if cmd != nil {
+		if dir, _ := cmd.Flags().GetString("rego-dir"); strings.TrimSpace(dir) != "" {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() {
+				return "", fmt.Errorf("policy: rego directory not found: %s", dir)
+			}
+			return dir, nil
+		}
+	}
+	paths, err := resolvePolicyPaths()
+	if err != nil {
+		return "", fmt.Errorf("policy: resolve paths: %w", err)
+	}
+	return paths.regoDir, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +330,7 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
-	Short: "Tell the running sidecar daemon to reload OPA policies",
+	Short: "Tell the running gateway to reload OPA policies",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		port := 18790
 		bind := "127.0.0.1"
@@ -246,6 +339,12 @@ var policyReloadCmd = &cobra.Command{
 			if cfg.Gateway.APIBind != "" {
 				bind = cfg.Gateway.APIBind
 			}
+		}
+
+		// The reload carries the gateway token: never to a listener that is
+		// not this account's gateway (GAP-1563).
+		if problem := foreignGatewayListener(cfg); problem != "" {
+			return fmt.Errorf("policy reload: %s; the gateway token was not sent. %s", problem, foreignGatewayListenerFix(cfg))
 		}
 
 		url := fmt.Sprintf("http://%s:%d/policy/reload", bind, port)

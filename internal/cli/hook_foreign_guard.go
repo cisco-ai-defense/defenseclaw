@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // hookForeignGuardPayloadLimit bounds how much of the hook payload the
@@ -59,6 +60,14 @@ var hookForeignGuardRecordEnv = enterprisepolicy.RecordEnvRedirect
 // hookForeignGuardAgentProcess names the agent process that runs the hook,
 // which keeps the hooks it loaded for its lifetime (replaceable in tests).
 var hookForeignGuardAgentProcess = agentprocess.Identity
+
+// hookAgentHost names the process that started the agent (replaceable in
+// tests).
+var hookAgentHost = agentprocess.Host
+
+// hookAgentExecutable is the agent engine's executable path (replaceable
+// in tests).
+var hookAgentExecutable = agentprocess.Executable
 
 // hookForeignGuardExchange is replaceable in tests. Production reaches the
 // standalone gateway over its authenticated hook transport.
@@ -101,6 +110,17 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 		return
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.Connector))
+	// A standalone host: the managed hook tags the audit with the agent's
+	// host process, so Devin Local under Devin Desktop is told apart from
+	// the Devin CLI. The lookup (a process snapshot on Windows) runs only
+	// when its result is used.
+	if opts.ManagedEnterprise {
+		opts.AgentHost = hookAgentHost()
+	}
+	// Every hook call names its surface so the gateway can refuse an
+	// unverified app or extension under unverified_versions: refuse, next
+	// to the same user's enrolled CLI.
+	opts.AgentSurface = connector.ClassifyAgentSurface(name, hookAgentExecutable(), os.Getenv)
 	policy, ok := summary.Connectors[name]
 	if !ok || !policy.Guard {
 		return
@@ -112,12 +132,22 @@ func applyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	opts.StartedAt = startedAt
 	deadline := startedAt.Add(hookForeignGuardScanBudget(name, opts.Event))
 	facts := captureHookPayloadFacts(opts)
+	if hookexec.HookSurfaceAllowed(name, opts.HookSurface) {
+		facts.surface = strings.TrimSpace(opts.HookSurface)
+	}
 	event := strings.TrimSpace(opts.Event)
 	if event == "" {
 		event = facts.event
 	}
 	decision, accountHome := evaluateHookForeignGuard(name, summary.HookBinary, policy, facts, event, deadline)
 	if decision.Deny {
+		if name == "devin" {
+			host := opts.AgentHost
+			if host == "" {
+				host = hookAgentHost()
+			}
+			decision.Reason = withDesktopRestartNote(name, host, decision.Reason)
+		}
 		opts.ManagedEnterprise = true
 		opts.ManagedRuntimeFailure = decision.Reason
 		// The block never reaches the gateway, and the managed hook's own
@@ -309,7 +339,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 	accountHome := hookForeignGuardAccountHome()
 	owned := []string{}
 	if accountHome != "" {
-		owned = perUserOwnedHookCommands(name, accountHome, "")
+		owned = perUserOwnedHookCommandsForBinary(name, accountHome, "", hookBinary)
 	}
 	homes := hookForeignGuardHomes(accountHome)
 	if len(homes) == 0 {
@@ -328,6 +358,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		Policy:              policy,
 		Getenv:              os.Getenv,
 		OwnedCommands:       owned,
+		HookSurface:         facts.surface,
 		Deadline:            deadline,
 		StopAtFirstBlocking: !sessionStart,
 	}
@@ -349,6 +380,21 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		Key:          enterprisepolicy.SessionKey{Connector: name, Session: facts.session, Process: hookForeignGuardAgentProcess()},
 		SessionStart: sessionStart,
 		Decision:     decision,
+		Event:        event,
+		Tool:         facts.tool,
+	}
+	if foreignHookSessionLocal(name) {
+		// No gateway exchange is possible for this connector, so the
+		// session record lives under the account's home, as on hosts
+		// without the standalone gateway path.
+		decision = enterprisepolicy.ApplyForeignHookSession(enterprisepolicy.SessionUpdate{
+			AccountHome:  accountHome,
+			Key:          update.Key,
+			SessionStart: sessionStart,
+			Decision:     decision,
+			Now:          now,
+		})
+		return decision, accountHome
 	}
 	decision, err := hookForeignGuardExchange(name, event, deadline, update)
 	if err != nil {
@@ -363,6 +409,20 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 		}
 	}
 	return decision, accountHome
+}
+
+// hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
+var hookForeignGuardGOOS = runtime.GOOS
+
+// foreignHookSessionLocal reports a connector whose foreign-hook check cannot
+// reach the gateway's session store. On Windows the Amp plugin calls the
+// gateway with its own per-user token and has no hook-binary runtime
+// generation, so `hook --connector amp --foreign-hook-check` has no
+// credential for the exchange; every check failed closed and blocked each
+// Amp tool call. The plugin itself keeps the session.load
+// decision for the life of the Amp process.
+func foreignHookSessionLocal(name string) bool {
+	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
 }
 
 func exchangeForeignHookSession(name, event string, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
@@ -412,6 +472,13 @@ type hookPayloadFacts struct {
 	// session is the agent's session ID (Claude Code, Codex, Devin and
 	// Copilot session_id or sessionId; Cursor conversation_id).
 	session string
+	// surface is the hook command's --hook-surface marker when the
+	// connector lists it (the VS Code Local harness reads more sources).
+	surface string
+	// tool is the tool the event is for (tool_name or toolName; "" for
+	// session and prompt events), which labels the gateway's export of a
+	// denial.
+	tool string
 }
 
 // hookForeignGuardSessionKeys name the agent's session ID, in order.
@@ -447,6 +514,13 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 			break
 		}
 	}
+	for _, key := range []string{"tool_name", "toolName"} {
+		var tool string
+		if json.Unmarshal(payload[key], &tool) == nil && strings.TrimSpace(tool) != "" {
+			facts.tool = strings.TrimSpace(tool)
+			break
+		}
+	}
 	for _, key := range hookForeignGuardSessionKeys {
 		var session string
 		if json.Unmarshal(payload[key], &session) == nil && strings.TrimSpace(session) != "" {
@@ -475,11 +549,18 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 // commands for the default per-user data dir under home and any explicit
 // data dir.
 func perUserOwnedHookCommands(name, home, dataDir string) []string {
+	return perUserOwnedHookCommandsForBinary(name, home, dataDir, "")
+}
+
+// perUserOwnedHookCommandsForBinary also owns the per-user commands rendered
+// for the administrator's published hookBinary: the hook process cannot
+// resolve the launcher the guardian registered.
+func perUserOwnedHookCommandsForBinary(name, home, dataDir, hookBinary string) []string {
 	dirs := appendDistinctAbs(nil, filepath.Join(home, ".defenseclaw"))
 	dirs = appendDistinctAbs(dirs, dataDir)
 	owned := []string{}
 	for _, dir := range dirs {
-		owned = append(owned, connector.PerUserOwnedHookCommands(name, dir)...)
+		owned = append(owned, connector.PerUserOwnedHookCommandsForBinary(name, dir, hookBinary)...)
 	}
 	return owned
 }
@@ -496,4 +577,22 @@ func appendDistinctAbs(list []string, value string) []string {
 		}
 	}
 	return append(list, value)
+}
+
+// devinDesktopRestartNote explains restarting the agent to a Devin Desktop
+// user: one Devin Local process (devin acp) serves every Desktop tab, so a
+// session block keyed to that process holds in every tab until Desktop
+// restarts.
+const devinDesktopRestartNote = "Devin Desktop runs every tab in one Devin Local process, so closing a tab does not restart the agent: quit and reopen Devin Desktop."
+
+// withDesktopRestartNote adds devinDesktopRestartNote to a Devin block that
+// asks for a restart when the agent runs under Devin Desktop (or the
+// Desktop's legacy process name).
+func withDesktopRestartNote(name, host, reason string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	desktop := strings.HasPrefix(host, "devin") || strings.HasPrefix(host, legacyconnector.ProcessName)
+	if name != "devin" || !desktop || !strings.Contains(reason, "restart") {
+		return reason
+	}
+	return reason + " " + devinDesktopRestartNote
 }

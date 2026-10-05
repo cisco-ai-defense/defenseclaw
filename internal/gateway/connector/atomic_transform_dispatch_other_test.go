@@ -115,3 +115,40 @@ func TestAtomicTransformWithStateDirClearsSuccessfulReceiptBeforeLifecycleChange
 		t.Fatalf("final body = %q, want second replacement", body)
 	}
 }
+
+// GAP-1447: with the data dir on another filesystem than the target, the
+// transform keeps its receipts next to the target so the receipt renames do
+// not cross filesystems, and the config is written.
+func TestAtomicTransformWithStateDirAcrossFilesystemsStaysNextToTarget(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "codex", "config.toml")
+	stateDir := filepath.Join(root, "data")
+	for _, dir := range []string{filepath.Dir(path), stateDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, []byte("old = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !atomicTransformSameFilesystem(filepath.Dir(path), stateDir) {
+		t.Fatal("two directories under one temp dir reported as different filesystems")
+	}
+	previous := atomicTransformSameFilesystem
+	atomicTransformSameFilesystem = func(string, string) bool { return false }
+	t.Cleanup(func() { atomicTransformSameFilesystem = previous })
+
+	err := atomicTransformFileWithStateDir(path, stateDir, 0o600,
+		func(_ []byte, _ bool) (atomicTransformResult, error) {
+			return atomicTransformResult{Data: []byte("new = true\n")}, nil
+		})
+	if err != nil {
+		t.Fatalf("transform across filesystems: %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "new = true\n" {
+		t.Fatalf("config = %q, want the new content", got)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(path), ".defenseclaw-cas-state")); err != nil {
+		t.Fatalf("no target-local state dir for a cross-filesystem data dir: %v", err)
+	}
+}

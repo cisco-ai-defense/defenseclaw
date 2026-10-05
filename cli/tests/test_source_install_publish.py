@@ -82,6 +82,32 @@ def test_windows_publication_pins_parent_and_creates_relative_to_handle(tmp_path
     assert not moved.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires native Win32 relative opens")
+def test_windows_rebuild_replaces_only_the_bound_destination(tmp_path: Path) -> None:
+    # GAP-1784: builds stamp their date, so a same-checkout `make all` rebuild
+    # never matches the installed gateway and was always refused on Windows.
+    destination = tmp_path / "defenseclaw-gateway.exe"
+    old, new = tmp_path / "old.bin", tmp_path / "new.bin"
+    old.write_bytes(b"old build")
+    new.write_bytes(b"new build")
+    install_publish.publish_regular(old, destination, None)
+    with pytest.raises(install_publish.PublishError, match="preserved"):
+        install_publish.publish_regular(new, destination, None)
+    with pytest.raises(install_publish.PublishError, match="changed before publication"):
+        install_publish.publish_regular(new, destination, hashlib.sha256(b"other").hexdigest())
+    assert destination.read_bytes() == b"old build"
+
+    install_publish.publish_regular(new, destination, hashlib.sha256(b"old build").hexdigest())
+    assert destination.read_bytes() == b"new build"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["defenseclaw-gateway.exe", "new.bin", "old.bin"]
+    # A copy renamed aside while it ran is removed by the next rebuild.
+    leftover = tmp_path / ".defenseclaw-gateway.exe.source-install-old-0123"
+    leftover.write_bytes(b"older build")
+    install_publish.publish_regular(old, destination, hashlib.sha256(b"new build").hexdigest())
+    assert destination.read_bytes() == b"old build"
+    assert not leftover.exists()
+
+
 def test_source_preflight_publication_verbs_are_directly_executable(tmp_path: Path) -> None:
     install_dir = tmp_path / "home/.local/bin"
     reserved = _run("ensure-directory", install_dir)
@@ -1365,3 +1391,84 @@ def test_regular_replace_reclaims_completed_retirement_when_custody_is_full(
     assert destination.read_bytes() == replacement
     assert len(list(custody.iterdir())) <= install_publish.MAX_CUSTODY_ENTRIES
     assert len(list(custody.glob("intent-*.json"))) == len(list(custody.glob("retired-*")))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
+def test_regular_replace_prunes_old_retired_binaries(tmp_path: Path) -> None:
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    destination = install_dir / "defenseclaw-gateway"
+    for index in range(6):
+        prior = install_dir / f".defenseclaw-gateway.source-install-{index:032x}"
+        prior.write_bytes(f"gateway-old-{index}\n".encode())
+        assert install_publish.unlink_exact(prior, install_publish.path_identity(prior), custody_root=custody)
+
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside\n")
+    link = install_dir / f".defenseclaw-gateway.source-symlink-{0:032x}"
+    link.symlink_to(outside)
+    assert install_publish.unlink_exact(link, install_publish.path_identity(link), custody_root=custody)
+
+    # An intent whose retired name holds a different object is unfinished
+    # recovery work and must survive.
+    claimed = install_dir / f".defenseclaw-gateway.source-install-{99:032x}"
+    claimed.write_bytes(b"claimed\n")
+    claim = install_publish.path_identity(claimed)
+    intent, retired = install_publish._retirement_names(str(claimed), claim, "entry")
+    (custody / intent).write_bytes(install_publish._retirement_document(str(claimed), claim, "entry"))
+    (custody / retired).write_bytes(b"substitute\n")
+    for entry in custody.glob("intent-*.json"):
+        os.utime(entry, ns=(1_000_000_000, 1_000_000_000))
+
+    current, replacement = b"gateway-v1\n", b"gateway-v2\n"
+    destination.write_bytes(current)
+    destination.chmod(0o755)
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(replacement)
+    source.chmod(0o755)
+    install_publish.publish_regular(
+        source,
+        destination,
+        hashlib.sha256(current).hexdigest(),
+        expected_source=hashlib.sha256(replacement).hexdigest(),
+        custody_root=custody,
+    )
+
+    assert destination.read_bytes() == replacement
+    kept = sorted(p.read_bytes() for p in custody.glob("retired-*") if not p.is_symlink())
+    assert kept == [current, b"substitute\n"]
+    assert [p.readlink() for p in custody.glob("retired-*") if p.is_symlink()] == [outside]
+    assert outside.read_bytes() == b"outside\n"
+    assert len(list(custody.glob("intent-*.json"))) == 3
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and stage pruning")
+def test_regular_publish_prunes_day_old_own_stages_and_reports_others(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    old = install_dir / f".defenseclaw-gateway.source-install-{1:032x}"
+    fresh = install_dir / f".defenseclaw.source-install-{2:032x}"
+    for stray in (old, fresh):
+        stray.write_bytes(b"partial\n")
+    os.utime(old, (1_000_000_000, 1_000_000_000))
+    destination = install_dir / "defenseclaw-gateway"
+    source = tmp_path / "defenseclaw-gateway"
+    source.write_bytes(b"gateway\n")
+    source.chmod(0o755)
+    install_publish.publish_regular(source, destination, None, custody_root=custody)
+
+    assert not old.exists() and fresh.exists()
+    assert sorted(p.name for p in install_dir.iterdir()) == [custody.name, fresh.name, destination.name]
+
+    os.utime(fresh, (1_000_000_000, 1_000_000_000))
+    parent_fd = os.open(install_dir, os.O_RDONLY)
+    try:
+        reported = install_publish._prune_stale_stages(parent_fd, install_dir, custody, uid=os.geteuid() + 1)
+    finally:
+        os.close(parent_fd)
+    assert reported == [str(fresh)] and fresh.exists()
+    assert f"sudo rm -f {fresh}" in capsys.readouterr().err

@@ -152,6 +152,10 @@ type GuardRequest struct {
 	// registration is DefenseClaw's hook and the guardian repairs it); on a
 	// machine-policy connector the same command is foreign.
 	OwnedCommands []string
+	// HookSurface is the hook command's --hook-surface marker. The VS Code
+	// Local harness (connector.CopilotHookSurfaceVSCodeLocal) reads sources
+	// the Copilot CLI does not, which are scanned only for its requests.
+	HookSurface string
 	// Deadline bounds the scan (zero: none). Past it, and past the scan's
 	// file, byte and directory-entry budgets, the scan stops with an
 	// unverifiable finding, so a slow or flooded tree fails closed instead
@@ -415,6 +419,8 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 		project(formatFlat, ".github", "copilot", "settings.json")
 		project(formatFlat, ".github", "copilot", "settings.local.json")
 		claudeFormat(false)
+		user(formatCopilotPlugins, copilotHome, "installed-plugins")
+		copilotVSCodeSources(req, home, userWith, project)
 	case "devin":
 		if req.goos() == "windows" {
 			// APPDATA as the agent sees it, and the profile's default
@@ -435,6 +441,9 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 		project(formatGrouped, ".devin", "config.json")
 		project(formatGrouped, ".devin", "config.local.json")
 		claudeFormat(true)
+		for _, store := range devinPluginStores(req, home) {
+			user(formatDevinPlugins, store)
+		}
 	case ConnectorClaudeCode:
 		claudeDir := req.getenv("CLAUDE_CONFIG_DIR")
 		if claudeDir == "" {
@@ -506,6 +515,9 @@ func (r GuardRequest) ownedCommand(command string) bool {
 				return true
 			}
 		}
+	}
+	if copilotVSCodeLocalCommandOwned(r.goos(), r.HookBinary, command) {
+		return true
 	}
 	return ownedCommand(command, r.HookBinary)
 }
@@ -1138,6 +1150,12 @@ func (s *guardScan) scan(stopAtBlocking bool) []Finding {
 			found = s.scanPluginDir(source)
 		case source.format == formatClaudePlugins:
 			found = s.scanClaudePlugins(source)
+		case source.format == formatDevinPlugins:
+			found = s.scanDevinPlugins(source)
+		case source.format == formatCopilotPlugins:
+			found = s.scanCopilotPlugins(source)
+		case source.format == formatAgentMarkdownDir:
+			found = s.scanAgentMarkdownDir(source)
 		default:
 			found = s.scanFile(source)
 		}
@@ -1186,6 +1204,8 @@ func (s *guardScan) scanFile(source hookSource) []Finding {
 		return s.scanPluginList(source, data)
 	case formatHermesYAML:
 		return s.scanHermesYAML(source, data)
+	case formatVSCodeHookLocations:
+		return s.scanVSCodeHookLocations(source, data)
 	default:
 		return s.scanJSONHooks(source, data)
 	}

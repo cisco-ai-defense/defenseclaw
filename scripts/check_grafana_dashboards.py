@@ -614,11 +614,17 @@ def static_audit(
                     )
                 if (
                     datasource == "prometheus"
-                    and "defenseclaw_ai_discovery_signals_total" in expression
-                    and "max_over_time" in expression
+                    and re.search(
+                        r"defenseclaw_ai_discovery_(?:signals|new_signals|gone_signals)_total", expression
+                    )
+                    and ("max_over_time" in expression or "increase(" in expression or " offset " not in expression)
                 ):
+                    # GAP-2646: these series get one sample per change, so
+                    # increase() returns nothing for a series first seen in
+                    # the range; subtract the last value before the range.
                     errors.append(
-                        f"{uid}/{title}: selected-range discovery counters must use increase",
+                        f"{uid}/{title}: sparse discovery signal counters must use "
+                        "last_over_time minus the value before the range (offset), not increase",
                     )
                 if (
                     datasource == "prometheus"

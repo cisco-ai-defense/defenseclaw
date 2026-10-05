@@ -12,6 +12,19 @@ keywords:
 
 <Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
 
+<Callout title="At a glance">
+- **You upload:** a Win32 app, `Install-DefenseClawIntune.intunewin`, that
+  `New-DefenseClawIntunePackage.ps1` builds from
+  `DefenseClawSetup-Enterprise-Standalone-x64.exe` and your `config.yaml`,
+  plus a PowerShell 7 Win32 app that it depends on.
+- **Install:** the app runs `Install-DefenseClawIntune.ps1` as System, which
+  runs Setup `/ensure`.
+- **Detection:** the registry value `ProductVersion` under
+  `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, greater than or
+  equal to the version you deploy. Optional Remediations keep it healthy.
+- **Uninstall:** `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1`.
+</Callout>
+
 This recipe creates three things in Intune: a Win32 app that installs
 PowerShell 7, a Win32 app that installs DefenseClaw and depends on it, and an
 optional Remediations package that keeps DefenseClaw healthy. It follows the
@@ -69,9 +82,9 @@ script:
   -SetupPath .\DefenseClawSetup-Enterprise-Standalone-x64.exe `
   -Sha256 '<SHA-256 of the Setup from checksums.txt>' `
   -ConfigPath .\config.yaml `
-  -OutputDirectory .\intune-defenseclaw-1.4.0 `
+  -OutputDirectory .\intune-defenseclaw-1.0.0 `
   -IntuneWinAppUtil C:\Tools\IntuneWinAppUtil.exe `
-  -ProductVersion 1.4.0
+  -ProductVersion 1.0.0
 ```
 
 | Parameter | Meaning |
@@ -111,8 +124,8 @@ Upload the `.intunewin` in **Apps** > **All Apps** > **Create** >
 | Program | Device restart behavior | **Determine behavior based on return codes** |
 | Program | Return codes | Keep the defaults: `0` Success, `1707` Success, `3010` Soft reboot, `1641` Hard reboot, `1618` Retry. The lifecycle's `1603` and `1639` then report as Failed. |
 | Requirements | Operating system architecture | **x64** only |
-| Requirements | Minimum operating system | The oldest Windows release your fleet runs. DefenseClaw does not check the Windows version; it needs x64 and PowerShell 7. |
-| Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `1.4.0`, *Associated with a 32-bit app on 64-bit clients*: **No** |
+| Requirements | Minimum operating system | The oldest Windows release your fleet runs. The packaging script prints Windows 10 22H2 as a starting point. DefenseClaw itself does not check the Windows version; it needs x64 and PowerShell 7. |
+| Detection rules | Rule | **Registry**. Key path `HKEY_LOCAL_MACHINE\SOFTWARE\Cisco\DefenseClaw\Enterprise`, value name `ProductVersion`, detection method **Version comparison**, operator **Greater than or equal to**, value `<version>`, *Associated with a 32-bit app on 64-bit clients*: **No** |
 | Dependencies | App | The PowerShell 7 app, **Automatically install**: **Yes** |
 | Supersedence | Previous DefenseClaw app | **Uninstall previous version**: **No** |
 | Assignments | Required | Device groups |
@@ -238,7 +251,7 @@ roll out a new config:
    value from the new package's `intune-package.json`:
 
 ```powershell
-$minimum = [version]'1.4.0'
+$minimum = [version]'1.0.0'
 $configSha256 = 'replace-with-config_sha256-from-intune-package.json'
 $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
 $key = $base.OpenSubKey('SOFTWARE\Cisco\DefenseClaw\Enterprise')
@@ -273,8 +286,9 @@ Assign the Win32 app as **Uninstall** to the device group. Intune runs the
 uninstall command, `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall
 JSON=1`, which stops and deletes the services, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), and removes the
-Add/Remove Programs entry and the marker. Add `PURGE=1` to the uninstall
-command to also remove the config, the key and the state.
+Add/Remove Programs entry and the marker, and removes the config, the key and
+the machine state. Add `PURGE=1` to the uninstall command to also remove each
+enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries.
 
 `packaging/mdm/windows/uninstall.ps1 [-Purge]` does the same from any
 PowerShell, as a platform script for example. Both are idempotent.

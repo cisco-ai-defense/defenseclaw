@@ -31,7 +31,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Final
 
-from defenseclaw.file_permissions import UnsafePathError
+from defenseclaw.file_permissions import UnsafePathError, unsafe_gateway_remedy
 from defenseclaw.gateway import resolve_trusted_gateway_binary
 
 RULEPACK_WIRE_VERSION: Final = 1
@@ -111,7 +111,7 @@ def validate_rule_pack(
         binary = gateway_binary if gateway_binary is not None else resolve_trusted_gateway_binary()
     except UnsafePathError as exc:
         raise RulePackValidationBridgeError(
-            f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw",
+            unsafe_gateway_remedy(exc),
             code="gateway_untrusted",
         ) from exc
     if not binary:
@@ -183,8 +183,15 @@ def validate_rule_pack(
 
 
 def safe_display_path(path: str) -> str:
-    """Quote an operator/config path without emitting terminal control bytes."""
-    return json.dumps(str(path), ensure_ascii=True)
+    """Quote an operator/config path without emitting terminal control bytes.
+
+    Only quotes and non-printable characters are escaped, so a Windows path
+    keeps its single backslashes.
+    """
+    text = "".join(
+        '\\"' if ch == '"' else ch if ch.isprintable() else f"\\u{ord(ch):04x}" for ch in str(path)
+    )
+    return f'"{text}"'
 
 
 def bridge_error_wire(error: RulePackValidationBridgeError) -> dict[str, Any]:

@@ -392,7 +392,9 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 			pending = false
 			pendingTrigger = ""
-			if err := m.Reload(ctx, reason); err != nil {
+			// A reload the gateway's own stop or restart cancelled is not a
+			// failure; the restart applies the new config (GAP-1698).
+			if err := m.Reload(ctx, reason); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
 			// Piggyback on the reload path — the AVC packaging pipeline
@@ -998,6 +1000,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"tenant_id":        {},
 		"workspace_id":     {},
 		"discovery_source": {},
+		// The gateway never reads registry sources (the CLI fetches and
+		// promotes them into asset_policy), so a registry add/edit must not
+		// make every later reload fail as restart-required (GAP-2422).
+		"registries": {},
 		// Sandbox settings are read per launch, and the sandbox listeners
 		// rebind in-process (apiNeedsRestart). Only the legacy standalone
 		// mode behind the bind shim needs a fresh process (below).

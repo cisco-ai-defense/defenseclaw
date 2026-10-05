@@ -26,6 +26,7 @@ const (
 	kiroManagedAgentName        = "defenseclaw"
 	kiroBuiltInDefaultAgentName = "kiro_default"
 	kiroV3HooksLogicalName      = "hooks"
+	kiroGlobalHooksLogicalName  = "hooks-global"
 	kiroV2AgentLogicalName      = "agent-defenseclaw"
 	kiroSettingsLogicalName     = "settings-cli"
 	kiroDefaultAgentSettingKey  = "chat.defaultAgent"
@@ -60,12 +61,26 @@ func (*KiroConnector) HookScriptNames(SetupOpts) []string     { return []string{
 
 func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	_ = ctx
+	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
+		return fmt.Errorf("kiro migrate hook backup: %w", err)
+	}
+	defer recordKiroCreatedDirs(opts, missingKiroScaffoldDirs())
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("kiro hook script: %w", err)
 	}
 	command := c.hookCommand(opts)
 	v3Command := c.hookCommandForV3Surface(opts)
+	// A workspace copy an earlier Setup wrote for another (or no longer
+	// selected) workspace runs a DefenseClaw hook nothing maintains, for
+	// example after a failed setup rolled the workspace setting back. A
+	// managed Setup reclaims it with the rest of the per-user footprint.
+	var staleErr error
+	if !kiroManaged(opts) {
+		for _, path := range c.staleRecordedKiroHookPaths(opts, c.hookConfigPaths(opts)) {
+			staleErr = errors.Join(staleErr, c.reclaimKiroHookFile(opts, path, v3Command))
+		}
+	}
 	for _, path := range c.hookConfigPaths(opts) {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroBackupLogicalName(path), path); err != nil {
 			return fmt.Errorf("kiro capture hook backup %s: %w", path, err)
@@ -113,13 +128,18 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), kiroSettingsLogicalName, settingsPath); err != nil {
 		return errors.Join(reclaimErr, fmt.Errorf("kiro record settings backup: %w", err))
 	}
-	return reclaimErr
+	return errors.Join(staleErr, reclaimErr)
 }
 
 func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	command := c.hookCommand(opts)
 	var errs []error
-	for _, path := range c.hookCleanupPaths(opts) {
+	if err := migrateKiroGlobalHooksBackup(opts); err != nil {
+		errs = append(errs, fmt.Errorf("kiro migrate hook backup: %w", err))
+	}
+	cleanup := c.hookCleanupPaths(opts)
+	cleanup = append(cleanup, c.staleRecordedKiroHookPaths(opts, cleanup)...)
+	for _, path := range cleanup {
 		if err := c.reclaimKiroHookFile(opts, path, command); err != nil {
 			errs = append(errs, err)
 		}
@@ -163,7 +183,65 @@ func (c *KiroConnector) Teardown(_ context.Context, opts SetupOpts) error {
 	if err := writeDisabledHookTombstone(opts, kiroHookScriptName, c.Name()); err != nil {
 		errs = append(errs, fmt.Errorf("kiro disabled hook tombstone: %w", err))
 	}
+	if strings.TrimSpace(opts.DataDir) != "" {
+		removeCreatedDirs(filepath.Join(opts.DataDir, kiroCreatedDirsFile), filepath.Dir(kiroHomeDir()))
+	}
 	return errors.Join(errs...)
+}
+
+// kiroCreatedDirsFile, in the DefenseClaw data directory, lists the Kiro
+// folders Setup created in a home that never ran Kiro (the guardian enrolls
+// every user with kiro-cli on PATH), so teardown removes them while empty.
+const kiroCreatedDirsFile = "kiro-created-dirs.json"
+
+func kiroScaffoldDirs() []string {
+	home := kiroHomeDir()
+	return []string{home, filepath.Join(home, "agents"), filepath.Join(home, "hooks"), filepath.Join(home, "settings")}
+}
+
+func missingKiroScaffoldDirs() []string {
+	var missing []string
+	for _, dir := range kiroScaffoldDirs() {
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			missing = append(missing, dir)
+		}
+	}
+	return missing
+}
+
+// RecordHookConfigParentDirs records the hook config folders an installer
+// created for the named connector before its Setup ran, so they are removed
+// while they are still empty: by the purge and a per-user uninstall --all
+// (the data directory's created-folder list), and for Kiro also by its
+// teardown (its own list). It is best effort.
+func RecordHookConfigParentDirs(name, dataDir string, dirs []string) {
+	if strings.TrimSpace(dataDir) == "" || len(dirs) == 0 {
+		return
+	}
+	// Every connector's go in the data directory's created-folder list,
+	// which the purge and a per-user uninstall --all clear.
+	_ = RecordWatcherCreatedDirs(dataDir, dirs)
+	if name != "kiro" {
+		return
+	}
+	_ = recordCreatedDirs(filepath.Join(dataDir, kiroCreatedDirsFile), dirs)
+}
+
+// recordKiroCreatedDirs records the folders of missing that Setup created.
+// It is best effort: an unrecorded folder only stays behind after teardown.
+func recordKiroCreatedDirs(opts SetupOpts, missing []string) {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return
+	}
+	var created []string
+	for _, dir := range missing {
+		if info, err := os.Lstat(dir); err == nil && info.IsDir() {
+			created = append(created, dir)
+		}
+	}
+	if len(created) > 0 {
+		_ = recordCreatedDirs(filepath.Join(opts.DataDir, kiroCreatedDirsFile), created)
+	}
 }
 
 func (c *KiroConnector) VerifyClean(opts SetupOpts) error {
@@ -203,6 +281,15 @@ func (c *KiroConnector) reclaimKiroHookFile(opts SetupOpts, path, command string
 		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove hook %s: %w", path, err)
 		}
+	} else if present, err := kiroV3FileReferencesHook(path, command); err != nil {
+		return fmt.Errorf("kiro inspect restored hook %s: %w", path, err)
+	} else if present {
+		// A backup captured while the account still held an earlier
+		// enrollment's hooks (whose own backup is gone) put DefenseClaw's
+		// entries back; they go too (GAP-1932).
+		if err := removeKiroV3Hooks(path, command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("kiro remove hook %s: %w", path, err)
+		}
 	}
 	discardManagedFileBackup(opts.DataDir, c.Name(), logical)
 	return nil
@@ -216,6 +303,14 @@ func (c *KiroConnector) reclaimKiroAgentFile(opts SetupOpts, path, command strin
 		return fmt.Errorf("kiro restore agent %s: %w", path, err)
 	}
 	if !restored {
+		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
+		}
+	} else if present, err := kiroV2AgentReferencesAnyHook(path, command); err != nil {
+		return fmt.Errorf("kiro inspect restored agent %s: %w", path, err)
+	} else if present {
+		// The restored agent came from a backup that already held
+		// DefenseClaw's hooks (GAP-1932).
 		if err := removeKiroV2AgentHooks(path, command); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("kiro remove agent hooks %s: %w", path, err)
 		}
@@ -405,45 +500,69 @@ func (c *KiroConnector) HookScripts(opts SetupOpts) []string {
 }
 
 func (c *KiroConnector) hookCommand(opts SetupOpts) string {
-	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), "")
+	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), "", kiroManaged(opts))
 }
 
 // kiroHookInvocationCommandFor renders one Kiro hook command. surface marks
 // the .kiro/hooks configuration (KiroHookSurfaceV3); the CLI 2.x agent
-// configuration is unmarked.
+// configuration is unmarked. On Windows, managed adds --enterprise-managed,
+// as every managed Windows hook command does.
 //
-// On Windows both commands run the system Windows PowerShell with an encoded
-// script that starts the GUI-subsystem launcher, waits for it and exits with
-// its status, so exit 2 (Kiro's only block) reaches Kiro when Kiro runs the
-// command through cmd.exe (Node's shell: true, `cmd /C`) or directly
-// (windowsKiroHookCommandForBinary). The earlier `& '<launcher>' ...` form
-// failed under cmd.exe ("& was unexpected at this time", exit 1) and, under
-// PowerShell, returned before the GUI launcher finished; either way Kiro
-// proceeded. A launcher that evaluates the command with `powershell -Command`
-// reports any native exit status other than 0 as 1, which no command string
-// can change; Kiro does not document which shell it uses (see the Kiro
-// connector docs).
-func kiroHookInvocationCommandFor(goos, unixCommand, surface string) string {
+// On Windows both commands start cmd.exe, which runs the system Windows
+// PowerShell with an encoded script that starts the GUI-subsystem launcher,
+// waits for it and exits with its status. Exit 2 (Kiro's only block) reaches
+// Kiro whether Kiro runs the command through `pwsh -Command` or
+// `powershell -Command` (what Kiro CLI 2.24 does), through cmd.exe (Node's
+// shell: true, `cmd /C`) or directly (windowsKiroHookCommandForBinary). The
+// earlier `& '<launcher>' ...` form failed under cmd.exe ("& was unexpected
+// at this time", exit 1) and, under PowerShell, returned before the GUI
+// launcher finished; either way Kiro proceeded.
+func kiroHookInvocationCommandFor(goos, unixCommand, surface string, managed bool) string {
 	if goos != "windows" {
 		if surface != "" {
 			return unixCommand + " --hook-surface " + surface
 		}
 		return unixCommand
 	}
-	return windowsKiroHookCommandForBinary(defenseclawHookBinary(), surface)
+	return windowsKiroHookCommandForBinary(defenseclawHookBinary(), surface, managed)
 }
 
-// windowsKiroHookCommandForBinary renders the Windows Kiro command: the
-// shared encoded bridge (windowsAwaitedHookStatements), which starts the
-// launcher with Process.Start and returns a fast-exiting launcher's block to
-// Kiro. The arguments are fixed tokens without spaces or quotes. Kiro is not
-// part of any enterprise profile on Windows, so only per-user setup writes
-// this.
-func windowsKiroHookCommandForBinary(hookBinary, surface string) string {
-	if surface == "" {
-		return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary)
+// windowsKiroHookCommandForBinary renders the Windows Kiro command:
+// `<system>\cmd.exe /d /c <bridge>`, a line feed, then `exit $LASTEXITCODE`.
+// A PowerShell host (`pwsh -Command`, `powershell -Command`) reports any
+// native exit status other than 0 as 1 unless the command itself exits with
+// it, so a block came back as 1 and Kiro proceeded. The second line is that
+// exit. cmd.exe stops reading a command line at the line feed, so cmd.exe
+// never sees it: not when the host is cmd.exe (`cmd /d /s /c`, `cmd /C`) and
+// not when the command line is started directly, where cmd.exe is the
+// program. Starting cmd.exe rather than the bridge also keeps a direct start
+// working, because powershell.exe refuses any argument after
+// -EncodedCommand's value. /d skips cmd.exe AutoRun commands; the command has
+// no quotes, percent signs or cmd.exe operators.
+func windowsKiroHookCommandForBinary(hookBinary, surface string, managed bool) string {
+	return windowsSystemCmdExe() + " /d /c " + windowsKiroPowerShellBridgeForBinary(hookBinary, surface, managed) + "\nexit $LASTEXITCODE"
+}
+
+// windowsKiroPowerShellBridgeForBinary renders the encoded system PowerShell
+// bridge the Kiro command runs: the shared awaited-hook bridge
+// (windowsAwaitedHookStatements), which starts the launcher with Process.Start
+// and returns a fast-exiting launcher's block, with a Constrained Language
+// mode fallback. Earlier builds wrote this bridge as the whole command, which
+// lost the block under a PowerShell host, so it stays owned for repair and
+// teardown. The arguments are fixed tokens without spaces or quotes, so the
+// rendered bridge is byte-identical to the one those builds wrote. Managed
+// Windows writes the same bridge under the target user token with managed
+// set; there hookBinary is the standalone defenseclaw-hook.exe and the
+// arguments add --enterprise-managed.
+func windowsKiroPowerShellBridgeForBinary(hookBinary, surface string, managed bool) string {
+	var extra []string
+	if managed {
+		extra = append(extra, "--enterprise-managed")
 	}
-	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, "--hook-surface", surface)
+	if surface != "" {
+		extra = append(extra, "--hook-surface", surface)
+	}
+	return windowsNativePowerShellHookCommandForBoundEvent("kiro", "", "", hookBinary, extra...)
 }
 
 // legacyWindowsKiroStartProcessHookCommandForBinary is the Start-Process
@@ -456,18 +575,27 @@ func legacyWindowsKiroStartProcessHookCommandForBinary(hookBinary, surface strin
 }
 
 // kiroWindowsOwnedHookCommands are the Windows Kiro commands DefenseClaw
-// wrote for every launcher it may have registered: the current command and
-// the Start-Process bridge (both surfaces), and the `& '<launcher>' hook
-// --connector kiro` call-operator form earlier builds wrote. Setup replaces
+// wrote for every launcher it may have registered: the current command, the
+// bare Process.Start and Start-Process bridges (both surfaces), and the
+// `& '<launcher>' hook --connector kiro` call-operator form earlier builds
+// wrote. Setup replaces
 // and teardown removes an older form in the CLI 2.x agent files, whose
 // entries are otherwise matched by exact command.
 func kiroWindowsOwnedHookCommands() []string {
 	var commands []string
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
 		legacy := "& " + powershellQuoteLiteral(binary) + " " + nativeHookFlag + "kiro"
+		// Managed and per-user forms, and the managed form without
+		// --enterprise-managed that earlier managed builds wrote.
+		for _, managed := range []bool{false, true} {
+			commands = append(commands,
+				windowsKiroHookCommandForBinary(binary, "", managed),
+				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),
+				windowsKiroPowerShellBridgeForBinary(binary, "", managed),
+				windowsKiroPowerShellBridgeForBinary(binary, KiroHookSurfaceV3, managed),
+			)
+		}
 		commands = append(commands,
-			windowsKiroHookCommandForBinary(binary, ""),
-			windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3),
 			legacyWindowsKiroStartProcessHookCommandForBinary(binary, ""),
 			legacyWindowsKiroStartProcessHookCommandForBinary(binary, KiroHookSurfaceV3),
 			legacy,
@@ -495,13 +623,13 @@ func kiroOwnedHookCommands(hookScript string) []string {
 // an argument there would orphan DefenseClaw's own entry. An absent marker
 // already resolves to the 2.x veto surface, which is what that config is.
 func (c *KiroConnector) hookCommandForV3Surface(opts SetupOpts) string {
-	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), KiroHookSurfaceV3)
+	return kiroHookInvocationCommandFor(runtime.GOOS, filepath.Join(opts.DataDir, "hooks", kiroHookScriptName), KiroHookSurfaceV3, kiroManaged(opts))
 }
 
 // kiroManaged reports whether opts render the administrator-managed Kiro
-// footprint. Only the standalone enterprise guardian on Linux and macOS
-// manages Kiro: the Secure Client profiles do not list it and the Windows
-// guardian refuses it, so a managed Kiro install is a standalone one.
+// footprint. Only the standalone enterprise guardian manages Kiro: the
+// Secure Client profiles do not list it, so a managed Kiro install is a
+// standalone one.
 func kiroManaged(opts SetupOpts) bool {
 	return opts.ManagedEnterprise
 }
@@ -531,6 +659,31 @@ func (c *KiroConnector) hookCleanupPaths(opts SetupOpts) []string {
 		paths = append(paths, workspace)
 	}
 	return uniqueNonEmptyStrings(paths)
+}
+
+// staleRecordedKiroHookPaths lists the v3 hook files a Kiro backup record
+// names that are not in current. The records outlive the workspace setting,
+// so a workspace copy is still found once claw.workspace_dir no longer names
+// it (RHEL-U3-09).
+func (c *KiroConnector) staleRecordedKiroHookPaths(opts SetupOpts, current []string) []string {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	known := map[string]bool{}
+	for _, path := range current {
+		known[filepath.Clean(path)] = true
+	}
+	var stale []string
+	_ = forEachManagedFileBackup(opts.DataDir, func(b managedFileBackup) error {
+		if b.Connector != c.Name() || !strings.HasPrefix(b.LogicalName, kiroV3HooksLogicalName+"-") ||
+			b.LogicalName != kiroBackupLogicalName(b.Path) || known[filepath.Clean(b.Path)] {
+			return nil
+		}
+		known[filepath.Clean(b.Path)] = true
+		stale = append(stale, b.Path)
+		return nil
+	})
+	return stale
 }
 
 func kiroHooksPath(opts SetupOpts) string {
@@ -658,9 +811,33 @@ func kiroHomeDir() string {
 	return homePath(".kiro")
 }
 
+// kiroBackupLogicalName names a v3 hook file's backup record. On Windows the
+// global ~/.kiro/hooks/defenseclaw.json has the fixed name
+// kiroGlobalHooksLogicalName, so the guardian's managed-runtime cleanup,
+// which accepts only fixed file names, can remove its record; every other
+// file keeps its path-derived name.
 func kiroBackupLogicalName(path string) string {
 	cleaned := filepath.Clean(path)
-	return kiroV3HooksLogicalName + "-" + strings.ReplaceAll(cleaned, string(filepath.Separator), "_")
+	if runtime.GOOS == "windows" && cleaned == filepath.Clean(kiroHooksPath(SetupOpts{})) {
+		return kiroGlobalHooksLogicalName
+	}
+	return kiroPathBackupLogicalName(cleaned)
+}
+
+func kiroPathBackupLogicalName(path string) string {
+	return kiroV3HooksLogicalName + "-" + strings.ReplaceAll(filepath.Clean(path), string(filepath.Separator), "_")
+}
+
+// migrateKiroGlobalHooksBackup moves a Windows backup record an earlier
+// release kept under the global hook file's path-derived name to
+// kiroGlobalHooksLogicalName, so Setup keeps the original preimage and
+// Teardown still restores it.
+func migrateKiroGlobalHooksBackup(opts SetupOpts) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	path := kiroHooksPath(opts)
+	return migrateManagedFileBackupLogicalName(opts.DataDir, "kiro", kiroPathBackupLogicalName(path), kiroBackupLogicalName(path))
 }
 
 // ownedHookContractPresent proves Kiro's effective hook registration for the
@@ -675,12 +852,15 @@ func kiroBackupLogicalName(path string) string {
 //
 // Both surfaces must be registered for Kiro to be guarded: the v3 config that
 // Kiro IDE and `kiro-cli --v3` read, and the CLI 2.x agent config that bare
-// `kiro-cli` reads. Ownership uses kiroCommandOwned, the same argument-aware
-// predicate setup and teardown use, so the three agree by construction.
+// `kiro-cli` reads. The v3 file must hold every entry as Setup renders it
+// (kiroV3HooksCurrent), so the guardian repairs one that was turned off,
+// removed or pointed elsewhere; the CLI 2.x agent is checked the same way
+// (kiroV2AgentReferencesHook).
 func (c *KiroConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	command := c.hookCommand(opts)
+	v3Command := c.hookCommandForV3Surface(opts)
 	for _, path := range c.hookConfigPaths(opts) {
-		present, err := kiroV3FileReferencesHook(path, command)
+		present, err := kiroV3HooksCurrent(path, v3Command)
 		if err != nil {
 			return false, err
 		}

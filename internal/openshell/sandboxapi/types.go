@@ -76,6 +76,10 @@ type Status struct {
 	// it drives the user's OpenShell gateway and mounts the user's files, so
 	// the doctor checks it is the user's own.
 	DaemonUID *int `json:"daemon_uid,omitempty"`
+	// DockerGroupMissing reports that the daemon's user is in the docker
+	// group but the daemon started before that, so it cannot reach Docker
+	// until it restarts (Linux).
+	DockerGroupMissing bool `json:"docker_group_missing,omitempty"`
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -296,6 +300,9 @@ type HookCoverage struct {
 	ToolCalls    int64 `json:"tool_calls"`
 	ToolBlocked  int64 `json:"tool_blocked"`
 	ToolAsked    int64 `json:"tool_asked,omitempty"`
+	// PromptBlocked counts the submitted prompts DefenseClaw blocked
+	// (UserPromptSubmit and each harness's spelling of it).
+	PromptBlocked int64 `json:"prompt_blocked,omitempty"`
 	// Events counts the hook verdicts per hook event, under the name the
 	// harness sends (PreToolUse, preToolUse, tool.execute.before, ...).
 	// Their sum can be below HookRequests: a post refused before a verdict
@@ -555,6 +562,10 @@ type ReviewResponse struct {
 	Summary  string                  `json:"summary"`
 	RiskLine string                  `json:"risk_line,omitempty"`
 	Diff     string                  `json:"diff,omitempty"`
+	// UnmaskedSecrets are the project's files that look like secrets and
+	// that the sandbox's masks (fixed when it was created) leave visible:
+	// its next start refuses while they stay in the project.
+	UnmaskedSecrets []string `json:"unmasked_secrets,omitempty"`
 }
 
 // Workspace operations the CLI reports (the copy-mode steps it runs).
@@ -763,9 +774,12 @@ const (
 	// ActivityToolAsked is a tool call DefenseClaw asked the user to
 	// confirm; the harness asks in its own UI.
 	ActivityToolAsked = "tool.asked"
-	ActivityLifecycle = "sandbox.lifecycle"
-	ActivityFinding   = "finding"
-	ActivityWorkspace = "workspace"
+	// ActivityHookBlocked is a hook event other than a tool call that
+	// DefenseClaw blocked, such as a submitted prompt.
+	ActivityHookBlocked = "hook.blocked"
+	ActivityLifecycle   = "sandbox.lifecycle"
+	ActivityFinding     = "finding"
+	ActivityWorkspace   = "workspace"
 	// ActivityHookFailed reports hook posts DefenseClaw answered with an
 	// error status (HookCoverage.HookFailed).
 	ActivityHookFailed = "hook.failed"

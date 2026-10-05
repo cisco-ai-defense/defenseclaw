@@ -101,7 +101,7 @@ func (p *Provider) EmitV8GeneratedCanary(
 	rootStart := time.Now().UTC()
 	rootContext, root := p.tracer.Start(
 		rootContext,
-		"invoke_agent diagnostic",
+		observability.RuntimeCanaryAgentSpanName,
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithTimestamp(rootStart),
 		trace.WithAttributes(p.v8CanaryStartAttributes(
@@ -131,7 +131,7 @@ func (p *Provider) EmitV8GeneratedCanary(
 	childStart := time.Now().UTC()
 	_, child = p.tracer.Start(
 		rootContext,
-		"chat gpt-4o-mini",
+		observability.RuntimeCanaryModelSpanName,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(childStart),
 		trace.WithAttributes(p.v8CanaryStartAttributes(
@@ -143,8 +143,8 @@ func (p *Provider) EmitV8GeneratedCanary(
 	child.SetStatus(codes.Ok, "")
 	child.SetAttributes(
 		attribute.String("gen_ai.operation.name", "chat"),
-		attribute.String("gen_ai.provider.name", "openai"),
-		attribute.String("gen_ai.request.model", "gpt-4o-mini"),
+		attribute.String("gen_ai.provider.name", observability.RuntimeCanaryProvider),
+		attribute.String("gen_ai.request.model", observability.RuntimeCanaryModel),
 	)
 
 	rootSpanContext := root.SpanContext()
@@ -195,7 +195,7 @@ func (p *Provider) EmitV8GeneratedCanary(
 		GenAIConversationID:                   conversationID, GenAIAgentID: agentID,
 		GenAIAgentName: observability.Present("defenseclaw"), DefenseClawAgentType: "diagnostic",
 		GenAIOperationName:                  observability.Present("invoke_agent"),
-		GenAIProviderName:                   observability.Present("openai"),
+		GenAIProviderName:                   observability.Present(observability.RuntimeCanaryProvider),
 		DefenseClawAgentReportedCostPresent: false,
 		DefenseClawTelemetryInputReported:   false, DefenseClawContentInputState: "not_reported",
 		DefenseClawTelemetryOutputReported: false, DefenseClawContentOutputState: "not_reported",
@@ -236,7 +236,7 @@ func (p *Provider) EmitV8GeneratedCanary(
 		DefenseClawTelemetryInputReported:   false, DefenseClawContentInputState: "not_reported",
 		DefenseClawTelemetryOutputReported: false, DefenseClawContentOutputState: "not_reported",
 		GenAIOperationName: observability.Present("chat"),
-		GenAIProviderName:  observability.Present("openai"), GenAIRequestModel: "gpt-4o-mini",
+		GenAIProviderName:  observability.Present(observability.RuntimeCanaryProvider), GenAIRequestModel: observability.RuntimeCanaryModel,
 		DefenseClawTelemetryTokensReported: observability.Present(false),
 		ConditionConnectorKnown:            false, ConditionOperationTerminal: true, ConditionTechnicalFailure: false,
 	})

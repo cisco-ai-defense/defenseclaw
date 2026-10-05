@@ -101,6 +101,9 @@ async def test_setup_views_keep_primary_content_on_screen_at_80x24(hermetic) -> 
         assert app.setup_model.form_active
         _assert_on_screen(app, app.setup_model.form_fields[0].label, max_body_lines=3)
 
+        await pilot.press("escape")  # back to the goal menu (GAP-2091)
+        await pilot.pause()
+        assert app.setup_model.goal_active
         await pilot.press("escape")
         await pilot.pause()
         await pilot.press("c")  # config editor
@@ -165,23 +168,26 @@ def test_fifteen_tabs_fit_at_120_columns(width: int) -> None:
     assert labels["setup"] == "0 Setup"
     for name, key, _label in FIFTEEN_PANELS:
         assert labels[name].startswith(key)
-    assert "(12)" in labels["alerts"]
+    # The Alerts count stays; it may be compact so more tabs keep a name
+    # (GAP-2150).
+    assert "(12)" in labels["alerts"] or "¹²" in labels["alerts"]
 
 
 def test_tabs_name_the_most_important_panels_first() -> None:
     full = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 400)
-    wide = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 180 - 33)
+    # Since GAP-1544 every tab has a (tiny) name from about 150 columns, so
+    # check the order at 120.
+    wide = fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 120 - 33)
 
     assert full["policies"] == "P Policies"
     assert wide["overview"] == "1 Overview"
-    assert strip_width(tuple(wide.values())) <= 180 - 33
-    # A named tab is never less important than a letter-only one.
+    assert strip_width(tuple(wide.values())) <= 120 - 33
+    # Overview, Alerts and Policies are named first, then the cheapest names
+    # so the most tabs get one (GAP-2180).
     named = [name for name in LABEL_PRIORITY if name in wide and wide[name] != wide[name][:1]]
     letter_only = [name for name in LABEL_PRIORITY if name in wide and name not in named]
     assert named and letter_only
-    assert max(LABEL_PRIORITY.index(n) for n in named if n != "overview") < min(
-        LABEL_PRIORITY.index(n) for n in letter_only
-    )
+    assert {"overview", "alerts", "policies"} <= set(named)
     # Unknown width (before the first layout) keeps the full labels.
     assert fit_tab_labels(FIFTEEN_PANELS, "overview", {}, 0) == full
 
@@ -193,7 +199,7 @@ def test_status_line_has_no_debug_text(hermetic) -> None:
     assert "hints=" not in app._status_text()  # noqa: SLF001
 
 
-def test_every_tab_fits_at_80_columns_with_unread_badges() -> None:
+def test_every_tab_fits_at_80_columns_with_unread_badges(monkeypatch) -> None:
     # 80 columns, no title: 80 - 2 (padding) - 12 (the : and ? buttons).
     unread = {"alerts": 2, "logs": 2, "audit": 1, "activity": 1, "ai": 2}
     for active in ("overview", "policies", "setup"):
@@ -201,5 +207,71 @@ def test_every_tab_fits_at_80_columns_with_unread_badges() -> None:
         assert strip_width(tuple(labels.values())) <= 66, active
         for name, key, _label in FIFTEEN_PANELS:
             assert labels[name].startswith(key)
-    # Letter-only tabs keep their badge, as superscript digits.
-    assert fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)["logs"] == "8²"
+    # Letter-only tabs keep their badge in brackets: "8²" read as an
+    # exponent (GAP-2247).
+    monkeypatch.setattr("defenseclaw.tui.widgets.tab_fit._PLAIN_BADGE", False)
+    assert fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)["logs"] == "8(2)"
+    # Windows consoles draw most superscript digits wrong; use a plain badge.
+    monkeypatch.setattr("defenseclaw.tui.widgets.tab_fit._PLAIN_BADGE", True)
+    labels = fit_tab_labels(FIFTEEN_PANELS, "setup", unread, 66)
+    assert labels["logs"] == "8(2)"
+    assert strip_width(tuple(labels.values())) <= 66
+    labels = fit_tab_labels(FIFTEEN_PANELS, "overview", unread, 66)
+    assert strip_width(tuple(labels.values())) <= 66
+    assert labels["alerts"] == "2(2)"
+
+
+async def test_a_wide_then_80_column_screen_names_tabs_and_keeps_validation(hermetic, monkeypatch) -> None:
+    """GAP-1283: at 200 columns every tab has a name. GAP-1166: shrinking to
+    80x24 rebuilds the config table so the Validation column stays on screen."""
+
+    from defenseclaw.config import default_config
+
+    # The 200-column names assume superscript badges; Windows uses "(2)".
+    monkeypatch.setattr("defenseclaw.tui.widgets.tab_fit._PLAIN_BADGE", False)
+    app = snapshot_app(hermetic, setup_config=default_config())
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.pause()
+        tabs = screen_text(app).splitlines()[0]
+        assert "R Reg" in tabs and "N Run" in tabs, tabs
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press("c", "/", *"device", "enter")
+        await pilot.pause()
+        await pilot.resize_terminal(80, 24)
+        for _ in range(3):
+            await pilot.pause()
+        rows = _table_rows_on_screen(app)
+        assert "Validation" in rows[0], "\n".join(rows)
+
+
+def test_the_active_tab_always_shows_its_name() -> None:
+    """GAP-1327: at 160 columns Activity or Audit active read just "A"/"9"."""
+
+    unread = {"alerts": 9}
+    for width in (66, 134, 148):
+        for active in ("activity", "audit", "registries", "ai"):
+            labels = fit_tab_labels(FIFTEEN_PANELS, active, unread, width)
+            assert strip_width(tuple(labels.values())) <= width, (width, active)
+            assert len(labels[active]) > 2, (width, active, labels[active])
+            for name, key, _label in FIFTEEN_PANELS:
+                assert labels[name].startswith(key)
+
+
+async def test_config_editor_keeps_the_selected_field_in_view_after_a_resize(hermetic) -> None:
+    """GAP-2535: after 160x45 -> 80x24 the table stayed scrolled to the top
+    while the selection (the row Enter edits) sat below the bottom edge."""
+
+    from defenseclaw.config import default_config
+
+    app = snapshot_app(hermetic, setup_config=default_config())
+    async with app.run_test(size=(160, 45)) as pilot:
+        app.action_switch_panel("setup")
+        await pilot.pause()
+        await pilot.press("c", "/", *"llm.timeout", "enter")
+        await pilot.pause()
+        for size in ((80, 24), (160, 45), (80, 24)):
+            await pilot.resize_terminal(*size)
+            for _ in range(3):
+                await pilot.pause()
+            assert any("Timeout (s)" in row for row in _table_rows_on_screen(app)), size

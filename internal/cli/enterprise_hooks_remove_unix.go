@@ -40,7 +40,9 @@ import (
 // cleanups (targets the manifest stopped enrolling) are finished. With
 // --purge (uninstall --purge) each enrolled user's worker then removes that
 // user's DefenseClaw per-user state, once every removal for the user
-// succeeded.
+// succeeded. Every account also loses DefenseClaw's VS Code Local hook
+// file and Copilot plugin: both run the administrator's hook binary, and
+// the Copilot CLI denies every tool call once that binary is gone.
 
 var (
 	enterpriseHooksRemoveAllManifest string
@@ -59,7 +61,7 @@ func init() {
 	enterpriseHooksRemoveAllCmd.Flags().StringVar(&enterpriseHooksRemoveAllManifest, "manifest", defaultEnterpriseHookManifest,
 		"YAML manifest of per-user hook targets")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHooksRemoveAllPurge, "purge", false,
-		"Also remove each enrolled user's DefenseClaw per-user state")
+		"Also remove each enrolled user's ~/.defenseclaw, per-user binaries in ~/.local/bin and DefenseClaw's entries in ~/.cache/uv, after stopping its per-user gateway")
 	enterpriseHooksRemoveAllCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false, "Emit machine-readable JSON")
 	enterpriseHooksCmd.AddCommand(enterpriseHooksRemoveAllCmd)
 }
@@ -74,6 +76,9 @@ type enterpriseHooksRemoveAllReport struct {
 	// StateFailed ("user: reason") the ones whose state stayed.
 	Purged      []string `json:"purged,omitempty"`
 	StateFailed []string `json:"state_failed,omitempty"`
+	// PurgedDetail is what the purge found and removed for each user in
+	// Purged, so the uninstall names only that.
+	PurgedDetail map[string]enterpriseHookPurgeDetail `json:"purged_detail,omitempty"`
 }
 
 func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
@@ -82,6 +87,12 @@ func runEnterpriseHooksRemoveAll(cmd *cobra.Command, _ []string) error {
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(report)
 	} else if err == nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "removed %d per-user registrations; %d pending, %d failed\n", report.Removed, len(report.Pending), len(report.Failed))
+		for _, user := range report.Purged {
+			fmt.Fprintf(cmd.OutOrStdout(), "purged %s: ~/.defenseclaw and the per-user binaries in ~/.local/bin are gone\n", user)
+		}
+		for _, entry := range report.StateFailed {
+			fmt.Fprintf(cmd.OutOrStdout(), "not purged %s\n", entry)
+		}
 	}
 	if err != nil {
 		return err
@@ -119,9 +130,21 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		report.Failed = append(report.Failed, "eligible accounts: "+boundedString(err.Error(), 256))
 	}
 	addEnterpriseHookLeftoverRemovals(jobs, manifest, accounts)
+	// The VS Code Local files also go from the accounts the guardian wrote
+	// them for that are no longer eligible.
+	vscodeRecordPath, recorded, recordErr := loadEnterpriseHookCopilotVSCodeAccounts(manifestPath)
+	if recordErr != nil {
+		report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(recordErr.Error(), 256))
+	}
+	vscodeAccounts := append(append([]enterprisehooks.UnixEligibleAccount{}, accounts...), staleCopilotVSCodeAccounts(recorded, accounts)...)
+	if vscode, err := enterpriseHookCopilotVSCodeRemoval(); err != nil {
+		report.Failed = append(report.Failed, "copilot vscode hooks: "+boundedString(err.Error(), 256))
+	} else {
+		addEnterpriseHookCopilotVSCodeRemovals(jobs, vscodeAccounts, vscode, copilotVSCodeCreatedDirs(recorded))
+	}
 	cleanupFailed := runEnterpriseHookPendingCleanups(cmd, &report, jobs)
 	if enterpriseHooksRemoveAllPurge {
-		addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)
+		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, manifest, cleanupFailed)...)
 	}
 	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
@@ -135,6 +158,12 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 				switch {
 				case ok && result.OK:
 					report.Purged = append(report.Purged, run.Job.Account.User)
+					if result.Purged != nil {
+						if report.PurgedDetail == nil {
+							report.PurgedDetail = map[string]enterpriseHookPurgeDetail{}
+						}
+						report.PurgedDetail[run.Job.Account.User] = *result.Purged
+					}
 				case ok && result.Pending:
 					report.StateFailed = append(report.StateFailed, run.Job.Account.User+": the home is not available")
 				case ok:
@@ -161,12 +190,26 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 				report.Removed++
 			}
 		}
+		if vscode := run.Response.CopilotVSCode; vscode != nil {
+			report.Removed += len(vscode.Removed)
+			if vscode.Error != "" {
+				report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(vscode.Error))
+			}
+		} else if run.Job.Request.CopilotVSCode != nil && run.Err != nil && len(run.Job.Request.Targets) == 0 {
+			report.Failed = append(report.Failed, run.Job.Account.User+"/copilot: "+boundedWorkerError(run.Err.Error()))
+		}
 	}
 	sort.Strings(report.Pending)
 	sort.Strings(report.Failed)
 	sort.Strings(report.Purged)
 	sort.Strings(report.StateFailed)
 	report.OK = len(report.Failed) == 0
+	if report.OK && len(report.Pending) == 0 && recordErr == nil {
+		if err := removeEnterpriseHookCopilotVSCodeAccounts(vscodeRecordPath, manifestPath); err != nil {
+			report.Failed = append(report.Failed, "copilot vscode accounts record: "+boundedString(err.Error(), 256))
+			report.OK = false
+		}
+	}
 	return report, nil
 }
 
@@ -276,6 +319,51 @@ func addEnterpriseHookLeftoverRemovals(jobs map[int]*enterpriseHookWorkerJob, ma
 	}
 }
 
+// enterpriseHookCopilotVSCodeRemoval is the worker request that removes
+// DefenseClaw's VS Code Local hook file and Copilot plugin, recognized by
+// the administrator's hook binary.
+func enterpriseHookCopilotVSCodeRemoval() (*enterpriseHookWorkerCopilotVSCode, error) {
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return nil, err
+	}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(opts.HookBinary) == "" {
+		return nil, errors.New("the hook binary is not configured")
+	}
+	return &enterpriseHookWorkerCopilotVSCode{HookBinary: opts.HookBinary}, nil
+}
+
+// addEnterpriseHookCopilotVSCodeRemovals asks the worker of every account
+// in jobs, and of every eligible account with an available home, to remove
+// DefenseClaw's VS Code Local hook file and Copilot plugin. They are
+// rendered for eligible accounts whether or not a manifest row names them,
+// and only DefenseClaw's exact renders are removed.
+func addEnterpriseHookCopilotVSCodeRemovals(jobs map[int]*enterpriseHookWorkerJob, accounts []enterprisehooks.UnixEligibleAccount, vscode *enterpriseHookWorkerCopilotVSCode, createdDirs map[int][]string) {
+	if vscode == nil {
+		return
+	}
+	for _, account := range accounts {
+		home := filepath.Clean(account.Home)
+		if account.UID <= 0 || jobs[account.UID] != nil || enterpriseHookCheckHome(home, account.UID).State != enterprisehooks.HomeAvailable {
+			continue
+		}
+		jobs[account.UID] = &enterpriseHookWorkerJob{
+			Account: enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home},
+			Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
+		}
+	}
+	for uid, job := range jobs {
+		removal := *vscode
+		removal.HookFile, removal.Plugin = false, false
+		removal.RemoveDirs = createdDirs[uid]
+		job.Request.CopilotVSCode = &removal
+	}
+}
+
 // runEnterpriseHookPendingCleanups finishes the guardian's pending per-user
 // cleanups (registrations of targets the manifest no longer enrolls, which
 // the guardian retries while it runs; the uninstall stopped it), as each
@@ -327,16 +415,31 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 
 // addEnterpriseHookStatePurges ends the job of every account the manifest
 // enrolls with the purge of that account's DefenseClaw per-user state (each
-// data directory its rows name), except for the accounts in skip, whose
-// pending cleanup failed.
-func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) {
+// data directory its rows name) and per-user binaries, except for the
+// accounts in skip, whose pending cleanup failed and whose backups a retry
+// still needs. It returns every enrolled account it did not add a purge for,
+// as "user: reason", so the report names each account whose data stays.
+func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifest enterprisehooks.Manifest, skip map[int]bool) []string {
 	dataDirs := map[int][]string{}
+	notPurged := map[string]string{}
 	for _, target := range manifest.Targets {
-		if target.UID == nil {
+		user := strings.TrimSpace(target.User)
+		if target.UID == nil || *target.UID <= 0 {
+			notPurged[user] = "its manifest row has no usable uid"
 			continue
 		}
 		job := jobs[*target.UID]
 		if job == nil {
+			reason := "its home is not trusted"
+			home := filepath.Clean(strings.TrimSpace(target.UserHome))
+			if filepath.IsAbs(home) && enterpriseHookCheckHome(home, *target.UID).State == enterprisehooks.HomePending {
+				reason = "its home is not available; rerun the purge when it is"
+			}
+			notPurged[user] = reason
+			continue
+		}
+		if skip[*target.UID] {
+			notPurged[job.Account.User] = "its pending hook cleanup failed; the state stays for a retry"
 			continue
 		}
 		dataDir := strings.TrimSpace(target.DataDir)
@@ -372,6 +475,15 @@ func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, manifes
 			index++
 		}
 	}
+	for uid := range dataDirs {
+		delete(notPurged, jobs[uid].Account.User)
+	}
+	var out []string
+	for user, reason := range notPurged {
+		out = append(out, user+": "+reason)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // workerErrorMaxBytes bounds one worker error in the remove-all report.

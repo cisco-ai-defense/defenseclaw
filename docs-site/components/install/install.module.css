@@ -1,0 +1,384 @@
+/* Install surfaces: one-liner with copy, OS switcher, landing runbook, OS tabs.
+ * Uses the editorial tokens from app/global.css; never redefines them. */
+
+/* ── One-liner ─────────────────────────────────────────────────────────── */
+
+.command {
+  --cmd-bg: #0b1318;
+  --cmd-rule: rgb(255 255 255 / 0.12);
+  --cmd-ink: #e8eef2;
+  --cmd-muted: #93a6b2;
+  --cmd-url: #7fd0f0;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid #0b1318;
+  background: var(--cmd-bg);
+  color: var(--cmd-ink);
+}
+
+:global(.dark) .command {
+  --cmd-bg: #0a0f13;
+  border-color: var(--editorial-rule);
+}
+
+.commandText {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0.8rem 1rem;
+  border: 0;
+  background: transparent !important;
+  color: inherit;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 0.78rem;
+  line-height: 1.65;
+  font-variant-ligatures: none;
+  white-space: normal;
+  overflow-wrap: break-word;
+  /* Hanging indent: wrapped lines align after the prompt. */
+  padding-left: calc(1rem + var(--prompt-w, 0ch));
+  text-indent: calc(-1 * var(--prompt-w, 0ch));
+}
+
+.commandLg .commandText {
+  padding-block: 1rem;
+  font-size: 0.86rem;
+}
+
+.prompt {
+  display: inline-block;
+  width: var(--prompt-w, 0ch);
+  white-space: nowrap;
+  color: var(--cmd-url);
+  opacity: 0.75;
+  text-indent: 0;
+  user-select: none;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.tokCmd {
+  color: #ffffff;
+  font-weight: 650;
+}
+
+.tokFlag,
+.tokPipe {
+  color: var(--cmd-muted);
+}
+
+.tokUrl {
+  color: var(--cmd-url);
+}
+
+.copy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+  padding: 0 0.9rem;
+  border: 0;
+  border-left: 1px solid var(--cmd-rule);
+  background: transparent;
+  color: var(--cmd-ink);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.copy:hover {
+  background: rgb(255 255 255 / 0.07);
+}
+
+.copy:focus-visible {
+  outline: 2px solid var(--cmd-url);
+  outline-offset: -2px;
+}
+
+.copy svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.copyText {
+  display: none;
+}
+
+.commandLg .copyText {
+  display: inline;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ── OS switcher ───────────────────────────────────────────────────────── */
+
+.switcher {
+  display: inline-flex;
+  border: 1px solid var(--editorial-rule);
+  background: var(--editorial-paper);
+}
+
+.switcherButton {
+  min-height: 2.25rem;
+  padding: 0 0.85rem;
+  border: 0;
+  border-right: 1px solid var(--editorial-rule);
+  background: transparent;
+  color: var(--editorial-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease;
+}
+
+.switcherButton:last-child {
+  border-right: 0;
+}
+
+.switcherButton:hover {
+  color: var(--editorial-ink);
+}
+
+.switcherButton[aria-pressed='true'] {
+  background: var(--editorial-ink);
+  color: var(--editorial-paper);
+}
+
+.switcherButton:focus-visible {
+  position: relative;
+  outline: 2px solid var(--editorial-blue);
+  outline-offset: 2px;
+}
+
+/* ── Landing runbook: install, set up, block ───────────────────────────── */
+/* The page's one install surface and its one loud element: a terminal-dark
+ * panel in both themes. Rows share the panel; the commands lose their own box. */
+
+.runbook {
+  --rb-bg: #0b1318;
+  --rb-rule: rgb(255 255 255 / 0.12);
+  --rb-ink: #f2f6f8;
+  --rb-muted: #a3b4bf;
+  --rb-accent: #7fd0f0;
+  min-width: 0;
+  border: 1px solid var(--rb-bg);
+  border-top: 3px solid var(--brand-cisco);
+  background: var(--rb-bg);
+  color: var(--rb-ink);
+}
+
+:global(.dark) .runbook {
+  --rb-bg: #0a0f13;
+  border-color: var(--editorial-rule);
+  border-top-color: var(--brand-cisco);
+}
+
+.runbookHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem 1rem;
+  padding: 0.85rem 1rem 0.85rem 1.25rem;
+  border-bottom: 1px solid var(--rb-rule);
+}
+
+.runbookTitle {
+  margin: 0;
+  color: var(--rb-ink);
+  font-size: 1rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.runbook .runbookOs {
+  border-color: var(--rb-rule);
+  background: transparent;
+}
+
+.runbook .runbookOs .switcherButton {
+  min-height: 2.5rem;
+  border-right-color: var(--rb-rule);
+  color: var(--rb-muted);
+}
+
+.runbook .runbookOs .switcherButton:hover {
+  color: var(--rb-ink);
+}
+
+.runbook .runbookOs .switcherButton[aria-pressed='true'] {
+  background: var(--rb-ink);
+  color: #0b1318;
+}
+
+.runbook .runbookOs .switcherButton:focus-visible {
+  outline-color: var(--rb-accent);
+}
+
+.runbookSteps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.runbookStep {
+  display: grid;
+  grid-template-columns: 1.75rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 1rem 0 0.25rem 1.25rem;
+  border-bottom: 1px solid var(--rb-rule);
+}
+
+.runbookStep:last-child {
+  border-bottom: 0;
+}
+
+.runbookNum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border: 1px solid color-mix(in oklab, var(--rb-accent) 55%, transparent);
+  border-radius: 50%;
+  color: var(--rb-accent);
+  font-size: 0.8rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.runbookBody {
+  min-width: 0;
+}
+
+.runbookText {
+  max-width: 34rem;
+  margin: 0.1rem 1rem 0 0;
+  color: var(--rb-muted);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.runbookText strong {
+  color: var(--rb-ink);
+  font-weight: 620;
+}
+
+.runbookText a {
+  color: var(--rb-accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+}
+
+.runbookText a:hover {
+  text-decoration-thickness: 2px;
+}
+
+.runbookText a:focus-visible {
+  outline: 2px solid var(--rb-accent);
+  outline-offset: 2px;
+}
+
+/* Commands sit flush in the panel: no box of their own. */
+.runbook .runbookCmd.runbookCmd {
+  --cmd-bg: transparent;
+  margin-left: -1rem;
+  border: 0;
+  background: transparent;
+}
+
+.runbook .runbookCmd .commandText {
+  padding-block: 0.55rem 0.8rem;
+  font-size: 0.84rem;
+}
+
+.runbook .runbookCmd .copy {
+  border-left: 0;
+  color: var(--rb-muted);
+}
+
+.runbook .runbookCmd .copy:hover {
+  color: var(--rb-ink);
+}
+
+/* ── OS tabs on MDX pages ──────────────────────────────────────────────── */
+
+.osTabs {
+  margin-block: 1.5rem 2rem;
+}
+
+.osTabsSwitcher {
+  margin-bottom: 0.25rem;
+}
+
+.osPanel {
+  padding-top: 0.25rem;
+}
+
+.osPanel > .command {
+  margin-block: 1rem 1.25rem;
+}
+
+.osPanel[hidden] {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .switcherButton {
+    min-height: 2.75rem;
+    padding: 0 0.8rem;
+  }
+
+  .commandText,
+  .commandLg .commandText,
+  .runbook .runbookCmd .commandText {
+    font-size: 0.76rem;
+  }
+
+  .commandLg .copyText {
+    display: none;
+  }
+}
+
+@media (max-width: 479px) {
+  .runbookHead {
+    padding-left: 1rem;
+  }
+
+  .runbookStep {
+    grid-template-columns: 1.5rem minmax(0, 1fr);
+    gap: 0.6rem;
+    padding-left: 0.85rem;
+  }
+
+  .runbookNum {
+    width: 1.4rem;
+    height: 1.4rem;
+    font-size: 0.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copy,
+  .switcherButton {
+    transition: none;
+  }
+}

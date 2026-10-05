@@ -249,7 +249,30 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, combined_output)
         self.assertIn("OTel: not emitted", combined_output)
         self.assertNotEqual(required.exit_code, 0)
-        self.assertIn("sidecar unavailable", required.output)
+        self.assertIn("gateway is not running", required.output)
+        # GAP-1471: no raw urllib3/requests exception text.
+        self.assertNotIn("no sidecar", combined_output)
+        self.assertIn("defenseclaw-gateway start", combined_output)
+
+    def test_missing_token_names_the_next_step(self):
+        # GAP-1553: a gateway that never started has no token yet.
+        app, tmp_dir, db_path = make_app_context()
+        try:
+            with patch(
+                "defenseclaw.commands.cmd_agent.agent_discovery.discover_agents",
+                return_value=_discovery(),
+            ), patch(
+                "defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                return_value=("127.0.0.1", 18970, ""),
+            ):
+                result = self.runner.invoke(agent, ["discover"], obj=app, catch_exceptions=False)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        combined_output = result.output + result.stderr
+        self.assertEqual(result.exit_code, 0, combined_output)
+        self.assertIn("OTel: not emitted - no gateway token yet for 127.0.0.1:18970", combined_output)
+        self.assertIn("defenseclaw-gateway start", combined_output)
 
     def test_no_emit_skips_client(self):
         with patch(
@@ -802,10 +825,10 @@ class AiUsageRendererTests(unittest.TestCase):
         )
 
     def test_grouped_view_surfaces_per_component_confidence(self):
-        """Default grouped table must show Identity / Presence so
+        """``--wide`` grouped table shows Identity / Presence so
         operators don't have to drop into ``--detail`` to see the
-        engine's verdict. Bug regression: pre-fix the columns only
-        appeared in detail mode and were repeated 488x per group."""
+        engine's verdict; the default table leaves them out so it fits
+        (GAP-1101)."""
         from defenseclaw.commands import cmd_agent
 
         sigs = []
@@ -835,9 +858,14 @@ class AiUsageRendererTests(unittest.TestCase):
                         "files_scanned": 1},
             "signals": sigs,
         }
-        out = cmd_agent._render_ai_usage_table(payload)
+        default = cmd_agent._render_ai_usage_table(payload)
+        self.assertNotIn("Identity", default)
+        self.assertNotIn("Version", default)
+        self.assertIn("--wide", " ".join(default.split()))
+        out = cmd_agent._render_ai_usage_table(payload, wide=True)
         self.assertIn("Identity", out)
         self.assertIn("Presence", out)
+        self.assertIn("Version", out)
         # Bands rendered with percentage just like --detail does.
         # Rich may wrap the cell across lines depending on terminal
         # width; assert each fragment separately so the test is
@@ -850,6 +878,36 @@ class AiUsageRendererTests(unittest.TestCase):
         # truncate the component cell with "…" when the terminal
         # width is tight, so we assert on the unique prefix.
         self.assertEqual(out.count("@anthrop"), 1)
+
+    def test_grouped_view_fits_an_80_column_terminal(self):
+        """At 80 columns the default table drops its secondary columns
+        instead of drawing 120 wide and wrapping every row (GAP-1284)."""
+        import os as _os
+
+        from defenseclaw.commands import cmd_agent
+
+        sig = {
+            "state": "seen",
+            "category": "supported_connector",
+            "product": "OpenCode",
+            "vendor": "OpenCode",
+            "detector": "plugin",
+            "basenames": ["opencode.json"],
+            "component": {"ecosystem": "npm", "name": "opencode-ai", "version": "1.0.0"},
+            "last_active_at": "2026-10-02T07:00:00Z",
+        }
+        payload = {
+            "enabled": True,
+            "summary": {"active_signals": 1, "scanned_at": "2026-10-02T07:41:06Z", "files_scanned": 1},
+            "signals": [sig],
+        }
+        with patch("shutil.get_terminal_size", return_value=_os.terminal_size((80, 24))):
+            narrow = cmd_agent._render_ai_usage_table(payload)
+            wide = cmd_agent._render_ai_usage_table(payload, wide=True)
+        self.assertTrue(all(len(line) <= 80 for line in narrow.splitlines()), narrow)
+        self.assertNotIn("Vendor", narrow)
+        self.assertIn("--wide", " ".join(narrow.split()))
+        self.assertIn("Vendor", wide)
 
     def test_grouped_view_omits_confidence_when_engine_silent(self):
         """Older sidecars without the engine must render the legacy

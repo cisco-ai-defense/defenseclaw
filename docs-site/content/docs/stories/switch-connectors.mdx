@@ -12,6 +12,8 @@ The audit DB is connector-agnostic. Current canonical events persist a
 history. New events land under the connector that produced them; migrated
 legacy or unclassified rows may have an empty connector value.
 
+## Try it
+
 <Steps>
 
 <Step>
@@ -21,14 +23,13 @@ legacy or unclassified rows may have an empty connector value.
 ```bash
 defenseclaw status
 defenseclaw alerts --limit 25
-defenseclaw-gateway audit export --output - \
-  | tail -n 200 \
+defenseclaw-gateway audit export --limit 500 --newest \
   | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
 `status` shows enforcement flags plus a per-connector block for every active
-connector. `alerts` lists the most recent decisions as a table. The SQLite
-export histogram gives you a quick by-connector view of recent canonical events.
+connector. `alerts` lists the most recent decisions as a table. The last
+command counts the 500 newest audit rows by connector.
 
 </Step>
 
@@ -65,11 +66,11 @@ defenseclaw setup codex --mode action
 ```bash
 defenseclaw doctor
 defenseclaw alerts --limit 10
-defenseclaw-gateway audit export --connector codex --output - | tail -n 100
+defenseclaw-gateway audit export --connector codex --since 30m
 ```
 
-`doctor` confirms connector health. `alerts` and the connector-filtered SQLite
-export show new events landing under `codex`.
+`doctor` confirms connector health. `alerts` and the audit export, filtered to
+`codex` and the last 30 minutes, show new events landing under `codex`.
 
 </Step>
 
@@ -81,7 +82,7 @@ export show new events landing under `codex`.
 | --- | --- |
 | Audit DB (`~/.defenseclaw/audit.db`) | Active connector roster |
 | Rule packs (`~/.defenseclaw/policies/`) | Hook scripts wired in agent config |
-| Sinks (OTLP / Splunk / webhooks) | `guardrail.connectors.<name>` policy blocks |
+| Observability destinations and notifier webhooks | `guardrail.connectors.<name>` policy blocks |
 | Historical audit attribution | Backed-up agent files for removed or replaced connectors |
 
 <Callout type="info">

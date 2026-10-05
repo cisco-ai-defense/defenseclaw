@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -175,5 +176,62 @@ func TestRulePackValidateIsAVisibleCommand(t *testing.T) {
 	}
 	if rulePackValidateCmd.Flags().Lookup("dir") == nil || rulePackValidateCmd.Flags().Lookup("json") == nil {
 		t.Fatal("rulepack validate lost its --dir or --json flag")
+	}
+}
+
+// GAP-1274: a pack the service account cannot read is not "valid" with exit 0
+// in text mode; --json keeps its validity-only contract.
+func TestRulePackValidateFailsWhenTheGatewayCannotLoadThePack(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput, previousProblem := rulePackValidateCmd.OutOrStdout(), rulePackServiceReadProblemFn
+	previousErr := rulePackValidateCmd.ErrOrStderr()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+		rulePackValidateCmd.SetErr(previousErr)
+		rulePackServiceReadProblemFn = previousProblem
+	})
+	rulePackServiceReadProblemFn = func(context.Context, string) string { return "the folder is 0700" }
+	rulePackValidateDir = shippedRulePackForCLITest(t, "default")
+
+	rulePackValidateJSON = false
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	rulePackValidateCmd.SetErr(&strings.Builder{})
+	err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "the gateway cannot load this pack: the folder is 0700") {
+		t.Fatalf("text mode err = %v", err)
+	}
+	if strings.Contains(output.String(), "valid rule pack:") || !strings.Contains(output.String(), "syntax is valid") {
+		t.Fatalf("text mode output = %q", output.String())
+	}
+
+	rulePackValidateJSON = true
+	output.Reset()
+	if err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil); err != nil {
+		t.Fatalf("json mode err = %v", err)
+	}
+}
+
+// GAP-1405: a missing --dir is named in the text output and the error, not
+// reported "at .".
+func TestRulePackValidateMissingDirNamesTheDirectory(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nonexistent-rs3")
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousOutput := rulePackValidateCmd.OutOrStdout()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateCmd.SetOut(previousOutput)
+	})
+	rulePackValidateDir = missing
+	rulePackValidateJSON = false
+	output := &strings.Builder{}
+	rulePackValidateCmd.SetOut(output)
+	err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error = %v, want it to name %s", err, missing)
+	}
+	if !strings.Contains(output.String(), "at "+missing+":") {
+		t.Fatalf("text output does not name the directory:\n%s", output)
 	}
 }

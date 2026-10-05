@@ -281,6 +281,23 @@ _SECRET_FIELD_NAMES = frozenset(
 _HEADER_MAP_FIELD_NAMES = frozenset(("headers", "extra_headers"))
 
 
+def yaml_error_mark(exc: BaseException) -> Any:
+    """The source position a YAML error belongs to.
+
+    When the parser only notices the problem at the end of the stream (an
+    unclosed ``[`` or quote on the last line), the problem mark is the line
+    after the file; the context mark is the line that opened the construct,
+    which is the line to fix (GAP-1430).
+    """
+
+    problem_mark = getattr(exc, "problem_mark", None)
+    context_mark = getattr(exc, "context_mark", None)
+    problem = str(getattr(exc, "problem", "") or "")
+    if context_mark is not None and ("stream end" in problem or "end of stream" in problem):
+        return context_mark
+    return problem_mark or context_mark
+
+
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
@@ -614,7 +631,7 @@ def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bo
     except V8ConfigError:
         raise
     except (yaml.YAMLError, RecursionError, OverflowError) as exc:
-        mark = getattr(exc, "problem_mark", None)
+        mark = yaml_error_mark(exc)
         path = f"$ (line {mark.line + 1}, column {mark.column + 1})" if mark is not None else "$"
         raise V8ConfigError(
             source_name,
@@ -1520,7 +1537,7 @@ def _built_in_field_modes() -> dict[str, dict[str, str]]:
     }
 
 
-def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False) -> Any:
+def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False, in_asset_policy: bool = False) -> Any:
     if isinstance(value, dict):
         if in_headers and set(value) == {"env"} and isinstance(value["env"], str):
             return {"env": value["env"]}
@@ -1528,19 +1545,22 @@ def _masked_copy(value: Any, parent_key: str = "", in_headers: bool = False) -> 
         for key, child in value.items():
             key_text = str(key).lower()
             headers = in_headers or key_text in _HEADER_MAP_FIELD_NAMES
+            asset_policy = in_asset_policy or (parent_key == "" and key_text == "asset_policy")
             if headers and key_text not in _HEADER_MAP_FIELD_NAMES and isinstance(child, str):
                 result[key] = "[REDACTED]"
             elif parent_key == "webhooks" and key_text == "url" and isinstance(child, str):
                 result[key] = "[REDACTED]"
+            elif asset_policy and key_text == "url" and isinstance(child, str):
+                result[key] = _masked_rule_url(child)
             elif key_text in {"endpoint", "base_url", "url"} and isinstance(child, str):
                 result[key] = _masked_url(child)
             elif key_text in _SECRET_FIELD_NAMES and not key_text.endswith("_env"):
                 result[key] = "[REDACTED]" if child else child
             else:
-                result[key] = _masked_copy(child, key_text, headers)
+                result[key] = _masked_copy(child, key_text, headers, asset_policy)
         return result
     if isinstance(value, list):
-        return [_masked_copy(child, parent_key, in_headers) for child in value]
+        return [_masked_copy(child, parent_key, in_headers, in_asset_policy) for child in value]
     return copy.deepcopy(value)
 
 
@@ -1557,6 +1577,32 @@ def _resource_value_has_inline_credentials(value: str) -> bool:
             return False
         authority = re.split(r"[/?#]", remainder, maxsplit=1)[0]
         return "@" in authority
+
+
+# A path segment this long made of token characters, with both letters and
+# digits, is treated as an embedded key (for example a per-user MCP server URL).
+_TOKEN_LIKE_PATH_SEGMENT = re.compile(r"(?=[^/]*[0-9])(?=[^/]*[A-Za-z])[A-Za-z0-9._~+=-]{24,}")
+
+
+def _masked_rule_url(value: str) -> str:
+    """Mask an asset_policy rule URL while keeping it readable.
+
+    The URL is the matching key of an allow/deny rule, so the scheme, host
+    and ordinary path stay visible. Userinfo, the query, the fragment and any
+    token-like path segment are still masked.
+    """
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "[REDACTED_URL]"
+    if parsed.username is not None or parsed.password is not None:
+        return "[REDACTED_URL]"
+    path = "/".join(
+        "[REDACTED]" if _TOKEN_LIKE_PATH_SEGMENT.fullmatch(segment) else segment for segment in parsed.path.split("/")
+    )
+    query = "[REDACTED]" if parsed.query else ""
+    fragment = "[REDACTED]" if parsed.fragment else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, fragment))
 
 
 def _masked_url(value: str) -> str:

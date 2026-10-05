@@ -114,3 +114,81 @@ func TestRedirectReductionSafe(t *testing.T) {
 		t.Fatal("nil program is redirect-reduction safe")
 	}
 }
+
+func TestStaticCommandSubsetSafe(t *testing.T) {
+	compiler, err := NewCompiler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = `f.commands.exists(c, c.argv.exists(a, a == "dc-block-marker"))`
+	tests := []struct {
+		name       string
+		expression string
+		want       bool
+	}{
+		{"argv marker", marker, true},
+		{"complete argv", `f.commands.exists(c, c.argv_complete && "dc-block-marker" in c.argv)`, true},
+		{"negation over one command's argv", `f.commands.exists(c, c.program == "echo" && !c.argv.exists(a, a == "-n"))`, true},
+		{"no other command", marker + ` && !f.commands.exists(c, c.program == "tee")`, false},
+		{"every command", `f.commands.all(c, c.program == "echo")`, false},
+		{"no redirect", marker + ` && !f.commands.exists(c, c.redirects.exists(r, r.fd == 1))`, false},
+		{"no data flow", marker + ` && !f.data_flows.exists(d, d.from_command_id != 0)`, false},
+		{"no network", marker + ` && !f.network.exists(n, n.host != "")`, false},
+		{"parse status", marker + ` && f.parse.status == ` + parseStatusComplete, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			program, code := compiler.Compile(test.expression)
+			if code != CompileOK {
+				t.Fatalf("Compile(%s) = %q", test.expression, code)
+			}
+			if got := program.StaticCommandSubsetSafe(); got != test.want {
+				t.Fatalf("StaticCommandSubsetSafe(%s) = %t, want %t", test.expression, got, test.want)
+			}
+		})
+	}
+	var missing *Program
+	if missing.StaticCommandSubsetSafe() {
+		t.Fatal("nil program is subset safe")
+	}
+}
+
+func TestStaticArgvSubsetSafe(t *testing.T) {
+	compiler, err := NewCompiler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = `f.commands.exists(c, c.argv.exists(a, a == "dc-block-marker"))`
+	const write = "defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE"
+	tests := []struct {
+		name       string
+		expression string
+		want       bool
+	}{
+		{"argv marker", marker, true},
+		{"marker in argv", `f.commands.exists(c, "dc-block-marker" in c.argv)`, true},
+		{"complete argv", `f.commands.exists(c, c.argv_complete && "dc-block-marker" in c.argv)`, true},
+		{"program in a list", `f.commands.exists(c, c.program in ["echo"] && "dc-block-marker" in c.argv)`, true},
+		{"operation", `f.commands.exists(c, ` + write + ` in c.operations)`, true},
+		{"negation over argv", `f.commands.exists(c, c.program == "echo" && !c.argv.exists(a, a == "-n"))`, false},
+		{"every argument", `f.commands.exists(c, c.argv.all(a, a != "-n"))`, false},
+		{"no operation", `f.commands.exists(c, !(` + write + ` in c.operations))`, false},
+		{"no other command", marker + ` && !f.commands.exists(c, c.program == "tee")`, false},
+		{"effect", `f.commands.exists(c, c.effect == defenseclaw.guardrail.semantic.v1.CommandEffect.COMMAND_EFFECT_EXECUTE && "dc-block-marker" in c.argv)`, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			program, code := compiler.Compile(test.expression)
+			if code != CompileOK {
+				t.Fatalf("Compile(%s) = %q", test.expression, code)
+			}
+			if got := program.StaticArgvSubsetSafe(); got != test.want {
+				t.Fatalf("StaticArgvSubsetSafe(%s) = %t, want %t", test.expression, got, test.want)
+			}
+		})
+	}
+	var missing *Program
+	if missing.StaticArgvSubsetSafe() {
+		t.Fatal("nil program is argv subset safe")
+	}
+}

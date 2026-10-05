@@ -273,7 +273,7 @@ try {
                 error = 'enterprise hooks: protected target requires repair but its exact active Windows session is unavailable'
             }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @([pscustomobject]@{ sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }, $signedOut)
-            Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018).'
+            Assert-TestSyncRefuses 'signed-out account' 'sign in, or remove it with its profile, then run this command again: alice (S-1-5-21-1-2-3-1018). The guardian repairs their DefenseClaw hooks only in their own Windows session)'
             # A deleted account whose profile folder was removed fails every
             # reconcile until the enumerator's next pass drops its rows; the
             # guardian status counts exactly those failures, and the adoption

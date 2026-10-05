@@ -142,17 +142,32 @@ func (s *guardScan) scanClaudePluginRoot(enabling hookSource, id, root string) [
 	case !info.IsDir():
 		return []Finding{unreadableFinding(req, rootSource, fmt.Errorf("plugin %s install path is not a directory", id))}
 	}
+	return s.scanPluginHooks(enabling, root, []string{filepath.Join(".claude-plugin", "plugin.json")}, []string{filepath.Join("hooks", "hooks.json")}, formatGrouped)
+}
+
+// scanPluginHooks scans one plugin root's hook files: the default files
+// (relative to root) and whatever the first existing manifest's hooks entry
+// names (a path, a list of paths, or inline hooks). format is the hook file
+// format.
+func (s *guardScan) scanPluginHooks(enabling hookSource, root string, manifests, defaults []string, format string) []Finding {
+	req := s.req
 	pluginSource := func(path string) hookSource {
-		return hookSource{scope: enabling.scope, path: path, format: formatGrouped, base: root, home: enabling.home}
+		return hookSource{scope: enabling.scope, path: path, format: format, base: root, home: enabling.home}
 	}
-	files := []string{filepath.Join(root, "hooks", "hooks.json")}
-	manifestSource := pluginSource(filepath.Join(root, ".claude-plugin", "plugin.json"))
+	var files []string
+	for _, rel := range defaults {
+		files = append(files, filepath.Join(root, rel))
+	}
 	var findings []Finding
-	manifest, exists, err := s.readFile(manifestSource.path)
-	if err != nil {
-		return []Finding{s.unreadable(manifestSource, err)}
-	}
-	if exists {
+	for _, rel := range manifests {
+		manifestSource := pluginSource(filepath.Join(root, rel))
+		manifest, exists, err := s.readFile(manifestSource.path)
+		if err != nil {
+			return []Finding{s.unreadable(manifestSource, err)}
+		}
+		if !exists {
+			continue
+		}
 		doc, _, err := decodeGuardDocument(manifest)
 		if err != nil {
 			return []Finding{s.unreadable(manifestSource, err)}
@@ -185,6 +200,7 @@ func (s *guardScan) scanClaudePluginRoot(enabling hookSource, id, root string) [
 		default:
 			return []Finding{unreadableFinding(req, manifestSource, errors.New("plugin manifest hooks entry has an unexpected type"))}
 		}
+		break
 	}
 	seen := []string{}
 	for _, path := range files {

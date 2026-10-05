@@ -41,7 +41,7 @@ export const INDEX: IndexEntry[] = [
   { sectionId: 'guardrail', group: 'Guardrail', label: 'Block threshold', keywords: ['block_threshold', 'sev to block'] },
   { sectionId: 'guardrail', group: 'Guardrail', label: 'Alert threshold', keywords: ['alert_threshold'] },
   { sectionId: 'guardrail', group: 'Guardrail', label: 'Pattern categories', keywords: ['regex', 'patterns'] },
-  { sectionId: 'guardrail', group: 'Guardrail', label: 'HILT (human in the loop)', keywords: ['human in the loop', 'hilt min severity', 'hilt timeout'] },
+  { sectionId: 'guardrail', group: 'Guardrail', label: 'HITL (human in the loop)', keywords: ['human in the loop', 'hitl', 'hilt min severity', 'hilt timeout'] },
 
   // rules
   { sectionId: 'rules', group: 'Rules', label: 'Rule pack files', keywords: ['rule pack', 'pack file'] },
@@ -298,7 +298,7 @@ export function CommandPalette({ onJump }: CommandPaletteProps) {
 /** Hint button operators can click to discover the shortcut. */
 export function CommandPaletteHint() {
   return (
-    <span className="hidden items-center gap-1 text-[11px] text-fd-muted-foreground sm:inline-flex">
+    <span className="hidden shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-fd-muted-foreground sm:inline-flex">
       <kbd className="rounded border border-fd-border bg-fd-background px-1 py-px text-[10px]">⌘K</kbd>
       <span>to search knobs</span>
     </span>
