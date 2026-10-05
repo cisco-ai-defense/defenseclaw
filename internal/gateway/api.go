@@ -157,6 +157,10 @@ type APIServer struct {
 	configSnapshot func() *config.Config
 	configWriteMu  sync.Mutex
 
+	// guardrailProfiles holds the identity-based guardrail profiles derived
+	// at load and on every reload (guardrail_profile.go).
+	guardrailProfiles guardrailProfileHolder
+
 	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
 	// per-source OTLP credentials loaded from
 	// ${data_dir}/hooks/.otlp-<source>.token. Reads happen on every
@@ -884,6 +888,7 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
+		s.initGuardrailProfiles(s.scannerCfg)
 	}
 	return s
 }
@@ -1018,6 +1023,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
 	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
@@ -1038,7 +1044,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	inspectMux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
 	inspectMux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
-	mux.Handle("/api/v1/inspect/", hookLimiter(inspectMux))
+	mux.Handle("/api/v1/inspect/", hookLimiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
@@ -1497,8 +1503,8 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// connector_modes fans the same shape out across every active
 		// connector so multi-connector status can show each one's
 		// enforcement/observability posture, not just the primary's.
-		"connector_mode":  a.connectorModeSummary(),
-		"connector_modes": a.connectorModesSummary(),
+		"connector_mode":  a.connectorModeSummary(r.Context()),
+		"connector_modes": a.connectorModesSummary(r.Context()),
 	}
 
 	if a.client != nil && a.client.Hello() != nil {
@@ -1601,7 +1607,7 @@ func sameRuntimeDataDir(left, right string) bool {
 // This is the singular (active-connector) view kept for back-compat;
 // connectorModesSummary fans the same shape out across every active
 // connector for the multi-connector status surface.
-func (a *APIServer) connectorModeSummary() map[string]interface{} {
+func (a *APIServer) connectorModeSummary(ctx context.Context) map[string]interface{} {
 	cfg := a.runtimeConfigSnapshot()
 	if cfg != nil && !cfg.HasConnectorConfigured() {
 		return map[string]interface{}{
@@ -1613,7 +1619,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 			"proxy_intercept":     false,
 		}
 	}
-	return connectorModeForConfig(cfg, connectorNameForConfig(cfg))
+	return connectorModeForDecision(cfg, a.decisionConfigFrom(ctx, cfg), connectorNameForConfig(cfg))
 }
 
 // connectorModesSummary returns one connectorModeFor entry per active
@@ -1623,8 +1629,9 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 // returns a single name on a single-connector install — so the shape is
 // identical regardless of count. Falls back to the singular active
 // connector when the config is unavailable.
-func (a *APIServer) connectorModesSummary() []map[string]interface{} {
+func (a *APIServer) connectorModesSummary(ctx context.Context) []map[string]interface{} {
 	cfg := a.runtimeConfigSnapshot()
+	decisionCfg := a.decisionConfigFrom(ctx, cfg)
 	var names []string
 	if cfg != nil {
 		names = cfg.ActiveConnectors()
@@ -1637,7 +1644,7 @@ func (a *APIServer) connectorModesSummary() []map[string]interface{} {
 	}
 	out := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
-		out = append(out, connectorModeForConfig(cfg, strings.ToLower(strings.TrimSpace(name))))
+		out = append(out, connectorModeForDecision(cfg, decisionCfg, strings.ToLower(strings.TrimSpace(name))))
 	}
 	return out
 }
@@ -1707,11 +1714,21 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 }
 
 func connectorModeForConfig(cfg *config.Config, name string) map[string]interface{} {
+	return connectorModeForDecision(cfg, cfg, name)
+}
+
+// connectorModeForDecision reports the guardrail mode decisionCfg (the
+// caller's guardrail profile, or cfg) applies, while the hook fail mode and
+// enablement, which are baked into the installed hooks, stay cfg's.
+func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[string]interface{} {
 	guardrailMode := "observe"
 	hookFailMode := "closed"
 	enabled := false
 	if cfg != nil {
 		guardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		if decisionCfg != nil {
+			guardrailMode = decisionCfg.EffectiveGuardrailModeForConnector(name)
+		}
 		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
@@ -2989,7 +3006,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 	// requests routed through this endpoint.
 	if a.scannerCfg != nil {
 		a.cfgMu.RLock()
-		hilt := a.scannerCfg.Guardrail.HILT
+		hilt := a.decisionConfig(r.Context()).Guardrail.HILT
 		a.cfgMu.RUnlock()
 		minSev := strings.ToUpper(strings.TrimSpace(hilt.MinSeverity))
 		if minSev == "" {

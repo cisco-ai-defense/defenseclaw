@@ -758,7 +758,10 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		}
 		events = append(events, enforcementEvent)
 	}
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	return observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.observedAt),
 			Source:     observability.SourceGateway, Connector: connector,
@@ -833,7 +836,10 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
+		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: facts.envelope(ctx, snapshot), Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
 			GenAIConversationID:                 optionalJudgeMetricText(facts.meta.SessionID),

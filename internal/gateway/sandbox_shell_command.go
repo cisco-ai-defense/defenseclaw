@@ -100,7 +100,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		EnforcementCapable:        action.EnforcementCapable,
 		DowngradeReadOnlyDataArgs: action.DowngradeReadOnlyDataArgs,
 	})
-	return mergeSandboxShellCommandVerdict(a.scannerCfg, firstNonEmpty(req.Connector, action.Connector), verdict, findings)
+	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector), verdict, findings)
 }
 
 // mergeSandboxShellCommandVerdict raises verdict to the action findings, the

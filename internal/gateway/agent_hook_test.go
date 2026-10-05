@@ -1286,10 +1286,10 @@ func TestAgentHookMode_HonorsPerConnectorOverride(t *testing.T) {
 	}
 	a := &APIServer{scannerCfg: cfg}
 
-	if got := a.agentHookMode("codex"); got != "action" {
+	if got := a.agentHookMode(context.Background(), "codex"); got != "action" {
 		t.Errorf("codex per-connector mode override = %q, want action", got)
 	}
-	if got := a.agentHookMode("cursor"); got != "observe" {
+	if got := a.agentHookMode(context.Background(), "cursor"); got != "observe" {
 		t.Errorf("cursor should inherit global observe, got %q", got)
 	}
 }

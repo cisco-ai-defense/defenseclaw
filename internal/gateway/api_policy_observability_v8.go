@@ -213,7 +213,10 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 		)
 		envelope.ObservedAt = observability.Present(completedAt)
 		envelope.Correlation.EvaluationID = operation.evaluationID
+		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
 		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityInfo),
 			LogLevel:                            observability.Present(observability.LogLevelInfo),
 			Outcome:                             apiPolicyEvaluationOutcome(verdict),
@@ -285,7 +288,10 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 		)
 		envelope.ObservedAt = observability.Present(completedAt)
 		envelope.Correlation.EvaluationID = operation.evaluationID
+		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
 		return builder.BuildLogGuardrailEvaluationFailed(observability.LogGuardrailEvaluationFailedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityHigh),
 			LogLevel: observability.Present(observability.LogLevelError), Outcome: observability.OutcomeFailed,
 			GenAIConversationID:                optionalJudgeMetricText(operation.meta.SessionID),
@@ -408,7 +414,10 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		decision = hookV8OptionalText(apiPolicyEvaluationDecision(verdict), 4096)
 		effectiveAction = hookV8OptionalText(verdict, 4096)
 	}
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
+		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(completedAt), Source: observability.SourceGateway,
 			Connector: operation.connector, Action: string(audit.ActionGuardrailOPAVerdict), Phase: operation.domain,

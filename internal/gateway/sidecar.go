@@ -1691,6 +1691,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if err != nil {
 		return fmt.Errorf("config reload rule pack preflight: %w", err)
 	}
+	// Identity-based guardrail profiles are derived, digested and their rule
+	// packs preloaded in the same candidate transaction.
+	profileCandidate, err := newGuardrailProfileSet(newCfg, true)
+	if err != nil {
+		return fmt.Errorf("config reload guardrail profiles: %w", err)
+	}
 	onlyReloadModeChange := onlyConfigReloadModeChanged(oldCfg, newCfg) &&
 		len(diff.Changed) == 1 && diff.Changed[0] == "gateway"
 	// restart mode authorizes a process replacement for changes that cannot be
@@ -1844,6 +1850,11 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		ruleManagedConnectors(current),
 		rulePackCandidate.connectorRules,
 	)
+	if api := s.apiSnapshot(); api != nil {
+		previousProfiles := api.guardrailProfileSet()
+		api.setGuardrailProfiles(profileCandidate)
+		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+	}
 	if s.router != nil {
 		if nextRulePack != nil {
 			s.router.SetRulePack(nextRulePack)

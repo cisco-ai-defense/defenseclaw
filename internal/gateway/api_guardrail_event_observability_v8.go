@@ -159,7 +159,10 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 		)
 		envelope.ObservedAt = observability.Present(facts.observedAt)
 		envelope.Correlation.EvaluationID = facts.request.EvaluationID
+		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
 			GenAIConversationID:                 optionalJudgeMetricText(facts.meta.SessionID),
