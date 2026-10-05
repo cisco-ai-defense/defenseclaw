@@ -1391,6 +1391,31 @@ def _current_action_connectors(
         return []
 
 
+def _current_judge_connectors(
+    connectors: list[str],
+    data_dir: str | os.PathLike[str] | None = None,
+) -> list[str]:
+    """Connectors an existing config already sends to the hook-lane LLM judge.
+
+    Mirrors ``_current_action_connectors`` (and ``setup``'s judge default) so
+    a re-run of init keeps the judge on when the operator presses Enter
+    (GAP-2642). ``"*"`` counts only while the judge is enabled."""
+    try:
+        from defenseclaw import config as cfg_mod
+
+        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
+            return []
+        judge = cfg_mod.load(data_dir=data_dir).guardrail.judge
+        gate = [connector_paths.normalize(str(c)) for c in (judge.hook_connectors or []) if str(c).strip()]
+        if not judge.enabled:
+            gate = [c for c in gate if c != "*"]
+        if gate == ["*"]:
+            return list(connectors)
+        return [c for c in connectors if connector_paths.normalize(c) in set(gate)]
+    except Exception:  # noqa: BLE001 - an unreadable config preselects nothing
+        return []
+
+
 def _prompt_action_connectors(
     connectors: list[str],
     current_action: list[str] | None = None,
@@ -1943,7 +1968,11 @@ def _prompt_first_run(
     # requested action set here.
     judge_candidates = [c for c in connectors if c in set(requested_action)]
     if judge_candidates:
-        judge_hook_connectors = _prompt_first_run_judge_connectors(judge_candidates, default_all=with_judge)
+        judge_hook_connectors = _prompt_first_run_judge_connectors(
+            judge_candidates,
+            default_all=with_judge,
+            current=_current_judge_connectors(judge_candidates, data_dir),
+        )
     else:
         judge_hook_connectors = []
         ux.subhead("LLM judge: skipped because no selected connector is in action mode.")
@@ -1978,12 +2007,19 @@ def _prompt_first_run(
     return connector_settings, scanner_mode, with_judge, judge_hook_connectors, start_gateway, verify
 
 
-def _prompt_first_run_judge_connectors(connectors: list[str], *, default_all: bool) -> list[str]:
+def _prompt_first_run_judge_connectors(
+    connectors: list[str],
+    *,
+    default_all: bool,
+    current: list[str] | None = None,
+) -> list[str]:
     """Ask which requested-action connectors should get the optional LLM judge.
 
     ``connectors`` intentionally includes candidates downgraded to observe by
     hook-contract admission. The operator's requested mode, rather than the
     effective fallback mode, controls whether the optional judge is offered.
+    ``current`` lists the connectors whose judge is already on; a re-run
+    preselects them so accepting the defaults keeps the judge (GAP-2642).
     """
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is already enabled for every active connector selected above.")
@@ -1992,10 +2028,23 @@ def _prompt_first_run_judge_connectors(connectors: list[str], *, default_all: bo
     ux.subhead("Configure provider/model/key later with `defenseclaw setup guardrail` or `defenseclaw setup llm`.")
     return _prompt_checkbox_selection(
         connectors,
-        default_selected=(connectors if default_all else []),
+        default_selected=(connectors if default_all else [c for c in connectors if c in set(current or ())]),
         title="Select action connector(s) for LLM judge.",
         empty_ok=True,
     )
+
+
+def _configured_judge_llm(data_dir: str | os.PathLike[str] | None) -> str:
+    """The judge's configured provider/model from an existing config, or ""."""
+    try:
+        from defenseclaw import config as cfg_mod
+
+        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
+            return ""
+        llm = cfg_mod.load(data_dir=data_dir).resolve_llm("guardrail.judge")
+        return (llm.model or llm.provider or "").strip()
+    except Exception:  # noqa: BLE001 - an unreadable config means nothing configured
+        return ""
 
 
 def _prompt_first_run_judge_llm_config(
@@ -2014,9 +2063,13 @@ def _prompt_first_run_judge_llm_config(
     """
     ux.section("LLM judge configuration")
     ux.subhead("These settings are saved to the unified llm block and used by the guardrail judge.")
+    configured = _configured_judge_llm(data_dir)
+    if configured:
+        # GAP-2642: a re-run keeps the judge's existing LLM unless asked.
+        ux.subhead(f"Current judge LLM: {configured}. Answer no to keep it.")
     if not click.confirm(
         "  Configure LLM judge provider/model/API settings now?",
-        default=True,
+        default=not configured,
     ):
         return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url, {}
 

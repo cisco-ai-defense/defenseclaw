@@ -3928,6 +3928,38 @@ class TestMultiConnectorInit(unittest.TestCase):
         ):
             self.assertEqual(cmd_init._current_action_connectors(["codex", "opencode"], "/x"), ["opencode"])
 
+    def test_rerun_preselects_connectors_whose_judge_is_on(self):
+        """GAP-2642: Enter at the judge step of a re-run keeps the judge on."""
+        from defenseclaw.commands import cmd_init
+
+        def judge_cfg(enabled, gate):
+            judge = SimpleNamespace(enabled=enabled, hook_connectors=gate)
+            return SimpleNamespace(guardrail=SimpleNamespace(judge=judge))
+
+        names = ["claudecode", "codex"]
+        with patch("defenseclaw.config.config_path_for_data_dir", return_value=__file__):
+            for cfg, want in (
+                (judge_cfg(True, ["claudecode"]), ["claudecode"]),
+                (judge_cfg(True, ["*"]), names),
+                (judge_cfg(False, ["*"]), []),
+            ):
+                with patch("defenseclaw.config.load", return_value=cfg):
+                    self.assertEqual(cmd_init._current_judge_connectors(names, "/x"), want)
+
+        with patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["claudecode"]) as prompt:
+            cmd_init._prompt_first_run_judge_connectors(names, default_all=False, current=["claudecode"])
+        self.assertEqual(prompt.call_args.kwargs["default_selected"], ["claudecode"])
+
+        # The follow-up LLM question defaults to keeping the configured judge LLM.
+        with patch.object(cmd_init, "_configured_judge_llm", return_value="bedrock/model-x"), \
+                patch.object(cmd_init.click, "confirm", return_value=False) as confirm:
+            got = cmd_init._prompt_first_run_judge_llm_config(
+                data_dir="/x", llm_provider="", llm_model="", llm_api_key="",
+                llm_api_key_env="", llm_base_url="",
+            )
+        self.assertFalse(confirm.call_args.kwargs["default"])
+        self.assertEqual(got, ("", "", "", "", "", {}))
+
     def test_single_connector_selection_prompts_trust_without_picker(self):
         from defenseclaw.commands import cmd_init
         from defenseclaw.inventory import agent_discovery as ad
