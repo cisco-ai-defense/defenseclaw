@@ -356,6 +356,23 @@ attributes:
     id: identifier-v1
     notes: nonempty bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.agent.identity.id
+  type: string
+  brief: Stable agent identity for one harness install of one user on one machine
+  examples:
+  - agt-3f9c0a1b2c3d4e5f
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 20
+      pattern: '^agt-[0-9a-f]{16}$'
+    notes: derived by the gateway from the machine id, the verified user, the connector and the config root; never a credential and never a metric label
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.agent.root.id
   type: string
   brief: Logical root agent
@@ -642,6 +659,43 @@ attributes:
       - compact
     notes: startup|resume|clear|compact
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.session.kind
+  type: string
+  brief: Kind of login session the agent runs in
+  examples:
+  - ssh
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - local
+      - ssh
+      - rdp
+      - console
+    notes: closed login-session vocabulary; assurance follows defenseclaw.user.principal.assurance
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.session.kerberos_principal
+  type: string
+  brief: Default Kerberos principal in the login session's credential cache
+  examples:
+  - alice@CORP.EXAMPLE.COM
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 512
+      pattern: '^[^\x00-\x20\x7f]+$'
+    notes: always claimed; read from the session credential cache header and never used to select a guardrail profile
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.session.resumed
   type: boolean
   brief: Whether execution resumed
@@ -766,6 +820,131 @@ attributes:
       - windows_sid
       - posix_uid
     notes: closed namespace so a consumer can join user.id without inferring the platform from its shape
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.principal
+  type: string
+  brief: Qualified directory principal of the end user behind user.id (UPN, Kerberos principal or domain-qualified account)
+  examples:
+  - alice@CORP.EXAMPLE.COM
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 512
+      pattern: '^[^\x00-\x20\x7f]+$'
+    notes: resolved from the OS directory for the account behind user.id; never derived from a display name, an email, a git identity or the service principal running the sidecar
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.domain
+  type: string
+  brief: Directory domain or Kerberos realm of the end-user principal
+  examples:
+  - CORP.EXAMPLE.COM
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 255
+      pattern: '^[^\x00-\x20\x7f]+$'
+    notes: DNS domain, NetBIOS domain or Kerberos realm as the OS reports it; absent for local accounts
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.directory
+  type: string
+  brief: Directory that owns the end-user account
+  examples:
+  - active_directory
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - local
+      - ldap
+      - active_directory
+      - entra_id
+      - okta
+      - other
+    notes: closed directory vocabulary; read from the OS only, never from an identity-provider API
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.tenant_id
+  type: string
+  brief: Cloud directory tenant of the end-user account
+  examples:
+  - 6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+    notes: tenant identifier from the OS join state (for example an Entra tenant GUID); absent for on-premises and local accounts
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.identity.source
+  type: string
+  brief: OS facility that resolved the end-user directory facts
+  examples:
+  - sssd
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+    notes: bounded lowercase source token such as nss_files, sssd, winbind, nss_ldap, sssd_infopipe, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso or hook_reported
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.principal.assurance
+  type: string
+  brief: Whether the end-user directory facts were verified by DefenseClaw or claimed by the hook
+  examples:
+  - verified
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - verified
+      - claimed
+    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; anything the hook reports is claimed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.group_count
+  type: int64
+  brief: Number of directory groups the end-user account belongs to
+  examples:
+  - 12
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 65535
+    notes: count only; group names never leave the endpoint on identity records
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.telemetry.input.reported
   type: boolean
@@ -2175,6 +2354,34 @@ groups:
           user_name: defenseclaw.user.name
           policy_id: defenseclaw.policy.id
           destination_app: defenseclaw.destination.app
+- id: correlation.identity
+  type: attribute_group
+  brief: End-user directory principal, login session and stable agent identity; attribution join keys, never a metric label set.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.tenant_id
+    requirement_level: recommended
+  - ref: defenseclaw.user.identity.source
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
+    requirement_level: recommended
+  - ref: defenseclaw.session.kind
+    requirement_level: recommended
+  - ref: defenseclaw.session.kerberos_principal
+    requirement_level: recommended
+  - ref: client.address
+    requirement_level: recommended
+  - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  body_fields: []
 - id: correlation.model.identity
   type: attribute_group
   brief: Optional source-reported provider, requested/returned model, and provider request/response identity without model-content fields.
@@ -2701,6 +2908,7 @@ groups:
   extends:
   - correlation.interaction
   - correlation.agent
+  - correlation.identity
   - genai.tool
   attributes: []
   body_fields:
@@ -2772,6 +2980,7 @@ groups:
   - telemetry.canary
   - correlation.interaction
   - correlation.agent
+  - correlation.identity
   - correlation.model.identity
   - correlation.tool.identity
   - cost.agent.reported
@@ -2899,6 +3108,8 @@ groups:
   - telemetry.canary
   - correlation.interaction
   - correlation.agent
+  - correlation.identity
+  - correlation.guardrail.profile
   - cost.agent.reported
   - content.input
   - content.output
@@ -3010,6 +3221,8 @@ groups:
   - span.core
   - correlation.interaction
   - correlation.agent
+  - correlation.identity
+  - correlation.guardrail.profile
   - cost.agent.reported
   - content.input
   - content.output
@@ -4860,6 +5073,13 @@ groups:
 producer_identity_sets: []
 producer_mappings: []
 attribute_extensions:
+- ref: client.address
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    notes: remote address of the login session (for example the SSH client); never a metric label
 - ref: db.collection.name
   field_class: identifier
   sensitivity: sensitive

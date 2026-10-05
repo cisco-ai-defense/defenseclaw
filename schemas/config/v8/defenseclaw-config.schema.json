@@ -1343,6 +1343,130 @@
         }
       }
     },
+    "guardrailProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Named guardrail policy overrides for the subjects guardrail.profile_assignments selects. Precedence: profile.connectors[c], then the profile field, then guardrail.connectors[c], then the application_protection overlay, then guardrail.*. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
+      "properties": {
+        "description": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "hilt": {
+          "$ref": "#/$defs/hilt"
+        },
+        "rule_pack_dir": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "block_message": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "connectors": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "$ref": "#/$defs/connectorName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/guardrailProfileConnector"
+          }
+        }
+      }
+    },
+    "guardrailProfileConnector": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-connector overrides inside one guardrail profile. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/guardrailModeOrInherit"
+        },
+        "hilt": {
+          "$ref": "#/$defs/hilt"
+        },
+        "block_message": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "rule_pack_dir": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        }
+      }
+    },
+    "guardrailProfileAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "match"
+      ],
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/stableName"
+        },
+        "match": {
+          "$ref": "#/$defs/guardrailProfileMatch"
+        }
+      }
+    },
+    "guardrailProfileMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Subjects an assignment selects. Keys combine with AND, the values of one key with OR. Only verified identity facts are compared; headers, hook payloads and claimed facts never select a profile.",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "connectors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "pattern": "^agt-[0-9a-f]{16}$"
+          }
+        }
+      }
+    },
     "guardrail": {
       "type": "object",
       "additionalProperties": false,
@@ -1494,6 +1618,31 @@
           "additionalProperties": {
             "$ref": "#/$defs/perConnectorGuardrail"
           }
+        },
+        "profiles": {
+          "type": "object",
+          "maxProperties": 1024,
+          "propertyNames": {
+            "$ref": "#/$defs/stableName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/guardrailProfile"
+          },
+          "description": "Identity-based guardrail profiles keyed by profile name. Not supported with the Secure Client integration."
+        },
+        "profile_assignments": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/guardrailProfileAssignment"
+          },
+          "description": "Ordered profile assignments; the first match wins."
+        },
+        "default_profile": {
+          "type": "string",
+          "pattern": "^(|[a-z0-9][a-z0-9_-]{0,63})$",
+          "default": "",
+          "description": "Profile for subjects no assignment selects. Empty keeps the guardrail.* configuration."
         }
       }
     },
@@ -2101,7 +2250,7 @@
       "oneOf": [
         {
           "type": "string",
-          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|µs|ms|s|m|h))*$"
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*$"
         },
         {
           "type": "integer",
@@ -2397,6 +2546,21 @@
           "type": "boolean",
           "default": false,
           "description": "Opt in to attaching the end-user email address a connector reports to identity telemetry. Off by default: unlike the uid or SID it accompanies, the address identifies a person across systems and is emitted as plaintext."
+        },
+        "include_user_principal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to attaching the end-user directory principal (UPN or Kerberos principal) to AI discovery inventory records. Off by default: like the email address, the principal identifies a person across systems."
+        },
+        "ide_inventory": {
+          "type": "string",
+          "enum": [
+            "all",
+            "ai_only",
+            "off"
+          ],
+          "default": "all",
+          "description": "IDE extension and plugin inventory: all lists every plugin, ai_only lists only plugins that match an AI signature, off disables the inventory. Plugin lists can reveal personal tooling."
         },
         "lookup_model_provenance_online": {
           "type": "boolean",
@@ -4198,7 +4362,7 @@
     },
     "acpPairName": {
       "type": "string",
-      "description": "Per-pair binding key, \"<client>/<agent>\" — the identifier `defenseclaw acp status` prints.",
+      "description": "Per-pair binding key, \"<client>/<agent>\" \u2014 the identifier `defenseclaw acp status` prints.",
       "pattern": "^[a-z0-9][a-z0-9_-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
     },
     "acpPairBindings": {

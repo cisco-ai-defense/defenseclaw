@@ -1801,6 +1801,77 @@ attributes:
     id: identity-v1
     notes: Source Blocked Boolean or exact decision=block derivation; false is meaningful
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.guardrail.profile.name
+  type: string
+  brief: Identity-based guardrail profile that supplied the decision configuration
+  examples:
+  - contractors
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    notes: operator-configured profile name from guardrail.profiles; absent when no profile applies and the global guardrail configuration decides
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.guardrail.profile.digest
+  type: string
+  brief: Content digest of the effective guardrail profile configuration
+  examples: ['sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: digest of the derived profile configuration computed at load and reload, so an audit can tie a decision to the exact configuration
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.guardrail.profile.match
+  type: string
+  brief: Why the guardrail profile was selected
+  examples:
+  - group
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - agent
+      - user
+      - group
+      - connector
+      - default
+      - default_unverified
+      - default_lookup_failed
+    notes: most specific matched assignment key (agent, then user, then group, then connector), or the default_profile reason
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.guardrail.profile.matched_group
+  type: string
+  brief: Directory group whose assignment selected the guardrail profile
+  examples:
+  - CORP\Contractors
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 256
+      pattern: '^[^\x00-\x1f\x7f]+$'
+    notes: the configured group selector that matched, present only when defenseclaw.guardrail.profile.match is group
+  introduced_in: telemetry-registry-v2
 groups:
 - id: correlation.security
   type: attribute_group
@@ -1822,6 +1893,22 @@ groups:
   - ref: defenseclaw.enforcement.id
     requirement_level: recommended
   - ref: defenseclaw.approval.id
+    requirement_level: recommended
+  body_fields: []
+- id: correlation.guardrail.profile
+  type: attribute_group
+  brief: Identity-based guardrail profile name, digest and match reason recorded on every decision it governs.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.digest
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.match
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.profile.matched_group
     requirement_level: recommended
   body_fields: []
 - id: security.guardrail
@@ -2085,6 +2172,8 @@ groups:
   extends:
   - correlation.agent
   - correlation.security
+  - correlation.identity
+  - correlation.guardrail.profile
   - security.guardrail
   attributes: []
   body_fields:
@@ -2138,6 +2227,8 @@ groups:
   - correlation.interaction
   - correlation.agent
   - correlation.security
+  - correlation.identity
+  - correlation.guardrail.profile
   - correlation.sandbox
   attributes: []
   body_fields:
@@ -2356,6 +2447,8 @@ groups:
   introduced_in: telemetry-registry-v1
   extends: []
   attributes:
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
   - ref: defenseclaw.evaluation.id
     requirement_level: recommended
   - ref: defenseclaw.guardrail.decision
@@ -2378,6 +2471,8 @@ groups:
   introduced_in: telemetry-registry-v1
   extends: []
   attributes:
+  - ref: defenseclaw.guardrail.profile.name
+    requirement_level: recommended
   - ref: defenseclaw.evaluation.id
     requirement_level: recommended
   - ref: defenseclaw.guardrail.raw_action
@@ -2549,6 +2644,8 @@ groups:
   - correlation.agent
   - correlation.tool.identity
   - correlation.security
+  - correlation.identity
+  - correlation.guardrail.profile
   - security.guardrail
   - security.guardrail.outcome
   - error.core
