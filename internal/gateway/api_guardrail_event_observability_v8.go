@@ -160,7 +160,7 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 		envelope.ObservedAt = observability.Present(facts.observedAt)
 		envelope.Correlation.EvaluationID = facts.request.EvaluationID
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
@@ -197,7 +197,9 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			DefenseClawAcpSurface:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.surface }),
 			DefenseClawAcpProfile:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.profile }),
 			DefenseClawAcpProtocolVersion:       optionalACPFact(facts.acp, func(_ *acpEvaluationV8Context) string { return acp.SchemaVersion }),
-		})
+		}
+		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	facts.recordMetrics(ctx, metricRuntime)
 	return logErr

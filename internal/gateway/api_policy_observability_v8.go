@@ -214,7 +214,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 		envelope.ObservedAt = observability.Present(completedAt)
 		envelope.Correlation.EvaluationID = operation.evaluationID
 		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityInfo),
@@ -256,7 +256,9 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 			DefenseClawSecuritySeverity:         severity,
 			DefenseClawGuardrailReason:          hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable:  severity.IsPresent(),
-		})
+		}
+		auditCallerIdentity(operation.signalCtx).Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
 }
@@ -290,7 +292,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 		envelope.ObservedAt = observability.Present(completedAt)
 		envelope.Correlation.EvaluationID = operation.evaluationID
 		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
-		return builder.BuildLogGuardrailEvaluationFailed(observability.LogGuardrailEvaluationFailedInput{
+		input := observability.LogGuardrailEvaluationFailedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityHigh),
@@ -321,7 +323,9 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 			DefenseClawSecuritySeverity:        severity,
 			DefenseClawGuardrailReason:         hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable: severity.IsPresent(),
-		})
+		}
+		auditCallerIdentity(operation.signalCtx).Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationFailed(input)
 	})
 	return err
 }
@@ -472,6 +476,7 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		ConditionOperationTerminal:          outcome != observability.OutcomeAttempted,
 		ConditionTechnicalFailure:           technicalErr != nil,
 	}
+	auditCallerIdentity(ctx).Identity.applyTo(&input)
 	return input
 }
 
