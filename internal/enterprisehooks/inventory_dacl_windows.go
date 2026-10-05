@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -21,12 +22,14 @@ import (
 )
 
 // inventoryDACLDotdirs enumerates the top-level user-profile subdirectories the
-// AI discovery scanner walks for skill, plugin, rule, and MCP-config signatures.
+// AI discovery scanner walks for skill, plugin, rule, and MCP-config signatures,
+// and the IDE folders the IDE plugin inventory reads (ideplugins.WindowsHomeDirs;
+// without them a managed host listed no IDE plugin for anyone, GAP-0042).
 // Kept in sync with the catalog under internal/inventory/ai_signatures.json —
 // this list covers the ancestor traversal that the scanner needs. Child ACEs
 // inherit from these parents via SUB_CONTAINERS_AND_OBJECTS_INHERIT so
 // per-file reads don't need a separate grant.
-var inventoryDACLDotdirs = append([]string{
+var inventoryDACLDotdirs = append(append([]string{
 	".claude",
 	".codex",
 	".cursor",
@@ -50,7 +53,7 @@ var inventoryDACLDotdirs = append([]string{
 	// Hermes for any user.
 	`AppData\Local\hermes\skills`,
 	`AppData\Local\hermes\plugins`,
-}, legacyconnector.InventoryDotDirs...)
+}, legacyconnector.InventoryDotDirs...), ideplugins.WindowsHomeDirs()...)
 
 // inventoryDACLGuardianOwnedDotdirs maps a dotdir to the connectors whose
 // enrollment puts it on that user's managed hook path (Kiro: .kiro\settings;

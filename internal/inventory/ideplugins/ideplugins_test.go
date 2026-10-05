@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -218,5 +219,46 @@ func TestScanOtherEditors(t *testing.T) {
 	}
 	if p := vs["Other.Ext|user"]; p.Enabled != EnabledOff {
 		t.Fatalf("vs other = %+v", p)
+	}
+}
+
+// A managed Windows gateway reads only the folders the enumerator grants it
+// (WindowsHomeDirs): every installation and plugin a Windows scan reports
+// must be inside one of them (GAP-0042).
+func TestWindowsHomeDirsCoverTheWindowsScan(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.0.1", "package.json"),
+		`{"name":"claude-code","publisher":"anthropic","version":"2.0.1"}`)
+	writeFile(t, filepath.Join(home, "AppData", "Roaming", "Code", "User", "profiles", "a1b2", "extensions.json"),
+		`[{"identifier":{"id":"anthropic.claude-code"},"version":"2.0.1","relativeLocation":"anthropic.claude-code-2.0.1"}]`)
+	writeJar(t, filepath.Join(home, "AppData", "Roaming", "JetBrains", "PyCharm2024.1", "plugins", "copilot", "lib", "copilot.jar"),
+		`<idea-plugin><id>com.github.copilot</id><version>1.5</version></idea-plugin>`)
+	writeFile(t, filepath.Join(home, "AppData", "Local", "Zed", "extensions", "installed", "html", "extension.toml"), "id = \"html\"\n")
+	writeFile(t, filepath.Join(home, "AppData", "Local", "nvim", "lazy-lock.json"), `{"copilot.lua":{"commit":"0123456789abcdef"}}`)
+
+	var granted []string
+	for _, dir := range WindowsHomeDirs() {
+		granted = append(granted, filepath.Join(home, filepath.FromSlash(strings.ReplaceAll(dir, `\`, "/"))))
+	}
+	covered := func(path string) bool {
+		for _, dir := range granted {
+			if path == dir || strings.HasPrefix(path, dir+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+	installs := Scan(home, "windows", Limits{})
+	plugins := 0
+	for _, inst := range installs {
+		for _, p := range inst.Plugins {
+			plugins++
+			if !covered(p.Path) {
+				t.Errorf("%s plugin %s at %s is outside the granted folders", inst.Product, p.ID, p.Path)
+			}
+		}
+	}
+	if plugins < 5 {
+		t.Fatalf("the Windows fixture scan found %d plugins, want 5: %+v", plugins, installs)
 	}
 }
