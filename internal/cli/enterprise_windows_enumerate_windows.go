@@ -274,6 +274,14 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		if _, cacheErr := enterpriseWindowsEnumerateGroupCacheWriter(enterprisehooks.WindowsEnrollmentGroupsCachePath(manifestPath), enumerateOpts.GroupCache); cacheErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not save the enrollment group cache: %v\n", cacheErr)
 		}
+		// The gateway's service account cannot read that cache: publish each
+		// user's verified directory facts and named groups where it can.
+		identityDir := enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
+		if spoolErr := enterpriseWindowsIdentitySpoolWriter(identityDir, enumerateOpts.GroupCache, enterpriseHookAuthorizationOwnershipSetter, func(format string, args ...any) {
+			fmt.Fprintf(stderr, format+"\n", args...)
+		}); spoolErr != nil {
+			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish identity facts: %v\n", spoolErr)
+		}
 		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
@@ -517,6 +525,7 @@ var (
 	// record beside the manifest.
 	enterpriseWindowsEnumerateGroupCacheLoader  = enterprisehooks.LoadWindowsEnrollmentGroupCache
 	enterpriseWindowsEnumerateGroupCacheWriter  = enterprisehooks.SaveWindowsEnrollmentGroupCache
+	enterpriseWindowsIdentitySpoolWriter        = enterprisehooks.WriteWindowsIdentitySpool
 	enterpriseWindowsEnumerateUnprotectedWriter = enterprisehooks.WriteWindowsUnprotectedAgents
 )
 

@@ -1,0 +1,106 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package enterprisehooks
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// IdentitySpoolAccount is one enrolled account the guardian resolves.
+type IdentitySpoolAccount struct {
+	UID  int
+	User string
+}
+
+// identitySpoolLookupTimeout bounds the privileged lookups for one account,
+// so one unreachable directory cannot stall the guardian's pass.
+const identitySpoolLookupTimeout = 10 * time.Second
+
+// WriteIdentitySpool resolves every account's privileged directory facts
+// and replaces dir's records with them: a record per account, and none for
+// an account no longer enrolled. setOwnership gives each new file (and the
+// directory) the guardian authorization ownership, root:<gateway group>,
+// before it is renamed into place, so the gateway never reads a partial or
+// unreadable record. An account whose lookups fail keeps no record; the
+// gateway then reports only what it resolves itself.
+func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error, logf func(string, ...any)) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("create identity spool: %w", err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil {
+		return fmt.Errorf("harden identity spool: %w", err)
+	}
+	if setOwnership != nil {
+		if err := setOwnership(dir); err != nil {
+			return fmt.Errorf("set identity spool ownership: %w", err)
+		}
+	}
+	keep := map[string]bool{}
+	realms := readRealmList(ctx)
+	for _, account := range accounts {
+		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
+			continue
+		}
+		name := strconv.Itoa(account.UID) + ".json"
+		keep[name] = true
+		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
+		record, err := collectIdentitySpoolRecord(lookupCtx, account, realms, time.Now().UTC())
+		cancel()
+		if err == nil {
+			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
+		}
+		if err != nil && logf != nil {
+			logf("[hook-guardian] identity facts for uid %d: %v", account.UID, err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	for _, entry := range entries {
+		if !keep[entry.Name()] {
+			_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
+		}
+	}
+	return nil
+}
+
+// trustedIdentityTool returns the first root-owned, non-writable candidate.
+func trustedIdentityTool(candidates ...string) string {
+	for _, candidate := range candidates {
+		info, err := os.Lstat(candidate)
+		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// boundedOutput trims command output to a sane size.
+func boundedOutput(data []byte) string {
+	const limit = 64 << 10
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	return strings.ToValidUTF8(string(data), "")
+}

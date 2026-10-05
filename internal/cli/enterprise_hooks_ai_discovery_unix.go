@@ -46,7 +46,10 @@ var enterpriseHookAIDiscoveryState struct {
 }
 
 func init() {
-	enterpriseHookAfterWatchReconcile = startEnterpriseHookAIDiscovery
+	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
+		startEnterpriseHookAIDiscovery(ctx, stderr, run)
+		startEnterpriseHookIdentitySpool(ctx, stderr, run)
+	}
 }
 
 // startEnterpriseHookAIDiscovery starts a pass in the background when one is
