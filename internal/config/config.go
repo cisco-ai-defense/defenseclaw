@@ -2635,29 +2635,8 @@ type PluginActionsConfig struct {
 	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
 }
 
-func Load() (*Config, error) {
-	return LoadFromFileWithRuntimeMigration(ConfigPath())
-}
-
 func LoadFromFile(configFile string) (*Config, error) {
-	return loadFromFile(configFile, false)
-}
-
-// LoadFromBytes applies the same defaults, migrations, environment bindings,
-// compatibility decoding, and validation as LoadFromFile, but decodes the
-// supplied immutable source bytes instead of rereading configFile. configFile
-// remains the source identity for relative defaults, diagnostics, trust checks,
-// and ConfigFilePath. Runtime-file migration is deliberately disabled because
-// a captured snapshot must never cause an ambient-path rewrite.
-func LoadFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, false, true)
-}
-
-// LoadCandidateFromBytes decodes an exact reload candidate without publishing
-// process-global provenance. The caller must set version.SetContentHash only
-// after the candidate has passed every compile/apply transaction boundary.
-func LoadCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, false, false, true)
+	return loadConfigSource(configFile, nil, false, true, false, true)
 }
 
 // LoadRuntimeV8FromBytes decodes the non-observability portions of an exact
@@ -2671,7 +2650,7 @@ func LoadRuntimeV8FromBytes(configFile string, raw []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, true, true)
+	candidate, err := loadConfigSource(configFile, append([]byte(nil), raw...), true, true, true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2702,7 +2681,6 @@ func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManag
 	}
 	candidate, err := loadConfigSource(
 		configFile,
-		false,
 		append([]byte(nil), raw...),
 		true,
 		false,
@@ -2729,7 +2707,6 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 ) (ObservabilityV8ManagedAIDOptions, error) {
 	candidate, err := loadConfigSource(
 		configFile,
-		false,
 		append([]byte(nil), raw...),
 		true,
 		false,
@@ -2827,14 +2804,6 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 }
 
-func LoadFromFileWithRuntimeMigration(configFile string) (*Config, error) {
-	return loadFromFile(configFile, true)
-}
-
-func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
-	return loadConfigSource(configFile, migrateRuntime, nil, false, true, false, true)
-}
-
 // LoadManagedFileForLifecycleRecovery loads a managed config like
 // LoadFromFile, without publishing provenance and without requiring the
 // standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
@@ -2845,12 +2814,11 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 // service stopped (GAP-1291). The gateway and every activation keep the
 // strict loaders.
 func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
-	return loadConfigSourceChecked(configFile, false, nil, false, false, false, true, false)
+	return loadConfigSourceChecked(configFile, nil, false, false, false, true, false)
 }
 
 func loadConfigSource(
 	configFile string,
-	migrateRuntime bool,
 	sourceBytes []byte,
 	sourceProvided bool,
 	publishProvenance bool,
@@ -2858,14 +2826,13 @@ func loadConfigSource(
 	enforceManagedTrust bool,
 ) (*Config, error) {
 	return loadConfigSourceChecked(
-		configFile, migrateRuntime, sourceBytes, sourceProvided,
+		configFile, sourceBytes, sourceProvided,
 		publishProvenance, runtimeV8, enforceManagedTrust, true,
 	)
 }
 
 func loadConfigSourceChecked(
 	configFile string,
-	migrateRuntime bool,
 	sourceBytes []byte,
 	sourceProvided bool,
 	publishProvenance bool,
@@ -3253,24 +3220,6 @@ func loadConfigSourceChecked(
 		seedProvenanceOnLoadSource(configFile, &cfg, sourceBytes, sourceProvided)
 	}
 
-	// Managed-enterprise config is an administrator-owned trust boundary while
-	// data_dir is intentionally writable by the lower-privilege service account.
-	// Never let ordinary gateway or root guardian startup promote legacy runtime
-	// state across that boundary. Managed upgrades must migrate config through an
-	// explicit administrator-controlled workflow; config.yaml remains authoritative.
-	if guardrailRuntimeMigrationAllowed(migrateRuntime, cfg.DeploymentMode) {
-		migrated, err := MigrateGuardrailRuntimeFile(configFile, cfg.DataDir)
-		if err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "guardrail_runtime_migration")
-			}
-			return nil, err
-		}
-		if migrated {
-			return loadFromFile(configFile, false)
-		}
-	}
-
 	return &cfg, nil
 }
 
@@ -3420,10 +3369,6 @@ func isLoopbackListenerHost(host string) bool {
 	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 // clearLegacyObservabilityRuntimeConfig makes the general application Config
@@ -4379,7 +4324,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	// observe-mode "would have blocked / would have asked" toasts
 	// stay quiet by default and are an explicit opt-in for operators
 	// tuning policy. Keep this in lockstep with
-	// DefaultNotificationsConfig() and cli/defenseclaw/config.py.
+	// cli/defenseclaw/config.py.
 	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
 	viper.SetDefault("notifications.block_enforced", true)
 	viper.SetDefault("notifications.block_would_block", false)

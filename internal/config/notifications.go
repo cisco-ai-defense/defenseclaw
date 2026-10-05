@@ -106,32 +106,6 @@ const NotificationsDefaultMaxPerMinute = 12
 // the matrix without taking a build-tag dependency.
 var DefaultNotificationsEnabled = runtime.GOOS == "darwin" || runtime.GOOS == "windows"
 
-// DefaultNotificationsConfig returns the recommended starting point
-// for fresh installs: master switch defaults to true on macOS and Windows and
-// false elsewhere (see DefaultNotificationsEnabled). Categories
-// favor signal over noise — a fresh install only notifies for
-// things that ACTUALLY happened (enforced block, real native ask).
-// BlockWouldBlock defaults to false; observe-mode "would have
-// blocked" / "would have asked" toasts are off by default and are
-// an explicit opt-in for operators tuning a strict policy. Sources
-// remain on so opting BlockWouldBlock back in still hits every
-// emission site without a second tuning pass.
-func DefaultNotificationsConfig() NotificationsConfig {
-	return NotificationsConfig{
-		Enabled:         DefaultNotificationsEnabled,
-		BlockEnforced:   true,
-		BlockWouldBlock: false,
-		HITLApproval:    true,
-		Sources: NotificationSourceFilter{
-			Hook:        true,
-			Guardrail:   true,
-			AssetPolicy: true,
-		},
-		DedupWindow:  NotificationsDefaultDedupWindow,
-		MaxPerMinute: NotificationsDefaultMaxPerMinute,
-	}
-}
-
 // EffectiveDedupWindow returns DedupWindow when set, otherwise the
 // package default. Used by the dispatcher so callers do not
 // distinguish unset from explicit-zero (zero is interpreted as

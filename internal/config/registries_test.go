@@ -44,7 +44,7 @@ func TestLoadRegistriesFromYAML(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestLoadEmptyRegistriesIsZeroValue(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", tmpDir)
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}

@@ -2926,10 +2926,8 @@ class NotificationsConfig:
     and ``hitl_approval`` are on so users see real blocks and real
     chat-side asks, while ``block_would_block`` is OFF so the
     observe-mode "would have blocked / would have asked" toasts
-    stay quiet by default. Keep these defaults in lockstep with
-    ``internal/config/notifications.go``'s
-    ``DefaultNotificationsConfig`` and the viper SetDefault calls
-    in ``internal/config/config.go``.
+    stay quiet by default. Keep these defaults in lockstep with the
+    viper SetDefault calls in ``internal/config/config.go``.
 
     Throttle defaults match the Go side
     (``dedup_window=30s``, ``max_per_minute=12``); zero values are

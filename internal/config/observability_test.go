@@ -112,7 +112,7 @@ observability:
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}

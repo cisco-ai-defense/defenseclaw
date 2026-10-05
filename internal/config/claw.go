@@ -569,11 +569,6 @@ func (c *Config) InstalledSkillCandidates(skillName string) []string {
 	return candidates
 }
 
-// ClawHomeDir returns the resolved home directory for the active claw framework.
-func (c *Config) ClawHomeDir() string {
-	return c.ConnectorHomeDir(c.activeConnector())
-}
-
 // OpenClawConfigCandidates returns the openclaw.json paths whose presence
 // marks OpenClaw as set up on this machine: claw.config_file and
 // <claw.home_dir>/openclaw.json, with "~/" expanded and duplicates removed.
