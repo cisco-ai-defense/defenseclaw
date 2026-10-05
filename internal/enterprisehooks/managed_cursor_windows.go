@@ -38,21 +38,6 @@ const (
 
 var windowsCursorManagedRootResolver = defaultWindowsCursorManagedRoot
 
-// windowsCursorManagedTrustStrictAncestors returns true when the strict-
-// mode env knob is explicitly set, matching the semantics of the trust
-// package's package-private helper. The env var name is sourced from the
-// exported managed.TrustStrictAncestorsEnv constant so a rename there
-// propagates automatically.
-func windowsCursorManagedTrustStrictAncestors() bool {
-	switch strings.ToLower(strings.TrimSpace(
-		os.Getenv(managed.TrustStrictAncestorsEnv),
-	)) {
-	case "1", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 // WindowsCursorManagedRuntimeTarget binds a machine-authorized SID to only
 // that user's canonical DefenseClaw runtime. No token is stored in ProgramData.
 type WindowsCursorManagedRuntimeTarget struct {
@@ -579,7 +564,7 @@ func validateWindowsCursorManagedPublicArtifacts(
 			)
 			if removeErr == nil &&
 				!connector.WindowsCursorEnterpriseHooksSemanticallyEqual(cleaned, artifacts.hooks.data) {
-				if windowsCursorManagedTrustStrictAncestors() {
+				if managed.TrustStrictAncestors() {
 					return artifacts, errors.New("enterprise hooks: Cursor hook references remain without ownership metadata")
 				}
 				// Bulldoze reclaim: a prior scoped install stamped
@@ -1788,6 +1773,14 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 			return nil
 		}
 		if err := windowsCursorOptionsMatch(artifacts.parsed, opts); err != nil {
+			// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+			// preserves the refuse-on-drift posture - a hardened
+			// deployment must NOT silently reclaim identity-drifted
+			// artifacts because that masks the exact tamper signal
+			// operators configure strict mode to catch.
+			if managed.TrustStrictAncestors() {
+				return err
+			}
 			// Bulldoze: the Cursor managed artifacts authenticated as OURS
 			// (validateWindowsCursorManagedArtifacts passed above) but their
 			// scoped identity does not match the current install (same

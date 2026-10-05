@@ -24453,14 +24453,36 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $nuclearSafeRootPattern =
         '^[A-Z]:\\(Program Files|ProgramData)\\Cisco\\' +
         'Cisco Secure Client\\DefenseClaw(-Cert)?(\\|$)'
+    # Canonicalize both roots before matching the safe-root pattern.
+    # A raw-string regex over the caller-supplied path accepts
+    # traversal segments ("..\..") that still LITERALLY match the
+    # pattern but resolve to a path outside the Cisco scope - which
+    # the nuclear teardown would then takeown/icacls/remove-item.
+    # [IO.Path]::GetFullPath normalizes "..", ".", redundant
+    # separators, and alt-separators into the canonical absolute
+    # path. Pass the canonicalized values through to the nuclear
+    # function so the function body operates on the same shape the
+    # safe-root check saw.
+    $nuclearInstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+        $InstallRoot
+    }
+    else {
+        [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\')
+    }
+    $nuclearStateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+        $StateRoot
+    }
+    else {
+        [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+    }
     if ($Action -eq 'Uninstall' -and $Purge -and
         -not (Test-DefenseClawTrustStrictAncestors) -and
-        $InstallRoot -match $nuclearSafeRootPattern -and
-        $StateRoot   -match $nuclearSafeRootPattern) {
+        $nuclearInstallRoot -match $nuclearSafeRootPattern -and
+        $nuclearStateRoot   -match $nuclearSafeRootPattern) {
         return Invoke-DefenseClawNuclearUninstall `
             -Layout @{
-                InstallRoot = $InstallRoot
-                StateRoot   = $StateRoot
+                InstallRoot = $nuclearInstallRoot
+                StateRoot   = $nuclearStateRoot
             } `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName

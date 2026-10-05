@@ -279,6 +279,16 @@ func relaxAncestorTrustJudgement(advisory bool, path, label string, err error) e
 }
 
 func trustStrictAncestors() bool {
+	return TrustStrictAncestors()
+}
+
+// TrustStrictAncestors reports whether DEFENSECLAW_MANAGED_TRUST_STRICT_
+// ANCESTORS is set to a truthy value. Exported so callers outside this
+// package (enterprisehooks reclaim paths, Windows filelock trust checks)
+// can honor the same strict/non-strict toggle without duplicating the
+// env-var parse, and so a future rename of the env var only has to
+// change the TrustStrictAncestorsEnv constant.
+func TrustStrictAncestors() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(TrustStrictAncestorsEnv))) {
 	case "1", "true", "yes", "on":
 		return true

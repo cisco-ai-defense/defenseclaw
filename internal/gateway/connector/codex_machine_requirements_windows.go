@@ -153,6 +153,15 @@ func ReconcileWindowsCodexMachineRequirements(
 				ownershipAdopted = true
 				state = windowsCodexMachineOwnership{}
 			} else if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
+				// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+				// preserves refuse-on-drift: a hardened deployment must
+				// NOT silently adopt a mismatched ownership record,
+				// because that masks exactly the tamper signal operators
+				// configure strict mode to catch (a prior install's
+				// scoped layout surviving into a new scope).
+				if managed.TrustStrictAncestors() {
+					return err
+				}
 				// Bulldoze: ownership metadata is a valid DefenseClaw record
 				// but belongs to a prior install with a different ManagedDir
 				// / HookBinary / RequirementsPath (common cause: an unsigned

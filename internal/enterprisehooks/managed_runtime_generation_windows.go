@@ -24,6 +24,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -1017,10 +1018,13 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		// Bulldoze: a bundle whose Connector + TargetSID + GenerationID
 		// identify it as ours but whose DataDir / HookExecutable point at
 		// a prior scoped install's layout is an orphan from an unsigned
-		// certification cycle. Log a diagnostic and overwrite the bundle
-		// fields with the current install's canonical values. The
-		// subsequent generation stamp rewrites the on-disk bundle with
-		// the corrected scope.
+		// certification cycle. Log a diagnostic and overwrite the in-
+		// memory bundle fields with the current install's canonical
+		// values. The caller is loadUnselectedWindowsManagedRuntimeBundle,
+		// used by GC: once the corrected-identity bundle is validated,
+		// the GC flow DELETES the on-disk bundle at the current DataDir
+		// (no on-disk rewrite). Install's regenerate path writes a fresh
+		// bundle separately when it next publishes a selector entry.
 		fmt.Fprintf(os.Stderr,
 			"[enterprise-hooks] reclaiming identity-drifted managed runtime bundle "+
 				"for %s/%s/%s: bundle DataDir=%q HookExecutable=%q, current "+
@@ -1927,8 +1931,21 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 			"enterprise hooks: refusing to remove a managed runtime selector entry owned by another deployment",
 		)
 	}
+	strict := managed.TrustStrictAncestors()
 	if entry.HookExecutable != opts.HookExecutable ||
 		!sameWindowsEnterprisePath(entry.HookExecutable, opts.HookExecutable) {
+		if strict {
+			// Strict mode preserves refuse-on-drift: a hardened deployment
+			// MUST fail removal when the stored selector entry's hook
+			// executable path does not match the current install. Silently
+			// retiring it masks tampering with the hook-launcher binding.
+			return fmt.Errorf(
+				"enterprise hooks: refusing to remove managed runtime selector "+
+					"for %s/%s - stored HookExecutable %q does not match current %q",
+				opts.Connector, opts.TargetSID,
+				entry.HookExecutable, opts.HookExecutable,
+			)
+		}
 		// Bulldoze: the entry has a stale HookExecutable path (prior
 		// unsigned-certification install at a different scoped InstallRoot
 		// left a runtime selector pointing at its now-dead bin/
@@ -1943,6 +1960,14 @@ func validateWindowsManagedRuntimeSelectorTargetAgainstRemoval(
 	}
 	if opts.DataDir != "" && (entry.DataDir != opts.DataDir ||
 		!sameWindowsEnterprisePath(entry.DataDir, opts.DataDir)) {
+		if strict {
+			return fmt.Errorf(
+				"enterprise hooks: refusing to remove managed runtime selector "+
+					"for %s/%s - stored DataDir %q does not match current %q",
+				opts.Connector, opts.TargetSID,
+				entry.DataDir, opts.DataDir,
+			)
+		}
 		// Bulldoze: same posture as the HookExecutable mismatch above. A
 		// stale DataDir from a prior install's per-user runtime path does
 		// not block removal; the install reconcile replaces it with the

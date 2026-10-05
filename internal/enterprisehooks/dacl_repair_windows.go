@@ -8,7 +8,6 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -148,6 +147,14 @@ func enableWindowsThreadPrivilege(token windows.Token, name string) error {
 // opened with FILE_OPEN_REPARSE_POINT and must be owned by the manifest SID.
 // An attacker therefore cannot redirect LocalSystem DACL repair through a
 // junction to an object outside the profile.
+// repairWindowsTargetOwnedPathDACLNoFollow repairs a per-user path without
+// following reparse points. The impersonated-target caller runs with the
+// target's token so cannot invoke LocalSystem repair privileges; admin-
+// reclaim must stay refused here. The privileged guardian caller (which
+// does hold SeTakeOwnershipPrivilege + SeRestorePrivilege via
+// repairWindowsTargetOwnedPathDACL and friends, not this function) is
+// never routed through here, so no exported allowAdminReclaim exists
+// yet - all current callers get the strict posture by construction.
 func repairWindowsTargetOwnedPathDACLNoFollow(
 	home string,
 	path string,
@@ -345,27 +352,23 @@ func validateWindowsGuardianACLHandle(
 		ownerOK = windowsEnterpriseProfileAnchorOwner(owner, target)
 	}
 	if !ownerOK {
-		// Bulldoze: a prior unsigned certification install done under an
-		// elevated token (LocalSystem or BUILTIN\Administrators) can leave
-		// per-user runtime files owned by that admin principal instead of
-		// the target user SID. Those are the ONLY orphan owners that are
-		// trusted enough to transfer; a foreign user SID or a well-known
-		// group outside the admin set stays fatal. The caller's final
-		// SetSecurityInfo (with OWNER_SECURITY_INFORMATION added) transfers
-		// ownership to the target SID so subsequent reconciles see a
-		// canonical owner.
-		if !final || !windowsEnterpriseAdminIdentity(owner) {
-			return fmt.Errorf(
-				"owner SID %s is not trusted for target SID %s",
-				windowsSIDString(owner),
-				windowsSIDString(target),
-			)
-		}
-		fmt.Fprintf(os.Stderr,
-			"[enterprise-hooks] reclaiming admin-owned per-user runtime file "+
-				"(owner=%s, target=%s): transferring ownership to target SID\n",
+		// Admin reclaim is NOT performed on the impersonated-target path.
+		// repairWindowsTargetOwnedPathDACLNoFollow (the only caller of
+		// this validator) runs under the target's token, which has
+		// neither SeTakeOwnershipPrivilege nor SeRestorePrivilege, so a
+		// SetSecurityInfo attempting to transfer admin ownership would
+		// fail - and silently "accepting" an admin-owned file as if the
+		// transfer would succeed hides the drift from the guardian-side
+		// repair that CAN transfer it. Keep this check strict: any owner
+		// that is not the exact target SID (or, for the profile root,
+		// the profile-anchor set) is fatal. Guardian-side repair runs
+		// through a different path (repairWindowsTargetOwnedPathDACL)
+		// where privileged ownership transfer is wired in.
+		return fmt.Errorf(
+			"owner SID %s is not trusted for target SID %s",
 			windowsSIDString(owner),
-			windowsSIDString(target))
+			windowsSIDString(target),
+		)
 	}
 	if final {
 		// This query is bound to the exact no-follow handle that will receive

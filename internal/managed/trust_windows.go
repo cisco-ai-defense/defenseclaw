@@ -537,6 +537,17 @@ func windowsWorldSID(sid *windows.SID) bool {
 }
 
 func windowsTrustedOwner(sid *windows.SID) bool {
+	return IsWindowsTrustedAdminOwner(sid)
+}
+
+// IsWindowsTrustedAdminOwner reports whether the given SID identifies a
+// platform-installer-trusted administrator principal: SYSTEM, BUILTIN\
+// Administrators, or NT SERVICE\TrustedInstaller. Callers outside this
+// package (connector filelock + hook-API token validators, enterprise-
+// hooks DACL repair) use this to decide whether an admin-owned leaf is
+// safe to adopt during install reconcile. Centralized here so the
+// well-known SID string lives in exactly one place.
+func IsWindowsTrustedAdminOwner(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}

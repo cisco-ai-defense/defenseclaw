@@ -26,6 +26,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -399,13 +400,7 @@ func validateWindowsManagedFileLockHandleForTarget(
 		// the exact 4-ACE canonical layout, so a trusted admin owner on
 		// an otherwise canonical lock is safe to adopt. A foreign user
 		// SID or non-admin group stays fatal.
-		adminSystem, systemErr := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
-		adminBuiltin, builtinErr := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-		trustedInstaller, tiErr := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
-		isAdmin := (systemErr == nil && owner.Equals(adminSystem)) ||
-			(builtinErr == nil && owner.Equals(adminBuiltin)) ||
-			(tiErr == nil && owner.Equals(trustedInstaller))
-		if !isAdmin {
+		if !managed.IsWindowsTrustedAdminOwner(owner) {
 			return fmt.Errorf("managed lock owner does not match effective target user")
 		}
 		fmt.Fprintf(os.Stderr,

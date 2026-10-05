@@ -157,6 +157,14 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 			return nil
 		}
 		if err := validateWindowsClaudeManagedPolicyTeardownState(parsed, opts, expected); err != nil {
+			// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+			// preserves refuse-on-drift. A hardened deployment must NOT
+			// silently delete identity-drifted policy + state because
+			// that masks the exact tamper signal operators configure
+			// strict mode to catch.
+			if managed.TrustStrictAncestors() {
+				return err
+			}
 			// Bulldoze: the on-disk Claude managed policy state authenticated
 			// as OURS (ownership + SHA256 check above passed) but its scoped
 			// identity does not match the current install (common cause: a
