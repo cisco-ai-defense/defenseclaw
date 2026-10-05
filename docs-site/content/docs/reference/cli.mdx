@@ -806,7 +806,7 @@ Setup. See [Install with an MDM](/docs/enterprise/mdm).
 | `CONFIG=<file>` | Absolute path of the config. A first `/ensure` needs it and exits `1639` without it |
 | `MANIFEST=<file>` | Absolute path of a guardian target manifest. `/install` needs both `CONFIG=` and `MANIFEST=`; `/ensure` prepares a manifest from the config |
 | `ALLOWEDSIGNERS=<sha256>,<sha256>` | Accepted Authenticode signer thumbprints, comma-separated |
-| `JSON=1`, `NOSTART=1`, `PURGE=1` | Print JSON, stage without starting, remove state on uninstall |
+| `JSON=1`, `NOSTART=1`, `PURGE=1` | Print JSON, stage without starting, also remove each enrolled account's DefenseClaw data and per-user binaries on uninstall |
 | `TIMEOUTSECONDS=<n>` | Lifecycle timeout, from 60 to 7200 seconds. Default 1800 |
 | `/quiet`, `/norestart` | Accepted and ignored |
 
