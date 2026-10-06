@@ -247,6 +247,8 @@ class HintEngine:
     def _inventory_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
+        if state.panel_view == "detail":
+            return "KEYS  PgUp/PgDn scroll detail | Esc close | j/k move | h/l sub-tab | r scan."
         return (
             "KEYS  h/l sub-tab | j/k move | Enter detail | 1-4 filter (Skills/Plugins only) | "
             "o fast scan scope | r scan."
