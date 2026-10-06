@@ -296,7 +296,7 @@ rules:
 	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
 	raw := func(strict string) []byte {
 		return []byte(fmt.Sprintf(
-			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  profiles:\n    strict: %s\n    watch: {mode: observe}\n  default_profile: watch\nobservability: {}\n",
+			"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nguardrail:\n  enabled: true\n  rule_pack_dir: \"\"\n  profiles:\n    strict: %s\n    watch: {mode: observe}\n  profile_assignments:\n    - {profile: strict, match: {users: [\"1001\"]}}\n  default_profile: watch\nobservability: {}\n",
 			fixture.dataDir, strict,
 		))
 	}
@@ -345,7 +345,6 @@ rules:
 		t.Fatalf("digest changes = %+v, want strict only", changes)
 	}
 	ctx := context.WithValue(context.Background(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
-	set.assignments = []config.ProfileAssignment{{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}}}
 	ctx = api.withGuardrailProfileDecision(ctx, "codex")
 	if ids := findingIDs(scanAllRulesForConnectorFor(ctx, "codex", "profile_marker_token", "exec")); !containsRuleID(ids, "PROFILE-MARKER") {
 		t.Fatalf("strict profile did not scan with its rule pack: %v", ids)
