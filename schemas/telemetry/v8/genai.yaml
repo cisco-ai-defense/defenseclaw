@@ -3110,6 +3110,7 @@ groups:
   - correlation.agent
   - correlation.identity
   - correlation.guardrail.profile
+  - correlation.policy.effective
   - cost.agent.reported
   - content.input
   - content.output
@@ -3223,6 +3224,7 @@ groups:
   - correlation.agent
   - correlation.identity
   - correlation.guardrail.profile
+  - correlation.policy.effective
   - cost.agent.reported
   - content.input
   - content.output

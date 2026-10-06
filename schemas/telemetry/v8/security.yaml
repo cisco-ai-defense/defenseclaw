@@ -1872,6 +1872,37 @@ attributes:
       pattern: '^[^\x00-\x1f\x7f]+$'
     notes: the configured group selector that matched, present only when defenseclaw.guardrail.profile.match is group
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.effective_digest
+  type: string
+  brief: Effective policy digest of the configuration generation that made the decision
+  examples: ['sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: effective_policy_digest of config.yaml and its policy assets, the value /health reports as policy.effective_digest, so a fleet can tie each decision to the exact applied policy
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.policy.generation
+  type: int64
+  brief: In-process configuration generation that made the decision
+  examples:
+  - 3
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 1
+      max: 9223372036854775807
+    notes: the gateway's applied generation counter, the value /health reports as policy.generation; it increments on every configuration or policy asset swap
+  introduced_in: telemetry-registry-v2
 groups:
 - id: correlation.security
   type: attribute_group
@@ -1909,6 +1940,18 @@ groups:
   - ref: defenseclaw.guardrail.profile.match
     requirement_level: recommended
   - ref: defenseclaw.guardrail.profile.matched_group
+    requirement_level: recommended
+  body_fields: []
+- id: correlation.policy.effective
+  type: attribute_group
+  brief: Effective policy digest and configuration generation recorded on every decision they governed.
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends: []
+  attributes:
+  - ref: defenseclaw.policy.effective_digest
+    requirement_level: recommended
+  - ref: defenseclaw.policy.generation
     requirement_level: recommended
   body_fields: []
 - id: security.guardrail
@@ -2174,6 +2217,7 @@ groups:
   - correlation.security
   - correlation.identity
   - correlation.guardrail.profile
+  - correlation.policy.effective
   - security.guardrail
   attributes: []
   body_fields:
@@ -2229,6 +2273,7 @@ groups:
   - correlation.security
   - correlation.identity
   - correlation.guardrail.profile
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields:
@@ -2646,6 +2691,7 @@ groups:
   - correlation.security
   - correlation.identity
   - correlation.guardrail.profile
+  - correlation.policy.effective
   - security.guardrail
   - security.guardrail.outcome
   - error.core
