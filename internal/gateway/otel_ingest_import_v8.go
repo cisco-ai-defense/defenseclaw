@@ -361,7 +361,7 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 	}
 	meta, found := a.hookLifecycleSnapshot(authenticatedSource, conversationID, "")
 	if !found {
-		return fields, false, nil
+		return inboundConversationRootAgentV8(target, authenticatedSource, correlation, fields, selected), false, nil
 	}
 	// An agent or turn the native rail only inferred from the durable prompt
 	// cursor is not a sender report, and it can differ from the live hook
@@ -472,6 +472,31 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		}
 	}
 	return fields, true, nil
+}
+
+// inboundConversationRootAgentV8 names the conversation's root agent on a
+// native record that no hook of the conversation has reached yet: Codex
+// exports its user_prompt log as the prompt is submitted, while the hooks
+// still run. The hook records derive the root agent from the conversation
+// the same way (hookLLMEventMeta), so the record joins them (GAP-0082).
+func inboundConversationRootAgentV8(
+	target observability.InboundTarget,
+	source string,
+	correlation *observability.Correlation,
+	fields []observability.InboundMappedField,
+	selected map[string]bool,
+) []observability.InboundMappedField {
+	if correlation.AgentID != "" || selected["gen_ai.agent.id"] {
+		return fields
+	}
+	correlation.AgentID = stableLLMEventID("agent", source, correlation.SessionID, "root")
+	if field, ok := inboundTargetFieldsByName(target)["gen_ai.agent.id"]; ok {
+		fields = append(fields, observability.NewInboundMappedString(field, correlation.AgentID))
+		if selected != nil {
+			selected["gen_ai.agent.id"] = true
+		}
+	}
+	return fields
 }
 
 func selectedInboundLogTime(record *logspb.LogRecord, receipt time.Time) (time.Time, error) {

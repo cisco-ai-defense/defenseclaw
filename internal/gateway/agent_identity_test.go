@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 func agentIdentityTestSetup(t *testing.T) {
@@ -116,6 +117,53 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("identity %s missing from %+v", want, body.Identities)
+	}
+}
+
+// The session registry is in memory, so a session resumed after a gateway
+// restart is minted again; it is not counted twice. Doctor's hook probe is
+// not agent use and is not recorded (GAP-0086).
+func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
+	agentIdentityTestSetup(t)
+	store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	facts := agentIdentityFacts{ID: "agt-00000000000000c1", UserID: "4545", Connector: "claudecode", MachineHash: "m"}
+	recorder.observe(facts, "sess-a", true)
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	// After the restart: session A resumed, then a new session B.
+	recorder.observe(facts, "sess-a", true)
+	recorder.observe(facts, "sess-a", false)
+	recorder.observe(facts, "sess-b", true)
+	stored, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := recorder.snapshot()
+	if rows := mergeAgentIdentityRows(stored, pending, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].SessionsSeen != 2 {
+		t.Fatalf("buffered view = %+v, want 2 sessions", rows)
+	}
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{}); err != nil || len(rows) != 1 ||
+		rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "sess-b" {
+		t.Fatalf("stored rows = %+v, err %v; want 2 sessions, last sess-b", rows, err)
+	}
+
+	dave := withManagedHookPeer(ctx, managedHookPeer{UID: 4646, Name: "dave", Home: t.TempDir()})
+	probe := agentIdentityForGenericHook(dave, agentHookRequest{
+		ConnectorName: "claudecode", SessionID: doctorProbeSessionID, HookEventName: "SessionStart",
+		Payload: map[string]interface{}{},
+	})
+	if pending, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
+		t.Fatalf("doctor probe recorded identity %q: %+v", probe.IdentityID, pending[probe.IdentityID])
 	}
 }
 

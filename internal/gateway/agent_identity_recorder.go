@@ -50,7 +50,9 @@ var sharedAgentIdentities = &agentIdentityRecorder{
 }
 
 // observe records one hook of an agent identity. newSession is true when the
-// hook started a session the registry had not seen.
+// hook started a session the registry had not seen; the registry is in
+// memory, so the batch keeps the first session it counted for the upsert to
+// recognize a session resumed after a restart.
 func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID string, newSession bool) {
 	if r == nil || facts.ID == "" {
 		return
@@ -73,11 +75,15 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserName != "" {
 		rec.UserName = facts.UserName
 	}
-	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
-		rec.LastSessionID = sessionID
-	}
-	if newSession {
+	sessionID = strings.TrimSpace(sessionID)
+	if newSession && sessionID != "" && sessionID != rec.LastSessionID {
+		if rec.SessionsSeen == 0 {
+			rec.FirstSessionID = sessionID
+		}
 		rec.SessionsSeen++
+	}
+	if sessionID != "" {
+		rec.LastSessionID = sessionID
 	}
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {
 		r.hints[facts.ID] = facts.InstallHint
@@ -116,6 +122,9 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
 		}
 		if old.FirstSeen.Before(cur.FirstSeen) {
 			cur.FirstSeen = old.FirstSeen
+		}
+		if old.SessionsSeen > 0 {
+			cur.FirstSessionID = old.FirstSessionID
 		}
 		cur.SessionsSeen += old.SessionsSeen
 		if cur.UserName == "" {
@@ -311,6 +320,12 @@ func mergeAgentIdentityRows(
 			order = append(order, id)
 			continue
 		}
+		// The way the upsert counts: a buffered session that resumes the
+		// stored last session is not a new one.
+		rec.SessionsSeen += buffered.SessionsSeen
+		if buffered.SessionsSeen > 0 && buffered.FirstSessionID != "" && buffered.FirstSessionID == rec.LastSessionID {
+			rec.SessionsSeen--
+		}
 		if buffered.LastSeen.After(rec.LastSeen) {
 			rec.LastSeen = buffered.LastSeen
 			if buffered.LastSessionID != "" {
@@ -323,7 +338,6 @@ func mergeAgentIdentityRows(
 		if buffered.UserName != "" {
 			rec.UserName = buffered.UserName
 		}
-		rec.SessionsSeen += buffered.SessionsSeen
 	}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
