@@ -144,3 +144,8 @@ def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["protection", "enable", DB], obj=app)
     assert result.exit_code == 3
     assert "managed" in result.output
+    app.logger.log_action.assert_called_once_with(
+        "guardrail-config",
+        "guardrail.rules.protections",
+        f"outcome=refused reason=managed_device command=guardrail protection enable {DB}",
+    )

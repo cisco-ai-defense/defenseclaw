@@ -103,7 +103,14 @@ def audit_managed_refusal(action: str, target: str, details: str = "") -> None:
     records CLI events is down)."""
     try:
         ctx = click.get_current_context(silent=True)
-        logger = getattr(getattr(ctx, "obj", None), "logger", None) if ctx is not None else None
+        app = getattr(ctx, "obj", None) if ctx is not None else None
+        logger = getattr(app, "logger", None)
+        if logger is None and ctx is not None:
+            # ``config`` skips the startup load, so it has no logger yet.
+            from defenseclaw import config as config_module
+            from defenseclaw.logger import Logger
+
+            logger = Logger.from_config(getattr(app, "cfg", None) or config_module.load())
         if logger is not None:
             logger.log_action(action, target, f"outcome=refused reason=managed_device {details}".strip())
     except Exception:  # noqa: BLE001 - auditing must not turn the refusal into a crash

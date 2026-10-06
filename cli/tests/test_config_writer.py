@@ -117,6 +117,26 @@ def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeyp
     config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
 
 
+def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
+    # `config` skips the startup load, so the refusal opens its own logger.
+    from unittest.mock import MagicMock
+
+    import click
+    from defenseclaw import config as config_module
+    from defenseclaw import logger as logger_module
+    from defenseclaw.context import AppContext
+    from defenseclaw.enforce import asset_lists
+
+    audit = MagicMock()
+    monkeypatch.setattr(config_module, "load", lambda: object())
+    monkeypatch.setattr(logger_module.Logger, "from_config", staticmethod(lambda _cfg: audit))
+    with click.Context(click.Command("set"), obj=AppContext()):
+        asset_lists.audit_managed_refusal("config-update", "guardrail.mode", "verb=set")
+    audit.log_action.assert_called_once_with(
+        "config-update", "guardrail.mode", "outcome=refused reason=managed_device verb=set"
+    )
+
+
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
     from defenseclaw import config as config_module
 

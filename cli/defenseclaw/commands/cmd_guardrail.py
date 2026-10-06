@@ -3219,6 +3219,9 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
         )
     except config_writer.ManagedConfigWriteError:
+        from defenseclaw.enforce.asset_lists import audit_managed_refusal
+
+        audit_managed_refusal("guardrail-config", getattr(changes[0], "path", "") or "guardrail", f"command={reason}")
         fail(
             3,
             "This device is managed: change the guardrail in the admin config (MDM or management plane). "
