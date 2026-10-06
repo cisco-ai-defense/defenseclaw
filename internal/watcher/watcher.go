@@ -1070,7 +1070,7 @@ func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) 
 
 func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
 	if w == nil || w.cfg == nil || w.store == nil {
-		w.emitQuarantineFailure(ctx, evt.Path, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
+		w.emitQuarantineFailure(ctx, evt, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
 		return
 	}
 	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
@@ -1090,7 +1090,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		physicalName, connector, evt.Path,
 	)
 	if err != nil {
-		w.emitQuarantineFailure(ctx, evt.Path, err)
+		w.emitQuarantineFailure(ctx, evt, err)
 		return
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
@@ -1114,7 +1114,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		Connectors: []string{connector, ""},
 	})
 	if err != nil {
-		w.emitQuarantineFailure(ctx, evt.Path, err)
+		w.emitQuarantineFailure(ctx, evt, err)
 		return
 	}
 	if record.State == audit.QuarantineStateRestoring &&
@@ -1132,7 +1132,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		if _, statErr := os.Lstat(plan.QuarantinePath); os.IsNotExist(statErr) {
 			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
 		}
-		w.emitQuarantineFailure(ctx, evt.Path, err)
+		w.emitQuarantineFailure(ctx, evt, err)
 		return
 	}
 	if err := w.store.UpdateQuarantineRecordState(
@@ -1328,11 +1328,22 @@ func watcherPathAtOrBelow(path, root string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
-func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, path string, err error) {
+// emitQuarantineFailure reports an asset the verdict blocked but the watcher
+// could not move: it stays in place, so besides the log line and the metric
+// the audit log records an enforcement failure the administrator can find
+// (GAP-0133).
+func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
+		_ = w.logger.LogEventCtx(ctx, audit.Event{
+			Action:   string(audit.ActionWatcherBlock),
+			Target:   evt.Path,
+			Actor:    "defenseclaw",
+			Details:  fmt.Sprintf("type=%s quarantine failed, the blocked asset stays in place: %v", evt.Type, err),
+			Severity: "HIGH",
+		})
 	}
-	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", path, err)
+	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 }
 
 func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {
