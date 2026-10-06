@@ -79,6 +79,12 @@ observability: {}
 	if err := os.WriteFile(staleRego, []byte("package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"allowed\" if data.config.scan_on_install == false\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// A hand-written provider overlay (no _derived_from) with an inline CA.
+	overlay := filepath.Join(dir, ProvidersOverlayFile)
+	if err := os.WriteFile(overlay, []byte(`{"providers": [{"name": "acme", "domains": ["llm.acme.internal"],
+	  "env_keys": ["ACME_KEY"], "tls": {"ca_cert_pem": "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	auditDB := filepath.Join(dir, "audit.db")
 	db, err := sql.Open("sqlite", auditDB)
 	if err != nil {
@@ -144,6 +150,8 @@ observability: {}
 		"asset_policy.mcp":                                        nil,
 		"ai_discovery.signature_packs":                            []any{installedPack},
 		"asset_policy.tool.denied":                                []any{map[string]any{"name": "rm", "connector": "codex"}},
+		"llm_providers.custom": []any{map[string]any{"name": "acme", "domains": []any{"llm.acme.internal"}, "env_keys": []any{"ACME_KEY"},
+			"tls": map[string]any{"ca_cert_file": filepath.Join(dir, "provider-ca", "acme.pem")}}},
 	} {
 		if got, _ := json.Marshal(get(path)); string(got) != mustJSON(t, want) {
 			t.Errorf("%s = %s, want %s", path, got, mustJSON(t, want))
@@ -176,6 +184,12 @@ observability: {}
 	}
 	if _, err := os.Stat(dataJSON + DataJSONMigratedSuffix); err != nil {
 		t.Errorf("data.json was not renamed: %v", err)
+	}
+	if _, err := os.Stat(overlay); !os.IsNotExist(err) {
+		t.Errorf("the legacy custom-providers.json is still a live input: %v", err)
+	}
+	if pem, _ := os.ReadFile(filepath.Join(dir, "provider-ca", "acme.pem")); !strings.Contains(string(pem), "BEGIN CERTIFICATE") {
+		t.Error("the inline provider CA was not moved to provider-ca/acme.pem")
 	}
 	if refreshed, _ := os.ReadFile(staleRego); v9LegacyRegoData.Match(refreshed) || !strings.Contains(string(refreshed), "input.admission") {
 		t.Error("the pre-9 admission.rego was not replaced with the shipped module")

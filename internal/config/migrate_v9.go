@@ -32,6 +32,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
@@ -39,7 +40,8 @@ import (
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
 // admission and guardrail values, the *_actions keys,
 // watch.allow_list_bypass_scan, rule_pack_dir, the v8 scanner keys,
-// update_check and (OSS only) the operator block/allow rows of audit.db.
+// update_check and (OSS only) the operator block/allow rows of audit.db and a
+// legacy custom-providers.json overlay.
 // It is the one implementation: `defenseclaw-gateway config migrate --to 9`,
 // the Python CONFIG_MIGRATIONS[8] step and enterprise ensure all call it,
 // and the gateway runs it in memory (read-only) on a v8 file at load.
@@ -148,7 +150,7 @@ type MigrationRecord struct {
 
 // MigrationMove is one value moved from a v8 source to a v9 key.
 type MigrationMove struct {
-	// Source is "config", "data.json" or "audit.db".
+	// Source is "config", "data.json", "audit.db" or "custom-providers.json".
 	Source string `json:"source"`
 	// From is the source path, for example skill_actions.high or
 	// data.json:config.scan_on_install or actions:<id>.
@@ -365,6 +367,10 @@ type v9Migrator struct {
 	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
 	// replaces with the shipped module (nil data retires the file).
 	rego []v9RegoRefresh
+	// providersOverlay is the legacy custom-providers.json folded into
+	// llm_providers; commit writes providerCAs and retires the file.
+	providersOverlay string
+	providerCAs      []v9RegoRefresh
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
@@ -429,6 +435,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
+	m.migrateCustomProviders(root)
 	if err := m.planRegoRefresh(); err != nil {
 		return nil, false, err
 	}
@@ -497,6 +504,9 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			continue
 		}
 		written = append(written, module.path+DataJSONMigratedSuffix)
+	}
+	if m.providersOverlay != "" {
+		m.retireProvidersOverlay(&written)
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
@@ -1554,6 +1564,143 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
 		packs.Content = append(packs.Content, v9Scalar(path))
 	}
 	m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
+}
+
+// ---------------------------------------------------------------------------
+// custom-providers.json
+
+// ProvidersOverlayFile is the operator provider overlay in data_dir. From
+// config_version 9 on it is derived from llm_providers (spec section 6).
+const ProvidersOverlayFile = "custom-providers.json"
+
+// migrateCustomProviders folds a legacy operator overlay (one without
+// _derived_from) into llm_providers, so config.yaml is the one provider
+// list: the gateway and the Python readers then see the same providers.
+// An inline CA bundle moves to <data_dir>/provider-ca/<name>.pem. The
+// in-memory load leaves it alone (the gateway still merges a legacy overlay
+// itself), as does a managed host, whose provider list is the admin's. An
+// overlay that uses request_overrides, which config can not hold, stays a
+// live input and is reported.
+func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
+	if m.in.InMemory {
+		return
+	}
+	path := filepath.Join(m.dataDir(), ProvidersOverlayFile)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the data_dir provider overlay.
+	if err != nil {
+		return
+	}
+	var overlay configs.ProvidersConfig
+	if err := json.Unmarshal(raw, &overlay); err != nil {
+		m.note("%s is not valid JSON (%v); its providers were not moved to llm_providers", path, err)
+		return
+	}
+	if overlay.DerivedFrom != "" || (len(overlay.Providers) == 0 && len(overlay.OllamaPorts) == 0) {
+		return
+	}
+	if m.in.Managed {
+		m.note("%s is a local provider overlay; on a managed host llm_providers comes from the admin config, so it was not moved", path)
+		return
+	}
+	for _, p := range overlay.Providers {
+		if len(p.RequestOverrides) > 0 {
+			m.note("%s sets request_overrides for %q, which llm_providers can not hold; the file stays a live input", path, p.Name)
+			return
+		}
+	}
+	existing := map[string]bool{}
+	for _, item := range v9SeqItems(v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")) {
+		existing[strings.ToLower(yamlScalarValue(v8YAMLMapValue(item, "name")))] = true
+	}
+	var custom []LLMCustomProvider
+	var names []string
+	for _, p := range overlay.Providers {
+		name := strings.TrimSpace(p.Name)
+		if name == "" || existing[strings.ToLower(name)] {
+			continue
+		}
+		existing[strings.ToLower(name)] = true
+		entry := LLMCustomProvider{
+			Name: name, Domains: p.Domains, EnvKeys: p.EnvKeys, BaseProviderType: p.BaseProviderType,
+			BaseURL: p.BaseURL, AllowedRequests: p.AllowedRequests, AvailableModels: p.AvailableModels,
+			RequestPathOverrides: p.RequestPathOverrides, ExtraHeaders: p.ExtraHeaders,
+		}
+		if p.ProfileID != nil {
+			entry.ProfileID = *p.ProfileID
+		}
+		if t := p.TLS; t != nil {
+			entry.TLS = &LLMCustomProviderTLS{InsecureSkipVerify: t.InsecureSkipVerify}
+			if pem := strings.TrimSpace(t.CACertPEM); pem != "" {
+				ca := filepath.Join(m.dataDir(), "provider-ca", v9PackNameUnsafe.ReplaceAllString(strings.ToLower(name), "_")+".pem")
+				entry.TLS.CACertFile = ca
+				m.providerCAs = append(m.providerCAs, v9RegoRefresh{path: ca, data: []byte(t.CACertPEM)})
+			}
+		}
+		if b := p.Bedrock; b != nil {
+			entry.Bedrock = &BedrockKeyConfig{Region: b.Region, AuthMode: b.AuthMode, AccessKeyEnv: b.AccessKeyEnv,
+				SecretKeyEnv: b.SecretKeyEnv, SessionTokenEnv: b.SessionTokenEnv, ProfileName: b.ProfileName,
+				InferenceProfile: b.InferenceProfile, DeploymentAliases: b.DeploymentAliases}
+		}
+		if v := p.Vertex; v != nil {
+			entry.Vertex = &VertexKeyConfig{ProjectID: v.ProjectID, Region: v.Region, AuthMode: v.AuthMode,
+				ServiceAccountJSONEnv: v.ServiceAccountJSONEnv}
+		}
+		if a := p.Azure; a != nil {
+			entry.Azure = &AzureKeyConfig{Endpoint: a.Endpoint, APIVersion: a.APIVersion, AuthMode: a.AuthMode,
+				DeploymentAliases: a.DeploymentAliases}
+		}
+		custom = append(custom, entry)
+		names = append(names, name)
+	}
+	if len(custom) > 0 {
+		list := v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")
+		if list == nil || list.Kind != yaml.SequenceNode {
+			list = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+			v9Set(root, list, "llm_providers", "custom")
+		}
+		for _, entry := range custom {
+			var node yaml.Node
+			if err := node.Encode(entry); err != nil {
+				m.note("could not move provider %q from %s: %v", entry.Name, path, err)
+				return
+			}
+			list.Content = append(list.Content, &node)
+		}
+		m.moved(ProvidersOverlayFile, path, "llm_providers.custom", names)
+	}
+	if len(overlay.OllamaPorts) > 0 && v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "ollama_ports") == nil {
+		ports := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		for _, port := range overlay.OllamaPorts {
+			ports.Content = append(ports.Content, v9Scalar(port))
+		}
+		v9Set(root, ports, "llm_providers", "ollama_ports")
+		m.moved(ProvidersOverlayFile, path+":ollama_ports", "llm_providers.ollama_ports", overlay.OllamaPorts)
+	}
+	m.providersOverlay = path
+}
+
+// retireProvidersOverlay writes the moved CA bundles and renames the legacy
+// overlay once its providers are in the committed config; the next config
+// write renders the derived file. A CA bundle that can not be written
+// leaves the overlay in place.
+func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
+	for _, ca := range m.providerCAs {
+		if err := func() error {
+			if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
+				return err
+			}
+			return cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600)
+		}(); err != nil {
+			m.note("could not write the provider CA bundle %s: %v; %s stays in place", ca.path, err, m.providersOverlay)
+			return
+		}
+		*written = append(*written, ca.path)
+	}
+	if err := os.Rename(m.providersOverlay, m.providersOverlay+DataJSONMigratedSuffix); err != nil {
+		m.note("could not rename %s: %v", m.providersOverlay, err)
+		return
+	}
+	*written = append(*written, m.providersOverlay+DataJSONMigratedSuffix)
 }
 
 // ---------------------------------------------------------------------------
