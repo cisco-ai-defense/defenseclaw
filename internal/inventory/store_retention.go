@@ -121,6 +121,28 @@ func (s *InventoryStore) PruneScanHistory(ctx context.Context, cutoff time.Time,
 	}
 }
 
+// PruneAgentIdentities deletes agent identities last seen before cutoff and
+// returns how many it removed. agent_identities hangs off no scan, so the
+// ON DELETE CASCADE of PruneScanHistory never reaches it; without this pass
+// the agents and users of a removed account stay listed for ever. An agent
+// that runs again is recorded again under the same id, which is derived
+// from the account and install, not stored state.
+func (s *InventoryStore) PruneAgentIdentities(ctx context.Context, cutoff time.Time) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	if err := ensureAgentIdentitiesTable(ctx, s.db); err != nil {
+		return 0, fmt.Errorf("inventory store: prune agent identities: %w", err)
+	}
+	res, err := s.execDB(ctx, "agent_identities_prune",
+		`DELETE FROM agent_identities WHERE last_seen < ?`, formatAgentIdentityTime(cutoff))
+	if err != nil {
+		return 0, fmt.Errorf("inventory store: prune agent identities: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ScanHistoryCompaction reports the space-reclaim step that follows a prune.
 type ScanHistoryCompaction struct {
 	// Vacuumed is true when a legacy auto_vacuum=NONE file was rewritten
