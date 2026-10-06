@@ -41,3 +41,9 @@ def test_config_diff_model_truncates_and_reports_extra_rows() -> None:
 
     assert "before: before-" in preview
     assert "... 1 more changes" in preview
+
+
+def test_config_diff_offers_a_restart_only_for_keys_read_at_start() -> None:
+    hot = ConfigDiffModalModel((ConfigDiffEntry("ai_discovery.scan_interval_min", "5", "6"),))
+    assert hot.save_label == "Save"
+    assert ConfigDiffModalModel(_diff_entries()).save_label == "Save and queue restart"

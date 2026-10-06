@@ -139,6 +139,9 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 # ``AppContext`` object so unrelated command modules don't accidentally
 # collide with it.
 _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
+# The config.yaml bytes before the subcommand ran: the result callback diffs
+# them to see whether a change reaches a key the gateway reads once at start.
+_SETUP_CFG_BYTES_KEY = "defenseclaw._setup_config_bytes_before"
 
 # Set by :func:`_restart_defense_gateway` when a subcommand has
 # already restarted the sidecar explicitly (e.g.
@@ -400,6 +403,32 @@ def _safe_mtime(path: str | None) -> float | None:
         return None
 
 
+def _read_config_bytes(path: str | None) -> bytes | None:
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(4 * 1024 * 1024)
+    except (OSError, ValueError):
+        return None
+
+
+def _only_hot_config_changes(ctx: click.Context, cfg_path: str | None) -> bool:
+    """Whether the subcommand changed only keys the running gateway applies
+    from its next config generation. Any doubt (no snapshot, unreadable or
+    unparsable YAML) reads as a restart-required change."""
+    from defenseclaw import config_writer
+
+    before = ctx.meta.get(_SETUP_CFG_BYTES_KEY)
+    after = _read_config_bytes(cfg_path)
+    if before is None or after is None:
+        return False
+    try:
+        return not config_writer.restart_required(config_writer.diff_documents(before, after))
+    except Exception:  # noqa: BLE001 - an unreadable document is not provably hot.
+        return False
+
+
 @click.group(cls=_SetupGroup, invoke_without_command=True)
 @click.option(
     "--connector",
@@ -517,6 +546,7 @@ def setup(
     # sidecar when the file actually changed — so read-only subcommands
     # like ``setup llm --show`` don't bounce a running gateway.
     ctx.meta[_SETUP_CFG_MTIME_KEY] = _safe_mtime(_config_yaml_path_from_ctx(ctx))
+    ctx.meta[_SETUP_CFG_BYTES_KEY] = _read_config_bytes(_config_yaml_path_from_ctx(ctx))
 
     if ctx.invoked_subcommand is not None:
         # A subcommand (setup codex, setup guardrail, …) will run; the
@@ -16294,6 +16324,12 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         return
 
     click.echo("")
+    if not secret_changed and _only_hot_config_changes(ctx, cfg_path):
+        # The gateway applies a hot key from its next config generation
+        # (a webhook, a destination, a scanner setting); only a key it reads
+        # once at start needs the bounce.
+        ux.echo("  Config updated. The running gateway applies it without a restart.")
+        return
     ux.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
     if not _restart_defense_gateway(data_dir, start_if_stopped=False):
         # GAP-1573: a failed restart left the change unapplied but exited 0.
