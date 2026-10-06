@@ -1746,6 +1746,14 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
 	}
 
+	keptConfig := ""
+	if plan.Action == "upgrade" && plan.Reason == "drift:config" {
+		if windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result) {
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
+	}
+
 	actionOpts := *opts
 	actionOpts.jsonOutput = true
 	if plan.Action == "repair" {
@@ -1852,6 +1860,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	addWindowsEnterpriseNothingInstalledError(result, report, plan.Action)
+	if keptConfig != "" && len(result.Errors) == 0 {
+		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+keptConfig)
+	}
 	applyWindowsEnterprisePolicy(ctx, result)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))

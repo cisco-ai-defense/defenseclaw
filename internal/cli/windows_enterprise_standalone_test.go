@@ -730,11 +730,14 @@ func (stub *ensureStub) install(t *testing.T) {
 	originalRunner := windowsEnterpriseStandaloneRunner
 	originalObserver := windowsEnterpriseStandaloneObserver
 	originalDrift := windowsEnterpriseEnsureDriftDetector
+	originalPolicy := windowsEnterprisePolicyDigest
 	t.Cleanup(func() {
 		windowsEnterpriseStandaloneRunner = originalRunner
 		windowsEnterpriseStandaloneObserver = originalObserver
 		windowsEnterpriseEnsureDriftDetector = originalDrift
+		windowsEnterprisePolicyDigest = originalPolicy
 	})
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
 	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {

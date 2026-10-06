@@ -340,7 +340,9 @@ What the lifecycle does with it:
   installed config and its assets no longer build into a policy; the gateway
   keeps enforcing the earlier one. `config_edited_outside_lifecycle` says
   `config.yaml` was changed by hand; run `ensure` with the intended config to
-  put the managed config back. None of them changes `ok`.
+  put the managed config back. On Windows that `ensure` keeps the edited file
+  as `rejected-config.yaml` next to `config.yaml` (administrators only) and
+  warns `config_reverted`. None of them changes `ok`.
 - **Secure Client.** Nothing changes under the Secure Client profile: the
   gateway omits `policy` from `/health` and `/status`, and the lifecycle result
   has no `policy` object.

@@ -48,6 +48,7 @@ import (
 	"os"
 	"os/user"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -322,6 +323,26 @@ var restartKeys = []string{
 	"claw", "agent", "routing",
 	"deployment_mode", "enterprise.profile", "enterprise.network",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
+}
+
+// ManagedRestartRequired is RestartRequired for a managed standalone host. It
+// also counts the enterprise block outside enterprise.inspection: the
+// gateway reads enrollment and the hook-socket authorizer built from it once,
+// at start, and its reload refuses such a change.
+func ManagedRestartRequired(changed []string) []string {
+	out := RestartRequired(changed)
+	for _, path := range changed {
+		if path != "enterprise" && !strings.HasPrefix(path, "enterprise.") {
+			continue
+		}
+		if path == "enterprise.inspection" || strings.HasPrefix(path, "enterprise.inspection.") {
+			continue
+		}
+		if !slices.Contains(out, path) {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 // RestartRequired returns the paths in changed that need a gateway restart.
