@@ -6,8 +6,14 @@
 package gateway
 
 import (
+	"os"
 	osuser "os/user"
+	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // TestResolvePeerDirectoryFactsWithoutSpool pins the per-user macOS path: with
@@ -22,5 +28,39 @@ func TestResolvePeerDirectoryFactsWithoutSpool(t *testing.T) {
 	facts, err := resolvePeerDirectoryFacts(current.Uid)
 	if err != nil || facts.ResolvedAt.IsZero() || len(facts.Groups) == 0 {
 		t.Fatalf("facts = %+v, err = %v; want resolved groups", facts, err)
+	}
+}
+
+// TestResolvePeerDirectoryFactsKeepsGroupsUnderSpool pins the managed macOS
+// path: the enumerator's record has no groups, and the account's own groups
+// must survive under its directory facts or no groups assignment can match
+// (GAP-0123).
+func TestResolvePeerDirectoryFactsKeepsGroupsUnderSpool(t *testing.T) {
+	current, err := osuser.Current()
+	if err != nil {
+		t.Skipf("current user: %v", err)
+	}
+	dir := t.TempDir()
+	data, err := enterprisehooks.MarshalIdentitySpoolRecord(enterprisehooks.IdentitySpoolRecord{
+		Key: current.Uid, UpdatedAt: time.Now().UTC(),
+		Facts: useridentity.DirectoryFacts{
+			Principal: "alice@CORP.EXAMPLE.COM", Directory: useridentity.DirectoryActiveDirectory,
+			ResolvedAt: time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, current.Uid+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restoreValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(string, string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = restoreValidate; setIdentitySpoolDir("") })
+	setIdentitySpoolDir(dir)
+	facts, err := resolvePeerDirectoryFacts(current.Uid)
+	if err != nil || len(facts.Groups) == 0 || facts.Directory != useridentity.DirectoryActiveDirectory ||
+		facts.Principal != "alice@CORP.EXAMPLE.COM" || facts.Assurance != useridentity.AssuranceVerified {
+		t.Fatalf("facts = %+v, err = %v; want the account groups under the record's directory facts", facts, err)
 	}
 }
