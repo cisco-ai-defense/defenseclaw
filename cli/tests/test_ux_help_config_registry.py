@@ -153,6 +153,29 @@ def test_config_get_shows_the_scanner_gate_the_gateway_runs_with(tmp_path: Path,
     assert not {"binary", "use_virustotal", "use_aidefense", "virustotal_api_key"} & set(skill)
 
 
+def test_config_get_destinations_index_the_list_config_set_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0008: the resolved plan lists the generated local-sqlite destination first.
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 9\ngateway: {}\nobservability:\n  destinations:\n"
+        "    - {name: remote, kind: otlp, endpoint: 'https://otel.example.test'}\n",
+        encoding="utf-8",
+    )
+    plan = {"destinations": [{"name": "local-sqlite"}, {"name": "remote"}]}
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_effective(plan)),
+    ):
+        first = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations[0].name"])
+        listed = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations", "--format", "json"])
+    assert first.exit_code == 0, first.output
+    assert first.stdout == "remote\n"
+    assert [item["name"] for item in json.loads(listed.stdout)] == ["remote"]
+
+
 def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -101,16 +101,6 @@ class TestRenderPreamble(unittest.TestCase):
         out = self._capture(lambda: _scan_ui.render_preamble(ctx, 5))
         self.assertEqual(out, "")
 
-    def test_scanner_summary_line(self):
-        ctx = _scan_ui.ScanContext.for_skill(connector="claudecode", paths=[])
-
-        class Scanner:
-            def summary(self):
-                return "policy quiet; judge bedrock/model"
-
-        out = self._capture(lambda: _scan_ui.render_preamble(ctx, 1, scanner=Scanner()))
-        self.assertIn("Scanner: policy quiet; judge bedrock/model", out)
-
     def test_single_source_label(self):
         ctx = _scan_ui.ScanContext.for_plugin(
             connector="codex",

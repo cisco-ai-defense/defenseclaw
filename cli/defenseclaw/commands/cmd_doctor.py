@@ -2522,20 +2522,22 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     return "pass", f"{dist} {installed}"
 
 
-def _litellm_version_note(settings) -> tuple[str, str]:
-    """``(status, note)`` for the LiteLLM that routes the judge calls."""
+def _litellm_version_note() -> tuple[str, str]:
+    """``(status, note)`` for the installed LiteLLM, which both scanners call (GAP-0073)."""
     import importlib.metadata as importlib_metadata
+    import re
 
+    from defenseclaw.scanner import settings as scanner_settings
+
+    dist, floor = scanner_settings.LITELLM_DIST, scanner_settings.LITELLM_MIN_VERSION
     try:
-        installed = importlib_metadata.version(settings.LITELLM_DIST)
+        installed = importlib_metadata.version(dist)
     except importlib_metadata.PackageNotFoundError:
-        return "fail", f"{settings.LITELLM_DIST} is not installed; {_scanner_repair_hint()}"
-    numbers = tuple(int(part) for part in re.findall(r"\d+", installed)[:3])
-    if not settings.LITELLM_MIN_VERSION <= numbers < settings.LITELLM_BELOW_VERSION:
-        low = ".".join(map(str, settings.LITELLM_MIN_VERSION))
-        high = ".".join(map(str, settings.LITELLM_BELOW_VERSION))
-        return "warn", f"{settings.LITELLM_DIST} {installed} (this release pins >={low},<{high}); {_scanner_repair_hint()}"
-    return "pass", f"{settings.LITELLM_DIST} {installed}"
+        return "fail", f"{dist} is not installed; {_scanner_repair_hint()}"
+    if tuple(int(part) for part in re.findall(r"\d+", installed)[:3]) < floor:
+        needed = ".".join(str(part) for part in floor)
+        return "warn", f"{dist} {installed} (this release needs {needed} or newer); {_scanner_repair_hint()}"
+    return "pass", f"{dist} {installed}"
 
 
 def _check_scanners(cfg, r: _DoctorResult) -> None:
@@ -2557,8 +2559,8 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     # this environment, not a standalone mcp-scanner launcher.
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
     _emit(status, "Scanner: mcp-scanner", note, r=r)
-    status, note = _litellm_version_note(scanner_settings)
-    _emit(status, "Scanner: LiteLLM", note, r=r)
+    status, note = _litellm_version_note()
+    _emit(status, "Scanner: litellm", note, r=r)
 
     issue = scanner_settings.recommended_settings_issue(cfg) if hasattr(cfg, "resolve_llm") else ""
     if issue:

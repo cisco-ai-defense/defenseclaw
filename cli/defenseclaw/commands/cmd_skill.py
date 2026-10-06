@@ -2292,7 +2292,7 @@ def _scan_one_local_skill(
         as_json=as_json,
         where=_scan_ui.WHERE_ADHOC_PATH if adhoc else "",
     )
-    _scan_ui.render_preamble(ctx, target_count=1, scanner=scanner)
+    _scan_ui.render_preamble(ctx, target_count=1)
 
     captured_stdout = None
     try:
@@ -3846,6 +3846,12 @@ def _print_result(name: str, result) -> None:
     click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {result.target}")
     click.echo(f"  {ux._style('Duration:', fg='bright_black', bold=True)} {result.duration.total_seconds():.2f}s")
     click.echo(f"  {ux._style('Findings:', fg='bright_black', bold=True)} {len(result.findings)}")
+    ran_with = getattr(result, "settings", None)
+    if ran_with:
+        click.echo(
+            f"  {ux._style('Scanner:', fg='bright_black', bold=True)}  "
+            f"policy {ran_with.get('policy', '')}, judge {ran_with.get('judge', 'off')}"
+        )
 
     if result.is_clean():
         ux.ok("Verdict:  CLEAN", indent="  ")

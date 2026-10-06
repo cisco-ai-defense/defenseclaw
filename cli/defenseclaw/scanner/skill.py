@@ -129,11 +129,6 @@ class SkillScannerWrapper:
     def name(self) -> str:
         return "skill-scanner"
 
-    def summary(self) -> str:
-        """The policy and judge model the next scan runs with, for the scan banner."""
-        model = litellm_model(self._llm) if self.config.use_llm else ""
-        return f"policy {settings.effective_policy(self.config)}; judge {model or 'off'}"
-
     def batch_workers(self, **_scan_options) -> int:
         """Items ``skill scan --all`` may scan at once (GAP-2643).
 
@@ -205,7 +200,10 @@ class SkillScannerWrapper:
                 _apply_meta_analysis(scanner, sdk_result, target, cfg.lenient, judge, policy)
             elapsed = time.monotonic() - start
 
-        return self._convert(sdk_result, target, elapsed)
+        result = self._convert(sdk_result, target, elapsed)
+        # The scan says which policy and judge model it ran with (GAP-0047).
+        result.settings = {"policy": settings.effective_policy(cfg), "judge": judge.get("llm_model") or "off"}
+        return result
 
     def _judge(self) -> dict:
         """The judge's ``build_analyzers`` arguments, or ``{}`` when none can run.

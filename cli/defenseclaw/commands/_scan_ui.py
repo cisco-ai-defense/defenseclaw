@@ -248,11 +248,10 @@ WHERE_ADHOC_PATH = "at a path (not from a connector config)"
 # ---------------------------------------------------------------------------
 
 
-def render_preamble(ctx: ScanContext, target_count: int, *, scanner: object | None = None) -> None:
+def render_preamble(ctx: ScanContext, target_count: int) -> None:
     """Print the "Scanning N <components> on <connector> for ..." banner.
 
-    A *scanner* with a ``summary()`` adds one line naming the policy and judge
-    it runs with. Skipped entirely when ``ctx.as_json`` is True — JSON callers
+    Skipped entirely when ``ctx.as_json`` is True — JSON callers
     care only about the final document.
     """
     if ctx.as_json:
@@ -264,10 +263,6 @@ def render_preamble(ctx: ScanContext, target_count: int, *, scanner: object | No
     )
     for cat in ctx.categories:
         click.echo(f"    - {cat}")
-    summary = getattr(scanner, "summary", None)
-    if callable(summary):
-        click.echo()
-        click.echo(f"  Scanner: {summary()}")
     if ctx.paths:
         click.echo()
         if len(ctx.paths) == 1:

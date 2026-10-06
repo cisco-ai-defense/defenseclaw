@@ -73,6 +73,31 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
     ) == ["guardrail.hook_self_heal", "guardrail.connectors.codex.enabled"]
 
 
+def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
+    # GAP-0084: the digest pins the pack, so each key alone is refused.
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_config
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(
+        tmp_path,
+        "openshell:\n  admin:\n    required_pack: balanced\n    required_pack_digest: sha256:" + "ab" * 32 + "\n",
+    )
+    pack, digest = "openshell.admin.required_pack", "openshell.admin.required_pack_digest"
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+    ):
+        alone = CliRunner().invoke(cmd_config.config_cmd, ["unset", pack])
+        both = CliRunner().invoke(cmd_config.config_cmd, ["unset", pack, digest])
+    assert alone.exit_code != 0 and f"config unset {pack} {digest}" in alone.output
+    assert both.exit_code == 0, both.output
+    text = open(path, encoding="utf-8").read()
+    assert "required_pack" not in text
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 

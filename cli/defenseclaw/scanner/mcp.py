@@ -46,10 +46,12 @@ from typing import TYPE_CHECKING, TypeVar
 from urllib.parse import urlparse
 
 from defenseclaw.config import (
+    AssetFileRef,
     CiscoAIDefenseConfig,
     InspectLLMConfig,
     LLMConfig,
     MCPScannerConfig,
+    MCPScannerYARAConfig,
     MCPServerEntry,
 )
 from defenseclaw.models import Finding, ScanResult
@@ -74,8 +76,22 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
-def _supplemental_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
-    """Load DefenseClaw rules alongside, never instead of, SDK YARA rules."""
+def _supplemental_yara_analyzers(yara_analyzer_cls: type, yara_cfg: MCPScannerYARAConfig | None = None) -> list[object]:
+    """Load DefenseClaw rules alongside, never instead of, SDK YARA rules.
+
+    ``scanners.mcp_scanner.yara`` selects them: the bundled set unless
+    ``include_bundled`` is false, and every ``extra_rules`` file, which loads
+    only from bytes matching its pinned digest (GAP-0071).
+    """
+    analyzers: list[object] = []
+    if yara_cfg is None or yara_cfg.include_bundled is not False:
+        analyzers.extend(_bundled_yara_analyzers(yara_analyzer_cls))
+    if yara_cfg is not None and yara_cfg.extra_rules:
+        analyzers.append(_extra_yara_analyzer(yara_analyzer_cls, yara_cfg.extra_rules))
+    return analyzers
+
+
+def _bundled_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
     rules_dir = bundled_mcp_yara_rules_dir()
     if rules_dir is None:
         print(
@@ -93,6 +109,16 @@ def _supplemental_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
             file=sys.stderr,
         )
         return []
+
+
+def _extra_yara_analyzer(yara_analyzer_cls: type, refs: list[AssetFileRef]) -> object:
+    """Compile the pinned extra rule files; a digest mismatch or a bad rule fails the scan."""
+    with tempfile.TemporaryDirectory(prefix="dc-mcp-yara-") as tmp:
+        for index, ref in enumerate(refs):
+            data = settings.verified_asset_bytes(ref.path, ref.digest)
+            with open(os.path.join(tmp, f"extra-{index}.yar"), "wb") as fh:
+                fh.write(data)
+        return yara_analyzer_cls(rules_dir=tmp)
 
 
 # env vars whose names contain any of these
@@ -1174,7 +1200,7 @@ class MCPScannerWrapper:
                     file=sys.stderr,
                 )
             else:
-                supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer)
+                supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer, getattr(self.config, "yara", None))
         scanner = MCPSDKScanner(
             sdk_config,
             custom_analyzers=supplemental_analyzers,

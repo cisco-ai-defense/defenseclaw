@@ -135,9 +135,6 @@ CURRENT_CONFIG_VERSION = 9
 #: loads (the gateway migrates it in memory) until ``defenseclaw migrate``
 #: rewrites it as 9.
 FIRST_CURRENT_CONFIG_VERSION = 8
-#: The config_version a brand-new config.yaml is written with. Only an
-#: existing v8 file needs ``defenseclaw migrate``.
-FRESH_CONFIG_VERSION = CURRENT_CONFIG_VERSION
 
 
 def is_current_schema(version: Any) -> bool:
@@ -3709,7 +3706,7 @@ class Config:
             verify=verify,
         )
         if self._source_config_version == 0:
-            self._source_config_version = FRESH_CONFIG_VERSION
+            self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
         return result
 
@@ -3724,7 +3721,7 @@ class Config:
             # canonical defaults as its structural baseline so explicit
             # caller choices are persisted while removed v7 fields remain
             # excluded. Existing unversioned/v7 files still fail closed below.
-            version = FRESH_CONFIG_VERSION
+            version = CURRENT_CONFIG_VERSION
             baseline = _config_to_dict(default_config())
         if not is_current_schema(version):
             raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
@@ -3786,7 +3783,7 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
         document = data
         if not current.strip() and "config_version" not in document:
             # A writer creating config.yaml writes a current-schema document.
-            document = {"config_version": FRESH_CONFIG_VERSION, **document}
+            document = {"config_version": CURRENT_CONFIG_VERSION, **document}
             document.setdefault("observability", {})
         candidate = config_writer.render_document(current, document, source_name)
         return candidate, config_writer.diff_documents(current, candidate)
@@ -7002,15 +6999,16 @@ def default_config() -> Config:
 
 
 def prepare_fresh_v8_config(cfg: Config) -> Config:
-    """Mark a never-persisted default config as a canonical current-schema source.
+    """Mark a never-persisted default config as a current-schema source.
 
     Capturing dataclass defaults as the baseline means the first save writes
-    only explicit first-run choices, plus ``config_version`` and the canonical
+    only explicit first-run choices, plus ``config_version`` (the current one,
+    so a fresh install has nothing to migrate) and the canonical
     ``observability`` block.
     """
 
     if cfg is None or cfg._source_config_version != 0:
-        raise ValueError("fresh configuration requires an unversioned default")
-    cfg._source_config_version = FRESH_CONFIG_VERSION
+        raise ValueError("fresh v8 configuration requires an unversioned default")
+    cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg

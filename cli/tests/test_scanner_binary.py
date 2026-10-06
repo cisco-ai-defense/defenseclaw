@@ -127,9 +127,10 @@ class ScannerCommandIntegrationTests(unittest.TestCase):
         # so doctor checks its installed version, not a mcp-scanner launcher.
         self.assertEqual(result.checks[1]["status"], "pass")
         self.assertIn("cisco-ai-mcp-scanner 4.3.0", result.checks[1]["detail"])
-        # The judge calls route through LiteLLM, so doctor reports its version too (GAP-0068).
-        self.assertEqual(result.checks[2]["label"], "Scanner: LiteLLM")
-        self.assertRegex(result.checks[2]["detail"], r"^litellm \d+\.\d+")
+        # GAP-0073: the LiteLLM both scanners call has its own row.
+        litellm_row = next(check for check in result.checks if check["label"] == "Scanner: litellm")
+        self.assertEqual(litellm_row["status"], "pass")
+        self.assertRegex(litellm_row["detail"], r"^litellm \d")
 
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     @patch("defenseclaw.commands.cmd_doctor.os.path.expanduser", return_value="/Users/test/.local/bin/skill-scanner")

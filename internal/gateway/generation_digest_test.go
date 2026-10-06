@@ -85,3 +85,30 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 		t.Fatal("the Secure Client integration's /health or decision records carry the effective policy")
 	}
 }
+
+// The observability section (retention, destinations, redaction) is part of
+// the effective digest, with data_dir paths rewritten (GAP-0007).
+func TestEffectivePolicyDigestCoversObservability(t *testing.T) {
+	build := func(dataDir, section string) string {
+		t.Helper()
+		g, err := buildGeneration(context.Background(), generationInputs{
+			cfg: &config.Config{DataDir: dataDir},
+			raw: []byte("config_version: 9\nobservability:\n" + section),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.Digest
+	}
+	base := build("/home/alice/.defenseclaw", "  local:\n    retention_days: 7\n")
+	if build("/home/alice/.defenseclaw", "  local:\n    retention_days: 1\n") == base {
+		t.Fatal("observability.local.retention_days did not change the effective digest")
+	}
+	if build("/home/bob/.defenseclaw", "  local:\n    retention_days: 7\n") != base {
+		t.Fatal("the same observability policy under another data_dir changed the digest")
+	}
+	alicePath := build("/home/alice/.defenseclaw", "  local:\n    path: /home/alice/.defenseclaw/audit.db\n")
+	if alicePath != build("/home/bob/.defenseclaw", "  local:\n    path: /home/bob/.defenseclaw/audit.db\n") {
+		t.Fatal("a store path under data_dir differs between users")
+	}
+}
