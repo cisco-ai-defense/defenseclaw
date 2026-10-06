@@ -1948,7 +1948,9 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 			return "", err
 		}
 		got, err := windowsEnterpriseFileSHA256(layout.ConfigPath)
-		if err != nil || got != want {
+		// A config_version 8 source is installed as its v9 migration, so the
+		// same source is not drift while the installed file is that result.
+		if err != nil || (got != want && !config.MigratedFrom(layout.ConfigPath, want, got)) {
 			return "config", nil
 		}
 	}

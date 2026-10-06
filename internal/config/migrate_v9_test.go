@@ -26,6 +26,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 )
 
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
@@ -183,6 +185,10 @@ observability: {}
 	}
 	if _, err := os.Stat(MigrationRecordPath(configPath)); err != nil {
 		t.Errorf("migration-v9.json missing: %v", err)
+	}
+	if !MigratedFrom(configPath, cfgtxn.SHA256Hex([]byte(source)), cfgtxn.SHA256Hex(migrated)) ||
+		MigratedFrom(configPath, cfgtxn.SHA256Hex(migrated), cfgtxn.SHA256Hex(migrated)) {
+		t.Error("MigratedFrom does not recognise the installed migration of the v8 source")
 	}
 	db, _ = sql.Open("sqlite", auditDB)
 	defer db.Close()

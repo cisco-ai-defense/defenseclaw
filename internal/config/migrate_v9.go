@@ -290,6 +290,25 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	return result.Migrated, nil
 }
 
+// MigratedFrom reports whether the config at configPath is still the
+// config_version 9 migration of a v8 source: migration-v9.json next to it
+// records sourceSHA256 as the input and installedSHA256 as the result (both
+// hex). A lifecycle that compares an administrator's v8 file with the
+// installed config uses it, so the same v8 file is not drift once the
+// upgrade migrated it.
+func MigratedFrom(configPath, sourceSHA256, installedSHA256 string) bool {
+	raw, err := os.ReadFile(MigrationRecordPath(configPath))
+	if err != nil {
+		return false
+	}
+	var record MigrationRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return false
+	}
+	return record.SourceSHA256 != "" && strings.EqualFold(record.SourceSHA256, sourceSHA256) &&
+		strings.EqualFold(record.ResultSHA256, installedSHA256)
+}
+
 // AcknowledgeMigrationV9 marks migration-v9.json next to configPath as read
 // (`defenseclaw config migrate --ack`), so doctor stops reporting it.
 func AcknowledgeMigrationV9(configPath string) error {

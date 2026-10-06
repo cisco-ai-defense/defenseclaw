@@ -11,7 +11,7 @@
          services from the Setup's hash-pinned payload and enrolls this
          account for Claude Code and Codex: the Codex requirements and the
          Claude Code managed-settings fragment name the DefenseClaw hook
-      2. /ensure JSON=1 again must be a no-op
+      2. /ensure CONFIG=<the same config> JSON=1 again must be a no-op
       3. the installed CLI's verify and status pass, the services run, the
          HKLM marker and the Add/Remove Programs entry exist, and the MDM
          detect.ps1 (Windows PowerShell 5.1, as Intune runs it) detects it
@@ -465,8 +465,10 @@ try {
     if ((Get-MarkerValue 'TrustMode') -ne 'hash_pinned') { Fail "the HKLM marker trust mode is '$(Get-MarkerValue 'TrustMode')', want 'hash_pinned'" }
     if (-not (Test-Path -LiteralPath $arpKey)) { Fail 'the Add/Remove Programs entry is missing' }
 
-    Step 'Setup /ensure again (must be a no-op)'
-    $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', 'JSON=1')
+    # The same command line an MDM re-applies: the v8 CONFIG= is installed as
+    # its v9 migration, which must not count as drift.
+    Step 'Setup /ensure again with the same CONFIG= (must be a no-op)'
+    $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
 
     Step 'installed CLI verify'
