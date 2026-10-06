@@ -93,7 +93,14 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 			}
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
-			if domain != "" {
+			if domain != "" && known.directory == useridentity.DirectoryEntraID {
+				// The aad and himmelblau modules name an Entra ID account by
+				// its UPN. It has no Kerberos realm, and the UPN is the
+				// principal Windows reports for the same user.
+				facts.Domain = strings.ToLower(domain)
+				facts.UPN = useridentity.NormalizeUPN(account.Name)
+				facts.Principal = facts.UPN
+			} else if domain != "" {
 				facts.Domain = domain
 				if strings.Contains(domain, ".") {
 					facts.Realm = strings.ToUpper(domain)
