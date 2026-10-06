@@ -640,11 +640,7 @@ func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryServ
 	return svc, nil
 }
 
-func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, legacy ...any) *ContinuousDiscoveryService {
-	// Historical constructors accepted optional telemetry collaborators. The
-	// v8 runtime binds observability explicitly after construction, but keeping
-	// the optional arguments source-compatible lets older native tests build.
-	_ = legacy
+func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature) *ContinuousDiscoveryService {
 	opts = normalizeAIDiscoveryOptions(opts)
 	svc := &ContinuousDiscoveryService{
 		opts:     opts,
