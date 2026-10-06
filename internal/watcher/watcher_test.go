@@ -1015,3 +1015,32 @@ func TestAdmission_FallbackOnlyOnOPAError(t *testing.T) {
 		t.Fatal("the fallback overrode a valid OPA scan verdict")
 	}
 }
+
+// TestEvaluateAdmissionFollowsThePolicySource: admission evaluates the live
+// generation's prepared OPA on every event, so a changed Rego module applies
+// without /policy/reload or a gateway restart.
+func TestEvaluateAdmissionFollowsThePolicySource(t *testing.T) {
+	prepare := func(verdict string) *policy.Prepared {
+		dir := t.TempDir()
+		module := "package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"" + verdict + "\"\n"
+		if err := os.WriteFile(filepath.Join(dir, "admission.rego"), []byte(module), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := policy.Prepare(context.Background(), dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return prepared
+	}
+	current := prepare("allowed")
+	w := &InstallWatcher{}
+	w.SetPolicySource(func() *policy.Prepared { return current })
+	in := policy.AdmissionInput{TargetType: "skill", TargetName: "s"}
+	if got := w.evaluateAdmission(context.Background(), in).Verdict; got != "allowed" {
+		t.Fatalf("verdict = %q, want allowed", got)
+	}
+	current = prepare("warning")
+	if got := w.evaluateAdmission(context.Background(), in).Verdict; got != "warning" {
+		t.Fatalf("verdict after the generation changed = %q, want warning", got)
+	}
+}

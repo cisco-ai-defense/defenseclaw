@@ -155,6 +155,11 @@ type InstallWatcher struct {
 	// admission without a watcher restart. Nil uses cfg.
 	configSource func() *config.Config
 
+	// policySource returns the live generation's prepared OPA admission
+	// query (nil when that generation has none), so a changed Rego module
+	// applies to the next admission. Nil uses opa.
+	policySource func() *policy.Prepared
+
 	// scannerFactory resolves the scanner for an event. Defaults to
 	// scannerFor; tests inject a fake to observe scan invocations without
 	// shelling out to the real scanner binaries.
@@ -193,6 +198,11 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 
 // SetConfigSource binds the live config the admission gate reads
 // asset_policy and admission from. Call it before Run.
+func (w *InstallWatcher) SetPolicySource(source func() *policy.Prepared) {
+	w.policySource = source
+}
+
+// SetConfigSource binds the live config admission decisions read.
 func (w *InstallWatcher) SetConfigSource(source func() *config.Config) {
 	w.configSource = source
 }
@@ -865,6 +875,14 @@ func (w *InstallWatcher) legacyAllowPathMismatch(ctx context.Context, cfg *confi
 // only when OPA is unavailable or fails. A valid OPA verdict (including
 // "scan") is final.
 func (w *InstallWatcher) evaluateAdmission(ctx context.Context, input policy.AdmissionInput) *policy.AdmissionOutput {
+	if w.policySource != nil {
+		if prepared := w.policySource(); prepared != nil {
+			if out, err := prepared.EvaluateAdmission(ctx, input); err == nil && out != nil {
+				return out
+			}
+		}
+		return policy.EvaluateAdmissionFallback(input)
+	}
 	if w.opa != nil {
 		if out, err := w.opa.Evaluate(ctx, input); err == nil && out != nil {
 			return out

@@ -92,7 +92,6 @@ type Sidecar struct {
 	logger        *audit.Logger
 	health        *SidecarHealth
 	notify        *NotificationQueue
-	opa           *policy.Engine
 	hilt          *HILTApprovalManager
 	webhooks      *WebhookDispatcher
 	aiDiscovery   *inventory.ContinuousDiscoveryService
@@ -982,21 +981,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 					s.health.SetRouting(StateStopped, "", routingHealthDetails)
 				}()
 			}
-		}
-	}
-
-	// Initialize OPA engine before goroutines so both the watcher and the
-	// API reload handler share the same instance.
-	if s.currentConfig().PolicyDir != "" {
-		if engine, err := policy.New(s.currentConfig().PolicyDir); err == nil {
-			if compileErr := engine.Compile(); compileErr == nil {
-				s.opa = engine
-				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", s.currentConfig().PolicyDir)
-			} else {
-				fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %v\n", compileErr)
-			}
-		} else {
-			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
 		}
 	}
 
@@ -3212,10 +3196,18 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 
-	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.opa, func(r watcher.AdmissionResult) {
+	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
 	w.SetConfigSource(s.currentConfig)
+	// Admission evaluates the live generation's prepared OPA, which the
+	// config manager rebuilds when a watched Rego module changes.
+	w.SetPolicySource(func() *policy.Prepared {
+		if g := s.Generation(); g != nil {
+			return g.OPA
+		}
+		return nil
+	})
 	if conn != nil {
 		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
@@ -6902,14 +6894,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.setGuardrailProfiles(g.Profiles)
 	}
 	// /policy/reload rebuilds the generation now (Rego and rule packs are
-	// also watched, so this is a hint for scripts). The watcher's admission
-	// engine reloads with it.
+	// also watched, so this is a hint for scripts); the watcher's admission
+	// reads the rebuilt generation.
 	api.SetPolicyReloader(func() error {
-		if s.opa != nil {
-			if err := s.opa.Reload(); err != nil {
-				return err
-			}
-		}
 		if s.configMgr == nil {
 			return fmt.Errorf("config manager is not running")
 		}
