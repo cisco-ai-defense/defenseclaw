@@ -200,14 +200,14 @@ func (context V8ResourceContext) Values() map[string]string {
 	return cloneV8ResourceValues(context.values)
 }
 
-// CustomResourceAttributes returns the sealed custom-resource projection and
-// compatibility-alias policy owned by this provider generation.
+// CustomResourceAttributes returns the sealed custom-resource projection owned
+// by this provider generation.
 func (context V8ResourceContext) CustomResourceAttributes() observability.TelemetryCustomResourceAttributes {
 	return context.custom
 }
 
 // TraceResourceFields returns a fresh structural resource input with the same
-// sealed custom attributes and alias policy used by the physical SDK resource.
+// sealed custom attributes used by the physical SDK resource.
 func (context V8ResourceContext) TraceResourceFields() V8TraceResourceFields {
 	value := func(key string) observability.Optional[string] {
 		if candidate := context.values[key]; candidate != "" {
@@ -1062,17 +1062,6 @@ func newV8ResourceContext(
 	}
 	if identity.deviceFingerprint != "" {
 		values["defenseclaw.device.public_key_fingerprint"] = identity.deviceFingerprint
-	}
-	if snapshot.ResourceAttributeEntries.CompatibilityAliasesEnabled() {
-		for canonical, legacy := range map[string]string{
-			"deployment.environment.name":               "deployment.environment",
-			"defenseclaw.deployment.mode":               "deployment.mode",
-			"defenseclaw.device.public_key_fingerprint": "defenseclaw.device.id",
-		} {
-			if value := values[canonical]; value != "" {
-				values[legacy] = value
-			}
-		}
 	}
 	for key, value := range values {
 		if value == "" {

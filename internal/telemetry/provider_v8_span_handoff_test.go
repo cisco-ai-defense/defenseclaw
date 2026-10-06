@@ -295,65 +295,56 @@ func v8HandoffRecordWithResourceDroppedCount(
 }
 
 func TestV8ResourceContextExactlyMatchesGeneratedCanonicalResource(t *testing.T) {
-	for _, aliases := range []bool{false, true} {
-		t.Run(fmt.Sprintf("aliases_%t", aliases), func(t *testing.T) {
-			deviceKeyFile := filepath.Join(t.TempDir(), "device.pem")
-			seed := make([]byte, 32)
-			seed[0] = 1
-			if err := os.WriteFile(
-				deviceKeyFile,
-				pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: seed}),
-				0o600,
-			); err != nil {
-				t.Fatal(err)
-			}
-			plan := v8PlanForTest(t, "always_on", "", func(source *config.ObservabilityV8Source) {
-				source.TracePolicy.CompatibilityAliases = &aliases
-				source.Resource.Attributes = map[string]string{
-					"deployment.environment.name": "test",
-					"operator.profile":            "soc",
-				}
-			})
-			provider, err := NewProviderV8Inactive(
-				context.Background(), plan, v8HandoffTestGeneration,
-				V8ProviderOptions{
-					Version: "8.0.0", ServiceInstanceID: "instance-001",
-					DefenseClawInstanceID: "instance-001", DeploymentMode: "unmanaged",
-					DeviceKeyFile: deviceKeyFile,
-				},
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
-			resourceContext, ok := provider.V8ResourceContext()
-			if !ok {
-				t.Fatal("resource context unavailable")
-			}
-			record := v8HandoffRecord(
-				t,
-				trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
-				trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
-				time.Unix(1_783_080_000, 0).UTC(), time.Unix(1_783_080_000, 1).UTC(),
-				plan.Digest(), "", observability.Absent[string](), 0x101, provider,
-			)
-			canonical := mustV8CanonicalEndedSpan(t, record)
-			if got, want := canonical.resourceAttributes, resourceContext.Values(); !reflect.DeepEqual(got, want) {
-				t.Fatalf("generated/physical resource mismatch:\n generated=%v\n physical=%v", got, want)
-			}
-			_, hasEnvironmentAlias := canonical.resourceAttributes["deployment.environment"]
-			_, hasModeAlias := canonical.resourceAttributes["deployment.mode"]
-			_, hasDeviceAlias := canonical.resourceAttributes["defenseclaw.device.id"]
-			if hasEnvironmentAlias != aliases || hasModeAlias != aliases || hasDeviceAlias != aliases {
-				t.Fatalf(
-					"alias presence environment/mode/device=%t/%t/%t, want %t",
-					hasEnvironmentAlias, hasModeAlias, hasDeviceAlias, aliases,
-				)
-			}
-			if _, found := canonical.resourceAttributes["discovery.source"]; found {
-				t.Fatal("generated resource retained discovery.source")
-			}
-		})
+	deviceKeyFile := filepath.Join(t.TempDir(), "device.pem")
+	seed := make([]byte, 32)
+	seed[0] = 1
+	if err := os.WriteFile(
+		deviceKeyFile,
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: seed}),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	plan := v8PlanForTest(t, "always_on", "", func(source *config.ObservabilityV8Source) {
+		source.Resource.Attributes = map[string]string{
+			"deployment.environment.name": "test",
+			"operator.profile":            "soc",
+		}
+	})
+	provider, err := NewProviderV8Inactive(
+		context.Background(), plan, v8HandoffTestGeneration,
+		V8ProviderOptions{
+			Version: "8.0.0", ServiceInstanceID: "instance-001",
+			DefenseClawInstanceID: "instance-001", DeploymentMode: "unmanaged",
+			DeviceKeyFile: deviceKeyFile,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	resourceContext, ok := provider.V8ResourceContext()
+	if !ok {
+		t.Fatal("resource context unavailable")
+	}
+	record := v8HandoffRecord(
+		t,
+		trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		time.Unix(1_783_080_000, 0).UTC(), time.Unix(1_783_080_000, 1).UTC(),
+		plan.Digest(), "", observability.Absent[string](), 0x101, provider,
+	)
+	canonical := mustV8CanonicalEndedSpan(t, record)
+	if got, want := canonical.resourceAttributes, resourceContext.Values(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("generated/physical resource mismatch:\n generated=%v\n physical=%v", got, want)
+	}
+	for _, retired := range []string{"deployment.environment", "deployment.mode", "defenseclaw.device.id"} {
+		if _, found := canonical.resourceAttributes[retired]; found {
+			t.Fatalf("generated resource carries the retired alias %s", retired)
+		}
+	}
+	if _, found := canonical.resourceAttributes["discovery.source"]; found {
+		t.Fatal("generated resource retained discovery.source")
 	}
 }
 

@@ -977,7 +977,7 @@ func TestCompileObservabilityV8ClassifiesRegisteredCoreAndCanonicalizesEqualAlia
 	}
 	if !reflect.DeepEqual(snapshot.ResourceAttributeEntries.Values(), map[string]string{
 		"organization.unit": "security",
-	}) || !snapshot.ResourceAttributeEntries.CompatibilityAliasesEnabled() {
+	}) {
 		t.Fatalf("custom resource entries = %+v", snapshot.ResourceAttributeEntries)
 	}
 }
@@ -1008,19 +1008,6 @@ func TestCompileObservabilityV8ResourceAttributeEntriesAreSealedAndCopySafe(t *t
 	again := plan.Snapshot()
 	if !reflect.DeepEqual(again.ResourceAttributeEntries.Values(), want) || plan.Digest() != digest {
 		t.Fatal("mutating a resource projection changed the immutable plan")
-	}
-}
-
-func TestCompileObservabilityV8ResourceAttributeEntriesBindCompatibilityAliases(t *testing.T) {
-	disabled := false
-	plan := mustCompileObservabilityV8(t, &ObservabilityV8Source{
-		TracePolicy: ObservabilityV8TracePolicySource{CompatibilityAliases: &disabled},
-		Resource: ObservabilityV8ResourceSource{Attributes: map[string]string{
-			"organization.unit": "security",
-		}},
-	})
-	if plan.Snapshot().ResourceAttributeEntries.CompatibilityAliasesEnabled() {
-		t.Fatal("sealed resource attributes enabled compatibility aliases against trace policy")
 	}
 }
 

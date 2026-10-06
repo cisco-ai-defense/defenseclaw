@@ -29,7 +29,6 @@ func TestLogAdapterSnapshotsGenerationResourceAndIsolatesSiblings(t *testing.T) 
 		"service.name":                   "defenseclaw",
 		"service.instance.id":            "generation-one",
 		"deployment.environment.name":    "production",
-		"deployment.environment":         "production",
 		"defenseclaw.custom.team.name":   "security-platform",
 		"defenseclaw.custom.region.name": "east",
 	}
