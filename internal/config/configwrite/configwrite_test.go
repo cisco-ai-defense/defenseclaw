@@ -19,8 +19,11 @@ package configwrite
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -116,5 +119,38 @@ func TestParsePath(t *testing.T) {
 		if _, err := parsePath(bad); err == nil {
 			t.Fatalf("parsePath(%q) accepted", bad)
 		}
+	}
+}
+
+// TestOnlyTheWriterWritesConfigYAML is the spec section 3 guard: config.yaml
+// is written only by this package (and the config package beneath it) and
+// by the managed lifecycle, which takes config.yaml.lock and records the
+// generation itself. Any other write would skip the lock, the canonical
+// validation and config.generation.json.
+func TestOnlyTheWriterWritesConfigYAML(t *testing.T) {
+	write := regexp.MustCompile(`(os\.WriteFile|os\.Create|os\.OpenFile|os\.Rename|WriteFileDurable|[wW]riteFileAtomic)\([^)\n]*(ConfigPath\b|cfgPath\b|configPath\b|ConfigFilePath\b|"config\.yaml")`)
+	allowed := []string{"internal/config/", "internal/enterpriseunix/"}
+	_, thisFile, _, _ := runtime.Caller(0)
+	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", "..", ".."))
+	for _, dir := range []string{"internal", "cmd"} {
+		_ = filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, _ := filepath.Rel(root, path)
+			rel = filepath.ToSlash(rel)
+			for _, prefix := range allowed {
+				if strings.HasPrefix(rel, prefix) {
+					return nil
+				}
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr == nil {
+				if hit := write.Find(raw); hit != nil {
+					t.Errorf("%s writes config.yaml directly (%s); use configwrite.Apply or ReplaceDocument", rel, hit)
+				}
+			}
+			return nil
+		})
 	}
 }
