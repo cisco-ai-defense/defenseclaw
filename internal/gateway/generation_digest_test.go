@@ -23,9 +23,12 @@ import (
 // integration, whose /health is unchanged.
 func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	policyDir := repoPolicyDir(t)
-	build := func(dataDir, token, blockAt string) *Generation {
+	build := func(dataDir, token, blockAt string, edits ...func(*config.Config)) *Generation {
 		t.Helper()
 		cfg := &config.Config{PolicyDir: policyDir, DataDir: dataDir}
+		for _, edit := range edits {
+			edit(cfg)
+		}
 		cfg.Gateway.Token = token
 		cfg.AIDiscovery.ConfidencePolicyPath = filepath.Join(dataDir, "confidence.yaml")
 		cfg.Guardrail.RulePack = "default"
@@ -49,6 +52,14 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	}
 	if strict := build("/home/alice/.defenseclaw", "token-a", "HIGH"); strict.Digest == alice.Digest {
 		t.Fatal("guardrail.block_at did not change the effective digest")
+	}
+	// Unset keeps the built-in first-party plugin, [] clears it: different
+	// enforcement, so a different digest (GAP-0028).
+	cleared := build("/home/alice/.defenseclaw", "token-a", "", func(cfg *config.Config) {
+		cfg.Admission.Plugin.FirstPartyAllowList = []config.AdmissionFirstParty{}
+	})
+	if cleared.Digest == alice.Digest {
+		t.Fatal("an empty admission.plugin.first_party_allow_list left the effective digest unchanged")
 	}
 
 	prev := liveGeneration.Load()

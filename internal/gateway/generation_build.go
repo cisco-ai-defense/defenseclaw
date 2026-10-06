@@ -124,6 +124,14 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	for key, digest := range assetDigestComponents(cfg) {
 		g.Components[key] = digest
 	}
+	// The config digest cannot tell an unset list (built-in default) from an
+	// empty one: the marshalled config drops both. The compiled admission
+	// carries the lists as enforced, so unset and [] digest differently.
+	if !cfg.SecureClientIntegration() {
+		if raw, err := json.Marshal(policy.CompileAdmission(cfg)); err == nil {
+			g.Components["admission"] = sha256Digest(raw)
+		}
+	}
 	g.Providers = buildGenerationProviders(cfg)
 	g.Components["providers"] = g.Providers.digest()
 	for key, pack := range g.RulePacks {

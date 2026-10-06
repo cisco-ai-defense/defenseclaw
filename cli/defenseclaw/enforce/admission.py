@@ -308,7 +308,7 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
                 overrides.setdefault(str(scanner).strip(), {}).update(compiled)
 
     first_party = dict(out.first_party_allow)
-    for layer in (own, defaults):
+    for layer_name, layer in ((target_type, own), ("defaults", defaults)):
         entries = getattr(layer, "first_party_allow_list", None) if layer is not None else None
         # An explicit empty list allows nothing first party (Go firstParty
         # treats a non-nil empty list the same way); None inherits.
@@ -317,6 +317,8 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
                 str(getattr(e, "name", "")): list(getattr(e, "source_path_contains", []) or [])
                 for e in entries
             }
+            if source == out.source:
+                source = f"config:admission.{layer_name}.first_party_allow_list"
             break
     return CompiledAdmission(
         scan_on_install=scan_on_install,
