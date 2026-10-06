@@ -512,9 +512,17 @@ func localProfileSubject(account *osuser.User) profileSubject {
 // subject. On Windows each group is its SID followed by its name, as the
 // Windows directory facts list them; identityGroupCount counts the SIDs.
 func localAccountGroups(account *osuser.User) []string {
+	groups, _ := accountGroups(account)
+	return groups
+}
+
+// accountGroups is localAccountGroups with the error when the OS account
+// database cannot list the account's groups: facts a lookup resolves for
+// the hook path must not be cached as resolved without them.
+func accountGroups(account *osuser.User) ([]string, error) {
 	gids, err := account.GroupIds()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var groups []string
 	for _, gid := range gids {
@@ -527,7 +535,7 @@ func localAccountGroups(account *osuser.User) []string {
 			groups = append(groups, group.Name)
 		}
 	}
-	return groups
+	return groups, nil
 }
 
 // match runs the ordered assignments: the first match wins; within one
