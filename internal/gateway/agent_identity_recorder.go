@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFlushInterval is how often observed agent identities are
@@ -338,7 +339,7 @@ func mergeAgentIdentityRows(
 }
 
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if user := filter.User; user != "" && rec.UserID != user && !strings.EqualFold(rec.UserName, user) {
+	if user := filter.User; user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector
