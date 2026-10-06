@@ -93,3 +93,26 @@ func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
 		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
 	}
 }
+
+// A package upgrade whose activation was rolled back left
+// last-package-result.json at ok:false after ensure recovered the host
+// (GAP-0151). A later run that commits a deployment removes it; the
+// package's own run leaves the file to its shell, which writes the document
+// after the lifecycle returns.
+func TestRecoveringRunClearsTheFailedPackageResult(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	last := filepath.Join(h.env.P(h.env.Layout.LifecycleDir), lastPackageResultFile)
+	failed := `{"ok":false,"action":"ensure","errors":[{"code":"activation_failed","message":"gateway exited"}]}`
+	if err := os.WriteFile(last, []byte(failed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1"), Reason: "package"}))
+	if !exists(last) {
+		t.Fatal("the package's own run removed the result its shell writes")
+	}
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.2")}))
+	if exists(last) {
+		t.Fatal("a recovering run left the failed package result in place")
+	}
+}
