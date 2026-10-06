@@ -954,20 +954,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	// Every pack the gateway can load: the v9 rule_pack and custom_packs
 	// selections, profile packs and the v8 rule_pack_dir alike.
 	dirs := cfg.ReferencedRulePackDirs()
-	labels := make([]string, 0, len(dirs))
-	for label := range dirs {
-		labels = append(labels, label)
-	}
-	// The global pack first, so a connector that only inherits it is not
-	// the one a refusal names.
-	sort.Slice(labels, func(i, j int) bool {
-		gi, gj := !strings.Contains(strings.TrimPrefix(labels[i], "guardrail."), "."), !strings.Contains(strings.TrimPrefix(labels[j], "guardrail."), ".")
-		if gi != gj {
-			return gi
-		}
-		return labels[i] < labels[j]
-	})
-	for _, label := range labels {
+	for _, label := range RulePackCheckOrder(dirs) {
 		if err := check(label, dirs[label]); err != nil {
 			return err
 		}

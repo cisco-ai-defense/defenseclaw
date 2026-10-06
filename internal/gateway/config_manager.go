@@ -53,7 +53,8 @@ const configReloadStartupQuietPeriod = 25 * time.Millisecond
 const configDiffAssets = "assets"
 
 // errGenerationUnchanged reports an asset reload whose rebuilt generation
-// has the live generation's digest; nothing is swapped.
+// has the live generation's digest; nothing is swapped, and a recorded build
+// error is cleared.
 var errGenerationUnchanged = errors.New("config reload: generation unchanged")
 
 type ConfigDiff struct {
@@ -743,7 +744,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
-	if len(diff.Changed) == 0 && assets {
+	// After a rejected candidate every reload rebuilds, so putting the file
+	// or asset back confirms the live generation and clears the error.
+	if len(diff.Changed) == 0 && (assets || generationBuildFailed()) {
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
@@ -785,7 +788,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		// rejected edit is resolved (a pack restored after a digest
 		// mismatch): clear its last_reload_error and error state, otherwise
 		// they stay until an unrelated config write.
-		liveReloadError.Store("")
+		clearGenerationBuildError()
 		if m.health != nil {
 			state, msg := StateRunning, ""
 			if envOverlayErr != nil {
