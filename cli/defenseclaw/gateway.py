@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache
@@ -1393,3 +1394,33 @@ def _is_runnable_file(path: str) -> bool:
         return os.path.isfile(path) and os.access(path, os.X_OK)
     except OSError:
         return False
+
+
+def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
+    """Compute effective_policy_digest from disk with the installed gateway
+    (``defenseclaw-gateway policy digest --json``); None when it cannot."""
+    binary = resolve_gateway_binary()
+    if not binary:
+        return None
+    env = dict(os.environ)
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if data_dir:
+        env["DEFENSECLAW_HOME"] = data_dir
+    try:
+        proc = subprocess.run(
+            [binary, "policy", "digest", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return report if isinstance(report, dict) and report.get("effective_digest") else None

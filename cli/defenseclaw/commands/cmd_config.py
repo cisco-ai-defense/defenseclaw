@@ -228,7 +228,8 @@ def config_show(
 @click.option(
     "--effective",
     is_flag=True,
-    help="Also print where the value comes from (config.yaml or the default).",
+    help="Print the value the gateway enforces and where it comes from "
+    "(config.yaml, the rule pack's default, the derived scanner gate).",
 )
 @pass_ctx
 def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
@@ -236,12 +237,21 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
 
     KEY is a dotted path such as asset_policy.enabled or
     asset_policy.mcp.registry_required. A key config.yaml leaves out prints
-    its default, with a note on stderr. Exits 1 when the key has no value
+    its default, with a note on stderr. With --effective, guardrail levels
+    (guardrail.block_at, guardrail.connectors.<c>.alert_at) and admission.<type>
+    print what the gateway resolves them to. Exits 1 when the key has no value
     and no default, and 2 for an unknown section.
     """
     parts = [part for part in key.strip().split(".") if part]
     if not parts:
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
+    if effective:
+        resolved = _effective_value(app, parts)
+        if resolved is not None:
+            value, source = resolved
+            click.echo(f"(source: {source})", err=True)
+            _echo_value(value, fmt)
+            return
     view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
     found, value = _lookup(view, parts)
     if not found:
@@ -263,6 +273,10 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             click.echo(f"(default: config.yaml does not set {key})", err=True)
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
+    _echo_value(value, fmt)
+
+
+def _echo_value(value: object, fmt: str) -> None:
     if isinstance(value, (dict, list)) or fmt.lower() == "json":
         _emit(value, fmt)
     elif isinstance(value, bool):
@@ -271,6 +285,64 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         click.echo("null")
     else:
         click.echo(str(value))
+
+
+_LEVEL_KEYS = ("block_at", "alert_at")
+_ADMISSION_TYPES = ("skill", "mcp", "plugin")
+
+
+def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | None:
+    """The resolved value of a guardrail level or admission.<type> key and its
+    source, as the gateway resolves them; None for any other key."""
+    cfg = app.cfg if app.cfg is not None else config_module.load()
+    if parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS:
+        if len(parts) == 2:
+            connector = ""
+        elif len(parts) == 4 and parts[1] == "connectors":
+            connector = parts[2]
+        else:
+            return None
+        from defenseclaw.policy_catalog import level_name, pack_profile, scope_levels, scope_pack_path
+
+        levels = scope_levels(cfg, connector)
+        which = parts[-1]
+        source = levels.block_source if which == "block_at" else levels.alert_source
+        value = level_name(levels.block_rank if which == "block_at" else levels.alert_rank)
+        if source == "pack":
+            label = f"pack-default:{pack_profile(scope_pack_path(cfg, connector))}"
+        elif source == "global":
+            label = f"config:guardrail.{which}"
+        else:
+            label = f"config:guardrail.connectors.{connector}.{which}"
+        if which == "alert_at" and levels.alert_clamped:
+            label += " (clamped to block_at)"
+        return value, label
+    if parts[0] == "admission" and len(parts) >= 2 and parts[1] in _ADMISSION_TYPES:
+        from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
+
+        compiled = compile_admission(cfg, parts[1])
+        data = {
+            "scan_on_install": compiled.scan_on_install,
+            "allow_list_bypass_scan": compiled.allow_list_bypass_scan,
+            "actions": {
+                sev.lower(): action_label(compiled.actions[sev])
+                for sev in ADMISSION_SEVERITY_ORDER
+                if sev in compiled.actions
+            },
+            "scanner_overrides": {
+                scanner: {sev.lower(): action_label(action) for sev, action in actions.items()}
+                for scanner, actions in compiled.scanner_overrides.items()
+            },
+            "first_party_allow_list": [
+                {"name": name, "source_path_contains": list(paths)}
+                for name, paths in compiled.first_party_allow.items()
+            ],
+        }
+        found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
+        if not found:
+            return None
+        return value, compiled.source
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +380,11 @@ def _write_config_change(app: AppContext, change: object, expect_sha256: str | N
         click.echo(f"{key} already has that value (generation {result.generation}).")
         return
     click.echo(f"{verb.capitalize()} {key} (config generation {result.generation}, sha256 {result.sha256[:12]}).")
+    from defenseclaw.gateway import local_policy_digest
+
+    digest = local_policy_digest(app.cfg if app.cfg is not None else config_module.load(), timeout=20)
+    if digest:
+        click.echo(f"Effective policy digest: {digest['effective_digest']}")
     if result.restart_required:
         click.echo(
             f"Restart the gateway to apply {', '.join(result.restart_required)}: defenseclaw-gateway restart"

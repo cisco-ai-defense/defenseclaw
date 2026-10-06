@@ -134,3 +134,29 @@ def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: py
     assert run(["show", "--section", "managed"]).exit_code == 1
     source = run(["show", "--source", "--section", "asset_policy"])
     assert source.exit_code == 1 and "Drop --source" in source.output
+
+
+def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 9\ngateway: {}\nobservability: {}\nguardrail: {rule_pack: strict}\n"
+        "scanners: {skill_scanner: {fail_on_severity: CRITICAL}}\n",
+        encoding="utf-8",
+    )
+    with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
+        block = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.block_at", "--effective"])
+        skill = CliRunner().invoke(
+            cmd_config.config_cmd, ["get", "admission.skill.actions", "--effective", "--format", "json"]
+        )
+    assert block.exit_code == 0, block.output
+    assert block.stdout == "MEDIUM\n" and "pack-default:strict" in block.stderr
+    assert skill.exit_code == 0, skill.output
+    assert json.loads(skill.stdout) == {
+        "critical": "quarantine", "high": "warn", "medium": "warn", "low": "allow", "info": "allow"
+    }
+    assert "derived:scanners.skill_scanner" in skill.stderr

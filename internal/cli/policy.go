@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -182,11 +183,21 @@ var policyShowCmd = &cobra.Command{
 	Short: "Display the admission policy and thresholds compiled from config.yaml",
 	RunE: func(_ *cobra.Command, _ []string) error {
 		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
-		if cfg != nil {
+		if cfg != nil && cfg.SecureClientIntegration() {
 			view["guardrail"] = map[string]string{
 				"block_at":          cfg.Guardrail.BlockAt,
 				"alert_at":          cfg.Guardrail.AlertAt,
 				"cisco_trust_level": cfg.Guardrail.CiscoTrustLevel,
+			}
+		} else if cfg != nil {
+			// The levels the gateway resolves: block_at / alert_at over
+			// the rule pack's posture.
+			levels := gateway.ConfigThresholds(cfg, "")
+			view["guardrail"] = map[string]string{
+				"block_at":          levels.Block,
+				"alert_at":          levels.Alert,
+				"source":            levels.Source,
+				"cisco_trust_level": cfg.Guardrail.EffectiveCiscoTrustLevel(),
 			}
 		}
 		out, err := json.MarshalIndent(view, "", "  ")

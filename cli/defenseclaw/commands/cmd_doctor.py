@@ -8956,35 +8956,10 @@ def _short_policy_digest(digest: str) -> str:
 
 
 def _local_policy_digest(cfg) -> dict | None:
-    """Compute effective_policy_digest from disk with the installed gateway
-    (``defenseclaw-gateway policy digest --json``); None when it cannot."""
-    from defenseclaw.gateway import resolve_gateway_binary
+    """effective_policy_digest computed from disk (see gateway.local_policy_digest)."""
+    from defenseclaw.gateway import local_policy_digest
 
-    binary = resolve_gateway_binary()
-    if not binary:
-        return None
-    env = dict(os.environ)
-    data_dir = getattr(cfg, "data_dir", "") or ""
-    if data_dir:
-        env["DEFENSECLAW_HOME"] = data_dir
-    try:
-        proc = subprocess.run(
-            [binary, "policy", "digest", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        report = json.loads(proc.stdout)
-    except ValueError:
-        return None
-    return report if isinstance(report, dict) and report.get("effective_digest") else None
+    return local_policy_digest(cfg)
 
 
 def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> None:

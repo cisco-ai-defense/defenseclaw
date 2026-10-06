@@ -1302,11 +1302,18 @@ def scope_levels(cfg: Any, connector: str = "") -> ScopeLevels:
     in internal/config/application_protection.go), which no catalog scope is.
     """
     gc = _guardrail(cfg)
-    fallback = global_pack(cfg)
+    path = scope_pack_path(cfg, connector)
     if not connector:
-        return resolve_levels(fallback.path, _level_pair(gc))
-    path = _override_dir(gc, connector, cfg) or fallback.path
+        return resolve_levels(path, _level_pair(gc))
     return resolve_levels(path, _level_pair(gc), _level_pair(_connector_block(gc, connector)))
+
+
+def scope_pack_path(cfg: Any, connector: str = "") -> str:
+    """The rule-pack directory the global scope ("") or an active connector enforces."""
+    fallback = global_pack(cfg).path
+    if not connector:
+        return fallback
+    return _override_dir(_guardrail(cfg), connector, cfg) or fallback
 
 
 # ---------------------------------------------------------------------------

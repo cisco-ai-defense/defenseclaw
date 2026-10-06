@@ -71,6 +71,16 @@ _SHORTHANDS = {
 }
 
 
+def action_label(action: tuple[SeverityAction, bool]) -> object:
+    """A compiled action as config.yaml writes it: its shorthand, else the
+    ``{install, file, runtime}`` triple."""
+    for name, value in _SHORTHANDS.items():
+        if value == action:
+            return name
+    triple, _ = action
+    return {"install": triple.install, "file": triple.file, "runtime": triple.runtime}
+
+
 def _builtin_admission(target_type: str) -> CompiledAdmission:
     """The admission defaults that shipped in policies/rego/data.json up to 1.0."""
     actions = {

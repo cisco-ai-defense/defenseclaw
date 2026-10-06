@@ -97,6 +97,12 @@ func resolveThresholds(cfg *config.Config, connector string) ResolvedThresholds 
 	return thresholdsFromLevels(&cfg.Guardrail, connector, posture, ref)
 }
 
+// ConfigThresholds is resolveThresholds for a caller outside the gateway
+// (`defenseclaw-gateway policy show`).
+func ConfigThresholds(cfg *config.Config, connector string) ResolvedThresholds {
+	return resolveThresholds(cfg, config.NormalizeConnectorName(connector))
+}
+
 // resolvePackThresholds is the rule pack's posture levels alone, without
 // guardrail.block_at / alert_at (the Secure Client content surfaces).
 func resolvePackThresholds(cfg *config.Config, connector string) ResolvedThresholds {
