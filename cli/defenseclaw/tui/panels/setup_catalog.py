@@ -427,7 +427,7 @@ def _splunk_status(cfg: Any, observability: Any) -> TaskStatus:
             if getattr(d, "kind", "") == "splunk_hec" or str(getattr(d, "preset", "")).startswith("splunk")
         ]
         return TaskStatus("ok", _plural(len(splunk), "destination")) if splunk else TaskStatus("off")
-    return TaskStatus("ok", "HEC on") if _flag(cfg, "splunk.enabled") else TaskStatus("off")
+    return TaskStatus("off")
 
 
 def _has_preset(observability: Any, preset: str) -> bool:

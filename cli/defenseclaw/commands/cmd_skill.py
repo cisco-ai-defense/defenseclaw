@@ -1657,8 +1657,9 @@ def _build_skill_scanner(
         app.cfg.cisco_ai_defense,
         llm=llm,
     )
-    # R4: overlay the configured guardrail rule pack so `skill scan` flags what
-    # the gateway's rule lanes would catch. No-op when no rule_pack_dir is set.
+    # R4: overlay the configured guardrail rule pack (and guardrail.rules) so
+    # `skill scan` flags what the gateway's rule lanes would catch, and what the
+    # install watcher flags. No-op when neither is set.
     return maybe_wrap(
         scanner,
         app.cfg,

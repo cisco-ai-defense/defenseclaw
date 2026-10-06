@@ -221,9 +221,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		// Resolve the identity-based guardrail profile once, after
-		// authentication, from the route's connector and the verified
-		// subject (never the payload). No-op without profiles. The agent
-		// identity is folded in by enrichAgentHookContext.
+		// authentication, from the route's connector, the verified subject
+		// and the agent identity derived from both (never the payload).
+		// No-op without profiles.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
@@ -1237,7 +1237,6 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
-	ctx = refreshGuardrailProfileForAgent(ctx)
 	// Refresh the audit correlation envelope with payload-derived
 	// correlation. CorrelationMiddleware snapshots the envelope
 	// from the HTTP headers BEFORE this handler runs; for hook
@@ -2021,7 +2020,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	evalCtx := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx,
+		a.dispatchAgentHookNotification(ctx, req, action, rawAction, severity, reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	// A configured block message overrides the user-facing reason on block
@@ -2264,9 +2263,9 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 // req.ConnectorName so the subtitle reads e.g. "DefenseClaw hermes
 // PreToolUse" — operators paging through toasts can attribute each
 // one to a specific framework without opening the audit log.
-func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchAgentHookNotification(ctx context.Context, req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook(req.ConnectorName, req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, req.ConnectorName, req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return

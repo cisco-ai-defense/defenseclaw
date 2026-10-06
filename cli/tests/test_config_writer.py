@@ -18,6 +18,9 @@
 
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 from defenseclaw import config_writer
 from defenseclaw.config_writer import Change
@@ -109,12 +112,54 @@ def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, mo
 
 def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, monkeypatch):
     path = _config(tmp_path)
+    (tmp_path / config_writer.MANAGED_RUNTIME_DESCRIPTOR).write_text("{}")
+    tmp_path.chmod(0o755)
     monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
     monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
     with pytest.raises(config_writer.ManagedConfigWriteError):
         config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
     with pytest.raises(FileNotFoundError):
         config_writer.read_generation_state(path)
+    # A refusal leaves the lifecycle's folder as it was: every user's hook reads it.
+    if os.name != "nt":
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+
+
+def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeypatch):
+    # A standard user's per-user config says nothing about the host: the
+    # machine marker the enterprise lifecycle publishes decides.
+    from defenseclaw import upgrade_shim
+    from defenseclaw.config import default_config
+    from defenseclaw.enforce import asset_lists
+
+    path = _config(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    with pytest.raises(asset_lists.ManagedDeviceError):
+        asset_lists.refuse_if_managed(default_config(), target_type="skill", op=asset_lists.OP_BLOCK, name="x")
+    config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
+
+
+def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
+    # `config` skips the startup load, so the refusal opens its own logger.
+    from unittest.mock import MagicMock
+
+    import click
+    from defenseclaw import config as config_module
+    from defenseclaw import logger as logger_module
+    from defenseclaw.context import AppContext
+    from defenseclaw.enforce import asset_lists
+
+    audit = MagicMock()
+    monkeypatch.setattr(config_module, "load", lambda: object())
+    monkeypatch.setattr(logger_module.Logger, "from_config", staticmethod(lambda _cfg: audit))
+    with click.Context(click.Command("set"), obj=AppContext()):
+        asset_lists.audit_managed_refusal("config-update", "guardrail.mode", "verb=set")
+    audit.log_action.assert_called_once_with(
+        "config-update", "guardrail.mode", "outcome=refused reason=managed_device verb=set"
+    )
 
 
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):

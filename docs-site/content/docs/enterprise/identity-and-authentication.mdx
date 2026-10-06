@@ -367,7 +367,7 @@ Two settings decide how much personal data leaves the host:
 | `ai_discovery.ide_inventory` | `all` | `all`, `ai_only` or `off`. Plugin lists can reveal personal tooling; `ai_only` keeps only AI plugins and `off` collects no IDE inventory. |
 
 ```yaml title="~/.defenseclaw/config.yaml"
-config_version: 8
+config_version: 9
 ai_discovery:
   include_user_principal: false   # the default; true sends the principal
   ide_inventory: ai_only          # all | ai_only | off
@@ -377,7 +377,9 @@ Then check the file with `defenseclaw config validate`. A running gateway
 applies the change on its next reload; on a managed host, edit the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives)
 instead. Confirm with the audit export in the first guide: the `principal`
-and `kerberos_principal` keys are absent while the setting is off.
+and `kerberos_principal` keys are absent while the setting is off. A home-directory
+path can still contain the UPN on SSSD hosts with fully qualified names; see
+[End-user identity](/docs/observability/end-user-identity#optional-principal).
 
 What stays on in either case: `user.id`, the account name, the domain, the
 directory type, the assurance, the session kind and the client address. There

@@ -53,8 +53,7 @@ observability: {}
 	}
 }
 
-func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
-	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
+func TestLoadRuntimeV8FromBytesRetainsConnectorWebhookOverride(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw-v8
 observability:
@@ -66,21 +65,9 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OTel.Enabled || len(cfg.OTel.Destinations) != 0 {
-		t.Fatalf("target runtime retained legacy OTel config: %+v", cfg.OTel)
-	}
-	if cfg.AuditSinks != nil {
-		t.Fatalf("target runtime retained global legacy audit sinks: %+v", cfg.AuditSinks)
-	}
-	if cfg.AIDiscovery.EmitOTel {
-		t.Fatal("target runtime retained ai_discovery.emit_otel")
-	}
 	connector, ok := cfg.Observability.Connectors["codex"]
 	if !ok || connector.Webhooks == nil {
 		t.Fatalf("v8 connector webhook override was not retained: %+v", cfg.Observability.Connectors)
-	}
-	if connector.AuditSinks != nil {
-		t.Fatalf("target runtime retained connector legacy audit sinks: %+v", connector.AuditSinks)
 	}
 }
 
@@ -367,8 +354,8 @@ admission:
 guardrail:
   rule_pack: strict
   rules:
-    disable: [ENT-DATA-EMPLOYEE-ID]
-    severity_overrides: {SEC-AWS-SECRET: HIGH}
+    disable: [ENT-DATA-EMPLOYEE-ID, exec.remote_ip_download_execute_same_artifact]
+    severity_overrides: {SEC-AWS-SECRET: HIGH, impact.cloud_s3_data_delete: HIGH}
   profiles:
     contractors:
       rules: {severity_overrides: {SEC-OPENAI-V2: LOW}}
@@ -407,6 +394,10 @@ observability: {}
 	}
 	if got := cfg.Guardrail.Rules.SeverityOverrides["SEC-AWS-SECRET"]; got != "HIGH" || cfg.Guardrail.RulePack != "strict" {
 		t.Errorf("rules = %+v rule_pack = %q; rule IDs must keep their case", cfg.Guardrail.Rules, cfg.Guardrail.RulePack)
+	}
+	// The newer semantic packs spell their IDs in lower case with dots.
+	if rules := cfg.Guardrail.Rules; len(rules.Disable) != 2 || rules.SeverityOverrides["impact.cloud_s3_data_delete"] != "HIGH" {
+		t.Errorf("lower-case dotted rule IDs = %+v", rules)
 	}
 	if rules := cfg.Guardrail.Profiles["contractors"].Rules; rules == nil || rules.SeverityOverrides["SEC-OPENAI-V2"] != "LOW" {
 		t.Errorf("profile rules = %+v", rules)

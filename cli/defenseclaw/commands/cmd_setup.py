@@ -10509,7 +10509,6 @@ def _maybe_bring_up_local_stack(app: AppContext, *, auto: bool) -> None:
             endpoint=None,
             signals="traces,metrics,logs",
             service_name="defenseclaw",
-            with_audit_sink=True,
         )
     except SystemExit:
         # ``up_cmd`` raises SystemExit(1) on Docker preflight failure.

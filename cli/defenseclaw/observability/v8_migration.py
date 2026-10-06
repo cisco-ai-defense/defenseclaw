@@ -2524,10 +2524,7 @@ def _convert_sink(
             "guardrail-verdict": "defenseclaw:verdict",
             **copy.deepcopy(block.get("sourcetype_overrides") or {}),
         }
-        if block.get("insecure_skip_verify") is True or (
-            "insecure_skip_verify" not in block and block.get("verify_tls") is False
-        ):
-            target["tls"] = {"insecure_skip_verify": True}
+        _legacy_skip_verify(target, block, name, ctx)
     elif kind == "otlp_logs":
         target["endpoint"] = _text(block.get("endpoint"), "$.audit_sinks[].otlp_logs.endpoint", ctx)
         target["protocol"] = _protocol(block.get("protocol") or "grpc", "$.audit_sinks[].otlp_logs.protocol", ctx)
@@ -2573,10 +2570,7 @@ def _convert_sink(
                 ctx.warning("unresolved_optional_bearer_omitted")
         elif bearer := block.get("bearer_token"):
             target["bearer_env"] = _protect_bearer(name, bearer, ctx)
-        if block.get("insecure_skip_verify") is True or (
-            "insecure_skip_verify" not in block and block.get("verify_tls") is False
-        ):
-            target["tls"] = {"insecure_skip_verify": True}
+        _legacy_skip_verify(target, block, name, ctx)
     default_batch = 512 if kind == "otlp_logs" else (50 if kind == "splunk_hec" else 1)
     timeout = _effective_positive_int(sink, "timeout_s", 10, "$.audit_sinks[].timeout_s", ctx)
     target["timeout_ms"] = timeout * 1000
@@ -2644,6 +2638,25 @@ def _convert_sink(
     _validate_generated_route_count(routes, "$.audit_sinks[]", ctx)
     target["routes"] = routes
     return target
+
+
+def _legacy_skip_verify(target: dict[str, Any], block: Mapping[str, Any], name: str, ctx: _Context) -> None:
+    """Carry a v7 sink's certificate opt-out onto an https endpoint only.
+
+    A v7 sink on a plain-http endpoint ignored the opt-out, and the v8 runtime
+    refuses a certificate option on such an endpoint, so converting it would
+    leave a gateway that cannot start.
+    """
+
+    if not (
+        block.get("insecure_skip_verify") is True
+        or ("insecure_skip_verify" not in block and block.get("verify_tls") is False)
+    ):
+        return
+    if str(target.get("endpoint", "")).lower().startswith("https://"):
+        target["tls"] = {"insecure_skip_verify": True}
+    else:
+        ctx.warning(f"legacy_insecure_skip_verify_ignored:{name}")
 
 
 def _legacy_audit_min_severity(value: str) -> str:

@@ -118,6 +118,11 @@ func TestAgentVerdictReasonNamesALoadedRulePackTitle(t *testing.T) {
 	if got := agentVerdictReason("block", other, agentDisplayReason(other, redaction.SinkPolicyDefault), redaction.SinkPolicyDefault); strings.Contains(got, "secret value") {
 		t.Fatalf("a title outside the loaded pack reached the agent: %q", got)
 	}
+	// A title that holds ", " is one label, not two (GAP-0126).
+	comma := "matched: TEST-MARKER-COMMA:Test marker, with a comma, " + strings.TrimPrefix(markerRuleReason, "matched: ")
+	if got, want := agentMatchedRules(comma), "rules TEST-MARKER-COMMA: Test marker, with a comma, TEST-MARKER-BLOCK: Test marker (block)"; got != want {
+		t.Fatalf("agentMatchedRules(%q) = %q, want %q", comma, got, want)
+	}
 }
 
 // The observe-mode notice names the rule the way the action-mode block does,
@@ -156,6 +161,12 @@ func applyMarkerRulePack(t *testing.T, connectorName string) {
 			ID:         "TEST-MARKER-BLOCK",
 			Pattern:    `(?i)\btest-marker-block\b`,
 			Title:      "Test marker (block)",
+			Severity:   "HIGH",
+			Confidence: 0.99,
+		}, guardrail.RuleDefYAML{
+			ID:         "TEST-MARKER-COMMA",
+			Pattern:    `(?i)\btest-marker-comma\b`,
+			Title:      "Test marker, with a comma",
 			Severity:   "HIGH",
 			Confidence: 0.99,
 		})
