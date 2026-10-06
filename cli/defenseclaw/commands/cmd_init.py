@@ -2410,7 +2410,7 @@ def _activate_additional_connectors(
 
 
 # Per-connector guardrail settings init never prompts for (GAP-1713).
-_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "block_at", "alert_at", "block_message")
+_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "rule_pack", "block_at", "alert_at", "block_message")
 
 
 def _saved_connector_overrides() -> dict[str, object]:

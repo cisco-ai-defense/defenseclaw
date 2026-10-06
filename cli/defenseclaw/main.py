@@ -347,7 +347,8 @@ def cli(ctx: click.Context) -> None:
         # A missing config is represented by an in-memory source version of
         # zero. Do not create audit/runtime state before the setup group proves
         # that the requested child is the trusted-paths bootstrap. Config.save
-        # will promote this fresh document to v8 while holding its file lock.
+        # will write this fresh document at the current version while holding
+        # its file lock.
         app.preinit_setup_bootstrap = True
         return
 

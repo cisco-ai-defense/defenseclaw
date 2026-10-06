@@ -135,11 +135,9 @@ CURRENT_CONFIG_VERSION = 9
 #: loads (the gateway migrates it in memory) until ``defenseclaw migrate``
 #: rewrites it as 9.
 FIRST_CURRENT_CONFIG_VERSION = 8
-#: The config_version a brand-new config.yaml is written with. It stays 8
-#: until the setup commands write the v9 keys (rule_pack, admission,
-#: scanner analyzers) themselves; ``defenseclaw migrate`` then moves the
-#: file to 9, and the gateway reads either.
-FRESH_CONFIG_VERSION = 8
+#: The config_version a brand-new config.yaml is written with. Only an
+#: existing v8 file needs ``defenseclaw migrate``.
+FRESH_CONFIG_VERSION = CURRENT_CONFIG_VERSION
 
 
 def is_current_schema(version: Any) -> bool:
@@ -7004,15 +7002,15 @@ def default_config() -> Config:
 
 
 def prepare_fresh_v8_config(cfg: Config) -> Config:
-    """Mark a never-persisted default config as a canonical v8 source.
+    """Mark a never-persisted default config as a canonical current-schema source.
 
-    Capturing dataclass defaults as the v8 baseline means the first save writes
+    Capturing dataclass defaults as the baseline means the first save writes
     only explicit first-run choices, plus ``config_version`` and the canonical
     ``observability`` block.
     """
 
     if cfg is None or cfg._source_config_version != 0:
-        raise ValueError("fresh v8 configuration requires an unversioned default")
+        raise ValueError("fresh configuration requires an unversioned default")
     cfg._source_config_version = FRESH_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
