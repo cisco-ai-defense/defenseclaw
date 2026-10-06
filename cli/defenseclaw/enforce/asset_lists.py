@@ -72,7 +72,11 @@ def is_secure_client(cfg: Any) -> bool:
 
 
 def is_managed_standalone(cfg: Any) -> bool:
-    return cfg is not None and enterprise_profile(cfg) == "standalone"
+    """A managed standalone device: the config says so, or this computer's
+    machine marker does (a standard user's per-user config does not)."""
+    from defenseclaw import config_writer
+
+    return cfg is not None and (enterprise_profile(cfg) == "standalone" or config_writer.machine_managed_standalone())
 
 
 _REFUSAL_ACTIONS = {

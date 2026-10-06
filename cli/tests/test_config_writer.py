@@ -100,6 +100,23 @@ def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, mo
         assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
 
 
+def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeypatch):
+    # A standard user's per-user config says nothing about the host: the
+    # machine marker the enterprise lifecycle publishes decides.
+    from defenseclaw import upgrade_shim
+    from defenseclaw.config import default_config
+    from defenseclaw.enforce import asset_lists
+
+    path = _config(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    with pytest.raises(asset_lists.ManagedDeviceError):
+        asset_lists.refuse_if_managed(default_config(), target_type="skill", op=asset_lists.OP_BLOCK, name="x")
+    config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
+
+
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
     from defenseclaw import config as config_module
 

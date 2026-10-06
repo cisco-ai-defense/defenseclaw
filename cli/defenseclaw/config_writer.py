@@ -514,12 +514,26 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     return profile == "standalone"
 
 
+def machine_managed_standalone() -> bool:
+    """Whether this computer is a managed standalone host: the enterprise
+    lifecycle published its runtime descriptor (Linux, macOS) or the Windows
+    marker with the standalone profile. Any account's CLI sees it, so a
+    standard user's per-user config cannot opt out of the managed gate.
+    Secure Client hosts publish neither, so their path is unchanged."""
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
+
+
 def standalone_managed(current: bytes) -> bool:
-    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
-    managed deployment on the standalone profile. Secure Client hosts are
-    not standalone, so their path is unchanged."""
+    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
+    describe a managed deployment on the standalone profile. Secure Client
+    hosts are not standalone, so their path is unchanged."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
+    if machine_managed_standalone():
+        return True
     try:
         document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
     except (UnicodeDecodeError, yaml.YAMLError):
