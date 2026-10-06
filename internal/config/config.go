@@ -1381,7 +1381,7 @@ type FirewallConfig struct {
 // Name is the CLI-visible identifier (“defenseclaw setup webhook
 // enable <name>“ etc.). The runtime dispatcher itself identifies
 // webhooks by URL, but Name is round-tripped through Load/Save so
-// saving the config via Config.Save() or the TUI doesn't silently
+// saving the config through the config writer or the TUI doesn't silently
 // strip the operator's chosen name. “omitempty“ keeps legacy files
 // that never set “name:“ identical after load-save.
 type WebhookConfig struct {
@@ -4101,35 +4101,6 @@ func normalizeDeploymentMode(mode string) string {
 	default:
 		return strings.TrimSpace(mode)
 	}
-}
-
-func (c *Config) Save() error {
-	configFile := filepath.Join(c.DataDir, DefaultConfigName)
-
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("config: marshal: %w", err)
-	}
-
-	if err := os.WriteFile(configFile, data, 0o600); err != nil {
-		return err
-	}
-
-	// v7 provenance: every successful config save updates the
-	// content_hash (so downstream events carry a fingerprint of
-	// exactly which config shape produced them) and bumps the
-	// monotonic generation counter (so dashboards can detect churn
-	// without diffing hashes). A failed Save() never reaches this
-	// line — a stale generation would fire spurious "config
-	// changed" alerts. Hash the marshaled YAML bytes directly; they
-	// are already deterministic per (Config struct, yaml.Marshal
-	// impl) and any Load() reading the same file will compute the
-	// same fingerprint, which is the property needed for content
-	// hash stability across save↔load round-trips.
-	version.SetContentHash(data)
-	version.BumpGeneration()
-
-	return nil
 }
 
 func setDefaults(dataDir string, legacyObservability bool) {
