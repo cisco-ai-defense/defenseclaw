@@ -66,6 +66,9 @@ const (
 	MaxSandboxScanSignals = MaxUserScanSignals
 
 	maxSandboxScanRecordBytes = 16 << 20
+	// maxSandboxCollectDetail bounds the sandbox_collect detector error: a
+	// detail is at most 1024 bytes (ValidateUserScanReport).
+	maxSandboxCollectDetail = 1024
 	// sandboxRecordDirName is the sandbox manager's own record directory
 	// under <data_dir>/sandboxes, which is no sandbox.
 	sandboxRecordDirName = "manager"
@@ -328,7 +331,12 @@ func ScanSandboxRoot(ctx context.Context, scan SandboxScan, opts SandboxScanOpti
 	}
 	if len(scan.Problems) > 0 {
 		stats.Errors++
-		stats.DetectorErrors["sandbox_collect"] = strings.Join(scan.Problems, "; ")
+		// Within what a report may carry (ValidateUserScanReport).
+		detail := strings.Join(scan.Problems, "; ")
+		if len(detail) > maxSandboxCollectDetail {
+			detail = strings.ToValidUTF8(detail[:maxSandboxCollectDetail-3], "") + "..."
+		}
+		stats.DetectorErrors["sandbox_collect"] = detail
 	}
 	if ctx.Err() != nil {
 		stats.Errors++

@@ -12,6 +12,7 @@ package inventory
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -189,6 +190,23 @@ func TestScanSandboxRootMarksACollectionShortfallPartial(t *testing.T) {
 	}
 	if report.Summary.Result != "partial" || !strings.Contains(report.Summary.DetectorErrors["sandbox_collect"], "4 MiB") {
 		t.Fatalf("summary = %+v, want partial naming the collection's shortfall", report.Summary)
+	}
+	// However many shortfalls, the report stays within what a record may
+	// carry: one the gateway refused would hide the sandbox's inventory.
+	many := make([]string, 200)
+	for i := range many {
+		many[i] = fmt.Sprintf("dccert shortfall %03d", i)
+	}
+	report, err = ScanSandboxRoot(context.Background(), SandboxScan{Root: t.TempDir(), Home: "/sandbox", Problems: many},
+		SandboxScanOptions{}, []AISignature{sandboxTestSignature()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail := report.Summary.DetectorErrors["sandbox_collect"]; len(detail) > 1024 || !strings.HasPrefix(detail, "dccert shortfall 000") {
+		t.Fatalf("detail of %d bytes: %.80q", len(detail), detail)
+	}
+	if err := ValidateUserScanReport(report, []AISignature{sandboxTestSignature()}); err != nil {
+		t.Fatalf("the report is refused: %v", err)
 	}
 }
 

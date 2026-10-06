@@ -278,11 +278,14 @@ type collectScope struct {
 	// exeDirs and binaries make up the executable lookups.
 	exeDirs  map[string]bool
 	binaries map[string]bool
+	// maxFiles bounds the files whose content the answer may bring
+	// (ai_discovery.max_files_per_scan, at most collectMaxEntries).
+	maxFiles int
 }
 
 func newCollectScope() *collectScope {
 	return &collectScope{roots: collectRoots, exact: map[string]bool{}, content: map[string]bool{}, dirs: map[string]int{},
-		manifests: map[string]bool{}, exeDirs: map[string]bool{}, binaries: map[string]bool{}}
+		manifests: map[string]bool{}, exeDirs: map[string]bool{}, binaries: map[string]bool{}, maxFiles: collectMaxEntries}
 }
 
 // inRoots reports a sandbox path under one of the scope's roots.
@@ -420,7 +423,7 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 	procs := map[int]*collectedProcess{}
 	envs := map[string]bool{}
 	seenEntry := map[string]bool{}
-	entryCapped := false
+	entryCapped, filesCapped := false, false
 	refuse := func() { c.Refused++ }
 	for i := 1; i < len(lines); i++ {
 		line := string(lines[i])
@@ -553,6 +556,10 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 				refuse()
 				continue
 			}
+			if _, again := c.Contents[p]; !again && len(c.Contents) >= scope.maxFiles {
+				filesCapped = true
+				continue
+			}
 			if int64(base64.StdEncoding.DecodedLen(len(data))) > maxFileBytes+2 {
 				refuse()
 				c.Problems = appendOnce(c.Problems, fmt.Sprintf("a file over %d bytes was not read", maxFileBytes))
@@ -565,14 +572,21 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 			}
 			c.Contents[p] = content
 		case "Q":
-			c.ProcessesCapped = c.ProcessesCapped || rest == "processes"
-			c.Problems = appendOnce(c.Problems, "the collector stopped at its bound of "+collectText(rest, 64))
+			// The script reports one bound only: its process bound.
+			if rest != "processes" {
+				refuse()
+				continue
+			}
+			c.ProcessesCapped = true
 		default:
 			refuse()
 		}
 	}
 	if entryCapped {
 		c.Problems = append(c.Problems, fmt.Sprintf("the sandbox listed more than %d entries", collectMaxEntries))
+	}
+	if filesCapped {
+		c.Problems = append(c.Problems, fmt.Sprintf("the sandbox sent more than %d files", scope.maxFiles))
 	}
 	if c.ProcessesCapped {
 		c.Problems = appendOnce(c.Problems, fmt.Sprintf("the sandbox has more than %d processes", collectMaxProcesses))

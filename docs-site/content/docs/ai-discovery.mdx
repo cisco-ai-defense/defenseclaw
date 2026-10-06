@@ -359,8 +359,9 @@ configured there, which its own scan of this machine never sees:
   which the gateway's own scan reads.
 - Everything the sandbox sends back is checked as the agent's: only
   absolute, printable paths under the sandbox's home, projects or harness
-  install, within what was asked for and within `max_file_bytes`,
-  `max_files_per_scan` and a 4 MiB stream, are kept. They are written as
+  install, within what was asked for and within the bounds (`max_file_bytes`
+  a file, `max_files_per_scan` files read, 8,192 entries listed and a 4 MiB
+  stream), are kept. They are written as
   private regular files (never links or FIFOs) under
   `<data_dir>/sandboxes/NAME/discovery` and scanned on this machine with the
   same detectors, without the machine-wide ones (applications, IDEs,

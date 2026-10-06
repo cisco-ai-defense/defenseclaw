@@ -305,6 +305,7 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "plan the discovery of sandbox %s: %v", rec.Name, err)
 	}
 	pairs, scope := collectPlan(plan, rec.Harness)
+	scope.maxFiles = min(opts.MaxFilesPerScan, collectMaxEntries)
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return nil, err

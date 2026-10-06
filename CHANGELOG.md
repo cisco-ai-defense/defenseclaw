@@ -1075,7 +1075,8 @@ deleted.
   sandbox with one read-only command it builds itself, checks every path and
   file the sandbox sends back (absolute, printable, under the sandbox's home,
   projects or harness install, within what was asked and within
-  `ai_discovery.max_file_bytes`, `max_files_per_scan` and a 4 MiB stream),
+  `ai_discovery.max_file_bytes` a file, `max_files_per_scan` files read,
+  8,192 entries listed and a 4 MiB stream),
   writes what passes as private regular files on this machine and scans them
   there. It runs once a sandbox is ready, every
   `ai_discovery.scan_interval_min` while it runs, and on demand with

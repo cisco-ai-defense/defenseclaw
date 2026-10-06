@@ -182,6 +182,57 @@ func TestParseCollectionCapsAHundredThousandEntries(t *testing.T) {
 	}
 }
 
+// Content files stop at max_files_per_scan, however many records of files
+// the scope allows the answer sends: each one becomes a file on the host.
+func TestParseCollectionCapsContentFiles(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(collectSchema + "\n")
+	for i := range 20_000 {
+		fmt.Fprintf(&b, "F /sandbox/work/repo/d%05d/package.json\n\n", i)
+	}
+	b.WriteString(collectEnd + "\n")
+	scope := testScope()
+	scope.maxFiles = 100
+	c, err := parseCollection([]byte(b.String()), false, scope, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Contents) != 100 || c.Refused != 0 || !strings.Contains(strings.Join(c.Problems, ";"), "more than 100 files") {
+		t.Fatalf("contents = %d refused = %d problems = %v, want the bound of 100", len(c.Contents), c.Refused, c.Problems)
+	}
+	n, err := writeCollectedTree(filepath.Join(t.TempDir(), "root"), c)
+	if err != nil || n != 100 {
+		t.Fatalf("wrote %d, %v, want 100", n, err)
+	}
+	// Without a lower setting, the entry bound applies.
+	if c, err = parseCollection([]byte(b.String()), false, testScope(), 1024); err != nil || len(c.Contents) != collectMaxEntries {
+		t.Fatalf("contents = %d, %v, want %d", len(c.Contents), err, collectMaxEntries)
+	}
+}
+
+// The script reports one bound (its process bound); other bound records
+// are refused, so the sandbox cannot grow the problems a report carries.
+func TestParseCollectionRefusesForgedBoundRecords(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(collectSchema + "\n")
+	for i := range 100_000 {
+		fmt.Fprintf(&b, "Q dccert%06d\n", i)
+	}
+	b.WriteString("Q processes\n" + collectEnd + "\n")
+	start := time.Now()
+	c, err := parseCollection([]byte(b.String()), false, testScope(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("parse took %s", took)
+	}
+	joined := strings.Join(c.Problems, "; ")
+	if c.Refused != 100_000 || !c.ProcessesCapped || len(c.Problems) > 4 || len(joined) > 1024 || strings.Contains(joined, "dccert") {
+		t.Fatalf("refused = %d capped = %v problems = %q", c.Refused, c.ProcessesCapped, c.Problems)
+	}
+}
+
 // /proc lines the workload shapes (its argv, its comm) cannot forge a
 // process or its fields.
 func TestParseCollectionReadsHostileProcessLines(t *testing.T) {
