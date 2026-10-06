@@ -2506,6 +2506,10 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.guardrail.enforced
     requirement_level: recommended
+  - ref: defenseclaw.policy.effective_digest
+    requirement_level: recommended
+  - ref: defenseclaw.policy.generation
+    requirement_level: recommended
   body_fields: []
   x-defenseclaw:
     route_selector: false
@@ -2529,6 +2533,10 @@ groups:
   - ref: defenseclaw.guardrail.would_block
     requirement_level: recommended
   - ref: defenseclaw.guardrail.enforced
+    requirement_level: recommended
+  - ref: defenseclaw.policy.effective_digest
+    requirement_level: recommended
+  - ref: defenseclaw.policy.generation
     requirement_level: recommended
   body_fields: []
   x-defenseclaw:

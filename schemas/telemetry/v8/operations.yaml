@@ -4656,6 +4656,7 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - correlation.security
+  - correlation.policy.effective
   attributes:
   - ref: defenseclaw.asset.id
     requirement_level: recommended
