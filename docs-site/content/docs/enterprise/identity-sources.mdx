@@ -98,7 +98,7 @@ that SSSD serves without realmd has no directory type on any install.
 | --- | --- | --- |
 | Which user made the request | The kernel-verified SID of the caller on a managed host, or the account of the per-user credential on a per-user install | Verified |
 | Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
-| AD UPN | `TranslateNameW`, resolved in the background and cached for 24 hours | Verified |
+| AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. An answer is cached for 24 hours and a failed lookup (no domain controller reachable) for 2 minutes; an account still without its UPN is looked up again after 2 minutes | Verified |
 | Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
 | Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local, AD and Entra group SIDs and names. Standalone enterprise only; a per-user install has no group list | Verified |
 | Remote desktop and logon type | `LsaGetLogonSessionData` for the hook's own logon session | Claimed |
