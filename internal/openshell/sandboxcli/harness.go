@@ -385,13 +385,18 @@ func (a *App) claudeSetupToken(spec *harness.Spec) string {
 func mountedSettingsHarnesses(names []string) []string {
 	var out []string
 	for _, h := range names {
-		if s, ok := harness.Get(h); ok {
-			if _, mounted := s.Provider.(connector.SandboxRunConfigProvider); mounted {
-				out = append(out, s.DisplayName)
-			}
+		if s, ok := harness.Get(h); ok && mountsSettings(s) {
+			out = append(out, s.DisplayName)
 		}
 	}
 	return out
+}
+
+// mountsSettings reports a harness whose per-run settings DefenseClaw
+// mounts read-only, so its sandbox cannot start without bind mounts.
+func mountsSettings(s *harness.Spec) bool {
+	_, mounted := s.Provider.(connector.SandboxRunConfigProvider)
+	return mounted
 }
 
 // codexAuthKey reads the API key a `codex login --with-api-key` stored.

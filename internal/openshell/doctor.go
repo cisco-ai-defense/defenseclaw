@@ -327,6 +327,10 @@ type Doctor struct {
 	// Gateway reads the gateway configuration and service; it defaults to
 	// a configurator over Discover.ConfigDir, Runner and GOOS.
 	Gateway *GatewayConfigurator
+	// GatewayApplied hears of each gateway change a fix applied, rolled
+	// back or not, so the caller can record the files it wrote (setup's
+	// receipt, which teardown restores them from).
+	GatewayApplied func(*GatewayApplyResult)
 	// CLI is the openshell binary (default DefaultBinary).
 	CLI string
 
@@ -1959,7 +1963,10 @@ func (r *doctorRun) applyGateway(ch GatewayChanges) func(context.Context) error 
 		if err != nil {
 			return err
 		}
-		_, err = r.Gateway.Apply(ctx, plan)
+		res, err := r.Gateway.Apply(ctx, plan)
+		if res != nil && r.GatewayApplied != nil {
+			r.GatewayApplied(res)
+		}
 		return err
 	}
 }
