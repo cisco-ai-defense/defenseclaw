@@ -168,7 +168,9 @@ than one key, the reason names the most specific key, in the order
 
 The subject of a profile decision is the user the kernel or a per-user
 credential proved, with the directory facts the gateway resolved for that
-user from the operating system. **Identity headers, hook payloads and claimed
+user from the operating system. An agent in a sandbox counts as the user who
+started the sandbox, with the same facts and refresh as that user's other
+agents. **Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
 `KRB5CCNAME`, edits a local file or overrides a config directory cannot move
 to a weaker profile.
