@@ -11,6 +11,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -158,8 +159,9 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	tuned := profileConnectorNames(cfg)
 	for _, name := range names {
-		for _, dir := range profileRulePackDirs(derived[name].Config) {
+		for _, dir := range profileRulePackDirs(derived[name].Config, tuned) {
 			key := profileRulePackKey(dir)
 			if _, done := set.rules[key]; done {
 				continue
@@ -184,8 +186,10 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 }
 
 // profileRulePackDirs lists every rule-pack directory a derived configuration
-// can resolve for some connector.
-func profileRulePackDirs(cfg *config.Config) []string {
+// can resolve for some connector, including the connectors some profile
+// tunes (tuned, from profileConnectorNames: computed once for all profiles,
+// as walking every profile for each derived configuration was quadratic).
+func profileRulePackDirs(cfg *config.Config, tuned []string) []string {
 	if cfg == nil {
 		return nil
 	}
@@ -206,7 +210,7 @@ func profileRulePackDirs(cfg *config.Config) []string {
 	for name := range cfg.Guardrail.Connectors {
 		add(cfg.EffectiveRulePackDirForConnector(name))
 	}
-	for _, name := range profileConnectorNames(cfg) {
+	for _, name := range tuned {
 		add(cfg.EffectiveRulePackDirForConnector(name))
 	}
 	add(cfg.ApplicationProtection.Guardrail.RulePackDir)
@@ -226,7 +230,8 @@ func profileConnectorNames(cfg *config.Config) []string {
 			names = append(names, config.NormalizeConnectorName(name))
 		}
 	}
-	return names
+	sort.Strings(names)
+	return slices.Compact(names)
 }
 
 func profileRulePackKey(dir string) string {
