@@ -181,6 +181,8 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 	// would let the service account choose what is read in user homes.
 	catalog, err := inventory.LoadAISignaturesWithOptions(inventory.AISignatureLoadOptions{
 		SignaturePacks:       cfg.AIDiscovery.SignaturePacks,
+		PackDigests:          cfg.AIDiscovery.SignaturePackDigests,
+		RequireDigests:       cfg.StandaloneEnterprise(),
 		DisabledSignatureIDs: cfg.AIDiscovery.DisabledSignatureIDs,
 	})
 	if err != nil {

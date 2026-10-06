@@ -474,6 +474,13 @@ type AIDiscoveryConfig struct {
 	// IDEInventoryAll (the default, also when empty), IDEInventoryAIOnly
 	// or IDEInventoryOff. Resolve through EffectiveIDEInventory.
 	IDEInventory string `mapstructure:"ide_inventory" yaml:"ide_inventory,omitempty"`
+
+	// SignaturePackDigests pins pack files by path ("sha256:<hex>"): a
+	// pinned pack loads only when it matches, and on a managed standalone
+	// device an unpinned pack does not load. ConfidencePolicyDigest pins
+	// ConfidencePolicyPath the same way.
+	SignaturePackDigests   map[string]string `mapstructure:"signature_pack_digests"   yaml:"signature_pack_digests,omitempty"`
+	ConfidencePolicyDigest string            `mapstructure:"confidence_policy_digest" yaml:"confidence_policy_digest,omitempty"`
 }
 
 // IDE inventory scopes for AIDiscoveryConfig.IDEInventory.

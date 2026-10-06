@@ -17,7 +17,9 @@
 package inventory
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -175,7 +177,11 @@ func LoadAISignatures() ([]AISignature, error) {
 // globs (ai_discovery.signature_packs, the only operator source since
 // config_version 9) and optional workspace-local packs.
 type AISignatureLoadOptions struct {
-	SignaturePacks           []string
+	SignaturePacks []string
+	// PackDigests pins pack files by path (ai_discovery.signature_pack_digests).
+	PackDigests map[string]string
+	// RequireDigests refuses a pack without a pin (managed standalone).
+	RequireDigests           bool
 	AllowWorkspaceSignatures bool
 	ScanRoots                []string
 	DisabledSignatureIDs     []string
@@ -196,6 +202,8 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 	wd, _ := os.Getwd()
 	return LoadAISignaturesWithOptions(AISignatureLoadOptions{
 		SignaturePacks:           append([]string{}, cfg.AIDiscovery.SignaturePacks...),
+		PackDigests:              cfg.AIDiscovery.SignaturePackDigests,
+		RequireDigests:           cfg.StandaloneEnterprise(),
 		AllowWorkspaceSignatures: WorkspaceSignaturesAllowed(cfg),
 		ScanRoots:                append([]string{}, cfg.AIDiscovery.ScanRoots...),
 		DisabledSignatureIDs:     append([]string{}, cfg.AIDiscovery.DisabledSignatureIDs...),
@@ -237,8 +245,19 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxSignatureBytes
 	}
+	pins := pinnedDigests(opts.PackDigests, opts.HomeDir)
 	for _, packPath := range packs {
-		sigs, err := readAISignaturePack(packPath, maxBytes)
+		raw, err := readAISignaturePackBytes(packPath, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if refusal := pinRefusal(pins[filepath.Clean(packPath)], raw, opts.RequireDigests); refusal != "" {
+			// A pack that is not the one the administrator pinned is not
+			// loaded; the rest of the catalog still is.
+			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: %s\n", packPath, refusal)
+			continue
+		}
+		sigs, err := parseAISignatureCatalog(packPath, raw)
 		if err != nil {
 			return nil, err
 		}
@@ -281,7 +300,37 @@ func parseAISignatureCatalog(source string, raw []byte) ([]AISignature, error) {
 	return cat.Signatures, nil
 }
 
-func readAISignaturePack(path string, maxBytes int64) ([]AISignature, error) {
+// pinnedDigests keys ai_discovery.signature_pack_digests by cleaned,
+// home-expanded path.
+func pinnedDigests(pins map[string]string, home string) map[string]string {
+	out := make(map[string]string, len(pins))
+	for path, digest := range pins {
+		path = strings.TrimSpace(path)
+		if strings.HasPrefix(path, "~/") && home != "" {
+			path = filepath.Join(home, path[2:])
+		}
+		out[filepath.Clean(path)] = strings.ToLower(strings.TrimSpace(digest))
+	}
+	return out
+}
+
+// pinRefusal is why raw may not load under the pinned digest want ("" when
+// it may): a pin that does not match, or no pin where one is required.
+func pinRefusal(want string, raw []byte, required bool) string {
+	if want == "" {
+		if required {
+			return "a managed device loads only packs pinned in ai_discovery.signature_pack_digests"
+		}
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	if got := "sha256:" + hex.EncodeToString(sum[:]); got != want {
+		return "its digest " + got + " does not match the pinned " + want
+	}
+	return ""
+}
+
+func readAISignaturePackBytes(path string, maxBytes int64) ([]byte, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("ai signature catalog: stat %s: %w", path, err)
@@ -296,7 +345,7 @@ func readAISignaturePack(path string, maxBytes int64) ([]AISignature, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ai signature catalog: read %s: %w", path, err)
 	}
-	return parseAISignatureCatalog(path, raw)
+	return raw, nil
 }
 
 type signaturePackCandidate struct {

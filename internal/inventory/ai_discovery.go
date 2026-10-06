@@ -136,6 +136,7 @@ type AIDiscoveryOptions struct {
 	MaxFileBytes                int64
 	StoreRawLocalPaths          bool
 	ConfidencePolicyPath        string
+	ConfidencePolicyDigest      string
 	RequireTrustedBinaryPaths   bool
 	TrustedBinaryPrefixes       []string
 	DataDir                     string
@@ -668,7 +669,12 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 	// to the embedded default; unreadable or invalid overrides
 	// degrade to defaults with a stderr diagnostic because this
 	// constructor cannot currently return initialization errors.
-	policy, err := LoadConfidencePolicyFromFile(opts.ConfidencePolicyPath)
+	policyPath := opts.ConfidencePolicyPath
+	if refusal := confidencePolicyRefusal(policyPath, opts.ConfidencePolicyDigest, opts.StandaloneEnterprise); refusal != "" {
+		fmt.Fprintf(os.Stderr, "[ai-discovery] confidence policy %s not applied: %s; the built-in default applies\n", policyPath, refusal)
+		policyPath = ""
+	}
+	policy, err := LoadConfidencePolicyFromFile(policyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ai-discovery] confidence policy degraded to defaults: %v\n", err)
 		if fallback, fallbackErr := LoadDefaultConfidencePolicy(); fallbackErr == nil {
@@ -682,6 +688,24 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 		SignatureSpecificity: buildSignatureSpecificityIndex(catalog),
 	}
 	return svc
+}
+
+// confidencePolicyRefusal is why the confidence policy file at path may not
+// apply under ai_discovery.confidence_policy_digest ("" when it may, or when
+// there is no file and the built-in default applies anyway).
+func confidencePolicyRefusal(path, digest string, required bool) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	refusal := pinRefusal(strings.ToLower(strings.TrimSpace(digest)), raw, required)
+	if refusal != "" && strings.TrimSpace(digest) == "" {
+		refusal = "a managed device applies it only when ai_discovery.confidence_policy_digest pins it"
+	}
+	return refusal
 }
 
 // buildSignatureSpecificityIndex projects the SignatureID ->
@@ -730,6 +754,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		MaxFileBytes:                int64(ad.MaxFileBytes),
 		StoreRawLocalPaths:          ad.StoreRawLocalPaths,
 		ConfidencePolicyPath:        ad.ConfidencePolicyPath,
+		ConfidencePolicyDigest:      ad.ConfidencePolicyDigest,
 		RequireTrustedBinaryPaths:   ad.RequireTrustedBinaryPaths,
 		TrustedBinaryPrefixes:       append([]string{}, ad.TrustedBinaryPrefixes...),
 		DataDir:                     cfg.DataDir,

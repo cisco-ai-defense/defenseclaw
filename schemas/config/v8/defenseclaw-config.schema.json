@@ -2730,6 +2730,20 @@
             "maxLength": 256
           }
         },
+        "signature_pack_digests": {
+          "type": "object",
+          "description": "sha256 digest of each signature pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load.",
+          "maxProperties": 1024,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          }
+        },
         "allow_workspace_signatures": {
           "type": "boolean"
         },
@@ -2796,6 +2810,11 @@
         "confidence_policy_path": {
           "type": "string",
           "maxLength": 4096
+        },
+        "confidence_policy_digest": {
+          "type": "string",
+          "description": "sha256 digest of confidence_policy_path. When set the file applies only when it matches; on a managed standalone device a present file without one does not apply.",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
         },
         "require_trusted_binary_paths": {
           "type": "boolean"

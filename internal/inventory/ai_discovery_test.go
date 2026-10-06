@@ -18,6 +18,8 @@ package inventory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -447,6 +449,39 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 	if seen["unlisted-ai"] {
 		t.Fatalf("an unlisted pack under signature-packs/ was loaded")
+	}
+}
+
+// TestLoadAISignaturesPinnedByDigest: a pack pinned in
+// ai_discovery.signature_pack_digests loads only when it matches, and a
+// managed device loads no unpinned pack (a file dropped into a glob).
+func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "packs")
+	body := `{"version": 1, "signatures": [{"id": "pinned-ai", "name": "Pinned", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	pack := filepath.Join(packDir, "pinned.json")
+	mustWrite(t, pack, body)
+	mustWrite(t, filepath.Join(packDir, "dropped.json"), `{"version": 1, "signatures": [{"id": "dropped-ai", "name": "Dropped", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`)
+	sum := sha256.Sum256([]byte(body))
+	load := func(digest string, require bool) map[string]bool {
+		sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+			SignaturePacks: []string{filepath.Join(packDir, "*.json")},
+			PackDigests:    map[string]string{pack: digest},
+			RequireDigests: require,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, sig := range sigs {
+			seen[sig.ID] = true
+		}
+		return seen
+	}
+	if seen := load("sha256:"+hex.EncodeToString(sum[:]), true); !seen["pinned-ai"] || seen["dropped-ai"] {
+		t.Fatalf("managed load = %v, want only the pinned pack", seen)
+	}
+	if seen := load("sha256:"+strings.Repeat("0", 64), false); seen["pinned-ai"] || !seen["dropped-ai"] {
+		t.Fatalf("mismatched pin = %v, want the pinned pack refused", seen)
 	}
 }
 
