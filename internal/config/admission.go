@@ -62,7 +62,8 @@ type AdmissionAssetType struct {
 	AllowListBypassScan *bool              `yaml:"allow_list_bypass_scan,omitempty"`
 	Actions             AdmissionActionMap `yaml:"actions,omitempty"`
 	// ScannerOverrides is keyed by scan_result.scanner_name (for example
-	// virustotal) and wins over Actions for that scanner's findings.
+	// skill-scanner; analyzers such as VirusTotal run inside it) and wins over
+	// Actions for that scanner's findings.
 	ScannerOverrides    map[string]AdmissionActionMap `yaml:"scanner_overrides,omitempty"`
 	FirstPartyAllowList []AdmissionFirstParty         `yaml:"first_party_allow_list,omitempty"`
 }

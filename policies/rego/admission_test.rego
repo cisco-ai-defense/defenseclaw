@@ -114,8 +114,8 @@ test_allow_action_verdict_allowed if {
 }
 
 test_scanner_override_by_scanner_name if {
-	adm := object.union(_skill_admission, {"scanner_overrides": {"virustotal": {"MEDIUM": _quarantine}}})
-	vt := {"scan_result": {"max_severity": "MEDIUM", "total_findings": 1, "scanner_name": "virustotal"}}
+	adm := object.union(_skill_admission, {"scanner_overrides": {"codeguard": {"MEDIUM": _quarantine}}})
+	vt := {"scan_result": {"max_severity": "MEDIUM", "total_findings": 1, "scanner_name": "codeguard"}}
 	admission.verdict == "rejected" with input as _input(object.union({"admission": adm}, vt))
 	admission.verdict == "warning" with input as _input(object.union({"admission": adm}, _scan("MEDIUM", 1)))
 }

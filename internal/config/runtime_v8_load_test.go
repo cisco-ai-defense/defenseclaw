@@ -362,7 +362,7 @@ admission:
     scan_on_install: false
     actions: {critical: quarantine, low: {install: none, file: none, runtime: disable}}
   skill:
-    scanner_overrides: {virustotal: {high: block}}
+    scanner_overrides: {skill-scanner: {high: block}}
     first_party_allow_list: [{name: codeguard, source_path_contains: [.claude/skills/codeguard]}]
 guardrail:
   rule_pack: strict
@@ -396,8 +396,8 @@ observability: {}
 	if admission.Defaults.ScanOnInstall == nil || *admission.Defaults.ScanOnInstall {
 		t.Errorf("scan_on_install = %v, want false", admission.Defaults.ScanOnInstall)
 	}
-	if got := admission.Skill.ScannerOverrides["virustotal"].High; got == nil || got.Shorthand != AdmissionActionBlock {
-		t.Errorf("virustotal high = %+v, want block", got)
+	if got := admission.Skill.ScannerOverrides["skill-scanner"].High; got == nil || got.Shorthand != AdmissionActionBlock {
+		t.Errorf("skill-scanner high = %+v, want block", got)
 	}
 	// The gateway clones a config through JSON; both action forms survive.
 	var cloned AdmissionConfig

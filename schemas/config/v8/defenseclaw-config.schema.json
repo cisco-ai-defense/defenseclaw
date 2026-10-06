@@ -5072,12 +5072,22 @@
       "type": "object",
       "maxProperties": 32,
       "propertyNames": {
-        "$ref": "#/$defs/stableName"
+        "enum": [
+          "skill-scanner",
+          "mcp-scanner",
+          "plugin-scanner",
+          "codeguard",
+          "clawshield-injection",
+          "clawshield-malware",
+          "clawshield-pii",
+          "clawshield-secrets",
+          "clawshield-vuln"
+        ]
       },
       "additionalProperties": {
         "$ref": "#/$defs/admissionActionMap"
       },
-      "description": "Per-scanner action maps keyed by scan_result.scanner_name (for example virustotal)."
+      "description": "Per-scanner action maps keyed by the scanner that produced the result (scan_result.scanner_name, for example skill-scanner). VirusTotal and the other analyzers run inside skill-scanner, so their findings use the skill-scanner key."
     },
     "admissionAssetType": {
       "type": "object",
