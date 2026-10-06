@@ -295,7 +295,7 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 }
 
 // mergeAgentIdentityRows overlays the buffered rows on the stored ones, the
-// way the next flush will write them.
+// way the next flush will write them, and names each row's account.
 func mergeAgentIdentityRows(
 	stored []inventory.AgentIdentityRecord,
 	pending map[string]inventory.AgentIdentityRecord,
@@ -339,9 +339,23 @@ func mergeAgentIdentityRows(
 			rec.UserName = buffered.UserName
 		}
 	}
+	// Each account is named as the host names its uid or SID now, the way a
+	// new hook call would record it, so a row an older build stored with
+	// another spelling (a bare SSSD name, DOMAIN\user) reads like the rest
+	// (GAP-0103). A row whose account no longer resolves keeps its name.
+	names := map[string]string{}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
-		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *byID[id], InstallHint: hints[id]})
+		rec := byID[id]
+		name, ok := names[rec.UserID]
+		if !ok {
+			name = sanitizeLLMEventUser(userScopedIdentityName(rec.UserID))
+			names[rec.UserID] = name
+		}
+		if name != "" {
+			rec.UserName = name
+		}
+		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *rec, InstallHint: hints[id]})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if !rows[i].LastSeen.Equal(rows[j].LastSeen) {

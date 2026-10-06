@@ -164,6 +164,13 @@ func gatewaySelfUser() agentIdentityUser {
 				self.ID = strconv.Itoa(uid)
 			}
 		}
+		// Named as every verified hook caller is: the account database's
+		// name for the uid or SID. That keeps an SSSD user@realm but gives
+		// the bare Windows account, not os/user's DOMAIN\user, so agent
+		// identities agree with the other per-user views (GAP-0107).
+		if name := userScopedIdentityName(self.ID); name != "" {
+			self.Name = name
+		}
 		if self.Home == "" {
 			self.Home, _ = os.UserHomeDir()
 		}
