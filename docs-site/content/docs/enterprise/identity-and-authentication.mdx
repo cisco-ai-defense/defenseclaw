@@ -215,6 +215,11 @@ an elevated PowerShell prompt (or as LocalSystem from an MDM script):
   or a SID. `groups` match a group name, `DOMAIN\Group` or a SID, including
   Entra `S-1-12-1-...` SIDs. Both compare without regard to case.
 - `agents` match an agent identity (`agt-` and 16 hex digits).
+- Group membership is what the OS reports, and the gateway caches a user's
+  directory facts for up to 15 minutes. On Windows the groups are those of
+  the user's sign-in token, so a user added to or removed from a group,
+  local, AD or Entra ID, gets the new profile only after signing out and
+  back in, and then within those 15 minutes.
 - A request with no match gets `default_profile`. An empty default keeps the
   global `guardrail.*` settings.
 
@@ -307,5 +312,5 @@ dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freed
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. Expected on a per-user macOS install. On Linux check `getent passwd alice`. |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
 | `default_lookup_failed` | The directory lookup for a verified user failed, so the default profile applied. Check that the directory service answers on the host. |
-| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice` and compare the group spelling. Use the SID to avoid name ambiguity. |
+| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice` and compare the group spelling. Use the SID to avoid name ambiguity. On Windows, a user added to the group must sign out and back in first. |
 | A new session ID after a restart | Expected only for a new chat. The agent ID (`agt-`) stays the same; if it changed, the connector's config root moved. |
