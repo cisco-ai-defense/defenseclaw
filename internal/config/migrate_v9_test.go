@@ -56,7 +56,8 @@ observability: {}
 	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// scan_on_install is absent: v8 scanned.
+	// scan_on_install is absent: v8 scanned. block_threshold 3 is looser than
+	// the strict pack's MEDIUM, which governed the hook paths.
 	data := `{"config": {"allow_list_bypass_scan": false, "policy_name": "x"},
 	  "actions": {"HIGH": {"install": "none", "file": "none", "runtime": "allow"}},
 	  "guardrail": {"block_threshold": 3, "alert_threshold": 1}}`
@@ -119,7 +120,7 @@ observability: {}
 		"admission.skill.actions.high":                            "warn",
 		"admission.skill.actions.critical":                        "quarantine",
 		"guardrail.rule_pack":                                     "strict",
-		"guardrail.block_at":                                      "HIGH",
+		"guardrail.block_at":                                      nil,
 		"admission.defaults.scan_on_install":                      nil,
 		"scanners.skill_scanner.analyzers.virustotal.enabled":     true,
 		"scanners.skill_scanner.analyzers.virustotal.api_key_env": "VT_KEY",
@@ -147,7 +148,8 @@ observability: {}
 	if get("guardrail.alert_at") != nil {
 		t.Error("alert_at was written although data.json matched the pack default")
 	}
-	if len(result.Record.Conflicts) != 1 || result.Record.Conflicts[0].To != "admission.skill.actions.high" {
+	if len(result.Record.Conflicts) != 2 || result.Record.Conflicts[0].To != "admission.skill.actions.high" ||
+		result.Record.Conflicts[1].To != "guardrail.block_at" {
 		t.Errorf("conflicts = %+v", result.Record.Conflicts)
 	}
 	if result.Record.ActionsRowsMoved != 3 {

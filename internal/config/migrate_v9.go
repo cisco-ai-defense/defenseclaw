@@ -761,13 +761,15 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		pack = name
 	}
 	packBlock, packAlert := v9PostureRanks(pack)
+	shippedBlock, shippedAlert := v9PostureRanks("default")
 	for _, item := range []struct {
-		key   string
-		value *int
-		pack  int
+		key     string
+		value   *int
+		pack    int
+		shipped int
 	}{
-		{"block_at", data.Guardrail.BlockThreshold, packBlock},
-		{"alert_at", data.Guardrail.AlertThreshold, packAlert},
+		{"block_at", data.Guardrail.BlockThreshold, packBlock, shippedBlock},
+		{"alert_at", data.Guardrail.AlertThreshold, packAlert, shippedAlert},
 	} {
 		if item.value == nil || *item.value == item.pack {
 			continue
@@ -775,9 +777,27 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		if strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(guardrail, item.key))) != "" {
 			continue
 		}
+		// v8 hook prompts and tool calls took the pack posture, and only the
+		// proxy read data.json. The shipped data.json value was never a
+		// choice (selecting a pack left it alone), and a value looser than
+		// the pack would weaken the hook paths under one threshold model: in
+		// both cases the pack default stays.
+		if *item.value == item.shipped {
+			m.note("data.json guardrail %s (%s) is the shipped value; the LLM proxy now follows the %s pack default",
+				strings.Replace(item.key, "_at", "_threshold", 1), v9RankNames[*item.value], pack)
+			continue
+		}
 		name, ok := v9RankNames[*item.value]
 		if !ok {
 			m.note("data.json guardrail %s threshold %d has no severity name; the pack default applies", item.key, *item.value)
+			continue
+		}
+		if *item.value > item.pack {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: "guardrail." + item.key, Kept: "pack-default:" + pack + ":" + v9RankNames[item.pack],
+				Lost:   "data.json:guardrail." + strings.Replace(item.key, "_at", "_threshold", 1) + ":" + name,
+				Reason: "the pack posture governed hook prompts and tool calls; the looser data.json level only applied to the LLM proxy",
+			})
 			continue
 		}
 		v9Set(root, v9Scalar(name), "guardrail", item.key)
