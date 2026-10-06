@@ -57,17 +57,17 @@ guardrail:
       connectors:
         codex: {mode: action, block_at: MEDIUM}
 
-  profile_assignments:           # ordered: the first match wins
-    - profile: contractors       # by directory group
-      match: {groups: ["contractors@corp.example.com"]}
-    - profile: ml-team           # by directory group
-      match: {groups: ["ml-team@corp.example.com"]}
+  profile_assignments:           # ordered: the first match wins, so list the narrowest first
+    - profile: ml-team           # by one agent install
+      match: {agents: ["agt-3f9c0a1b2c3d4e5f"]}
     - profile: alice-codex       # by user and connector together
       match:
         users: ["alice@CORP.EXAMPLE.COM"]
         connectors: [codex]
-    - profile: ml-team           # by one agent install
-      match: {agents: ["agt-3f9c0a1b2c3d4e5f"]}
+    - profile: contractors       # by directory group
+      match: {groups: ["contractors@corp.example.com"]}
+    - profile: ml-team           # by directory group
+      match: {groups: ["ml-team@corp.example.com"]}
 
   default_profile: strict        # everyone verified who matched nothing above
 ```
