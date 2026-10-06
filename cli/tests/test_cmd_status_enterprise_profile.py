@@ -34,8 +34,10 @@ def config_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         # An unmanaged install has no profile, whatever its config says.
         ("config_version: 8\nenterprise:\n  profile: standalone\n", "", "", None, {""}),
         ("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", "managed_enterprise", "", None, {"standalone"}),
-        # The service pin wins over the config.
+        # The service pin decides when the config declares no profile.
         ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "Standalone", None, {"standalone"}),
+        # A pin that contradicts the declared profile does not reclassify the host (as Go).
+        ("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n", "managed_enterprise", "secure_client", None, {"standalone"}),
         # Without either, the default follows the platform.
         ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "", "linux", {"standalone"}),
         ("config_version: 8\ndeployment_mode: managed_enterprise\n", "managed_enterprise", "", "win32", {"secure_client"}),

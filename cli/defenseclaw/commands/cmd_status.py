@@ -74,15 +74,15 @@ _STANDALONE_ENTERPRISE_PROFILE = "standalone"
 def _enterprise_profile(cfg) -> str:
     """Return the managed_enterprise profile, or "" for unmanaged installs.
 
-    Mirrors internal/managed/profile.go: the service pin wins, then the
-    config's ``enterprise.profile``, then the per-OS default (standalone on
-    Linux, secure_client elsewhere). Read-only; never raises.
+    Mirrors internal/managed/profile.go: the service pin, then the config's
+    ``enterprise.profile``, then the per-OS default (standalone on Linux,
+    secure_client elsewhere). A pin that contradicts the declared profile is
+    ignored, as Go's StandaloneManagedSource does, so a user-set environment
+    variable cannot reclassify the host. Read-only; never raises.
     """
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
         return ""
     pinned = os.environ.get("DEFENSECLAW_ENTERPRISE_PROFILE", "").strip().lower()
-    if pinned:
-        return pinned
     configured = ""
     try:
         import yaml
@@ -96,6 +96,8 @@ def _enterprise_profile(cfg) -> str:
         configured = ""
     except Exception:  # noqa: BLE001 - status must never fail on a malformed config
         configured = ""
+    if pinned and (not configured or pinned == configured):
+        return pinned
     if configured:
         return configured
     return _default_enterprise_profile()

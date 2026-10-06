@@ -445,6 +445,11 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     configured = ""
     if isinstance(enterprise, dict):
         configured = str(enterprise.get("profile") or "").strip().lower()
+    # As Go (managed.ResolveEnterpriseProfile / StandaloneManagedSource): a
+    # pin that contradicts the document's declared profile does not
+    # reclassify the host; the document decides.
+    if pinned and configured and pinned != configured:
+        pinned = ""
     profile = pinned or configured or ("standalone" if sys.platform.startswith("linux") else "secure_client")
     return profile == "standalone"
 
