@@ -2612,7 +2612,13 @@ class RoutingConfig:
 
 @dataclass
 class TrainingCategoryConfig:
-    """A single training category entry inside ``training.categories[]``."""
+    """A single training category entry inside ``training.categories[]``.
+
+    Mirrors the Go-side ``PipelineConfig`` fields that are per-category.
+    ``min_traces``, ``eval_threshold``, and ``auto_trigger`` correspond to
+    the Go ``PipelineConfig.MinTraces``, ``PipelineConfig.EvalThreshold``,
+    and the automatic-run gate respectively.
+    """
 
     name: str = ""
     algorithm: str = ""
@@ -2622,6 +2628,9 @@ class TrainingCategoryConfig:
     kl_coef: float = 0.0
     lora_rank: int = 0
     reward_funcs: list[str] = field(default_factory=list)
+    min_traces: int = 0
+    eval_threshold: float = 0.0
+    auto_trigger: bool = False
 
 
 @dataclass
@@ -6144,6 +6153,9 @@ def _merge_training(raw: dict[str, Any] | None) -> TrainingConfig:
                 kl_coef=float(entry.get("kl_coef", 0.0) or 0.0),
                 lora_rank=_as_int(entry.get("lora_rank", 0), 0),
                 reward_funcs=[str(r) for r in (entry.get("reward_funcs") or []) if r],
+                min_traces=_as_int(entry.get("min_traces", 0), 0),
+                eval_threshold=float(entry.get("eval_threshold", 0.0) or 0.0),
+                auto_trigger=_coerce_bool(entry.get("auto_trigger", False)),
             )
         )
 

@@ -80,7 +80,6 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-restart-gateway \
         proto proto-check proto-tools \
-        grpo-engine \
         dist dist-cli dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -1443,6 +1442,3 @@ clean:
 # ---------------------------------------------------------------------------
 # GRPO training engine
 # ---------------------------------------------------------------------------
-
-grpo-engine:
-	$(MAKE) -C internal/training/grpo_engine

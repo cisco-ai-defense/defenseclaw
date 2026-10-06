@@ -344,14 +344,17 @@ func TestServiceSign(t *testing.T) {
 		t.Fatalf("Sign: %v", err)
 	}
 
-	// Signed blob = original blob + 32 bytes HMAC
-	expectedLen := len(blob) + 32
+	// Signed blob = original blob + 64-byte signature field
+	// (32 bytes HMAC-SHA256 + 32 bytes zero padding for Ed25519 slot).
+	// Comment 51 fix: Sign() now produces a 64-byte signature field to
+	// match the C-side dclaw_emergency_msg_t / OTA format.
+	expectedLen := len(blob) + 64
 	if len(signed) != expectedLen {
 		t.Fatalf("signed length = %d, want %d", len(signed), expectedLen)
 	}
 
-	// Verify the signature portion
-	sig := signed[len(blob):]
+	// Verify the HMAC portion (first 32 bytes of the 64-byte sig field)
+	sig := signed[len(blob) : len(blob)+32]
 	if err := svc.signer.Verify(blob, sig); err != nil {
 		t.Fatalf("signature verification failed: %v", err)
 	}
@@ -574,7 +577,7 @@ func TestFullSignDistributeRoundTrip(t *testing.T) {
 
 	// Verify the HMAC in the published payload
 	pubBlob := published[0].Payload[:len(blob)]
-	pubSig := published[0].Payload[len(blob):]
+	pubSig := published[0].Payload[len(blob) : len(blob)+32]
 	if err := svc.signer.Verify(pubBlob, pubSig); err != nil {
 		t.Fatalf("published signature verification failed: %v", err)
 	}

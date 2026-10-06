@@ -207,6 +207,12 @@ outputs/
 /docs/papers/
 /docs/architecture/defenseclaw-lite-*
 
+# GRPO training engine (separate feature branch)
+/internal/training/
+/internal/config/training.go
+/benchmarks/grpo/
+/cli/defenseclaw/commands/cmd_training.py
+
 # DefenseClaw-managed Kiro hook config. Written by `defenseclaw setup kiro`
 # with machine-absolute hook-script paths, so it is per-machine state.
 .kiro/hooks/defenseclaw.json
