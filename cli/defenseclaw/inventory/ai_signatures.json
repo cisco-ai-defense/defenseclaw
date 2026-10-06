@@ -1641,6 +1641,28 @@
       "local_endpoints": []
     },
     {
+      "id": "jetbrains-ai",
+      "name": "JetBrains AI Assistant",
+      "vendor": "JetBrains",
+      "category": "editor_extension",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "jetbrains_plugin_ids": [
+        "com.intellij.ml.llm"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [],
+      "history_patterns": [],
+      "local_endpoints": []
+    },
+    {
       "id": "qwen-code",
       "name": "Qwen Code",
       "vendor": "Alibaba Cloud",
