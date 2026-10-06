@@ -637,22 +637,14 @@ func standaloneCredentialsDir(configFile string, document *yaml.Node) string {
 }
 
 // standaloneLayoutDataDirForSource applies standaloneLayoutDataDir to the
-// source the loader is about to read: sourceBytes when provided, else the
-// file. A read or parse error returns false; the loader reports it itself.
-func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte, sourceProvided bool) (string, bool) {
+// source bytes the loader is about to decode. A parse error returns false;
+// the loader reports it itself.
+func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte) (string, bool) {
 	if _, ok := standaloneUnixLayoutForConfig(configFile); !ok {
 		return "", false
 	}
-	raw := sourceBytes
-	if !sourceProvided {
-		data, err := os.ReadFile(configFile)
-		if err != nil {
-			return "", false
-		}
-		raw = data
-	}
 	var document yaml.Node
-	if err := yaml.Unmarshal(raw, &document); err != nil {
+	if err := yaml.Unmarshal(sourceBytes, &document); err != nil {
 		return "", false
 	}
 	return standaloneLayoutDataDir(configFile, &document)

@@ -30,11 +30,13 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 IDENTITY_RELATIVE_PATH = Path("release/source-install-identity.json")
-COMPATIBILITY_CONFIG_RELATIVE_PATH = Path("internal/config/config.go")
 OBSERVABILITY_V8_CONFIG_RELATIVE_PATH = Path(
     "internal/config/observability_v8_types.go"
 )
 IDENTITY_SCHEMA_VERSION = 1
+#: The config_version the 0.8.4 bridge release attests. No gateway source
+#: declares it any more, so it is fixed here for the releases before 0.8.5.
+BRIDGE_RUNTIME_CONFIG_VERSION = 7
 MARKER_SCHEMA_VERSION = 2
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -176,16 +178,6 @@ def _go_config_version_literal(root: Path, relative_path: Path, name: str) -> in
     return value
 
 
-def compatibility_config_version(root: Path = ROOT) -> int:
-    """Read the legacy compatibility-decoder ceiling."""
-
-    return _go_config_version_literal(
-        root,
-        COMPATIBILITY_CONFIG_RELATIVE_PATH,
-        "CurrentConfigVersion",
-    )
-
-
 def observability_v8_config_version(root: Path = ROOT) -> int:
     """Read the strict observability-v8 runtime schema literal."""
 
@@ -217,7 +209,7 @@ def runtime_config_version(
     release_key = _version_tuple(source_release)
     if release_key >= (0, 8, 5):
         return observability_v8_config_version(root)
-    return compatibility_config_version(root)
+    return BRIDGE_RUNTIME_CONFIG_VERSION
 
 
 def _validate_identity_payload(payload: dict[str, Any]) -> dict[str, int | str]:
@@ -275,12 +267,6 @@ def validate_source_tree(
             raise SourceIdentityError(
                 f"requested release {expected_release} does not match reviewed source_release {release}"
             )
-    compatibility_runtime = compatibility_config_version(root)
-    if _version_tuple(release) >= (0, 8, 5) and compatibility_runtime != 7:
-        raise SourceIdentityError(
-            "hard-cut source must retain CurrentConfigVersion=7 as its compatibility ceiling: "
-            f"got {compatibility_runtime}"
-        )
     source_runtime = runtime_config_version(root, source_release=release)
     if identity["runtime_config_version"] != source_runtime:
         raise SourceIdentityError(

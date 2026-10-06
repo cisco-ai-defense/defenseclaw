@@ -53,8 +53,7 @@ observability: {}
 	}
 }
 
-func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
-	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
+func TestLoadRuntimeV8FromBytesRetainsConnectorWebhookOverride(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw-v8
 observability:
@@ -66,21 +65,9 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OTel.Enabled || len(cfg.OTel.Destinations) != 0 {
-		t.Fatalf("target runtime retained legacy OTel config: %+v", cfg.OTel)
-	}
-	if cfg.AuditSinks != nil {
-		t.Fatalf("target runtime retained global legacy audit sinks: %+v", cfg.AuditSinks)
-	}
-	if cfg.AIDiscovery.EmitOTel {
-		t.Fatal("target runtime retained ai_discovery.emit_otel")
-	}
 	connector, ok := cfg.Observability.Connectors["codex"]
 	if !ok || connector.Webhooks == nil {
 		t.Fatalf("v8 connector webhook override was not retained: %+v", cfg.Observability.Connectors)
-	}
-	if connector.AuditSinks != nil {
-		t.Fatalf("target runtime retained connector legacy audit sinks: %+v", connector.AuditSinks)
 	}
 }
 

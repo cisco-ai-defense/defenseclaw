@@ -98,7 +98,7 @@ func TestBootMigratesRetiredConnectorToDevin(t *testing.T) {
 
 	t.Setenv("DEFENSECLAW_HOME", dataDir)
 	cfgPath := filepath.Join(dataDir, config.DefaultConfigName)
-	body := "config_version: 6\ndata_dir: " + dataDir + "\nclaw:\n  mode: " + legacyconnector.RetiredDesktopID +
+	body := "config_version: 9\ndata_dir: " + dataDir + "\nclaw:\n  mode: " + legacyconnector.RetiredDesktopID +
 		"\nguardrail:\n  enabled: true\n  mode: observe\n  connector: " + legacyconnector.RetiredDesktopID +
 		"\n  connectors:\n    " + legacyconnector.RetiredDesktopID + ":\n      mode: observe\ngateway:\n  api_port: 18970\n"
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {

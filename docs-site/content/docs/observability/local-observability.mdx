@@ -119,17 +119,6 @@ defenseclaw setup local-observability up \
 
 The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. To use `http/protobuf`, configure that protocol on the named `local-observability` destination.
 
-<Accordions>
-
-<Accordion title="Upgrading from v7: --with-audit-sink">
-Older releases exposed `--with-audit-sink/--no-audit-sink` because logs and OTel
-signals used separate `audit_sinks` and `otel` blocks. Config v8 has one
-destination capable of logs, traces, and metrics, so new configuration does not
-need or write a second audit sink.
-</Accordion>
-
-</Accordions>
-
 <Callout title="No-password mode is local trust, not authentication">
 `--no-password` gives every process on the workstation anonymous Grafana Admin
 access. The managed controller still rejects any effective Grafana port bind
