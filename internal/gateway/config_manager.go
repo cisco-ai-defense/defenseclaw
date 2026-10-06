@@ -609,7 +609,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(next.ConfigVersion) {
 		m.recordLoadError(ctx, "schema_version")
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 	}
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
 		m.recordLoadError(ctx, "managed_downgrade")
@@ -893,7 +893,7 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			raw:        append([]byte(nil), before.raw...),
 		}
 		if !config.CurrentSchemaVersion(next.ConfigVersion) {
-			return nil, configReloadSource{}, fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+			return nil, configReloadSource{}, fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 		}
 		if compiled == nil || compiled.Plan == nil {
 			return nil, configReloadSource{}, fmt.Errorf("config reload v8 compiler returned no effective plan")

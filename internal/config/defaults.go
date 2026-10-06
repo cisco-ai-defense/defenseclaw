@@ -184,7 +184,6 @@ func DefaultConfig() *Config {
 			IncludeNetworkDomains:     true,
 			MaxFilesPerScan:           1000,
 			MaxFileBytes:              512 * 1024,
-			EmitOTel:                  true,
 			StoreRawLocalPaths:        false,
 			ConfidencePolicyPath:      filepath.Join(dataDir, "confidence.yaml"),
 			RequireTrustedBinaryPaths: false,
@@ -219,10 +218,6 @@ func DefaultConfig() *Config {
 				MinSeverity: "HIGH",
 			},
 		},
-		// AuditSinks is empty by default — operators opt in to forwarding
-		// by adding entries (splunk_hec / otlp_logs / http_jsonl). The
-		// local SQLite store always receives every event.
-		AuditSinks: nil,
 		Gateway: GatewayConfig{
 			Host:            "127.0.0.1",
 			Port:            18789,

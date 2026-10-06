@@ -295,8 +295,8 @@ func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 		Enterprise:     EnterpriseConfig{Profile: "standalone"},
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
 	}
-	if standalone.HasManagedAIDLogSink() {
-		t.Fatal("standalone must not require the CMID-authenticated AI Defense sink")
+	if standalone.SecureClientIntegration() {
+		t.Fatal("standalone must not take the Secure Client integration (CMID-authenticated AI Defense sink)")
 	}
 	if standalone.ManagedIPCEnabled() {
 		t.Fatal("standalone has no Secure Client GUI and must not expose IPC")
@@ -305,7 +305,7 @@ func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 		DeploymentMode: "managed_enterprise",
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
 	}
-	if !secureClient.HasManagedAIDLogSink() || !secureClient.ManagedIPCEnabled() {
+	if !secureClient.SecureClientIntegration() || !secureClient.ManagedIPCEnabled() {
 		t.Fatal("Secure Client surfaces must stay enabled for an unprofiled managed config")
 	}
 }
@@ -683,7 +683,7 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "config.yaml")
-	body := fmt.Sprintf("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
+	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -1621,10 +1621,10 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 	requirements := daemonReadinessRequirements{
 		guardrailEnabled: configuredGuardrailExpectedRunning(cfg),
 		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
-		// The canonical schema-v8 observability runtime always binds the
-		// sidecar telemetry health source.
-		// Match that runtime state instead of waiting forever for "disabled".
-		telemetryEnabled: cfg.ConfigVersion >= config.ObservabilityV8ConfigVersion,
+		// The canonical observability runtime always binds the sidecar
+		// telemetry health source. Match that runtime state instead of
+		// waiting forever for "disabled".
+		telemetryEnabled: true,
 		routingEnabled:   cfg.Routing.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,

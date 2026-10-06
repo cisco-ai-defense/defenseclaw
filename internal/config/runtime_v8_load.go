@@ -24,17 +24,9 @@ func LoadRuntimeV8File(configFile string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("config: resolve v8 source: %w", err)
 	}
-	file, err := os.Open(absPath)
+	raw, err := readRuntimeSourceFile(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("config: read v8 source %s: %w", absPath, err)
-	}
-	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, int64(ObservabilityV8MaxSourceBytes)+1))
-	if err != nil {
-		return nil, fmt.Errorf("config: read v8 source %s: %w", absPath, err)
-	}
-	if len(raw) > ObservabilityV8MaxSourceBytes {
-		return nil, fmt.Errorf("config: v8 source exceeds the %d-byte limit", ObservabilityV8MaxSourceBytes)
+		return nil, err
 	}
 	compiled, err := ParseCompileObservabilityV8(
 		absPath,
@@ -62,4 +54,23 @@ func LoadRuntimeV8File(configFile string) (*Config, error) {
 	candidate.AuditDB = snapshot.Local.Path
 	candidate.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
 	return candidate, nil
+}
+
+// readRuntimeSourceFile reads one config source, bounded by the v8 source
+// size limit. The error wraps the underlying os error, so a missing file still
+// satisfies errors.Is(err, fs.ErrNotExist).
+func readRuntimeSourceFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: read v8 source %s: %w", path, err)
+	}
+	defer file.Close()
+	raw, err := io.ReadAll(io.LimitReader(file, int64(ObservabilityV8MaxSourceBytes)+1))
+	if err != nil {
+		return nil, fmt.Errorf("config: read v8 source %s: %w", path, err)
+	}
+	if len(raw) > ObservabilityV8MaxSourceBytes {
+		return nil, fmt.Errorf("config: v8 source exceeds the %d-byte limit", ObservabilityV8MaxSourceBytes)
+	}
+	return raw, nil
 }

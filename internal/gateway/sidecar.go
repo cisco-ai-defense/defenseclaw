@@ -226,7 +226,7 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 // NewSidecar creates a sidecar instance ready to connect.
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*Sidecar, error) {
 	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) {
-		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
+		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw migrate' first")
 	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
@@ -1728,7 +1728,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 ) error {
 	if oldCfg == nil || newCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(newCfg.ConfigVersion) {
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 	}
 	v8PlanChanged := false
 	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||

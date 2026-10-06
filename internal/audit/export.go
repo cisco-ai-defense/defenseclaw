@@ -174,10 +174,3 @@ func (s *Store) ExportCSV(path string, limit int) error {
 	w.Flush()
 	return w.Error()
 }
-
-// ExportSplunk used to backfill historical events into Splunk HEC. The
-// generic audit-sinks system now performs the same job declaratively
-// (configure a `splunk_hec` sink, then call `defenseclaw audit replay
-// --to-sinks`). The function is intentionally unexported here; the
-// replay path lives in internal/cli and constructs sinks from
-// config.AuditSink directly.
