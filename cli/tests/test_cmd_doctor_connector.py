@@ -1682,6 +1682,28 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
     )
+    def test_custom_pack_edited_after_pinning_fails_and_names_the_v9_key(self, validate):
+        validate.return_value = self._valid()  # files_digest is "b" * 64
+        cfg = self._cfg(rule_pack_dir="/packs/mine")
+        cfg.guardrail.effective_rule_pack.return_value = "mine"
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "c" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn('configured rule pack "mine"', rp["detail"])
+        self.assertIn("guardrail.custom_packs.mine.digest", rp["detail"])
+        self.assertNotIn("rule_pack_dir", rp["detail"])
+        self.assertIn("guardrail use-pack", rp["remediation"])
+
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "b" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        self.assertEqual(next(c for c in r.checks if c["label"] == "Rule pack")["status"], "pass")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
     def test_valid_partial_pack_with_no_direct_rules_warns(self, validate):
         validate.return_value = self._valid(
             rule_file_count=0,
