@@ -51,7 +51,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_skill import skill
-from defenseclaw.config import SeverityAction
 from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
@@ -197,7 +196,6 @@ class TestSingleTargetUX(_SkillScanUXBase):
     def test_action_policy_block_uses_blocked(
         self, mock_cls, _mock_info, mock_sidecar,
     ) -> None:
-        self.app.cfg.skill_actions.high = SeverityAction(install="block")
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
         mock_cls.return_value = mock_scanner
@@ -238,7 +236,6 @@ class TestPathTargetUX(_SkillScanUXBase):
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_folder_target_is_adhoc_and_not_called_loaded(self, mock_cls) -> None:
-        self.app.cfg.skill_actions.high = SeverityAction(install="block")
         mock_scanner = MagicMock()
         mock_scanner.scan.return_value = self._blocked_result(self.skill_dir)
         mock_cls.return_value = mock_scanner

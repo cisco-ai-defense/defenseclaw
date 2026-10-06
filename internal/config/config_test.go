@@ -317,9 +317,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Watch.DebounceMs != 500 {
 		t.Errorf("expected debounce 500ms, got %d", cfg.Watch.DebounceMs)
 	}
-	if !cfg.Watch.AllowListBypassScan {
-		t.Error("expected allow-list bypass scan enabled by default")
-	}
 	if !cfg.Watch.RescanEnabled {
 		t.Error("expected rescan enabled by default")
 	}

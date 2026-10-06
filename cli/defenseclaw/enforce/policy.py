@@ -199,10 +199,6 @@ class PolicyEngine:
         if self.store:
             self.store.set_action_field(target_type, name, "install", "block", reason, connector)
 
-    def journal_install_blocked(self, target_type: str, name: str, connector: str = "") -> bool:
-        """True when the journal holds an install block for name."""
-        return self._journal_install_is(target_type, name, connector, "block")
-
     def _journal_install_is(self, target_type: str, name: str, connector: str, want: str) -> bool:
         if not self.store:
             return False
