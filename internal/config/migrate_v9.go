@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/policies"
 )
 
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
@@ -252,6 +253,14 @@ type v9Migrator struct {
 	rows []v9ActionRow
 	// envKey is an inline scanner key moved to .env on commit.
 	envKey, envValue string
+	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
+	// replaces with the shipped module (nil data retires the file).
+	rego []v9RegoRefresh
+}
+
+type v9RegoRefresh struct {
+	path string
+	data []byte
 }
 
 func (m *v9Migrator) moved(source, from, to string, value any) {
@@ -304,6 +313,9 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		}
 	}
 	if err := m.migrateActionsRows(root); err != nil {
+		return nil, false, err
+	}
+	if err := m.planRegoRefresh(); err != nil {
 		return nil, false, err
 	}
 	versionNode.Value = fmt.Sprint(ConfigVersionV9)
@@ -363,6 +375,13 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			}
 		}
 	}
+	for _, module := range m.rego {
+		if err := m.refreshRegoModule(module); err != nil {
+			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
+			continue
+		}
+		written = append(written, module.path+DataJSONMigratedSuffix)
+	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
 	if len(m.rows) > 0 {
@@ -408,6 +427,67 @@ func appendDotEnvKey(path, key, value string) error {
 	}
 	fmt.Fprintf(&out, "%s=%s\n", key, value)
 	return cfgtxn.WriteFileDurable(path, out.Bytes(), 0o600)
+}
+
+// ---------------------------------------------------------------------------
+// Rego modules
+
+// v9LegacyRegoData matches the data.json documents a pre-9 admission,
+// guardrail or skill_actions module read. Since 9 those values are
+// evaluation input, so such a module sees nothing and fails open.
+var v9LegacyRegoData = regexp.MustCompile(`\bdata\.(config|actions|scanner_overrides|first_party_allow_list|guardrail|severity_ranking)\b`)
+
+// planRegoRefresh finds the pre-9 vendor modules left under
+// <policy_dir>/rego: init only seeded missing files, so an upgrade keeps the
+// old ones. On a per-user install they are replaced with the shipped module
+// (skill_actions.rego, removed in 9, is retired); on a managed host the
+// admin owns policy_dir, so they are only reported.
+func (m *v9Migrator) planRegoRefresh() error {
+	dir := filepath.Join(m.policyDir(), "rego")
+	shipped := map[string][]byte{}
+	files, err := policyassets.Files()
+	if err != nil {
+		return fmt.Errorf("config: read the shipped Rego modules: %w", err)
+	}
+	for _, f := range files {
+		if strings.HasPrefix(f.Path, "rego/") {
+			shipped[strings.TrimPrefix(f.Path, "rego/")] = f.Data
+		}
+	}
+	for _, name := range []string{"admission.rego", "guardrail.rego", "skill_actions.rego"} {
+		path := filepath.Join(dir, name)
+		raw, err := os.ReadFile(path)
+		if err != nil || !v9LegacyRegoData.Match(raw) {
+			continue
+		}
+		if m.in.Managed {
+			m.note("%s is a pre-9 module that reads data.json; the gateway refuses it and uses the config-driven "+
+				"admission and thresholds until the admin replaces it with the shipped module", path)
+			continue
+		}
+		m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
+		if shipped[name] == nil {
+			m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
+		} else {
+			m.note("%s is a pre-9 module that reads data.json; it is kept as %s%s and replaced with the shipped module",
+				path, name, DataJSONMigratedSuffix)
+		}
+	}
+	return nil
+}
+
+func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
+	info, err := os.Stat(module.path)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(module.path, module.path+DataJSONMigratedSuffix); err != nil {
+		return err
+	}
+	if module.data == nil {
+		return nil
+	}
+	return cfgtxn.WriteFileDurable(module.path, module.data, info.Mode().Perm())
 }
 
 // ---------------------------------------------------------------------------

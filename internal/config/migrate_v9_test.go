@@ -64,6 +64,11 @@ observability: {}
 	if err := os.WriteFile(dataJSON, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// init seeded the 1.0 admission.rego, which reads data.config.
+	staleRego := filepath.Join(dir, "policies", "rego", "admission.rego")
+	if err := os.WriteFile(staleRego, []byte("package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"allowed\" if data.config.scan_on_install == false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	auditDB := filepath.Join(dir, "audit.db")
 	db, err := sql.Open("sqlite", auditDB)
 	if err != nil {
@@ -160,6 +165,12 @@ observability: {}
 	}
 	if _, err := os.Stat(dataJSON + DataJSONMigratedSuffix); err != nil {
 		t.Errorf("data.json was not renamed: %v", err)
+	}
+	if refreshed, _ := os.ReadFile(staleRego); v9LegacyRegoData.Match(refreshed) || !strings.Contains(string(refreshed), "input.admission") {
+		t.Error("the pre-9 admission.rego was not replaced with the shipped module")
+	}
+	if _, err := os.Stat(staleRego + DataJSONMigratedSuffix); err != nil {
+		t.Errorf("the pre-9 admission.rego was not kept: %v", err)
 	}
 	if _, err := os.Stat(MigrationRecordPath(configPath)); err != nil {
 		t.Errorf("migration-v9.json missing: %v", err)

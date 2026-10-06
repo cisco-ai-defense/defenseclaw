@@ -187,3 +187,17 @@ func TestEvaluateFirewallExact(t *testing.T) {
 }
 
 func boolPtr(v bool) *bool { return &v }
+
+// TestPrepareRefusesPre9Modules: a 1.0 admission or guardrail module reads
+// data.json documents that no longer exist and would fail open, so the load
+// fails and the gateway uses the config-driven fallback.
+func TestPrepareRefusesPre9Modules(t *testing.T) {
+	dir := t.TempDir()
+	stale := "package defenseclaw.guardrail\n\nimport rego.v1\n\naction := \"block\" if input.severity_rank >= data.guardrail.block_threshold\n"
+	if err := os.WriteFile(filepath.Join(dir, "guardrail.rego"), []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Prepare(context.Background(), dir); err == nil {
+		t.Fatal("Prepare accepted a module that reads data.guardrail")
+	}
+}
