@@ -135,10 +135,10 @@ def _lookup_latest() -> str:
     socket timeout; a slow network must not hold the terminal.
     """
 
-    from defenseclaw.upgrade_shim import DEFAULT_REPO, REPO_ENV, _latest_from_redirect
+    from defenseclaw.upgrade_shim import _latest_from_redirect, release_source
 
     found: list[str] = []
-    repo = os.environ.get(REPO_ENV) or DEFAULT_REPO
+    repo = release_source()
 
     def lookup() -> None:
         # A notice is best effort: nothing from the network may reach the terminal.

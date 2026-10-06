@@ -66,6 +66,13 @@ try {
 $DcVersion = "__DEFENSECLAW_VERSION__"
 $DefaultRepo = "cisco-ai-defense/defenseclaw"
 $Repo = if ($env:DEFENSECLAW_REPO) { $env:DEFENSECLAW_REPO } else { $DefaultRepo }
+# DEFENSECLAW_REPO (the deprecated alias of config.yaml update.source) is a
+# GitHub owner/name or an https mirror base URL. It only changes where release
+# bytes come from: signatures are always checked against the official release
+# identity, and a mirror's downloads are refused without cosign.
+$ReleaseBase = if ($Repo -like "https://*") { $Repo.TrimEnd("/") } else { "https://github.com/$Repo" }
+$OfficialReleaseBase = "https://github.com/$DefaultRepo"
+$ReleaseSigner = '^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 $DataDir = if ($env:DEFENSECLAW_HOME) { $env:DEFENSECLAW_HOME } else { Join-Path $env:USERPROFILE ".defenseclaw" }
 $Venv = Join-Path $DataDir ".venv"
 $BinDir = Join-Path $env:USERPROFILE ".local\bin"
@@ -350,14 +357,14 @@ function Get-Asset([string]$Name, [string]$Destination) {
         Copy-Item -LiteralPath $source -Destination $Destination -Force
         return $true
     }
-    return Save-Url "https://github.com/$Repo/releases/download/$Ver/$Name" $Destination
+    return Save-Url "$ReleaseBase/releases/download/$Ver/$Name" $Destination
 }
 
 function Get-LatestRelease {
     # releases/latest redirects to the latest tag: no API call, no rate limit.
     $tag = ""
     try {
-        $request = [Net.HttpWebRequest]::Create("https://github.com/$Repo/releases/latest")
+        $request = [Net.HttpWebRequest]::Create("$ReleaseBase/releases/latest")
         $request.Method = "HEAD"
         $request.AllowAutoRedirect = $false
         $request.UserAgent = "defenseclaw-install"
@@ -427,9 +434,8 @@ function Get-Cosign {
 }
 
 function Test-ReleaseSignature([string]$Cosign, [string]$Bundle, [string]$Checksums) {
-    # 0 when checksums.txt carries this repository's Release workflow signature.
-    $signer = "^https://github\.com/" + [regex]::Escape($Repo) + "/\.github/workflows/release\.yaml@refs/heads/main$"
-    return Invoke-Native $Cosign @("verify-blob", "--bundle", $Bundle, "--certificate-identity-regexp", $signer,
+    # 0 when checksums.txt carries the official Release workflow signature.
+    return Invoke-Native $Cosign @("verify-blob", "--bundle", $Bundle, "--certificate-identity-regexp", $ReleaseSigner,
         "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com", $Checksums) -Quiet
 }
 
@@ -441,7 +447,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
         Write-Info "Fetching the installer for DefenseClaw $ReleaseVersion"
-        $base = "https://github.com/$Repo/releases/download/$ReleaseVersion"
+        $base = "$ReleaseBase/releases/download/$ReleaseVersion"
         if (-not (Save-Url "$base/install.ps1" "$tmp\install.ps1")) {
             Die "Release $ReleaseVersion has no install.ps1 (1.x releases start at 1.0.0)"
         }
@@ -458,6 +464,8 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             if ((Test-ReleaseSignature $cosign "$tmp\checksums.txt.bundle" "$tmp\checksums.txt") -ne 0) {
                 Die "The release signature on the checksums.txt of $ReleaseVersion did not verify"
             }
+        } elseif ($ReleaseBase -ne $OfficialReleaseBase) {
+            Die "Releases from $ReleaseBase are verified by their signature: install cosign 2.0 or later"
         }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
         # Start the child on this console rather than through the pipeline, so its
@@ -1606,7 +1614,7 @@ function Invoke-Rollback {
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
     if (Test-Path -LiteralPath (Join-Path $Previous "legacy-setup")) {
         Die ("The previous install is DefenseClaw Setup $backTo, which cannot be restored automatically. To go back to it, " +
-            "run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from https://github.com/$Repo/releases/tag/$backTo " +
+            "run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from $ReleaseBase/releases/tag/$backTo " +
             "and run it in your desktop session. Its files and your data from before the upgrade are in $Previous; nothing was changed")
     }
     $current = Get-InstalledVersion
@@ -1750,7 +1758,7 @@ function Invoke-Install {
     if ($NoPersistPath) { $Forward += "-NoPersistPath" }
     if ($CosignPath) { $Forward += @("-CosignPath", $CosignPath) }
     if ($TargetVersion -and -not $Rollback -and [version]$TargetVersion -lt [version]"1.0.0") {
-        Die "DefenseClaw $TargetVersion predates this installer; see https://github.com/$Repo/releases/tag/$TargetVersion"
+        Die "DefenseClaw $TargetVersion predates this installer; see $ReleaseBase/releases/tag/$TargetVersion"
     }
     $Ver = $DcVersion
     if (-not (Test-Version $Ver)) {
@@ -1865,6 +1873,8 @@ function Invoke-Install {
         } else {
             Write-Warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
         }
+    } elseif (-not $Local -and $ReleaseBase -ne $OfficialReleaseBase) {
+        Die "Releases from $ReleaseBase are verified by their signature: install cosign 2.0 or later; nothing was changed"
     } elseif (-not $Local) {
         Write-Info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
     }

@@ -43,7 +43,14 @@ import urllib.error
 import urllib.request
 
 DEFAULT_REPO = "cisco-ai-defense/defenseclaw"
+# Deprecated alias of config.yaml update.source: a GitHub owner/name.
 REPO_ENV = "DEFENSECLAW_REPO"
+OFFICIAL_SOURCE = "https://github.com/" + DEFAULT_REPO
+# The release signing identity is compiled in. update.source and
+# DEFENSECLAW_REPO only change where release bytes are fetched from; a
+# mirror serves the same signed checksums.txt and its bundle.
+RELEASE_SIGNER = r"^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
+RELEASE_ISSUER = "https://token.actions.githubusercontent.com"
 # Tests only: take the installer and checksums.txt from this directory and
 # pass it to the installer as --local.
 LOCAL_DIR_ENV = "DEFENSECLAW_UPGRADE_LOCAL_DIR"
@@ -191,10 +198,46 @@ def _parse(command: str, args: list[str]) -> dict[str, object] | None:
     return options
 
 
+def release_source() -> str:
+    """The base URL release bytes come from: config.yaml ``update.source``,
+    else ``DEFENSECLAW_REPO`` (deprecated; a GitHub owner/name), else the
+    official repository."""
+
+    configured = _configured_update_source()
+    if configured:
+        return configured.rstrip("/")
+    repo = os.environ.get(REPO_ENV, "").strip()
+    if repo:
+        return _source_url(repo)
+    return OFFICIAL_SOURCE
+
+
+def _source_url(source: str) -> str:
+    """A base URL; a bare owner/name is a GitHub repository."""
+
+    source = source.strip().rstrip("/")
+    return source if source.startswith("https://") else f"https://github.com/{source}"
+
+
+def _configured_update_source() -> str:
+    try:
+        import yaml
+
+        home = os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw")
+        config = os.environ.get("DEFENSECLAW_CONFIG", "").strip() or os.path.join(home, "config.yaml")
+        with open(os.path.expanduser(config), encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream)
+    except Exception:  # noqa: BLE001 - a missing or unreadable config keeps the official source
+        return ""
+    update = raw.get("update") if isinstance(raw, dict) else None
+    source = str(update.get("source") or "").strip() if isinstance(update, dict) else ""
+    return source if source.startswith("https://") else ""
+
+
 def _upgrade(version: str | None, *, yes: bool) -> int:
     from defenseclaw import __version__ as installed
 
-    repo = os.environ.get(REPO_ENV) or DEFAULT_REPO
+    repo = release_source()
     local_dir = os.environ.get(LOCAL_DIR_ENV)
     explicit = version is not None
     if version is None:
@@ -249,7 +292,7 @@ def _rollback(*, yes: bool) -> int:
                 back_to = handle.read().strip()
         except OSError:
             back_to = "0.8.x"
-        raise ShimError(legacy_setup_rollback_refusal(back_to, previous, os.environ.get(REPO_ENV) or DEFAULT_REPO))
+        raise ShimError(legacy_setup_rollback_refusal(back_to, previous, release_source()))
     workdir = tempfile.mkdtemp(prefix="defenseclaw-rollback-")
     copy = os.path.join(workdir, name)
     try:
@@ -267,12 +310,17 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     return (
         f"The previous install is DefenseClaw Setup {back_to}, which cannot be restored automatically. "
         f"To go back to it, run 'defenseclaw uninstall', then download DefenseClawSetup-x64.exe from "
-        f"https://github.com/{repo}/releases/tag/{back_to} and run it in your desktop session. "
+        f"{_source_url(repo)}/releases/tag/{back_to} and run it in your desktop session. "
         f"Its files and your data from before the upgrade are in {previous}"
     )
 
 
 def _run_installer(path: str, args: list[str], workdir: str) -> int:
+    # The installer downloads the release assets: hand it update.source
+    # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
+    configured = _configured_update_source()
+    if configured:
+        os.environ[REPO_ENV] = configured.rstrip("/")
     if os.name == "nt":
         # The running CLI holds files in .venv open; start the installer in its
         # own console and exit so it can replace them.
@@ -348,7 +396,7 @@ def _fetch_installer(repo: str, version: str, local_dir: str | None, workdir: st
             except OSError as exc:
                 raise ShimError(f"could not read {asset} from {local_dir}: {exc}") from None
     else:
-        base = f"https://github.com/{repo}/releases/download/{version}"
+        base = f"{_source_url(repo)}/releases/download/{version}"
         for asset, destination in ((name, installer), ("checksums.txt", checksums)):
             _download(f"{base}/{asset}", destination)
     _verify_release_signature(repo, version, local_dir, workdir, checksums)
@@ -386,8 +434,15 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
 
     cosign = _cosign()
     if cosign is None:
-        if not local_dir:
-            print("  ! cosign 2.0 or later is not installed; the installer is checked against checksums.txt only")
+        if local_dir:
+            return
+        if _source_url(repo) != OFFICIAL_SOURCE:
+            # checksums.txt from a mirror proves nothing without its signature.
+            raise ShimError(
+                f"releases from {_source_url(repo)} are verified by their signature: install cosign 2.0 or later, "
+                "or clear update.source (and DEFENSECLAW_REPO) to use the official releases"
+            )
+        print("  ! cosign 2.0 or later is not installed; the installer is checked against checksums.txt only")
         return
     bundle = os.path.join(workdir, "checksums.txt.bundle")
     if local_dir:
@@ -396,8 +451,7 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
             return
         shutil.copyfile(source, bundle)
     else:
-        _download(f"https://github.com/{repo}/releases/download/{version}/checksums.txt.bundle", bundle)
-    signer = "^https://github\\.com/" + re.escape(repo) + "/\\.github/workflows/release\\.yaml@refs/heads/main$"
+        _download(f"{_source_url(repo)}/releases/download/{version}/checksums.txt.bundle", bundle)
     try:
         result = subprocess.run(  # noqa: S603 - fixed verifier, arguments built from constants and paths
             [
@@ -406,9 +460,9 @@ def _verify_release_signature(repo: str, version: str, local_dir: str | None, wo
                 "--bundle",
                 bundle,
                 "--certificate-identity-regexp",
-                signer,
+                RELEASE_SIGNER,
                 "--certificate-oidc-issuer",
-                "https://token.actions.githubusercontent.com",
+                RELEASE_ISSUER,
                 checksums,
             ],
             capture_output=True,
@@ -473,7 +527,7 @@ def latest_version(repo: str | None = None, *, timeout: float = _TIMEOUT) -> str
     to a GET of the same page and then to the REST API.
     """
 
-    repo = repo or os.environ.get(REPO_ENV) or DEFAULT_REPO
+    repo = repo or release_source()
     for method in ("HEAD", "GET"):
         tag = _latest_from_redirect(repo, method, timeout)
         if tag:
@@ -489,7 +543,7 @@ def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
         _NoRedirect, urllib.request.HTTPSHandler(context=_tls_context())
     )
     request = urllib.request.Request(
-        f"https://github.com/{repo}/releases/latest",
+        f"{_source_url(repo)}/releases/latest",
         method=method,
         headers={"User-Agent": "defenseclaw-upgrade"},
     )
@@ -508,8 +562,11 @@ def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
 
 
 def _latest_from_api(repo: str, timeout: float) -> str | None:
+    source = _source_url(repo)
+    if not source.startswith("https://github.com/"):
+        return None
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/releases/latest",
+        f"https://api.github.com/repos/{source.removeprefix('https://github.com/')}/releases/latest",
         headers={"User-Agent": "defenseclaw-upgrade", "Accept": "application/vnd.github+json"},
     )
     try:
