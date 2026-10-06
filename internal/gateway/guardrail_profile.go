@@ -495,9 +495,9 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	subject := profileSubject{
 		UserID:   account.Uid,
 		IDKind:   useridentity.KindForID(account.Uid),
-		UserName: bareAccountName(account.Username),
+		UserName: useridentity.BareAccountName(account.Username),
 	}
-	if strings.Contains(account.Username, `\`) {
+	if strings.ContainsAny(account.Username, `\@`) {
 		subject.Principal = account.Username
 	}
 	subject.Groups = localAccountGroups(account)

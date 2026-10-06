@@ -35,7 +35,7 @@ func (a *APIServer) attachVerifiedSubject(ctx context.Context, userID, userName,
 	subject := VerifiedSubject{
 		UserID:    userID,
 		IDKind:    useridentity.KindForID(userID),
-		UserName:  userName,
+		UserName:  useridentity.BareAccountName(userName),
 		Directory: facts,
 		Source:    source,
 	}

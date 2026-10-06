@@ -90,6 +90,7 @@ func (m *Manager) hostPortDenied(ctx context.Context, b *box, r ocsf.Record, at 
 		Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: openshellHostAlias, Port: port,
 		Blocked: true, DecisionCode: "SANDBOX_EGRESS_OPENSHELL_DENIED", Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512),
 		PolicyOutcome: truncate(r.Policy, 256), Timestamp: at,
+		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 	})
 	refusal := errors.New("the sandbox policy is not resolved")
 	if eff != nil {

@@ -118,12 +118,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	// Mint only on a reviewed lifecycle boundary. UUIDv7 IDs are persisted in
 	// the same transaction as the occurrence so restart never falls back to a
 	// process-local "latest turn" map.
+	// The minted agent is the session's root agent, with the ID the hook
+	// model and lifecycle records derive for it (hookLLMEventMeta), so every
+	// row of one session carries the same agent_id.
 	if req.SessionID != "" && req.AgentID == "" &&
 		(lifecycle == connector.CorrelationLifecycleSessionStart || lifecycle == connector.CorrelationLifecycleTurnStart) {
-		if id, idErr := audit.NewSemanticEventID(); idErr == nil {
-			req.AgentID = string(id)
-			appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
-		}
+		req.AgentID = stableLLMEventID("agent", req.ConnectorName, req.SessionID, "root")
+		appendHookCorrelationValue(&req, connector.CorrelationTargetAgent, req.AgentID, connector.CorrelationOriginMinted)
 	}
 	if req.TurnID == "" && lifecycle == connector.CorrelationLifecycleTurnStart &&
 		spec.Allows(connector.CorrelationInferencePromptBoundaryTurn) {

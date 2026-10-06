@@ -76,7 +76,7 @@ func TestHookOccurrenceMintsOnlyAtReviewedBoundariesAndRestoresCursor(t *testing
 	}
 	for field, value := range map[string]string{
 		"semantic": prompt.SemanticEventID, "logical": prompt.LogicalEventID,
-		"connector instance": prompt.ConnectorInstanceID, "turn": prompt.TurnID, "agent": prompt.AgentID,
+		"connector instance": prompt.ConnectorInstanceID, "turn": prompt.TurnID,
 	} {
 		parsed, parseErr := uuid.Parse(value)
 		if parseErr != nil || parsed.Version() != 7 {
@@ -463,8 +463,9 @@ func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t 
 		prompt.SourceEventID != "" || prompt.CorrelationReceipt != nil {
 		t.Fatalf("cursor prompt identity=%+v", prompt)
 	}
-	if parsed, parseErr := uuid.Parse(prompt.AgentID); parseErr != nil || parsed.Version() != 7 {
-		t.Fatalf("cursor prompt agent=%q err=%v", prompt.AgentID, parseErr)
+	// GAP-0031: the minted root agent is the one the model records name.
+	if want := hookLLMEventMeta(t.Context(), "cursor", "cursor-conversation-1", "", "", "", "", "", "", map[string]interface{}{}).AgentID; prompt.AgentID != want {
+		t.Fatalf("cursor prompt agent=%q, want the model records' %q", prompt.AgentID, want)
 	}
 
 	startPayload := map[string]interface{}{

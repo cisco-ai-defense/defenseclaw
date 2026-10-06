@@ -155,6 +155,21 @@ type llmEventIdentity struct {
 	Session   useridentity.SessionFacts
 }
 
+// processOwnerIdentity is the directory identity of the gateway's own
+// account, for records that no request carries (the OpenClaw stream). The
+// account is verified: a per-user gateway runs as it.
+func processOwnerIdentity(userID string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	facts, _ := verifiedIdentityDirectory(userID, false)
+	if facts.Empty() {
+		return nil
+	}
+	facts.Assurance = useridentity.AssuranceVerified
+	return &llmEventIdentity{Directory: facts}
+}
+
 // requestIdentityFor merges the request's verified subject, verified session
 // and claimed session facts for the record of userID. Verified facts always
 // win: claimed facts fill only what nothing verified, and a claimed

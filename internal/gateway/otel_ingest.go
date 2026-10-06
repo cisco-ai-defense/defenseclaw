@@ -954,7 +954,6 @@ func codexNotifyToAgentHookRequest(p codexNotifyPayload, raw []byte) agentHookRe
 		"session_id":      codexNotifySessionID(p),
 		"turn_id":         p.TurnID,
 		"model":           p.Model,
-		"agent_id":        "codex",
 		"agent_type":      "codex",
 		"codex_notify": map[string]interface{}{
 			"type":   p.Type,
@@ -967,7 +966,6 @@ func codexNotifyToAgentHookRequest(p codexNotifyPayload, raw []byte) agentHookRe
 		HookEventName: "Stop",
 		SessionID:     codexNotifySessionID(p),
 		TurnID:        p.TurnID,
-		AgentID:       "codex",
 		AgentName:     "codex",
 		AgentType:     "codex",
 		ToolName:      "codex-notify",
