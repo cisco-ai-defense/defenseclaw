@@ -72,7 +72,7 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 	}
 	stderr := new(bytes.Buffer)
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
-	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest, true); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	return stderr.String(), calls
@@ -154,7 +154,7 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 		return true, nil
 	}
 	stderr := new(bytes.Buffer)
-	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest, true); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	if strings.Join(seen.IncludeGroups, ",") != "Developers" || strings.Join(seen.ExcludeGroups, ",") != "Administrators" {
@@ -176,7 +176,7 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	secureClient.Enterprise.Enrollment = cfg.Enterprise.Enrollment
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return secureClient, nil }
 	published, savedCache, seen = nil, nil, enterprisehooks.EnumerateOptions{}
-	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest, true); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
 		t.Fatalf("Secure Client cycle: %v", err)
 	}
 	if len(seen.IncludeGroups)+len(seen.ExcludeGroups) != 0 || seen.GroupCache != nil || seen.ReportUnprotected != nil || savedCache != nil || published != nil {
