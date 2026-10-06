@@ -1092,7 +1092,8 @@ class AdmissionAssetType:
     allow_list_bypass_scan: bool | None = None
     actions: dict[str, Any] = field(default_factory=dict)
     scanner_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
-    first_party_allow_list: list[AdmissionFirstParty] = field(default_factory=list)
+    #: ``None`` inherits; an explicit ``[]`` allows nothing first party (as Go).
+    first_party_allow_list: list[AdmissionFirstParty] | None = None
 
 
 @dataclass
@@ -5765,7 +5766,7 @@ def _merge_admission_scanner_overrides(raw: Any) -> dict[str, dict[str, Any]]:
 
 def _merge_admission_asset_type(raw: Any) -> AdmissionAssetType:
     raw = _mapping(raw)
-    first_party = []
+    first_party: list[AdmissionFirstParty] | None = None if raw.get("first_party_allow_list") is None else []
     for entry in raw.get("first_party_allow_list") or []:
         if isinstance(entry, dict):
             first_party.append(

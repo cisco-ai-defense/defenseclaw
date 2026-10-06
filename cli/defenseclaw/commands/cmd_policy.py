@@ -723,6 +723,8 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
         paths = [str(p) for p in entry.get("source_path_contains") or [] if p]
         if holder is None or not name or not paths:
             continue
+        if holder.first_party_allow_list is None:
+            holder.first_party_allow_list = []
         holder.first_party_allow_list.append(
             AdmissionFirstParty(name=name, source_path_contains=paths, reason=str(entry.get("reason", "") or "")),
         )

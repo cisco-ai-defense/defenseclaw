@@ -217,7 +217,9 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     first_party = dict(out.first_party_allow)
     for layer in (own, defaults):
         entries = getattr(layer, "first_party_allow_list", None) if layer is not None else None
-        if entries:
+        # An explicit empty list allows nothing first party (Go firstParty
+        # treats a non-nil empty list the same way); None inherits.
+        if entries is not None:
             first_party = {
                 str(getattr(e, "name", "")): list(getattr(e, "source_path_contains", []) or [])
                 for e in entries

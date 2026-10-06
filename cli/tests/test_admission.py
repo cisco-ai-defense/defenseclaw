@@ -873,6 +873,10 @@ class TestCompileAdmission(unittest.TestCase):
         cfg = SimpleNamespace(admission=AdmissionConfig(), scanners=SimpleNamespace(skill_scanner=gate))
         cfg.admission.defaults.actions["low"] = "block"
         cfg.admission.skill.actions["critical"] = "block"
+        # An explicit empty first-party list allows nothing first party (Go firstParty).
+        cfg.admission.plugin.first_party_allow_list = []
+        self.assertEqual(compile_admission(cfg, "plugin").first_party_allow, {})
+        self.assertIn("codeguard", compile_admission(cfg, "skill").first_party_allow)
         skill = compile_admission(cfg, "skill")
         self.assertEqual(skill.source, "config:admission.skill.actions")
         self.assertEqual(skill.actions["CRITICAL"][0].file, "none")
