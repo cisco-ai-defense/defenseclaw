@@ -137,7 +137,7 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 	state.Applied = state.EffectiveDigest != "" && state.EffectiveDigest == reported && reloadError == ""
 	r.Policy = state
 	if reloadError != "" {
-		r.AddWarning(codePolicyReloadRejected, "the gateway rejected its last policy reload and keeps enforcing the previous policy: "+reloadError+
+		r.AddWarning(codePolicyReloadRejected, "the gateway reports a policy error and keeps enforcing the policy it last built: "+reloadError+
 			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
 	}
 	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify || !computed || !r.Readiness.Gateway {

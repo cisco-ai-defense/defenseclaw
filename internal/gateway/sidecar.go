@@ -1835,13 +1835,15 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// composed rule packs, profiles, the prepared OPA queries and the
 	// resolved thresholds. A Rego module that does not load rejects the
 	// reload and keeps the previous generation, so last_reload_error names it
-	// until it is fixed.
+	// until it is fixed. A generation that already runs without Rego because
+	// its modules did not load (the boot fallback) keeps the lenient build,
+	// so a config change is not held back by a module it never used.
 	nextGen, err := buildGeneration(ctx, generationInputs{
 		cfg:       cloneConfig(&next),
 		raw:       source.raw,
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
-		strictOPA: true,
+		strictOPA: previousGen != nil && previousGen.opaError == "",
 	})
 	if err != nil {
 		recordGenerationBuildError(err)
