@@ -126,12 +126,12 @@ class HealthSnapshot:
     policy_generation: int = 0
     policy_digest: str = ""
 
-    def applied_policy_label(self) -> str:
-        """``gen N · <12 hex>`` for the status strip, "" when not reported."""
+    def applied_policy_label(self, digest_chars: int = 12) -> str:
+        """``gen N · <hex>`` for the status strip, "" when not reported."""
         digest = self.policy_digest.removeprefix("sha256:")
         if not digest:
             return ""
-        return f"gen {self.policy_generation} · {digest[:12]}"
+        return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
 # Probe states that mean the sidecar is not running.

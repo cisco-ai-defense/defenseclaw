@@ -10949,10 +10949,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             elif mode:
                 policy_posture = f"policy {mode}"
 
+        # The applied generation and digest sit next to the gateway in the
+        # strip, so the one-line bar cuts the ambient pills, not this, on a
+        # narrow terminal (GAP-0042); an 80-column bar gets a shorter digest.
         health = self.overview_model.health
-        applied = health.applied_policy_label() if health is not None else ""
-        if applied:
-            policy_posture = f"{policy_posture} · {applied}" if policy_posture else applied
+        compact = int(getattr(self.size, "width", 0) or 0) < 100
+        applied = health.applied_policy_label(8 if compact else 12) if health is not None else ""
 
         return StatusModel(
             gateway=ServiceStatus("Gateway", gateway_state, gateway_detail),
@@ -10963,6 +10965,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             redaction_label=redaction_label,
             redaction_on=redaction_on,
             policy_posture=policy_posture,
+            applied_policy=applied,
             commands_run=int(self.commands_run),
             active_alerts=(
                 self.alerts_model.connector_scope_count()
