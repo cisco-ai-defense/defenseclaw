@@ -79,16 +79,16 @@ func TestOpenClawPromptBlockMarksTheTurn(t *testing.T) {
 	}
 }
 
-// TestOpenClawAllowedTurnNamesTheLocalUser pins GAP-2287: an allowed
-// OpenClaw turn names the gateway's own user on an unmanaged install, as a
-// blocked turn and every other connector's turns do; a user the stream
-// named is kept.
+// TestOpenClawAllowedTurnNamesTheLocalUser pins GAP-2287 and GAP-0065: the
+// OpenClaw stream meta names the gateway's own user on an unmanaged install,
+// so an allowed turn's records carry it as a blocked turn and every other
+// connector's turns do; a user the stream named is kept.
 func TestOpenClawAllowedTurnNamesTheLocalUser(t *testing.T) {
 	_, wantName := localProcessUser()
 	if wantName == "" {
 		t.Skip("no local process user on this host")
 	}
-	allowed := hookModelV8Observation{response: "ok"}
+	allowed := hookModelV8Observation{response: "ok", meta: streamLLMEventMeta(&EventRouter{}, "s1", "r1", "openai", "gpt-test", "")}
 	applyOpenClawPromptBlock(&allowed)
 	if allowed.outcome != "" {
 		t.Fatalf("an allowed turn was marked %q", allowed.outcome)
