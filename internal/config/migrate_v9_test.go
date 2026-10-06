@@ -74,6 +74,9 @@ observability: {}
 		`INSERT INTO actions VALUES ('1','skill','bad-skill','/s/bad','{"install":"block"}','operator','now','')`,
 		`INSERT INTO actions VALUES ('2','tool','@codex/rm','','{"install":"block"}','','now','')`,
 		`INSERT INTO actions VALUES ('3','skill','scanned','','{"install":"block","file":"quarantine"}','auto-block: watch detected HIGH findings','now','')`,
+		`INSERT INTO actions VALUES ('4','skill','post','','{"install":"block"}','post-scan: 2 findings, max=HIGH','now','')`,
+		`INSERT INTO actions VALUES ('5','mcp','fs','','{"install":"allow"}','scan clean or within policy','now','codex')`,
+		`INSERT INTO actions VALUES ('6','plugin','ok','/p/ok','{"install":"allow"}','operator','now','')`,
 	} {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -158,8 +161,8 @@ observability: {}
 	db, _ = sql.Open("sqlite", auditDB)
 	defer db.Close()
 	var left int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM actions`).Scan(&left); err != nil || left != 1 {
-		t.Errorf("actions rows left = %d (%v), want only the automatic block", left, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM actions`).Scan(&left); err != nil || left != 3 {
+		t.Errorf("actions rows left = %d (%v), want the three scan verdicts", left, err)
 	}
 	if again, err := MigrateV9(context.Background(), in); err != nil || len(again.Written) != 0 {
 		t.Errorf("a second run = %+v, %v; want a no-op", again, err)

@@ -28,9 +28,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// v9AutomaticInstallReasons start the reason of an install block or allow
+// that a scan verdict wrote up to 1.0: the gateway watcher ("auto-block:")
+// and the CLI scan, install and mcp set paths (which also recorded
+// scan-clean allows). Such a row is the enforcement journal, not operator
+// intent, and stays in the table.
+var v9AutomaticInstallReasons = []string{
+	"auto-block", "post-scan:", "post-install scan:", "scan:", "scan clean or within policy",
+}
+
+func v9AutomaticInstallReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	for _, prefix := range v9AutomaticInstallReasons {
+		if strings.HasPrefix(reason, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // readV9ActionRows returns the operator block/allow rows of the actions
-// table: install=block or allow, excluding the watcher's and gateway's
-// automatic blocks (reason "auto-block..."), which stay as the journal.
+// table: install=block or allow, excluding scan verdicts
+// (v9AutomaticInstallReasons), which stay as the journal.
 func readV9ActionRows(path string) ([]v9ActionRow, error) {
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -63,7 +82,7 @@ func readV9ActionRows(path string) ([]v9ActionRow, error) {
 		if install != "block" && install != "allow" {
 			continue
 		}
-		if install == "block" && strings.HasPrefix(strings.TrimSpace(row.reason), "auto-block") {
+		if v9AutomaticInstallReason(row.reason) {
 			continue
 		}
 		out = append(out, row)
