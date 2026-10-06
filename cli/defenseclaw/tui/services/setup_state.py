@@ -697,9 +697,6 @@ def _collect_errors(sections: Sequence[ConfigSection], *, changed_only: bool) ->
 # Key prefixes whose editor writes go through a dedicated writer in
 # :func:`apply_config_field` that builds the typed dataclass entries itself.
 SPECIAL_WRITER_PREFIXES: tuple[str, ...] = (
-    "skill_actions.",
-    "mcp_actions.",
-    "plugin_actions.",
     "asset_policy.connectors.",
     "guardrail.connectors.",
     "guardrail.judge.hook_connectors.",
@@ -871,8 +868,8 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
         return
     if key.startswith("firewall."):
         return
-    if key.startswith(("skill_actions.", "mcp_actions.", "plugin_actions.")):
-        _apply_action_matrix_field(cfg, key, value)
+    if key.startswith("admission.") and ".actions." in key:
+        _apply_admission_action_field(cfg, key, value)
         return
     if _apply_global_registry_required_field(cfg, key, value):
         return
@@ -1396,18 +1393,24 @@ def _apply_connector_hook_field(cfg: object | dict[str, Any], key: str, value: s
     _apply_typed_field(cfg, key, value)
 
 
-def _apply_action_matrix_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+def _apply_admission_action_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Set ``admission.<type>.actions.<severity>`` to a shorthand; blank
+    removes it, so the default for that severity applies again."""
     parts = key.split(".")
-    if len(parts) != 3:
+    if len(parts) != 4 or parts[1] not in {"defaults", "skill", "mcp", "plugin"}:
         return
-    prefix, severity, column = parts
-    if prefix not in {"skill_actions", "mcp_actions", "plugin_actions"}:
-        return
+    severity = parts[3]
     if severity not in {"critical", "high", "medium", "low", "info"}:
         return
-    if column not in {"file", "runtime", "install"}:
-        return
-    set_config_value(cfg, key, value)
+    actions = get_config_value(cfg, ".".join(parts[:3]), None)
+    if not isinstance(actions, dict):
+        actions = {}
+        set_config_value(cfg, ".".join(parts[:3]), actions)
+    choice = value.strip().lower()
+    if not choice:
+        actions.pop(severity, None)
+    elif choice in {"block", "quarantine", "warn", "allow"}:
+        actions[severity] = choice
 
 
 def _coerce_per_connector_asset_policy_value(field_name: str, value: str) -> Any:

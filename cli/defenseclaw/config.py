@@ -3900,10 +3900,12 @@ def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[st
 def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> None:
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
-    Setup commands that still set a v8 field (``rule_pack_dir``, the
-    ``*_actions`` maps, the v8 scanner toggles) would otherwise write a key
+    Setup commands that still set a v8 field (``rule_pack_dir``, the v8
+    scanner toggles, ``update_check``) would otherwise write a key
     config_version 9 rejects. This maps them the way the Go migration does;
-    it goes away as each caller moves to the v9 key.
+    it goes away as each caller moves to the v9 key. The ``*_actions`` maps
+    are dropped: nothing edits them since 9 (the admission actions are
+    ``admission.<type>.actions``).
     """
     for key in ("skill_actions", "mcp_actions", "plugin_actions", "update_check"):
         value = merged.pop(key, None)

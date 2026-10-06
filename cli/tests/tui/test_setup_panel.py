@@ -38,7 +38,7 @@ from defenseclaw.tui.panels.setup import (
     _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
-    action_matrix_fields,
+    admission_action_fields,
     build_setup_sections,
     build_wizard_args,
     connector_setup_command,
@@ -114,9 +114,9 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watchdog",
         "Observability",
         "Webhooks",
-        "Skill Actions",
-        "MCP Actions",
-        "Plugin Actions",
+        "Skill Admission",
+        "MCP Admission",
+        "Plugin Admission",
         "Watch",
         "OpenShell Sandboxes",
         "Inspect LLM (legacy - read-only)",
@@ -432,15 +432,20 @@ def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
     assert "desktop toasts" in section.summary.lower()
 
 
-def test_action_matrix_has_header_and_severity_triplets() -> None:
-    fields = action_matrix_fields("skill_actions", {})
+def test_admission_fields_edit_the_v9_admission_actions() -> None:
+    from defenseclaw.config import default_config
+    from defenseclaw.tui.services.setup_state import apply_config_field
 
-    assert len(fields) == 16
-    assert fields[0].kind == "header"
-    assert fields[1].key == "skill_actions.critical.file"
-    assert fields[1].options == ("none", "quarantine")
-    assert fields[2].options == ("enable", "disable")
-    assert fields[3].options == ("none", "block", "allow")
+    fields = admission_action_fields("skill", {})
+    assert fields[0].kind == "header" and len(fields) == 6
+    assert fields[2].key == "admission.skill.actions.high"
+    assert fields[2].options == ("", "block", "quarantine", "warn", "allow")
+
+    cfg = default_config()
+    apply_config_field(cfg, "admission.skill.actions.high", "allow")
+    assert cfg.admission.skill.actions == {"high": "allow"}
+    apply_config_field(cfg, "admission.skill.actions.high", "")
+    assert cfg.admission.skill.actions == {}
 
 
 def test_config_validation_matches_go_setup_state_rules() -> None:

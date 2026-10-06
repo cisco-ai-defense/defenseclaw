@@ -1940,13 +1940,9 @@ def build_setup_sections(
             "Read-only effective plan; press E to manage destinations through setup observability.",
         ),
         ConfigSection("Webhooks", tuple(_webhook_summary_fields(cfg)), "Read-only notifier webhook summary."),
-        ConfigSection(
-            "Skill Actions", tuple(action_matrix_fields("skill_actions", cfg)), "Skill admission response matrix."
-        ),
-        ConfigSection("MCP Actions", tuple(action_matrix_fields("mcp_actions", cfg)), "MCP admission response matrix."),
-        ConfigSection(
-            "Plugin Actions", tuple(action_matrix_fields("plugin_actions", cfg)), "Plugin admission response matrix."
-        ),
+        ConfigSection("Skill Admission", admission_action_fields("skill", cfg), "Skill admission action per severity."),
+        ConfigSection("MCP Admission", admission_action_fields("mcp", cfg), "MCP admission action per severity."),
+        ConfigSection("Plugin Admission", admission_action_fields("plugin", cfg), "Plugin admission action per severity."),
         _watch_section(cfg),
         _openshell_section(cfg),
         ConfigSection(
@@ -2029,49 +2025,30 @@ def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key
     )
 
 
-def action_matrix_fields(prefix: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
-    if prefix not in {"skill_actions", "mcp_actions", "plugin_actions"}:
-        return (ConfigField("(unknown actions prefix)", prefix + ".error", "header"),)
-    # A short group header with no value, so it reads whole: the long one
-    # and its legend value were both cut with "…" at every width (GAP-2508).
-    # The legend is the header's hint; each row's own hint names its choices.
+def admission_action_fields(asset_type: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
+    """``admission.<type>.actions.<severity>``: the action shorthand a scan
+    finding at that severity gets. Blank inherits admission.defaults, then
+    the built-in default (the skill scanner gate for skills)."""
+    if asset_type not in {"skill", "mcp", "plugin"}:
+        return (ConfigField("(unknown admission type)", f"admission.{asset_type}.error", "header"),)
     out = [
         ConfigField(
-            label=".. " + prefix.replace("_", " ").upper() + " (per severity) ..",
-            key=prefix + ".hint",
+            label=f".. {asset_type.upper()} ACTIONS (per severity) ..",
+            key=f"admission.{asset_type}.hint",
             kind="header",
-            hint="file: quarantine/none; runtime: enable/disable; install: none/block/allow",
+            hint="block/quarantine reject the install; warn admits with a warning; allow admits; blank=default",
         ),
     ]
     for severity in ("critical", "high", "medium", "low", "info"):
-        label = severity[:1].upper() + severity[1:]
-        out.extend(
-            (
-                _field(
-                    cfg,
-                    f"{label} - file",
-                    f"{prefix}.{severity}.file",
-                    "choice",
-                    ("none", "quarantine"),
-                    f"On {severity.upper()}: quarantine moves the artifact; none leaves it in place.",
-                ),
-                _field(
-                    cfg,
-                    f"{label} - runtime",
-                    f"{prefix}.{severity}.runtime",
-                    "choice",
-                    ("enable", "disable"),
-                    f"On {severity.upper()}: disable stops runtime invocation; enable keeps it live.",
-                ),
-                _field(
-                    cfg,
-                    f"{label} - install",
-                    f"{prefix}.{severity}.install",
-                    "choice",
-                    ("none", "block", "allow"),
-                    f"On {severity.upper()}: block rejects installs; allow permits; none defers.",
-                ),
-            ),
+        out.append(
+            _field(
+                cfg,
+                severity[:1].upper() + severity[1:],
+                f"admission.{asset_type}.actions.{severity}",
+                "choice",
+                ("", "block", "quarantine", "warn", "allow"),
+                f"On a {severity.upper()} finding; blank=the default for this severity.",
+            )
         )
     return tuple(out)
 
