@@ -1,11 +1,15 @@
 ---
 title: Install
-description: Build the Edge Connector from source, configure a policy, and integrate it with your AI agent on Linux.
+description: Build the Edge Connector from source, configure a policy, and integrate it with any AI agent framework on Linux.
 keywords:
   - Edge Connector install
   - build from source
   - Raspberry Pi
   - PicoClaw integration
+  - LangChain
+  - LangGraph
+  - FastAPI
+  - Flask
   - CMake
   - IoT setup
 ---
@@ -144,9 +148,67 @@ python3 tools/policy_compiler.py \
 
 ## Integrate with your AI agent
 
+The Edge Connector is framework-agnostic. Choose the integration that matches your stack.
+
+### Generic Python adapter (recommended)
+
+The simplest starting point for any Python agent. Three lines to add security enforcement:
+
+```python
+from generic_hook import EdgeConnector
+
+ec = EdgeConnector()  # auto-detects FFI or Unix socket
+
+verdict = ec.evaluate(
+    tool_name="exec_shell",
+    arguments={"command": "rm -rf /"},
+)
+if verdict.blocked:
+    print(f"Blocked: {verdict.reason}")
+```
+
+Auto-detects FFI (ctypes) first, falls back to Unix socket. Configure fail-open/fail-closed with `DCLAW_FAIL_OPEN=1`.
+
+### LangChain / LangGraph
+
+Wrap LangChain tools so every invocation passes through the Edge Connector:
+
+```python
+from langchain_hook import wrap_tools
+
+tools = wrap_tools(my_tools)
+agent = create_react_agent(llm, tools)
+```
+
+Or use as a LangGraph node:
+
+```python
+from langchain_hook import edge_connector_node
+
+graph.add_node("security_gate", edge_connector_node)
+graph.add_edge("agent", "security_gate")
+graph.add_edge("security_gate", "tools")
+```
+
+### HTTP middleware (FastAPI / Flask)
+
+For agents that expose tool execution via HTTP APIs:
+
+```python
+# FastAPI
+from http_middleware import EdgeConnectorMiddleware
+app.add_middleware(EdgeConnectorMiddleware)
+
+# Flask
+from http_middleware import flask_edge_connector
+flask_edge_connector(app)
+```
+
+Intercepts POST requests to tool-execution endpoints and returns `403` for blocked calls.
+
 ### PicoClaw
 
-PicoClaw is the primary supported agent framework. The Edge Connector integrates via PicoClaw's process hook system.
+PicoClaw integrates via its process hook system:
 
 ```bash
 cp /usr/local/lib/defenseclaw/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
@@ -197,17 +259,19 @@ picoclaw agent -m "run whoami in the shell"
 tail -f ~/edge-connector.log
 ```
 
-### Generic integration (any framework)
+### Low-level: shared library (FFI)
 
-**Shared library (FFI)** — load `libdclaw_core.so` from any language:
+Load `libdclaw_core.so` from any language that supports C FFI:
 
 ```python
 import ctypes
 lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
-# Call dclaw_evaluate() for every tool call
+# Call dclaw_evaluate() — see defenseclaw.h for struct definitions
 ```
 
-**Unix socket (JSON-RPC)** — query the daemon from any process:
+### Low-level: Unix socket (JSON-RPC)
+
+Query the daemon from any process:
 
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{

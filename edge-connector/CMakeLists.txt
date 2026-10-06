@@ -181,3 +181,49 @@ message(STATUS "  Sessions:         ${DCLAW_MAX_SESSIONS}")
 message(STATUS "  MQTT:             ${DCLAW_MQTT_ENABLED}")
 message(STATUS "  Speculative exec: ${DCLAW_SPECULATIVE_EXECUTION}")
 message(STATUS "  Canary window:    ${DCLAW_CANARY_WINDOW_SEC}s")
+
+# --- Install targets ---
+include(GNUInstallDirs)
+
+# The static library
+install(TARGETS dclaw_core
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+# The shared library
+install(TARGETS dclaw_shared
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+# The standalone binary
+install(TARGETS edge-connector
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Public headers
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/defenseclaw.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/platform.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/content_scanner.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/sha256.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/hmac_sha256.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/defenseclaw
+)
+
+# The PicoClaw hook
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/picoclaw_hook.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+
+# The policy compiler
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/policy_compiler.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+
+# Default policy
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/policies/strict.yaml
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/defenseclaw
+    RENAME policy.yaml
+)

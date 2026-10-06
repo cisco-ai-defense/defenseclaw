@@ -1,15 +1,21 @@
 # DefenseClaw Edge Connector
 
-Sub-microsecond AI agent security enforcement for IoT and edge devices.
+Framework-agnostic, sub-microsecond AI agent security enforcement for any device.
 
 ## Overview
 
-DefenseClaw Edge Connector is a purpose-built C-language enforcement agent (~68KB binary) that
+DefenseClaw Edge Connector is a purpose-built C-language enforcement engine (~68KB binary) that
 provides local policy enforcement with AI-aware content inspection, delegating complex analysis
-(YARA, LLM judge, OPA) to a cloud DefenseClaw instance via MQTT 5.0. Unlike purely rule-based
-policy engines, the Edge Connector inspects the actual content of tool call arguments and LLM
-responses to detect secrets, PII, credential leakage, data exfiltration, prompt injection, and
-dangerous commands before they leave the device.
+(YARA, LLM judge, OPA) to a cloud DefenseClaw instance via MQTT 3.1.1. It works with **any AI
+agent framework** — LangChain, LangGraph, FastAPI-based agents, PicoClaw, or your own custom
+framework — through a generic Python adapter, HTTP middleware, or direct FFI/socket calls.
+
+Unlike purely rule-based policy engines, the Edge Connector inspects the actual content of tool
+call arguments and LLM responses to detect secrets, PII, credential leakage, data exfiltration,
+prompt injection, and dangerous commands before they leave the device.
+
+**Quick start:** Use the generic Python adapter (`tools/generic_hook.py`) — three lines to add
+security enforcement to any agent.
 
 **Architecture:** See `docs/architecture/edge-connector-iot-proposal.md` (v1.2)  
 **Spec:** See `docs/specs/001-edge-connector-phase1/`
@@ -100,7 +106,12 @@ edge-connector/
 │   └── content_scanner.h         # Content scanner API and pattern category flags
 ├── generated/                    # Compiled policy tables (including DFA tables)
 ├── policies/                     # YAML policy files
-├── tools/                        # Policy compiler (Python)
+├── tools/                        # Adapters and policy compiler
+│   ├── generic_hook.py           # Framework-agnostic Python adapter
+│   ├── langchain_hook.py         # LangChain / LangGraph adapter
+│   ├── http_middleware.py        # FastAPI / Flask HTTP middleware
+│   ├── picoclaw_hook.py          # PicoClaw robot agent hook
+│   └── policy_compiler.py        # Policy YAML → C header / binary
 ├── tests/                        # Unit tests, acceptance, benchmark, fuzz
 ├── dashboards/                   # Grafana dashboard JSON
 └── CMakeLists.txt                # Build system

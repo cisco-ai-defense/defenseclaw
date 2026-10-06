@@ -175,9 +175,126 @@ python3 /usr/local/lib/defenseclaw/policy_compiler.py \
 
 ## Integration with AI Agents
 
-### PicoClaw (Supported)
+The Edge Connector is framework-agnostic. Pick the integration method that fits your stack:
 
-PicoClaw is the primary supported agent framework. DefenseClaw Edge Connector integrates via PicoClaw's process hook system, intercepting all tool calls, LLM inputs, and LLM outputs.
+| Method | Best For | File |
+|--------|----------|------|
+| **Generic Python adapter** | Any Python agent | `tools/generic_hook.py` |
+| **LangChain / LangGraph** | LangChain-based agents | `tools/langchain_hook.py` |
+| **HTTP middleware** | FastAPI, Flask, any HTTP API | `tools/http_middleware.py` |
+| **PicoClaw hook** | PicoClaw robot agents | `tools/picoclaw_hook.py` |
+| **Shared library (FFI)** | Any language via ctypes/cffi | `libdclaw_core.so` |
+| **Unix socket (JSON-RPC)** | Any process, any language | `/tmp/defenseclaw.sock` |
+
+---
+
+### Generic Python Adapter (Recommended)
+
+The simplest way to integrate from any Python agent. Works with any framework — just call `evaluate()` before running a tool.
+
+```python
+from generic_hook import EdgeConnector
+
+ec = EdgeConnector()  # auto-detects FFI or Unix socket
+
+# Before executing any tool call:
+verdict = ec.evaluate(
+    tool_name="exec_shell",
+    arguments={"command": "rm -rf /"},
+)
+
+if verdict.blocked:
+    print(f"Blocked: {verdict.reason}")
+else:
+    # proceed with tool execution
+    ...
+```
+
+**Features:**
+- Auto-detects backend: tries FFI (ctypes) first, falls back to Unix socket
+- Configurable fail-open / fail-closed behavior
+- Built-in tool-name-to-capability mapping with heuristic fallback
+- Automatic destination extraction from URL arguments
+- Content scanning when arguments are provided
+
+**Configuration:**
+
+```python
+ec = EdgeConnector(
+    lib_path="/path/to/libdclaw_core.so",   # override FFI path
+    socket_path="/tmp/defenseclaw.sock",     # override socket path
+    fail_open=True,                          # allow when engine is down
+    tool_cap_map={"my_tool": 0x04},          # custom capability mapping
+    session_id=42,                           # session correlation ID
+)
+```
+
+Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`.
+
+---
+
+### LangChain / LangGraph
+
+Wraps LangChain tools so every invocation passes through the Edge Connector.
+
+**With LangChain:**
+
+```python
+from langchain_hook import wrap_tools
+
+# Wrap all tools — blocked calls return an error message instead of executing
+tools = wrap_tools(my_tools)
+agent = create_react_agent(llm, tools)
+```
+
+**With LangGraph (graph node):**
+
+```python
+from langchain_hook import edge_connector_node
+
+graph = StateGraph(AgentState)
+graph.add_node("agent", agent_node)
+graph.add_node("security_gate", edge_connector_node)
+graph.add_node("tools", tool_node)
+graph.add_edge("agent", "security_gate")
+graph.add_edge("security_gate", "tools")
+```
+
+Blocked tool calls produce a `ToolMessage` with the block reason so the LLM can respond appropriately.
+
+---
+
+### HTTP Middleware
+
+For agents that expose tool execution via HTTP endpoints (FastAPI, Flask, or any ASGI/WSGI server).
+
+**With FastAPI:**
+
+```python
+from fastapi import FastAPI
+from http_middleware import EdgeConnectorMiddleware
+
+app = FastAPI()
+app.add_middleware(EdgeConnectorMiddleware)
+```
+
+**With Flask:**
+
+```python
+from flask import Flask
+from http_middleware import flask_edge_connector
+
+app = Flask(__name__)
+flask_edge_connector(app)
+```
+
+The middleware intercepts POST requests to tool-execution endpoints (configurable URL patterns), extracts the tool name and arguments from the JSON body, and returns a `403` response with the block reason when a tool call is denied.
+
+---
+
+### PicoClaw
+
+PicoClaw integrates via its process hook system, intercepting tool calls, LLM inputs, and LLM outputs.
 
 ```bash
 # 1. Copy the hook
@@ -234,37 +351,42 @@ tail -f ~/edge-connector.log
 
 ---
 
-### Upcoming Integrations (Roadmap)
+### Low-Level: Shared Library (FFI)
 
-The following frameworks are planned for future releases. DefenseClaw Edge Connector's shared library (`libdclaw_core.so`) and Unix socket interface make integration straightforward — each framework needs only a thin adapter at its tool-dispatch layer.
+Load `libdclaw_core.so` from any language that supports C FFI:
 
-| Framework | Type | Integration Point | Status |
-|-----------|------|-------------------|--------|
-| **Bubbaloop** (Kornia) | Physical AI fleet agent (Rust, 47 MCP tools) | MCP tool authorization layer / Telemetry Watchdog plugin | Planned |
-| **IoT-Edge-MCP-Server** | Industrial MQTT/Modbus/PLC gateway (Python) | HTTP middleware on MCP API endpoint | Planned |
-| **SimpleTool** (ICML 2026) | Real-time robot control at 16 Hz (Python/vLLM) | FastAPI middleware on `/v1/function_call` | Planned |
-| **TinyAgent** | ESP32/Arduino microcontroller agent (C++) | Tool Registry callback wrapper | Planned |
-| **Claude Code** | Developer AI agent (hooks system) | `settings.json` hook configuration | Planned |
-| **LangChain / LangGraph** | Python agent framework | `pre_tool_hook` callback | Planned |
-| **CrewAI** | Multi-agent framework | Tool execution middleware | Planned |
-
-#### Generic Integration (Any Framework)
-
-For frameworks not listed above, DefenseClaw Edge Connector exposes two generic interfaces:
-
-**Shared Library (FFI)** — load `libdclaw_core.so` from any language:
 ```python
 import ctypes
 lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
-# Call dclaw_evaluate() for every tool call
+# Call dclaw_evaluate() for every tool call — see defenseclaw.h for struct definitions
 ```
 
-**Unix Socket (JSON-RPC)** — query the daemon from any process:
+### Low-Level: Unix Socket (JSON-RPC)
+
+Query the daemon from any process:
+
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
   "tool_name":"exec_shell","capabilities":4,"destination":"","session_id":1
 }}' | socat - UNIX-CONNECT:/tmp/defenseclaw.sock
 ```
+
+---
+
+### Additional Framework Integrations (Roadmap)
+
+| Framework | Type | Integration Point | Status |
+|-----------|------|-------------------|--------|
+| **Generic Python** | Any Python agent | `EdgeConnector.evaluate()` | **Available** |
+| **LangChain / LangGraph** | Python agent framework | Tool wrapper / graph node | **Available** |
+| **HTTP Middleware** | FastAPI, Flask, ASGI/WSGI | Request interception | **Available** |
+| **PicoClaw** | Robot agent (JSON-RPC hooks) | Process hook system | **Available** |
+| **Bubbaloop** (Kornia) | Physical AI fleet agent (Rust, 47 MCP tools) | MCP tool authorization layer / Telemetry Watchdog plugin | Planned |
+| **IoT-Edge-MCP-Server** | Industrial MQTT/Modbus/PLC gateway (Python) | HTTP middleware on MCP API endpoint | Planned |
+| **SimpleTool** (ICML 2026) | Real-time robot control at 16 Hz (Python/vLLM) | FastAPI middleware on `/v1/function_call` | Planned |
+| **TinyAgent** | ESP32/Arduino microcontroller agent (C++) | Tool Registry callback wrapper | Planned |
+| **Claude Code** | Developer AI agent (hooks system) | `settings.json` hook configuration | Planned |
+| **CrewAI** | Multi-agent framework | Tool execution middleware | Planned |
 
 If you'd like to contribute an integration adapter for your framework, see [CONTRIBUTING.md](../docs/CONTRIBUTING.md).
 
@@ -457,4 +579,4 @@ sudo make install
 | Trust boundary inference | — |
 | Enriched cloud escalation with content | Max escalation payload size |
 | Response interception | — |
-| Pre-built hooks for PicoClaw | Custom hooks for other frameworks |
+| Pre-built adapters (Generic Python, LangChain, HTTP, PicoClaw) | Custom hooks for other frameworks |

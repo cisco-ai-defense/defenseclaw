@@ -39,7 +39,7 @@ The Edge Connector solves this by running an 8-stage evaluation pipeline entirel
   <Card title="Sequence correlation" description="FSM-based detection of dangerous multi-step capability patterns (e.g., net_fetch → exec_shell)." />
   <Card title="Rate limiting" description="Three independent token buckets — tool calls, network requests, and physical actuations — each configurable per-minute." />
   <Card title="Verdict caching" description="LRU cache with TTL and clock-trust validation so repeated safe calls skip the full pipeline." />
-  <Card title="Cloud escalation" description="Forwards content snippets via MQTT 5.0 to a cloud DefenseClaw instance for YARA, LLM judge, or OPA when local policy is insufficient." />
+  <Card title="Cloud escalation" description="Forwards content snippets via MQTT 3.1.1 to a cloud DefenseClaw instance for YARA, LLM judge, or OPA when local policy is insufficient." />
 </Cards>
 
 ## 8-stage evaluation pipeline
@@ -54,7 +54,7 @@ Every tool call passes through all eight stages in order. The pipeline short-cir
 5. Destination filter   →  Allowlist/denylist + SSRF validation
 6. Sequence correlation →  Multi-step pattern detection via DFA
 7. Verdict cache        →  LRU lookup with TTL
-8. Cloud escalation     →  MQTT 5.0 with enriched content snippets
+8. Cloud escalation     →  MQTT 3.1.1 with enriched content snippets
 ```
 
 ## Build profiles
