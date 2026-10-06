@@ -253,7 +253,15 @@ func hookSubagentID(req agentHookRequest) string {
 	case event == "subagentstart" || event == "subagentstop":
 		return agentID
 	case req.CorrelationProfileVersion == connector.CorrelationProfileClaudeCodeV1:
-		return agentID
+		// Claude Code reports agent_id only inside a sub-agent. Any other
+		// agent id is one correlation minted or restored for the main agent
+		// on a session or turn boundary; keying the instance on it moved
+		// ais- whenever a new one was minted, as on a resume after a
+		// gateway restart.
+		if reported, _, _ := extractAgentIdentityFromHookPayload(req.Payload); strings.TrimSpace(reported) == agentID {
+			return agentID
+		}
+		return ""
 	case strings.TrimSpace(req.ParentAgentID) != "" && strings.TrimSpace(req.ParentAgentID) != agentID:
 		return agentID
 	}

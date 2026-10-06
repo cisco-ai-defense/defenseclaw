@@ -358,10 +358,13 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := codexResponseFor(
-		req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	// A configured block message replaces the agent-facing reason on blocks,
+	// as on the generic hook path.
+	reason, policy := resolveHookBlockReasonForConfig(
+		a.decisionConfig(ctx), "codex", action, verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
+	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	resp.SourceReason = verdict.Reason
 	if mode != "action" && resp.AdditionalContext != "" {
 		eligible := assetContextEligible || codexObserveContextEnforcementEligible(verdict)
 		if !eligible || !a.codexAdditionalContextFirstInWindow(req, rawAction, verdict, time.Now()) {

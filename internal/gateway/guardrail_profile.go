@@ -302,6 +302,21 @@ func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConne
 	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolved)
 }
 
+// refreshGuardrailProfileForAgent re-resolves the request's profile once the
+// hook path has put the verified agent identity on ctx
+// (enrichAgentHookContext). withGuardrailProfileDecision runs before that
+// identity exists, so an agents assignment could never match it.
+func refreshGuardrailProfileForAgent(ctx context.Context) context.Context {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil {
+		return ctx
+	}
+	if _, verified := profileAgentSource(ctx); !verified {
+		return ctx
+	}
+	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, resolved.set))
+}
+
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
@@ -485,15 +500,25 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	if strings.Contains(account.Username, `\`) {
 		subject.Principal = account.Username
 	}
-	if gids, err := account.GroupIds(); err == nil {
-		for _, gid := range gids {
-			subject.Groups = append(subject.Groups, gid)
-			if group, lookupErr := osuser.LookupGroupId(gid); lookupErr == nil && group.Name != "" {
-				subject.Groups = append(subject.Groups, group.Name)
-			}
+	subject.Groups = localAccountGroups(account)
+	return subject
+}
+
+// localAccountGroups lists an OS account's groups as each group's id
+// followed by its name, from the OS account database.
+func localAccountGroups(account *osuser.User) []string {
+	gids, err := account.GroupIds()
+	if err != nil {
+		return nil
+	}
+	var groups []string
+	for _, gid := range gids {
+		groups = append(groups, gid)
+		if group, lookupErr := osuser.LookupGroupId(gid); lookupErr == nil && group.Name != "" {
+			groups = append(groups, group.Name)
 		}
 	}
-	return subject
+	return groups
 }
 
 // match runs the ordered assignments: the first match wins; within one
@@ -548,7 +573,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 	if len(m.Groups) > 0 {
 		matched := ""
 		for _, want := range m.Groups {
-			if anyEqualFold(subject.Groups, want) {
+			if profileGroupMatches(subject.Groups, want) {
 				matched = strings.TrimSpace(want)
 				break
 			}
@@ -575,6 +600,26 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// profileGroupMatches reports whether one of a subject's groups is want,
+// compared without regard to case. Windows subjects carry each group as its
+// SID and DOMAIN\name, so a bare group name in an assignment also matches
+// the name part of a DOMAIN\name group.
+func profileGroupMatches(groups []string, want string) bool {
+	if anyEqualFold(groups, want) {
+		return true
+	}
+	want = strings.TrimSpace(want)
+	if want == "" || strings.Contains(want, `\`) {
+		return false
+	}
+	for _, group := range groups {
+		if i := strings.LastIndexByte(group, '\\'); i >= 0 && strings.EqualFold(strings.TrimSpace(group[i+1:]), want) {
+			return true
+		}
+	}
+	return false
 }
 
 func anyMatches(values []string, pred func(string) bool) bool {

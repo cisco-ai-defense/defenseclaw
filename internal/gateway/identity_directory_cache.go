@@ -19,10 +19,17 @@ import (
 // identityDirectoryBudget, and only when asked to block, otherwise it gets no
 // facts this time and the next request finds them cached. A failed lookup is
 // retried no sooner than identityDirectoryRetry.
+//
+// Callers block only when a guardrail profile assignment selects by user or
+// group, so the budget covers a cold SSSD or Active Directory lookup (often
+// one to two seconds) and the first request after a cold cache still gets
+// its group profile. A lookup slower than that selects the default profile
+// with match default_lookup_failed; the budget stays well inside the hook
+// request timeout.
 
 const (
 	identityDirectoryTTL    = 15 * time.Minute
-	identityDirectoryBudget = 200 * time.Millisecond
+	identityDirectoryBudget = 2 * time.Second
 	identityDirectoryRetry  = 15 * time.Second
 	identityDirectoryMax    = 4096
 )
