@@ -679,7 +679,6 @@ enum TUIWizards {
             WizardField(key: "sourcetype", label: "Splunk sourcetype", kind: .text(placeholder: "_json"), defaultValue: "_json", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec", "splunk-enterprise"])),
             WizardField(key: "url", label: "Webhook URL", kind: .text(placeholder: "https://…"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "method", label: "Webhook method", kind: .choice(options: ["POST", "PUT"]), defaultValue: "POST", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
-            WizardField(key: "url-path", label: "Webhook URL path", kind: .text(placeholder: "/events"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "verify-tls-hec", label: "Verify HEC TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
             WizardField(key: "verify-tls-webhook", label: "Verify webhook TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "token", label: "Token / API key", kind: .secure(placeholder: "optional token"), visibleWhen: (key: "action", equals: ["add"])),
@@ -1295,7 +1294,7 @@ enum TUIWizards {
             case "newrelic", "grafana-cloud": keys = ["region"]
             case "galileo": keys = ["endpoint", "project", "logstream"]
             case "otlp": keys = ["endpoint", "protocol"]
-            case "webhook": keys = ["url", "method", "url-path"]
+            case "webhook": keys = ["url", "method"]
             default: keys = []
             }
             for key in keys { append(v, key, flag: "--\(key)", to: &args) }
