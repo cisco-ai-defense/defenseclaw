@@ -135,8 +135,11 @@ How the keys combine:
   copy-paste sources produce it.
 - **An account name is not unique.** It is the name without its domain, so
   `alice` matches a local account `alice` and a directory account
-  `alice@corp.example.com` alike. Use the principal, the uid or the SID to
-  tell two people of the same short name apart.
+  `alice@corp.example.com` alike, for requests and for `guardrail profile
+  explain` (both build the user the same way). Use the principal, the uid or
+  the SID to tell two people of the same short name apart. When a bare name
+  selects a directory account, `explain`, `status` and `doctor` warn and name
+  the principal to write instead.
 - **Nothing matches: the default.** A request that no assignment selects gets
   `guardrail.default_profile`. An empty default keeps the global `guardrail.*`
   settings.

@@ -2223,8 +2223,18 @@ def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
             check_id="doctor.guardrail.profile",
             remediation="defenseclaw guardrail profile explain",
         )
-        return
-    _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
+    else:
+        _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
+    # What the decision alone does not show: a warning, never a failure.
+    for note in result.get("warnings") or []:
+        _emit(
+            "warn",
+            "Guardrail assignments",
+            str(note),
+            r=r,
+            check_id="doctor.guardrail.assignments",
+            remediation="defenseclaw guardrail profile explain",
+        )
 
 
 def _check_device_identity(cfg, r: _DoctorResult) -> None:

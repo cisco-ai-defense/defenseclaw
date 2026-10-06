@@ -13,7 +13,10 @@
 package gateway
 
 import (
+	"context"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +154,44 @@ func TestUnnamedGroupMakesDirectoryFactsIncomplete(t *testing.T) {
 	unnamed := useridentity.DirectoryFacts{Groups: []string{"dc-ml-team@dclab.test", "94400513"}}
 	if hasUnnamedGroup(named) || !hasUnnamedGroup(unnamed) {
 		t.Fatalf("hasUnnamedGroup(named) = %t, (unnamed) = %t; want false, true", hasUnnamedGroup(named), hasUnnamedGroup(unnamed))
+	}
+}
+
+// TestExplainAndLiveRequestsBuildTheSameSubject pins GAP-0182: the subject a
+// request is matched as and the subject `explain --user` reports are built
+// the same way, so a users entry selects the account in both or in neither,
+// and explain says when an entry selects a directory account by short name.
+func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
+	facts := useridentity.DirectoryFacts{
+		Principal: "dcad-alice@DCLAB.TEST", UPN: "dcad-alice@dclab.test", Domain: "dclab.test",
+		Groups: []string{"dc-devs@dclab.test"}, ResolvedAt: time.Now(),
+	}
+	prevDirectory, prevAccount, prevFacts := managedHookPeerDirectory, profileExplainAccount, profileExplainDirectoryFacts
+	managedHookPeerDirectory = func(int, bool) (useridentity.DirectoryFacts, bool) { return facts, true }
+	profileExplainAccount = func(string) (string, string, bool) { return "94401103", "dcad-alice@dclab.test", true }
+	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) { return facts, nil }
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() {
+		managedHookPeerDirectory, profileExplainAccount, profileExplainDirectoryFacts = prevDirectory, prevAccount, prevFacts
+		setIdentityFactsEnabled(false)
+	})
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
+	ctx := api.attachVerifiedSubject(context.Background(), "94401103", "dcad-alice@dclab.test", subjectSourcePeerCredentials)
+	live, ok := profileSubjectSource(ctx)
+	explained, err := lookupDirectoryProfileSubject("dcad-alice")
+	if !ok || err != nil || !reflect.DeepEqual(live, explained) {
+		t.Fatalf("live subject %+v (%t) and explained subject %+v (%v) differ", live, ok, explained, err)
+	}
+
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"dcad-alice"}}},
+	}}
+	note := shortNameUserNote(set, profileDecision{Assignment: 1}, &explained)
+	if !strings.Contains(note, `"dcad-alice"`) || !strings.Contains(note, "dcad-alice@dclab.test") {
+		t.Errorf("short-name note = %q, want the entry and the account to write instead", note)
+	}
+	local := profileSubject{UserID: "1006", UserName: "dcad-alice"}
+	if note := shortNameUserNote(set, profileDecision{Assignment: 1}, &local); note != "" {
+		t.Errorf("a local account got the short-name note %q", note)
 	}
 }

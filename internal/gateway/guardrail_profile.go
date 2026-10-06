@@ -54,6 +54,10 @@ type profileSubject struct {
 	UserName  string
 	Principal string
 	UPN       string
+	// Directory and Domain say where the account lives (explain's short-name
+	// note); an empty Domain is an account the host knows by a bare name.
+	Directory useridentity.Directory
+	Domain    string
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
@@ -125,6 +129,9 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
+	// Assignment is the 1-based index of the assignment that matched, 0 for
+	// the default.
+	Assignment int
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -447,13 +454,20 @@ var processOwnerProfileSubject = sync.OnceValues(func() (profileSubject, bool) {
 // user assignment is configured); a subject whose facts then never resolved
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
 // has unknown groups, not empty ones, and selects like an unverified one.
+//
+// The account name is the bare one (alice for alice@corp.example.com and
+// CORP\alice) here, for every caller: a request and `explain --user` both
+// build their subject through this function, so a users entry cannot match
+// one and not the other (GAP-0182).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
 	return profileSubject{
 		UserID:          s.UserID,
 		IDKind:          s.IDKind,
-		UserName:        s.UserName,
+		UserName:        useridentity.BareAccountName(s.UserName),
 		Principal:       s.Directory.Principal,
 		UPN:             s.Directory.UPN,
+		Directory:       s.Directory.Directory,
+		Domain:          s.Directory.Domain,
 		Groups:          s.Directory.Groups,
 		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
@@ -570,12 +584,14 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 	if verified {
 		groups.list = subject.Groups
 	}
-	for _, assignment := range set.assignments {
+	for i, assignment := range set.assignments {
 		reason, group, ok := assignmentMatches(assignment.Match, subject, groups, verified, connectorName, agent)
 		if !ok {
 			continue
 		}
-		return set.decision(assignment.Profile, reason, group, source)
+		decision := set.decision(assignment.Profile, reason, group, source)
+		decision.Assignment = i + 1
+		return decision
 	}
 	reason := profileMatchDefault
 	switch {
@@ -626,11 +642,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchGroup, matched
 	}
 	if len(m.Users) > 0 {
-		candidates := []string{subject.UserID, subject.UserName}
-		if !anyMatches(m.Users, func(v string) bool {
-			return anyEqualFold(candidates, v) ||
-				useridentity.PrincipalsEqual(subject.Principal, v) || useridentity.PrincipalsEqual(subject.UPN, v)
-		}) {
+		if !anyMatches(m.Users, func(v string) bool { return userEntryMatches(subject, v) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchUser, ""
@@ -642,6 +654,13 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// userEntryMatches reports whether a users entry names the subject: its uid
+// or SID, its account name without the domain, or its principal or UPN.
+func userEntryMatches(subject *profileSubject, entry string) bool {
+	return anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
+		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry)
 }
 
 // subjectGroups answers whether one of a subject's groups is the group an
@@ -1002,6 +1021,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["match"] = decision.Match
 	out["matched_group"] = decision.MatchedGroup
 	out["subject_source"] = decision.SubjectSource
+	out["assignment"] = decision.Assignment
+	if warnings := profileExplainWarnings(set, decision, subject); len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {
 		effective = derived.Config

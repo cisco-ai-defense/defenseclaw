@@ -164,6 +164,37 @@ def test_explain_blames_a_slow_directory_not_a_stopped_gateway(monkeypatch):
     assert "running but did not answer in time" in text
 
 
+def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
+    """GAP-0182: what the decision alone does not show is a warning in each view."""
+    from defenseclaw import gateway
+    from defenseclaw.commands import cmd_doctor
+
+    note = 'assignment 1 selects this account by the short name "alice", so it selects a local account of that name too'
+    answer = {
+        "profiles_configured": True,
+        "profile": "strict",
+        "match": "user",
+        "subject": {"user_name": "alice", "group_count": 1},
+        "warnings": [note],
+    }
+    assert note in _explain(monkeypatch, answer).output
+
+    app = AppContext()
+    app.cfg = default_config()
+    app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
+    app.logger = MagicMock()
+    monkeypatch.setattr(gateway, "current_user_guardrail_profile", lambda cfg: {**answer, "user": "alice", "overrides": []})
+    status = CliRunner().invoke(cmd_guardrail.guardrail, ["status"], obj=app, catch_exceptions=False)
+    assert note in status.output
+
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_guardrail_profile(app.cfg, result)
+    assert [(c["status"], c["label"]) for c in result.checks if c["label"].startswith("Guardrail")] == [
+        ("pass", "Guardrail profile"),
+        ("warn", "Guardrail assignments"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
