@@ -3950,14 +3950,6 @@ _HERMES_LEGACY_MCP_KEY = ("mcp", "servers")
 _HERMES_MCP_HINT = "add or remove the server with `hermes mcp add` / `hermes mcp remove` instead"
 
 
-def _drop_hermes_legacy_mcp_server(path: str, name: str) -> None:
-    """Remove a server older DefenseClaw builds wrote under ``mcp.servers``."""
-    try:
-        _atomic_yaml_delete(path, _HERMES_LEGACY_MCP_KEY + (name,))
-    except MCPWriteUnsupportedError:
-        pass  # best-effort cleanup of a key Hermes never reads
-
-
 def _hermes_mcp_servers(
     *,
     diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
@@ -5051,10 +5043,9 @@ def set_mcp_server(
         )
     if name_n == "hermes":
         # GAP-1591: Hermes loads top-level ``mcp_servers`` (what ``hermes mcp
-        # add`` writes); the old ``mcp.servers`` copy is legacy DefenseClaw.
+        # add`` writes).
         path = hermes_config_path()
         _atomic_yaml_merge(path, _HERMES_MCP_KEY + (name,), entry, hint=_HERMES_MCP_HINT)
-        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -5166,7 +5157,6 @@ def unset_mcp_server(
     if name_n == "hermes":
         path = hermes_config_path()
         _atomic_yaml_delete(path, _HERMES_MCP_KEY + (name,), hint=_HERMES_MCP_HINT)
-        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
