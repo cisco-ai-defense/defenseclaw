@@ -182,7 +182,9 @@ class LoadablePluginNameTests(_DataDirCase):
         os.chmod(path, stat.S_IRWXU)
         return path
 
-    def test_a_name_a_loadable_plugin_may_register_is_kept(self):
+    # The fake gateway only answers `connector verify`; the config check has its own test.
+    @patch.object(migrations, "_check_staged_gateway_accepts")
+    def test_a_name_a_loadable_plugin_may_register_is_kept(self, _config_check):
         # The gateway registers this plugin as "acme" (the name its code
         # reports), which matches neither its directory nor its manifest.
         self.plugin("acme-connector", self.MANIFEST)
