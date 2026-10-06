@@ -40,11 +40,23 @@ func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
 	// GAP-0107: a per-user gateway names itself from the same account
 	// database, the bare Windows account rather than os/user's DOMAIN\user.
 	restoreName := userScopedIdentityName
-	userScopedIdentityName = func(string) string { return "dcw-std1" }
+	userScopedIdentityName = func(id string) string {
+		if id == "4646" {
+			return "dcad-bob@dclab.test"
+		}
+		return "dcw-std1"
+	}
 	gatewaySelf.once = sync.Once{}
 	t.Cleanup(func() { userScopedIdentityName, gatewaySelf.once = restoreName, sync.Once{} })
 	if self := gatewaySelfUser(); self.Name != "dcw-std1" {
 		t.Fatalf("gateway self user = %q, want the account database name", self.Name)
+	}
+
+	// GAP-0103: a row an older build stored with the bare name reads with
+	// the host's name for its uid.
+	stored := []inventory.AgentIdentityRecord{{AgentID: "agt-00000000000000b0", UserID: "4646", UserName: "dcad-bob", Connector: "claudecode"}}
+	if rows := mergeAgentIdentityRows(stored, nil, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].UserName != "dcad-bob@dclab.test" {
+		t.Fatalf("listed rows = %+v, want the host's account name", rows)
 	}
 }
 
