@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from fixtures import screen_text, settle_panel, snapshot_app  # noqa: E402
+from fixtures import screen_text, settle_layout, settle_panel, snapshot_app  # noqa: E402
 
 
 async def test_registries_detail_refits_at_once_on_resize(tmp_path) -> None:
@@ -37,13 +37,12 @@ async def test_registries_detail_refits_at_once_on_resize(tmp_path) -> None:
         assert app.registries_model.detail_open and "Cache Path" in screen_text(app)
 
         await pilot.resize_terminal(80, 24)
-        await pilot.pause()
-        await pilot.pause()
+        await settle_layout(pilot, lambda: detail.max_scroll_y > 0)
         assert detail.has_class("compact")
         assert detail.region.bottom <= main.region.bottom
         assert detail.max_scroll_y > 0
 
         await pilot.resize_terminal(200, 50)
-        await pilot.pause(0.4)
+        await settle_layout(pilot, lambda: detail.max_scroll_y == 0)
         assert not detail.has_class("compact")
         assert detail.max_scroll_y == 0 and "Cache Path" in screen_text(app)
