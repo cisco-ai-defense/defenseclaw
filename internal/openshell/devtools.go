@@ -205,9 +205,16 @@ func probeDeveloperTools(ctx context.Context, run Runner, app string) *Developer
 type HomebrewInstallError struct {
 	Err   error
 	Tools *DeveloperTools
+	// FormulaInstalled reports that the formula is installed: the script
+	// got past Homebrew's install and failed after it, starting the gateway
+	// service or registering the gateway with the OpenShell CLI.
+	FormulaInstalled bool
 }
 
 func (e *HomebrewInstallError) Error() string {
+	if e.FormulaInstalled {
+		return fmt.Sprintf("openshell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it (%v)", e.Err)
+	}
 	return fmt.Sprintf("%v (%v)", ErrHomebrewInstall, e.Err)
 }
 
