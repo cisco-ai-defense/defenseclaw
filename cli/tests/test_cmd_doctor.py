@@ -180,6 +180,22 @@ class DoctorSecurityOverrideTests(unittest.TestCase):
         self.assertIn("environment", detail)
 
 
+class DoctorIgnoredEnvironmentTests(unittest.TestCase):
+    def test_secure_client_only_variable_is_listed_as_ignored(self):
+        # GAP-0082: DEFENSECLAW_JUDGE_TRACE is read only on the Secure Client
+        # integration; doctor said it was an active override.
+        cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=[]))
+        result = _DoctorResult()
+
+        with patch.dict(os.environ, {"DEFENSECLAW_JUDGE_TRACE": "1"}, clear=True):
+            _check_security_overrides(cfg, result)
+
+        labels = [check["label"] for check in result.checks]
+        self.assertNotIn("Security override", labels)
+        ignored = next(check for check in result.checks if check["label"] == "Ignored environment overrides")
+        self.assertIn("DEFENSECLAW_JUDGE_TRACE (use guardrail.judge.trace)", ignored["detail"])
+
+
 class DoctorMultiConnectorInventoryTests(unittest.TestCase):
     """D6: the connector inventory check scopes paths per connector."""
 

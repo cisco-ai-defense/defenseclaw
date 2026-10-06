@@ -10398,6 +10398,11 @@ _OVERRIDE_TAG_BY_IMPACT = {
 }
 
 
+# Variables only the Secure Client integration still reads. Every other install,
+# including every host this CLI runs on, takes the setting from the config key.
+_SECURE_CLIENT_ONLY_ENV = {"DEFENSECLAW_JUDGE_TRACE": "guardrail.judge.trace"}
+
+
 def _check_security_overrides(cfg, r: _DoctorResult) -> None:
     """Surface DEFENSECLAW_* env vars that weaken security defaults.
 
@@ -10434,6 +10439,17 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
             r=r,
         )
         active = [entry for entry in active if entry.name not in ignored]
+
+    replaced = [entry for entry in active if entry.name in _SECURE_CLIENT_ONLY_ENV]
+    if replaced:
+        _emit(
+            "pass",
+            "Ignored environment overrides",
+            "no effect on this install, set the config key instead: "
+            + ", ".join(f"{entry.name} (use {_SECURE_CLIENT_ONLY_ENV[entry.name]})" for entry in replaced),
+            r=r,
+        )
+        active = [entry for entry in active if entry.name not in _SECURE_CLIENT_ONLY_ENV]
 
     private_env_name = "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"
     active = [entry for entry in active if entry.name != private_env_name]

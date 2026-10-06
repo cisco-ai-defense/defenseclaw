@@ -74,7 +74,8 @@ read the raw environment, so the line does not apply to them.
   `DEFENSECLAW_REPO` is the deprecated alias of `update.source`,
   `DEFENSECLAW_NO_UPDATE_CHECK` has `update.check: false`, and
   `DEFENSECLAW_JUDGE_TRACE` was replaced by `guardrail.judge.trace` (it is read
-  only on the Secure Client integration). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`
+  only on the Secure Client integration; `defenseclaw doctor` lists it under
+  Ignored environment overrides when it is set elsewhere). `DEFENSECLAW_CUSTOM_PROVIDERS_PATH`
   names the derived `custom-providers.json`, not an input. See
   [Configuration: one source of truth](/docs/reference/source-of-truth#environment-variables-and-env)
   for how the environment fits the model.

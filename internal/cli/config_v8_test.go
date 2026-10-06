@@ -135,6 +135,23 @@ observability: {}
 	}
 }
 
+func TestConfigV8ValidationFailureNamesAnInvalidDeploymentModePin(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "oss")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 8\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadConfigV8File(path, dir)
+	if err == nil {
+		t.Fatal("an invalid DEFENSECLAW_DEPLOYMENT_MODE did not fail the config load")
+	}
+	failure := configV8ValidationFailure(err)
+	if !strings.Contains(failure.Reason, "DEFENSECLAW_DEPLOYMENT_MODE") || strings.Contains(failure.Reason, "oss") {
+		t.Fatalf("diagnostic = %q, want the variable named without its value", failure.Reason)
+	}
+}
+
 func TestCompileConfigV8FileUsesCanonicalMaskedPlan(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")

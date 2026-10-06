@@ -2877,7 +2877,7 @@ func loadConfigSourceChecked(
 	}
 	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if err := validateDeploymentMode(pinnedDeploymentMode); err != nil {
-		return nil, fmt.Errorf("config: %s: %w", managed.DeploymentModeEnv, err)
+		return nil, &DeploymentModeEnvError{Err: err}
 	}
 	if enforceManagedTrust && managed.IsManagedEnterprise(pinnedDeploymentMode) {
 		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
@@ -4008,6 +4008,23 @@ func warnPlaintextSecrets(cfg *Config) {
 				"prefer bearer_env to keep secrets out of config.yaml", s.Name)
 		}
 	}
+}
+
+// DeploymentModeEnvError reports a DEFENSECLAW_DEPLOYMENT_MODE value that is
+// not a deployment mode. Its Diagnostic names the variable without the value,
+// so a validation result can say what to unset.
+type DeploymentModeEnvError struct{ Err error }
+
+func (e *DeploymentModeEnvError) Error() string {
+	return fmt.Sprintf("config: %s: %v", managed.DeploymentModeEnv, e.Err)
+}
+
+func (e *DeploymentModeEnvError) Unwrap() error { return e.Err }
+
+// Diagnostic is the value-free text of the error.
+func (e *DeploymentModeEnvError) Diagnostic() string {
+	return managed.DeploymentModeEnv + " is not a deployment mode (allowed: managed_enterprise, unmanaged_byod, " +
+		"ci_cd, sandboxed, server, saas); unset it in the environment and in .env"
 }
 
 func validateDeploymentMode(mode string) error {
