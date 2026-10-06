@@ -699,14 +699,20 @@ func TestDiffConfigsMarksOpenShellChanged(t *testing.T) {
 	}
 }
 
-func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
+func TestDiffConfigsApplicationProtectionAndAIDefenseAreHot(t *testing.T) {
 	oldCfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
 	newCfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
 	newCfg.ApplicationProtection.Enabled = !oldCfg.ApplicationProtection.Enabled
 
+	newCfg.CiscoAIDefense.Endpoint = "https://aid.example.test"
+
 	diff := diffConfigs(oldCfg, newCfg)
 	if !slices.Contains(diff.Changed, "application_protection") {
 		t.Fatalf("changed = %v, missing application_protection", diff.Changed)
+	}
+	// Both reload hot on an open-source host (spec section 4).
+	if len(diff.RestartRequired) != 0 {
+		t.Fatalf("restart required = %v, want none", diff.RestartRequired)
 	}
 }
 

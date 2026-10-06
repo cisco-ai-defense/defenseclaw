@@ -2059,6 +2059,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			if proxy := s.proxySnapshot(); proxy != nil {
 				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
 			}
+		} else if !managed.IsManagedEnterprise(newCfg.DeploymentMode) {
+			// The open-source proxy's AI Defense client is built from
+			// cisco_ai_defense too; rebuild it so an edit applies hot.
+			if proxy := s.proxySnapshot(); proxy != nil {
+				proxy.ReloadCiscoClient(&newCfg.CiscoAIDefense, newCfg.DataDir)
+			}
 		}
 	}
 
@@ -2198,7 +2204,10 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
+	// application_protection acts on discovery reports, so the rebuilt
+	// service's first report applies an edit at once.
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
+		!reflect.DeepEqual(oldCfg.ApplicationProtection, newCfg.ApplicationProtection) ||
 		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode)
 }
 

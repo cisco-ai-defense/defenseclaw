@@ -493,6 +493,28 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 	}
 }
 
+// ReloadCiscoClient rebuilds the open-source AI Defense client of a proxy
+// built for a remote scanner mode from the reloaded cisco_ai_defense.
+func (p *GuardrailProxy) ReloadCiscoClient(aid *config.CiscoAIDefenseConfig, dataDir string) {
+	if p == nil || aid == nil {
+		return
+	}
+	g, ok := p.inspector.(*GuardrailInspector)
+	if !ok || g.managedMode {
+		return
+	}
+	p.rtMu.Lock()
+	defer p.rtMu.Unlock()
+	if mode := p.cfg.ScannerMode; mode != "remote" && mode != "both" {
+		return
+	}
+	if client := NewCiscoInspectClient(aid, filepath.Join(dataDir, ".env")); client != nil {
+		g.SetCiscoInspector(client)
+		return
+	}
+	g.SetCiscoInspector(nil)
+}
+
 // ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
 // the live proxy without rereading any side files.
 // profileModeFor applies the request's identity-based guardrail profile to

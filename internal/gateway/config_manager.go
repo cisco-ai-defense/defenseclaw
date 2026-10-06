@@ -1158,8 +1158,9 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// configuration generation (rule packs, rules, levels, profiles, OPA,
 	// judge). The rest of this list is the explicit restart set: keys a
 	// process-level resource captures once (listeners, stores, identity,
-	// the OTel resource), plus sections whose consumers still read the
-	// start-time configuration.
+	// the OTel resource): claw (the agent home and config paths the
+	// connectors set up from), agent (the identity the agent registry
+	// installs once) and routing (the model router process and its port).
 	var restart []string
 	hotReloadable := map[string]struct{}{
 		"acp":                {},
@@ -1197,15 +1198,14 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"scanners":        {},
 		"watch":           {},
 		"connector_hooks": {},
-	}
-	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
-	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)
-	// and the OTel log-sink rebuild (otelNeedsReload folds
-	// CiscoAIDefense.Endpoint) together cover every field on the
-	// struct. Opensource callers keep the restart because the proxy
-	// constructs its AI Defense client once.
-	if managed.IsManagedEnterprise(newCfg.DeploymentMode) {
-		hotReloadable["cisco_ai_defense"] = struct{}{}
+		// The levels and packs of application_protection are generation
+		// input; its enablement and connector filters apply when the
+		// rebuilt discovery service reports (aiDiscoveryNeedsRestart).
+		"application_protection": {},
+		// The AI Defense clients are rebuilt in place (inspectorNeedsRebuild
+		// in applyConfigReload: the hook lane, and the proxy's) and the OTel
+		// log sink folds the endpoint (otelNeedsReload).
+		"cisco_ai_defense": {},
 	}
 	// standalone: inspectorNeedsRebuild covers the enterprise AI Defense
 	// settings, so they stay hot. enterprise.network is restart-required
@@ -1280,10 +1280,6 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.Agent = running.Agent
 		case "routing":
 			held.Routing = running.Routing
-		case "application_protection":
-			held.ApplicationProtection = running.ApplicationProtection
-		case "cisco_ai_defense":
-			held.CiscoAIDefense = running.CiscoAIDefense
 		case "gateway", "gateway.device_key_file":
 			reload, watcher := held.Gateway.ConfigReload, held.Gateway.Watcher
 			held.Gateway = running.Gateway
