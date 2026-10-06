@@ -76,6 +76,36 @@ func configDigest(cfg *config.Config) (string, error) {
 	return sha256Digest(canonical), nil
 }
 
+// observabilityDigest digests the observability section of config.yaml
+// (local retention, destinations, redaction profiles) the way configDigest
+// digests the rest. The typed Config carries only per-connector overrides of
+// that section, so configDigest alone never saw a retention or redaction
+// change (GAP-0007). raw is the file's bytes; nil reads cfg.ConfigFilePath. A
+// config with no readable file has no observability component.
+func observabilityDigest(cfg *config.Config, raw []byte) string {
+	if raw == nil {
+		path := strings.TrimSpace(cfg.ConfigFilePath)
+		if path == "" {
+			return ""
+		}
+		var err error
+		if raw, err = os.ReadFile(path); err != nil { // #nosec G304 -- the loaded config file.
+			return ""
+		}
+	}
+	var doc struct {
+		Observability any `yaml:"observability"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	canonical, err := json.Marshal(canonicalConfigValue("observability", doc.Observability, dataDirOf(cfg)))
+	if err != nil {
+		return ""
+	}
+	return sha256Digest(canonical)
+}
+
 func canonicalConfigValue(path string, value any, dataDir string) any {
 	switch v := value.(type) {
 	case map[string]any:

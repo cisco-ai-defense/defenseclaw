@@ -200,7 +200,10 @@ class SkillScannerWrapper:
                 _apply_meta_analysis(scanner, sdk_result, target, cfg.lenient, judge, policy)
             elapsed = time.monotonic() - start
 
-        return self._convert(sdk_result, target, elapsed)
+        result = self._convert(sdk_result, target, elapsed)
+        # The scan says which policy and judge model it ran with (GAP-0047).
+        result.settings = {"policy": settings.effective_policy(cfg), "judge": judge.get("llm_model") or "off"}
+        return result
 
     def _judge(self) -> dict:
         """The judge's ``build_analyzers`` arguments, or ``{}`` when none can run.

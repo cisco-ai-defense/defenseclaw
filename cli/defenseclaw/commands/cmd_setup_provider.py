@@ -80,7 +80,7 @@ import click
 import requests
 
 from defenseclaw import connector_paths, platform_support, ux
-from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.context import AppContext, mark_setup_restart_handled, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
 OVERLAY_FILENAME = "custom-providers.json"
@@ -567,6 +567,9 @@ def _report_reload_outcome(app: AppContext | None, persisted_action: str) -> Non
     status = _reload_sidecar(app)
     if status == _RELOAD_OK:
         ux.ok("sidecar reloaded provider registry; disk and live state match.")
+        # The registry swap is hot; the setup group's restart would only
+        # interrupt in-flight calls (GAP-0030).
+        mark_setup_restart_handled()
         return
 
     if status == _RELOAD_UNAUTHORIZED:
@@ -1240,7 +1243,7 @@ def _provider_add_interactive() -> dict[str, Any]:
     help=(
         "Canonical provider name (case-insensitive match against built-ins). "
         "When omitted and stdin is a tty, an interactive wizard prompts for "
-        "every field. Under --non-interactive this becomes a hard error."
+        "every field. Without a terminal, a missing --name is an error."
     ),
 )
 @click.option(

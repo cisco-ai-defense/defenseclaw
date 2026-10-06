@@ -162,6 +162,41 @@ func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T)
 	}
 }
 
+// A destination key written to .env after the gateway started resolves when
+// the config that references it reloads (GAP-0017).
+func TestConfigManagerReloadReadsDotEnvKeysAddedSinceStart(t *testing.T) {
+	const keyName = "P0_RELOAD_DEST_KEY"
+	t.Setenv(keyName, "")
+	os.Unsetenv(keyName)
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	initialRaw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.RegisterDotEnvLoader(func(string) { os.Setenv(keyName, "from-dotenv") })
+	t.Cleanup(func() { config.RegisterDotEnvLoader(nil) })
+	mgr := newConfigManagerWithSnapshot(
+		path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			return nil
+		},
+	)
+	withDestination := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"    - name: remote\n      kind: otlp\n      endpoint: https://otel.example.test\n" +
+		"      headers:\n        Authorization: {env: " + keyName + "}\n")
+	if err := os.WriteFile(path, withDestination, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "test"); err != nil {
+		t.Fatalf("reload with a key that is only in .env: %v", err)
+	}
+}
+
 func TestConfigManagerV8ReloadRejectsInvalidSourceBeforeApply(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
