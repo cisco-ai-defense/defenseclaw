@@ -74,6 +74,10 @@ ACTOR_PREFIX_API = "api:"
 ACTOR_PREFIX_SANDBOX = "sandbox:"
 ACTOR_PREFIX_HAND_EDIT = "hand-edit:"
 
+#: The runtime descriptor the enterprise lifecycle writes next to the managed
+#: config.yaml. The folder that holds it is the lifecycle's, not the writer's.
+MANAGED_RUNTIME_DESCRIPTOR = "managed-runtime.json"
+
 #: Shown when a local writer is refused on a managed (standalone) device.
 MANAGED_REFUSAL = (
     "This device is managed: change config.yaml in the admin config "
@@ -305,7 +309,11 @@ def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT
         finally:
             held[target] -= 1
         return
-    file_permissions.make_private_directory(os.path.dirname(target) or ".")
+    directory = os.path.dirname(target) or "."
+    # The managed config folder is root-owned 0755 on purpose (every user's
+    # hook reads it); a refused or lifecycle write must not tighten it.
+    if not os.path.isfile(os.path.join(directory, MANAGED_RUNTIME_DESCRIPTOR)):
+        file_permissions.make_private_directory(directory)
     stack = ExitStack()
     try:
         stack.enter_context(locked_file_update(target, timeout_seconds=timeout_s))
