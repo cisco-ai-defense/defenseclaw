@@ -3533,9 +3533,13 @@ class TestMultiConnectorInit(unittest.TestCase):
             cfg.guardrail.connector = "codex"
             cfg.guardrail.enabled = True
             cfg.save()
+            # A fresh config is config_version 9, which names the built-in packs.
+            packs = os.path.join(cfg.policy_dir, "guardrail")
             before = {
-                "claudecode": PerConnectorGuardrailConfig(mode="action", rule_pack_dir="/p/strict", block_at="HIGH"),
-                "codex": PerConnectorGuardrailConfig(rule_pack_dir="/p/custom"),
+                "claudecode": PerConnectorGuardrailConfig(
+                    mode="action", rule_pack_dir=os.path.join(packs, "strict"), block_at="HIGH"
+                ),
+                "codex": PerConnectorGuardrailConfig(rule_pack_dir=os.path.join(packs, "permissive")),
             }
             none = {"fail_mode": None, "human_approval": None, "hilt_min_severity": None}
             _activate_additional_connectors(
@@ -3545,9 +3549,9 @@ class TestMultiConnectorInit(unittest.TestCase):
                 overrides_before=before,
             )
             gc = cfg_mod.load().guardrail
-            self.assertEqual(gc.effective_rule_pack_dir("claudecode"), os.path.abspath("/p/strict"))
+            self.assertEqual(os.path.basename(gc.effective_rule_pack_dir("claudecode")), "strict")
             self.assertEqual(gc.connectors["claudecode"].block_at, "HIGH")
-            self.assertEqual(gc.effective_rule_pack_dir("codex"), os.path.abspath("/p/custom"))
+            self.assertEqual(os.path.basename(gc.effective_rule_pack_dir("codex")), "permissive")
             # The mode is the answer given in this init run, not the old override.
             self.assertEqual(gc.connectors["claudecode"].mode, "")
 
