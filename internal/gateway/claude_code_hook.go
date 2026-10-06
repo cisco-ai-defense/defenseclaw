@@ -272,7 +272,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// row + HTTP response will surface.
 	evalCtx := a.emitClaudeCodeHookRuleFindings(ctx, req, verdict, time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+		a.dispatchClaudeCodeHookNotification(ctx, req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	// A configured block message (the request's guardrail profile, then the
@@ -317,9 +317,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // through OnWouldBlock with WouldAsk=true so a single
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
-func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchClaudeCodeHookNotification(ctx context.Context, req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook("claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, "claudecode", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return
