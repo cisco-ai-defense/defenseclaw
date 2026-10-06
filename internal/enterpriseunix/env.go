@@ -63,6 +63,7 @@ var commandCandidates = map[string][]string{
 	"systemctl":        {"/usr/bin/systemctl", "/bin/systemctl"},
 	"systemd-sysusers": {"/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"},
 	"getent":           {"/usr/bin/getent", "/bin/getent"},
+	"journalctl":       {"/usr/bin/journalctl", "/bin/journalctl"},
 	"useradd":          {"/usr/sbin/useradd", "/sbin/useradd"},
 	"groupadd":         {"/usr/sbin/groupadd", "/sbin/groupadd"},
 	"userdel":          {"/usr/sbin/userdel", "/sbin/userdel"},

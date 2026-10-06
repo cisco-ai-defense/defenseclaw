@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -204,18 +205,25 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		}
 	}
 	if inv := report.IDEInventory; inv != nil && !inv.Carried {
-		for _, plugin := range inv.Plugins {
-			if plugin.State != inventory.AIStateNew && plugin.State != inventory.AIStateChanged {
-				continue
-			}
-			if err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin); err != nil && logErr == nil {
+		skipped := 0
+		emitPlugin := func(plugin inventory.IDEPlugin) {
+			err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin)
+			if errors.Is(err, errIDEPluginSkipped) {
+				skipped++
+			} else if err != nil && logErr == nil {
 				logErr = err
 			}
 		}
-		for _, plugin := range inv.Removed {
-			if err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin); err != nil && logErr == nil {
-				logErr = err
+		for _, plugin := range inv.Plugins {
+			if plugin.State == inventory.AIStateNew || plugin.State == inventory.AIStateChanged {
+				emitPlugin(plugin)
 			}
+		}
+		for _, plugin := range inv.Removed {
+			emitPlugin(plugin)
+		}
+		if skipped > 0 {
+			fmt.Fprintf(os.Stderr, "[ai_discovery] %d ide.plugin records skipped: the plugin id or product is outside the registered syntax (the CLI and the ide_plugins gauge still count them)\n", skipped)
 		}
 	}
 	metricErr := adapter.emitMetrics(ctx, report, components)
@@ -393,8 +401,15 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	return nil
 }
 
+// errIDEPluginSkipped marks a plugin whose id or product does not fit the
+// registered attribute syntax; the record is dropped, never rewritten.
+var errIDEPluginSkipped = errors.New("ide plugin outside the registered attribute syntax")
+
 var (
-	ideV8PluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9._@/:+-]*$`)
+	// ideV8PluginIDPattern is the defenseclaw.ide.plugin.id syntax. It admits
+	// interior spaces because JetBrains ids are free text ("String
+	// Manipulation").
+	ideV8PluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9._@/:+ -]*$`)
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
 	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
@@ -412,7 +427,7 @@ func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observabilit
 // plugin. Plugin ids and versions are exported as they are; paths never
 // leave the process (the row carries only their hashes, which this record
 // does not use). A plugin whose id does not fit the attribute's syntax is
-// skipped rather than rewritten.
+// skipped rather than rewritten, and reported as errIDEPluginSkipped.
 func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 	ctx context.Context,
 	summary inventory.AIDiscoverySummary,
@@ -431,7 +446,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 	}
 	pluginID := strings.TrimSpace(plugin.PluginID)
 	if len(pluginID) > 256 || !ideV8PluginIDPattern.MatchString(pluginID) || !ideV8ProductPattern.MatchString(plugin.Product) {
-		return nil
+		return errIDEPluginSkipped
 	}
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,

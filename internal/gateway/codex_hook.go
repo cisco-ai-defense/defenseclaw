@@ -355,7 +355,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
+		a.dispatchCodexHookNotification(ctx, req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
 	// A configured block message replaces the agent-facing reason on blocks,
@@ -384,9 +384,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
+func (a *APIServer) dispatchCodexHookNotification(ctx context.Context, req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext, policy ...redaction.SinkPolicy) {
 	if action == "block" {
-		a.dispatchHookBlockWebhook("codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
+		a.dispatchHookBlockWebhook(ctx, "codex", req.ToolName, req.HookEventName, severity, reason, evalCtx.RuleIDs)
 	}
 	if a == nil || a.notifier == nil {
 		return

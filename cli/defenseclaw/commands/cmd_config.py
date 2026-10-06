@@ -53,7 +53,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_validate_v8
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_config_value, load_validate_v8
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -445,14 +445,15 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
 
     KEY is a dotted path with [i] list indexes, for example
     guardrail.block_at or asset_policy.skill.denied[0].name. VALUE is a YAML
-    scalar (true, 3, HIGH) or, with --json, any JSON value. The change is
+    scalar (true, 3, HIGH, off: only true and false are booleans) or, with
+    --json, any JSON value. The change is
     validated before it is written; on a managed device it is refused (exit 3).
     """
     from defenseclaw.config_writer import Change, parse_path
 
     try:
         parse_path(key)
-        parsed = json.loads(value) if as_json else yaml.safe_load(value)
+        parsed = json.loads(value) if as_json else load_config_value(value)
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")

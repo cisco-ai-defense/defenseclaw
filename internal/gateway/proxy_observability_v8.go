@@ -131,6 +131,12 @@ func (p *GuardrailProxy) observabilityV8TraceRuntime() lifecycleV8Runtime {
 	return p.observabilityV8Trace
 }
 
+// observabilityV8Emitter is the proxy's runtime as a record emitter, or nil.
+func (p *GuardrailProxy) observabilityV8Emitter() sidecarRuntimeEmitter {
+	emitter, _ := p.observabilityV8TraceRuntime().(sidecarRuntimeEmitter)
+	return emitter
+}
+
 func (p *GuardrailProxy) startProxyV8RequestTrace(
 	ctx context.Context,
 	req *ChatRequest,
