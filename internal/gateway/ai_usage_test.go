@@ -274,16 +274,16 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	}
 }
 
-// GAP-0051: --ide vscode selects VS Code, not its forks; a bare account name
-// still selects DOMAIN\name rows; a Windows transcript keeps its backslashes
-// in the install hint.
+// GAP-0051: --ide vscode selects VS Code, not its forks; a DOMAIN\name filter
+// selects the bare-name rows; a Windows transcript keeps its backslashes in
+// the install hint.
 func TestIDEPluginFiltersAndInstallHintKeepWindowsSpelling(t *testing.T) {
 	if ideFilterMatches("vscode", "vscode", "cursor") || !ideFilterMatches("vscode", "vscode", "vscode") ||
 		!ideFilterMatches("jetbrains", "jetbrains", "pycharm") {
 		t.Fatal("ide filter must match products, and families only when the family is not a product")
 	}
-	if !accountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || accountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
-		t.Fatal("user filter must accept the account name without its domain")
+	if !accountFilterMatches(`DCLAB\dcad-alice`, "S-1-5-21-1", "dcad-alice") || accountFilterMatches("bob", "S-1-5-21-1", "dcad-alice") {
+		t.Fatal("user filter must accept the account name with its domain")
 	}
 	hint := claimedInstallHint(map[string]interface{}{"transcript_path": `C:\Users\dcad-alice\altcfg\projects\p\s.jsonl`})
 	if hint != `C:\Users\dcad-alice\altcfg` {

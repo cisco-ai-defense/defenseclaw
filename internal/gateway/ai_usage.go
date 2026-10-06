@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // confidencePolicyMaxRequestBytes caps the body of
@@ -105,14 +106,11 @@ func ideFilterMatches(ide, family, product string) bool {
 }
 
 // accountFilterMatches reports whether a user filter selects a row: the
-// account id, the account name (DOMAIN\name on Windows) or the name without
-// its domain.
+// account id or the account name, given bare or qualified (DOMAIN\name,
+// user@realm). Rows carry the bare name.
 func accountFilterMatches(user, id, name string) bool {
-	if user == "" || user == id || strings.EqualFold(user, name) {
-		return true
-	}
-	i := strings.LastIndex(name, `\`)
-	return i >= 0 && strings.EqualFold(user, name[i+1:])
+	return user == "" || user == id ||
+		strings.EqualFold(useridentity.BareAccountName(user), useridentity.BareAccountName(name))
 }
 
 func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Request) {

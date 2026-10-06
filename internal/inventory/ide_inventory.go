@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // IDE inventory: every IDE installation in each scanned home and every
@@ -275,9 +276,9 @@ var currentIDEOwner = func() ideOwner {
 	if err != nil {
 		return ideOwner{}
 	}
-	// The full account name (DOMAIN\name on Windows), as agent identities and
-	// hook records spell it.
-	return ideOwner{id: u.Uid, name: u.Username}
+	// The bare account name, as agent identities and hook records spell it
+	// (DOMAIN\name and user@realm are the principal, reported separately).
+	return ideOwner{id: u.Uid, name: useridentity.BareAccountName(u.Username)}
 }
 
 func programFilesDirs() []string {
