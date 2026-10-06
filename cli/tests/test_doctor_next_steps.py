@@ -760,11 +760,14 @@ def test_stopped_gateway_row_carries_its_next_step(tmp_path) -> None:
 def test_drifted_exporter_warn_names_setup_in_remediation() -> None:
     # GAP-1526: the Connector OTLP drift WARN row had an empty remediation.
     report = _custody_report(managed_config_state="drifted", drop_only_batches=0, drop_only_signals=())
+    # GAP-0076: the text row printed no Next step line (the remedy sat in the detail).
     r = _DoctorResult()
-    cmd_doctor._check_connector_export_custody(report, r)
+    text = _render(lambda: cmd_doctor._check_connector_export_custody(report, r))
     check = r.checks[-1]
     assert check["status"] == "warn"
     assert check["remediation"] == "run 'defenseclaw setup claude-code' to re-apply"
+    assert "Next step: run 'defenseclaw setup claude-code' to re-apply" in text
+    assert text.count("defenseclaw setup claude-code") == 1
 
 
 def test_rows_that_name_a_command_in_their_detail_carry_it_as_remediation() -> None:

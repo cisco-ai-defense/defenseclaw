@@ -9605,12 +9605,10 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             # The file changed after setup: agents such as Codex write their
             # own settings to it. Teardown then removes only DefenseClaw's
             # entries, so this is not a failure; setup re-applies them and
-            # records the file again (GAP-1448, GAP-0043).
+            # records the file again (GAP-1448, GAP-0043). The remedy goes on
+            # the row's Next step line, not in the detail (GAP-0076).
             tag = "warn"
-            conditions.append(
-                "managed-exporter drift detected (the file changed after setup); "
-                f"run 'defenseclaw setup {setup_name}' to re-apply"
-            )
+            conditions.append("managed-exporter drift detected (the file changed after setup)")
         elif item.managed_config_state == "unverifiable":
             tag = "warn"
             conditions.append("managed-exporter state is unverifiable")
