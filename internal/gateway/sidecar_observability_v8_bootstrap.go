@@ -129,7 +129,8 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if err != nil {
 		return false, err
 	}
-	if configVersion != 8 {
+	// config_version 9 keeps the v8 observability document.
+	if !config.CurrentSchemaVersion(configVersion) {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	cfg := s.currentConfig()
@@ -185,7 +186,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	version, err := sidecarObservabilityConfigVersion(raw)
-	if err != nil || version != 8 {
+	if err != nil || !config.CurrentSchemaVersion(version) {
 		if err != nil {
 			return runtimegraph.ReloadResult{}, err
 		}

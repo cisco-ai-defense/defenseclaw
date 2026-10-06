@@ -1723,7 +1723,7 @@ func TestSidecarConfigManagerV8RestartRequiredChangeHelperFailureIsAtomic(t *tes
 }
 
 func TestSidecarConfigManagerV8ArmsRestartModeWithoutImmediateRestart(t *testing.T) {
-	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
+	fixture := newSidecarV8BootstrapFixture(t, config.ConfigVersionV9, "")
 	initialRaw := []byte(fmt.Sprintf(
 		"config_version: 9\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nobservability: {}\n",
 		fixture.dataDir,
