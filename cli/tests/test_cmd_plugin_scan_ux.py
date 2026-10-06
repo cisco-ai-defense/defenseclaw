@@ -198,7 +198,7 @@ class TestScanUXSummary(_PluginScanUXBase):
     def test_summary_block_listed_is_blocked(self, mock_scan) -> None:
         from defenseclaw.enforce import PolicyEngine
 
-        PolicyEngine(self.app.store).block("plugin", self.plugin_name, "test")
+        PolicyEngine(self.app.store, self.app.cfg).block("plugin", self.plugin_name, "test")
         mock_scan.return_value = self._blocked_result()
         result = self.invoke(["scan", self.plugin_name])
         self.assertEqual(result.exit_code, 0, result.output)

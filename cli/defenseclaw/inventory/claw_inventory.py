@@ -44,7 +44,7 @@ from typing import Any, NamedTuple, TypedDict
 import yaml
 
 from defenseclaw import connector_paths
-from defenseclaw.config import Config, SkillActionsConfig, _expand
+from defenseclaw.config import Config, _expand
 from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import open_regular_file_no_follow
 
@@ -413,8 +413,6 @@ _POLICY_CATEGORIES: list[tuple[str, str, str]] = [
 def enrich_with_policy(
     inv: dict[str, Any],
     store: Any,
-    skill_actions: SkillActionsConfig | None = None,
-    policy_dir: str = "",
     cfg: Config | None = None,
 ) -> None:
     """Evaluate OPA-style admission gate per item and annotate the inventory.
@@ -429,9 +427,7 @@ def enrich_with_policy(
 
     from defenseclaw.enforce import PolicyEngine
 
-    pe = PolicyEngine(store)
-    if skill_actions is None:
-        skill_actions = SkillActionsConfig()
+    pe = PolicyEngine(store, cfg)
     inv_connector = connector_paths.normalize(str(inv.get("connector") or inv.get("claw_mode") or ""))
 
     for inv_key, target_type, scanner_name in _POLICY_CATEGORIES:
@@ -439,7 +435,7 @@ def enrich_with_policy(
         if not items:
             continue
 
-        actions_map = _build_actions_map_for_type(store, target_type, inv_connector)
+        actions_map = _build_actions_map_for_type(store, target_type, inv_connector, cfg)
         scan_map = _build_scan_map_for_type(store, scanner_name)
         scan_by_path = _scan_map_by_path(scan_map)
 
@@ -465,7 +461,6 @@ def enrich_with_policy(
             scan_entry = _scan_entry_for_item_path(scan_by_path, item)
             if scan_entry is None:
                 scan_entry = _lookup_by_candidates(scan_map, candidates)
-            fallback_actions = _fallback_actions_for(target_type, skill_actions, cfg)
             action_entry = _lookup_by_candidates(actions_map, candidates)
             policy_name = _inventory_policy_name(item, target_type, name, action_entry)
             source_path = _inventory_source_path(
@@ -504,8 +499,6 @@ def enrich_with_policy(
                 policy_name,
                 scan_entry,
                 action_entry,
-                fallback_actions,
-                policy_dir=policy_dir,
                 source_path=source_path,
                 allow_first_party=allow_first_party,
                 connector=inv_connector,
@@ -560,20 +553,6 @@ def _action_holds_off(action_entry: Any) -> bool:
     if actions is None:
         return False
     return getattr(actions, "runtime", "") == "disable" or getattr(actions, "file", "") == "quarantine"
-
-
-def _fallback_actions_for(
-    target_type: str,
-    skill_actions: SkillActionsConfig,
-    cfg: Config | None,
-) -> Any:
-    if target_type == "skill" or cfg is None:
-        return skill_actions
-    if target_type == "plugin":
-        return cfg.plugin_actions
-    if target_type == "mcp":
-        return cfg.mcp_actions
-    return skill_actions
 
 
 # F-0742: AIBOM rows carry a ``source`` describing where the asset came
@@ -634,8 +613,6 @@ def _admission_verdict(
     name: str,
     scan_entry: dict[str, Any] | None,
     action_entry: ActionEntry | None,
-    skill_actions: SkillActionsConfig,
-    policy_dir: str = "",
     source_path: str = "",
     allow_first_party: bool = True,
     connector: str = "",
@@ -650,14 +627,12 @@ def _admission_verdict(
 
     decision = evaluate_admission(
         pe,
-        policy_dir=policy_dir,
         target_type=target_type,
         name=name,
         source_path=source_path,
         connector=connector,
         scan_result=scan_entry,
         action_entry=action_entry,
-        fallback_actions=skill_actions,
         include_quarantine=True,
         allow_first_party=allow_first_party,
     )
@@ -807,13 +782,15 @@ def _lookup_by_candidates(mapping: dict[str, Any], candidates: list[str]) -> Any
 
 
 def _build_actions_map_for_type(
-    store: Any, target_type: str, connector: str = "",
+    store: Any, target_type: str, connector: str = "", cfg: Any = None,
 ) -> dict[str, ActionEntry]:
     """Name -> action entry; with *connector*, its own entry wins over a
     global one and other connectors' entries are ignored."""
     actions_map: dict[str, ActionEntry] = {}
     try:
-        entries = store.list_actions_by_type(target_type)
+        from defenseclaw.enforce import asset_lists
+
+        entries = asset_lists.merge_operator_entries(store.list_actions_by_type(target_type), cfg, target_type)
     except Exception:
         return actions_map
     if not connector:

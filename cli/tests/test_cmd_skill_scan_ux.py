@@ -472,7 +472,7 @@ class TestScanAllUX(_SkillScanUXBase):
 
         root = self._make_skills_dir(["alpha", "beta"])
         self.app.cfg.skill_dirs = lambda connector=None: [root]
-        PolicyEngine(self.app.store).block("skill", "beta", "test block")
+        PolicyEngine(self.app.store, self.app.cfg).block("skill", "beta", "test block")
         responses = {
             os.path.join(root, "alpha"): self._clean_result(os.path.join(root, "alpha")),
             os.path.join(root, "beta"): self._blocked_result(os.path.join(root, "beta")),

@@ -57,7 +57,6 @@ from defenseclaw import __version__, codeguard_skill
 from defenseclaw.commands import cmd_version
 from defenseclaw.config import _coerce_bool, load
 from defenseclaw.db import Store
-from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.observability import resolve_preset
 from defenseclaw.observability.v8_presets import apply_secret
 
@@ -238,15 +237,14 @@ def test_f0082_block_wins_over_allow_during_migration(tmp_path):
     store = Store(db_path)
     store.init()
     try:
-        pe = PolicyEngine(store)
         row = store.db.execute(
             "SELECT actions_json FROM actions WHERE target_type = 'skill' AND target_name = 'evil'"
         ).fetchone()
         # The surviving row is the BLOCK, not the stale allow.
         assert row is not None
         assert json.loads(row[0]) == {"install": "block"}
-        assert pe.is_blocked("skill", "evil") is True
-        assert pe.is_allowed("skill", "evil") is False
+        assert store.has_action("skill", "evil", "install", "block") is True
+        assert store.has_action("skill", "evil", "install", "allow") is False
     finally:
         store.close()
 

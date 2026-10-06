@@ -107,7 +107,7 @@ class TestSkillQuarantineProvenance(unittest.TestCase):
         original = self.create_skill("codex")
         enforcer = SkillEnforcer(self.app.cfg.quarantine_dir)
         legacy_quarantine = enforcer.quarantine("dangerous", original)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.quarantine_for_connector("skill", "dangerous", "codex", "legacy scan")
         pe.set_source_path("skill", "dangerous", original, "codex")
         self.assertEqual(self.records("codex"), [])
@@ -164,7 +164,7 @@ class TestSkillQuarantineProvenance(unittest.TestCase):
         )
         record = self.records("codex")[0]
         self.app.store.associate_quarantine_connector(record.id, "claudecode")
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.quarantine_for_connector("skill", "dangerous", "claudecode", "shared quarantine")
         pe.set_source_path("skill", "dangerous", original, "claudecode")
 

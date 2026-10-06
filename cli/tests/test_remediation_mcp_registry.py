@@ -467,7 +467,7 @@ def test_f0347_stream_download_blocks_loopback_and_redirect(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_f0323_named_scan_blocked_by_resolved_url(app_ctx):
-    pe = PolicyEngine(app_ctx.store)
+    pe = PolicyEngine(app_ctx.store, app_ctx.cfg)
     pe.block("mcp", "http://internal.example/mcp", "blocked by url")
     app_ctx.cfg.mcp_servers = lambda connector=None, **_: [
         MCPServerEntry(
@@ -487,7 +487,7 @@ def test_f0323_named_scan_blocked_by_resolved_url(app_ctx):
 # ---------------------------------------------------------------------------
 
 def test_f0324_scan_all_skips_blocked_server(app_ctx):
-    pe = PolicyEngine(app_ctx.store)
+    pe = PolicyEngine(app_ctx.store, app_ctx.cfg)
     pe.block("mcp", "blocked-srv", "operator block")
     app_ctx.cfg.mcp_servers = lambda connector=None, **_: [
         MCPServerEntry(name="blocked-srv", url="http://x.example/mcp", transport="sse"),

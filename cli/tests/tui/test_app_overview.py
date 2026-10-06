@@ -1124,38 +1124,19 @@ def test_overview_config_sets_roster_error_when_enumeration_raises() -> None:
     assert any(n.level == "error" for n in notices)
 
 
-def test_flatten_scanner_overrides_skips_malformed() -> None:
-    """N3: a malformed scanner_overrides branch is skipped, not fatal."""
+def test_overview_config_reads_per_type_admission_actions() -> None:
+    """N3: the adapter flattens the per-type admission actions into
+    OverviewConfig so the Overview/status can surface them."""
 
-    from defenseclaw.tui.app import _flatten_scanner_overrides
+    from defenseclaw.config import AdmissionConfig
 
-    flat = _flatten_scanner_overrides(
-        {
-            "mcp": {"LOW": {"runtime": "block", "file": "none"}},
-            "bad": "not-a-dict",
-            "plugin": {"HIGH": "also-bad"},
-        }
-    )
-    assert ("mcp", "LOW", "runtime", "block") in flat
-    assert all(entry[0] != "plugin" for entry in flat)
-    assert _flatten_scanner_overrides("nope") == ()
-
-
-def test_overview_config_reads_scanner_overrides_from_active_policy(tmp_path) -> None:
-    """N3: the adapter flattens the active policy's data.json scanner_overrides
-    into OverviewConfig so the Overview/status can surface them."""
-
-    rego = tmp_path / "rego"
-    rego.mkdir()
-    (rego / "data.json").write_text(
-        json.dumps({"scanner_overrides": {"secrets": {"HIGH": {"file": "block", "install": "warn"}}}})
-    )
     cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
-    cfg.policy_dir = str(tmp_path)
+    cfg.admission = AdmissionConfig()
+    cfg.admission.mcp.actions = {"low": "block", "high": "not-an-action"}
     overview = _overview_config(cfg)
-    assert ("secrets", "HIGH", "file", "block") in overview.scanner_overrides
-    assert ("secrets", "HIGH", "install", "warn") in overview.scanner_overrides
-    assert "secrets" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
+    assert ("mcp", "LOW", "install", "block") in overview.scanner_overrides
+    assert all(entry[1] != "HIGH" for entry in overview.scanner_overrides)
+    assert "mcp" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
 
 
 def test_overview_body_renders_scanner_override_summary() -> None:

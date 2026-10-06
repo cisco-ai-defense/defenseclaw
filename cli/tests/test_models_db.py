@@ -47,11 +47,15 @@ class ModelsDbTests(unittest.TestCase):
         self.assertLess(compare_severity("LOW", "HIGH"), 0)
 
     def test_policy_engine_block_allow(self):
-        pe = PolicyEngine(self.store)
+        from tests.helpers import make_temp_config
+
+        cfg = make_temp_config()
+        pe = PolicyEngine(self.store, cfg)
 
         self.assertFalse(pe.is_blocked("skill", "bad-skill"))
         pe.block("skill", "bad-skill", "test")
         self.assertTrue(pe.is_blocked("skill", "bad-skill"))
+        self.assertEqual([r.name for r in cfg.asset_policy.skill.denied], ["bad-skill"])
 
         self.assertFalse(pe.is_allowed("skill", "good-skill"))
         pe.allow("skill", "good-skill", "test")
@@ -80,11 +84,11 @@ class ModelsDbTests(unittest.TestCase):
             self.assertEqual(action.actions.runtime, "")
 
     def test_get_enforcement_counts_skips_alert_count(self):
-        pe = PolicyEngine(self.store)
-        pe.block("skill", "blocked-skill", "test")
-        pe.allow("skill", "allowed-skill", "test")
-        pe.block("mcp", "blocked-mcp", "test")
-        pe.allow("mcp", "allowed-mcp", "test")
+        for target_type, name, value in (
+            ("skill", "blocked-skill", "block"), ("skill", "allowed-skill", "allow"),
+            ("mcp", "blocked-mcp", "block"), ("mcp", "allowed-mcp", "allow"),
+        ):
+            self.store.set_action_field(target_type, name, "install", value, "test")
 
         self.store.insert_scan_result(
             "scan-1",

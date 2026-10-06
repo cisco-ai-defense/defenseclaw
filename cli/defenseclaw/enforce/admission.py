@@ -1,22 +1,25 @@
 """Shared admission evaluation helpers for Python CLI paths.
 
-These helpers intentionally mirror the admission ordering used by the Go
-gateway/watcher:
+These helpers mirror the Go gateway/watcher admission (policies/rego/
+admission.rego and internal/policy), reading only config.yaml:
 
-1. Explicit block list entries override everything.
+1. The operator block list (asset_policy.<type>.denied) overrides everything.
 2. Asset policy can block denied/unregistered/default-denied assets.
-3. Explicit allow list entries skip scan/enforcement after asset policy.
-4. Policy-managed allow entries (for example first-party bundles) may bypass
-   scan depending on the active policy data.
-5. If no scan result exists yet, the active policy decides whether scanning is
-   required.
-6. Once a scan result exists, the effective per-target action mapping decides
-   whether the result is rejected or only warned.
+3. The operator allow list (asset_policy.<type>.allowed) skips scan and
+   enforcement after asset policy; an allow pinned to a source path only
+   matches that path.
+4. The first-party allow list (admission.<type>.first_party_allow_list) may
+   bypass scan when admission.<type>.allow_list_bypass_scan is on.
+5. If no scan result exists yet, admission.<type>.scan_on_install decides
+   whether scanning is required.
+6. Once a scan result exists, the compiled admission action for the
+   severity (scanner override, then severity action) decides whether the
+   result is rejected, allowed, or only warned. A severity nothing covers
+   fails closed.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -38,76 +41,194 @@ class AdmissionDecision:
 
 
 @dataclass(frozen=True)
-class AdmissionPolicyData:
-    allow_list_bypass_scan: bool = True
+class CompiledAdmission:
+    """``admission:`` compiled for one asset type (Go policy.CompiledAdmission).
+
+    ``actions`` and ``scanner_overrides`` values are ``(SeverityAction, allow)``
+    pairs, where ``allow`` marks the ``allow`` shorthand (verdict allowed
+    rather than warning)."""
+
     scan_on_install: bool = True
-    actions: dict[str, SeverityAction] = field(default_factory=dict)
-    scanner_overrides: dict[str, dict[str, SeverityAction]] = field(default_factory=dict)
-    first_party_allow: dict[tuple[str, str], tuple[str, list[str]]] = field(default_factory=dict)
+    allow_list_bypass_scan: bool = True
+    actions: dict[str, tuple[SeverityAction, bool]] = field(default_factory=dict)
+    scanner_overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = field(default_factory=dict)
+    first_party_allow: dict[str, list[str]] = field(default_factory=dict)
+    source: str = "builtin"
 
 
-def _default_admission_policy() -> AdmissionPolicyData:
-    return AdmissionPolicyData(
-        allow_list_bypass_scan=True,
-        scan_on_install=True,
-        actions={
-            "CRITICAL": SeverityAction(file="quarantine", runtime="disable", install="block"),
-            "HIGH": SeverityAction(file="quarantine", runtime="disable", install="block"),
-            "MEDIUM": SeverityAction(file="none", runtime="enable", install="none"),
-            "LOW": SeverityAction(file="none", runtime="enable", install="none"),
-            "INFO": SeverityAction(file="none", runtime="enable", install="none"),
-        },
-        scanner_overrides={
-            "mcp": {
-                "MEDIUM": SeverityAction(file="quarantine", runtime="disable", install="block"),
-                "LOW": SeverityAction(file="none", runtime="disable", install="none"),
-            },
-            "plugin": {
-                "HIGH": SeverityAction(file="quarantine", runtime="disable", install="block"),
-                "MEDIUM": SeverityAction(file="none", runtime="enable", install="none"),
-            },
-        },
-        first_party_allow={
-            # F-0541: provenance markers must be specific to the first-party
-            # asset's own directory, not a broad parent like ``.defenseclaw``
-            # or ``.openclaw/extensions`` that any sibling plugin/skill could
-            # be dropped into. Each marker pins the asset's leaf component.
-            #
-            # F-0902: markers must also be home-anchored, not bare relative
-            # sequences ("extensions/defenseclaw") — a bare marker blesses any
-            # attacker path that merely contains the subsequence
-            # (``/tmp/attacker/extensions/defenseclaw``). ``_matches_provenance``
-            # anchors the match defensively, but these built-in defaults are
-            # kept home-anchored too so they mirror the bundled policy data
-            # (policies/{default,strict,permissive}.yaml + rego/data.json) and
-            # never rely solely on the matcher.
-            ("plugin", "defenseclaw"): (
-                "first-party DefenseClaw plugin",
-                [
-                    ".openclaw/extensions/defenseclaw",
-                    ".zeptoclaw/extensions/defenseclaw",
-                    ".claude/extensions/defenseclaw",
-                    ".codex/extensions/defenseclaw",
-                    ".config/amp/plugins/defenseclaw.ts",
-                ],
+ADMISSION_SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
+
+_QUARANTINE = SeverityAction(file="quarantine", runtime="disable", install="block")
+_BLOCK = SeverityAction(file="none", runtime="disable", install="block")
+_WARN = SeverityAction(file="none", runtime="enable", install="none")
+_FAIL_CLOSED = (_BLOCK, False)
+
+_SHORTHANDS = {
+    "block": (_BLOCK, False),
+    "quarantine": (_QUARANTINE, False),
+    "warn": (_WARN, False),
+    "allow": (_WARN, True),
+}
+
+
+def _builtin_admission(target_type: str) -> CompiledAdmission:
+    """The admission defaults that shipped in policies/rego/data.json up to 1.0."""
+    actions = {
+        "CRITICAL": (_QUARANTINE, False), "HIGH": (_QUARANTINE, False),
+        "MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),
+    }
+    first_party: dict[str, list[str]] = {}
+    if target_type == "skill":
+        # F-0541/F-0902: markers are specific to the asset's own directory and
+        # home-anchored, never a broad parent like ``.defenseclaw``.
+        first_party["codeguard"] = [
+            ".openclaw/workspace/skills/codeguard",
+            ".openclaw/skills/codeguard",
+            ".zeptoclaw/skills/codeguard",
+            ".claude/skills/codeguard",
+        ]
+    elif target_type == "mcp":
+        actions["MEDIUM"] = (_QUARANTINE, False)
+        actions["LOW"] = (SeverityAction(file="none", runtime="disable", install="none"), False)
+    elif target_type == "plugin":
+        actions["HIGH"] = (_QUARANTINE, False)
+        first_party["defenseclaw"] = [
+            ".openclaw/extensions/defenseclaw",
+            ".zeptoclaw/extensions/defenseclaw",
+            ".claude/extensions/defenseclaw",
+            ".codex/extensions/defenseclaw",
+            ".config/amp/plugins/defenseclaw.ts",
+        ]
+    return CompiledAdmission(actions=actions, first_party_allow=first_party)
+
+
+def _compile_action(raw: Any) -> tuple[SeverityAction, bool] | None:
+    if isinstance(raw, str):
+        return _SHORTHANDS.get(raw.strip().lower())
+    if isinstance(raw, dict):
+        return (
+            SeverityAction(
+                file=str(raw.get("file") or "none"),
+                runtime="disable" if str(raw.get("runtime") or "") == "disable" else "enable",
+                install=str(raw.get("install") or "none"),
             ),
-            ("skill", "codeguard"): (
-                "first-party DefenseClaw skill",
-                [
-                    ".openclaw/workspace/skills/codeguard",
-                    ".openclaw/skills/codeguard",
-                    ".zeptoclaw/skills/codeguard",
-                    ".claude/skills/codeguard",
-                ],
-            ),
-        },
+            False,
+        )
+    if isinstance(raw, SeverityAction):
+        return raw, False
+    return None
+
+
+def _compile_action_map(raw: Any) -> dict[str, tuple[SeverityAction, bool]]:
+    out: dict[str, tuple[SeverityAction, bool]] = {}
+    for sev, value in (raw or {}).items() if isinstance(raw, dict) else ():
+        action = _compile_action(value)
+        if action is not None:
+            out[str(sev).upper()] = action
+    return out
+
+
+def _severity_rank(sev: str) -> int:
+    try:
+        return len(ADMISSION_SEVERITY_ORDER) - ADMISSION_SEVERITY_ORDER.index(str(sev).strip().upper())
+    except ValueError:
+        return 0
+
+
+def _derived_scanner_gate(fail_on: str, review_min: str) -> dict[str, tuple[SeverityAction, bool]]:
+    """scanners.skill_scanner.fail_on_severity/review_queue_min as an action
+    map: at or above the gate quarantine, [review, gate) warn, below allow."""
+    gate = _severity_rank(fail_on)
+    if not gate:
+        return {}
+    review = _severity_rank(review_min)
+    if not review or review > gate:
+        review = 1
+    out = {}
+    for sev in ADMISSION_SEVERITY_ORDER:
+        rank = _severity_rank(sev)
+        if rank >= gate:
+            out[sev] = _SHORTHANDS["quarantine"]
+        else:
+            out[sev] = _SHORTHANDS["warn"] if rank >= review else _SHORTHANDS["allow"]
+    return out
+
+
+def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
+    """Compile ``admission:`` for one asset type, as the gateway does (Go
+    ``policy.CompileAdmission``). Each field and severity resolves, first
+    match wins: ``admission.<type>`` > (skill) the scanner gate >
+    ``admission.defaults`` > the built-in default."""
+    out = _builtin_admission(target_type)
+    adm = getattr(cfg, "admission", None)
+    if adm is None:
+        return out
+    defaults = getattr(adm, "defaults", None)
+    own = getattr(adm, target_type, None)
+
+    def first_bool(name: str, fallback: bool) -> bool:
+        for layer in (own, defaults):
+            value = getattr(layer, name, None) if layer is not None else None
+            if value is not None:
+                return bool(value)
+        return fallback
+
+    scan_on_install = first_bool("scan_on_install", out.scan_on_install)
+    bypass = first_bool("allow_list_bypass_scan", out.allow_list_bypass_scan)
+
+    own_actions = _compile_action_map(getattr(own, "actions", None))
+    default_actions = _compile_action_map(getattr(defaults, "actions", None))
+    derived: dict[str, tuple[SeverityAction, bool]] = {}
+    if target_type == "skill":
+        ss = getattr(getattr(cfg, "scanners", None), "skill_scanner", None)
+        derived = _derived_scanner_gate(getattr(ss, "fail_on_severity", ""), getattr(ss, "review_queue_min", ""))
+    actions = dict(out.actions)
+    used = set()
+    for sev in ADMISSION_SEVERITY_ORDER:
+        for tag, layer in (("own", own_actions), ("derived", derived), ("defaults", default_actions)):
+            if sev in layer:
+                actions[sev] = layer[sev]
+                used.add(tag)
+                break
+    source = out.source
+    if "own" in used:
+        source = f"config:admission.{target_type}.actions"
+    elif "derived" in used:
+        source = "derived:scanners.skill_scanner"
+    elif "defaults" in used:
+        source = "config:admission.defaults.actions"
+
+    overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}
+    for layer in (defaults, own):
+        for scanner, raw in (getattr(layer, "scanner_overrides", None) or {}).items() if layer is not None else ():
+            compiled = _compile_action_map(raw)
+            if compiled:
+                overrides.setdefault(str(scanner).strip(), {}).update(compiled)
+
+    first_party = dict(out.first_party_allow)
+    for layer in (own, defaults):
+        entries = getattr(layer, "first_party_allow_list", None) if layer is not None else None
+        if entries:
+            first_party = {
+                str(getattr(e, "name", "")): list(getattr(e, "source_path_contains", []) or [])
+                for e in entries
+            }
+            break
+    if target_type == "tool":
+        first_party = {}
+    return CompiledAdmission(
+        scan_on_install=scan_on_install,
+        allow_list_bypass_scan=bypass,
+        actions=actions,
+        scanner_overrides=overrides,
+        first_party_allow=first_party,
+        source=source,
     )
 
 
 def evaluate_admission(
     pe: Any,
     *,
-    policy_dir: str,
     target_type: str,
     name: str,
     source_path: str = "",
@@ -117,26 +238,28 @@ def evaluate_admission(
     args: list[str] | None = None,
     transport: str = "",
     runtime_surface: str = "cli",
+    config: Any | None = None,
     asset_policy: Any | None = None,
     scan_result: Any | None = None,
     action_entry: Any | None = None,
-    fallback_actions: Any | None = None,
     include_quarantine: bool = False,
     allow_first_party: bool = True,
 ) -> AdmissionDecision:
-    """Evaluate admission for a target using active policy data when available.
+    """Evaluate admission for a target from config.yaml.
 
-    Explicit block entries always win. Explicit allow entries skip scanning
-    after asset policy has had a chance to enforce admin deny/default-deny
-    controls. Policy-managed allow entries from ``first_party_allow_list`` are
-    still subject to the policy's ``allow_list_bypass_scan`` setting.
+    ``config`` defaults to ``pe.cfg``; ``asset_policy`` to its
+    ``asset_policy``. Operator block entries always win. Operator allow
+    entries skip scanning after asset policy has enforced admin
+    deny/default-deny controls. First-party entries are subject to
+    ``allow_list_bypass_scan``.
     """
+    if config is None:
+        config = getattr(pe, "cfg", None)
+    if asset_policy is None:
+        asset_policy = getattr(config, "asset_policy", None)
+    legacy = getattr(pe, "_legacy_rows", lambda: False)()
+
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
-    # N2: honor a per-connector block at the admission gate. When a connector is
-    # in play, resolve most-specific-wins (connector-scoped entry, else global)
-    # via the *_for_connector engine method; the bare (global) path keeps the
-    # pre-N2 call so duck-typed callers/fakes without the connector dimension are
-    # unaffected (connector="" is equivalent to the global check anyway).
     if (
         pe.is_blocked_for_connector(target_type, name, connector)
         if connector
@@ -171,41 +294,14 @@ def evaluate_admission(
         )
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
-    if (
-        pe.is_allowed_for_connector(target_type, name, connector)
-        if connector
-        else pe.is_allowed(target_type, name)
-    ):
-        # an explicit operator allow that
-        # was registered with a source_path MUST NOT auto-allow a
-        # different on-disk asset just because it shares the
-        # registered name. Look up the stored entry and compare its
-        # source_path to the current source_path. If they differ
-        # we drop the allow and force a fresh scan/decision rather
-        # than honoring a name-only match. When the stored entry
-        # has no source_path (legacy allow) we keep current
-        # behavior to avoid breaking pre-fix entries; operators can
-        # re-allow with a path to opt into the strict mode.
-        #
-        # F-0401: when the allow IS path-pinned but the current request
-        # presents no source_path (empty/missing provenance, e.g. a
-        # non-local plugin/MCP pre-scan admission), we must NOT honor the
-        # pin as a match. An empty presented path cannot prove it is the
-        # pinned asset, so treat it as a mismatch and fail closed instead
-        # of falling through to an allow.
-        existing = _effective_action_entry(pe, target_type, name, connector)
-        existing_path = getattr(existing, "source_path", None) if existing else None
-        if existing_path and existing_path != source_path:
-            presented = source_path or "(no source path presented)"
-            return _done(AdmissionDecision(
-                "rejected",
-                (
-                    f"allow entry for {target_type} '{name}' is pinned to "
-                    f"{existing_path!r}, but the presented asset is at "
-                    f"{presented!r} — failing closed"
-                ),
-                source="manual-allow-path-mismatch",
-            ))
+    if legacy:
+        legacy_decision = _legacy_allow_decision(pe, target_type, name, connector, source_path, allowed_reason)
+        if legacy_decision is not None:
+            return _done(legacy_decision)
+    elif asset_decision.source == "asset-policy-allow":
+        # The allow matched with the presented source path, so an allow
+        # pinned to one on-disk asset never transfers to another that only
+        # shares the name (F-0941, F-0401).
         return _done(AdmissionDecision("allowed", allowed_reason, source="manual-allow"))
 
     quarantined = (
@@ -217,17 +313,18 @@ def evaluate_admission(
         reason = _action_reason(action_entry, default="quarantined")
         return _done(AdmissionDecision("rejected", f"quarantined: {reason}", source="quarantine"))
 
-    policy = load_admission_policy(policy_dir)
+    policy = compile_admission(config, target_type)
 
     # F-0742: callers evaluating untrusted-provenance inventory rows (e.g. a
     # ``source: user`` AIBOM entry) pass ``allow_first_party=False`` so the
     # first-party allow list cannot bless an operator/third-party asset that
     # merely lands under a first-party provenance directory.
-    fp_entry = policy.first_party_allow.get((target_type, name))
-    if allow_first_party and fp_entry is not None and policy.allow_list_bypass_scan:
-        fp_reason, fp_constraints = fp_entry
+    fp_constraints = policy.first_party_allow.get(name)
+    if allow_first_party and fp_constraints and policy.allow_list_bypass_scan:
         if _matches_provenance(fp_constraints, source_path):
-            return _done(AdmissionDecision("allowed", fp_reason, source="policy-allow"))
+            return _done(AdmissionDecision(
+                "allowed", f"{target_type} '{name}' is on the allow list — scan skipped", source="policy-allow",
+            ))
 
     if scan_result is None:
         if not policy.scan_on_install:
@@ -239,21 +336,52 @@ def evaluate_admission(
         return _done(AdmissionDecision("scan", "scan required", source="scan-required"))
 
     finding_count, severity = _scan_summary(scan_result)
-    action = effective_action_for(
-        policy,
-        target_type=target_type,
-        severity=severity,
-        fallback_actions=fallback_actions,
-    )
+    action, allow = effective_action_for(policy, severity=severity, scanner=_scanner_name(scan_result))
 
     if finding_count <= 0:
-        return _done(AdmissionDecision("clean", "scan clean", action=action, source="scan-clean"))
+        return _done(AdmissionDecision("clean", "scan clean", action=_WARN, source="scan-clean"))
 
     detail = f"{finding_count} {'finding' if finding_count == 1 else 'findings'}, max {severity}"
     if action.install == "block" or action.runtime == "disable":
         return _done(AdmissionDecision("rejected", detail, action=action, source="scan-rejected"))
-
+    if allow:
+        return _done(AdmissionDecision("allowed", detail, action=action, source="scan-allowed"))
     return _done(AdmissionDecision("warning", detail, action=action, source="scan-warning"))
+
+
+def _legacy_allow_decision(
+    pe: Any, target_type: str, name: str, connector: str, source_path: str, allowed_reason: str,
+) -> AdmissionDecision | None:
+    """The Secure Client allow read from the actions table, unchanged."""
+    if not (
+        pe.is_allowed_for_connector(target_type, name, connector)
+        if connector
+        else pe.is_allowed(target_type, name)
+    ):
+        return None
+    # An allow registered with a source_path must not auto-allow a different
+    # on-disk asset that shares the name; an empty presented path cannot
+    # prove it is the pinned asset either (F-0401).
+    existing = _effective_action_entry(pe, target_type, name, connector)
+    existing_path = getattr(existing, "source_path", None) if existing else None
+    if existing_path and existing_path != source_path:
+        presented = source_path or "(no source path presented)"
+        return AdmissionDecision(
+            "rejected",
+            (
+                f"allow entry for {target_type} '{name}' is pinned to "
+                f"{existing_path!r}, but the presented asset is at "
+                f"{presented!r} — failing closed"
+            ),
+            source="manual-allow-path-mismatch",
+        )
+    return AdmissionDecision("allowed", allowed_reason, source="manual-allow")
+
+
+def _scanner_name(scan_result: Any) -> str:
+    if isinstance(scan_result, dict):
+        return str(scan_result.get("scanner_name") or scan_result.get("scanner") or "")
+    return str(getattr(scan_result, "scanner", "") or "")
 
 
 def evaluate_asset_policy(
@@ -269,6 +397,21 @@ def evaluate_asset_policy(
     transport: str = "",
     runtime_surface: str = "cli",
 ) -> AdmissionDecision:
+    # The explicit operator lists apply in every mode, as the audit.db
+    # actions rows they replace did (config_version 9).
+    from defenseclaw.enforce import asset_lists
+
+    verdict, rule = asset_lists.list_decision(
+        asset_policy, target_type, name, connector,
+        source_path=source_path, url=url, command=command, args=args or [], transport=transport,
+    )
+    if verdict == asset_lists.LIST_DENY:
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        return AdmissionDecision("blocked", reason, source="asset-policy-deny")
+    if verdict == asset_lists.LIST_ALLOW:
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
+        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
+
     if not getattr(asset_policy, "enabled", False):
         return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
 
@@ -294,62 +437,6 @@ def evaluate_asset_policy(
         mode = getattr(asset_policy, "mode", "observe")
 
     rule_args = args or []
-    if rule := _find_asset_rule(
-        getattr(policy, "denied", []),
-        name,
-        connector,
-        source_path,
-        url,
-        command,
-        rule_args,
-        transport,
-        connector_scope="scoped",
-    ):
-        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
-        return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
-
-    if rule := _find_asset_rule(
-        getattr(policy, "allowed", []),
-        name,
-        connector,
-        source_path,
-        url,
-        command,
-        rule_args,
-        transport,
-        connector_scope="scoped",
-    ):
-        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
-        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
-
-    if rule := _find_asset_rule(
-        getattr(policy, "denied", []),
-        name,
-        connector,
-        source_path,
-        url,
-        command,
-        rule_args,
-        transport,
-        connector_scope="global",
-    ):
-        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
-        return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
-
-    if rule := _find_asset_rule(
-        getattr(policy, "allowed", []),
-        name,
-        connector,
-        source_path,
-        url,
-        command,
-        rule_args,
-        transport,
-        connector_scope="global",
-    ):
-        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
-        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
-
     registry = getattr(policy, "registry", [])
     # F-1906: registry membership for MCP servers is the gate that lets a
     # command actually run, so it must be matched strictly. The loose match
@@ -597,110 +684,20 @@ def _asset_rule_matches(
 
 
 def effective_action_for(
-    policy: AdmissionPolicyData,
+    policy: CompiledAdmission,
     *,
-    target_type: str,
     severity: str,
-    fallback_actions: Any | None = None,
-) -> SeverityAction:
+    scanner: str = "",
+) -> tuple[SeverityAction, bool]:
+    """The scanner override, then the severity action, then fail closed
+    (admission.rego ``_effective_action``)."""
     sev = severity.upper()
-    target_overrides = policy.scanner_overrides.get(target_type, {})
-    if sev in target_overrides:
-        return target_overrides[sev]
+    override = policy.scanner_overrides.get(scanner, {})
+    if sev in override:
+        return override[sev]
     if sev in policy.actions:
         return policy.actions[sev]
-    if fallback_actions is not None:
-        return fallback_actions.for_severity(sev)
-    return SeverityAction()
-
-
-def load_admission_policy(policy_dir: str) -> AdmissionPolicyData:
-    data = _read_policy_data(policy_dir)
-    if not data:
-        return _default_admission_policy()
-
-    defaults = _default_admission_policy()
-
-    cfg = data.get("config", {}) or {}
-    raw_actions = data.get("actions", {}) or {}
-    raw_overrides = data.get("scanner_overrides", {}) or {}
-    first_party = data.get("first_party_allow_list", []) or []
-
-    actions = {
-        severity.upper(): _severity_action_from_policy(raw)
-        for severity, raw in raw_actions.items()
-        if isinstance(raw, dict)
-    }
-
-    scanner_overrides: dict[str, dict[str, SeverityAction]] = {}
-    for target_type, overrides in raw_overrides.items():
-        if not isinstance(overrides, dict):
-            continue
-        scanner_overrides[target_type] = {
-            severity.upper(): _severity_action_from_policy(raw)
-            for severity, raw in overrides.items()
-            if isinstance(raw, dict)
-        }
-
-    first_party_allow: dict[tuple[str, str], tuple[str, list[str]]] = dict(defaults.first_party_allow)
-    for entry in first_party:
-        if not isinstance(entry, dict):
-            continue
-        target_type = str(entry.get("target_type", ""))
-        target_name = str(entry.get("target_name", ""))
-        if target_type and target_name:
-            reason = str(entry.get("reason", "first-party allow"))
-            source_path_contains = entry.get("source_path_contains", [])
-            if not isinstance(source_path_contains, list):
-                source_path_contains = []
-            first_party_allow[(target_type, target_name)] = (reason, source_path_contains)
-
-    merged_actions = dict(defaults.actions)
-    merged_actions.update(actions)
-
-    merged_overrides = {
-        target_type: dict(overrides)
-        for target_type, overrides in defaults.scanner_overrides.items()
-    }
-    for target_type, overrides in scanner_overrides.items():
-        merged_overrides.setdefault(target_type, {}).update(overrides)
-
-    return AdmissionPolicyData(
-        allow_list_bypass_scan=bool(cfg.get("allow_list_bypass_scan", defaults.allow_list_bypass_scan)),
-        scan_on_install=bool(cfg.get("scan_on_install", defaults.scan_on_install)),
-        actions=merged_actions,
-        scanner_overrides=merged_overrides,
-        first_party_allow=first_party_allow,
-    )
-
-
-def _severity_action_from_policy(raw: dict[str, Any]) -> SeverityAction:
-    runtime = "disable" if raw.get("runtime", "allow") == "block" else "enable"
-    return SeverityAction(
-        file=str(raw.get("file", "none")),
-        runtime=runtime,
-        install=str(raw.get("install", "none")),
-    )
-
-
-def _read_policy_data(policy_dir: str) -> dict[str, Any] | None:
-    for candidate in _policy_data_candidates(policy_dir):
-        try:
-            with open(candidate) as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
-def _policy_data_candidates(policy_dir: str) -> list[str]:
-    candidates: list[str] = []
-    if policy_dir:
-        candidates.append(os.path.join(policy_dir, "rego", "data.json"))
-        candidates.append(os.path.join(policy_dir, "data.json"))
-    return candidates
+    return _FAIL_CLOSED
 
 
 def _scan_summary(scan_result: Any) -> tuple[int, str]:

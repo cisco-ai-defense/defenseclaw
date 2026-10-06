@@ -16048,53 +16048,36 @@ def _overview_connector_names(cfg: OverviewConfig | None) -> tuple[str, ...]:
     return (active,) if active else ()
 
 
-def _flatten_scanner_overrides(
-    overrides: object,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Flatten a ``data.json`` ``scanner_overrides`` block (N3).
-
-    Input shape: ``{scanner_type: {severity: {install|file|runtime: action}}}``
-    (what ``policy show`` reads). Output: ``(scanner_type, severity, surface,
-    action)`` tuples for :func:`format_scanner_overrides_summary`. Malformed
-    branches are skipped so a bad payload degrades to a partial list, never a
-    raise.
-    """
-
-    flat: list[tuple[str, str, str, str]] = []
-    if not isinstance(overrides, dict):
-        return ()
-    for scanner_type, sevs in overrides.items():
-        if not isinstance(sevs, dict):
-            continue
-        for severity, surface_actions in sevs.items():
-            if not isinstance(surface_actions, dict):
-                continue
-            for surface in ("install", "file", "runtime"):
-                action = surface_actions.get(surface)
-                if action:
-                    flat.append((str(scanner_type), str(severity), surface, str(action)))
-    return tuple(flat)
-
-
 def _active_policy_scanner_overrides(
-    policy_dir: str,
+    config: object | None,
 ) -> tuple[tuple[str, str, str, str], ...]:
-    """Read the active policy's synced ``data.json`` scanner overrides (N3).
+    """The per-type admission actions config.yaml sets (N3).
 
-    Uses the same reader as the enforcement lane (``rego/data.json``, with the
-    flat ``data.json`` fallback). Any read/parse failure degrades to an empty
-    tuple so the Overview simply renders nothing.
+    ``admission.<skill|mcp|plugin>.actions`` refine the inherited
+    ``admission.defaults`` for one asset type. Output: ``(type, severity,
+    surface, action)`` tuples for :func:`format_scanner_overrides_summary`.
+    Malformed entries are skipped so a bad value degrades to a partial list,
+    never a raise.
     """
 
+    admission = getattr(config, "admission", None)
+    if admission is None:
+        return ()
     try:
-        from defenseclaw.enforce.admission import _read_policy_data
-
-        data = _read_policy_data(policy_dir or "")
+        from defenseclaw.enforce.admission import _compile_action
     except Exception:  # noqa: BLE001 - the override summary is purely informational.
         return ()
-    if not isinstance(data, dict):
-        return ()
-    return _flatten_scanner_overrides(data.get("scanner_overrides", {}))
+    flat: list[tuple[str, str, str, str]] = []
+    for target_type in ("skill", "mcp", "plugin"):
+        actions = getattr(getattr(admission, target_type, None), "actions", None) or {}
+        for severity, raw in actions.items():
+            compiled = _compile_action(raw)
+            if compiled is None:
+                continue
+            action = compiled[0]
+            for surface in ("install", "file", "runtime"):
+                flat.append((target_type, str(severity).upper(), surface, str(getattr(action, surface))))
+    return tuple(flat)
 
 
 def _overview_config(config: object | None) -> OverviewConfig | None:
@@ -16251,11 +16234,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         ai_discovery_enabled=getattr(getattr(config, "ai_discovery", None), "enabled", False) is True,
         # A2: visible diagnostic when the roster enumeration failed.
         roster_error=roster_error,
-        # N3: active-policy scanner action overrides (data.json), so the
-        # Overview/status surface a policy that downgrades a scanner surface.
-        scanner_overrides=_active_policy_scanner_overrides(
-            str(getattr(config, "policy_dir", "") or "")
-        ),
+        # N3: per-type admission actions, so the Overview/status surface a
+        # policy that changes one asset type's enforcement.
+        scanner_overrides=_active_policy_scanner_overrides(config),
     )
 
 

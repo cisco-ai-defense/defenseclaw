@@ -188,7 +188,7 @@ class TestSharedSkillDirScope(unittest.TestCase):
     def test_claudecode_scoped_unblock_and_restore_act_on_the_amp_quarantine(self):
         quarantined = self.invoke(["quarantine", "review", "--connector", "amp"])
         self.assertEqual(quarantined.exit_code, 0, quarantined.output)
-        PolicyEngine(self.app.store).block("skill", "review", "watcher enforcement")
+        PolicyEngine(self.app.store, self.app.cfg).block("skill", "review", "watcher enforcement")
 
         unblocked = self.invoke(["unblock", "review", "--connector", "claudecode"])
         self.assertEqual(unblocked.exit_code, 0, unblocked.output)
@@ -208,7 +208,7 @@ class TestSharedSkillDirGlobalWatcherBlock(TestSharedSkillDirScope):
     def _watcher_state(self):
         quarantined = self.invoke(["quarantine", "review", "--connector", "amp"])
         self.assertEqual(quarantined.exit_code, 0, quarantined.output)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.remove_action_for_connector("skill", "review", "amp")
         pe.block("skill", "review", "watcher enforcement")
         return pe
