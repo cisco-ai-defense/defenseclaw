@@ -84,12 +84,11 @@ func gatewayRunsAsServiceAccount() bool {
 // by any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
-	if isSandboxHookRequest(ctx) {
-		// A sandbox payload is agent-controlled end to end; the binding's
+	if !isSandboxHookRequest(ctx) {
+		// A sandbox payload is agent-controlled end to end: the binding's
 		// host user is the only attribution, and no address is inferred.
-		return user
+		user.Email = hookUserEmail(connector, payload)
 	}
-	user.Email = hookUserEmail(connector, payload)
 	user.Identity = requestIdentityFor(ctx, user.ID)
 	return user
 }
@@ -121,12 +120,11 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 // OTLP ingest traffic, where the caller is a library rather than a connector
 // with a local credential file to read.
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
+	var user llmEventUser
 	if binding, ok := sandboxauth.FromContext(r.Context()); ok {
 		userID, _, userName := sandboxBindingUser(binding)
-		return newLLMEventUser(userID, userName, userID != "")
-	}
-	var user llmEventUser
-	if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
+		user = newLLMEventUser(userID, userName, userID != "")
+	} else if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
 		// An authenticated caller's headers and body are claims; the
 		// verified subject is who it is.
 		user = newTrustedLLMEventUser(subject.UserID, subject.UserName)
