@@ -163,11 +163,89 @@ def _derived_scanner_gate(fail_on: str, review_min: str) -> dict[str, tuple[Seve
     return out
 
 
+def _data_json_action(raw: Any) -> tuple[SeverityAction, bool] | None:
+    """A 1.0 data.json action (runtime block|allow) as a SeverityAction."""
+    if not isinstance(raw, dict):
+        return None
+    return (
+        SeverityAction(
+            file=str(raw.get("file") or "none"),
+            runtime="disable" if str(raw.get("runtime") or "") in ("block", "disable") else "enable",
+            install=str(raw.get("install") or "none"),
+        ),
+        False,
+    )
+
+
+def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmission:
+    """The Secure Client admission, unchanged from 1.0 (Go
+    ``policy.secureClientAdmission``): the actions, per-type scanner
+    overrides, first-party list and scan flags of
+    ``<policy_dir>/rego/data.json`` (or ``<policy_dir>/data.json``) over the
+    shipped defaults, with no scanner-gate derivation, so a finding below
+    the block level is a warning."""
+    import json
+
+    out = _builtin_admission(target_type)
+    data: dict[str, Any] = {}
+    if str(policy_dir or "").strip():
+        for path in (os.path.join(policy_dir, "rego", "data.json"), os.path.join(policy_dir, "data.json")):
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    raw = handle.read()
+            except OSError:
+                continue
+            try:
+                loaded = json.loads(raw)
+            except ValueError:
+                loaded = {}
+            data = loaded if isinstance(loaded, dict) else {}
+            break
+    flags = data.get("config") if isinstance(data.get("config"), dict) else {}
+    scan_on_install = flags["scan_on_install"] if isinstance(flags.get("scan_on_install"), bool) else out.scan_on_install
+    bypass = (
+        flags["allow_list_bypass_scan"]
+        if isinstance(flags.get("allow_list_bypass_scan"), bool)
+        else out.allow_list_bypass_scan
+    )
+    actions, source = dict(out.actions), out.source
+    raw_actions = data.get("actions")
+    if isinstance(raw_actions, dict) and raw_actions:
+        actions = {}
+        overrides = (data.get("scanner_overrides") or {}).get(target_type) if isinstance(data.get("scanner_overrides"), dict) else None
+        for layer in (raw_actions, overrides if isinstance(overrides, dict) else {}):
+            for sev, value in layer.items():
+                action = _data_json_action(value)
+                if action is not None:
+                    actions[str(sev).upper()] = action
+        source = "data.json"
+    first_party = dict(out.first_party_allow)
+    entries = data.get("first_party_allow_list")
+    if isinstance(entries, list):
+        first_party = {
+            str(entry.get("target_name", "")): list(entry.get("source_path_contains") or [])
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("target_type") == target_type
+        }
+    return CompiledAdmission(
+        scan_on_install=scan_on_install,
+        allow_list_bypass_scan=bypass,
+        actions=actions,
+        first_party_allow=first_party,
+        source=source,
+    )
+
+
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     """Compile ``admission:`` for one asset type, as the gateway does (Go
     ``policy.CompileAdmission``). Each field and severity resolves, first
     match wins: ``admission.<type>`` > (skill) the scanner gate >
-    ``admission.defaults`` > the built-in default."""
+    ``admission.defaults`` > the built-in default. A Secure Client host
+    keeps the 1.0 admission (``_secure_client_admission``)."""
+    from defenseclaw.enforce import asset_lists
+
+    if asset_lists.is_secure_client(cfg):
+        return _secure_client_admission(str(getattr(cfg, "policy_dir", "") or ""), target_type)
     out = _builtin_admission(target_type)
     adm = getattr(cfg, "admission", None)
     if adm is None:

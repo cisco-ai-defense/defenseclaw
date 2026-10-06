@@ -885,6 +885,29 @@ class TestCompileAdmission(unittest.TestCase):
         self.assertTrue(skill.actions["LOW"][1])
         self.assertEqual(compile_admission(cfg, "plugin").actions["LOW"][0].install, "block")
 
+    def test_secure_client_keeps_the_1_0_data_json_admission(self):
+        # As Go secureClientAdmission: data.json decides and no scanner gate
+        # is derived, so a LOW skill finding stays a warning.
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as policy_dir:
+            os.makedirs(os.path.join(policy_dir, "rego"))
+            with open(os.path.join(policy_dir, "rego", "data.json"), "w", encoding="utf-8") as handle:
+                json.dump({"actions": {
+                    "HIGH": {"install": "block", "file": "quarantine", "runtime": "block"},
+                    "MEDIUM": {"install": "block", "file": "none", "runtime": "block"},
+                    "LOW": {"install": "none", "file": "none", "runtime": "allow"},
+                }}, handle)
+            cfg = SimpleNamespace(deployment_mode="managed_enterprise", policy_dir=policy_dir, admission=AdmissionConfig())
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+                skill = compile_admission(cfg, "skill")
+        self.assertEqual(skill.source, "data.json")
+        self.assertEqual((skill.actions["MEDIUM"][0].install, skill.actions["MEDIUM"][0].runtime), ("block", "disable"))
+        self.assertEqual(skill.actions["LOW"][0].install, "none")
+        self.assertFalse(skill.actions["LOW"][1])
+
 
 class TestPolicyEngineToolConnectorScope(_StoreTestBase):
     """T2: connector-scoped tool helpers (the @<connector>/<tool> gate).
