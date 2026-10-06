@@ -152,12 +152,15 @@ func (j *LLMJudge) judgeTraceInput(
 		ConditionConnectorKnown:            connector != "",
 		ConditionOperationTerminal:         true,
 	}
-	// Stamp the verified caller the turn's hook spans carry, so judge spans
-	// can be attributed to a user in Galileo and Tempo (GAP-2641).
+	// Stamp the caller, directory/session facts and agent identity the
+	// turn's hook spans carry, so judge spans join the user, the agent and
+	// the directory facts in Galileo and Tempo (GAP-2641, GAP-0066).
 	caller := auditCallerIdentity(ctx)
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)))
+	caller.Identity.applyTo(&input)
 	providerName := strings.TrimSpace(j.providerName)
 	if providerName == "" {
 		providerName = judgeGenAISystem(j.model)
