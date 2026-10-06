@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -160,6 +161,11 @@ type InstallWatcher struct {
 	// applies to the next admission. Nil uses opa.
 	policySource func() *policy.Prepared
 
+	// policyStamp returns the live generation's effective policy digest and
+	// applied generation for the admission decision records (absent before
+	// the first generation and under the Secure Client integration).
+	policyStamp func() (digest observability.Optional[string], generation observability.Optional[int64])
+
 	// scannerFactory resolves the scanner for an event. Defaults to
 	// scannerFor; tests inject a fake to observe scan invocations without
 	// shelling out to the real scanner binaries.
@@ -196,10 +202,16 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 	}
 }
 
-// SetConfigSource binds the live config the admission gate reads
-// asset_policy and admission from. Call it before Run.
+// SetPolicySource binds the live generation's prepared OPA admission
+// query. Call it before Run.
 func (w *InstallWatcher) SetPolicySource(source func() *policy.Prepared) {
 	w.policySource = source
+}
+
+// SetPolicyStamp binds the effective policy digest and generation the
+// admission decision records carry. Call it before Run.
+func (w *InstallWatcher) SetPolicyStamp(stamp func() (observability.Optional[string], observability.Optional[int64])) {
+	w.policyStamp = stamp
 }
 
 // SetConfigSource binds the live config admission decisions read.

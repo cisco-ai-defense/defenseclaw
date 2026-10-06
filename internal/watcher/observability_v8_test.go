@@ -5,6 +5,7 @@ package watcher
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -118,6 +119,9 @@ func TestWatcherAdmissionTraceUsesGeneratedFamilyAndJoinsScanEvaluation(t *testi
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	capture := &watcherAdmissionTraceCapture{}
 	w.BindObservabilityV8(capture)
+	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return observability.Present("sha256:" + strings.Repeat("ab", 32)), observability.Present(int64(7))
+	})
 	traceID, _ := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
 	spanID, _ := trace.SpanIDFromHex("0123456789abcdef")
 	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
@@ -153,6 +157,13 @@ func TestWatcherAdmissionTraceUsesGeneratedFamilyAndJoinsScanEvaluation(t *testi
 		completed.Outcome != observability.OutcomeBlocked || !completed.ConditionOperationTerminal ||
 		completed.ConditionTechnicalFailure || completed.Envelope.Correlation.EvaluationID != watcherAdmissionEvaluationID(started) {
 		t.Fatalf("watcher admission completion input=%+v", completed)
+	}
+	// The decision carries the live generation's effective policy digest.
+	if digest, ok := completed.DefenseClawPolicyEffectiveDigest.Get(); !ok || digest != "sha256:"+strings.Repeat("ab", 32) {
+		t.Fatalf("watcher admission policy digest = %q, %v", digest, ok)
+	}
+	if generation, ok := completed.DefenseClawPolicyGeneration.Get(); !ok || generation != 7 {
+		t.Fatalf("watcher admission policy generation = %d, %v", generation, ok)
 	}
 	corr := watcherScanCorrelation(started, "", "codex")
 	if corr.EvaluationID != watcherAdmissionEvaluationID(started) || corr.TraceID != traceID.String() ||

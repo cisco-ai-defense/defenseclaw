@@ -37,6 +37,10 @@ type watcherAdmissionTraceV8 struct {
 	targetRef    string
 	policyID     string
 	connector    string
+	// policyDigest and policyGeneration are the live generation's, read
+	// once when the decision starts.
+	policyDigest     observability.Optional[string]
+	policyGeneration observability.Optional[int64]
 }
 
 type watcherAdmissionEvaluationIDKey struct{}
@@ -73,6 +77,9 @@ func (w *InstallWatcher) startAdmissionTraceV8(
 		runtime: w.admissionObservabilityV8(), ctx: ctx, startedAt: time.Now().UTC(),
 		evaluationID: uuid.NewString(), targetType: targetType, targetRef: event.Name,
 		policyID: policyID, connector: w.eventConnector(event),
+	}
+	if w.policyStamp != nil {
+		operation.policyDigest, operation.policyGeneration = w.policyStamp()
 	}
 	ctx = context.WithValue(ctx, watcherAdmissionEvaluationIDKey{}, operation.evaluationID)
 	operation.ctx = ctx
@@ -139,6 +146,8 @@ func (operation *watcherAdmissionTraceV8) input(
 		DefenseClawAgentInstanceID:          watcherAdmissionOptionalIdentifier(correlation.AgentInstanceID),
 		DefenseClawEvaluationID:             watcherAdmissionOptionalIdentifier(operation.evaluationID),
 		DefenseClawPolicyID:                 watcherAdmissionOptionalIdentifier(operation.policyID),
+		DefenseClawPolicyEffectiveDigest:    operation.policyDigest,
+		DefenseClawPolicyGeneration:         operation.policyGeneration,
 		DefenseClawGuardrailName:            "admission",
 		DefenseClawGuardrailStrategy:        observability.Present("watcher_admission"),
 		DefenseClawGuardrailStage:           observability.Present("admission"),
