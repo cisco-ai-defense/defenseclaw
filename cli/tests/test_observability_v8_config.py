@@ -257,6 +257,15 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
     assert "run defenseclaw upgrade" in str(captured.value)
 
 
+def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nguardrail: {no_such_key: 1}\n")
+
+    assert captured.value.keyword == "additionalProperties"
+    assert "$.guardrail.no_such_key" in str(captured.value)
+    assert "upgrade" not in str(captured.value)
+
+
 @pytest.mark.parametrize(
     ("removed", "path", "target"),
     [
@@ -615,7 +624,7 @@ observability:
     rendered = str(captured.value)
     assert canary not in rendered
     assert "redacted.yaml" in rendered
-    assert captured.value.path == "$.observability"
+    assert captured.value.path == "$.observability.unknown_field"
 
 
 def test_semantic_diagnostics_do_not_render_resource_credentials() -> None:

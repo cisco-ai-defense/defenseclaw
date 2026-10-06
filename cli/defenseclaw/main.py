@@ -363,7 +363,7 @@ def cli(ctx: click.Context) -> None:
             elif status_continues:
                 ux.echo(
                     "  A gateway that is already running keeps the config it started with; "
-                    "its status follows. Fix the problem above, then run: defenseclaw-gateway restart",
+                    "its status follows. Fix the problem above and the gateway applies the change on its own.",
                     err=True,
                 )
             else:

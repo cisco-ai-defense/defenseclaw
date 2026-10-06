@@ -751,6 +751,7 @@ func (a *APIServer) sandboxIngressAuthorize(
 		// Session promotion re-resolves the agent identity from the
 		// registry; restore the binding's host user on top of it.
 		ctx = contextWithSandboxUser(ctx, binding)
+		ctx = a.attachSandboxHostSubject(ctx, binding)
 		next.ServeHTTP(w, r.WithContext(ctx))
 		// A panicking handler never gets here: the server drops its
 		// connection, which the hook sees as a transport failure.
@@ -893,6 +894,25 @@ func contextWithSandboxUser(ctx context.Context, binding sandboxauth.Binding) co
 	id := AgentIdentityFromContext(ctx)
 	id.UserID, id.UserIDKind, id.UserName = sandboxBindingUser(binding)
 	return ContextWithAgentIdentity(ctx, id)
+}
+
+// attachSandboxHostSubject verifies sandbox traffic as the binding's host
+// user. The sandbox manager launches every sandbox as the gateway's own
+// account and records it as the host user, and only that sandbox holds the
+// binding's credential, so on a per-user gateway the host user is verified
+// like host traffic's process owner: the same directory facts, 15-minute
+// refresh and lookup-failure handling, and identity.observed. A binding
+// that names another account, and every sandbox of a service-account
+// gateway, get no subject.
+func (a *APIServer) attachSandboxHostSubject(ctx context.Context, binding sandboxauth.Binding) context.Context {
+	if !identityFactsEnabled.Load() || a.userScopedCredentialsRequired() {
+		return ctx
+	}
+	hostID, _, hostName := sandboxBindingUser(binding)
+	if ownerID, _ := localProcessUser(); hostID == "" || hostID != ownerID {
+		return ctx
+	}
+	return a.attachVerifiedSubject(ctx, hostID, hostName, subjectSourceProcessOwner)
 }
 
 func writeSandboxIngressError(w http.ResponseWriter, status int, message string) {

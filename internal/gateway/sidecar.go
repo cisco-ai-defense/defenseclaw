@@ -3259,6 +3259,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		s.handleAdmissionResult(r)
 	})
 	w.SetConfigSource(s.currentConfig)
+	w.SetRulePackSource(installScanRulePack)
 	// Admission evaluates the live generation's prepared OPA, which the
 	// config manager rebuilds when a watched Rego module changes.
 	w.SetPolicySource(func() *policy.Prepared {
