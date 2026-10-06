@@ -144,6 +144,9 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// serviceAccountKept is set when an uninstall could not delete the
+	// service account (macOS can deny the directory-record delete).
+	serviceAccountKept bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -2023,8 +2026,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
 		if !l.opts.KeepServiceAccount {
+			// By now the services, the binaries (this CLI included) and the
+			// deployment record are gone, so failing the uninstall here would
+			// leave a command that cannot be rerun. The account is a leftover
+			// to delete by hand.
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
-				errs = append(errs, err)
+				l.serviceAccountKept = true
+				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
+					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
 			}
 		}
 	}
@@ -2054,6 +2063,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
+// serviceAccountDeleteCommand is how an administrator deletes the service
+// account by hand after an uninstall could not.
+func serviceAccountDeleteCommand(goos, name string) string {
+	if goos == "darwin" {
+		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+	}
+	return "`sudo userdel " + name + "`"
+}
+
 // uninstallSummary says what a completed uninstall removed and kept, like
 // the change list of ensure and repair. A bare "uninstall: done" did not
 // tell the administrator what happened to the machine state or to the
@@ -2079,6 +2097,8 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 	case l.opts.KeepServiceAccount:
 		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	case l.serviceAccountKept:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
