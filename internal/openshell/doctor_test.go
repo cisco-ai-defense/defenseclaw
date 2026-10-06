@@ -183,6 +183,32 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	return f
 }
 
+// TestDoctorRegistersAGatewayUnderAHomebrewOfYourOwn: the fix for a missing
+// registration is the command that works under the Homebrew prefix: the
+// OpenShell CLI finds the gateway's certificates only under /opt/homebrew
+// and /usr/local unless it is told where they are (GAP-0110).
+func TestDoctorRegistersAGatewayUnderAHomebrewOfYourOwn(t *testing.T) {
+	const plain = "openshell gateway add https://127.0.0.1:17670 --local --name openshell"
+	for _, tc := range []struct{ goos, prefix, want string }{
+		{"darwin", "/Users/a/homebrew", "OPENSHELL_LOCAL_TLS_DIR=/Users/a/homebrew/var/openshell/tls " + plain},
+		{"darwin", "/opt/homebrew", plain},
+		{"linux", "/Users/a/homebrew", plain},
+	} {
+		f := newDoctorFixture(t)
+		f.doctor.GOOS, f.doctor.Gateway.GOOS, f.doctor.Gateway.BrewPrefix = tc.goos, tc.goos, tc.prefix
+		if tc.goos == "darwin" {
+			f.onBrew()
+		}
+		if err := os.RemoveAll(filepath.Join(f.dir, "gateways")); err != nil {
+			t.Fatal(err)
+		}
+		c := f.run().Get(openshell.CheckIDRegistration)
+		if c == nil || c.Status != openshell.StatusFail || c.Fix == nil || c.Fix.Command != tc.want {
+			t.Fatalf("%s %s: registration check = %+v", tc.goos, tc.prefix, c)
+		}
+	}
+}
+
 // fakeShim stands for the ssh shim in doctor tests; Remove leaves it be.
 var fakeShim = &openshell.SSHShim{Dir: "/shim", Path: "/shim/ssh", Real: "/usr/bin/ssh"}
 

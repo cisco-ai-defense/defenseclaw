@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -217,7 +218,10 @@ func buildHookLifecycleV8Record(
 		GenAIToolCallID:                     hookV8OptionalIdentifier(meta.ToolID),
 		DefenseClawAgentReportedCostPresent: meta.ReportedCost,
 		DefenseClawAgentReportedCostUsd:     hookV8OptionalReportedCost(meta),
+		DefenseClawAgentIdentityID:          agentIdentityV8(meta.AgentIdentityID),
 	}
+	base.DefenseClawSandboxID, base.DefenseClawSandboxName = hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	meta.Identity.applyTo(&base)
 
 	switch meta.LifecycleEvent {
 	case observability.TelemetryEventSessionStart:
@@ -282,6 +286,18 @@ func hookLifecycleV8EventInput(base observability.LogCompatSessionStartInput) ob
 		DefenseClawToolSkillKey:             base.DefenseClawToolSkillKey,
 		DefenseClawAgentReportedCostPresent: base.DefenseClawAgentReportedCostPresent,
 		DefenseClawAgentReportedCostUsd:     base.DefenseClawAgentReportedCostUsd,
+		DefenseClawUserPrincipal:            base.DefenseClawUserPrincipal,
+		DefenseClawUserDomain:               base.DefenseClawUserDomain,
+		DefenseClawUserDirectory:            base.DefenseClawUserDirectory,
+		DefenseClawUserTenantID:             base.DefenseClawUserTenantID,
+		DefenseClawUserIdentitySource:       base.DefenseClawUserIdentitySource,
+		DefenseClawUserPrincipalAssurance:   base.DefenseClawUserPrincipalAssurance,
+		DefenseClawSessionKind:              base.DefenseClawSessionKind,
+		DefenseClawSessionKerberosPrincipal: base.DefenseClawSessionKerberosPrincipal,
+		ClientAddress:                       base.ClientAddress,
+		DefenseClawAgentIdentityID:          base.DefenseClawAgentIdentityID,
+		DefenseClawSandboxID:                base.DefenseClawSandboxID,
+		DefenseClawSandboxName:              base.DefenseClawSandboxName,
 	}
 }
 

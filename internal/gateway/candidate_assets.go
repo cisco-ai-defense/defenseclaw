@@ -57,8 +57,9 @@ func checkCandidateAssets(cfg *config.Config) error {
 		}
 	}
 	cache := guardrail.NewRulePackCache()
+	tuned := profileConnectorNames(cfg)
 	for _, c := range configs {
-		for _, scope := range profileRulePackScopes(c.cfg) {
+		for _, scope := range profileRulePackScopes(c.cfg, tuned) {
 			if builtinPackNotSeeded(scope) {
 				continue
 			}

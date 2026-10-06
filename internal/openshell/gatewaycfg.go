@@ -27,7 +27,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1827,7 +1826,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	if !g.BrewFormulaInstalled() {
 		return st, nil
 	}
-	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Timeout: time.Minute})
+	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
 		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
 	}
@@ -1838,13 +1837,35 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 		File       string `json:"file"`
 		Registered bool   `json:"registered"`
 	}
-	if err := json.Unmarshal(out, &infos); err != nil || len(infos) == 0 {
+	if err := json.NewDecoder(bytes.NewReader(jsonArrayFrom(out))).Decode(&infos); err != nil || len(infos) == 0 {
 		return nil, fmt.Errorf("openshell: brew services info %s: unexpected output %q", GatewayFormula, strings.TrimSpace(string(out)))
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
 	return st, nil
+}
+
+// brewQuietEnv turns off the warning Homebrew prints before the JSON of
+// `brew services info --json` when it runs through sudo (an administrator
+// who switched to the user with sudo -u) and its environment hints.
+var brewQuietEnv = []string{"HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1", "HOMEBREW_NO_ENV_HINTS=1"}
+
+// jsonArrayFrom is out from the first line that starts a JSON array: the
+// command's output is its stdout and stderr together, so a warning or a
+// hint can come before the JSON (and after it, which a decoder ignores).
+func jsonArrayFrom(out []byte) []byte {
+	for rest := out; len(rest) > 0; {
+		if bytes.HasPrefix(bytes.TrimLeft(rest, " \t"), []byte("[")) {
+			return rest
+		}
+		nl := bytes.IndexByte(rest, '\n')
+		if nl < 0 {
+			break
+		}
+		rest = rest[nl+1:]
+	}
+	return out
 }
 
 // brewFormulaInstalled reports whether GatewayFormula has a keg under a
@@ -1860,15 +1881,9 @@ func brewFormulaInstalled() bool {
 			prefixes = append(prefixes, filepath.Dir(filepath.Dir(real)))
 		}
 	}
-	name := path.Base(GatewayFormula)
 	for _, p := range prefixes {
-		if !filepath.IsAbs(p) {
-			continue
-		}
-		for _, keg := range []string{filepath.Join(p, "opt", name), filepath.Join(p, "Cellar", name)} {
-			if info, err := os.Stat(keg); err == nil && info.IsDir() {
-				return true
-			}
+		if filepath.IsAbs(p) && formulaKegInstalled(p) {
+			return true
 		}
 	}
 	return false
@@ -1878,24 +1893,7 @@ func brewFormulaInstalled() bool {
 // without running brew: HOMEBREW_PREFIX (which `brew shellenv` sets),
 // else the prefix of the brew on PATH (the one holding a Cellar, through
 // its link when it has none), else /opt/homebrew, Apple silicon's.
-var homebrewPrefix = sync.OnceValue(func() string {
-	if p := os.Getenv("HOMEBREW_PREFIX"); filepath.IsAbs(p) {
-		return filepath.Clean(p)
-	}
-	if brew, err := exec.LookPath("brew"); err == nil && filepath.IsAbs(brew) {
-		candidates := []string{brew}
-		if real, err := filepath.EvalSymlinks(brew); err == nil {
-			candidates = append(candidates, real)
-		}
-		for _, c := range candidates {
-			prefix := filepath.Dir(filepath.Dir(c))
-			if info, err := os.Stat(filepath.Join(prefix, "Cellar")); err == nil && info.IsDir() {
-				return prefix
-			}
-		}
-	}
-	return "/opt/homebrew"
-})
+var homebrewPrefix = sync.OnceValue(func() string { return findHomebrewPrefix(os.Getenv, exec.LookPath) })
 
 // runningDriver asks the gateway of opts which compute driver it runs.
 func runningDriver(ctx context.Context, opts DiscoverOptions) (Driver, error) {

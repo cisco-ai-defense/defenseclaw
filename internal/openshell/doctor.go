@@ -1418,6 +1418,17 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 	c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s", v, path)
 }
 
+// brewPrefix is the Homebrew prefix on a Mac ("" elsewhere).
+func (r *doctorRun) brewPrefix() string {
+	switch {
+	case r.GOOS != "darwin":
+		return ""
+	case r.Gateway.BrewPrefix != "":
+		return r.Gateway.BrewPrefix
+	}
+	return homebrewPrefix()
+}
+
 func (r *doctorRun) checkRegistration() {
 	c := Check{ID: CheckIDRegistration, Title: "Gateway registration"}
 	m := Check{ID: CheckIDMTLS, Title: "Gateway mTLS files"}
@@ -1447,10 +1458,10 @@ func (r *doctorRun) checkRegistration() {
 	case errors.Is(err, ErrUnauthenticatedGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "serve the local gateway over mTLS (the OpenShell package default; remove OPENSHELL_DISABLE_TLS from gateway.env) and register it with its client certificate",
-			Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
+			Command: registerGatewayCommand(r.brewPrefix())}
 	case errors.Is(err, ErrNoGateway), errors.Is(err, ErrGatewayNotFound):
 		c.Status, c.Detail = StatusFail, err.Error()
-		c.Fix = &Fix{Summary: "register the local gateway", Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
+		c.Fix = &Fix{Summary: "register the local gateway", Command: registerGatewayCommand(r.brewPrefix())}
 	case errors.Is(err, ErrRemoteGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "select the local gateway with openshell.gateway.name, or `openshell gateway select " + DefaultGatewayName + "`"}
