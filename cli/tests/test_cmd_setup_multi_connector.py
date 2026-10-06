@@ -376,7 +376,6 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             cmd_setup._apply_setup_batch(
                 ctx,
@@ -432,10 +431,6 @@ class TestAdditiveSetupCommand(unittest.TestCase):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch(
-                "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa",
-                return_value=None,
-            ) as hilt_sync,
             self.assertRaisesRegex(click.ClickException, "exact SST OpenCode 1.18.20"),
         ):
             cmd_setup._apply_setup_batch(
@@ -451,7 +446,6 @@ class TestAdditiveSetupCommand(unittest.TestCase):
 
         trusted.assert_not_called()
         generic.assert_not_called()
-        hilt_sync.assert_not_called()
         save.assert_not_called()
         self.assertEqual(tuple(self.app.cfg.active_connectors()), prior_roster)
         for path, payload in (
@@ -2494,7 +2488,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         )
 
         with (
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
             patch(
                 "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                 return_value=None,
@@ -2539,7 +2532,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             os.remove(failed_path)
 
         with (
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
             patch(
                 "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                 side_effect=reconcile,
@@ -2591,7 +2583,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             return self._post_runtime(snapshot, required)
 
         with (
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
             patch(
                 "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                 side_effect=reconcile,
@@ -2645,7 +2636,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             return self._post_runtime(snapshot, required)
 
         with (
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
             patch(
                 "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                 side_effect=reconcile,
@@ -2693,7 +2683,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         )
 
         with (
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
             patch(
                 "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                 return_value=None,
@@ -2738,7 +2727,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
             atomic_write_private_bytes(reused_path, prior_reused)
 
         with (
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
             patch(
                 "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                 side_effect=reconcile,
@@ -2784,7 +2772,6 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
                         "defenseclaw.commands.cmd_setup._capture_setup_lock_registration_locations_once",
                         side_effect=error,
                     ) as capture,
-                    patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"),
                     patch(
                         "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
                         return_value=None,

@@ -268,7 +268,6 @@ def test_gap1826_rollback_keeps_the_failed_generation_lock_for_the_gateway() -> 
 
         cause = cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
         with (
-            patch.object(cmd_setup, "_sync_guardrail_hilt_to_opa"),
             patch.object(cmd_setup, "_restart_restored_connector_runtime", side_effect=restart),
             pytest.raises(click.ClickException) as raised,
         ):

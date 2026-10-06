@@ -1116,9 +1116,7 @@ class HILTCommandTests(unittest.TestCase):
         runner = CliRunner()
         app = make_multi_ctx({})
         app.cfg.guardrail.hilt.enabled = False
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
-            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
-        ) as sync_mock:
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
             result = runner.invoke(
                 cmd_guardrail.hilt_cmd,
                 ["on", "--min-severity", "MEDIUM", "--yes"],
@@ -1128,7 +1126,6 @@ class HILTCommandTests(unittest.TestCase):
         self.assertTrue(app.cfg.guardrail.hilt.enabled)
         self.assertEqual(app.cfg.guardrail.hilt.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
-        sync_mock.assert_called_once()
         restart_mock.assert_called_once()
 
     def test_partial_change_preserves_other_field(self):
@@ -1136,9 +1133,7 @@ class HILTCommandTests(unittest.TestCase):
         app = make_multi_ctx({})
         app.cfg.guardrail.hilt.enabled = True
         app.cfg.guardrail.hilt.min_severity = "HIGH"
-        with patch("defenseclaw.commands.cmd_setup._restart_services"), patch(
-            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
-        ):
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
             result = runner.invoke(
                 cmd_guardrail.hilt_cmd, ["--min-severity", "LOW", "--yes"], obj=app
             )
@@ -1162,9 +1157,7 @@ class HILTCommandTests(unittest.TestCase):
     def test_bare_set_on_fans_out_to_all_active_connectors(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "cursor": None})
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
-            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
-        ) as sync_mock:
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
             result = runner.invoke(
                 cmd_guardrail.hilt_cmd,
                 ["on", "--min-severity", "MEDIUM", "--yes"],
@@ -1177,7 +1170,6 @@ class HILTCommandTests(unittest.TestCase):
             self.assertTrue(eff.enabled)
             self.assertEqual(eff.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
-        sync_mock.assert_not_called()
         restart_mock.assert_called_once()
 
     def test_bare_set_off_reconciles_enabled_connector_override(self):
@@ -1190,9 +1182,7 @@ class HILTCommandTests(unittest.TestCase):
         app.cfg.guardrail.connectors["cursor"].hilt = dcconfig.HILTConfig(
             enabled=True, min_severity="MEDIUM"
         )
-        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, patch(
-            "defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa"
-        ) as sync_mock:
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
             result = runner.invoke(cmd_guardrail.hilt_cmd, ["off", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertNotIn("nothing to do", result.output)
@@ -1201,7 +1191,6 @@ class HILTCommandTests(unittest.TestCase):
             self.assertFalse(eff.enabled)
         self.assertEqual(app.cfg.guardrail.connectors["cursor"].hilt.min_severity, "MEDIUM")
         app.cfg.save.assert_called_once()
-        sync_mock.assert_not_called()
         restart_mock.assert_called_once()
 
     def test_set_one_connector_persists_and_restarts_only_it(self):
