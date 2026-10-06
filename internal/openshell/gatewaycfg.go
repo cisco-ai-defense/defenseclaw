@@ -27,7 +27,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1882,15 +1881,9 @@ func brewFormulaInstalled() bool {
 			prefixes = append(prefixes, filepath.Dir(filepath.Dir(real)))
 		}
 	}
-	name := path.Base(GatewayFormula)
 	for _, p := range prefixes {
-		if !filepath.IsAbs(p) {
-			continue
-		}
-		for _, keg := range []string{filepath.Join(p, "opt", name), filepath.Join(p, "Cellar", name)} {
-			if info, err := os.Stat(keg); err == nil && info.IsDir() {
-				return true
-			}
+		if filepath.IsAbs(p) && formulaKegInstalled(p) {
+			return true
 		}
 	}
 	return false
