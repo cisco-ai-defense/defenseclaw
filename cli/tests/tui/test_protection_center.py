@@ -167,6 +167,8 @@ def test_posture_is_the_default_view_and_rows_show_each_scopes_tool_call_levels(
     # codex's strict pack blocks MEDIUM+ and alerts on LOW+; the others use default levels.
     assert rows[1][2:5] == ("MEDIUM+", "LOW+", "HIGH+")
     assert rows[0][2:5] == ("CRITICAL", "MEDIUM+", "off")
+    # The header names the global scope's levels, which LLM traffic follows too.
+    assert model.headline().startswith("Global: blocks CRITICAL, alerts MEDIUM+")
     assert rows[1][6] == "1/5" and rows[0][6] == "0/5"
     widest = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(columns)]
     assert sum(widest) + 2 * len(widest) <= 74

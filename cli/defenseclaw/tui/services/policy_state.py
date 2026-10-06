@@ -1449,13 +1449,14 @@ class PoliciesPanelModel:
         if view == "packs" and self.pack_error:
             return f"Could not read rule packs: {self.pack_error}"
         if view == "posture":
-            active = self.active_policy()
-            if active is None:
-                return "Tool-call levels are set per scope below · no policy is active for LLM traffic"
-            text = (
-                f"LLM traffic ({active.name} policy): blocks {active.block_at or '?'}, alerts {active.alert_at or '?'}"
-            )
-            wide = f"{text} · tool calls: per scope below"
+            # One threshold model: LLM traffic, prompts and tool calls all take
+            # their scope's levels (the rows below), not the preset's.
+            row = self.scope_row("")
+            if row is None:
+                return "Levels are set per scope below"
+            block, alert = self.scope_levels(row)
+            text = f"Global: blocks {block or '?'}, alerts {alert or '?'}"
+            wide = f"{text} · LLM traffic and tool calls use their scope's levels below"
             return wide if not width or len(wide) <= width else text
         if view in {"optin", "families"}:
             scope = self.scope_name() or "-"
@@ -1796,12 +1797,6 @@ class PoliciesPanelModel:
         if protection:
             titles = [str(_attr(self.protection_pack(name), "title")) or name for name in protection]
             lines.append("Opt-in: " + ", ".join(titles))
-        active = self.active_policy()
-        if active is not None:
-            lines.append(
-                f"LLM traffic through the guardrail proxy: the {active.name} policy blocks "
-                f"{active.block_at or '?'}, alerts at {active.alert_at or '?'}."
-            )
         return f"Posture · {scope}", tuple(lines)
 
     def _pack_line(self, row: object) -> str:
