@@ -87,7 +87,8 @@ def _disabled() -> bool:
             raw = yaml.safe_load(stream)
     except Exception:  # noqa: BLE001 - missing or unreadable config keeps the default
         return False
-    return isinstance(raw, dict) and raw.get("update_check") is False
+    update = raw.get("update") if isinstance(raw, dict) else None
+    return isinstance(update, dict) and update.get("check") is False
 
 
 def _self_update_disabled_by_policy() -> bool:

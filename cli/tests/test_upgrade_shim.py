@@ -441,7 +441,7 @@ def test_notice_never_creates_the_data_directory(tmp_path: Path, monkeypatch: py
 
 def test_notice_reads_update_check_from_defenseclaw_config(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     external = tmp_path / "elsewhere.yaml"
-    external.write_text("config_version: 8\nupdate_check: false\n")
+    external.write_text("config_version: 9\nupdate:\n  check: false\n")
     monkeypatch.setenv("DEFENSECLAW_CONFIG", str(external))
 
     assert update_notice._disabled()
@@ -475,7 +475,7 @@ def test_notice_can_be_disabled(home: Path, monkeypatch: pytest.MonkeyPatch, set
     elif setting == "ci":
         monkeypatch.setenv("CI", "true")
     else:
-        (home / "config.yaml").write_text("config_version: 8\nupdate_check: false\n")
+        (home / "config.yaml").write_text("config_version: 9\nupdate:\n  check: false\n")
 
     assert update_notice.available_message() is None
 
