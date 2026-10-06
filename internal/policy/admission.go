@@ -303,7 +303,7 @@ func listEntries(rules []config.AssetPolicyRule, assetType, connector string) []
 		if name == "" {
 			continue
 		}
-		if rc := strings.TrimSpace(rule.Connector); rc != "" && !strings.EqualFold(rc, strings.TrimSpace(connector)) {
+		if rc := strings.TrimSpace(rule.Connector); rc != "" && !config.SameConnector(rc, connector) {
 			continue
 		}
 		base := ListEntry{TargetType: assetType, TargetName: name, Reason: rule.Reason, Connector: strings.TrimSpace(rule.Connector)}

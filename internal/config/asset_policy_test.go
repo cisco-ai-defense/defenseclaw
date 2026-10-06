@@ -73,6 +73,20 @@ func TestEvaluateAssetPolicyExplicitListsApplyInEveryMode(t *testing.T) {
 	}
 }
 
+// A rule spelled with a connector alias (claude-code, as the hook script is
+// named) applies to the canonical name the runtime passes.
+func TestAssetPolicyListsMatchConnectorAliases(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Tool.Denied = []AssetPolicyToolRule{{Name: "Bash", Connector: "claude-code"}}
+	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "evil", Connector: "Claude_Code"}}
+	if verdict, _ := cfg.ToolListDecision("Bash", "claudecode"); verdict != AssetListDeny {
+		t.Fatalf("ToolListDecision = %q, want %q", verdict, AssetListDeny)
+	}
+	if verdict, _ := cfg.AssetListDecision(AssetPolicyInput{TargetType: "skill", Name: "evil", Connector: "claudecode"}); verdict != AssetListDeny {
+		t.Fatalf("AssetListDecision = %q, want %q", verdict, AssetListDeny)
+	}
+}
+
 func TestEvaluateAssetPolicyAllowOverridesDefaultDeny(t *testing.T) {
 	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
 	cfg.AssetPolicy.Enabled = true

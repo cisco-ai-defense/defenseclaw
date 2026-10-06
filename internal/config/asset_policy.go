@@ -489,7 +489,7 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	}
 	if rule.Connector != "" {
 		hasConstraint = true
-		if !strings.EqualFold(strings.TrimSpace(rule.Connector), strings.TrimSpace(in.Connector)) {
+		if !SameConnector(rule.Connector, in.Connector) {
 			return false
 		}
 	}

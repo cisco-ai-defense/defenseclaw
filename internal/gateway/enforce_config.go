@@ -65,7 +65,7 @@ type assetListEdit struct {
 func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Change {
 	base := "asset_policy." + edit.TargetType
 	sameAsset := func(name, connector string) bool {
-		return strings.TrimSpace(name) == edit.Name && strings.EqualFold(strings.TrimSpace(connector), edit.Connector)
+		return strings.TrimSpace(name) == edit.Name && config.SameConnector(connector, edit.Connector)
 	}
 	if edit.TargetType == "tool" {
 		denied, allowed := cfg.AssetPolicy.Tool.Denied, cfg.AssetPolicy.Tool.Allowed
@@ -183,6 +183,8 @@ func (a *APIServer) enforceWriteResponse(status string, generation uint64) map[s
 // sha256, retried when another writer got there first), then applies the
 // new config to this gateway.
 func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, actor string) (configwrite.Result, error) {
+	// Written as the canonical connector name the runtime passes.
+	edit.Connector = config.NormalizeConnectorName(edit.Connector)
 	path := configFilePathForSnapshot(a.liveConfig())
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {

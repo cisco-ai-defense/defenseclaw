@@ -88,7 +88,7 @@ func (c *Config) ToolListDecision(tool, connector string) (string, AssetPolicyTo
 				if strings.TrimSpace(rule.Name) != tool || (ruleConnector != "") != scoped {
 					continue
 				}
-				if scoped && !strings.EqualFold(ruleConnector, connector) {
+				if scoped && !SameConnector(ruleConnector, connector) {
 					continue
 				}
 				return list.verdict, rule
@@ -96,6 +96,15 @@ func (c *Config) ToolListDecision(tool, connector string) (string, AssetPolicyTo
 		}
 	}
 	return "", AssetPolicyToolRule{}
+}
+
+// SameConnector reports whether two connector names name the same connector
+// once aliases are normalized (claude-code and claude_code are claudecode,
+// open-hands and open_hands are openhands). asset_policy rules compare
+// connectors this way, as the Python lists do (connector_paths.normalize):
+// the runtime always passes the canonical name.
+func SameConnector(a, b string) bool {
+	return normalizeConnectorKey(a) == normalizeConnectorKey(b)
 }
 
 // allowPinMatches is the stricter path test for an allow rule: a pinned
