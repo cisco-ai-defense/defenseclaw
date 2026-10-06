@@ -388,7 +388,7 @@ func (a *APIServer) serveUserScoped(
 	defer release()
 	ctx := PromoteSessionIfAuthenticated(r.Context())
 	ctx = context.WithValue(ctx, verifiedUserScopedIdentityContextKey{}, identity)
-	ctx = a.attachVerifiedSubject(ctx, identity, sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
+	ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), identity, sanitizeLLMEventUser(userScopedIdentityName(identity)), subjectSourceUserCredential)
 	if mark != nil {
 		ctx = mark(ctx)
 	}
