@@ -777,6 +777,9 @@ func (a *APIServer) finalizeAgentHook(
 	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
 		safeSection("audit", func() {
 			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
+			if !panicked {
+				a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
+			}
 		})
 	}
 	return auditPersisted
