@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -32,13 +31,15 @@ import (
 
 // DefaultConfig is the configuration a fresh standalone install gets when
 // the administrator supplies none: local policy engine in observe mode, no
-// connectors, loopback listeners. Administrators replace it through their
-// MDM; the apply unit or `ensure` activates the change.
+// connectors, loopback listeners, the vendor default rule pack (rule_pack
+// resolves under policy_dir). It is config_version 9, so a fresh install has
+// nothing to migrate. Administrators replace it through their MDM; the
+// apply unit or `ensure` activates the change.
 func DefaultConfig(layout managed.StandaloneLayout) []byte {
 	return []byte(fmt.Sprintf(`# DefenseClaw managed enterprise configuration (standalone profile).
 # Administrator-owned. Edit through your MDM or configuration management;
 # the lifecycle validates and applies every change.
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: %s
 policy_dir: %s
@@ -50,8 +51,8 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-  rule_pack_dir: %s
-`, layout.DataDir, layout.VendorPolicyDir, path.Join(layout.VendorPolicyDir, "guardrail", "default")))
+  rule_pack: default
+`, layout.DataDir, layout.VendorPolicyDir))
 }
 
 // validatedConfig is an administrator config that passed every lifecycle

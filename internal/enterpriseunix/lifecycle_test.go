@@ -104,7 +104,7 @@ func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
 	if got := h.mode(filepath.Join(l.VendorPolicyDir, "rego", "guardrail.rego")); got != 0o644 {
 		t.Fatalf("vendor policy mode %04o", got)
 	}
-	if !strings.Contains(h.read(l.ConfigPath), "rule_pack_dir: "+filepath.Join(l.VendorPolicyDir, "guardrail", "default")) {
+	if !strings.Contains(h.read(l.ConfigPath), "rule_pack: default") {
 		t.Fatal("default config does not name the vendor rule pack")
 	}
 
@@ -468,7 +468,7 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			cfg := filepath.Join(t.TempDir(), "staged-config.yaml")
-			unversioned := strings.Replace(string(DefaultConfig(h.env.Layout)), "config_version: 8\n", "", 1)
+			unversioned := strings.Replace(string(DefaultConfig(h.env.Layout)), "config_version: 9\n", "", 1)
 			if err := os.WriteFile(cfg, []byte(unversioned), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -494,6 +494,13 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 // data_dir, is refused before any change instead of failing activation. A
 // missing pack names a source that exists before the first install
 // (GAP-1429: the hint named the vendor folder only an install creates).
+// v8AdminConfig is DefaultConfig as an administrator's config_version 8
+// file, which names its pack by folder.
+func v8AdminConfig(layout managed.StandaloneLayout) string {
+	raw := strings.Replace(string(DefaultConfig(layout)), "config_version: 9\n", "config_version: 8\n", 1)
+	return strings.Replace(raw, "rule_pack: default", "rule_pack_dir: "+filepath.Join(layout.VendorPolicyDir, "guardrail", "default"), 1)
+}
+
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	cases := map[string]struct {
@@ -506,7 +513,7 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0, false},
 		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0, false},
 		// A v9 config selects the pack by name; the check follows it.
-		"missing v9 custom pack": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default",
+		"missing v9 custom pack": {"rule_pack: default",
 			"rule_pack: acme\n  custom_packs:\n    acme: {path: /etc/defenseclaw/policies/guardrail/custom, digest: \"" + digest + "\"}",
 			"does not exist; create the pack there", 0, true},
 	}
@@ -523,10 +530,12 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 				}
 			}
 			cfg := filepath.Join(t.TempDir(), "config.yaml")
-			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), tc.replace, tc.with, 1)
+			// The v8 refusals keep their wording for an administrator's v8 file.
+			base := v8AdminConfig(h.env.Layout)
 			if tc.v9 {
-				raw = strings.Replace(raw, "config_version: 8\n", "config_version: 9\n", 1)
+				base = string(DefaultConfig(h.env.Layout))
 			}
+			raw := strings.Replace(base, tc.replace, tc.with, 1)
 			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
