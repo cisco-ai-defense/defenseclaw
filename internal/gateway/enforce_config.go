@@ -29,6 +29,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
@@ -250,11 +251,11 @@ func apiConfigActor(ctx context.Context) string {
 }
 
 // writeAssetListError maps a writer error to an HTTP status.
-func (a *APIServer) writeAssetListError(w http.ResponseWriter, err error) {
+func (a *APIServer) writeAssetListError(w http.ResponseWriter, r *http.Request, action audit.Action, err error) {
 	status := http.StatusInternalServerError
 	switch {
 	case errors.Is(err, configwrite.ErrManaged):
-		a.writeManagedDeviceRefusal(w)
+		a.writeManagedDeviceRefusal(w, r, action)
 		return
 	case errors.Is(err, configwrite.ErrLockBusy):
 		status = http.StatusServiceUnavailable
@@ -269,16 +270,22 @@ func (a *APIServer) writeAssetListError(w http.ResponseWriter, err error) {
 // refuseManagedPolicyWrite answers 403 on a managed standalone device, where
 // policy changes are made in the management plane, and reports whether it
 // did.
-func (a *APIServer) refuseManagedPolicyWrite(w http.ResponseWriter) bool {
+func (a *APIServer) refuseManagedPolicyWrite(w http.ResponseWriter, r *http.Request, action audit.Action) bool {
 	cfg := a.liveConfig()
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return false
 	}
-	a.writeManagedDeviceRefusal(w)
+	a.writeManagedDeviceRefusal(w, r, action)
 	return true
 }
 
-func (a *APIServer) writeManagedDeviceRefusal(w http.ResponseWriter) {
+// writeManagedDeviceRefusal audits the refused attempt (who asked for which
+// change), then answers 403 managed_device.
+func (a *APIServer) writeManagedDeviceRefusal(w http.ResponseWriter, r *http.Request, action audit.Action) {
+	if a.logger != nil && r != nil {
+		details := fmt.Sprintf("outcome=refused reason=managed_device method=%s actor=%s", r.Method, apiConfigActor(r.Context()))
+		_ = a.logger.LogActionCtx(r.Context(), string(action), r.URL.Path, details)
+	}
 	a.writeJSON(w, http.StatusForbidden, map[string]string{
 		"error":  "managed_device",
 		"detail": "policy changes are made in the management plane",

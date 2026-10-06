@@ -74,10 +74,35 @@ def is_managed_standalone(cfg: Any) -> bool:
     return cfg is not None and enterprise_profile(cfg) == "standalone"
 
 
-def refuse_if_managed(cfg: Any) -> None:
-    """Raise ManagedDeviceError on a managed standalone device."""
+_REFUSAL_ACTIONS = {
+    ("skill", OP_BLOCK): "skill-block", ("skill", OP_ALLOW): "skill-allow", ("skill", OP_UNBLOCK): "skill-unblock",
+    ("plugin", OP_BLOCK): "plugin-block", ("plugin", OP_ALLOW): "plugin-allow",
+    ("plugin", OP_UNBLOCK): "plugin-unblock",
+    ("mcp", OP_BLOCK): "block-mcp", ("mcp", OP_ALLOW): "allow-mcp", ("mcp", OP_UNBLOCK): "mcp-unblock",
+    ("tool", OP_BLOCK): "tool-block", ("tool", OP_ALLOW): "tool-allow", ("tool", OP_UNBLOCK): "tool-unblock",
+}
+
+
+def refuse_if_managed(cfg: Any, *, target_type: str = "", op: str = "", name: str = "") -> None:
+    """Raise ManagedDeviceError on a managed standalone device, after
+    auditing the refused attempt."""
     if is_managed_standalone(cfg):
+        action = _REFUSAL_ACTIONS.get((target_type, OP_UNBLOCK if op == OP_CLEAR else op), "config-update")
+        audit_managed_refusal(action, name or target_type or "config", f"type={target_type}" if target_type else "")
         raise ManagedDeviceError()
+
+
+def audit_managed_refusal(action: str, target: str, details: str = "") -> None:
+    """Record a refused local policy write on a managed device in the audit
+    trail (best effort: the refusal stands even when the gateway that
+    records CLI events is down)."""
+    try:
+        ctx = click.get_current_context(silent=True)
+        logger = getattr(getattr(ctx, "obj", None), "logger", None) if ctx is not None else None
+        if logger is not None:
+            logger.log_action(action, target, f"outcome=refused reason=managed_device {details}".strip())
+    except Exception:  # noqa: BLE001 - auditing must not turn the refusal into a crash
+        pass
 
 
 def _type_policy(asset_policy: Any, target_type: str) -> Any | None:
@@ -202,7 +227,7 @@ def write_operator_decision(
 
     if getattr(cfg, "asset_policy", None) is None:
         raise ValueError("an operator block or allow needs the loaded config.yaml")
-    refuse_if_managed(cfg)
+    refuse_if_managed(cfg, target_type=target_type, op=op, name=name)
     if target_type not in TARGET_TYPES:
         raise ValueError(f"target type must be one of {', '.join(TARGET_TYPES)}")
     path = str(config_path_for_data_dir(cfg.data_dir))

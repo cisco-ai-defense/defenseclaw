@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -109,4 +110,15 @@ func TestEnforceRefusedOnManagedStandalone(t *testing.T) {
 	if code != http.StatusForbidden || out["error"] != "managed_device" || len(*recorded) != 0 {
 		t.Fatalf("managed allow = %d %v, writes %d", code, out, len(*recorded))
 	}
+	// The refused attempt is in the audit trail.
+	events, err := api.store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range events {
+		if event.Action == "api-enforce-allow" && strings.Contains(event.Details, "outcome=refused reason=managed_device") {
+			return
+		}
+	}
+	t.Fatalf("no refused api-enforce-allow audit event in %d events", len(events))
 }

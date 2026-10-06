@@ -2083,7 +2083,11 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.refuseManagedPolicyWrite(w) {
+	blockAction := audit.ActionAPIEnforceBlock
+	if r.Method == http.MethodDelete {
+		blockAction = audit.ActionAPIEnforceUnblock
+	}
+	if a.refuseManagedPolicyWrite(w, r, blockAction) {
 		return
 	}
 	req, ok := a.decodeEnforcementRequest(w, r)
@@ -2106,7 +2110,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := a.applyAssetListEdit(r.Context(), edit, apiConfigActor(r.Context()))
 	if err != nil {
-		a.writeAssetListError(w, err)
+		a.writeAssetListError(w, r, action, err)
 		return
 	}
 	if r.Method == http.MethodDelete && a.store != nil {
@@ -2125,7 +2129,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.refuseManagedPolicyWrite(w) {
+	if a.refuseManagedPolicyWrite(w, r, audit.ActionAPIEnforceAllow) {
 		return
 	}
 	req, ok := a.decodeEnforcementRequest(w, r)
@@ -2196,7 +2200,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			Connector: req.Connector, Reason: reason, SourcePath: req.SourcePath,
 		}, apiConfigActor(r.Context()))
 		if err != nil {
-			a.writeAssetListError(w, err)
+			a.writeAssetListError(w, r, audit.ActionAPIEnforceAllow, err)
 			return
 		}
 		generation = result.Generation
