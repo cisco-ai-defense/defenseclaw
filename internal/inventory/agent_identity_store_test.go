@@ -38,7 +38,7 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rows, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "ALICE"})
+	rows, _, err := st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "ALICE"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,16 +51,16 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 		t.Fatalf("merged row = %+v", got)
 	}
 	for _, qualified := range []string{"alice@DCLAB.TEST", `DCLAB\alice`} {
-		if rows, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: qualified}); err != nil || len(rows) != 1 || rows[0].UserID != "1001" {
+		if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: qualified}); err != nil || len(rows) != 1 || rows[0].UserID != "1001" {
 			t.Fatalf("qualified user filter %q rows = %+v, err %v", qualified, rows, err)
 		}
 	}
 	// GAP-0097: an SSSD account is stored by its qualified name; the bare
 	// name still selects it.
-	if rows, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "bob"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
+	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: "bob"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
 		t.Fatalf("bare user filter rows = %+v, err %v", rows, err)
 	}
-	if rows, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{Connector: "codex"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
+	if rows, _, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{Connector: "codex"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
 		t.Fatalf("connector filter rows = %+v, err %v", rows, err)
 	}
 }

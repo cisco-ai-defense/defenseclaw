@@ -496,7 +496,7 @@ commands read with the deployment's service token. See
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/v1/guardrail/profiles/resolve` | Which guardrail profile a subject resolves to, and why. Query: `user` (account name, uid, SID or principal), `connector`, `agent` (`agt-` and 16 hex digits). Loopback only; a hook credential is refused with `403`. Answers `404` under the Secure Client integration, which rejects profiles. |
-| `GET` | `/api/v1/agents/identities` | The agent identities the gateway recorded. Query: `user` (account name or ID), `connector`. Under the Secure Client integration it answers `{"enabled": false, "identities": []}`. |
+| `GET` | `/api/v1/agents/identities` | The agent identities the gateway recorded. Query: `user` (account name or ID), `connector`, `limit` (default and at most 1000) and `cursor` (the previous page's `next_cursor`). A bad `limit` or `cursor` answers `400`. Under the Secure Client integration it answers `{"enabled": false, "identities": []}`. |
 | `GET` | `/api/v1/ai-usage/ide-plugins` | The last full scan's IDE installations and plugins. Query: `user`, `ide` (product or family), `ai_only` (`true` or `false`), `limit` (default 500, at most 1000) and `cursor` (the previous page's `next_cursor`). A bad `limit`, `cursor` or `ai_only` answers `400`. |
 
 `profiles/resolve` resolves the user through the operating system the way a
@@ -554,14 +554,18 @@ settings under `effective`.
       "last_session_id": "3034b58b-38bc-48da-bd70-efffc86bff40",
       "sessions_seen": 4
     }
-  ]
+  ],
+  "total": 1,
+  "next_cursor": ""
 }
 ```
 
 Rows are most recently seen first. The gateway writes new rows to
 `inventory.db` in a batch every 30 seconds, and the route merges the rows it
 has not written yet, so a new agent shows at once. `sessions_seen` counts each
-chat once, also when it resumes after a gateway restart.
+chat once, also when it resumes after a gateway restart. `total` counts every
+matching identity; while `next_cursor` is not empty, pass it as `cursor` for
+the next page. `defenseclaw agent identities` reads every page.
 
 ```json title="GET /api/v1/ai-usage/ide-plugins?ai_only=true (trimmed)"
 {
