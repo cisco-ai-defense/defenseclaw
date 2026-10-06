@@ -164,7 +164,7 @@ throwaway home first with [Verify a policy locally](/docs/policies/verify-locall
 | Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
 | Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-type `scanner_overrides.<type>.<sev>`; activation writes them to `admission.defaults`, `admission.skill` and `admission.<type>.actions`. |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
-| Guardrail        | `guardrail.block_threshold` / `alert_threshold`, `guardrail.hilt`, `guardrail.patterns`, `severity_mappings`, Cisco trust level.       |
+| Guardrail        | `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
 | Rule pack        | Per-file regex rules and CEL candidate expressions, including `tool_call_only` scoping (`policies/guardrail/<pack>/rules/<filename>.yaml`). |
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
@@ -174,7 +174,7 @@ throwaway home first with [Verify a policy locally](/docs/policies/verify-locall
 | Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
 | Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
 | Watch (rescan)   | `watch.rescan_enabled`, `watch.rescan_interval_min`.                                                                                    |
-| Enforcement      | `enforcement.max_enforcement_delay_seconds`.                                                                                            |
+| Enforcement      | `enforcement.max_enforcement_delay_seconds` is exported but not read by the gateway since `config_version: 9`.                          |
 | Audit            | `audit.log_all_actions`, `audit.log_scan_results`, `audit.retention_days`.                                                             |
 | Scanner profiles | `scanners.<scanner>` profile selection (codeguard / plugin-scanner / skill-scanner).                                                   |
 | Cisco AI Defense (optional · enterprise) | `cisco_ai_defense.enabled` / `endpoint` / `api_key_env` / `scan_hook_surface` — the optional remote lane read by `internal/config`. |

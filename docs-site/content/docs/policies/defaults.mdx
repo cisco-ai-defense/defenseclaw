@@ -20,7 +20,7 @@ DefenseClaw separates *admission policy* from *runtime guardrail rules*. They sh
 
 <Cards>
   <Card title="Admission policy (OPA)" description="What happens when a skill / MCP / plugin gets installed or executed. Lives in policies/<name>.yaml, activated by defenseclaw policy activate <name>." />
-  <Card title="Guardrail rule pack" description="The rules, LLM-judge prompts, and suppressions that check prompts, completions, and tool calls in flight. Lives in policies/guardrail/<name>/, pointed at by guardrail.rule_pack_dir." />
+  <Card title="Guardrail rule pack" description="The rules, LLM-judge prompts, and suppressions that check prompts, completions, and tool calls in flight. Lives in policies/guardrail/<name>/, selected by guardrail.rule_pack." />
 </Cards>
 
 Both layers ship in three named profiles — `default`, `strict`, `permissive` — and you flip them independently:
@@ -32,7 +32,7 @@ defenseclaw guardrail use-pack default        # Guardrail layer
 
 <Callout type="warn">
 `defenseclaw policy activate strict` does **not** change
-`guardrail.rule_pack_dir`, and vice versa. If you want strict everywhere,
+`guardrail.rule_pack`, and vice versa. If you want strict everywhere,
 flip both. [Policies](/docs/policies) explains why admission policy and
 in-flight guardrail detection are independent layers.
 </Callout>

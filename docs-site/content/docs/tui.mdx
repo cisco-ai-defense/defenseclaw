@@ -158,20 +158,24 @@ On **Opt-in packs**, `s` changes the scope and `Space` (or `Enter`) turns the
 highlighted pack on or off with `defenseclaw guardrail protection
 enable|disable NAME [--connector NAME]`. Turning a pack on tells DefenseClaw
 that the scope works against that kind of protected resource (for example a
-production database), so the confirm step says so; the pack is merged into a
-pack of its own under `~/.defenseclaw/policies/guardrail/protected-<scope>/`,
-checked with the rule-pack validator, and only then switched to. A global
-change lists connectors that keep their own pack.
+production database), so the confirm step says so; the pack is added to the
+scope's `rules.protections` list in `config.yaml`, and the gateway composes it
+with the scope's rule pack in memory when it applies the change (a composition
+that fails validation is refused, and the previous configuration keeps
+running). A global change covers every connector.
 
 Every change shows what it does first. The confirm step turns red and asks
 twice when protection gets weaker (for example action → observe, a higher block
 level, approval off, or an opt-in pack off). Mode, level, pack and opt-in
-changes restart a running gateway so they take effect (hook decisions read the
-configuration the gateway started with); a stopped gateway is never started.
+changes reach a running gateway on its next configuration reload (nothing is
+restarted); a stopped gateway is never started.
 
-In the **Policies** view, `b` and `a` edit the highlighted named policy's own
-block and alert thresholds, which apply to LLM traffic through the guardrail
-proxy (`defenseclaw policy edit guardrail …`, which reloads the gateway).
+In the **Policies** view, `b` and `a` on the active policy set the global
+`guardrail.block_at` / `alert_at` (`defenseclaw policy edit guardrail …`, which
+reloads the gateway). They apply to every guardrail surface (prompts,
+completions, the proxy's LLM traffic, tool calls and hooks) unless a connector
+has its own level. On another policy they only save its thresholds until you
+activate it.
 Overview's **Policy posture** reads, for example, `strict · block MEDIUM+ ·
 alert LOW+`, and the status line shows `policy <name> · <mode>`.
 

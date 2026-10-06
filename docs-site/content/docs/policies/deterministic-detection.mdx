@@ -367,10 +367,10 @@ fail closed to abstention in its ActionFacts helper.
 “Selectable” means the pack can be turned on for the global rule pack or one
 connector with `defenseclaw guardrail protection enable NAME [--connector X]`,
 layered into a custom pack in Policy Creator, or copied into an
-operator-owned policy directory. `guardrail protection enable` composes
-`~/.defenseclaw/policies/guardrail/protected-<scope>/<profile>/` from the scope's
-current pack plus every pack that is on (the same merge Policy Creator uses),
-validates it with the gateway's validator, and switches the scope to it;
+operator-owned policy directory. `guardrail protection enable` adds NAME to
+the scope's `rules.protections` list in `config.yaml`; the gateway composes
+the scope's current pack with every pack that is on (the same merge Policy
+Creator uses) in memory, and validates the result when it applies the change;
 `guardrail protection disable NAME` takes it out again and `guardrail
 protection list` shows which scope has which pack on. The staged SSH contract
 is refused. None of this adds another value to `defenseclaw setup guardrail

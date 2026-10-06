@@ -347,12 +347,34 @@ routing:
       priority: 1
       model_refs: [fast]
 
+# Admission policy for new skills, MCP servers and plugins: what a scan result does.
+# Each asset type inherits `defaults`; an `actions` value is block | quarantine | warn |
+# allow, or an exact {install, file, runtime} triple.
+admission:
+  defaults:
+    scan_on_install: true
+    allow_list_bypass_scan: true
+    actions: {critical: quarantine, high: quarantine, medium: warn, low: warn, info: warn}
+  skill:
+    actions: {medium: quarantine}
+    scanner_overrides:         # keyed by scanner name
+      skill-scanner: {high: block}
+  mcp:
+    actions: {low: {install: none, file: none, runtime: disable}}
+
 guardrail:
   enabled: true
   connector: claudecode        # actively enforced connector
   mode: action                 # observe | action (default observe)
   scanner_mode: local          # local | remote | both (default both)
   rule_pack: default           # default | strict | permissive, or a guardrail.custom_packs name (guardrail use-pack)
+  custom_packs:                # your own rule packs: name -> folder, pinned by the digest of the pack's files
+    acme-hardened: {path: /etc/defenseclaw/packs/acme-hardened, digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+  rules:                       # layered on the rule pack; also allowed per connector and profile
+    protections: [cloud-production-protection]   # opt-in packs (guardrail protection enable)
+    enable: [SEC-OPENAI-V2]
+    disable: [ENT-DATA-EMPLOYEE-ID]
+    severity_overrides: {SEC-AWS-SECRET: HIGH}
   block_at: ""                 # CRITICAL | HIGH | MEDIUM | LOW; empty -> the rule pack's level
   alert_at: ""                 # same values; never above block_at
   port: 4000                   # guardrail proxy port
@@ -427,6 +449,11 @@ webhooks:
     url: https://hooks.slack.com/services/T000/B000/XXX
     secret_env: ""             # optional HMAC for `type: generic`
     min_severity: HIGH
+
+update:
+  check: true                  # false turns the update notice off (was update_check)
+  channel: stable
+  source: ""                   # "" = the official release site; else an HTTPS mirror for downloads
 ```
 
 When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1`. The only
@@ -439,6 +466,15 @@ the literal `localhost`): the management API inherits `guardrail.host` until
 
 The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 [OpenShell sandbox settings](#openshell-sandbox-settings) below.
+
+### Admission, rule packs and update
+
+| Key | Meaning |
+| --- | --- |
+| `admission.defaults`, `admission.skill`, `admission.mcp`, `admission.plugin` | The admission policy. Every key has a built-in default, so a config without an `admission:` block enforces the shipped policy; `defenseclaw config get admission --effective` prints what is enforced. `scan_on_install`, `allow_list_bypass_scan`, `actions`, `scanner_overrides` and `first_party_allow_list` replace `policies/rego/data.json` and the `skill_actions`, `mcp_actions` and `plugin_actions` keys, which `config_version: 9` rejects. |
+| `guardrail.custom_packs` | Your own rule packs, by name. `defenseclaw guardrail use-pack PATH` validates the pack and writes the entry; the gateway refuses the pack when its files no longer match the digest. A name here is a valid `rule_pack` at any scope. |
+| `guardrail.rules` | Per-rule changes layered on the selected pack: `protections` (opt-in packs), `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Global, connector and profile layers apply broadest first. |
+| `update.check`, `update.channel`, `update.source` | The update notice and where `defenseclaw upgrade` downloads from. A mirror only changes where bytes are fetched; the release signature is always checked against the official identity. |
 
 ### Guardrail profiles and identity keys
 

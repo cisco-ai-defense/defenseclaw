@@ -393,18 +393,18 @@ for what each one covers. Enabling one tells DefenseClaw that the scope's
 environment is protected: it blocks what the pack proves there and never
 infers that from resource names.
 
-`guardrail protection enable NAME` builds the scope's pack from its current
-base pack (a preset or a custom directory; a pack composed earlier is rebuilt
-from the base it records) plus every opt-in pack that is on, using Policy
-Creator's merge: the pack's rule IDs are removed from every base file, then
-its rules are appended to the file with the same name or added as a new file.
-The result goes to `protected-global/` or `protected-<connector>/` with a
-`defenseclaw-pack.json` manifest (`{"version": 1, "base", "base_name",
-"protection": [...]}`), is validated before anything points at it, and the
-scope is switched to it. The global scope doesn't touch connectors that have
-their own rule pack; it lists them under `not_covered` so you can enable the
-pack there too. A composition that fails validation, for example one that
-exceeds the semantic-rule cost ceiling, changes nothing.
+`guardrail protection enable NAME` adds NAME to the scope's `rules.protections`
+list in `config.yaml` through the config writer: `guardrail.rules.protections`
+for the global scope, `guardrail.connectors.<connector>.rules.protections` with
+`--connector`, and the `guardrail.profiles.<profile>` equivalents with
+`--profile`. No pack directory is built or written. The gateway composes the
+scope's pack in memory when it applies the change: each opt-in pack's rules
+are merged into the base pack by rule ID, using Policy Creator's merge. A
+composition that fails validation, for example one that exceeds the
+semantic-rule cost ceiling, is refused when the gateway reloads, and the
+previous configuration keeps running. The global list applies to every
+connector, on top of whichever rule pack the connector selects.
+`protection disable NAME` removes it again.
 
 `protection enable|disable --json` prints:
 
@@ -413,29 +413,14 @@ exceeds the semantic-rule cost ceiling, changes nothing.
   "version": 1,
   "ok": true,
   "scope": "global",
-  "pack_path": "/Users/me/.defenseclaw/policies/guardrail/protected-global",
+  "profile": null,
   "protection": ["privacy-high-assurance", "cloud-production-protection"],
-  "validation": {
-    "wire_version": 1,
-    "kind": "validation",
-    "valid": true,
-    "summary": {
-      "judge_count": 4,
-      "judge_category_count": 23,
-      "rule_file_count": 8,
-      "rule_count": 247,
-      "enabled_rule_count": 243,
-      "local_pattern_count": 11,
-      "suppression_count": 9,
-      "sensitive_tool_count": 6,
-      "digest": "e9c55a1b691056955a3a2479b8eb694287dfb7b549cc869a01465e5583eaa5d5"
-    }
-  },
-  "not_covered": ["codex"],
-  "gateway": "restarted",
-  "message": "Cloud production protection is on for the global rule pack (protected-global, on top of 'default'). Restarted the gateway; it applies the change now."
+  "message": "Cloud production protection is on for the global scope. Only keep it on if it's true for the global scope: DefenseClaw takes the pack as your word about that environment and blocks what it proves there. Saved (config generation 7). The running gateway applies it on its next reload."
 }
 ```
+
+`protection` is the scope's list after the change, and `profile` is the
+`--profile` name or `null`.
 
 `protection list --json` prints `{"version": 1, "packs": [...], "scopes": [...]}`.
 Each pack has `name`, `title`, `summary` (the README's first paragraph),
@@ -443,8 +428,8 @@ Each pack has `name`, `title`, `summary` (the README's first paragraph),
 `staged`), and `rules` (`id`, `severity`, `title`). Each scope has `scope`
 (`global` or a connector), `pack`, `path`, and `enabled` (the packs on there).
 
-`gateway` in the `mode`, `block-at`, `alert-at`, `use-pack`, and `protection`
-results says how the saved change reached the gateway: `live` (the running
+`gateway` in the `mode`, `block-at`, `alert-at` and `use-pack` results says
+how the saved change reached the gateway: `live` (the running
 gateway applies it on its next reload; the usual case), `restarted` (a hook
 fail-mode change), `not_running` (it loads the change when it
 starts), `guardrail_off` (takes effect when you run
