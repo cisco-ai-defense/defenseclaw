@@ -468,7 +468,7 @@ func TestHookDecisionV8SandboxOmitsUnregisteredShapes(t *testing.T) {
 		{"free text is dropped", audit.CorrelationEnvelope{SandboxID: "has space", SandboxName: "-leading-dash"}, "", ""},
 		{"name over the registered bound is dropped", audit.CorrelationEnvelope{SandboxID: "sbx-2", SandboxName: "dc-" + strings.Repeat("a", 126)}, "sbx-2", ""},
 	} {
-		id, name := hookDecisionV8Sandbox(tc.envelope)
+		id, name := hookV8Sandbox(tc.envelope)
 		if got, ok := id.Get(); ok != (tc.wantID != "") || got != tc.wantID {
 			t.Errorf("%s: sandbox id=(%q,%v) want %q", tc.name, got, ok, tc.wantID)
 		}

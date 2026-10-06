@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -921,6 +922,23 @@ func TestGatewayServiceState(t *testing.T) {
 		}
 		if err := f.cfg.Restart(context.Background()); err != nil || !f.runner.Called("brew services restart nvidia/openshell/openshell") {
 			t.Fatalf("restart: %v", err)
+		}
+		// GAP-0111: run through sudo (an administrator who switched to the
+		// user), Homebrew prints its warning and hints around the JSON, and
+		// setup failed on "unexpected output" though the service ran.
+		f.runner.On("brew services info nvidia/openshell/openshell --json", "Warning: running through sudo, using user/* instead of gui/* domain!\n"+
+			"Hide this warning by setting `HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1`.\n[\n  {\"running\": true, \"loaded\": true, \"status\": \"started\", \"file\": \"/x.plist\"}\n]\nHint: more\n", nil)
+		if st, err := f.cfg.ServiceState(context.Background()); err != nil || !st.Active || !st.Installed {
+			t.Fatalf("state around a warning = %+v, %v", st, err)
+		}
+		var env []string
+		for _, c := range f.runner.Calls() {
+			if c.Name == "brew" && c.Args[0] == "services" && c.Args[1] == "info" {
+				env = c.Env
+			}
+		}
+		if !slices.Contains(env, "HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1") || !slices.Contains(env, "HOMEBREW_NO_ENV_HINTS=1") {
+			t.Fatalf("brew services info ran with env %v", env)
 		}
 	})
 	// Without the formula there is no service to ask brew about, and brew
