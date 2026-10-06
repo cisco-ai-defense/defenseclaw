@@ -637,7 +637,6 @@ _GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
-
 _GENERATED_HOOK_REGEN_COMMANDS: dict[str, str] = {
     "codex": "defenseclaw setup codex --yes --restart",
     "claudecode": "defenseclaw setup claude-code --yes --restart",
@@ -789,7 +788,7 @@ def _check_generated_hook_freshness(
                 f"{label} freshness",
                 "a generated script is not the one setup rendered (an edit, or a copy from another build)",
                 r=r,
-                remediation="run 'defenseclaw-gateway restart' to render the scripts again",
+                remediation="run 'defenseclaw doctor --fix' to render the scripts again",
             )
             return
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
@@ -11873,6 +11872,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             False,
         ),
         (
+            "doctor.connector.hook-scripts.regenerate",
+            "hook scripts",
+            "safe",
+            _fix_hook_scripts_regenerate,
+            ("doctor.connector.hook-scripts.restore-mode",),
+            ("re-render the hook scripts that no longer match config.yaml or the digests setup sealed",),
+            False,
+            False,
+        ),
+        (
             "doctor.acp.guard.repin",
             "ACP guard pins",
             "safe",
@@ -13278,15 +13287,16 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
 
     An edited script (an early ``exit 0``) silently disables enforcement and a
     missing token blocks every call, while the other hook rows stay green
-    (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
+    (GAP-1141, GAP-1138). ``doctor --fix`` re-renders the scripts from
+    config.yaml and restores the token.
     """
-    from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
+    from defenseclaw.hook_integrity import hook_runtime_problems
 
     # Token problems are reported once, by the Connector hook credential row,
     # with the repair doctor --fix applies (GAP-1436).
     problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
     if problems:
-        _emit("fail", "Hook runtime files", f"{'; '.join(problems)}; run `{setup_command(connector)}`", r=r)
+        _emit("fail", "Hook runtime files", f"{'; '.join(problems)}; run `defenseclaw doctor --fix`", r=r)
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:
@@ -15298,6 +15308,60 @@ def _fix_hook_script_modes(
     except OSError as exc:
         return ("fail", f"could not restore the hook script mode: {exc}")
     return ("pass", f"restored mode 0700 on {names}")
+
+
+def _hook_script_regen_targets(cfg) -> list[str]:
+    """Active connectors whose generated hook scripts differ from the render
+    setup sealed (an edit, or a copy from another build)."""
+    from defenseclaw.hook_integrity import hook_runtime_problems
+
+    targets: list[str] = []
+    for connector in _doctor_active_connectors(cfg):
+        script_problems = [
+            problem
+            for problem in hook_runtime_problems(cfg, connector)
+            if not problem.startswith("hook token ") and "is not executable" not in problem
+        ]
+        if script_problems:
+            targets.append(connector)
+    return targets
+
+
+def _fix_hook_scripts_regenerate(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Re-render the generated hook scripts from config.yaml (N03).
+
+    A script is derived from the config, never read back as input, so a hand
+    edit is replaced by the genuine render and the lock digest is sealed
+    again, as ``defenseclaw setup <connector>`` does for that connector alone.
+    Managed hosts are re-rendered by ``ensure``/``repair``, not by doctor.
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return ("skip", "managed hook scripts are re-rendered by 'enterprise <os> repair'")
+    targets = _hook_script_regen_targets(cfg)
+    if not targets:
+        return ("skip", "the generated hook scripts match config.yaml and the digests setup sealed")
+    names = ", ".join(targets)
+    if plan_only:
+        return ("plan", f"re-render the hook scripts of {names} from config.yaml")
+    if not assume_yes and not click.confirm(f"    Re-render the hook scripts of {names} from config.yaml?", default=True):
+        return ("skip", "declined by user")
+    from defenseclaw.fail_mode import reconcile_connector_registration
+    from defenseclaw.hook_integrity import setup_command
+
+    failures = []
+    for connector in targets:
+        try:
+            reconcile_connector_registration(cfg, connector)
+        except OSError as exc:
+            failures.append(f"{connector}: {exc} (run `{setup_command(connector)}`)")
+    if failures:
+        return ("fail", "could not re-render the hook scripts: " + "; ".join(failures))
+    return ("pass", f"re-rendered the hook scripts of {names}")
 
 
 def _fix_acp_guard_pins(

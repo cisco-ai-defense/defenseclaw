@@ -180,6 +180,7 @@ runs the comparison for you, in the **Policy** row below.
 | Retired policy data | WARN | A leftover `policies/rego/data.json` (or `policies/data.json`) is ignored since `config_version` 9, because admission and thresholds live in `config.yaml`. Review `defenseclaw config get admission`, then remove the file. |
 | Config migration | PASS or WARN | `migrated to 9 on <date>: N value(s) moved, N conflict(s); details in .../migration-v9.json`. It shows until you acknowledge it with `defenseclaw config migrate --ack`, and is a WARN when the migration recorded conflicts. |
 | Custom-provider overlay | FAIL | `custom-providers.json` was edited by hand or no longer matches `llm_providers` in `config.yaml`. The gateway ignores those edits. `defenseclaw doctor --fix` rewrites it. |
+| Hook runtime files | FAIL | A generated hook script was edited or replaced: it no longer matches the digest in `hook_contract_lock.json`. `defenseclaw doctor --fix` re-renders it from `config.yaml`. |
 | Claude Code hooks freshness, Codex hooks freshness | WARN | `stale generated script (...)`: a generated hook script was rendered by an older build, or bakes a hook fail mode that differs from `config.yaml`. The line names the command that regenerates it: `defenseclaw setup claude-code --yes --restart`, `defenseclaw setup codex --yes --restart`, or `defenseclaw-gateway restart`. |
 
 Real lines from a scratch install (paths shortened). A healthy gateway:
@@ -219,7 +220,8 @@ writes for other tools, or `config.yaml` itself:
 | Repair ID | Risk | What it does |
 | --- | --- | --- |
 | `doctor.providers.overlay.regenerate` | safe | Rewrites `custom-providers.json` from `llm_providers` in `config.yaml`. Fixes the Custom-provider overlay row. |
-| `doctor.connector.hook-scripts.restore-mode` | safe | Restores the owner execute bit on the generated hook scripts setup sealed. It does not re-render them: a stale script is fixed by the command its freshness row names. |
+| `doctor.connector.hook-scripts.restore-mode` | safe | Restores the owner execute bit on the generated hook scripts setup sealed. It does not re-render them. |
+| `doctor.connector.hook-scripts.regenerate` | safe | Re-renders the hook scripts of a connector whose script no longer matches the digest setup sealed (a hand edit, or a copy from another build), and seals the new digest. Fixes the Hook runtime files row. On a managed host `enterprise <os> repair` does this. |
 | `doctor.acp.guard.repin` | safe | Re-pins the upgraded ACP guard in the editor entries DefenseClaw wrote. |
 | `doctor.gateway.token-env.canonicalize` | safe | Saves the canonical gateway token provider in `config.yaml`. |
 | `doctor.policy.plugin-registry.clear-dead-end` | policy | Changes explicit plugin admission policy in `config.yaml`. Select it by ID; a blanket `--yes` never runs it. |

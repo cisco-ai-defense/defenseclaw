@@ -2557,14 +2557,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 19)
+        self.assertEqual(len(result.repairs), 20)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 10)
+        self.assertEqual(result.repair_summary.noop, 11)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -2654,10 +2654,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 19)
+        self.assertEqual(len(result.repairs), 20)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 10)
+        self.assertEqual(result.repair_summary.noop, 11)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()

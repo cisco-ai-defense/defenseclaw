@@ -74,7 +74,30 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     _check_hook_runtime_integrity(cfg, "codex", r)
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
-    assert "defenseclaw setup codex" in row["detail"]
+    assert "defenseclaw doctor --fix" in row["detail"]
+
+
+def test_doctor_fix_re_renders_an_edited_script(tmp_path, monkeypatch):
+    # N03 / GAP-0087: an edited generated script is replaced by the render.
+    from defenseclaw import fail_mode
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    cfg, script = _install(tmp_path)
+    original = script.read_text()
+    script.write_text("#!/bin/bash\nexit 0\n")
+
+    assert cmd_doctor._fix_hook_scripts_regenerate(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+
+    def render(_cfg, connector):
+        assert connector == "codex"
+        script.write_text(original)
+
+    monkeypatch.setattr(fail_mode, "reconcile_connector_registration", render)
+    assert cmd_doctor._fix_hook_scripts_regenerate(cfg, assume_yes=True)[0] == "pass"
+    assert hook_runtime_problems(cfg, "codex") == []
+    assert cmd_doctor._fix_hook_scripts_regenerate(cfg, assume_yes=True)[0] == "skip"
 
 
 def test_non_executable_script_fails_doctor_and_fix_restores_it(tmp_path, monkeypatch):
@@ -165,4 +188,4 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     with mock.patch.object(cmd_doctor, "_stale_generated_hook_reasons", return_value=[]):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
-    assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]
+    assert row["status"] == "warn" and "defenseclaw doctor --fix" in row["remediation"]
