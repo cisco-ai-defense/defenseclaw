@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -858,6 +859,42 @@ func TestHookSilenceResponse(t *testing.T) {
 				t.Fatalf("the next silent session: findings %+v, stopped %v", f, stopped(t, e, "silentbox"))
 			}
 		})
+	}
+}
+
+// While a sandbox's policy is not resolved, silent hooks get the fail-closed
+// response, and its view says so: a user-tier harness under a pack that
+// alerts after 2m is stopped after the default 10m.
+func TestHookSilenceWithAnUnresolvedPolicy(t *testing.T) {
+	dir := t.TempDir()
+	file := writeFile(t, filepath.Join(dir, "alerting", "pack.yaml"), strings.Replace(strings.Replace(teamPack, "name: team", "name: alerting", 1),
+		"hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_silence: alert, silence_after: 2m}", 1))
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = dir })
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "lostpack", Pack: "alerting"})
+	b := e.boxOf("lostpack")
+	e.m.mu.Lock()
+	b.rec.TamperTier = connector.SandboxTamperTierUser
+	e.m.mu.Unlock()
+	if h := e.get("lostpack").Hooks; h.OnSilence != "alert" || h.SilenceAfter != "2m" {
+		t.Fatalf("hooks = %+v, want the pack's alert after 2m", h)
+	}
+	must(t, os.Remove(file))
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("the policy still resolves without its pack")
+	}
+	if h := e.get("lostpack").Hooks; h.OnSilence != "stop" || h.SilenceAfter != "10m" {
+		t.Fatalf("hooks = %+v, want the fail-closed stop after 10m", h)
+	}
+	for range 10 {
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+		advance(time.Minute)
+	}
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+	e.m.checkHookSilence(t.Context())
+	if f := e.tel.findingsOf(audit.SandboxFindingHookSilence); len(f) != 1 || f[0].Evidence != "on_silence=stop silence_after=10m tier=user" ||
+		!stopped(t, e, "lostpack") {
+		t.Fatalf("findings %+v, stopped %v", f, stopped(t, e, "lostpack"))
 	}
 }
 

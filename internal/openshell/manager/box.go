@@ -652,6 +652,11 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		}
 	}
 	v.Egress.BlockedRequests = b.blockedRequests
+	// What silent hooks lead to, as checkHookSilence decides it: under a
+	// policy that is not resolved, the fail-closed response.
+	var after time.Duration
+	v.Hooks.OnSilence, after = silenceResponse(r.TamperTier, b.eff)
+	v.Hooks.SilenceAfter = packs.ShortDuration(after)
 	running := b.phase == audit.SandboxPhaseReady && !b.started.IsZero()
 	if running {
 		v.SessionYolo = launchYolo(b)
@@ -670,9 +675,6 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
 		}
 		v.Violations = wireViolations(b.violations)
-		var after time.Duration
-		v.Hooks.OnSilence, after = silenceResponse(r.TamperTier, e)
-		v.Hooks.SilenceAfter = packs.ShortDuration(after)
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
 		if running {
 			v.Warnings = append(v.Warnings, sessionDrift(r, e, v.SessionYolo, v.Yolo)...)
