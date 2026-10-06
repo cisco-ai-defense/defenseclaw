@@ -57,6 +57,143 @@ func TestValidateWindowsNamespacePurgeProductionRootAcceptsOnlyExactLayouts(t *t
 	}
 }
 
+func TestValidateWindowsNamespacePurgeProductionStateRootAcceptsOnlyExactLayout(t *testing.T) {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Fatalf("resolve trusted ProgramData: %v", err)
+	}
+	base := filepath.Join(programData, "Cisco", "Cisco Secure Client")
+	production := filepath.Join(base, "DefenseClaw")
+	// Both the signed production StateRoot and the scoped certification
+	// StateRoot (DefenseClaw-Cert\<10-hex-char runID>) are valid managed-
+	// enterprise roots. The validator must accept both.
+	for name, path := range map[string]string{
+		"production":    production,
+		"certification": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e"),
+	} {
+		t.Run("accept/"+name, func(t *testing.T) {
+			if err := validateWindowsNamespacePurgeProductionStateRoot(path); err != nil {
+				t.Fatalf("validate %s StateRoot: %v", name, err)
+			}
+		})
+	}
+	for name, path := range map[string]string{
+		"vendor parent":           base,
+		"sibling":                 filepath.Join(base, "AVC"),
+		"descendant":              filepath.Join(production, "install"),
+		"certification parent":    filepath.Join(base, "DefenseClaw-Cert"),
+		"certification short id":  filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d"),
+		"certification long id":   filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e5f"),
+		"certification bad chars": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3dXZ"),
+	} {
+		t.Run("reject/"+name, func(t *testing.T) {
+			if err := validateWindowsNamespacePurgeProductionStateRoot(path); err == nil {
+				t.Fatalf("non-production StateRoot was accepted: %s", path)
+			}
+		})
+	}
+}
+
+func TestValidateWindowsNamespacePurgeProductionInstallRootAcceptsOnlyExactLayout(t *testing.T) {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(programFiles, "Cisco", "Cisco Secure Client")
+	production := filepath.Join(base, "DefenseClaw")
+	// Both the signed production InstallRoot and the scoped certification
+	// InstallRoot are valid managed-enterprise roots. The validator must
+	// accept both.
+	for name, path := range map[string]string{
+		"production":    production,
+		"certification": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e"),
+	} {
+		t.Run("accept/"+name, func(t *testing.T) {
+			if err := validateWindowsNamespacePurgeProductionInstallRoot(path); err != nil {
+				t.Fatalf("validate %s InstallRoot: %v", name, err)
+			}
+		})
+	}
+	for name, path := range map[string]string{
+		"vendor parent":           base,
+		"sibling":                 filepath.Join(base, "AVC"),
+		"descendant":              filepath.Join(production, "bin"),
+		"certification parent":    filepath.Join(base, "DefenseClaw-Cert"),
+		"certification short id":  filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d"),
+		"certification long id":   filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3d4e5f"),
+		"certification bad chars": filepath.Join(base, "DefenseClaw-Cert", "0a1b2c3dXZ"),
+	} {
+		t.Run("reject/"+name, func(t *testing.T) {
+			if err := validateWindowsNamespacePurgeProductionInstallRoot(path); err == nil {
+				t.Fatalf("non-production InstallRoot was accepted: %s", path)
+			}
+		})
+	}
+}
+
+func TestValidateWindowsNamespacePurgeRequestRequiresInstallOperationAndIdentity(t *testing.T) {
+	oldScope := windowsNamespacePurgeInstallRootScope
+	windowsNamespacePurgeInstallRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeInstallRootScope = oldScope })
+	request := WindowsNamespacePurgeRequest{
+		SchemaVersion:     WindowsNamespacePurgeSchemaVersion,
+		Mode:              WindowsNamespacePurgeModeUninstallInstallPurge,
+		Operation:         WindowsNamespacePurgeOperationSealOnly,
+		Root:              filepath.Join(t.TempDir(), "managed-root"),
+		ExpectedIdentity:  "00000001:0000000000000001",
+		GatewayServiceSID: windowsNamespacePurgeTestGatewaySID,
+	}
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err != nil || descriptors == nil {
+		t.Fatalf("validate install seal request: descriptors=%v error=%v", descriptors, err)
+	}
+	request.Operation = WindowsNamespacePurgeOperationDelete
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err != nil || descriptors == nil {
+		t.Fatalf("validate install delete request: descriptors=%v error=%v", descriptors, err)
+	}
+	request.ExpectedIdentity = ""
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err == nil || descriptors != nil {
+		t.Fatalf("install purge without identity was accepted: descriptors=%v", descriptors)
+	}
+	request.ExpectedIdentity = "00000001:0000000000000001"
+	for _, operation := range []string{"", "unknown"} {
+		request.Operation = operation
+		if descriptors, err := validateWindowsNamespacePurgeRequest(request); err == nil || descriptors != nil {
+			t.Fatalf("install purge accepted operation %q: descriptors=%v", operation, descriptors)
+		}
+	}
+	request.Mode = ""
+	request.Operation = WindowsNamespacePurgeOperationDelete
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err == nil || descriptors != nil {
+		t.Fatalf("canonical mode accepted install operation: descriptors=%v", descriptors)
+	}
+}
+
+func TestValidateWindowsNamespacePurgeRequestRequiresStatePurgeIdentity(t *testing.T) {
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+
+	request := WindowsNamespacePurgeRequest{
+		SchemaVersion:     WindowsNamespacePurgeSchemaVersion,
+		Mode:              WindowsNamespacePurgeModeUninstallStatePurge,
+		Root:              filepath.Join(t.TempDir(), "managed-root"),
+		ExpectedIdentity:  "00000001:0000000000000001",
+		GatewayServiceSID: windowsNamespacePurgeTestGatewaySID,
+	}
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err != nil || descriptors == nil {
+		t.Fatalf("validate state purge request: descriptors=%v error=%v", descriptors, err)
+	}
+	request.ExpectedIdentity = ""
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err == nil || descriptors != nil {
+		t.Fatalf("state purge without a recorded identity was accepted: descriptors=%v", descriptors)
+	}
+	request.Mode = "unknown"
+	request.ExpectedIdentity = "00000001:0000000000000001"
+	if descriptors, err := validateWindowsNamespacePurgeRequest(request); err == nil || descriptors != nil {
+		t.Fatalf("unknown namespace purge mode was accepted: descriptors=%v", descriptors)
+	}
+}
+
 func TestValidateWindowsNamespacePurgeRequestRejectsInvalidGatewayServiceSID(t *testing.T) {
 	oldRootScope := windowsNamespacePurgeRootScope
 	windowsNamespacePurgeRootScope = func(string) error { return nil }
@@ -334,6 +471,277 @@ func TestPurgeWindowsNamespaceRootRejectsForeignDescriptor(t *testing.T) {
 	}
 	if got, readErr := os.ReadFile(foreign); readErr != nil || string(got) != "preserve" {
 		t.Fatalf("foreign file changed: %q, %v", got, readErr)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootDeletesACLDriftedChild(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	nested := filepath.Join(root, "runtime")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(nested, "foreign-acl.bin")
+	if err := os.WriteFile(child, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Deny the current account file-data reads without denying DACL repair,
+	// so a failed purge can still restore this isolated test fixture.
+	t.Cleanup(func() {
+		if _, err := os.Lstat(child); err == nil {
+			if err := protectWindowsTargetsManifestObject(child, false); err != nil {
+				t.Errorf("restore test child ACL: %v", err)
+			}
+		}
+	})
+	setWindowsSelfDenyDACL(t, child, currentWindowsTestSID(t), windows.FILE_READ_DATA)
+	if _, err := os.ReadFile(child); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("ACL-drifted child read error = %v, want access denied", err)
+	}
+	// Neither child has a canonical descriptor. The identity-bound StateRoot
+	// mode may inspect and delete them with narrowly scoped backup privileges.
+	request.ValidateOnly = true
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("validate ACL-drifted StateRoot report=%#v error=%v", report, err)
+	}
+	request.ValidateOnly = false
+	report, err = PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || !report.Removed || report.EntriesRemoved != 3 {
+		t.Fatalf("state purge of ACL-drifted children report=%#v error=%v", report, err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state purge root remains: %v", err)
+	}
+}
+
+func TestPurgeWindowsNamespaceInstallRootSealsThenDeletesACLDriftedTree(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeInstallRootScope
+	windowsNamespacePurgeInstallRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeInstallRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallInstallPurge
+	request.Operation = WindowsNamespacePurgeOperationSealOnly
+	nested := filepath.Join(root, "bin")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(nested, "gateway.exe")
+	if err := os.WriteFile(child, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsSelfDenyDACL(t, child, currentWindowsTestSID(t), windows.FILE_READ_DATA)
+	if _, err := os.ReadFile(child); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("fixture did not deny child data read: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := os.Lstat(child); err == nil {
+			if err := protectWindowsTargetsManifestObject(child, false); err != nil {
+				t.Errorf("restore install child fixture ACL: %v", err)
+			}
+		}
+	})
+	request.ValidateOnly = true
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("validate install seal report=%#v error=%v", report, err)
+	}
+	request.ValidateOnly = false
+	report, err = PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("seal InstallRoot report=%#v error=%v", report, err)
+	}
+	if content, err := os.ReadFile(child); err != nil || string(content) != "payload" {
+		t.Fatalf("sealed child is unreadable: %q, %v", content, err)
+	}
+	// A retry after partial finalization must be harmless.
+	report, err = PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("repeat seal InstallRoot report=%#v error=%v", report, err)
+	}
+	request.Operation = WindowsNamespacePurgeOperationDelete
+	report, err = PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || !report.Removed || report.EntriesRemoved != 3 {
+		t.Fatalf("delete sealed InstallRoot report=%#v error=%v", report, err)
+	}
+	report, err = PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("repeat delete InstallRoot report=%#v error=%v", report, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceInstallRootRejectsSocketPathSymlink(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeInstallRootScope
+	windowsNamespacePurgeInstallRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeInstallRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallInstallPurge
+	request.Operation = WindowsNamespacePurgeOperationDelete
+	ipc := filepath.Join(root, "ipc")
+	if err := os.Mkdir(ipc, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside.sock")
+	if err := os.WriteFile(outside, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ipc, "defenseclaw_ipc.sock")); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err == nil || report.OK || report.Removed || report.EntriesRemoved != 0 ||
+		!strings.Contains(strings.ToLower(err.Error()), "reparse") {
+		t.Fatalf("InstallRoot accepted socket-path symlink: report=%#v error=%v", report, err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "preserve" {
+		t.Fatalf("outside symlink target changed: %q, %v", data, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootDeletesACLDeniedRoot(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	t.Cleanup(func() {
+		if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+			return
+		}
+		descriptor, err := windowsTargetsManifestCanonicalDescriptor(true)
+		if err != nil {
+			t.Errorf("build root ACL for fixture cleanup: %v", err)
+			return
+		}
+		acl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Errorf("read root ACL for fixture cleanup: %v", err)
+			return
+		}
+		extended, err := winpath.Extended(root)
+		if err != nil {
+			t.Errorf("extend root path for fixture cleanup: %v", err)
+			return
+		}
+		if err := windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, acl, nil,
+		); err != nil {
+			t.Errorf("restore root ACL after fixture: %v", err)
+		}
+	})
+	setWindowsSelfDenyDACL(
+		t,
+		root,
+		currentWindowsTestSID(t),
+		windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY,
+	)
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || !report.Removed || report.EntriesRemoved != 1 {
+		t.Fatalf("ACL-denied StateRoot purge report=%#v error=%v", report, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootRejectsHardLinkedChild(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	outside := filepath.Join(filepath.Dir(root), "outside.bin")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outside, filepath.Join(root, "linked.bin")); err != nil {
+		t.Fatalf("create hard-link fixture: %v", err)
+	}
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err == nil || report.OK || report.Removed || report.EntriesRemoved != 0 ||
+		!strings.Contains(strings.ToLower(err.Error()), "hard link") {
+		t.Fatalf("hard-linked StateRoot purge report=%#v error=%v", report, err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "outside" {
+		t.Fatalf("outside hard-link peer changed: %q, %v", got, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootRejectsReparseChild(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	outside := filepath.Join(filepath.Dir(root), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(outside, "sentinel.txt")
+	if err := os.WriteFile(sentinel, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "redirect")); err != nil {
+		t.Skipf("Windows symbolic-link fixtures are unavailable: %v", err)
+	}
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err == nil || report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("reparse StateRoot purge report=%#v error=%v", report, err)
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "preserve" {
+		t.Fatalf("reparse target changed: %q, %v", got, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootAbsentRecordedIdentityIsIdempotent(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	if err := os.Remove(root); err != nil {
+		t.Fatalf("remove test root before resume: %v", err)
+	}
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("absent StateRoot resume report=%#v error=%v", report, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootAbsentParentIsIdempotent(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	if err := os.Remove(root); err != nil {
+		t.Fatalf("remove test root before resume: %v", err)
+	}
+	if err := os.Remove(filepath.Dir(root)); err != nil {
+		t.Fatalf("remove former test parent before resume: %v", err)
+	}
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err != nil || !report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("absent StateRoot parent resume report=%#v error=%v", report, err)
+	}
+}
+
+func TestPurgeWindowsNamespaceStateRootRejectsWrongIdentity(t *testing.T) {
+	request, root := newWindowsNamespacePurgeEmptyTestRoot(t)
+	oldScope := windowsNamespacePurgeStateRootScope
+	windowsNamespacePurgeStateRootScope = func(string) error { return nil }
+	t.Cleanup(func() { windowsNamespacePurgeStateRootScope = oldScope })
+	request.Mode = WindowsNamespacePurgeModeUninstallStatePurge
+	request.ExpectedIdentity = differentWindowsNamespacePurgeIdentity(request.ExpectedIdentity)
+	report, err := PurgeWindowsNamespaceRoot(request)
+	if err == nil || report.OK || report.Removed || report.EntriesRemoved != 0 {
+		t.Fatalf("wrong-identity StateRoot purge report=%#v error=%v", report, err)
+	}
+	if _, statErr := os.Lstat(root); statErr != nil {
+		t.Fatalf("wrong-identity StateRoot was removed: %v", statErr)
 	}
 }
 

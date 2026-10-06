@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -305,11 +307,30 @@ func reconcileWindowsCodexRequirements(
 			return nil, false, fmt.Errorf("hooks.windows_managed_dir has unsupported type %T", existing)
 		}
 		if !sameWindowsCodexMachinePath(value, opts.ManagedDir) {
-			return nil, false, fmt.Errorf(
-				"hooks.windows_managed_dir=%q conflicts with protected managed directory %q",
-				value,
-				opts.ManagedDir,
-			)
+			// Strict mode preserves refuse-on-drift: a hardened
+			// deployment MUST refuse a stale hooks.windows_managed_dir
+			// value instead of silently overwriting it. The managed-
+			// hooks adoptable fix in codex_machine_requirements_
+			// windows.go also honors strict mode for the ownership
+			// record; this is its on-wire mirror.
+			if managed.TrustStrictAncestors() {
+				return nil, false, fmt.Errorf(
+					"hooks.windows_managed_dir = %q does not match the current install's canonical ManagedDir %q",
+					value, opts.ManagedDir,
+				)
+			}
+			// Bulldoze: a prior unsigned certification install at a scoped
+			// path left windows_managed_dir pointing at its (now stale) bin
+			// directory. Refusing stranded the current install. Overwrite
+			// the value with the current install's canonical ManagedDir
+			// (the next statement already does this) and emit a diagnostic
+			// so a DART review can grep the recovery. The managed-hooks
+			// adoptable fix in codex_machine_requirements_windows.go upstream
+			// discards the stale ownership record for the same reason.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming stale Codex hooks.windows_managed_dir "+
+					"= %q, overwriting with current install's canonical ManagedDir %q\n",
+				value, opts.ManagedDir)
 		}
 	}
 	hooks["windows_managed_dir"] = opts.ManagedDir

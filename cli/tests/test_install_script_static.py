@@ -45,7 +45,7 @@ def test_posix_requires_portable_litellm_and_windows_delegates_to_native_setup()
     assert "--only-binary litellm" not in install_ps1
     assert "It does not install Python, uv, wheels" in install_ps1
     assert '$SetupAsset = "DefenseClawSetup-x64.exe"' in install_ps1
-    expected = SpecifierSet(">=1.84.0,<1.92.0")
+    expected = SpecifierSet(">=1.91.5,<1.92.0")
     direct = {requirement.name: requirement for requirement in map(Requirement, project["project"]["dependencies"])}
     overrides = {
         requirement.name: requirement

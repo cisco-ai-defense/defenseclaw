@@ -615,7 +615,9 @@ func upgradeReceiptFixture(t *testing.T) sidecarV8BootstrapFixture {
 }
 
 func validUpgradeReceipt(status string) upgradeReceipt {
-	created := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	// Keep the receipt inside the 90-day audit retention window. A fixed
+	// date aged out on 2026-10-05 and the store dropped every record.
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
 	completed := created.Add(time.Minute)
 	receipt := upgradeReceipt{
 		SchemaVersion: 1, ReceiptID: uuid.NewString(), CreatedAt: created,

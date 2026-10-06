@@ -26,6 +26,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -388,8 +389,30 @@ func validateWindowsManagedFileLockHandleForTarget(
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(target) {
-		return fmt.Errorf("managed lock owner does not match effective target user")
+	if owner == nil {
+		return fmt.Errorf("managed lock has null owner")
+	}
+	if !owner.Equals(target) {
+		// Bulldoze: a prior unsigned certification install done under an
+		// elevated token can leave the lock file owned by SYSTEM /
+		// BUILTIN\Administrators / TrustedInstaller instead of the target
+		// user. The DACL check below still enforces SE_DACL_PROTECTED and
+		// the exact 4-ACE canonical layout, so a trusted admin owner on
+		// an otherwise canonical lock is safe to adopt in non-strict
+		// mode. A foreign user SID or non-admin group stays fatal.
+		//
+		// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+		// refuses even trusted-admin ownership: a hardened deployment
+		// must observe the exact target-user owner on the lock, and
+		// silently adopting an admin-owned lock masks the exact tamper
+		// signal the strict-mode operator opts in to catch.
+		if managed.TrustStrictAncestors() ||
+			!managed.IsWindowsTrustedAdminOwner(owner) {
+			return fmt.Errorf("managed lock owner does not match effective target user")
+		}
+		fmt.Fprintf(os.Stderr,
+			"[connector] managed lock owner is trusted admin %s (target %s); adopting\n",
+			owner.String(), target.String())
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {

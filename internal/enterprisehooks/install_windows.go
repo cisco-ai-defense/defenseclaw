@@ -817,10 +817,44 @@ func windowsManagedObstructionQuarantinePath(path string) string {
 
 func quarantineWindowsTargetOwnedObstruction(home, path string, target *windows.SID, recreateDirectory bool, label string) error {
 	owner, err := windowsPathOwnerNoFollow(path)
-	if err != nil || owner == nil || !owner.Equals(target) {
+	if err != nil || owner == nil {
 		return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
 	}
+	if !owner.Equals(target) {
+		// Bulldoze: trusted admin owners (SYSTEM / BUILTIN\Administrators /
+		// TrustedInstaller) from a prior scoped install's elevated token
+		// are quarantinable. A foreign user SID or non-admin group stays
+		// fatal.
+		if !windowsEnterpriseAdminIdentity(owner) {
+			return fmt.Errorf("enterprise hooks: refusing foreign-owned obstruction in %s path %s", label, path)
+		}
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] admin-owned obstruction accepted for quarantine "+
+				"in %s path %s (owner=%s, target=%s)\n",
+			label, path, windowsSIDString(owner), windowsSIDString(target))
+	}
 	quarantine := windowsManagedObstructionQuarantinePath(path)
+	// If a prior repair left an admin-owned slot in the quarantine
+	// location, the target-token purge below will refuse it (its
+	// handle-owner check compares against the exact target SID).
+	// Remove any admin-owned slot via os.RemoveAll under the current
+	// elevated install process's privileges BEFORE the target-token
+	// purge runs, so the subsequent purge has a clean canvas.
+	// Target-owned slots stay on the target-token path.
+	if slotOwner, slotOwnerErr := windowsPathOwnerNoFollow(quarantine); slotOwnerErr == nil &&
+		slotOwner != nil && !slotOwner.Equals(target) &&
+		windowsEnterpriseAdminIdentity(slotOwner) {
+		fmt.Fprintf(os.Stderr,
+			"[enterprise-hooks] clearing admin-owned quarantine slot before "+
+				"target-token purge: %s (slot owner=%s, target=%s)\n",
+			quarantine, windowsSIDString(slotOwner), windowsSIDString(target))
+		if removeErr := os.RemoveAll(quarantine); removeErr != nil {
+			return fmt.Errorf(
+				"enterprise hooks: clear admin-owned quarantine slot %s: %w",
+				quarantine, removeErr,
+			)
+		}
+	}
 	if err := removeWindowsTargetOwnedQuarantine(quarantine, target, false); err != nil {
 		return fmt.Errorf(
 			"enterprise hooks: bounded obstruction quarantine for %s is unavailable: %w",
@@ -1643,8 +1677,25 @@ func validateWindowsUserPathElement(path string, target *windows.SID, wantDir, p
 		return err
 	}
 	if requireTargetOwner {
-		if owner == nil || !owner.Equals(target) {
-			return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+		if owner == nil {
+			return fmt.Errorf("enterprise hooks: null owner on %s", path)
+		}
+		if !owner.Equals(target) {
+			if !windowsEnterpriseAdminIdentity(owner) {
+				return fmt.Errorf("enterprise hooks: owner SID %s does not match target SID %s on %s", windowsSIDString(owner), windowsSIDString(target), path)
+			}
+			// Bulldoze: a prior unsigned certification install done under an
+			// elevated token (LocalSystem or BUILTIN\Administrators) can
+			// leave per-user runtime files owned by that admin principal
+			// instead of the target user SID. Trusted admin owners are
+			// accepted here; the subsequent DACL repair transfers
+			// ownership to the target SID. A foreign user SID (not in the
+			// trusted admin set) stays fatal above.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] admin-owned per-user runtime file "+
+					"accepted during trust check (owner=%s, target=%s on %s): "+
+					"subsequent DACL repair will transfer ownership\n",
+				windowsSIDString(owner), windowsSIDString(target), path)
 		}
 	} else if owner == nil || (!owner.Equals(target) && !windowsEnterpriseAdminIdentity(owner)) {
 		return fmt.Errorf("enterprise hooks: foreign owner SID %s on %s", windowsSIDString(owner), path)

@@ -147,6 +147,14 @@ func enableWindowsThreadPrivilege(token windows.Token, name string) error {
 // opened with FILE_OPEN_REPARSE_POINT and must be owned by the manifest SID.
 // An attacker therefore cannot redirect LocalSystem DACL repair through a
 // junction to an object outside the profile.
+// repairWindowsTargetOwnedPathDACLNoFollow repairs a per-user path without
+// following reparse points. The impersonated-target caller runs with the
+// target's token so cannot invoke LocalSystem repair privileges; admin-
+// reclaim must stay refused here. The privileged guardian caller (which
+// does hold SeTakeOwnershipPrivilege + SeRestorePrivilege via
+// repairWindowsTargetOwnedPathDACL and friends, not this function) is
+// never routed through here, so no exported allowAdminReclaim exists
+// yet - all current callers get the strict posture by construction.
 func repairWindowsTargetOwnedPathDACLNoFollow(
 	home string,
 	path string,
@@ -227,6 +235,16 @@ func repairWindowsTargetOwnedPathDACLNoFollow(
 	if err != nil {
 		return err
 	}
+	// DACL-only repair. The handle was opened with WRITE_DAC +
+	// FILE_READ_ATTRIBUTES; it does not hold WRITE_OWNER, so this call
+	// MUST NOT pass OWNER_SECURITY_INFORMATION (SetSecurityInfo returns
+	// ERROR_ACCESS_DENIED otherwise, even for a target-owned leaf that
+	// only needs DACL repair). The round-1 bulldoze refactor removed
+	// the admin-ownership-transfer branch from validateWindowsGuardian-
+	// ACLHandle, so this function is only reachable when the final
+	// element is already target-owned. Guardian-side ownership transfer
+	// runs through a different code path (repairWindowsTargetOwnedPath-
+	// DACL) with its own WRITE_OWNER-capable handle.
 	if err := windows.SetSecurityInfo(
 		handle,
 		windows.SE_FILE_OBJECT,
@@ -291,6 +309,17 @@ func openWindowsGuardianACLChild(
 			windows.FILE_OPEN_FOR_BACKUP_INTENT,
 	)
 	if final {
+		// Target-token-only DACL repair. The caller
+		// (repairWindowsTargetOwnedPathDACLNoFollow) runs under the
+		// target's token, which lacks SeTakeOwnershipPrivilege and
+		// SeRestorePrivilege, so we cannot (and must not) request
+		// WRITE_OWNER on this handle - an ownership transfer attempt
+		// would fail at SetSecurityInfo and the handle access would
+		// still have requested a privilege the token doesn't hold.
+		// Privileged ownership transfer runs through a different code
+		// path (repairWindowsTargetOwnedPathDACL) that explicitly
+		// holds the restore/takeOwnership privileges and opens its
+		// handles with WRITE_OWNER there.
 		access |= windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES
 	} else {
 		access |= windows.FILE_READ_ATTRIBUTES | windows.FILE_LIST_DIRECTORY | windows.SYNCHRONIZE
@@ -332,6 +361,18 @@ func validateWindowsGuardianACLHandle(
 		ownerOK = windowsEnterpriseProfileAnchorOwner(owner, target)
 	}
 	if !ownerOK {
+		// Admin reclaim is NOT performed on the impersonated-target path.
+		// repairWindowsTargetOwnedPathDACLNoFollow (the only caller of
+		// this validator) runs under the target's token, which has
+		// neither SeTakeOwnershipPrivilege nor SeRestorePrivilege, so a
+		// SetSecurityInfo attempting to transfer admin ownership would
+		// fail - and silently "accepting" an admin-owned file as if the
+		// transfer would succeed hides the drift from the guardian-side
+		// repair that CAN transfer it. Keep this check strict: any owner
+		// that is not the exact target SID (or, for the profile root,
+		// the profile-anchor set) is fatal. Guardian-side repair runs
+		// through a different path (repairWindowsTargetOwnedPathDACL)
+		// where privileged ownership transfer is wired in.
 		return fmt.Errorf(
 			"owner SID %s is not trusted for target SID %s",
 			windowsSIDString(owner),
