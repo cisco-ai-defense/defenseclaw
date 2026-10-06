@@ -131,11 +131,21 @@ func windowsEnterpriseHotConfigApply(
 	defer restoreEnvironment()
 
 	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
+	generationPath := configwrite.GenerationPath(layout.ConfigPath)
+	generationBefore, generationErr := os.ReadFile(generationPath)
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, "enterprise windows ensure"); err != nil {
 		return false
 	}
+	// Undoing puts back the config and the generation record as they were,
+	// so a hand-edited config is not recorded as a lifecycle generation by
+	// the attempt that did not stick.
 	undo := func() {
 		_ = windowsEnterpriseHotConfigWrite(context.WithoutCancel(ctx), layout.ConfigPath, previous, "enterprise windows ensure (config change not applied)")
+		if generationErr != nil {
+			_ = os.Remove(generationPath)
+			return
+		}
+		_ = writeFileKeepingDACL(generationPath, generationBefore, generationPath)
 	}
 	if _, err := windowsEnterpriseHotConfigValidate(layout.ConfigPath, layout.DataDir, layout.ServiceUser, false); err != nil {
 		undo()

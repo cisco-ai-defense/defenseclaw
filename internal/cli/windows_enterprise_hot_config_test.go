@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,10 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	}
 	windowsEnterpriseHotConfigWrite = func(_ context.Context, path string, raw []byte, reason string) error {
 		host.writes = append(host.writes, reason)
+		// The writer records a generation with every write.
+		if err := os.WriteFile(configwrite.GenerationPath(path), []byte(`{"generation":`+strconv.Itoa(len(host.writes)+10)+`}`), 0o600); err != nil {
+			return err
+		}
 		return os.WriteFile(path, raw, 0o600)
 	}
 	windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = 50*time.Millisecond, 5*time.Millisecond
@@ -129,14 +134,20 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 		t.Fatalf("restart-required change: installer runs %q, writes %q", stub.calls, host.writes)
 	}
 
-	// A gateway that does not adopt the change gets the old config back and
-	// the upgrade.
+	// A gateway that does not adopt the change gets the old config back, with
+	// the generation record as it was, and the upgrade.
 	host, opts = newHotConfigHost(t, previous, next)
+	recorded := `{"generation":3,"config_sha256":"` + strings.Repeat("0", 64) + `"}`
+	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
 	runHotConfigEnsure(t, host, opts, stub)
-	if got, _ := os.ReadFile(host.configPath); string(got) != previous || len(host.writes) != 2 ||
+	got, _ := os.ReadFile(host.configPath)
+	generation, _ := os.ReadFile(configwrite.GenerationPath(host.configPath))
+	if string(got) != previous || string(generation) != recorded || len(host.writes) != 2 ||
 		len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" {
-		t.Fatalf("gateway never adopted: config %q, writes %q, installer runs %q", got, host.writes, stub.calls)
+		t.Fatalf("gateway never adopted: config %q, generation %q, writes %q, installer runs %q", got, generation, host.writes, stub.calls)
 	}
 }
 
