@@ -414,9 +414,9 @@ func inspectCodex(opts Options, raw []byte, policy config.ResolvedConnectorPolic
 		count := countCodexOwnedGroups(hooksCfg[group.Event], group, codexHookCommandForEvent(opts, group.Event), opts)
 		switch {
 		case count == 0:
-			state.conflict("hooks.%s has no DefenseClaw managed group", group.Event)
+			state.entryConflict("hooks.%s has no DefenseClaw managed group", group.Event)
 		case count > 1:
-			state.conflict("hooks.%s has %d DefenseClaw managed groups, want exactly one", group.Event, count)
+			state.entryConflict("hooks.%s has %d DefenseClaw managed groups, want exactly one", group.Event, count)
 		}
 		owned += count
 	}
