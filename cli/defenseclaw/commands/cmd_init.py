@@ -3471,13 +3471,6 @@ def _install_with_uv(pkg: str) -> bool:
         return False
 
 
-def _install_codeguard_skill(cfg, logger) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = cfg
-    _ = logger
-    click.echo("  CodeGuard:     skipped (explicit opt-in required)")
-
-
 def _onboard_notifications(
     cfg,
     logger,

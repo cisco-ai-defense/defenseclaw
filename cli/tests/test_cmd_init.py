@@ -2867,7 +2867,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         self.assertIn("enable llm traffic inspection", result.output.lower())
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
@@ -2877,7 +2876,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_calls_interactive_setup(
         self, mock_path, _mock_env, mock_exec, mock_interactive,
-        _mock_scanners, _mock_which, _mock_guardrail, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_guardrail, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -2898,7 +2897,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         mock_exec.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
     @patch("defenseclaw.commands.cmd_setup._interactive_guardrail_setup")
@@ -2906,7 +2904,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_declined_shows_hint(
         self, mock_path, _mock_env, mock_interactive,
-        _mock_scanners, _mock_which, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)
@@ -2923,7 +2921,6 @@ class TestInitEnableGuardrail(unittest.TestCase):
         self.assertIn("defenseclaw setup guardrail", result.output)
 
     @patch("defenseclaw.commands.cmd_init._start_gateway")
-    @patch("defenseclaw.commands.cmd_init._install_codeguard_skill")
     @patch("defenseclaw.commands.cmd_init._install_guardrail")
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
     @patch("defenseclaw.commands.cmd_init._install_scanners")
@@ -2933,7 +2930,7 @@ class TestInitEnableGuardrail(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_enable_guardrail_shows_warnings(
         self, mock_path, _mock_env, mock_exec, mock_interactive,
-        _mock_scanners, _mock_which, _mock_guardrail, _mock_codeguard, _mock_start_gw
+        _mock_scanners, _mock_which, _mock_guardrail, _mock_start_gw
     ):
         from pathlib import Path
         mock_path.return_value = Path(self.tmp_dir)

@@ -149,28 +149,6 @@ Consumers that walk *installed* connectors keep using
 (inventory / agent_discovery) use this.
 """
 
-HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
-    {
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    }
-)
-"""Connectors added through lifecycle hook surfaces.
-
-Kept as a compatibility constant for older tests/importers. These connectors
-now expose connector-specific MCP/skill/rule/plugin path discovery instead of
-falling back to OpenClaw or returning hook-only empty paths.
-"""
-
-
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
