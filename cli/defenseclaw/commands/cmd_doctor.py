@@ -11617,6 +11617,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             True,
         ),
         (
+            "doctor.connector.hook-scripts.restore-mode",
+            "hook script mode",
+            "safe",
+            _fix_hook_script_modes,
+            (),
+            ("restore the owner execute bit on the generated hook scripts setup sealed",),
+            False,
+            False,
+        ),
+        (
             "doctor.acp.guard.repin",
             "ACP guard pins",
             "safe",
@@ -14968,6 +14978,41 @@ def _fix_plugin_registry_required(
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")
+
+
+def _fix_hook_script_modes(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Restore mode 0700 on generated hook scripts that lost it (GAP-0101).
+
+    A connector whose scripts no longer match the digests setup sealed is
+    left alone: the Hook runtime files row sends it to setup instead of
+    making an edited script runnable.
+    """
+    from defenseclaw.hook_integrity import hook_runtime_problems, non_executable_hook_scripts
+
+    targets = [
+        script
+        for connector in _doctor_active_connectors(cfg)
+        if not any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        for script in non_executable_hook_scripts(cfg, connector)
+    ]
+    if not targets:
+        return ("skip", "the generated hook scripts are executable")
+    names = ", ".join(str(script) for script in targets)
+    if plan_only:
+        return ("plan", f"restore mode 0700 on {names}")
+    if not assume_yes and not click.confirm(f"    Restore mode 0700 on {names}?", default=True):
+        return ("skip", "declined by user")
+    try:
+        for script in targets:
+            os.chmod(script, 0o700)
+    except OSError as exc:
+        return ("fail", f"could not restore the hook script mode: {exc}")
+    return ("pass", f"restored mode 0700 on {names}")
 
 
 def _fix_acp_guard_pins(
