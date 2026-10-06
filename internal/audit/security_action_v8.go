@@ -441,7 +441,7 @@ func validateJudgeCompletionInput(input JudgeCompletionInput) error {
 	}
 	action, _, ok := judgeCompletionOutcome(input.Action)
 	if !ok {
-		return fmt.Errorf("audit: judge action must be allow, block, or error")
+		return fmt.Errorf("audit: judge action must be allow, alert, block, or error")
 	}
 	if input.LatencyMS < 0 || input.InputBytes < 0 {
 		return fmt.Errorf("audit: judge measurements must not be negative")
@@ -498,6 +498,10 @@ func judgeCompletionOutcome(action string) (string, observability.Outcome, bool)
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case "allow":
 		return "allow", observability.OutcomeAllowed, true
+	case "alert":
+		// A flagged verdict that does not block: the judge completed and the
+		// request was allowed (the PII and injection judges return it).
+		return "alert", observability.OutcomeAllowed, true
 	case "block":
 		return "block", observability.OutcomeBlocked, true
 	case "error":
