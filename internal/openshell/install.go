@@ -338,6 +338,16 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 
 	plan.Command = []string{i.Shell, plan.ScriptPath}
 	plan.Env = []string{"OPENSHELL_VERSION=" + i.Release}
+	if tls := i.brewTLSDir(); tls != "" {
+		// The CLI the script registers the gateway with looks for the
+		// gateway's client certificates only under /opt/homebrew and
+		// /usr/local, and failed with "mTLS certificates ... were not found"
+		// after the formula was installed and the gateway running.
+		plan.Env = append(plan.Env, EnvLocalTLSDir+"="+tls)
+		plan.Notes = append(plan.Notes,
+			fmt.Sprintf("Homebrew is at %s, not at /opt/homebrew or /usr/local: %s tells the OpenShell CLI where the gateway's client certificates are", tildePath(i.BrewPrefix), EnvLocalTLSDir),
+			"Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)")
+	}
 	if i.PackageCLI != "" {
 		// Without it the script registers the gateway with, and checks its
 		// status through, whichever openshell comes first on PATH.
@@ -394,7 +404,7 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 			// Xcode or Command Line Tools older than the oldest it builds
 			// with on this macOS (homebrewMinimums): the error says which
 			// are here.
-			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp)}
+			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp), FormulaInstalled: formulaKegInstalled(i.BrewPrefix)}
 		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}
@@ -419,6 +429,15 @@ func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 		return err
 	}
 	return brew(ctx, i.Runner, "install", "e2fsprogs")
+}
+
+// brewTLSDir is the certificates directory the script's registration
+// needs on a Mac whose Homebrew prefix the CLI does not search ("" if none).
+func (i *Installer) brewTLSDir() string {
+	if i.GOOS != "darwin" {
+		return ""
+	}
+	return brewTLSDir(i.BrewPrefix)
 }
 
 // checkBrewWritable refuses, on a Mac, a Homebrew prefix this account
@@ -450,12 +469,17 @@ func (i *Installer) configDir() string {
 			return "~/.config/openshell"
 		}
 	}
+	return tildePath(dir)
+}
+
+// tildePath shows the home directory in p as ~.
+func tildePath(p string) string {
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
-		if rel, err := filepath.Rel(home, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if rel, err := filepath.Rel(home, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return filepath.Join("~", rel)
 		}
 	}
-	return dir
+	return p
 }
 
 func existingVersion(e *ExistingInstall) string {

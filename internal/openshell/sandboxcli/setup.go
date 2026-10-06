@@ -239,17 +239,23 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		if serr := a.homebrewNotWritable(err); serr != nil {
 			return serr
 		}
-		if errors.Is(err, openshell.ErrHomebrewInstall) {
+		var hb *openshell.HomebrewInstallError
+		switch {
+		case errors.As(err, &hb) && hb.FormulaInstalled:
+			// The script got past the install and failed after it, in
+			// starting the gateway or registering it with the CLI: the
+			// checks below name the step that still fails, with its fix.
+			a.warn("install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it " +
+				"(it starts the gateway and registers it with the OpenShell CLI); what it printed is above")
+		case errors.Is(err, openshell.ErrHomebrewInstall):
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
 			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
-		}
-		if err != nil {
+		case err != nil:
 			return fmt.Errorf("install OpenShell: %w", err)
-		}
-		if res.Installed {
+		case res.Installed:
 			a.ok("OpenShell " + res.CLIVersion.String() + " installed, gateway running")
-		} else {
+		default:
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)

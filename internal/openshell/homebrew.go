@@ -21,8 +21,52 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
+	"slices"
 )
+
+// EnvLocalTLSDir names the directory the OpenShell CLI imports the local
+// gateway's client certificates from when it registers the gateway.
+const EnvLocalTLSDir = "OPENSHELL_LOCAL_TLS_DIR"
+
+// cliTLSPrefixes are the Homebrew prefixes whose var/openshell/tls the
+// OpenShell 0.1.1 CLI searches for those certificates when
+// EnvLocalTLSDir is unset (besides its own state directory).
+var cliTLSPrefixes = []string{"/opt/homebrew", "/usr/local"}
+
+// brewTLSDir is where the Homebrew formula generates the gateway's
+// certificates under prefix (var/openshell/tls), for a prefix the CLI does
+// not search; "" for the ones it does.
+func brewTLSDir(prefix string) string {
+	if prefix == "" || slices.Contains(cliTLSPrefixes, filepath.Clean(prefix)) {
+		return ""
+	}
+	return filepath.Join(prefix, "var", "openshell", "tls")
+}
+
+// registerGatewayCommand registers the local gateway with the OpenShell
+// CLI; under a Homebrew prefix the CLI does not search, it is told where
+// the certificates are.
+func registerGatewayCommand(brewPrefix string) string {
+	cmd := "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName
+	if dir := brewTLSDir(brewPrefix); dir != "" {
+		cmd = EnvLocalTLSDir + "=" + shellQuote(dir) + " " + cmd
+	}
+	return cmd
+}
+
+// formulaKegInstalled reports whether GatewayFormula has a keg under
+// prefix (opt/openshell, or the Cellar directory), reading the file system.
+func formulaKegInstalled(prefix string) bool {
+	name := path.Base(GatewayFormula)
+	for _, keg := range []string{filepath.Join(prefix, "opt", name), filepath.Join(prefix, "Cellar", name)} {
+		if info, err := os.Stat(keg); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
 
 // findHomebrewPrefix finds the Homebrew prefix like `brew --prefix`
 // without running brew: HOMEBREW_PREFIX (which `brew shellenv` sets),

@@ -436,6 +436,56 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 	}
 }
 
+// TestInstallInAHomebrewOfYourOwn: with Homebrew outside /opt/homebrew and
+// /usr/local (a standard user's own, GAP-0110) the formula installed and
+// the gateway ran, then NVIDIA's script failed registering it ("mTLS
+// certificates for gateway 'openshell' were not found": the CLI looks for
+// them only under those two prefixes), and the error blamed Homebrew and
+// Xcode. The script now gets OPENSHELL_LOCAL_TLS_DIR, the plan says so, and
+// a failure after the formula is installed says that instead of blaming it.
+func TestInstallInAHomebrewOfYourOwn(t *testing.T) {
+	prefix := filepath.Join(t.TempDir(), "homebrew")
+	tls := filepath.Join(prefix, "var", "openshell", "tls")
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+	res, err := f.inst.Install(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := openshell.EnvLocalTLSDir + "=" + tls
+	if !slices.Contains(f.scriptRun().Env, want) || !slices.Contains(res.Plan.Env, want) || !strings.Contains(f.out.String(), "Command     OPENSHELL_VERSION=v0.1.1 "+want+" ") ||
+		!strings.Contains(f.out.String(), "Homebrew has no prebuilt packages for that prefix") {
+		t.Fatalf("env %v; plan:\n%s", f.scriptRun().Env, f.out.String())
+	}
+	// The prefixes the CLI searches need nothing.
+	f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS = "darwin"
+	if _, err := f.inst.Install(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range f.scriptRun().Env {
+		if strings.HasPrefix(kv, openshell.EnvLocalTLSDir+"=") {
+			t.Fatalf("env %v under /opt/homebrew", f.scriptRun().Env)
+		}
+	}
+	// A script that fails with the formula in place failed after it.
+	for _, keg := range []bool{false, true} {
+		f = newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+		f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+		if keg {
+			if err := os.MkdirAll(filepath.Join(prefix, "opt", "openshell"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		f.runner.On("/bin/sh", "", errors.New("exit status 1"))
+		_, err := f.inst.Install(context.Background())
+		var hb *openshell.HomebrewInstallError
+		if !errors.As(err, &hb) || hb.FormulaInstalled != keg || strings.Contains(err.Error(), "formula is installed, but") != keg {
+			t.Fatalf("keg %t: Install = %v", keg, err)
+		}
+	}
+}
+
 // TestInstallRefusesAHomebrewThisUserCannotWrite: NVIDIA's script runs
 // Homebrew as you, without sudo. On a Mac whose Homebrew belongs to an
 // administrator, a standard user's install failed halfway with "Permission

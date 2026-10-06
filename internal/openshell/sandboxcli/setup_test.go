@@ -432,6 +432,46 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 	lacks(t, ta.output(), "Xcode")
 }
 
+// TestSetupNamesTheStepAfterTheFormulaInstalled: NVIDIA's script failed
+// registering the gateway after Homebrew had installed the formula and
+// started the service, and setup blamed Homebrew and Xcode (GAP-0110). It
+// says the formula is installed, then shows the check that still fails,
+// with its fix.
+func TestSetupNamesTheStepAfterTheFormulaInstalled(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	missing := hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	const register = "OPENSHELL_LOCAL_TLS_DIR=/Users/a/homebrew/var/openshell/tls openshell gateway add https://127.0.0.1:17670 --local --name openshell"
+	unregistered := hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDRegistration)
+		c.Status, c.Detail = openshell.StatusFail, "no gateway registration"
+		c.Fix = &openshell.Fix{Summary: "register the local gateway", Command: register}
+	})
+	calls := 0
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		if calls++; calls == 1 {
+			return missing(ctx, d)
+		}
+		return unregistered(ctx, d)
+	}
+	inst := &fakeInstaller{err: &openshell.HomebrewInstallError{Err: errors.New("/bin/sh: exit status 1"), FormulaInstalled: true}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	var silent *Silent
+	if !errors.As(err, &silent) {
+		t.Fatalf("Setup = %v, want the failing check, already printed", err)
+	}
+	has(t, ta.output(), "the nvidia/openshell formula is installed, but NVIDIA's installer failed after it",
+		"✗ Gateway registration: no gateway registration", register)
+	lacks(t, ta.output(), "Xcode", "Homebrew could not install")
+}
+
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo
 // on Linux and installs a Homebrew formula on macOS, and the install
 // question says which (manual test M5).

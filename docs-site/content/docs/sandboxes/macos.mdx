@@ -98,6 +98,14 @@ own in your home directory (see Homebrew's
 [installation guide](https://docs.brew.sh/Installation)), put it first on
 `PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again.
 
+A Homebrew of your own works, with two differences. The OpenShell CLI looks
+for the gateway's client certificates only under `/opt/homebrew` and
+`/usr/local`, so for any other prefix the install plan passes
+`OPENSHELL_LOCAL_TLS_DIR=<prefix>/var/openshell/tls` to NVIDIA's installer
+(and the doctor's registration fix includes it). And Homebrew has no
+prebuilt packages for such a prefix, so it may build dependencies from
+source, which can take many minutes.
+
 ## Set up
 
 <Tabs items={['Command line', 'TUI', 'macOS app']}>
@@ -377,6 +385,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | You see | Do this |
 | --- | --- |
 | `install OpenShell: Homebrew at /opt/homebrew belongs to …, and you (…) cannot write to …` | Homebrew belongs to another account. Have its owner give you write access, or use a Homebrew of your own: see [a Homebrew that belongs to another account](#a-homebrew-that-belongs-to-another-account). |
+| `install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it` | Homebrew installed OpenShell and started its gateway; the installer then failed starting it or registering it with the OpenShell CLI. Setup shows the check that still fails and its fix, for example `openshell gateway add …` with `OPENSHELL_LOCAL_TLS_DIR` on a Homebrew outside `/opt/homebrew`. Run it, then run setup again. |
 | `install OpenShell: Homebrew could not install the nvidia/openshell formula` | Read Homebrew's `Error:` line above it. Most often your developer tools are too old: see [developer tools](#developer-tools). |
 | **MicroVM driver** fails: `e2fsprogs is not installed where the MicroVM driver looks for it` | `brew install e2fsprogs`, or run `defenseclaw sandbox setup` and let it install it. |
 | **MicroVM driver** fails: the driver is not signed for Apple's Hypervisor | `brew postinstall nvidia/openshell/openshell`. Setup runs it for you when you agree. |
