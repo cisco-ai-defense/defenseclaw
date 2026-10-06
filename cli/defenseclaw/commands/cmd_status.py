@@ -469,6 +469,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 "Sidecar",
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
+        _print_policy(health)
         _print_audit_log_health(cfg, health)
         _print_agents(cfg, health=health)
         _print_application_protection(cfg, health=health)
@@ -871,8 +872,38 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     health = document.get("health")
     if not isinstance(health, dict):
         return None
+    policy = document.get("policy")
+    if isinstance(policy, dict):
+        # The effective policy the gateway applied, for the Policy row.
+        health = {**health, "policy": policy}
     # The verified runtime PID, for the Sidecar row (GAP-1789).
     return {**health, "pid": trust.pid} if "pid" not in health else health
+
+
+def _policy_status(health: dict | None) -> dict | None:
+    """The applied effective policy from /status, or None when not reported."""
+    policy = (health or {}).get("policy")
+    if not isinstance(policy, dict) or not policy.get("effective_digest"):
+        return None
+    return {
+        "effective_digest": policy.get("effective_digest"),
+        "generation": policy.get("generation"),
+        "config_generation": policy.get("config_generation"),
+        "last_reload_error": policy.get("last_reload_error") or "",
+    }
+
+
+def _print_policy(health: dict | None) -> None:
+    policy = _policy_status(health)
+    if policy is None:
+        return
+    digest = str(policy["effective_digest"])
+    short = digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
+    value = f"generation {policy['generation']}, {short}"
+    if policy["last_reload_error"]:
+        _status_row("Policy", ux._style(f"{value}; the last change was rejected (see defenseclaw doctor)", fg="yellow"))
+        return
+    _status_row("Policy", value)
 
 
 def _fetch_health_connectors(
@@ -1687,6 +1718,8 @@ def _status_payload(app) -> dict:
         health = None
     running = health is not None
     payload["sidecar"] = {"running": running}
+    if (policy := _policy_status(health)) is not None:
+        payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
