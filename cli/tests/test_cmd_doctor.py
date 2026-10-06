@@ -2113,6 +2113,23 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         self.assertTrue(any("codex-hook.sh missing" in reason for reason in reasons), reasons)
         self.assertTrue(any("_hardening.sh missing" in reason for reason in reasons), reasons)
 
+    def test_stale_generated_hook_reasons_report_a_baked_fail_mode_config_changed(self):
+        # A writer change to guardrail.hook_fail_mode leaves the script with
+        # the old baked mode; its derived-from header says which.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            cfg.guardrail.mode, cfg.guardrail.hook_fail_mode = "action", "closed"
+            self._write_hook(
+                tmp, "codex-hook.sh",
+                "#!/bin/bash\n# defenseclaw-managed-hook v7\n# defenseclaw-derived: sha256=00 fail_mode=open\n"
+                "defenseclaw_response_failure_reason\n",
+            )
+            reasons = cmd_doctor._stale_generated_hook_reasons(cfg, "codex")
+
+        self.assertTrue(any("bakes hook fail mode open" in reason for reason in reasons), reasons)
+
     def test_codex_hook_check_warns_when_generated_script_is_stale(self):
         from defenseclaw.commands import cmd_doctor
 

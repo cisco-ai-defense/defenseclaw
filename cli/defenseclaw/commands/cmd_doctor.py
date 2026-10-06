@@ -725,7 +725,33 @@ def _stale_generated_hook_reasons(
             missing = [needle for needle in needles if needle not in text]
             if missing:
                 reasons.append(f"{display} missing {', '.join(missing)}")
+            if filename in expected_script_paths:
+                derived = _derived_hook_header_reason(cfg, connector, text)
+                if derived:
+                    reasons.append(f"{display} {derived}")
     return reasons
+
+
+_DERIVED_HOOK_HEADER = "# defenseclaw-derived:"
+
+
+def _derived_hook_header_reason(cfg, connector: str, text: str) -> str:
+    """Why a per-user connector script was not rendered from the current
+    config ("" when it was): its ``# defenseclaw-derived:`` header is missing
+    (an older build rendered it) or names another hook fail mode. Managed
+    installs compare the whole render in the gateway instead."""
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return ""
+    header = next((line for line in text.splitlines()[:5] if line.startswith(_DERIVED_HOOK_HEADER)), "")
+    if not header:
+        return "was rendered without the derived-from header (an older build)"
+    fields = dict(part.split("=", 1) for part in header[len(_DERIVED_HOOK_HEADER):].split() if "=" in part)
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_hook_fail_mode", None)
+    want = str(resolver(connector) if callable(resolver) else "").strip().lower()
+    baked = fields.get("fail_mode", "").strip().lower()
+    if want and baked and baked != want:
+        return f"bakes hook fail mode {baked}; config.yaml says {want}"
+    return ""
 
 
 def _check_generated_hook_freshness(
