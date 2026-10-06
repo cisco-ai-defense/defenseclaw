@@ -392,6 +392,10 @@ DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
 result names every user it purged or left alone.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
+If macOS denies deleting the `_defenseclaw` account (it can, from a remote
+shell), the uninstall still completes: the result carries a `service_account`
+warning with the two `dscl` commands that delete the account by hand.
+
 A pkg has no uninstaller, so the lifecycle removes the binaries itself. For
 a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,
 so the pkg receipt is gone afterward.
