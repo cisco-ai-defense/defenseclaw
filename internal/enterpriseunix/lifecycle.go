@@ -1212,7 +1212,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
-	l.clearSupersededPackageFailure()
+	l.clearSupersededFailures()
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}
