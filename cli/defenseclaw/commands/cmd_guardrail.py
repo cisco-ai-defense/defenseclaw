@@ -4481,15 +4481,10 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     Without --user it explains the account running the command, also for
     --connector and --agent, as live requests always carry a user.
     """
-    import getpass
-
-    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    from defenseclaw.gateway import OrchestratorClient, current_profile_account, gateway_api_client_host
 
     if not user:
-        try:
-            user = getpass.getuser()
-        except Exception:  # noqa: BLE001 - fall through to the error below.
-            user = ""
+        user = current_profile_account()[0]
         if not (user or connector or agent):
             ux.err("Name at least one of --user, --connector or --agent.")
             raise SystemExit(2)
