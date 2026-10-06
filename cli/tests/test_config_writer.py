@@ -222,12 +222,12 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     rejected.__cause__ = inspected
     assert config_writer.plain_error(rejected) == "guardrail.rules.enable: unknown rule NOPE-X. Fix the reference, then retry."
 
-    pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the canonical v8 schema and reference")
+    pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the configuration schema and reference")
     assert config_writer.plain_error(pattern) == (
         "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
     )
-    other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the canonical v8 schema")
-    assert "canonical v8 schema" not in config_writer.plain_error(other)
+    other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the configuration schema")
+    assert "configuration schema" not in config_writer.plain_error(other)
 
 
 def test_only_the_writer_writes_config_yaml():

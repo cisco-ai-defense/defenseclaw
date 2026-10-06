@@ -644,8 +644,8 @@ def validate_candidate(target: str, candidate: bytes) -> None:
 _REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
 _RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
 _SCHEMA_WORDS = (
-    ("correct the field using the canonical v8 schema and reference", "check the value and its documented format"),
-    ("use the value type documented by the canonical v8 schema", "use the value type the reference documents"),
+    ("correct the field using the configuration schema and reference", "check the value and its documented format"),
+    ("use the value type documented by the configuration schema", "use the value type the reference documents"),
 )
 
 

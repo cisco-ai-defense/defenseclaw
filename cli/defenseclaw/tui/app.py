@@ -15761,7 +15761,7 @@ def _fetch_v8_operator_status(
         if isinstance(path, str) and isinstance(keyword, str) and path and keyword:
             safe_path = re.sub(r"[^A-Za-z0-9_.$\[\]-]", "?", path)[:256]
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
-            return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
+            return None, f"invalid configuration at {safe_path} ({safe_keyword})"
         return None, "telemetry status could not be loaded; run defenseclaw observability validate"
 
 
