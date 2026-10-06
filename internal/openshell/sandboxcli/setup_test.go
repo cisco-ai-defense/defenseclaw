@@ -719,10 +719,15 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, SkipImages: true, Harnesses: []string{"codex"}}))
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}))
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
 	}
+	// It ends on the fix, not on a run that cannot start, and says nothing
+	// of a download for the image that is current (GAP-0091).
+	has(t, ta.output(), "not ready for sandboxes yet: no Claude Code or Codex sandbox can start without bind mounts; "+
+		"enable them with `defenseclaw sandbox doctor --fix`, then `cd <project> && defenseclaw sandbox run codex`")
+	lacks(t, ta.output(), "Done →", "Building the Codex image")
 	c := loadConfig(t, ta)
 	if c.OpenShell.Workdir.Mode != "copy" || !slices.Equal(c.OpenShell.Harnesses, []string{"codex"}) {
 		t.Fatalf("config = %+v", c.OpenShell)
