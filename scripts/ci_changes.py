@@ -78,6 +78,7 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     (("policies/",), frozenset({"rego", "go", "python"})),
     (("schemas/",), frozenset({"go", "python", "checks"})),
     (("bundles/",), frozenset({"go", "python"})),
+    (("edge-connector/",), frozenset({"go", "python"})),
     (
         ("internal/", "cmd/", "test/", "proto/", "plugins/", "testdata/", ".golangci.yml"),
         frozenset({"go"}),

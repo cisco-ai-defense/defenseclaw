@@ -72,7 +72,7 @@ spec:
 @click.option(
     "--endpoint",
     default=None,
-    help=f"Fleet API base URL (default: {_DEFAULT_FLEET_ENDPOINT}).",
+    help="Fleet API base URL (default: gateway loopback on port 13400).",
 )
 @click.option(
     "--emit-policy",
@@ -99,13 +99,13 @@ def edge_connector(
     Use ``--emit-policy`` to print a sample fleet policy YAML.
     """
     if emit_policy:
-        click.echo(_SAMPLE_POLICY)
+        ux.echo(_SAMPLE_POLICY)
         return
 
     ux.section("Edge Connector Setup")
 
     # --- 1. Build instructions -------------------------------------------
-    click.echo()
+    ux.echo()
     ux.info(
         "Edge Connector Engine (C):\n"
         "\n"
@@ -154,13 +154,13 @@ def edge_connector(
         if not non_interactive:
             endpoint = click.prompt("Fleet API endpoint", default=endpoint)
 
-    click.echo()
+    ux.echo()
     ux.ok(f"Fleet API endpoint: {endpoint}")
 
     # --- 4. Summary ------------------------------------------------------
-    click.echo()
+    ux.echo()
     ux.section("Next Steps")
-    click.echo(
+    ux.echo(
         "  1. Start (or restart) the DefenseClaw gateway -- the fleet API\n"
         f"     is now mounted at {endpoint}\n"
         "  2. Point your edge-connector devices at this endpoint.\n"
