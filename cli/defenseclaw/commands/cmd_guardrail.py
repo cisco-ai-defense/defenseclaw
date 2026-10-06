@@ -4476,7 +4476,7 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     Asks the running gateway (loopback, gateway token), which resolves the
     user through the operating system the way it does for live requests.
     Without --user it explains the account running the command, also for
-    --connector and --agent, as live requests always carry a user (GAP-0085).
+    --connector and --agent, as live requests always carry a user.
     """
     import getpass
 
