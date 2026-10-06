@@ -909,69 +909,9 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 	recordCodexNotifyV8(ctx, metricRuntime, kind, statusLabel, result, p.TurnID)
 
-	// Fold the notify event into the unified hook collector as a
-	// synthetic Stop event. The native codex CLI emits
-	// "agent-turn-complete" notifications outside the PreToolUse /
-	// PostToolUse stream, so without this fold the unified hook
-	// collector would have no visibility into them — breaking the
-	// "every connector emits the same hook metric set" invariant
-	// that downstream dashboards (defenseclaw.connector.hook.*) rely
-	// on for codex.
-	//
-	// The synthetic translation runs only when the parse succeeded
-	// (parseErr == nil) — a malformed payload should not invent a
-	// Stop event; the existing audit + metric path already captured
-	// the malformed marker above.
-	//
-	// handleAgentHookSynthetic emits a separate audit row under
-	// audit.ActionConnectorHookSynthetic so the canonical
-	// `codex.notify.<sanitized-type>` row count (one per inbound
-	// notify) is preserved — see the function godoc and
-	// TestCodexNotify_PersistsDynamicSuffixAction.
-	if parseErr == nil {
-		synthetic := codexNotifyToAgentHookRequest(p, body)
-		a.handleAgentHookSynthetic(ctx, "codex", synthetic, body)
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
-}
-
-// codexNotifyToAgentHookRequest translates a codexNotifyPayload into
-// a generic agentHookRequest carrying a synthetic HookEventName=Stop.
-// The translation preserves the codex notify fields in
-// req.Payload so a downstream consumer (hook profile evaluator,
-// audit envelope renderer) can still recover the type / status /
-// model values that the codex schema provides.
-//
-// PR 7 cleanup deletes codexNotifyPayload entirely once every
-// downstream that reads Type / Status / Model has switched to
-// pulling them out of req.Payload directly via firstString.
-func codexNotifyToAgentHookRequest(p codexNotifyPayload, raw []byte) agentHookRequest {
-	payload := map[string]interface{}{
-		"hook_event_name": "Stop",
-		"session_id":      codexNotifySessionID(p),
-		"turn_id":         p.TurnID,
-		"model":           p.Model,
-		"agent_type":      "codex",
-		"codex_notify": map[string]interface{}{
-			"type":   p.Type,
-			"status": p.Status,
-		},
-		"raw_notify_body_len": len(raw),
-	}
-	return agentHookRequest{
-		ConnectorName: "codex",
-		HookEventName: "Stop",
-		SessionID:     codexNotifySessionID(p),
-		TurnID:        p.TurnID,
-		AgentName:     "codex",
-		AgentType:     "codex",
-		ToolName:      "codex-notify",
-		Direction:     "tool_result",
-		Payload:       payload,
-	}
 }
 
 func codexNotifySessionID(p codexNotifyPayload) string {
