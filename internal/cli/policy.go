@@ -19,8 +19,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -96,12 +98,17 @@ var policyValidateCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
-
-		if _, err := policy.NewExact(regoDir); err != nil {
-			return fmt.Errorf("policy: compilation failed:\n%w", err)
+		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
+			// The managed packages ship no Rego: the admission policy is
+			// compiled from config.yaml alone, so there is nothing to compile.
+			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
+		} else {
+			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
+			if _, err := policy.NewExact(regoDir); err != nil {
+				return fmt.Errorf("policy: compilation failed:\n%w", err)
+			}
+			fmt.Println("All Rego modules compiled successfully.")
 		}
-		fmt.Println("All Rego modules compiled successfully.")
 
 		for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {
 			compiled := policy.CompileAdmission(cfg)[assetType]
