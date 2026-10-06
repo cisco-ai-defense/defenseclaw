@@ -234,6 +234,15 @@ def test_launchd_hook_guardian_is_separate_privileged_job():
     assert payload.get("KeepAlive") is True
 
 
+def test_enterprise_rpm_owns_its_doc_directory():
+    # An rpm erase removes only the directories the package lists; without
+    # the entry /usr/share/doc/defenseclaw-enterprise stays behind, empty.
+    config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
+    (nfpm,) = [n for n in config["nfpms"] if n["id"] == "defenseclaw-enterprise"]
+    owned = {c["dst"] for c in nfpm["contents"] if c.get("type") == "dir"}
+    assert "/usr/share/doc/defenseclaw-enterprise" in owned
+
+
 def test_release_archives_ship_enterprise_packaging_assets():
     config = yaml.safe_load((ROOT / ".goreleaser.yaml").read_text(encoding="utf-8"))
     for archive in config["archives"]:

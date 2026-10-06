@@ -237,7 +237,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		// The administrator's targets still need the gateway's inventory
 		// read access; the pass only adds that grant and never publishes.
 		if authored, loadErr := enterprisehooks.LoadManifest(manifestPath); loadErr == nil {
-			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", enumerationLoggerForStderr(stderr)); grantErr != nil {
+			if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(authored, "", !cfg.SecureClientIntegration(), enumerationLoggerForStderr(stderr)); grantErr != nil {
 				fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 			}
 		}
@@ -300,7 +300,9 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	// walks the right paths but ReadDir returns access-denied and every
 	// skill/plugin/rule/mcp signal is suppressed. Idempotent; per-directory
 	// failures log-only so one bad DACL doesn't block the enumerator cycle.
-	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", logf); grantErr != nil {
+	// The IDE plugin inventory's folders are added outside the Secure Client
+	// profile, whose gateway has no IDE inventory.
+	if grantErr := enterprisehooks.GrantGatewayInventoryReadForManifest(manifest, "", !cfg.SecureClientIntegration(), logf); grantErr != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL pass failed: %v\n", grantErr)
 	}
 	elapsed := time.Since(start)

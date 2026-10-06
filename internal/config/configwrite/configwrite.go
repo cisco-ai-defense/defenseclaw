@@ -685,6 +685,11 @@ func unsetPath(root *yaml.Node, parts []pathPart) error {
 	return nil
 }
 
+// ChangedPaths lists the leaf paths whose values differ between two config
+// documents (what Result.Changed carries), for a caller that installs the
+// document itself and still needs to know what it changed.
+func ChangedPaths(before, after []byte) ([]string, error) { return diffDocuments(before, after) }
+
 // diffDocuments lists the leaf paths whose values differ between two
 // documents. Lists compare as a whole.
 func diffDocuments(before, after []byte) ([]string, error) {
