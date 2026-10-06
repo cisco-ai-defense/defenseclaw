@@ -499,8 +499,40 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 	}
 }
 
-// ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
-// the live proxy without rereading any side files.
+// servedConnector is the connector this proxy serves: the wired connector
+// (guardrail.connector may be empty for OpenClaw), never the /c/<name>/ path
+// prefix or a header.
+func (p *GuardrailProxy) servedConnector() string {
+	p.rtMu.RLock()
+	defer p.rtMu.RUnlock()
+	if p.connector != nil {
+		return p.connector.Name()
+	}
+	if p.cfg != nil {
+		return p.cfg.Connector
+	}
+	return ""
+}
+
+// withProxyAgent attributes an authenticated proxy request to the agent
+// install the proxy serves, as acpEvaluationContext does for ACP: the agent
+// identity the hook path derives for the proxy's connector and the verified
+// user, recorded for `defenseclaw agent identities`. It then resolves the
+// request's guardrail profile with that connector and agent, so connectors
+// and agents assignments decide proxy traffic as explain says they do.
+func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
+	ctx := r.Context()
+	connectorName := p.servedConnector()
+	if identity := AgentIdentityFromContext(ctx); identity.IdentityID == "" {
+		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
+			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+			ctx = ContextWithAgentIdentity(ctx, identity)
+			sharedAgentIdentities.observe(facts, "", false)
+		}
+	}
+	return r.WithContext(withGuardrailProfile(ctx, liveGuardrailProfiles.Load(), connectorName))
+}
+
 // profileModeFor applies the request's identity-based guardrail profile to
 // the proxy's mode and block message. It changes them only for a request
 // with a verified user-scoped identity (profileProxyOverride) and never for
@@ -509,13 +541,7 @@ func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage 
 	if mode == "passthrough" {
 		return mode, blockMessage
 	}
-	connectorName := ""
-	p.rtMu.RLock()
-	if p.cfg != nil {
-		connectorName = p.cfg.Connector
-	}
-	p.rtMu.RUnlock()
-	profileMode, profileMessage, ok := profileProxyOverride(ctx, connectorName)
+	profileMode, profileMessage, ok := profileProxyOverride(ctx, p.servedConnector())
 	if !ok {
 		return mode, blockMessage
 	}
@@ -525,6 +551,8 @@ func (p *GuardrailProxy) profileModeFor(ctx context.Context, mode, blockMessage 
 	return normalizeAgentHookMode(profileMode), blockMessage
 }
 
+// ApplyGuardrailConfig applies a validated config.yaml guardrail snapshot to
+// the live proxy without rereading any side files.
 func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if p == nil || cfg == nil {
 		return
@@ -951,6 +979,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		p.handleChatCompletion(w, r)
 		return
 	}
+	r = p.withProxyAgent(r)
 
 	// Peek the body once so the shape classifier can run even when the
 	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
@@ -2629,6 +2658,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
+	r = p.withProxyAgent(r)
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
