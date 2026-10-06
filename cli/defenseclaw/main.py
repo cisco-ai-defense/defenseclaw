@@ -664,6 +664,7 @@ def main() -> None:
     ux.configure_console_output()
     _keep_console_width_when_piped()
     _force_utf8_io()
+    from defenseclaw.config_writer import ManagedConfigWriteError
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
     try:
@@ -685,6 +686,12 @@ def main() -> None:
     except CanonicalObservabilityError as exc:
         click.echo(f"Error: the audit event was not recorded: {exc}.", err=True)
         sys.exit(1)
+    except ManagedConfigWriteError as exc:
+        # Every command that saves config.yaml ends here when a managed
+        # standalone host refuses the write: one line and the documented
+        # exit 3, never a traceback.
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(3)
     except OSError as exc:
         if _output_pipe_closed(exc):
             _silence_closed_stdout()

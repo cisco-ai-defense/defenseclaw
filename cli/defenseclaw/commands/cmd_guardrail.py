@@ -130,7 +130,19 @@ def _confirm_proceed() -> bool:
 
 def _preflight_config_write(app: AppContext) -> None:
     """Surface managed-mode write rejection before an interactive prompt."""
+    from defenseclaw import config_writer
+
     cfg_path = str(config_path_for_data_dir(app.cfg.data_dir))
+    try:
+        with open(cfg_path, "rb") as handle:
+            current = handle.read()
+    except OSError:
+        current = b""
+    if config_writer.managed_refuses(current, _cli_actor()):
+        # The writer refuses every local actor on a managed standalone host,
+        # elevated or not, so do not suggest admin elevation.
+        ux.err(config_writer.MANAGED_REFUSAL, indent="  ")
+        raise SystemExit(3)
     try:
         _assert_config_write_allowed(cfg_path)
     except OSError as exc:

@@ -66,3 +66,19 @@ def test_main_turns_an_unreachable_gateway_audit_into_one_line(capsys):
     assert err.count("\n") == 1
     assert "gateway authentication is unavailable" in err
     assert "defenseclaw-gateway start" in err
+
+
+def test_main_turns_a_managed_config_refusal_into_one_line_and_exit_3(capsys):
+    from defenseclaw.config_writer import MANAGED_REFUSAL, ManagedConfigWriteError
+
+    with (
+        patch.object(main_mod.ux, "configure_console_output"),
+        patch.object(main_mod, "_force_utf8_io"),
+        patch.object(main_mod, "_try_launch_tui", side_effect=ManagedConfigWriteError(MANAGED_REFUSAL)),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main_mod.main()
+    assert exited.value.code == 3
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert err == f"error: {MANAGED_REFUSAL}\n"
