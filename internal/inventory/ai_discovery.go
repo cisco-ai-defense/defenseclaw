@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -170,6 +169,9 @@ type AIDiscoveryOptions struct {
 	// When set, full scans ingest it and this service's own process
 	// detector, which its sandbox blinds, is left to those scans.
 	UserScanDir string
+	// SandboxScanDir is <data_dir>/sandboxes, whose OpenShell sandboxes'
+	// scan records full scans ingest (SandboxScanDirForConfig).
+	SandboxScanDir string
 	// IDEInventory is ai_discovery.ide_inventory (all, ai_only or off).
 	IDEInventory string
 	// SecureClient marks the Secure Client profile, whose discovery output
@@ -364,8 +366,13 @@ type AISignal struct {
 	// UserID (a uid) and UserName name the account a per-user scan ran as.
 	// The gateway takes both from the guardian's spool record, never from
 	// the scan's own output.
-	UserID       string `json:"user_id,omitempty"`
-	UserName     string `json:"user,omitempty"`
+	UserID   string `json:"user_id,omitempty"`
+	UserName string `json:"user,omitempty"`
+	// SandboxID and SandboxName name the OpenShell sandbox a sandbox scan
+	// found the signal in (Source "sandbox"). The gateway takes both from
+	// the sandbox manager's record, never from the scan's own output.
+	SandboxID    string `json:"sandbox_id,omitempty"`
+	SandboxName  string `json:"sandbox_name,omitempty"`
 	EvidenceHash string `json:"-"`
 	// ModelProvenanceHubResolvedAt is an internal freshness marker for optional
 	// Hub enrichment. It is mirrored by aiStoredSignal but never returned by the
@@ -606,6 +613,9 @@ type ContinuousDiscoveryService struct {
 	// processOwners, when set, limits the process detector to processes of
 	// these owners (the account name or uid of a per-user scan).
 	processOwners map[string]bool
+	// sandbox, when set, makes this the scanner of one sandbox's collected
+	// tree (ScanSandboxRoot): its facts stand in for the host's.
+	sandbox *sandboxFacts
 	// account, when set, is the account a per-user install belongs to: the
 	// owner of every signal its scans find (perUserAccount).
 	account ideOwner
@@ -791,6 +801,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		ManagedEnterprise:           managed.IsManagedEnterprise(cfg.DeploymentMode),
 		StandaloneEnterprise:        cfg.StandaloneEnterprise(),
 		UserScanDir:                 UserScanDirForConfig(cfg),
+		SandboxScanDir:              SandboxScanDirForConfig(cfg),
 		IDEInventory:                ad.EffectiveIDEInventory(),
 		SecureClient:                cfg.SecureClientIntegration(),
 	})
@@ -1419,6 +1430,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		}
 	}
 	measure := func(name string, fn func() ([]AISignal, int, error)) {
+		if s.hostOnlyDetector(name) {
+			return
+		}
 		start := time.Now()
 		child := scanObservation.startDetector(ctx, s, AIDiscoveryV8DetectorStart{
 			ScanID: scanID, Detector: name, StartedAt: start,
@@ -1506,6 +1520,18 @@ func (s *ContinuousDiscoveryService) scanSignals(
 			}
 			if len(errs) > 0 {
 				return out, files, errors.New("per-user scan records are incomplete")
+			}
+			return out, files, nil
+		})
+	}
+	if s.opts.SandboxScanDir != "" {
+		measure("sandbox_scan", func() ([]AISignal, int, error) {
+			out, files, errs := s.detectSandboxScans()
+			for key, detail := range errs {
+				stats.DetectorErrors[key] = detail
+			}
+			if len(errs) > 0 {
+				return out, files, errors.New("sandbox scan records are incomplete")
 			}
 			return out, files, nil
 		})
@@ -2428,6 +2454,9 @@ var hermesProfileSkillsRoots = []string{
 // account's own Hermes home, so every user's Hermes category folders and
 // .bundled_manifest were listed as skills (GAP-2263).
 func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
+	if s.sandbox != nil {
+		return s.sandbox.hermesSkills != "" && filepath.Clean(path) == s.sandbox.hermesSkills
+	}
 	if hermesskills.IsRoot(path) {
 		return true
 	}
@@ -2504,6 +2533,9 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 
 func (s *ContinuousDiscoveryService) isCodexBundledSkillContainer(path string) bool {
 	configured := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if s.sandbox != nil {
+		configured, _ = s.variable("CODEX_HOME")
+	}
 	if configured != "" {
 		if !filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
 			return false
@@ -2563,7 +2595,7 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, bin := range sig.BinaryNames {
-			if path, err := exec.LookPath(bin); err == nil && path != "" {
+			if path, err := s.lookPath(bin); err == nil && path != "" {
 				out = append(out, s.signalFromPath(sig, SignalAICLI, "binary", path))
 			}
 		}
@@ -2572,7 +2604,7 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 }
 
 func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
-	procs, err := processSnapshot()
+	procs, err := s.processes()
 	if err != nil {
 		return nil, fmt.Errorf("process snapshot: %w", err)
 	}
@@ -3013,7 +3045,7 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 
 func (s *ContinuousDiscoveryService) detectEnvVars() []AISignal {
 	present := map[string]bool{}
-	for _, kv := range os.Environ() {
+	for _, kv := range s.environment() {
 		if idx := strings.IndexByte(kv, '='); idx > 0 {
 			present[strings.ToUpper(kv[:idx])] = true
 		}
@@ -3754,7 +3786,7 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 	}
 	missingEnv := false
 	candidate = os.Expand(candidate, func(name string) string {
-		value, ok := platformDiscoveryVariable(name, s.opts.HomeDir)
+		value, ok := s.variable(name)
 		if !ok || strings.TrimSpace(value) == "" {
 			missingEnv = true
 		}
@@ -4281,6 +4313,8 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 		report.Signals[i].Source = AISourceExternal
 		// Account attribution comes only from the guardian's per-user scans.
 		report.Signals[i].UserID, report.Signals[i].UserName = "", ""
+		// Sandbox attribution comes only from the sandbox manager's records.
+		report.Signals[i].SandboxID, report.Signals[i].SandboxName = "", ""
 		// Provenance country/publisher claims are catalog-controlled. An
 		// external discovery client may supply the model ID, but it cannot
 		// impersonate a higher-confidence publisher rule on outbound events.

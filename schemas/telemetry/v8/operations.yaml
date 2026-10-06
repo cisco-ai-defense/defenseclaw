@@ -6276,6 +6276,10 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.identity.id
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
   log:
     event_name: ai_component.changed
   x-defenseclaw:
@@ -6358,6 +6362,10 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.identity.id
     requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
   log:
     event_name: ai_component.discovered
   x-defenseclaw:
@@ -6400,6 +6408,10 @@ groups:
   - ref: defenseclaw.ai.model.provenance.source
     requirement_level: recommended
   - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
     requirement_level: recommended
   log:
     event_name: ai_component.observed
@@ -6459,6 +6471,10 @@ groups:
   - ref: defenseclaw.user.principal.assurance
     requirement_level: recommended
   - ref: defenseclaw.agent.identity.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.name
     requirement_level: recommended
   log:
     event_name: ai_component.removed
