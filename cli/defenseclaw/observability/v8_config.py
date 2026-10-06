@@ -977,6 +977,13 @@ def _declared_action(keyword: str, error: Any) -> str:
         ):
             return "use one of " + ", ".join(values)
         return ""
+    if keyword == "pattern":
+        return _pattern_action(error.validator_value)
+    if keyword == "oneOf":
+        return _one_of_action(error.validator_value)
+    if keyword == "type":
+        types = error.validator_value if isinstance(error.validator_value, list) else [error.validator_value]
+        return "use a value of type " + " or ".join(str(t) for t in types) if types else ""
     if keyword not in ("minimum", "maximum") or not isinstance(error.schema, Mapping):
         return ""
 
@@ -994,6 +1001,56 @@ def _declared_action(keyword: str, error: Any) -> str:
     if high:
         return f"use a number at or below {high}"
     return ""
+
+
+def _pattern_action(pattern: Any) -> str:
+    """The words a ``^(a|b|c)$`` pattern allows (``[Cc][Rr]...`` spellings
+    mean any case, an empty alternative means empty inherits); "" for any
+    other pattern."""
+
+    if not isinstance(pattern, str) or not (pattern.startswith("^(") and pattern.endswith(")$")):
+        return ""
+    words: list[str] = []
+    any_case = empty = False
+    for part in pattern[2:-2].split("|"):
+        if not part:
+            empty = True
+        elif re.fullmatch(r"(?:\[[A-Za-z][A-Za-z]\])+", part):
+            words.append("".join(pair[1] for pair in re.findall(r"\[[A-Za-z][A-Za-z]\]", part)).upper())
+            any_case = True
+        elif re.fullmatch(r"[A-Za-z0-9_-]+", part):
+            words.append(part)
+        else:
+            return ""
+    if not words:
+        return ""
+    return "use one of " + ", ".join(words) + (" in any case" if any_case else "") + (
+        " (empty inherits)" if empty else ""
+    )
+
+
+def _one_of_action(branches: Any) -> str:
+    """The shapes a ``oneOf`` allows, for example ``one of a, b or a mapping
+    with x, y``; "" when a branch is not a string list or a mapping."""
+
+    if not isinstance(branches, list) or not branches:
+        return ""
+    definitions = _schema_validator().schema.get("$defs", {})
+    parts: list[str] = []
+    for branch in branches:
+        if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
+            branch = definitions.get(str(branch["$ref"])[len("#/$defs/"):], {})
+        if not isinstance(branch, Mapping):
+            return ""
+        values = branch.get("enum")
+        if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
+            parts.append("one of " + ", ".join(values))
+        elif branch.get("type") == "object":
+            names = list(branch.get("properties") or {})
+            parts.append("a mapping with " + ", ".join(names) if names else "a mapping")
+        else:
+            return ""
+    return "use " + " or ".join(parts)
 
 
 def _json_path(parts: tuple[Any, ...]) -> str:

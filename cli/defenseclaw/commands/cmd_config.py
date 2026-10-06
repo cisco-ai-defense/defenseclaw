@@ -337,6 +337,11 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    if parts[0] == "update" and len(parts) <= 2:
+        data, sources = _update_view(cfg)
+        if len(parts) == 1:
+            return data, _whole_source(sources)
+        return (data[parts[1]], sources[parts[1]]) if parts[1] in data else None
     if parts[0] == "admission" and (len(parts) == 1 or parts[1] in _ADMISSION_TYPES):
         if len(parts) == 1:
             views = {name: _admission_view(cfg, name) for name in _ADMISSION_TYPES}
@@ -350,6 +355,23 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
             return None
         return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
     return None
+
+
+def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
+    """``update:`` with its defaults resolved (the update notice on, the stable
+    channel, the official release feed), and where each value comes from."""
+    from defenseclaw.upgrade_shim import OFFICIAL_SOURCE
+
+    written = getattr(cfg, "update", None)
+    check = getattr(written, "check", None)
+    channel = str(getattr(written, "channel", "") or "")
+    source = str(getattr(written, "source", "") or "")
+    data = {"check": True if check is None else bool(check), "channel": channel or "stable", "source": source or OFFICIAL_SOURCE}
+    sources = {
+        name: f"config:update.{name}" if is_set else "builtin"
+        for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
+    }
+    return data, sources
 
 
 def _whole_source(sources: dict[str, str]) -> str:
