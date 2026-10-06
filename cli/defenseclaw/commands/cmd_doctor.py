@@ -308,6 +308,15 @@ class _DoctorResult:
         # only repeat it stay quiet.
         self.gateway_down = ""
 
+    @property
+    def passive_reason(self) -> str:
+        """What made this run passive, as skip rows name it (GAP-0102).
+
+        --fix --dry-run is passive too; naming "passive mode" there points at
+        a mode the user never chose.
+        """
+        return "--dry-run" if self.mode == "plan" else "passive mode"
+
     def set_section(self, section: str) -> None:
         self.section = section.strip() or "general"
 
@@ -8566,7 +8575,7 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
             _emit(
                 "skip",
                 "LLM API key (Anthropic)",
-                f"{env_name} is set; passive mode avoids the inference-based authentication probe",
+                f"{env_name} is set; {r.passive_reason} skips the inference-based authentication probe",
                 r=r,
             )
         else:
@@ -8677,7 +8686,7 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         _emit(
             "skip",
             "LLM reachable",
-            "passive mode avoids the billable max_tokens=1 inference probe",
+            f"{r.passive_reason} skips the billable max_tokens=1 inference probe",
             r=r,
         )
         return
@@ -9359,7 +9368,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit(
             "skip",
             "Cisco AI Defense",
-            f"passive mode validated configuration and credential presence only; endpoint={endpoint}",
+            f"{r.passive_reason} checks configuration and credential presence only; endpoint={endpoint}",
             r=r,
         )
         return
@@ -9826,7 +9835,7 @@ def _check_galileo_trace_canaries(
             _emit(
                 "skip",
                 "Galileo canaries",
-                f"passive mode suppresses synthetic trace export; configured={len(destinations)}",
+                f"{r.passive_reason} does not send synthetic traces; configured={len(destinations)}",
                 r=r,
             )
         return
