@@ -530,7 +530,7 @@ func (l *lifecycle) ledgerProblem() string {
 func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
-	reportedPolicy := ""
+	reportedPolicy, reloadError := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
@@ -551,7 +551,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 				if body, err := l.gatewayHealth(ctx, unit, serviceUID); err == nil {
 					r.Readiness.Gateway = true
 					l.readInspection(body)
-					reportedPolicy = gatewayPolicyDigest(body)
+					reportedPolicy, reloadError = gatewayPolicyHealth(body)
 				}
 			}
 		case "guardian":
@@ -567,7 +567,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.InstalledVersion = record.ProductVersion
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy)
+	l.describePolicy(ctx, reportedPolicy, reloadError)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.

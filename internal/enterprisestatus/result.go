@@ -166,6 +166,10 @@ type PolicyState struct {
 	// GatewayReportedDigest is the digest /health reported; empty when the
 	// gateway was not reachable.
 	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+	// LastReloadError is policy.last_reload_error from /health: why the
+	// gateway rejected its last reload. While it is set the gateway enforces
+	// an older policy than the installed config, so Applied is false.
+	LastReloadError string `json:"last_reload_error,omitempty"`
 }
 
 // PolicyStateFileName is the lifecycle state file holding the last applied
