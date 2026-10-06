@@ -23,6 +23,8 @@ dependencies = [
     "pydantic-settings>=2.14.2",
     # CVE-2026-59881 and CVE-2026-69243/69244 are fixed by 3.14.3.
     "aiohttp>=3.14.3,<4",
+    # CVE-2026-104874 is fixed in 6.9.1 (aiohttp and yarl dependency).
+    "multidict>=6.9.1,<7",
     "pyjwt>=2.15.0",
     "starlette>=1.3.1,<1.4",
     "fastapi>=0.137.1,<0.138",
@@ -239,6 +241,9 @@ override-dependencies = [
     # CVE-2026-59881, CVE-2026-69243/69244, and PYSEC-2026-3545.
     # LiteLLM's transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.14.3,<4",
+    # CVE-2026-104874 fixed in 6.9.1. multidict comes in through aiohttp
+    # and yarl, which accept older releases.
+    "multidict>=6.9.1,<7",
     # pyjwt 2.13.0 fixes PYSEC-2026-175, PYSEC-2026-177, PYSEC-2026-178 and
     # PYSEC-2026-179; 2.14.0 fixes CVE-2026-101917, CVE-2026-102265..102273
     # and CVE-2026-102274; 2.15.0 fixes CVE-2026-101918. Pulled in

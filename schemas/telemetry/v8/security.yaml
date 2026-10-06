@@ -2817,6 +2817,7 @@ groups:
   - correlation.agent
   - correlation.interaction
   - correlation.security
+  - correlation.identity
   - security.guardrail
   - genai.model
   - content.input

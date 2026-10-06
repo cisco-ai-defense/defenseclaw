@@ -423,7 +423,7 @@ export interface RecipesFile {
 export interface Scenario {
   id: string;
   title: string;
-  domain: 'admission' | 'guardrail' | 'firewall' | 'audit' | 'skill_actions';
+  domain: 'admission' | 'guardrail' | 'firewall' | 'audit';
   input: Record<string, unknown>;
   description: string;
   expectedVerdict: string;

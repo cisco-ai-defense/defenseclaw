@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestHandleAIUsageDisabled(t *testing.T) {
@@ -172,6 +173,10 @@ func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 
 func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	tmp := t.TempDir()
+	// Windows also scans machine-wide Visual Studio extensions; keep the
+	// scan off the runner's own installation.
+	t.Setenv("ProgramFiles", tmp)
+	t.Setenv("ProgramFiles(x86)", tmp)
 	home := filepath.Join(tmp, "home")
 	rawPath := filepath.Join(home, ".raw-ai", "config.json")
 	if err := os.MkdirAll(filepath.Dir(rawPath), 0o700); err != nil {
@@ -185,6 +190,13 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(extensions, "extensions.json"), []byte(`[{"identifier":{"id":"example.raw-ai"},"version":"1.0.0","relativeLocation":"example.raw-ai-1.0.0"},{"identifier":{"id":"example.other"},"version":"2.0.0"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cursorExtensions := filepath.Join(home, ".cursor", "extensions")
+	if err := os.MkdirAll(cursorExtensions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cursorExtensions, "extensions.json"), []byte(`[{"identifier":{"id":"example.other"},"version":"2.0.0"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -214,7 +226,9 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- svc.Run(ctx) }()
-	scanCtx, scanCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// A hang guard, not a latency budget: a full scan on a loaded Windows
+	// runner still reads the account's real AppData.
+	scanCtx, scanCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	report, err := svc.ScanNow(scanCtx)
 	scanCancel()
 	if err != nil {
@@ -253,37 +267,45 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	}
 
 	// The IDE plugin list pages through the full inventory, filters to AI
-	// plugins on request, and carries paths only as hashes.
+	// plugins on request, counts the filtered rows (GAP-0096), keeps only the
+	// installations holding an AI plugin under ai_only (GAP-0104), and
+	// carries paths only as hashes.
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1", nil))
 	var page struct {
-		Total      int                   `json:"total"`
-		NextCursor string                `json:"next_cursor"`
-		Plugins    []inventory.IDEPlugin `json:"plugins"`
+		Total         int                          `json:"total"`
+		NextCursor    string                       `json:"next_cursor"`
+		Counts        inventory.IDEInventoryCounts `json:"counts"`
+		Installations []inventory.IDEInstallation  `json:"installations"`
+		Plugins       []inventory.IDEPlugin        `json:"plugins"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != http.StatusOK {
 		t.Fatalf("ide-plugins = %d %s", w.Code, w.Body.String())
 	}
-	if page.Total != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
+	if page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
 		t.Fatalf("ide-plugins page = %s", w.Body.String())
 	}
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?ai_only=true", nil))
-	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.Total != 1 || page.Plugins[0].PluginID != "example.raw-ai" || !page.Plugins[0].IsAI {
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.Total != 1 || page.Counts.Total != 1 || page.Counts.AI != 1 || page.Counts.Installations != 1 || len(page.Installations) != 1 || page.Installations[0].Product != "vscode" || page.Plugins[0].PluginID != "example.raw-ai" || !page.Plugins[0].IsAI {
 		t.Fatalf("ai_only = %s", w.Body.String())
 	}
 }
 
-// GAP-0051: --ide vscode selects VS Code, not its forks; a bare account name
-// still selects DOMAIN\name rows; a Windows transcript keeps its backslashes
-// in the install hint.
+// GAP-0051/GAP-0079: --ide vscode selects VS Code, not its forks; a bare
+// account name selects DOMAIN\name rows and a DOMAIN\name filter selects
+// bare-name rows; a Windows transcript keeps its backslashes in the install
+// hint.
 func TestIDEPluginFiltersAndInstallHintKeepWindowsSpelling(t *testing.T) {
 	if ideFilterMatches("vscode", "vscode", "cursor") || !ideFilterMatches("vscode", "vscode", "vscode") ||
 		!ideFilterMatches("jetbrains", "jetbrains", "pycharm") {
 		t.Fatal("ide filter must match products, and families only when the family is not a product")
 	}
-	if !accountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || accountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
+	if !useridentity.AccountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
 		t.Fatal("user filter must accept the account name without its domain")
+	}
+	if !useridentity.AccountFilterMatches(`DCLAB\dcad-alice`, "S-1-5-21-1", "dcad-alice") || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", "dcad-alice") {
+		t.Fatal("user filter must accept the account name with its domain")
 	}
 	hint := claimedInstallHint(map[string]interface{}{"transcript_path": `C:\Users\dcad-alice\altcfg\projects\p\s.jsonl`})
 	if hint != `C:\Users\dcad-alice\altcfg` {

@@ -38,6 +38,7 @@ func writeVSCodeExtensions(t *testing.T, home string, ids ...string) {
 // owner, flags AI plugins from the catalog, records the list in
 // inventory.db, and reports plugins that disappear as removed.
 func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
+	withoutMachineIDEs(t)
 	root := t.TempDir()
 	alice := filepath.Join(root, "Users", "alice")
 	bob := filepath.Join(root, "Users", "bob")
@@ -131,6 +132,17 @@ func TestIDEAIIndexFlagsPreRenameDevinPlugins(t *testing.T) {
 	}
 }
 
+// The built-in catalog flags JetBrains' own AI Assistant plugin as AI.
+func TestIDEAIIndexFlagsJetBrainsAIAssistant(t *testing.T) {
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sig, ok := newIDEAIIndex(catalog).match(ideplugins.FamilyJetBrains, "com.intellij.ml.llm"); !ok || sig.ID != "jetbrains-ai" {
+		t.Fatalf("com.intellij.ml.llm matched %+v, %t", sig, ok)
+	}
+}
+
 // A v3 inventory.db (the 1.0.0 schema) migrates to v4 in place: existing
 // rows survive and the new columns and tables are there.
 func TestInventoryStoreMigratesV3ToV4(t *testing.T) {
@@ -195,4 +207,13 @@ func TestInventoryStoreMigratesV3ToV4(t *testing.T) {
 		t.Fatalf("ide rows after prune = %d, %v", left, err)
 	}
 	_ = os.Remove(path)
+}
+
+// withoutMachineIDEs keeps a test's scan off the host's machine-wide IDE
+// installations (a Windows runner ships Visual Studio).
+func withoutMachineIDEs(t *testing.T) {
+	t.Helper()
+	previous := programFilesDirs
+	programFilesDirs = func() []string { return nil }
+	t.Cleanup(func() { programFilesDirs = previous })
 }

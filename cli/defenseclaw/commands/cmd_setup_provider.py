@@ -65,6 +65,7 @@ who need to disable one should use ``guardrail.disabled_providers``
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json as _json
 import os
 import re
@@ -72,7 +73,6 @@ import shutil
 import sys
 import tempfile
 import urllib.parse
-import dataclasses
 from dataclasses import dataclass
 from typing import Any
 

@@ -301,7 +301,10 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 		defer file.Close()
 		log = file
 	}
-	a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
+	// A current image is only checked: its one line is the verdict below.
+	if current, err := a.Images.Current(spec, microVM); force || err != nil || !current {
+		a.note("Building the " + spec.DisplayName + " image (the first build downloads about 3 GB)…")
+	}
 	started := a.Now()
 	rec, built, err := a.Images.Build(ctx, spec, microVM, force, log)
 	if err != nil {

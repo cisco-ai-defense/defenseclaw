@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentitiesDDL is the agent_identities table of inventory.db v4. The
@@ -39,12 +41,18 @@ type AgentIdentityRecord struct {
 	// SessionsSeen is the session count. In an UpsertAgentIdentities batch
 	// it is the number of sessions first seen since the previous flush.
 	SessionsSeen int64 `json:"sessions_seen"`
+	// FirstSessionID is, in a batch, the first session the batch counted.
+	// The session registry lives in memory, so a session resumed after a
+	// gateway restart is counted again; when it is the stored row's last
+	// session the upsert does not count it twice.
+	FirstSessionID string `json:"-"`
 }
 
 // AgentIdentityFilter narrows ListAgentIdentities. Empty fields match
 // everything.
 type AgentIdentityFilter struct {
-	// User matches the user id exactly or the user name case-insensitively.
+	// User matches the user id exactly or the user name case-insensitively,
+	// bare or qualified on either side (useridentity.AccountFilterMatches).
 	User      string
 	Connector string
 	// Limit caps the rows returned; 0 or less means 1000.
@@ -86,7 +94,9 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 				last_session_id = CASE
 					WHEN excluded.last_session_id <> '' AND excluded.last_seen >= agent_identities.last_seen
 					THEN excluded.last_session_id ELSE agent_identities.last_session_id END,
-				sessions_seen = agent_identities.sessions_seen + excluded.sessions_seen`)
+				sessions_seen = agent_identities.sessions_seen + excluded.sessions_seen - CASE
+					WHEN excluded.sessions_seen > 0 AND ? <> '' AND ? = agent_identities.last_session_id
+					THEN 1 ELSE 0 END`)
 		if err != nil {
 			return err
 		}
@@ -108,7 +118,7 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
-				rec.LastSessionID, sessions); err != nil {
+				rec.LastSessionID, sessions, rec.FirstSessionID, rec.FirstSessionID); err != nil {
 				return err
 			}
 		}
@@ -128,10 +138,6 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
 		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities WHERE 1=1`
 	var args []any
-	if user := strings.TrimSpace(filter.User); user != "" {
-		query += ` AND (user_id = ? OR lower(COALESCE(user_name, '')) = lower(?))`
-		args = append(args, user, user)
-	}
 	if connector := strings.TrimSpace(filter.Connector); connector != "" {
 		query += ` AND connector = ?`
 		args = append(args, strings.ToLower(connector))
@@ -140,8 +146,15 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	if limit <= 0 {
 		limit = 1000
 	}
-	query += ` ORDER BY last_seen DESC, agent_id LIMIT ?`
-	args = append(args, limit)
+	// The user filter runs in Go (useridentity.AccountFilterMatches), so a
+	// bare name selects a row stored as user@realm or DOMAIN\user and the
+	// other way round; the limit applies after it.
+	user := strings.TrimSpace(filter.User)
+	query += ` ORDER BY last_seen DESC, agent_id`
+	if user == "" {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	rows, err := s.queryDB(ctx, "agent_identities.list", query, args...)
 	if err != nil {
 		return nil, err
@@ -155,9 +168,15 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen); err != nil {
 			return nil, err
 		}
+		if user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
+			continue
+		}
 		rec.FirstSeen, _ = time.Parse(agentIdentityTimeLayout, first)
 		rec.LastSeen, _ = time.Parse(agentIdentityTimeLayout, last)
 		out = append(out, rec)
+		if len(out) == limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }

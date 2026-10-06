@@ -72,6 +72,8 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     The gateway resolves the account through the OS the way it does for live
     requests (``guardrail profile explain``). ``None`` when no profiles are
     configured; when the gateway cannot answer, the result has ``error``.
+    ``overrides`` lists the connectors and agents for which an assignment
+    picks another profile for this account (GAP-0075).
     """
     if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
         return None
@@ -92,11 +94,59 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
         )
         try:
             result = client.guardrail_profile_resolve(user=user)
+            overrides = _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
         finally:
             client.close()
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
         return {"user": user, "error": str(exc)}
-    return {**result, "user": user}
+    return {**result, "user": user, "overrides": overrides}
+
+
+_PROFILE_OVERRIDE_PROBES = 16
+
+
+def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
+    """Connector/agent subjects whose resolved profile differs from *profile*.
+
+    An assignment matching ``connectors`` or ``agents`` decides only for that
+    connector or agent, so the user-level answer alone would claim *profile*
+    decides everywhere. Each candidate is resolved by the gateway, which
+    applies the assignment order; an agent is attributed to its connector
+    through the user's agent identities, and agents of other users are skipped.
+    """
+    from defenseclaw.connector_paths import normalize
+
+    assignments = getattr(cfg.guardrail, "profile_assignments", None) or []
+    scoped = [a for a in assignments if a.match.connectors or a.match.agents]
+    if not scoped:
+        return []
+    owners: dict[str, str] | None = None
+    if any(a.match.agents for a in scoped):
+        try:
+            rows = client.agent_identities(user=user).get("identities") or []
+            owners = {str(r.get("agent_id")): normalize(str(r.get("connector") or "")) for r in rows}
+        except Exception:  # noqa: BLE001 - unknown owners: probe without a connector.
+            owners = None
+    probes: list[tuple[str, str]] = []
+    for assignment in scoped:
+        connectors = [normalize(c) for c in assignment.match.connectors]
+        for agent in assignment.match.agents or [""]:
+            if agent and owners is not None and agent not in owners:
+                continue
+            for connector in connectors or [owners.get(agent, "") if agent and owners else ""]:
+                if (connector, agent) not in probes:
+                    probes.append((connector, agent))
+    overrides: list[dict[str, str]] = []
+    for connector, agent in probes[:_PROFILE_OVERRIDE_PROBES]:
+        try:
+            answer = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
+        except Exception:  # noqa: BLE001 - the user-level answer still stands.
+            break
+        name = str(answer.get("profile") or "")
+        if name and name != profile:
+            match = str(answer.get("match") or "")
+            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match})
+    return overrides
 
 
 def gateway_api_client_host(cfg: Any) -> str:

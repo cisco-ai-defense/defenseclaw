@@ -273,6 +273,7 @@ class _DoctorResult:
         "run_id",
         "mode",
         "passive",
+        "list_processes",
         "quiet",
         "gateway_down",
     )
@@ -284,6 +285,7 @@ class _DoctorResult:
         run_id: str | None = None,
         passive: bool = False,
         quiet: bool = False,
+        list_processes: bool | None = None,
     ) -> None:
         self.passed = 0
         self.failed = 0
@@ -296,11 +298,24 @@ class _DoctorResult:
         self.run_id = run_id or str(uuid.uuid4())
         self.mode = mode
         self.passive = passive
+        # Listing this account's processes creates no telemetry, so a
+        # --fix --dry-run still does it; only --passive (and Setup's passive
+        # readiness check) skip it (GAP-0100).
+        self.list_processes = not passive if list_processes is None else list_processes
         self.quiet = quiet
         # "stopped" or "foreign" once the Sidecar API row explained that this
         # account's gateway is not serving the API port; later rows that would
         # only repeat it stay quiet.
         self.gateway_down = ""
+
+    @property
+    def passive_reason(self) -> str:
+        """What made this run passive, as skip rows name it (GAP-0102).
+
+        --fix --dry-run is passive too; naming "passive mode" there points at
+        a mode the user never chose.
+        """
+        return "--dry-run" if self.mode == "plan" else "passive mode"
 
     def set_section(self, section: str) -> None:
         self.section = section.strip() or "general"
@@ -6162,6 +6177,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     payload = json.dumps(
         {
             "hook_event_name": "sessionStart",
+            # The gateway does not record this session on the agent identity
+            # (doctorProbeSessionID in internal/gateway/agent_hook.go).
             "session_id": "defenseclaw-doctor-probe",
             "source": "defenseclaw-doctor",
             "workspace_roots": [],
@@ -7221,7 +7238,7 @@ def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> Wind
     is nothing to reload. --passive does not list processes and keeps the
     pending-reload state.
     """
-    if check.state != "pending-reload" or r.passive:
+    if check.state != "pending-reload" or not r.list_processes:
         return check
     running = _hermes_host_running()
     if running is None:
@@ -7589,7 +7606,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
             elif connector == "hermes":
-                if not r.passive and _hermes_host_running() is False:
+                if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
                         label,
@@ -7598,7 +7615,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         r=r,
                     )
                     return
-                if r.passive:
+                if not r.list_processes:
                     # --passive does not list processes, so an idle Hermes is
                     # unknown here, not a failure (the full doctor checks it).
                     _emit(
@@ -8624,7 +8641,7 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
             _emit(
                 "skip",
                 "LLM API key (Anthropic)",
-                f"{env_name} is set; passive mode avoids the inference-based authentication probe",
+                f"{env_name} is set; {r.passive_reason} skips the inference-based authentication probe",
                 r=r,
             )
         else:
@@ -8735,7 +8752,7 @@ def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
         _emit(
             "skip",
             "LLM reachable",
-            "passive mode avoids the billable max_tokens=1 inference probe",
+            f"{r.passive_reason} skips the billable max_tokens=1 inference probe",
             r=r,
         )
         return
@@ -8991,7 +9008,10 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.reload",
             reason_code="policy-reload-rejected",
-            remediation="Fix the change the error names in config.yaml or the policy asset; the gateway applies it once it builds",
+            remediation=(
+                "Fix the change the error names in config.yaml or the policy asset; "
+                "the gateway applies it once it builds"
+            ),
         )
         return
     local = _local_policy_digest(cfg)
@@ -9004,7 +9024,10 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.stale",
             reason_code="policy-stale",
-            remediation="Run `defenseclaw-gateway restart`, or check `defenseclaw-gateway status` for a rejected reload",
+            remediation=(
+                "Run `defenseclaw-gateway restart`, or check "
+                "`defenseclaw-gateway status` for a rejected reload"
+            ),
         )
         return
     if config_generation > 0 and policy.get("config_generation_recorded") is False:
@@ -9122,7 +9145,10 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.providers.overlay.derived",
             reason_code="derived-file-drift",
-            remediation="Run `defenseclaw doctor --fix` to regenerate it from config.yaml (change providers with `defenseclaw setup provider`)",
+            remediation=(
+                "Run `defenseclaw doctor --fix` to regenerate it from config.yaml "
+                "(change providers with `defenseclaw setup provider`)"
+            ),
         )
         return
     if not os.path.isfile(path):
@@ -9562,7 +9588,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit(
             "skip",
             "Cisco AI Defense",
-            f"passive mode validated configuration and credential presence only; endpoint={endpoint}",
+            f"{r.passive_reason} checks configuration and credential presence only; endpoint={endpoint}",
             r=r,
         )
         return
@@ -9816,12 +9842,10 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
             # The file changed after setup: agents such as Codex write their
             # own settings to it. Teardown then removes only DefenseClaw's
             # entries, so this is not a failure; setup re-applies them and
-            # records the file again (GAP-1448, GAP-0043).
+            # records the file again (GAP-1448, GAP-0043). The remedy goes on
+            # the row's Next step line, not in the detail (GAP-0076).
             tag = "warn"
-            conditions.append(
-                "managed-exporter drift detected (the file changed after setup); "
-                f"run 'defenseclaw setup {setup_name}' to re-apply"
-            )
+            conditions.append("managed-exporter drift detected (the file changed after setup)")
         elif item.managed_config_state == "unverifiable":
             tag = "warn"
             conditions.append("managed-exporter state is unverifiable")
@@ -10031,7 +10055,7 @@ def _check_galileo_trace_canaries(
             _emit(
                 "skip",
                 "Galileo canaries",
-                f"passive mode suppresses synthetic trace export; configured={len(destinations)}",
+                f"{r.passive_reason} does not send synthetic traces; configured={len(destinations)}",
                 r=r,
             )
         return
@@ -10662,7 +10686,7 @@ def doctor(
 
     cfg = app.cfg
     mode = "plan" if do_fix and dry_run else "repair" if do_fix else "check"
-    r = _DoctorResult(mode=mode, passive=passive or dry_run)
+    r = _DoctorResult(mode=mode, passive=passive or dry_run, list_processes=not passive)
     _json_mode = json_out
 
     if not json_out:
@@ -11837,6 +11861,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             ("change explicit plugin admission policy in config.yaml",),
             False,
             True,
+        ),
+        (
+            "doctor.connector.hook-scripts.restore-mode",
+            "hook script mode",
+            "safe",
+            _fix_hook_script_modes,
+            (),
+            ("restore the owner execute bit on the generated hook scripts setup sealed",),
+            False,
+            False,
         ),
         (
             "doctor.acp.guard.repin",
@@ -15229,6 +15263,41 @@ def _fix_custom_provider_overlay(
     except OSError as exc:
         return ("fail", f"could not write {path}: {type(exc).__name__}: {exc}")
     return ("pass", f"regenerated {path}")
+
+
+def _fix_hook_script_modes(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Restore mode 0700 on generated hook scripts that lost it (GAP-0101).
+
+    A connector whose scripts no longer match the digests setup sealed is
+    left alone: the Hook runtime files row sends it to setup instead of
+    making an edited script runnable.
+    """
+    from defenseclaw.hook_integrity import hook_runtime_problems, non_executable_hook_scripts
+
+    targets = [
+        script
+        for connector in _doctor_active_connectors(cfg)
+        if not any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        for script in non_executable_hook_scripts(cfg, connector)
+    ]
+    if not targets:
+        return ("skip", "the generated hook scripts are executable")
+    names = ", ".join(str(script) for script in targets)
+    if plan_only:
+        return ("plan", f"restore mode 0700 on {names}")
+    if not assume_yes and not click.confirm(f"    Restore mode 0700 on {names}?", default=True):
+        return ("skip", "declined by user")
+    try:
+        for script in targets:
+            os.chmod(script, 0o700)
+    except OSError as exc:
+        return ("fail", f"could not restore the hook script mode: {exc}")
+    return ("pass", f"restored mode 0700 on {names}")
 
 
 def _fix_acp_guard_pins(

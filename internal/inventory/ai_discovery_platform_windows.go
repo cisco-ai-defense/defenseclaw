@@ -146,11 +146,8 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 // folder's name when the account cannot be looked up.
 func windowsProfileAccountName(sid, home string) string {
 	if parsed, err := windows.StringToSid(sid); err == nil {
-		if account, domain, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
-			// DOMAIN\name, as agent identities and hook records spell it.
-			if domain = strings.TrimSpace(domain); domain != "" {
-				return domain + `\` + account
-			}
+		// The bare account name, as agent identities and hook records spell it.
+		if account, _, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
 			return account
 		}
 	}
@@ -459,8 +456,13 @@ func mergeWindowsApplicationNames(groups ...[]string) []string {
 
 // platformIDEAppData returns the current user's %APPDATA% and
 // %LOCALAPPDATA% (Known Folders, which folder redirection may move out of
-// the profile).
-func platformIDEAppData() (string, string) {
+// the profile) when home is that user's profile. Any other home is read
+// through its own AppData, never this account's.
+func platformIDEAppData(home string) (string, string) {
+	profile, err := platformDiscoveryHomeDir()
+	if err != nil || !strings.EqualFold(profile, filepath.Clean(home)) {
+		return "", ""
+	}
 	resolve := windowsDiscoveryKnownFolderResolver(winpath.CurrentUserKnownFolderPathWithFlags)
 	return windowsKnownFolderValue(resolve, windows.FOLDERID_RoamingAppData),
 		windowsKnownFolderValue(resolve, windows.FOLDERID_LocalAppData)

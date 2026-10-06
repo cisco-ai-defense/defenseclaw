@@ -209,7 +209,8 @@ def restart_required(changed: list[str]) -> list[str]:
             segs = [str(p) for p in parse_path(path) if not isinstance(p, int)]
         except ValueError:
             segs = path.split(".")
-        if segs[:2] == ["gateway", "watcher"] or (segs[:2] == ["gateway", "config_reload"] and segs[2:3] not in ([], ["mode"])):
+        hot_reload_key = segs[:2] == ["gateway", "config_reload"] and segs[2:3] not in ([], ["mode"])
+        if segs[:2] == ["gateway", "watcher"] or hot_reload_key:
             continue
         for key in RESTART_KEYS:
             parts = key.split(".")

@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
 
 func agentIdentityTestSetup(t *testing.T) {
@@ -23,6 +25,39 @@ func agentIdentityTestSetup(t *testing.T) {
 	setAgentIdentityConfig(nil)
 	t.Cleanup(func() { setAgentIdentityConfig(nil) })
 	InstallSharedAgentRegistry("", "")
+}
+
+// GAP-0097: an agent identity records the account as the host names it, so
+// an SSSD account keeps its qualified name for the admin views.
+func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
+	agentIdentityTestSetup(t)
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4545, Name: "dcad-alice@dclab.test", Home: t.TempDir()})
+	facts := resolveHookAgentIdentity(peer, agentHookRequest{ConnectorName: "codex"})
+	if facts.ID == "" || facts.UserName != "dcad-alice@dclab.test" {
+		t.Fatalf("agent identity = %q user %q, want the qualified account name", facts.ID, facts.UserName)
+	}
+
+	// GAP-0107: a per-user gateway names itself from the same account
+	// database, the bare Windows account rather than os/user's DOMAIN\user.
+	restoreName := userScopedIdentityName
+	userScopedIdentityName = func(id string) string {
+		if id == "4646" {
+			return "dcad-bob@dclab.test"
+		}
+		return "dcw-std1"
+	}
+	gatewaySelf.once = sync.Once{}
+	t.Cleanup(func() { userScopedIdentityName, gatewaySelf.once = restoreName, sync.Once{} })
+	if self := gatewaySelfUser(); self.Name != "dcw-std1" {
+		t.Fatalf("gateway self user = %q, want the account database name", self.Name)
+	}
+
+	// GAP-0103: a row an older build stored with the bare name reads with
+	// the host's name for its uid.
+	stored := []inventory.AgentIdentityRecord{{AgentID: "agt-00000000000000b0", UserID: "4646", UserName: "dcad-bob", Connector: "claudecode"}}
+	if rows := mergeAgentIdentityRows(stored, nil, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].UserName != "dcad-bob@dclab.test" {
+		t.Fatalf("listed rows = %+v, want the host's account name", rows)
+	}
 }
 
 // The agent identity comes from verified facts only: forged identity headers
@@ -116,6 +151,53 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("identity %s missing from %+v", want, body.Identities)
+	}
+}
+
+// The session registry is in memory, so a session resumed after a gateway
+// restart is minted again; it is not counted twice. Doctor's hook probe is
+// not agent use and is not recorded (GAP-0086).
+func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
+	agentIdentityTestSetup(t)
+	store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	facts := agentIdentityFacts{ID: "agt-00000000000000c1", UserID: "4545", Connector: "claudecode", MachineHash: "m"}
+	recorder.observe(facts, "sess-a", true)
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	// After the restart: session A resumed, then a new session B.
+	recorder.observe(facts, "sess-a", true)
+	recorder.observe(facts, "sess-a", false)
+	recorder.observe(facts, "sess-b", true)
+	stored, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := recorder.snapshot()
+	if rows := mergeAgentIdentityRows(stored, pending, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].SessionsSeen != 2 {
+		t.Fatalf("buffered view = %+v, want 2 sessions", rows)
+	}
+	if err := recorder.flush(ctx, store); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{}); err != nil || len(rows) != 1 ||
+		rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "sess-b" {
+		t.Fatalf("stored rows = %+v, err %v; want 2 sessions, last sess-b", rows, err)
+	}
+
+	dave := withManagedHookPeer(ctx, managedHookPeer{UID: 4646, Name: "dave", Home: t.TempDir()})
+	probe := agentIdentityForGenericHook(dave, agentHookRequest{
+		ConnectorName: "claudecode", SessionID: doctorProbeSessionID, HookEventName: "SessionStart",
+		Payload: map[string]interface{}{},
+	})
+	if pending, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
+		t.Fatalf("doctor probe recorded identity %q: %+v", probe.IdentityID, pending[probe.IdentityID])
 	}
 }
 

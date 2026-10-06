@@ -91,6 +91,13 @@ def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
     # Setup readiness still reads it as pending reload.
     assert "running hermes" in row["detail"].casefold() and "live=false" in row["detail"]
     assert "without --passive" in row["remediation"]
+    # GAP-0100: --fix --dry-run is passive but still lists processes, so it
+    # reports an idle Hermes as the plain doctor does.
+    with mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]), \
+            mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
+        dry_run = _DoctorResult(mode="plan", passive=True, list_processes=True)
+        cmd_doctor._check_hook_health(cfg, "hermes", dry_run)
+    assert dry_run.checks[-1]["status"] == "pass"
 
 
 def test_codex_plugin_cache_missing_is_not_a_warning() -> None:
@@ -760,11 +767,14 @@ def test_stopped_gateway_row_carries_its_next_step(tmp_path) -> None:
 def test_drifted_exporter_warn_names_setup_in_remediation() -> None:
     # GAP-1526: the Connector OTLP drift WARN row had an empty remediation.
     report = _custody_report(managed_config_state="drifted", drop_only_batches=0, drop_only_signals=())
+    # GAP-0076: the text row printed no Next step line (the remedy sat in the detail).
     r = _DoctorResult()
-    cmd_doctor._check_connector_export_custody(report, r)
+    text = _render(lambda: cmd_doctor._check_connector_export_custody(report, r))
     check = r.checks[-1]
     assert check["status"] == "warn"
     assert check["remediation"] == "run 'defenseclaw setup claude-code' to re-apply"
+    assert "Next step: run 'defenseclaw setup claude-code' to re-apply" in text
+    assert text.count("defenseclaw setup claude-code") == 1
 
 
 def test_rows_that_name_a_command_in_their_detail_carry_it_as_remediation() -> None:

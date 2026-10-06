@@ -606,6 +606,9 @@ type ContinuousDiscoveryService struct {
 	// processOwners, when set, limits the process detector to processes of
 	// these owners (the account name or uid of a per-user scan).
 	processOwners map[string]bool
+	// account, when set, is the account a per-user install belongs to: the
+	// owner of every signal its scans find (perUserAccount).
+	account ideOwner
 
 	// lastIDE is the last full scan's IDE inventory (guarded by mu);
 	// ideBaseline is its plugin set for lifecycle classification (guarded
@@ -633,6 +636,7 @@ func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryServ
 	opts := AIDiscoveryOptionsFromConfig(cfg)
 	svc := NewContinuousDiscoveryServiceWithOptions(opts, catalog)
 	svc.processOwners = perUserProcessOwners(opts)
+	svc.account = perUserAccount(opts)
 	return svc, nil
 }
 
@@ -1412,6 +1416,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 				continue
 			}
 			seen[sig.Fingerprint] = true
+			if sig.UserID == "" && s.account.id != "" {
+				sig.UserID, sig.UserName = s.account.id, s.account.name
+			}
 			signals = append(signals, sig)
 		}
 	}

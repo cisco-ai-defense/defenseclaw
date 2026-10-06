@@ -695,7 +695,7 @@ func TestDoctorChecks(t *testing.T) {
 			}},
 
 		{name: "bind mounts disabled are fixable", setup: noMounts(nil),
-			want: []checkWant{{"bind-mounts", fail, "only --copy sandboxes work"}}, fix: &fixWant{auto: true},
+			want: []checkWant{{"bind-mounts", fail, "no Claude Code or Codex sandbox can start"}}, fix: &fixWant{auto: true},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
 				applyFixes(t, r, openshell.CheckIDBindMounts)
 				if st, _ := f.doctor.Gateway.Read(); !st.BindMounts.Enabled() || !f.runner.Called(restart) {
@@ -725,7 +725,7 @@ func TestDoctorChecks(t *testing.T) {
 				f.t.Fatal(err)
 			}
 			f.doctor.Discover.ConfigDir, f.doctor.Gateway.Dir = link, link
-		}), want: []checkWant{{"bind-mounts", fail, "only --copy sandboxes work"}},
+		}), want: []checkWant{{"bind-mounts", fail, "no Claude Code or Codex sandbox can start"}},
 			then: func(t *testing.T, f *doctorFixture, r *openshell.DoctorReport) {
 				if r.Registration == nil || r.Registration.Name != "dev" {
 					t.Fatalf("registration = %+v", r.Registration)

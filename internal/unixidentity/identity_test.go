@@ -141,6 +141,11 @@ func TestNSSResolverLookups(t *testing.T) {
 	if _, err := r.LookupUser("broken"); err == nil || IsNotFound(err) {
 		t.Fatalf("getent failure must be transient, got %v", err)
 	}
+	// GAP-0072: SSSD answers a principal in any case with its canonical name.
+	f.results["passwd LDAPUser@EXAMPLE.TEST"] = commandResult{stdout: []byte("ldapuser@example.test:*:70002:70002::/home/ldapuser:/bin/bash\n")}
+	if upper, err := r.LookupUser("LDAPUser@EXAMPLE.TEST"); err != nil || upper.UID != 70002 {
+		t.Fatalf("a principal in another case = %+v, %v", upper, err)
+	}
 	if _, err := r.LookupUser("spoof"); err == nil {
 		t.Fatal("an answer for a different account was accepted")
 	}

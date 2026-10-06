@@ -129,7 +129,10 @@ func (r *NSSResolver) lookupPasswd(key string) (Account, error) {
 	return ParsePasswdLine(lines[0])
 }
 
-// LookupUser resolves an account by name.
+// LookupUser resolves an account by name. A directory provider such as
+// SSSD answers a principal in any case with the account's canonical name
+// (dcad-alice@DCLAB.TEST gives dcad-alice@dclab.test), so the answer may
+// differ from the key in case only (GAP-0072).
 func (r *NSSResolver) LookupUser(name string) (Account, error) {
 	if err := validName(name); err != nil {
 		return Account{}, err
@@ -138,7 +141,7 @@ func (r *NSSResolver) LookupUser(name string) (Account, error) {
 	if err != nil {
 		return Account{}, err
 	}
-	if account.Name != name {
+	if !strings.EqualFold(account.Name, name) {
 		return Account{}, fmt.Errorf("unixidentity: getent passwd %s answered for %q", name, account.Name)
 	}
 	return account, nil

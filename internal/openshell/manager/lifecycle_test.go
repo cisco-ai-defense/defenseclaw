@@ -377,6 +377,10 @@ func TestCreateRollsBackEachStep(t *testing.T) {
 		}, sandboxapi.CodeUpstream, true, true, true},
 		// The failed create collects the --credential profile it imported, too.
 		{"sandbox create fails", fail(openshelltest.MethodCreateSandbox, types.ErrorInvalidArgument), sandboxapi.CodeInvalid, true, true, true},
+		// Bind mounts off in gateway.toml: the error names the fix, not OpenShell's conflict.
+		{"bind mounts off", func(e *harnessEnv) {
+			e.fake.FailNext(openshelltest.MethodCreateSandbox, &types.StatusError{Code: types.ErrorConflict, Message: "caller driver config is disabled"})
+		}, sandboxapi.CodeUnavailable, true, true, true},
 		{"wait ready fails", fail(openshelltest.MethodWaitReady, types.ErrorInternal), sandboxapi.CodeUpstream, true, true, true},
 		{"configuration rejected", func(e *harnessEnv) {
 			e.fake.Intercept(func(method string) error {

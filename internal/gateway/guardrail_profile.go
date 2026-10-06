@@ -10,6 +10,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -509,8 +510,12 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	return subject
 }
 
-// localAccountGroups lists an OS account's groups as each group's id
-// followed by its name, from the OS account database.
+// localAccountGroups lists an OS account's groups from the OS account
+// database. On Linux and macOS each group is its name, or its gid when no
+// group answers for it, one entry per group as the NSS directory facts list
+// them (unixidentity), so counts and matching agree with a hook's verified
+// subject. On Windows each group is its SID followed by its name, as the
+// Windows directory facts list them; identityGroupCount counts the SIDs.
 func localAccountGroups(account *osuser.User) []string {
 	gids, err := account.GroupIds()
 	if err != nil {
@@ -518,8 +523,12 @@ func localAccountGroups(account *osuser.User) []string {
 	}
 	var groups []string
 	for _, gid := range gids {
-		groups = append(groups, gid)
-		if group, lookupErr := osuser.LookupGroupId(gid); lookupErr == nil && group.Name != "" {
+		group, lookupErr := osuser.LookupGroupId(gid)
+		named := lookupErr == nil && group.Name != ""
+		if runtime.GOOS == "windows" || !named {
+			groups = append(groups, gid)
+		}
+		if named {
 			groups = append(groups, group.Name)
 		}
 	}
@@ -906,6 +915,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["subject"] = map[string]any{
 			"user_id": found.UserID, "user_name": found.UserName,
 			"principal": found.Principal, "upn": found.UPN, "groups": found.Groups,
+			"group_count": identityGroupCount(found.Groups),
 		}
 	}
 	if source == "" {

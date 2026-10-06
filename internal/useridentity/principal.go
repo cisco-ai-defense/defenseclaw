@@ -95,6 +95,19 @@ func BareAccountName(name string) string {
 	return account
 }
 
+// AccountFilterMatches reports whether a --user filter selects an account
+// row: its id (uid or SID), its name, or the bare account of either side
+// (DOMAIN\name, user@realm), compared case-insensitively as Windows
+// compares account names. The admin views share it so a bare or a
+// qualified name works in each, whichever spelling the row carries
+// (GAP-0051, GAP-0079).
+func AccountFilterMatches(filter, id, name string) bool {
+	if filter == "" || strings.EqualFold(filter, id) || strings.EqualFold(filter, name) {
+		return true
+	}
+	return name != "" && strings.EqualFold(BareAccountName(filter), BareAccountName(name))
+}
+
 func plausiblePrincipal(value string) bool {
 	if value == "" || len(value) > maxPrincipalLength {
 		return false

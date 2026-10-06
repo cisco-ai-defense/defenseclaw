@@ -49,7 +49,7 @@ Each cell names what DefenseClaw reads and the assurance it records.
 
 | Identity | Linux | Windows | macOS |
 | --- | --- | --- | --- |
-| Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | Reported as `local` from Open Directory, read by the root enumerator (verified) |
+| Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | uid, name and groups from Open Directory, reported as `local` (verified) |
 | LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name and the groups from `initgroups` (verified). The guardian adds the UPN from SSSD InfoPipe and the directory type from `realm list` (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified) |
 | Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` in the background (verified). Groups from the SYSTEM enumerator's token-group cache (verified). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from the `dscl` AuthenticationAuthority and the domain from `dsconfigad -show` (verified) |
 | Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified). The user's Platform SSO login stays claimed and is not read |
@@ -65,8 +65,11 @@ Who resolves the verified facts depends on the install:
   modules name the directory without the guardian.
 - **Windows:** the gateway resolves the account, UPN and tenant itself. Groups come from the SYSTEM enumerator, on the standalone
   enterprise profile only.
-- **macOS:** every verified fact comes from the root enumerator, so a
-  per-user install has none. Its records carry only claimed facts.
+- **macOS:** the gateway resolves the account itself, on any install: the
+  directory `local`, the source `macos_opendirectory` and the groups from the
+  account database. The root enumerator adds the facts of a bound Mac on the
+  standalone enterprise profile only: the `dscl` directory and Kerberos
+  principal, the `dsconfigad` domain and the `app-sso` provider.
 
 A record carries `verified` facts whenever the gateway resolved some.
 Otherwise it falls back to what the hook claimed: the logon session's UPN or
@@ -186,15 +189,19 @@ defenseclaw guardrail profile explain --user alice --connector codex
 A managed install (the enterprise package, MDM or Setup) has no `defenseclaw`
 Python CLI, so these commands and `defenseclaw agent identities` are not
 there. As root on a managed Linux or macOS host, read the same answers from
-the managed gateway, as JSON:
+the managed gateway, as JSON. The package does not put `defenseclaw-gateway`
+on root's `PATH`, so use its full path:
 
 ```bash
-defenseclaw-gateway enterprise linux profile-explain --user alice --connector codex
-defenseclaw-gateway enterprise linux agent-identities --user alice
-defenseclaw-gateway enterprise linux ide-plugins --user alice --ai-only
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector codex
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux agent-identities --user alice
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ide-plugins --user alice --ai-only
 ```
 
-Use `enterprise macos` on a Mac. On a managed Windows computer, run them from
+On a Mac, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise
+macos ...` instead. `--user` takes the uid or the account name as
+`getent passwd` (or `id`) shows it: with SSSD's fully qualified names that
+is `alice@corp.example.com`, in any case. On a managed Windows computer, run them from
 an elevated PowerShell prompt (or as LocalSystem from an MDM script):
 
 ```powershell
@@ -309,8 +316,8 @@ dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freed
 | --- | --- |
 | No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear when they resolved. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice` and `id alice`; on SSSD, check InfoPipe as above. |
 | No `defenseclaw.user.directory` for an SSSD account | Expected on a per-user Linux install: SSSD does not say which directory serves the account, and only the standalone enterprise guardian reads it from `realm list`. The domain and groups are still verified. |
-| `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. Expected on a per-user macOS install. On Linux check `getent passwd alice`. |
+| `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice`; on macOS, `id alice`. |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
 | `default_lookup_failed` | The directory lookup for a verified user failed, so the default profile applied. Check that the directory service answers on the host. |
-| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice` and compare the group spelling. Use the SID to avoid name ambiguity. On Windows, a user added to the group must sign out and back in first. |
+| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice` and compare the group spelling. Use the SID to avoid name ambiguity. On Windows, a user added to the group must sign out and back in first. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
 | A new session ID after a restart | Expected only for a new chat. The agent ID (`agt-`) stays the same; if it changed, the connector's config root moved. |

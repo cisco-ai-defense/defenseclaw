@@ -281,6 +281,28 @@ def test_inventory_skill_and_plugin_filters_clamp_cursor_and_detail() -> None:
     assert ("Status", "disabled") in detail.fields
 
 
+def test_inventory_reload_keeps_selected_row_and_open_card() -> None:
+    # GAP-0106: the 60 s background reload must not move the cursor or close
+    # the card; only a row that is gone closes it.
+    panel = InventoryPanelModel()
+    panel.apply_loaded(_inventory())
+    panel.set_active_subtab("skills")
+    panel.set_cursor(2)
+    panel.toggle_detail()
+
+    payload = _inventory_payload()
+    payload["skills"] = payload["skills"][1:]
+    panel.apply_json(json.dumps(payload))
+    assert panel.cursor_at() == 1
+    assert panel.detail_open is True
+    assert panel.detail_info().title == "SKILL: gamma"
+
+    payload["skills"] = payload["skills"][:1]
+    panel.apply_json(json.dumps(payload))
+    assert panel.cursor_at() == 0
+    assert panel.detail_open is False
+
+
 def test_inventory_detail_info_for_all_non_summary_tabs_and_command_intent() -> None:
     panel = InventoryPanelModel()
     panel.apply_loaded(_inventory())
@@ -565,7 +587,8 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
 
     # At 80 columns long cells give way while Enabled and AI stay whole, a
-    # remote install is marked, and the detail leads with the state (GAP-0055).
+    # remote install is marked (GAP-0055), and the detail leads with what the
+    # row does not show (GAP-0098).
     remote = InventoryPanelModel()
     remote.set_size(80, 24)
     long_id = "ms-vscode-remote.remote-ssh-edit-nightly"
@@ -579,7 +602,7 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert row[0] == "vscode (ssh)" and row[1].endswith("…") and row[3:] == ("client side", "yes")
     assert sum(len(cell) + 2 for cell in row) <= 72
     remote.set_cursor(0)
-    assert remote.detail_info().fields[:3] == (("Enabled", "client side"), ("AI", "yes"), ("IDE", "vscode (ssh)"))
+    assert [name for name, _ in remote.detail_info().fields] == ["User", "Scope", "Enabled", "AI", "IDE", "Version"]
 
     # One user on Plugins: no User column.
     panel.set_active_subtab("plugins")

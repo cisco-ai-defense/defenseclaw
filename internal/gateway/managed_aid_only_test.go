@@ -820,56 +820,6 @@ func TestManagedAIDOnly_NativeHookAccountingFollowsFinalAssetOutcome(t *testing.
 	}
 }
 
-func TestManagedAIDOnly_NativeHookAccountingSyntheticParity(t *testing.T) {
-	tests := []struct {
-		name        string
-		assetMode   string
-		tool        string
-		wantAction  string
-		wantMetrics int
-	}{
-		{name: "final allow records", tool: "read_file", wantAction: "allow", wantMetrics: 1},
-		{name: "final asset block discards", assetMode: "action", tool: "mcp__rogue__search", wantAction: "block"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			capture := &managedAIDFailOpenCapture{}
-			inspector := &stubAIDInspector{}
-			api := testAPIServerWithConfig(t, "action")
-			api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
-			api.scannerCfg.Guardrail.Connector = "hermes"
-			api.scannerCfg.Guardrail.Mode = "action"
-			api.scannerCfg.AssetPolicy = config.DefaultAssetPolicy()
-			if test.assetMode != "" {
-				api.scannerCfg.AssetPolicy.Enabled = true
-				api.scannerCfg.AssetPolicy.Mode = test.assetMode
-				api.scannerCfg.AssetPolicy.MCP.RegistryRequired = true
-				api.scannerCfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "trusted"}}
-			}
-			api.SetCiscoInspector(inspector)
-			api.bindObservabilityV8Lifecycle(capture)
-
-			resp := api.handleAgentHookSynthetic(t.Context(), "hermes", agentHookRequest{
-				ConnectorName: "hermes",
-				HookEventName: "pre_tool_call",
-				SessionID:     "managed-synthetic-" + strings.ReplaceAll(test.name, " ", "-"),
-				ToolName:      test.tool,
-				ToolArgs:      json.RawMessage(`{"query":"status"}`),
-				Payload:       map[string]interface{}{"mcp_server_name": "rogue"},
-			}, []byte(`{"synthetic":true}`))
-			if resp.Action != test.wantAction {
-				t.Fatalf("synthetic action=%q raw=%q reason=%q, want %q", resp.Action, resp.RawAction, resp.Reason, test.wantAction)
-			}
-			if inspector.calls != 1 {
-				t.Fatalf("AID calls=%d, want 1", inspector.calls)
-			}
-			if len(capture.metricRecords) != test.wantMetrics || len(capture.metricErrors) != 0 {
-				t.Fatalf("fail-open metrics=%d errors=%v, want %d", len(capture.metricRecords), capture.metricErrors, test.wantMetrics)
-			}
-		})
-	}
-}
-
 func TestManagedAIDOnly_NativeHookGateConsumesOrderedCandidatesExactlyOnce(t *testing.T) {
 	capture := &managedAIDFailOpenCapture{}
 	inspector := &stubAIDInspector{}

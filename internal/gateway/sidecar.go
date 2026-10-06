@@ -269,8 +269,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// The boot judge and proxy read the provider registry before the
 	// generation is published.
 	applyGenerationProviders(bootGen.Providers)
-	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
-		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+	// A hook-only topology (managed standalone, no OpenClaw fleet) never
+	// dials gateway.host:port, so only announce the fleet client when the
+	// gateway loop will actually use it; the device identity still loads.
+	if RequiresFleetGateway(cfg) {
+		fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
+			cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+	}
 
 	// Mint a per-process agent instance id immediately so every
 	// audit row that fires during sidecar boot (device-identity
@@ -907,7 +912,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
-		s.currentConfig().Gateway.AutoApprove, s.currentConfig().Gateway.Watcher.Enabled, s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
+		s.currentConfig().Gateway.AutoApprove, WatcherWatchesDirs(s.currentConfig()), s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
 	if err := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStart); err != nil {
 		return err
 	}
@@ -3138,6 +3143,19 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 // apply in both cases.
 func watcherUsesConnectorDirs(cfg *config.Config) bool {
 	return cfg.HasConnectorConfigured() && !managed.IsManagedEnterprise(cfg.DeploymentMode)
+}
+
+// WatcherWatchesDirs reports whether the watcher is enabled and may watch a
+// folder: the connector's, or explicit gateway.watcher dirs. The start
+// banner and the subsystems line report the watcher off otherwise, as
+// runWatcher idles with "no directories to watch" (GAP-0077).
+func WatcherWatchesDirs(cfg *config.Config) bool {
+	w := cfg.Gateway.Watcher
+	if !w.Enabled {
+		return false
+	}
+	return watcherUsesConnectorDirs(cfg) ||
+		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
 func (s *Sidecar) runWatcher(ctx context.Context) error {

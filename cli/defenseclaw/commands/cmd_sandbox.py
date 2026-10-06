@@ -142,7 +142,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
                 "bool",
                 "install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo)",
             ),
-            _Flag("no-mounts", "bool", "leave bind mounts off (Linux); every run then works on a copy"),
+            _Flag(
+                "no-mounts",
+                "bool",
+                "leave bind mounts off (Linux); no Claude Code or Codex sandbox can then start, "
+                "a --copy run included, and other harnesses run on a copy",
+            ),
             _Flag("wrappers", "bool", "make the harness commands run sandboxed without asking"),
             _Flag("no-wrappers", "bool", "do not offer the shell wrappers"),
             _Flag(

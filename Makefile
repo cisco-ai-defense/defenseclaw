@@ -16,8 +16,9 @@ PLUGIN_DIR  := extensions/defenseclaw
 EXTENSION_FINGERPRINT := cli/defenseclaw/_data/plugin/extension-runtime-fingerprint.json
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
-# The race-enabled gateway package can exceed the default test deadline on
-# supported arm64 developer/CI hosts without any individual test hanging.
+# The gateway package can exceed go test's default 10m deadline (race-enabled
+# or not) without any individual test hanging; targets that run all or most
+# of it set this timeout.
 GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
@@ -505,29 +506,21 @@ endif
 # scanners/plugin_scanner/, etc.) because dist/index.js imports siblings
 # by relative path. Flattening the tree silently breaks plugin load.
 #
-# Best-effort: a fresh clone has no extensions/defenseclaw/dist/ until
-# `make plugin` runs. Forcing every gateway build to first run npm
+# Best-effort: a fresh clone has no extensions/defenseclaw/dist/index.js
+# until `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
 # who don't need the plugin at all. Instead we drop a placeholder file
 # so //go:embed has at least one entry (the tracked .placeholder is kept
 # even after a sync, so a build leaves the checkout clean), and the
-# OpenClaw connector finds no package.json at runtime and returns a clear error when
+# OpenClaw connector finds no plugin entry at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension: _checkout-write-preflight
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
-	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
-	  if [ ! -f "$$embed_dir/package.json" ]; then \
-	    mkdir -p "$$embed_dir"; \
-	    [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
-	      "OpenClaw extension bundle is not present in this source checkout." \
-	      > "$$embed_dir/.placeholder"; \
-	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
-	  else \
-	    echo "  • OpenClaw extension dist/ missing — keeping the previously synced tree under $$embed_dir/"; \
-	  fi; \
+	if [ ! -f "$$plugin_dist/index.js" ] && [ -f "$$embed_dir/dist/index.js" ]; then \
+	  echo "  • OpenClaw extension dist/ not built — keeping the previously synced tree under $$embed_dir/"; \
 	  exit 0; \
 	fi; \
 	mkdir -p "$$embed_dir"; \
@@ -535,6 +528,13 @@ sync-openclaw-extension: _checkout-write-preflight
 	  [ -e "$$entry" ] || continue; \
 	  [ "$${entry##*/}" = .placeholder ] || rm -rf "$$entry"; \
 	done; \
+	if [ ! -f "$$plugin_dist/index.js" ]; then \
+	  [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
+	    "OpenClaw extension bundle is not present in this source checkout." \
+	    > "$$embed_dir/.placeholder"; \
+	  echo "  • OpenClaw extension dist/ not built — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
+	  exit 0; \
+	fi; \
 	mkdir -p "$$embed_dir/node_modules"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
@@ -1063,7 +1063,7 @@ go-test-cov: sync-openclaw-extension
 connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
 
 go-connector-matrix-test: sync-openclaw-extension
-	go test -count=1 \
+	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
 		./internal/cli \
 		./internal/config \
 		./internal/gateway \
