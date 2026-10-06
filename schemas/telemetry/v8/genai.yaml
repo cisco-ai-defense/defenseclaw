@@ -2871,6 +2871,8 @@ groups:
   - correlation.model.identity
   - correlation.tool.identity
   - cost.agent.reported
+  - correlation.identity
+  - correlation.sandbox
   attributes: []
   body_fields:
   - ref: defenseclaw.agent.lifecycle.event
@@ -2892,6 +2894,8 @@ groups:
   - content.input
   - content.output
   - genai.model
+  - correlation.identity
+  - correlation.sandbox
   attributes: []
   body_fields:
   - ref: defenseclaw.telemetry.input.reported

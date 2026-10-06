@@ -217,6 +217,12 @@ type Installer struct {
 	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
 	// version a failed install on a Mac reports (HomebrewInstallError).
 	XcodeApp string
+	// BrewPrefix is the Homebrew prefix NVIDIA's script installs into on a
+	// Mac (default: HOMEBREW_PREFIX, else the brew LookPath finds, else
+	// /opt/homebrew). Writable reports whether this account can create
+	// entries in a directory (default: access(2)).
+	BrewPrefix string
+	Writable   func(dir string) bool
 }
 
 func (i *Installer) defaults() {
@@ -249,6 +255,12 @@ func (i *Installer) defaults() {
 	}
 	if i.LookPath == nil {
 		i.LookPath = exec.LookPath
+	}
+	if i.BrewPrefix == "" && i.GOOS == "darwin" {
+		i.BrewPrefix = findHomebrewPrefix(os.Getenv, i.LookPath)
+	}
+	if i.Writable == nil {
+		i.Writable = writableByCaller
 	}
 	if i.Candidates == nil {
 		i.Candidates = []string{"/usr/local/bin/openshell", "/usr/bin/openshell", "/opt/homebrew/bin/openshell"}
@@ -305,6 +317,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 	plan.BreakingUpgrade = existing != nil && (existing.Version == (Version{}) || existing.Version.Compare(mustParse(breakingReleaseFloor)) < 0)
 
+	// The script runs Homebrew as you: a prefix that belongs to another
+	// account fails it partway with a permission error, so say so first.
+	if err := i.checkBrewWritable(); err != nil {
+		return nil, err
+	}
 	script, err := i.download(ctx)
 	if err != nil {
 		return nil, err
@@ -321,6 +338,16 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 
 	plan.Command = []string{i.Shell, plan.ScriptPath}
 	plan.Env = []string{"OPENSHELL_VERSION=" + i.Release}
+	if tls := i.brewTLSDir(); tls != "" {
+		// The CLI the script registers the gateway with looks for the
+		// gateway's client certificates only under /opt/homebrew and
+		// /usr/local, and failed with "mTLS certificates ... were not found"
+		// after the formula was installed and the gateway running.
+		plan.Env = append(plan.Env, EnvLocalTLSDir+"="+tls)
+		plan.Notes = append(plan.Notes,
+			fmt.Sprintf("Homebrew is at %s, not at /opt/homebrew or /usr/local: %s tells the OpenShell CLI where the gateway's client certificates are", tildePath(i.BrewPrefix), EnvLocalTLSDir),
+			"Homebrew has no prebuilt packages for that prefix, so it may build dependencies from source, which can take many minutes (it prints its progress)")
+	}
 	if i.PackageCLI != "" {
 		// Without it the script registers the gateway with, and checks its
 		// status through, whichever openshell comes first on PATH.
@@ -332,8 +359,12 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the
 		// doctor does not find it: a Mac that has it gets no note.
+		next := "setup offers it next"
+		if driverSkipsHomebrew(i.BrewPrefix, i.E2fsprogsDirs) {
+			next = "the driver does not look in a Homebrew at " + tildePath(i.BrewPrefix) + ", so an administrator installs it under /opt/homebrew or /usr/local"
+		}
 		plan.Notes = append(plan.Notes, "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, "+
-			"which the formula does not install ("+InstallE2fsprogsCommand+"; setup offers it next)")
+			"which the formula does not install ("+InstallE2fsprogsCommand+"; "+next+")")
 	}
 	if plan.BreakingUpgrade {
 		plan.Env = append(plan.Env, "OPENSHELL_ACK_BREAKING_UPGRADE=1")
@@ -377,7 +408,7 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 			// Xcode or Command Line Tools older than the oldest it builds
 			// with on this macOS (homebrewMinimums): the error says which
 			// are here.
-			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp)}
+			return nil, &HomebrewInstallError{Err: err, Tools: probeDeveloperTools(ctx, i.Runner, i.XcodeApp), FormulaInstalled: formulaKegInstalled(i.BrewPrefix)}
 		}
 		return nil, fmt.Errorf("openshell: installer failed: %w", err)
 	}
@@ -398,7 +429,28 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 // consent.
 func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 	i.defaults()
-	return brew(ctx, i.Runner, "install", "e2fsprogs")
+	if err := i.checkBrewWritable(); err != nil {
+		return err
+	}
+	return brewTerminal(ctx, i.Runner, "install", "e2fsprogs")
+}
+
+// brewTLSDir is the certificates directory the script's registration
+// needs on a Mac whose Homebrew prefix the CLI does not search ("" if none).
+func (i *Installer) brewTLSDir() string {
+	if i.GOOS != "darwin" {
+		return ""
+	}
+	return brewTLSDir(i.BrewPrefix)
+}
+
+// checkBrewWritable refuses, on a Mac, a Homebrew prefix this account
+// cannot write (HomebrewNotWritableError).
+func (i *Installer) checkBrewWritable() error {
+	if i.GOOS != "darwin" {
+		return nil
+	}
+	return checkHomebrewWritable(i.BrewPrefix, i.Writable)
 }
 
 // ResignVMDriver reruns the nvidia/openshell formula's post-install step
@@ -421,12 +473,17 @@ func (i *Installer) configDir() string {
 			return "~/.config/openshell"
 		}
 	}
+	return tildePath(dir)
+}
+
+// tildePath shows the home directory in p as ~.
+func tildePath(p string) string {
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
-		if rel, err := filepath.Rel(home, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		if rel, err := filepath.Rel(home, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return filepath.Join("~", rel)
 		}
 	}
-	return dir
+	return p
 }
 
 func existingVersion(e *ExistingInstall) string {
