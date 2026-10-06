@@ -465,7 +465,8 @@ var inventoryMigrations = []invMigration{
 		// and the agent identity ledger. ide_installations and
 		// ide_plugins hang off ai_scans like ai_signals, so retention
 		// pruning (PruneScanHistory) bounds them through ON DELETE
-		// CASCADE. agent_identities is one row per agent, not per scan.
+		// CASCADE. agent_identities is one row per agent, not per scan;
+		// PruneAgentIdentities bounds it by last_seen.
 		description: "v4: signal accounts, IDE inventory, agent identities",
 		apply: func(ex invDBExecer) error {
 			stmts := []string{

@@ -204,7 +204,16 @@ This preserved class includes `user.id`, `defenseclaw.user.id_kind`,
 `ai_discovery.include_user_email` can export a sensitive cross-system personal
 identifier as plaintext; no built-in or custom v8 profile can remove it. Keep
 email collection disabled unless every selected destination and your privacy
-policy allow it. See [End-user identity](/docs/observability/end-user-identity).
+policy allow it. The same holds for `defenseclaw.user.principal`,
+`defenseclaw.session.kerberos_principal`, `client.address` and
+`defenseclaw.user.tenant_id`, which the telemetry registry marks sensitive: the
+`strict` profile keeps them too. The two principals are off until
+`ai_discovery.include_user_principal` is set, and that switch applies to the
+whole gateway, not to a single destination, so a principal sent to a trusted
+local Loki is also sent to Galileo or any other destination. The client address
+and the tenant ID have no switch. Leave the principals off when a selected
+destination must not receive a person's directory name. See
+[End-user identity](/docs/observability/end-user-identity).
 </Callout>
 
 ## Resolution order

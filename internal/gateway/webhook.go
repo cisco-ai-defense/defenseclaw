@@ -802,6 +802,11 @@ func formatSlackPayload(event audit.Event) ([]byte, error) {
 			"type": "mrkdwn", "text": fmt.Sprintf("*Connector:* %s", event.Connector),
 		})
 	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		fields = append(fields, map[string]interface{}{
+			"type": "mrkdwn", "text": fmt.Sprintf("*%s:* %s", field[0], field[1]),
+		})
+	}
 	if event.Details != "" {
 		details := event.Details
 		if len(details) > 500 {
@@ -849,23 +854,28 @@ func formatPagerDutyPayload(event audit.Event, routingKey string) ([]byte, error
 		pdSeverity = "warning"
 	}
 
+	customDetails := map[string]string{
+		"action":    event.Action,
+		"target":    event.Target,
+		"severity":  event.Severity,
+		"details":   event.Details,
+		"event_id":  event.ID,
+		"connector": event.Connector,
+	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		customDetails[field[0]] = field[1]
+	}
+
 	payload := map[string]interface{}{
 		"routing_key":  routingKey,
 		"event_action": "trigger",
 		"dedup_key":    fmt.Sprintf("defenseclaw-%s-%s", event.Target, event.Action),
 		"payload": map[string]interface{}{
-			"summary":   fmt.Sprintf("DefenseClaw %s: %s on %s", event.Action, event.Severity, event.Target),
-			"source":    "defenseclaw",
-			"severity":  pdSeverity,
-			"timestamp": event.Timestamp.Format(time.RFC3339),
-			"custom_details": map[string]string{
-				"action":    event.Action,
-				"target":    event.Target,
-				"severity":  event.Severity,
-				"details":   event.Details,
-				"event_id":  event.ID,
-				"connector": event.Connector,
-			},
+			"summary":        fmt.Sprintf("DefenseClaw %s: %s on %s", event.Action, event.Severity, event.Target),
+			"source":         "defenseclaw",
+			"severity":       pdSeverity,
+			"timestamp":      event.Timestamp.Format(time.RFC3339),
+			"custom_details": customDetails,
 		},
 	}
 	return json.Marshal(payload)
@@ -883,6 +893,9 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 	)
 	if event.Connector != "" {
 		markdown += fmt.Sprintf("- **Connector:** %s\n", event.Connector)
+	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		markdown += fmt.Sprintf("- **%s:** %s\n", field[0], field[1])
 	}
 	if event.Details != "" {
 		details := event.Details
@@ -906,6 +919,64 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 // from dispatchHookBlockWebhook to the generic payload (GAP-1351).
 const webhookRuleKey = "defenseclaw.webhook.rule"
 
+// webhookAttributionKey carries a webhookAttribution in audit.Event.Structured
+// from the code that knows the request to the payload formatters.
+const webhookAttributionKey = "defenseclaw.webhook.attribution"
+
+// webhookAttribution says whose agent raised an alert and where, so a
+// receiver that collects alerts from many hosts can attribute them
+// (GAP-0144). It holds the account, never the directory principal, which
+// follows ai_discovery.include_user_principal on the telemetry path only.
+type webhookAttribution struct {
+	UserID          string
+	UserName        string
+	AgentIdentityID string
+	Profile         string
+	Host            string
+}
+
+// webhookAttributionFor is the attribution of the request on ctx. The hook
+// payload is agent-controlled, so it never names the account here.
+func webhookAttributionFor(ctx context.Context) webhookAttribution {
+	user := resolveHookUser(ctx, nil)
+	agent, _ := agentIdentityFromContext(ctx)
+	profile, _ := guardrailProfileTelemetryFor(ctx).Name.Get()
+	return webhookAttribution{UserID: user.ID, UserName: user.Name, AgentIdentityID: agent, Profile: profile}
+}
+
+var webhookHostname = sync.OnceValue(func() string {
+	host, _ := os.Hostname()
+	return host
+})
+
+// webhookAttributionOf is the attribution of an event: what its sender
+// attached plus this gateway's host name. A managed deployment keeps the
+// historical payload, so it has none.
+func webhookAttributionOf(event audit.Event) webhookAttribution {
+	if ManagedEnterpriseActive() {
+		return webhookAttribution{}
+	}
+	attribution, _ := event.Structured[webhookAttributionKey].(webhookAttribution)
+	if attribution.Host == "" {
+		attribution.Host = webhookHostname()
+	}
+	return attribution
+}
+
+// pairs lists the non-empty fields under their payload names.
+func (a webhookAttribution) pairs() [][2]string {
+	var out [][2]string
+	for _, field := range [][2]string{
+		{"user_id", a.UserID}, {"user_name", a.UserName}, {"agent_identity_id", a.AgentIdentityID},
+		{"guardrail_profile", a.Profile}, {"host", a.Host},
+	} {
+		if field[1] != "" {
+			out = append(out, field)
+		}
+	}
+	return out
+}
+
 func formatGenericPayload(event audit.Event) ([]byte, error) {
 	eventData := map[string]interface{}{
 		"id":        event.ID,
@@ -923,6 +994,9 @@ func formatGenericPayload(event audit.Event) ([]byte, error) {
 	// when unknown to keep single-connector payloads unchanged.
 	if event.Connector != "" {
 		eventData["connector"] = event.Connector
+	}
+	for _, field := range webhookAttributionOf(event).pairs() {
+		eventData[field[0]] = field[1]
 	}
 	if strings.Contains(strings.ToLower(event.Action), "block") {
 		eventData["defenseclaw_blocked"] = true

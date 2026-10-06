@@ -44,7 +44,11 @@ if [ "$n" = 1 ]; then exit "${DC_COLD_FIRST_RC:-7}"; fi
 printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 `
 
+// The stub records only starts: the hook also asks the binary for session
+// facts (on macOS always, elsewhere when a credential cache can exist), and
+// that read never starts a gateway.
 const coldStartGatewayStub = `#!/bin/sh
+[ "$1" = hook ] && exit 0
 printf '%s|%s|%s|%s\n' "$HOME" "$*" "$(ulimit -S -t)" "$(ulimit -H -t)" >> "$DC_COLD_CAP/gateway.log"
 exit 0
 `

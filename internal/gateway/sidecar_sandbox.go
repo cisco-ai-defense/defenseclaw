@@ -196,7 +196,12 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 		Images: manager.BuilderImages{Builder: &image.Builder{
 			Docker: image.CLI{}, Store: images, Log: io.Discard,
 		}},
-		Profiles:           manager.CLIProfileImporter{Binary: cfg.OpenShell.EffectiveBinary()},
+		Profiles: manager.CLIProfileImporter{BinaryFunc: func() string {
+			if c := s.currentConfig(); c != nil {
+				return c.OpenShell.EffectiveBinary()
+			}
+			return cfg.OpenShell.EffectiveBinary()
+		}},
 		MCP:                mcp,
 		Telemetry:          s.sandboxTelemetry(),
 		Persist:            sandboxConfigPersister{api: api},

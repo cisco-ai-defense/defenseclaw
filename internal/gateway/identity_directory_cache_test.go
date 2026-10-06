@@ -35,3 +35,36 @@ func TestIdentityDirectoryCacheFirstLookupWaits(t *testing.T) {
 		t.Fatalf("first non-blocking lookup = %+v, %v; want the resolved facts", facts, ok)
 	}
 }
+
+// TestIdentityDirectoryCacheRefreshesIncompleteFacts pins GAP-0129: facts the
+// resolver marks incomplete (an AD account without its UPN) are served, then
+// refreshed after the short incomplete lifetime, not the full 15 minutes.
+func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	calls := 0
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		calls++
+		facts := useridentity.DirectoryFacts{Principal: "alice@DCLAB.TEST", ResolvedAt: now}
+		if calls > 1 {
+			facts.UPN = "alice@dclab.test"
+		}
+		return facts, nil
+	})
+	cache.now = func() time.Time { return now }
+	cache.incomplete = func(facts useridentity.DirectoryFacts) bool { return facts.UPN == "" }
+	if facts, ok := cache.get("S-1-5-21-1-2-3-1103", false); !ok || facts.UPN != "" {
+		t.Fatalf("first facts = %+v, %v; want them without the UPN", facts, ok)
+	}
+	now = now.Add(identityDirectoryIncompleteTTL)
+	if _, ok := cache.get("S-1-5-21-1-2-3-1103", false); !ok {
+		t.Fatal("the stale incomplete facts were not served while refreshing")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if facts, _ := cache.get("S-1-5-21-1-2-3-1103", false); facts.UPN != "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("incomplete facts were not refreshed after identityDirectoryIncompleteTTL")
+}
