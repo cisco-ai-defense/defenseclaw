@@ -454,8 +454,8 @@ func v9RemovedKeyError(source, path string, node *yaml.Node, target string) erro
 
 func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) error {
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
-		"a legacy v7 configuration key is not accepted by the v8 entrypoint",
-		"run defenseclaw upgrade; use "+target)
+		"a pre-v8 configuration key is not accepted by the v8 entrypoint",
+		"use "+target)
 }
 
 func projectV8YAML(source string, node *yaml.Node, path string) (any, error) {

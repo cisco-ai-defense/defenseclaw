@@ -111,10 +111,10 @@ SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "version"
 
 # These commands are the only top-level boundaries permitted to operate on an
 # existing pre-v8 document. They either create/replace a configuration,
-# migrate or replace the installation, remove it, or (for ``config``)
-# delegate the read-only/mutation boundary to that group's subcommand guard.
-# Every other group preflights the raw schema discriminator before a Python
-# compatibility dataclass can be constructed.
+# migrate or replace the installation, remove it, or (for ``config``) hand the
+# decision to that group's own guard, which lets only ``validate`` explain such
+# a file. Every other group preflights the raw schema discriminator and stops
+# with one instruction, `defenseclaw migrate`.
 LEGACY_CONFIG_BOUNDARY_COMMANDS = {
     "config",
     "init",
@@ -382,7 +382,7 @@ def cli(ctx: click.Context) -> None:
             elif status_continues:
                 ux.echo(
                     "  A gateway that is already running keeps the config it started with; "
-                    "its status follows. Fix the problem above, then run: defenseclaw-gateway restart",
+                    "its status follows. Fix the problem above and the gateway applies the change on its own.",
                     err=True,
                 )
             else:

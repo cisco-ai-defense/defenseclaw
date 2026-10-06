@@ -226,7 +226,7 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 // NewSidecar creates a sidecar instance ready to connect.
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*Sidecar, error) {
 	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) {
-		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
+		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw migrate' first")
 	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
@@ -1720,6 +1720,13 @@ func buildInitialSidecarJudge(
 	return judge, nil
 }
 
+// generationUnchanged reports a rebuild that matches the live generation: the
+// same effective digest and the same reason (if any) the Rego policy did not
+// load, so a new failure to load it is published, not swallowed.
+func generationUnchanged(live, next *Generation) bool {
+	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError
+}
+
 func (s *Sidecar) applyConfigReloadSnapshot(
 	ctx context.Context,
 	oldCfg, newCfg *config.Config,
@@ -1728,7 +1735,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 ) error {
 	if oldCfg == nil || newCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(newCfg.ConfigVersion) {
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 	}
 	v8PlanChanged := false
 	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||
@@ -1849,8 +1856,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		recordGenerationBuildError(err)
 		return fmt.Errorf("config reload generation: %w", err)
 	}
-	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets &&
-		previousGen != nil && previousGen.Digest == nextGen.Digest {
+	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
 	}
 	// Rule packs and the judge (which embeds the active pack's judge
@@ -2165,7 +2171,9 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailConfig) map[string]config.PerConnectorGuardrailConfig {
 	out := make(map[string]config.PerConnectorGuardrailConfig, len(connectors))
 	for name, pc := range connectors {
-		out[name] = config.PerConnectorGuardrailConfig{Enabled: pc.Enabled, HookFailMode: pc.HookFailMode}
+		// An unset enabled is enabled, so enabled: true is not a change.
+		enabled := pc.Enabled == nil || *pc.Enabled
+		out[name] = config.PerConnectorGuardrailConfig{Enabled: &enabled, HookFailMode: pc.HookFailMode}
 	}
 	return out
 }
@@ -3262,6 +3270,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		s.handleAdmissionResult(r)
 	})
 	w.SetConfigSource(s.currentConfig)
+	w.SetRulePackSource(installScanRulePack)
 	// Admission evaluates the live generation's prepared OPA, which the
 	// config manager rebuilds when a watched Rego module changes.
 	w.SetPolicySource(func() *policy.Prepared {

@@ -3403,10 +3403,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"
         }
       ],
       "since": "0.4.0",
@@ -3430,10 +3426,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 endpoint into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the endpoint only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3457,10 +3449,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3488,10 +3476,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3515,10 +3499,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3546,10 +3526,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3577,10 +3553,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 protocol into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the protocol only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3608,10 +3580,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 TLS policy into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the TLS decision only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3635,10 +3603,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3666,10 +3630,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",

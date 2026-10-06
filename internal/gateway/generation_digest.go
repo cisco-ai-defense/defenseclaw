@@ -30,6 +30,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -69,11 +70,42 @@ func configDigest(cfg *config.Config) (string, error) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
+	doc = materializeConfigDefaults(cfg, doc)
 	canonical, err := json.Marshal(canonicalConfigValue("", doc, dataDirOf(cfg)))
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
 	return sha256Digest(canonical), nil
+}
+
+// materializeConfigDefaults makes the config document digest what is
+// enforced, not how it was written (spec section 5, defaults materialised):
+// admission: becomes the compiled admission policy, so an explicit empty
+// first_party_allow_list (which YAML omits) differs from the built-in list and
+// a value equal to its default digests like the unset key; a connector's
+// enabled: true is the default and is dropped. A Secure Client host keeps its
+// document as written.
+func materializeConfigDefaults(cfg *config.Config, doc any) any {
+	root, ok := doc.(map[string]any)
+	if !ok || cfg == nil || cfg.SecureClientIntegration() {
+		return doc
+	}
+	if raw, err := json.Marshal(policy.CompileAdmission(cfg)); err == nil {
+		var compiled any
+		if json.Unmarshal(raw, &compiled) == nil {
+			root["admission"] = compiled
+		}
+	}
+	if guardrail, ok := root["guardrail"].(map[string]any); ok {
+		if overrides, ok := guardrail["connectors"].(map[string]any); ok {
+			for _, override := range overrides {
+				if fields, ok := override.(map[string]any); ok && fields["enabled"] == true {
+					delete(fields, "enabled")
+				}
+			}
+		}
+	}
+	return root
 }
 
 // observabilityDigest digests the observability section of config.yaml

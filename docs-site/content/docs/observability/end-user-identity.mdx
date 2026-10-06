@@ -160,6 +160,18 @@ ai_discovery:
 Like the email, the principal is an identifier, so v8 redaction profiles keep
 it. Enable it only when every selected destination may receive it.
 
+The option governs the two principal attributes only. On a Linux host that
+joined a directory with SSSD fully qualified names
+(`use_fully_qualified_names = true`), the home directory is
+`/home/alice@corp.example.com`, so a record that carries a home-directory path
+contains the UPN inside that path whatever this option says. The rule-pack
+directory of a hook decision, health errors and the AI discovery roots do, and so
+does `defenseclaw-gateway audit export`. Paths are the `path` field class: the
+`sensitive` and `content` profiles hash them, `strict` removes them, and the
+default profile `none` keeps them. Apply a path-redacting profile to a
+destination that must not learn the account's directory name, as in
+[Redaction](/docs/observability/redaction).
+
 See [AI Discovery](/docs/ai-discovery) for profile inventory, the
 [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory) and
 runtime-plane coverage, and [Redaction](/docs/observability/redaction) for the

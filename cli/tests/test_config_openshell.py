@@ -353,6 +353,21 @@ class TestOpenShellValidation(unittest.TestCase):
             self.assertEqual(caught.exception.corrective_action, want)
             self.assertNotIn(value, str(caught.exception))
 
+    def test_pattern_one_of_and_type_refusals_name_what_the_field_takes(self):
+        # GAP-0085: block_at (a pattern), an admission action (a oneOf) and a
+        # port (a type) were refused with no allowed values.
+        for document, path, want in (
+            ({"guardrail": {"block_at": "bogus"}}, "$.guardrail.block_at",
+             "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)"),
+            ({"admission": {"skill": {"actions": {"high": "explode"}}}}, "$.admission.skill.actions.high",
+             "use one of block, quarantine, warn, allow or a mapping with file, runtime, install"),
+            ({"gateway": {"api_port": "abc"}}, "$.gateway.api_port", "use a value of type integer"),
+        ):
+            with self.assertRaises(V8ConfigError) as caught:
+                load_validate_v8({"config_version": 9, **document})
+            self.assertEqual(caught.exception.path, path)
+            self.assertEqual(caught.exception.corrective_action, want)
+
 
 class TestPolicyConnectors(unittest.TestCase):
     def test_union_with_sandbox_harnesses(self):

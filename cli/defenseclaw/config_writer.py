@@ -74,6 +74,10 @@ ACTOR_PREFIX_API = "api:"
 ACTOR_PREFIX_SANDBOX = "sandbox:"
 ACTOR_PREFIX_HAND_EDIT = "hand-edit:"
 
+#: The runtime descriptor the enterprise lifecycle writes next to the managed
+#: config.yaml. The folder that holds it is the lifecycle's, not the writer's.
+MANAGED_RUNTIME_DESCRIPTOR = "managed-runtime.json"
+
 #: Shown when a local writer is refused on a managed (standalone) device.
 MANAGED_REFUSAL = (
     "This device is managed: change config.yaml in the admin config "
@@ -201,8 +205,20 @@ def current_actor(prefix: str = ACTOR_PREFIX_CLI) -> str:
     return prefix + (name or "unknown")
 
 
-def restart_required(changed: list[str]) -> list[str]:
-    """Return the paths in ``changed`` that need a gateway restart."""
+def _connector_enabled(raw: bytes, name: str) -> bool:
+    """Whether config bytes enable the guardrail connector ``name`` (unset is enabled)."""
+    try:
+        document = yaml.safe_load(raw.decode("utf-8")) if raw.strip() else {}
+        connectors = document["guardrail"]["connectors"]
+        return connectors[name]["enabled"] is not False
+    except (UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError):
+        return True
+
+
+def restart_required(changed: list[str], before: bytes | None = None, after: bytes | None = None) -> list[str]:
+    """Return the paths in ``changed`` that need a gateway restart. With the
+    document bytes before and after, a connector ``enabled`` that resolves to
+    the same value (``true`` against unset) is not a change."""
     out = []
     for path in changed:
         try:
@@ -215,6 +231,15 @@ def restart_required(changed: list[str]) -> list[str]:
         for key in RESTART_KEYS:
             parts = key.split(".")
             if all(k in ("*", p) for k, p in zip(parts, segs)):
+                if (
+                    before is not None
+                    and after is not None
+                    and len(segs) == 4
+                    and segs[:2] == ["guardrail", "connectors"]
+                    and segs[3] == "enabled"
+                    and _connector_enabled(before, segs[2]) == _connector_enabled(after, segs[2])
+                ):
+                    break
                 out.append(path)
                 break
     return out
@@ -305,7 +330,11 @@ def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT
         finally:
             held[target] -= 1
         return
-    file_permissions.make_private_directory(os.path.dirname(target) or ".")
+    directory = os.path.dirname(target) or "."
+    # The managed config folder is root-owned 0755 on purpose (every user's
+    # hook reads it); a refused or lifecycle write must not tighten it.
+    if not os.path.isfile(os.path.join(directory, MANAGED_RUNTIME_DESCRIPTOR)):
+        file_permissions.make_private_directory(directory)
     stack = ExitStack()
     try:
         stack.enter_context(locked_file_update(target, timeout_seconds=timeout_s))
@@ -350,7 +379,7 @@ def _transact(
                 os.unlink(target)
             raise
     _refresh_derived_files(target, candidate)
-    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed, current, candidate))
 
 
 def _refresh_derived_files(target: str, candidate: bytes) -> None:
@@ -506,10 +535,21 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     return profile == "standalone"
 
 
-def standalone_managed(current: bytes) -> bool:
-    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
-    managed deployment on the standalone profile. Secure Client hosts are
-    not standalone, so their path is unchanged."""
+def machine_managed_standalone() -> bool:
+    """Whether this computer is a managed standalone host: the enterprise
+    lifecycle published its runtime descriptor (Linux, macOS) or the Windows
+    marker with the standalone profile. Any account's CLI sees it, so a
+    standard user's per-user config cannot opt out of the managed gate.
+    Secure Client hosts publish neither, so their path is unchanged."""
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
+
+
+def _managed_document(current: bytes) -> tuple[bool, dict[str, Any]]:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) say managed
+    enterprise, with the parsed document."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
     try:
@@ -521,7 +561,26 @@ def standalone_managed(current: bytes) -> bool:
     managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
         str(document.get("deployment_mode") or "")
     )
+    return managed, document
+
+
+def standalone_managed(current: bytes) -> bool:
+    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
+    describe a managed deployment on the standalone profile. Secure Client
+    hosts are not standalone, so their path is unchanged."""
+    if machine_managed_standalone():
+        return True
+    managed, document = _managed_document(current)
     return managed and _standalone_profile(document)
+
+
+def secure_client_managed(current: bytes) -> bool:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
+    managed device on the Secure Client profile."""
+    if machine_managed_standalone():
+        return False
+    managed, document = _managed_document(current)
+    return managed and not _standalone_profile(document)
 
 
 def managed_refuses(current: bytes, actor: str) -> bool:

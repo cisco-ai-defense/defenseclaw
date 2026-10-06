@@ -777,8 +777,14 @@ func v9ActionNode(action SeverityAction) (*yaml.Node, any) {
 }
 
 func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
+	// What enforcement read: data.json, or the built-in defaults where there
+	// is none (a managed layout never has one).
+	source, read := "data.json", "data.json"
+	if !data.present {
+		source, read = "defaults", "the built-in defaults, there being no data.json"
+	}
 	// The v8 keys enforcement never read: removed, with a conflict when an
-	// operator customised them away from what data.json enforced.
+	// operator customised them away from what was enforced.
 	legacy := map[string]map[string]SeverityAction{}
 	for key, assetType := range map[string]string{
 		"skill_actions": AdmissionTypeSkill, "mcp_actions": AdmissionTypeMCP, "plugin_actions": AdmissionTypePlugin,
@@ -805,14 +811,21 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			enforced := !data.present || (data.Config.AllowListBypassScan != nil && *data.Config.AllowListBypassScan)
 			if node.Decode(&bypass) == nil && !bypass && enforced {
 				m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
-					To: "admission.defaults.allow_list_bypass_scan", Kept: "data.json:true",
-					Lost: "watch.allow_list_bypass_scan:false", Reason: "enforcement read data.json; watch.allow_list_bypass_scan had no reader",
+					To: "admission.defaults.allow_list_bypass_scan", Kept: source + ":true",
+					Lost: "watch.allow_list_bypass_scan:false", Reason: "enforcement read " + read + "; watch.allow_list_bypass_scan had no reader",
 				})
 			}
 		}
 	}
 
 	if !data.present {
+		for assetType, old := range legacy {
+			effective := map[string]SeverityAction{}
+			for _, severity := range v9Severities {
+				effective[severity] = v9BuiltinAdmissionAction(assetType, severity)
+			}
+			m.legacyActionConflicts(assetType, old, effective, source, read)
+		}
 		return
 	}
 	for _, key := range []string{"policy_name", "max_enforcement_delay_seconds"} {
@@ -876,7 +889,7 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			}
 		}
 		if old, ok := legacy[assetType]; ok {
-			m.legacyActionConflicts(assetType, old, effective)
+			m.legacyActionConflicts(assetType, old, effective, source, read)
 		}
 	}
 
@@ -919,8 +932,9 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 }
 
 // legacyActionConflicts records a conflict for every severity an operator
-// customised in a *_actions key away from what data.json enforced.
-func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[string]SeverityAction) {
+// customised in a *_actions key away from what was enforced (source names
+// where that came from, read says it in a sentence).
+func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[string]SeverityAction, source, read string) {
 	defaults := map[string]SeverityAction{}
 	switch assetType {
 	case AdmissionTypeSkill:
@@ -944,9 +958,9 @@ func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[
 		}
 		m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
 			To:     "admission." + assetType + ".actions." + lower,
-			Kept:   "data.json:" + v9ActionString(effective[severity]),
+			Kept:   source + ":" + v9ActionString(effective[severity]),
 			Lost:   assetType + "_actions." + lower + ":" + v9ActionString(v9NormalAction(value)),
-			Reason: "enforcement read data.json; " + assetType + "_actions only filled unknown severities",
+			Reason: "enforcement read " + read + "; " + assetType + "_actions only filled unknown severities",
 		})
 	}
 }

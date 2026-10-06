@@ -540,6 +540,9 @@ func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
 			Removed: []inventory.IDEPlugin{{PluginID: "com.github.copilot", Product: "pycharm", Enabled: "enabled", IsAI: true, State: inventory.AIStateGone}},
 		},
 	}
+	// JetBrains ids are free text and may contain a space (GAP-0159).
+	report.IDEInventory.Plugins = append(report.IDEInventory.Plugins,
+		inventory.IDEPlugin{PluginID: "String Manipulation", Product: "pycharm", Enabled: "disabled", State: inventory.AIStateNew})
 	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
 		t.Fatalf("EmitReport: %v", err)
 	}
@@ -550,7 +553,7 @@ func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
 			t.Fatalf("ide record carried a path hash: %s", raw)
 		}
 	}
-	if strings.Join(events, ",") != "ai.discovery.completed,ide.plugin.discovered,ide.plugin.removed" {
+	if strings.Join(events, ",") != "ai.discovery.completed,ide.plugin.discovered,ide.plugin.discovered,ide.plugin.removed" {
 		t.Fatalf("events = %v", events)
 	}
 	gauges := 0

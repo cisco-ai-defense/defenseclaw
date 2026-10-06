@@ -208,6 +208,8 @@ func openCommandAuditStore(path string) (*audit.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit store: %w", err)
 	}
+	// A command's output is not the place for per-migration notes (GAP-0153).
+	store.SetMigrationProgress(io.Discard)
 	if err := store.Init(); err != nil {
 		store.Close()
 		return nil, fmt.Errorf("failed to init audit store: %w", err)
@@ -331,8 +333,8 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 
 // loadGatewayConfigV8 strict-parses and compiles the exact source snapshot
 // before the general Config decoder sees it. The target gateway therefore
-// never invokes v7 compatibility decoding or runtime migration; those belong
-// exclusively to `defenseclaw upgrade`.
+// never decodes a pre-v8 source; `defenseclaw migrate` converts a released
+// 0.8.x config once, and this runtime refuses what it has not converted.
 func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, error) {
 	loaded, err := loadConfigV8File(path, config.DefaultDataPath())
 	if err != nil {
@@ -351,7 +353,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 		return nil, nil, err
 	}
 	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
-		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw upgrade' first")
+		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw migrate' first")
 	}
 	// The managed-mode environment policy (envvars.Lookup) follows the
 	// loaded config: on a standalone enterprise host ignore-listed variables

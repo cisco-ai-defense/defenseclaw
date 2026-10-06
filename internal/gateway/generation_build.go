@@ -340,6 +340,22 @@ func recordGenerationBuildError(err error) {
 	}
 }
 
+// livePendingRestart holds the config keys the running gateway keeps at their
+// running values until it restarts (a listener, a connector's hooks),
+// published as policy.pending_restart so doctor can tell a pending restart
+// from a stale gateway.
+var livePendingRestart atomic.Value // []string
+
+func setPendingRestart(keys []string) {
+	livePendingRestart.Store(append([]string(nil), keys...))
+}
+
+// clearGenerationBuildError ends a rejection: the next rebuild succeeded,
+// even when it built the generation already live and swapped nothing.
+func clearGenerationBuildError() {
+	liveReloadError.Store("")
+}
+
 // CurrentPolicyHealth is the "policy" object of /health and /status for the
 // live generation. ok is false before the first generation and under the
 // Secure Client integration, where the object is omitted.
@@ -359,6 +375,7 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 	for key, value := range g.Components {
 		health.Components[key] = value
 	}
+	health.PendingRestart, _ = livePendingRestart.Load().([]string)
 	if msg, _ := liveReloadError.Load().(string); msg != "" {
 		health.LastReloadError = msg
 	} else if g.opaError != "" {

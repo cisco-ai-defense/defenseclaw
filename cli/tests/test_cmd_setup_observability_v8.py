@@ -1634,3 +1634,34 @@ def test_setup_v8_add_with_only_a_new_key_restarts_the_gateway(
         result = CliRunner().invoke(key_only, [], obj=app)
     assert result.exit_code == 0, result.output
     assert restart.called and "Auto-restarting defenseclaw-gateway" in result.output
+
+
+def test_setup_restarts_the_gateway_only_for_a_key_it_reads_at_start(tmp_path: Path) -> None:
+    # GAP-0072: a webhook is a hot key (the gateway applies it from the next
+    # config generation), so setup no longer bounces the gateway for it.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+    config_path = tmp_path / "config.yaml"
+
+    def run(edit: str) -> tuple[bool, str]:
+        @click.command()
+        @click.pass_context
+        def change(ctx: click.Context) -> None:
+            ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+            ctx.meta[cmd_setup._SETUP_CFG_BYTES_KEY] = config_path.read_bytes()
+            config_path.write_text(edit)
+            cmd_setup._auto_restart_sidecar_after_setup()
+
+        with (
+            patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+            patch.object(cmd_setup, "_restart_defense_gateway", return_value=True) as restart,
+        ):
+            result = CliRunner().invoke(change, [], obj=app)
+        assert result.exit_code == 0, result.output
+        return restart.called, result.output
+
+    restarted, output = run("config_version: 8\nobservability: {}\nwebhooks: [{url: https://example.com/h, type: generic}]\n")
+    assert not restarted and "without a restart" in output
+    restarted, _ = run("config_version: 8\nobservability: {}\ngateway: {port: 18971}\n")
+    assert restarted

@@ -251,8 +251,8 @@ func TestParseV8YAMLTargetedLegacyDiagnostics(t *testing.T) {
 			if err.Path != test.path {
 				t.Fatalf("Path = %q, want %q", err.Path, test.path)
 			}
-			if !strings.Contains(err.Action, "defenseclaw upgrade") || !strings.Contains(err.Action, test.target) {
-				t.Fatalf("Action = %q, want upgrade guidance with %q", err.Action, test.target)
+			if !strings.Contains(err.Action, test.target) {
+				t.Fatalf("Action = %q, want the replacement %q", err.Action, test.target)
 			}
 		})
 	}

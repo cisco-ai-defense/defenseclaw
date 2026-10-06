@@ -125,6 +125,14 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	for _, problem := range problems {
 		r.AddError(codeVerify, problem)
 	}
+	if !record.NoStart && !r.Readiness.Gateway {
+		// A gateway that is down because the installed binary refuses the
+		// installed config is not helped by repair, which applies the same
+		// config again: say why and what to fix.
+		if refusal := l.configRefusal(ctx); refusal != "" {
+			r.AddError(codeConfigRefused, env.configRefusedMessage(refusal))
+		}
+	}
 	if strict && r.TransactionPending {
 		r.AddError(codeVerify, "a lifecycle transaction is pending; the next mutating run recovers it")
 	}
@@ -412,6 +420,26 @@ const codePackageInstallFailed = "package_install_failed"
 // lastPackageResultFile is the result the deb/rpm and the macOS pkg
 // postinstall keep of their own `ensure --from-package` run.
 const lastPackageResultFile = "last-package-result.json"
+
+// lastPackageLogFile is the standard error of the same run.
+const lastPackageLogFile = "last-package-result.log"
+
+// clearSupersededPackageFailure removes the failed result of the package's
+// own install run once a later run has committed a deployment. Left in
+// place, an upgrade whose activation was rolled back keeps reporting ok:false
+// and the previous version to MDM detection and to administrators after
+// ensure recovered the host. The package's own run is left alone: its shell
+// holds the result file open and the run writes the document after the
+// lifecycle returns.
+func (l *lifecycle) clearSupersededPackageFailure() {
+	if l.opts.Reason == "package" || l.env.lastPackageInstallFailure() == "" {
+		return
+	}
+	dir := l.env.P(l.env.Layout.LifecycleDir)
+	for _, name := range []string{lastPackageResultFile, lastPackageLogFile} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
 
 // lastPackageInstallFailure returns "code: message" of the first error of the
 // package postinstall's failed install run, or "" when there is none. dnf

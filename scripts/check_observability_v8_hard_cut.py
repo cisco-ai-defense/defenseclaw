@@ -66,16 +66,11 @@ class Rule:
     suffixes: tuple[str, ...] = (".go", ".py")
 
 
-# Exact compatibility boundaries. They may decode or reject v7 source, but may
-# not construct a target runtime. Runtime callsites outside these paths fail.
+# Exact compatibility boundaries: the strict YAML entrypoint that rejects a v7
+# key, and the one-way upgrade conversion. Runtime callsites outside these paths
+# fail.
 LEGACY_CONFIG_BOUNDARIES = (
-    "internal/config/config.go",
-    "internal/config/sinks.go",
     "internal/config/yaml_v8.go",
-    "cli/defenseclaw/config.py",
-    # Recovery commands can classify credentials before a v7 source has been
-    # upgraded; exact-v8 classification still resolves canonical destinations.
-    "cli/defenseclaw/credentials.py",
     "cli/defenseclaw/migrations.py",
     "cli/defenseclaw/observability/v8_migration.py",
 )
@@ -180,6 +175,16 @@ RULES = (
         "target Go code may not read legacy observability config",
         allowed_prefixes=LEGACY_CONFIG_BOUNDARIES,
         include_tests=False,
+        suffixes=(".go",),
+    ),
+    Rule(
+        "legacy-go-config-decoder",
+        re.compile(
+            r"\bCurrentConfigVersion\b|\bmigrateConfig\(|\bmigrateFlatOTelConfigFromViper\b|"
+            r"\bdetectLegacySplunk\b|\bOTelDestinationConfig\b|\bconfig\.AuditSink\b|\bAuditSinkKind\b",
+        ),
+        "the pre-v8 config decoder is removed; `defenseclaw migrate` converts a released 0.8.x config once "
+        "and the Go runtime refuses an older source",
         suffixes=(".go",),
     ),
     Rule(

@@ -168,11 +168,14 @@ def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "config_version: 9\ngateway: {}\nobservability: {}\nguardrail: {rule_pack: strict}\n"
-        "scanners: {skill_scanner: {fail_on_severity: CRITICAL}}\n",
+        "scanners: {skill_scanner: {fail_on_severity: CRITICAL}}\n"
+        "admission: {mcp: {scan_on_install: false}, plugin: {first_party_allow_list: []}}\n",
         encoding="utf-8",
     )
     with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
         block = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.block_at", "--effective"])
+        scan = CliRunner().invoke(cmd_config.config_cmd, ["get", "admission.mcp.scan_on_install", "--effective"])
+        plugin = CliRunner().invoke(cmd_config.config_cmd, ["get", "admission.plugin", "--effective"])
         skill = CliRunner().invoke(
             cmd_config.config_cmd, ["get", "admission.skill.actions", "--effective", "--format", "json"]
         )
@@ -183,3 +186,6 @@ def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(
         "critical": "quarantine", "high": "warn", "medium": "warn", "low": "allow", "info": "allow"
     }
     assert "derived:scanners.skill_scanner" in skill.stderr
+    # A key config.yaml sets names config.yaml as its source, not builtin (GAP-0009).
+    assert scan.stdout == "false\n" and "config:admission.mcp.scan_on_install" in scan.stderr
+    assert "config:admission.plugin.first_party_allow_list" in plugin.stderr

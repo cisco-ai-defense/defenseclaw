@@ -181,17 +181,17 @@ func (e *Env) explainConfigError(err error, source string) error {
 		fixed := *yamlErr
 		switch yamlErr.Code {
 		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
-			fixed.Action = "add `config_version: 8` as the first line of the file"
+			fixed.Action = "add `config_version: 9` as the first line of the file"
 		case config.V8YAMLErrorVersionUpgrade:
-			fixed.Action = "write the file in the current (v8) format and set `config_version: 8`"
+			fixed.Action = "write the file in the current (v9) format and set `config_version: 9`"
 		case config.V8YAMLErrorVersionUnsupported:
-			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 8`"
+			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 9`"
 		}
 		message = strings.Replace(message, yamlErr.Error(), fixed.Error(), 1)
 	}
 	if strings.Contains(message, "defenseclaw migrate") {
-		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 8`")
-		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v8) format and set `config_version: 8`")
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 9`")
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v9) format and set `config_version: 9`")
 	}
 	if source != "" && source != e.Layout.ConfigPath {
 		message = strings.ReplaceAll(message, e.Layout.ConfigPath, source)

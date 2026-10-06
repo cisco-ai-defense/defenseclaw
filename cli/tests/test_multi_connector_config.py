@@ -375,15 +375,6 @@ class TestMergeConnectors(unittest.TestCase):
         self.assertIsNotNone(gc.connectors["antigravity"].hilt)
         self.assertEqual(gc.connectors["antigravity"].hilt.min_severity, "LOW")
 
-    def test_hitl_alias_in_connector(self):
-        gc = _merge_guardrail(
-            {"connectors": {"codex": {"hitl": {"enabled": True}}}},
-            "/tmp",
-        )
-        self.assertIsNotNone(gc.connectors["codex"].hilt)
-        self.assertTrue(gc.connectors["codex"].hilt.enabled)
-
-
 class TestLoadAndRoundTrip(unittest.TestCase):
     def test_load_rejects_invalid_connector_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:

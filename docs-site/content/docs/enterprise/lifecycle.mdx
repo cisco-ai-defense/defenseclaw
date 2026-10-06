@@ -91,7 +91,8 @@ sudo dnf upgrade "./defenseclaw-enterprise-${VERSION}-linux-amd64.rpm"
 The package's install script runs `ensure --from-package` and writes the
 result to `/var/lib/defenseclaw-enterprise/last-package-result.json`. The
 script never fails the package transaction, so read that file or run `verify`
-afterwards.
+afterwards. A later `ensure` or `repair` that applies the deployment removes a
+failed result, so the file never reports a failure that was fixed.
 
 ```bash title="Payload archive"
 VERSION=1.0.0   # the release you deploy
