@@ -278,6 +278,14 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if err := config.ValidateCandidate(txn.Path(), candidate); err != nil {
 		return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)
 	}
+	// An editing writer also proves the rule packs and rule IDs load, so a
+	// bad reference is refused here instead of failing every later reload.
+	// Migrations and the lifecycle install what they were given.
+	if opt.Actor != ActorMigration && opt.Actor != ActorLifecycle {
+		if err := config.ValidateCandidateAssets(txn.Path(), candidate); err != nil {
+			return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}

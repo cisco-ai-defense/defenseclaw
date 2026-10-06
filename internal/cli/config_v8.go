@@ -77,6 +77,11 @@ var configV8ValidateCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		loaded, err := loadConfigV8File(configV8ConfigPath, configV8DataDir)
+		if err == nil {
+			// The writers' validator: the rule packs and rule IDs the
+			// candidate references must load, as the gateway's reload needs.
+			err = config.CheckCandidateAssets(loaded.runtime)
+		}
 		if err != nil {
 			failure := configV8ValidationFailure(err)
 			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(failure); encodeErr != nil {

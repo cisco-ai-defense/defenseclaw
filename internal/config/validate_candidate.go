@@ -25,10 +25,56 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+// candidateAssetCheck builds the rule packs a candidate config references
+// the way the gateway's generation build does. The gateway package
+// registers it (RegisterCandidateAssetCheck); a binary without the gateway
+// skips the check.
+var candidateAssetCheck func(*Config) error
+
+// RegisterCandidateAssetCheck installs the asset-reference check that
+// CheckCandidateAssets and ValidateCandidateAssets run.
+func RegisterCandidateAssetCheck(check func(*Config) error) { candidateAssetCheck = check }
+
+// CheckCandidateAssets refuses a decoded candidate whose asset references
+// the gateway would refuse when it builds the generation: a rule_pack that
+// is neither built in nor a custom_packs key, a custom pack whose digest
+// does not match, an unknown rule ID in guardrail.rules, or a protection
+// pack that does not exist. Writers run it before they commit, so a bad
+// reference never reaches config.yaml and blocks every later hot reload.
+func CheckCandidateAssets(cfg *Config) error {
+	if candidateAssetCheck == nil || cfg == nil {
+		return nil
+	}
+	if err := candidateAssetCheck(cfg); err != nil {
+		return &V8SemanticError{
+			Path:     "$.guardrail",
+			Summary:  err.Error(),
+			Expected: "rule packs, custom pack digests and rule IDs the gateway can load",
+			Action:   "fix the reference, then retry",
+			cause:    err,
+		}
+	}
+	return nil
+}
+
+// ValidateCandidateAssets decodes candidate bytes and runs
+// CheckCandidateAssets on them.
+func ValidateCandidateAssets(configFile string, raw []byte) error {
+	if candidateAssetCheck == nil {
+		return nil
+	}
+	candidate, err := LoadRuntimeV8InspectionCandidateFromBytes(configFile, raw)
+	if err != nil {
+		return err
+	}
+	return CheckCandidateAssets(candidate)
+}
+
 // ValidateCandidate runs the canonical validator on candidate config bytes
 // for configFile before any writer installs them: the strict YAML and JSON
 // Schema pass, the observability compiler and the runtime decode (which
-// includes the guardrail profile checks). It reads nothing but raw.
+// includes the guardrail profile checks). It reads nothing but raw; an
+// editing writer also runs ValidateCandidateAssets.
 func ValidateCandidate(configFile string, raw []byte) error {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
