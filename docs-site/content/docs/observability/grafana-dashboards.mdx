@@ -51,9 +51,13 @@ start the stack first with `defenseclaw setup local-observability up`.
 ## Filter by user
 
 Overview, Blocked Events, Policy decisions, Agent identity, Agent360, AI
-discovery and Identity & Users have a **User ID regex** box (`$user`). It
-narrows the Loki panels to records whose `user.id` (uid or SID) matches, for
-example `^1001$` or `S-1-5-21-.*-1104`. Records that carry no `user.id`, such as
+discovery and Identity & Users have a **User regex** box (`$user`). It
+narrows the Loki panels to records whose `user.id` (uid or SID), account name
+(`defenseclaw.user.name`) or directory principal matches, for example `1001`,
+`S-1-5-21-.*-1104`, `dcm-std1` or `alice@corp.example.com`. The principal is
+matched case-insensitively and is on records only when
+`ai_discovery.include_user_principal` is on. The regex must match the whole
+value, so use `alice.*` to match `alice@corp.example.com`. Records that carry no `user.id`, such as
 guardrail evaluations and discovery summaries, drop out once you narrow it.
 Metric panels have no per-user label, so they stay fleet-wide.
 
