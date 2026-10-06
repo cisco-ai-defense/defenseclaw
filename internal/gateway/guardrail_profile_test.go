@@ -19,6 +19,38 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// TestSubjectGroupsMatchLikeEqualFold: the group index answers as the scan
+// with strings.EqualFold it replaced (GAP-0118), for names, SIDs, DOMAIN\name
+// groups, a bare name against a DOMAIN\name group, padding, and runes whose
+// case folding is not their lower case.
+func TestSubjectGroupsMatchLikeEqualFold(t *testing.T) {
+	reference := func(groups []string, want string) bool {
+		if anyEqualFold(groups, want) {
+			return true
+		}
+		want = strings.TrimSpace(want)
+		if want == "" || strings.Contains(want, `\`) {
+			return false
+		}
+		for _, group := range groups {
+			if i := strings.LastIndexByte(group, '\\'); i >= 0 && strings.EqualFold(strings.TrimSpace(group[i+1:]), want) {
+				return true
+			}
+		}
+		return false
+	}
+	groups := []string{"DC-ML-Team@dclab.test", "S-1-5-21-1-2-3-1104", `CORP\Contractors`, " padded ", "ΣΑΣ", "Key", "5002", `CORP\ `}
+	for _, want := range []string{"dc-ml-team@DCLAB.TEST", "s-1-5-21-1-2-3-1104", `corp\contractors`, "contractors", `OTHER\Contractors`, "PADDED",
+		"σας", "ΣΑς", "key", "KEY", "5002", "", "  ", "missing", `CORP\`, "Contractor", "dc-ml-team"} {
+		if got, want2 := (&subjectGroups{list: groups}).has(want), reference(groups, want); got != want2 {
+			t.Errorf("has(%q) = %t, the EqualFold scan says %t", want, got, want2)
+		}
+	}
+	if (&subjectGroups{}).has("anything") {
+		t.Error("a subject with no groups is in a group")
+	}
+}
+
 type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:

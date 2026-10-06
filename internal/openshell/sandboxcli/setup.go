@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -236,17 +237,26 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return a.ask("Run this plan?", false, false)
 		})
 		res, err := inst.Install(ctx)
-		if errors.Is(err, openshell.ErrHomebrewInstall) {
+		if serr := a.homebrewNotWritable(err); serr != nil {
+			return serr
+		}
+		var hb *openshell.HomebrewInstallError
+		switch {
+		case errors.As(err, &hb) && hb.FormulaInstalled:
+			// The script got past the install and failed after it, in
+			// starting the gateway or registering it with the CLI: the
+			// checks below name the step that still fails, with its fix.
+			a.warn("install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it " +
+				"(it starts the gateway and registers it with the OpenShell CLI); what it printed is above")
+		case errors.Is(err, openshell.ErrHomebrewInstall):
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
 			a.note("→ " + homebrewInstallHint(err))
 			return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
-		}
-		if err != nil {
+		case err != nil:
 			return fmt.Errorf("install OpenShell: %w", err)
-		}
-		if res.Installed {
+		case res.Installed:
 			a.ok("OpenShell " + res.CLIVersion.String() + " installed, gateway running")
-		} else {
+		default:
 			a.ok("OpenShell " + res.CLIVersion.String() + " is already installed")
 		}
 		rep = a.runDoctor(ctx)
@@ -492,6 +502,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	updates := map[string]any{
 		"openshell.enabled": true, "openshell.harnesses": names, "openshell.upstream_telemetry": !telemetryOff,
 	}
+	// The daemon runs the CLI from the PATH it started with, which may not
+	// have the folder this shell found it in (a Homebrew of your own).
+	bin := cliBinaryToRecord(a.Cfg.OpenShell.Binary, rep.CLIPath)
+	if bin != "" {
+		updates["openshell.binary"] = bin
+	}
 	mode := a.Cfg.OpenShell.Workdir.Mode
 	switch {
 	case microVM:
@@ -512,6 +528,10 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	a.Cfg.OpenShell.Enabled, a.Cfg.OpenShell.Harnesses, a.Cfg.OpenShell.UpstreamTelemetry = true, names, !telemetryOff
 	a.ok("openshell.enabled is on in " + a.tildePath(a.ConfigPath))
+	if bin != "" {
+		a.Cfg.OpenShell.Binary = bin
+		a.note("openshell.binary is " + a.tildePath(bin) + ": the daemon runs the OpenShell CLI from there, as that folder may not be on the PATH it started with")
+	}
 
 	// 6. Wrappers, for the harness commands people type.
 	var wrappable []*harness.Spec
@@ -642,6 +662,37 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
+}
+
+// daemonPathDirs are the folders a daemon is taken to find the OpenShell
+// CLI in by its bare name, as NVIDIA's installer and the packages place it.
+var daemonPathDirs = []string{"/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"}
+
+// cliBinaryToRecord is the full path to record as openshell.binary: the
+// CLI the doctor found by its bare name, when openshell.binary is still the
+// default and the CLI lies outside daemonPathDirs. The daemon keeps the
+// PATH of its start, and a shell that put a per-user Homebrew on PATH
+// afterwards found a CLI the daemon could not run ("openshell: executable
+// file not found in $PATH" at the first sandbox). "" when nothing needs
+// recording.
+func cliBinaryToRecord(configured, found string) string {
+	if (configured != "" && configured != openshell.DefaultBinary) || !filepath.IsAbs(found) || slices.Contains(daemonPathDirs, filepath.Dir(found)) {
+		return ""
+	}
+	return found
+}
+
+// homebrewNotWritable reports a Homebrew prefix that belongs to another
+// account as the error setup returns, already printed with the way on; nil
+// for any other error.
+func (a *App) homebrewNotWritable(err error) error {
+	var hw *openshell.HomebrewNotWritableError
+	if !errors.As(err, &hw) {
+		return nil
+	}
+	a.bad("install OpenShell: " + a.tildeText(hw.Problem()))
+	a.note("→ " + a.tildeText(hw.Fix()))
+	return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
 }
 
 // homebrewInstallHint says what to update when Homebrew did not install
@@ -859,6 +910,14 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		return &Silent{Err: fmt.Errorf("the OpenShell MicroVM driver needs %s", what)}
 	}
 	changed := false
+	if m.E2fsprogs == "" && m.OwnBrewPrefix != "" {
+		// An e2fsprogs installed in a per-user Homebrew is never found by
+		// the driver, which would then take many minutes to build it from
+		// source for nothing.
+		a.bad("MicroVM driver: " + a.tildeText(openshell.E2fsprogsOwnPrefixFix(m.OwnBrewPrefix)))
+		a.note("→ then run `" + CommandName + " setup` again")
+		return nil, &Silent{Err: errors.New("the OpenShell MicroVM driver needs e2fsprogs where it looks for it")}
+	}
 	if m.E2fsprogs == "" {
 		yes, err := consent("Install e2fsprogs with Homebrew? The MicroVM driver formats its disks with it (" + openshell.InstallE2fsprogsCommand + ")")
 		if err != nil {
@@ -869,6 +928,9 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		}
 		a.note("Installing e2fsprogs with Homebrew…")
 		if err := a.Installer(nil).InstallE2fsprogs(ctx); err != nil {
+			if serr := a.homebrewNotWritable(err); serr != nil {
+				return nil, serr
+			}
 			return nil, fmt.Errorf("install e2fsprogs: %w", err)
 		}
 		a.ok("e2fsprogs installed")
