@@ -21,7 +21,7 @@ from __future__ import annotations
 GO_PARITY_REGISTRY: tuple[tuple[str, str, tuple[str, ...], str, str, bool, str], ...] = (
     ('init', 'defenseclaw', ('init',), 'Initialize DefenseClaw', 'setup', False, ''),
     ('init first-run', 'defenseclaw', ('init', '--non-interactive', '--yes', '--verify'), 'Run guided first-run backend with defaults', 'setup', False, ''),
-    ('quickstart', 'defenseclaw', ('quickstart', '--non-interactive', '--yes'), 'Compatibility first-run wrapper', 'setup', False, ''),
+    ('quickstart', 'defenseclaw', ('quickstart',), 'Compatibility first-run wrapper', 'setup', False, ''),
     ('setup llm', 'defenseclaw', ('setup', 'llm'), 'Configure the unified LLM interactively', 'setup', False, ''),
     ('setup llm show', 'defenseclaw', ('setup', 'llm', '--show'), 'Show unified LLM settings', 'setup', False, ''),
     ('setup migrate-llm', 'defenseclaw', ('setup', 'migrate-llm'), 'Migrate legacy LLM config into unified llm: block', 'setup', False, ''),

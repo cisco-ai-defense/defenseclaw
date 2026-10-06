@@ -1582,7 +1582,7 @@ first_install_extras() {
         if [[ -z "${CONNECTOR}" || "${CONNECTOR}" == none ]]; then
             warn "Quickstart needs a connector; run 'defenseclaw init' when ready"
         else
-            local args=(quickstart --non-interactive --yes --connector "${CONNECTOR}")
+            local args=(quickstart --connector "${CONNECTOR}")
             [[ -n "${QUICKSTART_MODE}" ]] && args+=(--mode "${QUICKSTART_MODE}")
             local rc=0
             if [[ "${OPENCLAW_MISSING}" == true ]]; then

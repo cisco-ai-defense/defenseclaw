@@ -1566,7 +1566,7 @@ function Invoke-FirstInstallExtras {
         if (-not $Connector -or $Connector -eq "none") {
             Write-Warn "Quickstart needs a connector; run 'defenseclaw init' when ready"
         } else {
-            $quickstartArgs = @("quickstart", "--non-interactive", "--yes", "--connector", $Connector)
+            $quickstartArgs = @("quickstart", "--connector", $Connector)
             if ($QuickstartMode) { $quickstartArgs += @("--mode", $QuickstartMode) }
             $quickstartRc = Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs
             if ($quickstartRc -ne 0) {

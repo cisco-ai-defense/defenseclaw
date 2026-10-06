@@ -200,7 +200,7 @@ enum CommandRegistry {
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
-        CommandDefinition(id: 2, title: "quickstart", binary: "defenseclaw", arguments: ["quickstart", "--non-interactive", "--yes"], summary: "Compatibility first-run wrapper", category: "setup", requiresInput: false, usage: ""),
+        CommandDefinition(id: 2, title: "quickstart", binary: "defenseclaw", arguments: ["quickstart"], summary: "Compatibility first-run wrapper", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 3, title: "setup llm", binary: "defenseclaw", arguments: ["setup", "llm"], summary: "Configure the unified LLM interactively", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 4, title: "setup llm show", binary: "defenseclaw", arguments: ["setup", "llm", "--show"], summary: "Show unified LLM settings", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 5, title: "setup migrate-llm", binary: "defenseclaw", arguments: ["setup", "migrate-llm"], summary: "Migrate legacy LLM config into unified llm: block", category: "setup", requiresInput: false, usage: ""),

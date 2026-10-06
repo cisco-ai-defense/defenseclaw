@@ -92,16 +92,6 @@ from defenseclaw import ux
     ),
 )
 @click.option(
-    "--non-interactive",
-    is_flag=True,
-    help="Never prompt. Same as --yes; kept for install-script compat.",
-)
-@click.option(
-    "--yes",
-    is_flag=True,
-    help="Assume yes for confirmations.",
-)
-@click.option(
     "--force",
     is_flag=True,
     help="Re-run all steps even if the environment is already initialized.",
@@ -149,8 +139,6 @@ def quickstart_cmd(
     fail_mode: str | None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
-    non_interactive: bool,
-    yes: bool,
     force: bool,
     agent_name: str | None,
     skip_gateway: bool,

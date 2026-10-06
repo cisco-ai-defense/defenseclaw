@@ -400,7 +400,7 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     completed = _run([str(script)], tmp_path)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    rerun = "defenseclaw quickstart --non-interactive --yes --connector codex --mode action"
+    rerun = "defenseclaw quickstart --connector codex --mode action"
     assert completed.stdout.strip() == f"7|{rerun}"
     summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
