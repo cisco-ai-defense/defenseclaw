@@ -665,12 +665,19 @@ _APPLE_FM_PROVIDERS = {"apple-fm", "apple_fm"}
 
 
 def _apply_apple_fm_llm(llm) -> None:
-    """Point an LLM block at the on-device system model and clear credentials."""
+    """Point an LLM block at the on-device system model and clear credentials.
+
+    ``instance_name`` is cleared too. A leftover name would let
+    ``Config.resolve_llm`` fill ``base_url`` and TLS back in from the
+    named custom-provider overlay.
+    """
     llm.provider = "apple-fm"
     llm.model = "apple-fm/system"
     llm.base_url = ""
     llm.api_key = ""
     llm.api_key_env = ""
+    llm.instance_name = ""
+
 
 # Default base URLs for local providers so the wizard can offer a sane
 # prefill. Operators can still override to point at a shared LAN host.

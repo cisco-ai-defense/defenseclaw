@@ -189,6 +189,30 @@ def litellm_model(llm: LLMConfig) -> str:
     return model
 
 
+_APPLE_FM_PROVIDERS = frozenset({"apple-fm", "apple_fm"})
+
+# Shown when a scanner would otherwise enable its LiteLLM lane for Apple FM.
+APPLE_FM_SCANNER_SKIP = (
+    "apple-fm is served by the gateway, not the Python scanners; "
+    "continuing with local analyzers"
+)
+
+
+def apple_fm_selected(llm: LLMConfig, model: str = "") -> bool:
+    """True when the resolved provider or model is the on-device Apple model.
+
+    Python scanners call LiteLLM. The on-device model is reached only by
+    the Go gateway, so this selection must not enable a scanner LLM lane.
+    """
+    prefix = llm.provider_prefix()
+    candidate = (model or llm.model or "").strip().lower()
+    if not prefix and "/" in candidate:
+        prefix = candidate.split("/", 1)[0]
+    if prefix in _APPLE_FM_PROVIDERS:
+        return True
+    return candidate.startswith(("apple-fm/", "apple_fm/"))
+
+
 def llm_analyzer_ready(
     llm: LLMConfig,
     *,
@@ -200,13 +224,16 @@ def llm_analyzer_ready(
     All scanner ``auto`` modes share this gate so skills, MCP servers, and
     plugins degrade the same way. A model is always required. Local providers
     are keyless, Bedrock can use its AWS credential chain, and other providers
-    require a resolved API key.
+    require a resolved API key. Apple FM is local for the gateway, but the
+    Python scanners cannot call it, so it is not ready here.
 
     ``model`` and ``api_key`` allow a scanner's one-shot CLI flags or legacy
     environment variables to override the resolved unified config.
     """
     effective_model = model or litellm_model(llm)
     if not effective_model:
+        return False
+    if apple_fm_selected(llm, effective_model):
         return False
     if llm.is_local_provider():
         return True

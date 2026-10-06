@@ -49,10 +49,12 @@ from defenseclaw.guardrail import detect_api_key_env
 from defenseclaw.scanner._llm_env import (
     _LOCAL_PROVIDERS,
     _PROVIDER_ENV_VARS,
+    apple_fm_selected,
     inject_llm_env,
     is_local_provider,
     litellm_completion_kwargs,
     litellm_model,
+    llm_analyzer_ready,
     provider_env_vars,
 )
 
@@ -196,6 +198,21 @@ class InjectLLMEnvTests(unittest.TestCase):
         llm = LLMConfig(provider="openai", model="openai/gpt-4o")
         self.assertEqual(inject_llm_env(llm), [])
         self.assertNotIn("OPENAI_API_KEY", os.environ)
+
+    def test_apple_fm_does_not_enable_python_scanner_llm(self):
+        # The gateway calls the on-device model. Scanner LLM lanes go
+        # through LiteLLM, so apple-fm must stay off even though it is
+        # a keyless local provider.
+        for llm, model in (
+            (LLMConfig(provider="apple-fm", model="apple-fm/system"), ""),
+            (LLMConfig(provider="apple_fm", model="system"), ""),
+            (LLMConfig(model="apple-fm/system"), "apple-fm/system"),
+        ):
+            with self.subTest(provider=llm.provider, model=model or llm.model):
+                self.assertTrue(apple_fm_selected(llm, model))
+                self.assertFalse(llm_analyzer_ready(llm, model=model))
+        ollama = LLMConfig(provider="ollama", model="ollama/llama3.1")
+        self.assertTrue(llm_analyzer_ready(ollama))
 
     def test_local_provider_skipped(self):
         # Ollama/vllm/lm_studio must never get an API key written —
