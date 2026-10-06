@@ -107,6 +107,12 @@ func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGen
 	return report.EffectiveDigest, report.ConfigGeneration, true
 }
 
+// gatewayPolicyDigest is policy.effective_digest from a /health body.
+func gatewayPolicyDigest(body []byte) string {
+	digest, _ := gatewayPolicyHealth(body)
+	return digest
+}
+
 // describePolicy fills Result.Policy. The digest is computed from the
 // installed config (computePolicy); when that is not possible the last
 // applied record stands in. A change action records policy-state.json once the gateway reports
