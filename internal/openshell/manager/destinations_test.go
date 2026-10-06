@@ -80,12 +80,15 @@ func TestDestinationsAreClassified(t *testing.T) {
 	proxy(egress.EventAllowed, "api.openai.com", "")
 	proxy(egress.EventBlocked, "inference.example-llm.net", egress.CategoryNotAllowlisted)
 	proxy(egress.EventAllowed, "registry.npmjs.org", egress.CategoryPackageRegistry)
+	proxy(egress.EventAllowed, "api.mailgun.net", "")
 
 	rows := destinationKinds(t, e, "destbox")
 	for host, kind := range map[string]string{
 		"api.anthropic.com": sandboxapi.DestinationModelProvider, "claude.ai": sandboxapi.DestinationHarnessVendor,
 		"api.openai.com": sandboxapi.DestinationOtherAI, "inference.example-llm.net": sandboxapi.DestinationUnknownAI,
 		"registry.npmjs.org": string(egress.CategoryPackageRegistry), "evil.example.com": sandboxapi.DestinationBlocked,
+		// An ordinary REST API whose name happens to hold the letters "ai".
+		"api.mailgun.net": sandboxapi.DestinationOther,
 	} {
 		if rows[host].Kind != kind {
 			t.Errorf("%s: kind %q, want %q (%+v)", host, rows[host].Kind, kind, rows[host])

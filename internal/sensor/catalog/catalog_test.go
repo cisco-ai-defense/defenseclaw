@@ -121,6 +121,8 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	for _, hostname := range []string{
 		"llm-gateway.internal.corp",
 		"api.someai.example",
+		"api.my-ai-gateway.example",
+		"api.example.ai",
 		"inference.acme.test",
 		"my-openai-proxy.example.net",
 		"models.chat.example",
@@ -131,6 +133,8 @@ func TestInferenceShapedRecognisesUncatalogedEndpoints(t *testing.T) {
 	}
 	for _, hostname := range []string{
 		"api.github.com", "www.example.com", "cdn.jsdelivr.net", "", "   ",
+		// "ai" inside another word is no sign of a model service.
+		"api.mailgun.net", "api.airtable.com", "api.domain.com", "api.braintreegateway.com",
 	} {
 		if InferenceShaped(hostname) {
 			t.Errorf("InferenceShaped(%q) = true, want false", hostname)
