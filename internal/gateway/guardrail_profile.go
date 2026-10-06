@@ -16,7 +16,10 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -52,6 +55,10 @@ type profileSubject struct {
 	UserName  string
 	Principal string
 	UPN       string
+	// Directory and Domain say where the account lives (explain's short-name
+	// note); an empty Domain is an account the host knows by a bare name.
+	Directory useridentity.Directory
+	Domain    string
 	// Groups are verified directory group names and SIDs.
 	Groups []string
 	// LookupFailed is set when the directory lookup for this subject failed
@@ -59,6 +66,9 @@ type profileSubject struct {
 	// like an unverified one, and the default reason is
 	// default_lookup_failed.
 	LookupFailed bool
+	// LookupError is why the lookup failed, when `explain` knows (the live
+	// path only records default_lookup_failed).
+	LookupError string
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -88,7 +98,7 @@ var (
 	}
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
-	profileAgentSource = agentIdentityFromContext
+	profileAgentSource = requestAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -120,6 +130,9 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
+	// Assignment is the 1-based index of the assignment that matched, 0 for
+	// the default.
+	Assignment int
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -128,6 +141,8 @@ type guardrailProfileSet struct {
 	profiles       map[string]config.DerivedGuardrailProfile
 	assignments    []config.ProfileAssignment
 	defaultProfile string
+	// groupCheck is the last look at whether the assignments' groups exist.
+	groupCheck profileGroupCheck
 	// rules holds the compiled rule pack of every rule_pack_dir a derived
 	// profile can resolve to, keyed by the cleaned directory.
 	rules map[string]*compiledRulePackCategories
@@ -298,30 +313,38 @@ type profileRouteConnectorKey struct{}
 // connector the server-side route serves (never a payload value). It is a
 // no-op when no profiles are configured.
 func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConnector string) context.Context {
-	set := a.guardrailProfileSet()
+	return withGuardrailProfile(ctx, a.guardrailProfileSet(), routeConnector)
+}
+
+// withGuardrailProfile is withGuardrailProfileDecision for set. The LLM
+// proxy, which has no APIServer, calls it with the live set and the
+// connector it serves (GuardrailProxy.withProxyAgent).
+func withGuardrailProfile(ctx context.Context, set *guardrailProfileSet, routeConnector string) context.Context {
 	if set == nil {
 		return ctx
 	}
 	if routeConnector = config.NormalizeConnectorName(routeConnector); routeConnector != "" {
 		ctx = context.WithValue(ctx, profileRouteConnectorKey{}, routeConnector)
 	}
-	resolved := resolveGuardrailProfileFor(ctx, set)
-	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolved)
+	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, set))
 }
 
-// refreshGuardrailProfileForAgent re-resolves the request's profile once the
-// hook path has put the verified agent identity on ctx
-// (enrichAgentHookContext). withGuardrailProfileDecision runs before that
-// identity exists, so an agents assignment could never match it.
-func refreshGuardrailProfileForAgent(ctx context.Context) context.Context {
-	resolved := resolvedGuardrailProfileFrom(ctx)
-	if resolved == nil {
-		return ctx
+// requestAgentIdentity is the agent identity an agents assignment matches
+// for ctx: the one the hook path, ACP or the LLM proxy put on ctx, else the
+// one the hook path derives for the connector the request authenticated for
+// or reached (profileRequestConnector) and its verified user. The derivation
+// covers the inspect endpoints, which carry no agent identity, and the
+// resolution at authentication, before the hook path has derived one.
+func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
+	if id, verified = agentIdentityFromContext(ctx); id != "" {
+		return id, verified
 	}
-	if _, verified := profileAgentSource(ctx); !verified {
-		return ctx
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" {
+		return "", false
 	}
-	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, resolved.set))
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	return facts.ID, facts.Verified
 }
 
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
@@ -442,13 +465,20 @@ var processOwnerProfileSubject = sync.OnceValues(func() (profileSubject, bool) {
 // user assignment is configured); a subject whose facts then never resolved
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
 // has unknown groups, not empty ones, and selects like an unverified one.
+//
+// The account name is the bare one (alice for alice@corp.example.com and
+// CORP\alice) here, for every caller: a request and `explain --user` both
+// build their subject through this function, so a users entry cannot match
+// one and not the other (GAP-0182).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
 	return profileSubject{
 		UserID:          s.UserID,
 		IDKind:          s.IDKind,
-		UserName:        s.UserName,
+		UserName:        useridentity.BareAccountName(s.UserName),
 		Principal:       s.Directory.Principal,
 		UPN:             s.Directory.UPN,
+		Directory:       s.Directory.Directory,
+		Domain:          s.Directory.Domain,
 		Groups:          s.Directory.Groups,
 		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
@@ -469,7 +499,17 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return lookupLocalProfileSubject(name)
 	}
 	facts, err := profileExplainDirectoryFacts(id)
-	if err != nil || facts.ResolvedAt.IsZero() {
+	if err != nil {
+		// The lookup the hook path would run failed, so a request from this
+		// account gets default_lookup_failed. Answering from the OS account
+		// database instead would explain a profile no request receives, and
+		// hide why (GAP-0124).
+		return profileSubject{
+			UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
+			LookupFailed: true, LookupError: err.Error(),
+		}, nil
+	}
+	if facts.ResolvedAt.IsZero() {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
 			return local, nil
 		}
@@ -555,12 +595,14 @@ func (set *guardrailProfileSet) match(subject *profileSubject, source, connector
 	if verified {
 		groups.list = subject.Groups
 	}
-	for _, assignment := range set.assignments {
+	for i, assignment := range set.assignments {
 		reason, group, ok := assignmentMatches(assignment.Match, subject, groups, verified, connectorName, agent)
 		if !ok {
 			continue
 		}
-		return set.decision(assignment.Profile, reason, group, source)
+		decision := set.decision(assignment.Profile, reason, group, source)
+		decision.Assignment = i + 1
+		return decision
 	}
 	reason := profileMatchDefault
 	switch {
@@ -611,11 +653,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchGroup, matched
 	}
 	if len(m.Users) > 0 {
-		candidates := []string{subject.UserID, subject.UserName}
-		if !anyMatches(m.Users, func(v string) bool {
-			return anyEqualFold(candidates, v) ||
-				useridentity.PrincipalsEqual(subject.Principal, v) || useridentity.PrincipalsEqual(subject.UPN, v)
-		}) {
+		if !anyMatches(m.Users, func(v string) bool { return userEntryMatches(subject, v) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchUser, ""
@@ -627,6 +665,13 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *s
 		reason, group = profileMatchAgent, ""
 	}
 	return reason, group, true
+}
+
+// userEntryMatches reports whether a users entry names the subject: its uid
+// or SID, its account name without the domain, or its principal or UPN.
+func userEntryMatches(subject *profileSubject, entry string) bool {
+	return anyEqualFold([]string{subject.UserID, subject.UserName}, entry) ||
+		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry)
 }
 
 // subjectGroups answers whether one of a subject's groups is the group an
@@ -685,7 +730,10 @@ func (g *subjectGroups) build() {
 
 // foldKey maps every rune to the smallest rune of its case-folding orbit,
 // so two strings have the same key exactly when strings.EqualFold says
-// they are equal.
+// they are equal, after both are put in Unicode normalization form C: an
+// assignment typed or pasted with a combining accent (e plus U+0301) names
+// the group the directory holds precomposed (U+00E9), and must match it
+// (GAP-0154).
 func foldKey(s string) string {
 	return strings.Map(func(r rune) rune {
 		smallest := r
@@ -693,7 +741,7 @@ func foldKey(s string) string {
 			smallest = min(smallest, f)
 		}
 		return smallest
-	}, s)
+	}, norm.NFC.String(s))
 }
 
 func anyMatches(values []string, pred func(string) bool) bool {
@@ -711,7 +759,7 @@ func anyEqualFold(have []string, want string) bool {
 		return false
 	}
 	for _, value := range have {
-		if value = strings.TrimSpace(value); value != "" && strings.EqualFold(value, want) {
+		if value = strings.TrimSpace(value); value != "" && useridentity.EqualFold(value, want) {
 			return true
 		}
 	}
@@ -786,7 +834,8 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 }
 
 // profileProxyOverride returns the mode and block message the guardrail
-// proxy applies for ctx. It applies only to a request with a verified
+// proxy applies for ctx, whose profile withProxyAgent resolved for the
+// proxy's connector and agent. It applies only to a request with a verified
 // user-scoped identity; without one the proxy keeps its own settings.
 func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
 	set := liveGuardrailProfiles.Load()
@@ -965,6 +1014,8 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		if err != nil {
 			found = profileSubject{UserName: user, LookupFailed: true}
 			out["lookup_error"] = err.Error()
+		} else if found.LookupError != "" {
+			out["lookup_error"] = found.LookupError
 		}
 		subject, source = &found, profileSubjectLookup
 		out["subject"] = map[string]any{
@@ -982,6 +1033,22 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["match"] = decision.Match
 	out["matched_group"] = decision.MatchedGroup
 	out["subject_source"] = decision.SubjectSource
+	out["assignment"] = decision.Assignment
+	warnings := profileExplainWarnings(set, decision, subject)
+	if source == profileSubjectLookup {
+		if view, warning := explainCacheView(set, subject, decision, connectorName, agent, time.Now()); view != nil {
+			out["cache"] = view
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+	}
+	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
+		out["directory"] = view
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {
 		effective = derived.Config

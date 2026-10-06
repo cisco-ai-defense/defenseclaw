@@ -96,6 +96,9 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
             overrides = _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
         finally:
             client.close()
+    except requests.exceptions.ReadTimeout as exc:
+        # The gateway took the connection and was still resolving the user.
+        return {"user": user, "error": str(exc), "timed_out": True}
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
         return {"user": user, "error": str(exc)}
     return {**result, "user": user, "overrides": overrides}

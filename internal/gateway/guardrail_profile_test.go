@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -215,24 +216,44 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	t.Run("verified group", func(t *testing.T) {
 		check(t, withVerifiedSubject(context.Background(), alice), "ml", profileMatchGroup, "DC-ML-Team@dclab.test")
 	})
-	t.Run("agent assignment on the hook path", func(t *testing.T) {
-		// The profile is resolved at authentication, before the hook path
-		// derives the agent identity; enrichAgentHookContext must re-resolve.
-		req := agentHookRequest{ConnectorName: "codex", SessionID: "s-agentpin"}
+	t.Run("agent and connector assignments on every path", func(t *testing.T) {
+		// The hook path resolves the profile at authentication, before it
+		// derives the agent identity; the inspect API and the LLM proxy
+		// carry none, and the proxy's connector is server-side config
+		// (GAP-0148, GAP-0170).
+		req := agentHookRequest{ConnectorName: "zeptoclaw", SessionID: "s-agentpin"}
 		agent, verified := agentIdentityFromContext(enrichAgentHookContext(context.Background(), req))
 		if agent == "" || !verified {
 			t.Skip("no verified agent identity on this host (machine id unreadable)")
 		}
-		pinned := &config.Config{}
-		pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"agentpin": {Mode: "action"}, "ml": {Mode: "action"}}
-		pinned.Guardrail.ProfileAssignments = []config.ProfileAssignment{
-			{Profile: "agentpin", Match: config.ProfileMatch{Agents: []string{agent}}},
-			{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}},
-		}
-		pinnedAPI := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, pinned)
-		ctx := pinnedAPI.withGuardrailProfileDecision(withVerifiedSubject(context.Background(), alice), "codex")
-		if got := pinnedAPI.resolveProfile(enrichAgentHookContext(ctx, req)); got.Name != "agentpin" || got.Match != profileMatchAgent {
-			t.Fatalf("resolveProfile = %+v, want agentpin by agent", got)
+		subject := withVerifiedSubject(context.Background(), alice)
+		for match, want := range map[string]config.ProfileMatch{
+			profileMatchAgent:     {Agents: []string{agent}},
+			profileMatchConnector: {Connectors: []string{"zeptoclaw"}},
+		} {
+			pinned := &config.Config{}
+			pinned.Guardrail.Mode = "action"
+			pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"pin": {Mode: "observe"}, "ml": {Mode: "action"}}
+			pinned.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+				{Profile: "pin", Match: want},
+				{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}},
+			}
+			pinnedAPI := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, pinned)
+			hook := enrichAgentHookContext(pinnedAPI.withGuardrailProfileDecision(subject, "zeptoclaw"), req)
+			inspect := pinnedAPI.withGuardrailProfileDecision(withAuthenticatedInspectConnector(subject, "zeptoclaw"), "")
+			for path, ctx := range map[string]context.Context{"hook": hook, "inspect": inspect} {
+				if got := pinnedAPI.resolveProfile(ctx); got.Name != "pin" || got.Match != match {
+					t.Fatalf("%s: resolveProfile = %+v, want pin by %s", path, got, match)
+				}
+			}
+			proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "zeptoclaw"}}
+			r := proxy.withProxyAgent(httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(subject))
+			if mode, _ := proxy.profileModeFor(r.Context(), "action", ""); mode != "observe" {
+				t.Fatalf("proxy mode with %s pin = %q, want observe", match, mode)
+			}
+			if id, _ := agentIdentityFromContext(r.Context()); id != agent {
+				t.Fatalf("proxy agent identity = %q, want %q", id, agent)
+			}
 		}
 	})
 	t.Run("unresolved lookup", func(t *testing.T) {
@@ -351,5 +372,126 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 	groups := localAccountGroups(account)
 	if len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
 		t.Fatalf("localAccountGroups = %v (count %d), want one entry per gid %v", groups, identityGroupCount(groups), gids)
+	}
+}
+
+// TestExplainReportsAFailedDirectoryLookup pins GAP-0124: when the directory
+// lookup of an account fails, explain says so, as a request gets
+// default_lookup_failed; it must not answer from the OS account database
+// with a profile no request receives.
+func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
+	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
+	t.Cleanup(func() { profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts })
+	profileExplainAccount = func(string) (string, string, bool) { return "94401116", "dcad-manygroups@dclab.test", true }
+	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, errors.New("in 3000 groups, more than the 2048 DefenseClaw names")
+	}
+	subject, err := lookupDirectoryProfileSubject("dcad-manygroups")
+	if err != nil || !subject.LookupFailed || !strings.Contains(subject.LookupError, "3000 groups") || len(subject.Groups) != 0 {
+		t.Fatalf("subject = %+v, %v; want a failed lookup that names its reason and has no groups", subject, err)
+	}
+}
+
+// TestAssignmentsIgnoreUnicodeNormalisationForm pins GAP-0154: an assignment
+// typed with a combining accent (decomposed, NFD) matches the precomposed
+// (NFC) group, user and principal the directory holds, and the reverse.
+func TestAssignmentsIgnoreUnicodeNormalisationForm(t *testing.T) {
+	const (
+		groupNFC, groupNFD = "dc-\u00e9quipe@dclab.test", "dc-e\u0301quipe@dclab.test"
+		userNFC, userNFD   = "dcad-zo\u00eb@dclab.test", "dcad-zoe\u0308@dclab.test"
+	)
+	for _, tc := range []struct{ held, spelled string }{{groupNFC, groupNFD}, {groupNFD, groupNFC}} {
+		subject := &profileSubject{UserID: "94401117", Groups: []string{tc.held}}
+		if _, group, ok := assignmentMatches(config.ProfileMatch{Groups: []string{strings.ToUpper(tc.spelled)}}, subject,
+			&subjectGroups{list: subject.Groups}, true, "", ""); !ok || group == "" {
+			t.Errorf("group %+q does not match the held %+q", tc.spelled, tc.held)
+		}
+	}
+	for _, tc := range []struct{ held, spelled string }{{userNFC, userNFD}, {userNFD, userNFC}} {
+		for _, subject := range []*profileSubject{{UserID: "94401117", UserName: tc.held}, {UserID: "94401117", Principal: tc.held}, {UserID: "94401117", UPN: tc.held}} {
+			if _, _, ok := assignmentMatches(config.ProfileMatch{Users: []string{tc.spelled}}, subject,
+				&subjectGroups{}, true, "", ""); !ok {
+				t.Errorf("user %+q does not match the held %+q (%+v)", tc.spelled, tc.held, subject)
+			}
+		}
+	}
+}
+
+// TestUnknownAssignmentGroupsAreReported pins GAP-0135: a group an assignment
+// names that the host definitely does not know (renamed or deleted in the
+// directory) is a warning; one that exists, one whose lookup failed, and
+// SIDs are not.
+func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-rename-me@dclab.test", "dc-ml-team@dclab.test"}}},
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"S-1-5-21-1-2-3-1104", "dc-flaky@dclab.test", "DC-RENAME-ME@dclab.test"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) {
+		switch name {
+		case "dc-ml-team@dclab.test":
+			return true, nil
+		case "dc-flaky@dclab.test":
+			return false, errors.New("getent timed out")
+		case "S-1-5-21-1-2-3-1104":
+			t.Error("a SID was looked up as a name")
+		}
+		return false, nil
+	}
+	got := unknownAssignmentGroups(context.Background(), assignments, exists)
+	if len(got) != 2 || !strings.HasPrefix(got[0], `assignment 1: group "dc-rename-me@dclab.test" is not known`) ||
+		!strings.HasPrefix(got[1], `assignment 2: group "DC-RENAME-ME@dclab.test" is not known`) {
+		t.Fatalf("warnings = %q, want the renamed group in assignments 1 and 2 only", got)
+	}
+
+	// A command does not wait for a slow directory: the pass runs in the
+	// background, and it is waited for only briefly the first time.
+	prev := profileGroupExists
+	t.Cleanup(func() { profileGroupExists = prev })
+	release := make(chan struct{})
+	profileGroupExists = func(ctx context.Context, name string) (bool, error) {
+		<-release
+		return exists(ctx, name)
+	}
+	set := &guardrailProfileSet{assignments: assignments}
+	if early := set.unknownGroupWarnings(10 * time.Millisecond); len(early) != 0 {
+		t.Fatalf("warnings = %q before the first pass finished", early)
+	}
+	close(release)
+	if late := set.unknownGroupWarnings(2 * time.Second); len(late) != 2 {
+		t.Fatalf("warnings = %q after the pass finished, want 2", late)
+	}
+}
+
+// TestExplainShowsTheProfileRequestsStillGet pins GAP-0134: explain resolves
+// the account's fresh groups, but requests keep the gateway's cached facts
+// for up to 15 minutes, so explain reports their age and the profile they
+// still get when it differs.
+func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
+	set := &guardrailProfileSet{
+		profiles:       map[string]config.DerivedGuardrailProfile{"ml": {Digest: "d1"}, "watch": {Digest: "d2"}},
+		assignments:    []config.ProfileAssignment{{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}}},
+		defaultProfile: "watch",
+	}
+	explained := &profileSubject{UserID: "1201", Groups: []string{"dc-ml-team@dclab.test"}}
+	decision := set.match(explained, profileSubjectLookup, "", "")
+	now := time.Now()
+	prev := cachedDirectoryFacts
+	t.Cleanup(func() { cachedDirectoryFacts = prev })
+	cached := useridentity.DirectoryFacts{Groups: []string{"dc-devs@dclab.test"}, ResolvedAt: now}
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
+		return cached, now.Add(-7 * time.Minute), true
+	}
+	view, warning := explainCacheView(set, explained, decision, "", "", now)
+	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" || view["differs"] != true ||
+		!strings.Contains(warning, "7m0s ago") || !strings.Contains(warning, "within 8m0s") {
+		t.Fatalf("view = %v, warning = %q; want 7 minute old facts that still give watch", view, warning)
+	}
+	cached.Groups = []string{"dc-ml-team@dclab.test"}
+	if view, warning := explainCacheView(set, explained, decision, "", "", now); view["differs"] != false || warning != "" {
+		t.Fatalf("view = %v, warning = %q; cached facts that agree must not warn", view, warning)
+	}
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) { return cached, time.Time{}, false }
+	if view, _ := explainCacheView(set, explained, decision, "", "", now); view != nil {
+		t.Fatalf("view = %v for an account nothing is cached for", view)
 	}
 }
