@@ -260,6 +260,11 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             return
     view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
     found, value = _lookup(view, parts)
+    if not found and parts[:2] == ["admission", "defaults"]:
+        raise click.ClickException(
+            f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
+            "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
+        )
     if not found:
         sections = _v8_sections() or set(view)
         if parts[0] not in view and parts[0] not in sections:
@@ -343,6 +348,18 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
             return None
         return value, source
     return None
+
+
+_ADMISSION_FIELDS = ("actions", "scan_on_install", "allow_list_bypass_scan", "scanner_overrides", "first_party_allow_list")
+
+
+def _admission_layer_key(parts: list) -> bool:
+    """Whether *parts* name a field of admission.defaults or admission.<type>."""
+    if len(parts) < 2 or parts[0] != "admission" or parts[1] not in ("defaults", *_ADMISSION_TYPES):
+        return False
+    if len(parts) > 3 and parts[2] == "actions":
+        return str(parts[3]).lower() in ("critical", "high", "medium", "low", "info")
+    return len(parts) == 2 or parts[2] in _ADMISSION_FIELDS
 
 
 def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
@@ -467,7 +484,9 @@ def config_unset(app: AppContext, key: str, expect_sha256: str | None) -> None:
         return
     # Nothing was removed: a key with a default is already unset, anything
     # else is not a configuration key (a typo must not look like success).
-    if _lookup(_show_data(app, source=False, effective=False, provenance=False, reveal=False), parts)[0]:
+    if _admission_layer_key(parts) or _lookup(
+        _show_data(app, source=False, effective=False, provenance=False, reveal=False), parts
+    )[0]:
         click.echo(f"{key} is not set in config.yaml; its default already applies.")
         return
     raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
@@ -570,7 +589,38 @@ def _v8_defaults(app: AppContext) -> dict:
         props = node["properties"]
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
-    return _prune(_config_to_masked_dict(cfg, reveal=False), schema)  # type: ignore[return-value]
+    pruned = _prune(_config_to_masked_dict(cfg, reveal=False), schema)
+    if not isinstance(pruned, dict):
+        return {}
+    update = pruned.get("update")
+    if isinstance(update, dict):
+        # Unset means the update notice is on and the stable channel.
+        if update.get("check") is None:
+            update["check"] = True
+        if not update.get("channel"):
+            update["channel"] = "stable"
+    return pruned
+
+
+def _resolve_admission(app: AppContext, view: dict, written: dict) -> None:
+    """Replace the admission placeholders with the policy the gateway enforces.
+
+    The dataclass dump shows an unset admission key as null or {}, which reads
+    as "no policy". Each asset type shows its resolved policy; admission.defaults
+    is shown only when config.yaml sets it, because it is an optional layer
+    under the three types with no value of its own.
+    """
+    if not isinstance(view.get("admission"), dict):
+        return
+    try:
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+    except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
+        cfg = config_module.default_config()
+    layer = written.get("admission") if isinstance(written.get("admission"), dict) else {}
+    resolved = {key: value for key, value in layer.items() if key not in _ADMISSION_TYPES}
+    for name in _ADMISSION_TYPES:
+        resolved[name] = _admission_view(cfg, name)[0]
+    view["admission"] = resolved
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -617,7 +667,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
             raise click.ClickException(str(exc)) from exc
         if source:
             return masked
-        masked = _merge_defaults(masked, _v8_defaults(app))
+        written = masked
+        masked = _merge_defaults(written, _v8_defaults(app))
+        _resolve_admission(app, masked, written)
     try:
         result = inspect_v8_config("effective", config_path=cfg_path)
     except ConfigInspectError as exc:
