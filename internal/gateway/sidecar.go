@@ -6826,6 +6826,23 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// cache are lightweight in-process singletons; metrics are connected once
 	// so Prometheus scrapes reflect live fleet state.
 	fleetMgr := fleetmanager.New(nil)
+	// Persist fleet device state to SQLite so data survives gateway
+	// restarts.  Falls back to in-memory (no persistence) if the DB
+	// cannot be opened.
+	fleetDataDir := filepath.Join(s.currentConfig().DataDir, "fleet")
+	if err := os.MkdirAll(fleetDataDir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] fleet data dir: %v\n", err)
+	}
+	if deviceStore, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db")); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] fleet SQLite store: %v (using in-memory)\n", err)
+	} else {
+		fleetMgr.SetStore(deviceStore)
+		if n, err := fleetMgr.LoadFromStore(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet load from store: %v\n", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet loaded %d devices from store\n", n)
+		}
+	}
 	fleetCache := fleetverdict.NewCache(4096, func(h [32]byte) (fleetverdict.Action, uint8) {
 		// Default-deny: unknown tool hashes must not be auto-allowed
 		// when no cloud inspection pipeline is configured.
@@ -6837,6 +6854,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// are functional instead of returning 501.
 	policySigner, _ := fleetpolicy.NewHMACSignerFromEnv()
 	policyStore := fleetpolicy.NewMemoryPolicyStore()
+	// TODO: replace with a SQLite-backed PolicyStore once one is implemented
+	// to persist policy versions across restarts.
 	var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
 
 	// Start the MQTT bridge if a broker URL is configured. The bridge

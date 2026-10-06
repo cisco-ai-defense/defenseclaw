@@ -58,7 +58,7 @@ class ESPClawAdapter:
         self.base_url = f"http://{host}:{port}"
         self.mcp_url = f"{self.base_url}{mcp_path}"
         self._connector = connector or EdgeConnector(
-            fail_open=True, tool_cap_map=ESPCLAW_TOOL_CAP_MAP, session_id=session_id,
+            fail_open=False, tool_cap_map=ESPCLAW_TOOL_CAP_MAP, session_id=session_id,
         )
         self._request_id = 0
 

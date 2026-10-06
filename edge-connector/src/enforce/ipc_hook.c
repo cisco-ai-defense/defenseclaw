@@ -68,21 +68,5 @@ int dclaw_ipc_validate_request(const dclaw_tool_request_t *req) {
     return 0;
 }
 
-/*
- * dclaw_ipc_init() and dclaw_ipc_shutdown() are dead code: main.c manages
- * the IPC socket directly via hal_ipc_socket_create/close.  Disabled to
- * avoid confusion and the unused ipc_server_fd variable.
- */
-#if 0
-int dclaw_ipc_init(void) {
-    ipc_server_fd = hal_ipc_socket_create(DCLAW_IPC_SOCKET_PATH);
-    return (ipc_server_fd >= 0) ? 0 : -1;
-}
-
-void dclaw_ipc_shutdown(void) {
-    if (ipc_server_fd >= 0) {
-        hal_ipc_socket_close(ipc_server_fd);
-        ipc_server_fd = -1;
-    }
-}
-#endif
+/* dclaw_ipc_init() and dclaw_ipc_shutdown() removed: main.c manages the
+ * IPC socket directly via hal_ipc_socket_create/close. */

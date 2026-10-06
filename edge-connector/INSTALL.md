@@ -571,7 +571,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
 # Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
 # 4. Benchmark performance
-edge-connector --benchmark
+cd edge-connector/build && ./tests/bench_latency
 # Expected: <5μs decisions, >100K/sec throughput
 ```
 

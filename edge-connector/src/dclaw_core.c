@@ -19,6 +19,7 @@ static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
 extern dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash);
 extern dclaw_action_t dclaw_policy_check_destination(const char *host);
 extern dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags);
+extern uint8_t dclaw_policy_lookup_capability(const char *tool_name);
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
                               dclaw_severity_t severity);
@@ -27,6 +28,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint16_t target_hash, uint16_t session_id);
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
+extern void dclaw_canary_record_block(void);
 
 dclaw_state_t *dclaw_get_state(void) {
     return &g_state;
@@ -128,14 +130,28 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
+        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
     }
+
+    /* Step 1b: Override caller-provided cap_flags with trusted policy lookup.
+     * The IPC caller cannot be trusted to declare its own capabilities —
+     * a malicious caller could submit CAP_SENSOR_READ for exec_shell to
+     * bypass rate limiting and correlation checks. (Comment 18 fix) */
+    uint8_t trusted_cap_flags = dclaw_policy_lookup_capability(req->tool_name);
+
+    /* Use a mutable copy with the trusted capability flags */
+    dclaw_tool_request_t trusted_req;
+    memcpy(&trusted_req, req, sizeof(dclaw_tool_request_t));
+    trusted_req.cap_flags = trusted_cap_flags;
+    req = &trusted_req;
 
     /* Step 2: Rate limit check */
     if (!dclaw_rate_limit_check(req->cap_flags)) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
+        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT, DCLAW_VERDICT_SYNC);
     }
 
@@ -152,6 +168,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                               target_hash, req->session_id);
             g_state.eval_denied_count++;
+            dclaw_canary_record_block();
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                                 DCLAW_VERDICT_SYNC);
         }
@@ -163,6 +180,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY,
                           target_hash, req->session_id);
         g_state.eval_denied_count++;
+        dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY, DCLAW_VERDICT_SYNC);
     }
 

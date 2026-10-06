@@ -655,6 +655,12 @@ from defenseclaw.commands.cmd_acp import adopt_cmd as _acp_adopt_cmd  # noqa: E4
 
 setup.add_command(_acp_adopt_cmd, name="acp")
 
+# Register `defenseclaw setup training` so operators can enable/configure
+# the GRPO training pipeline from the setup wizard surface.
+from defenseclaw.commands.cmd_training import training as _training_group  # noqa: E402
+
+setup.add_command(_training_group)
+
 
 # Local LLM providers that run on-box and don't require an API key.
 # This is intentionally a *subset* of ``_LOCAL_LLM_PROVIDERS`` in

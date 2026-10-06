@@ -3554,11 +3554,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		// Fleet API routes carry their own DCLAW_FLEET_API_TOKEN auth
-		// (see fleet.API.authMiddleware). Exempt them from the gateway's
-		// main token check so edge-connector tokens issued by
-		// `defenseclaw setup edge-connector` are not required to pass
-		// both layers.
-		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") {
+		// (see fleet.API.authMiddleware). Only exempt them from the
+		// gateway's main token check when the fleet token is actually
+		// configured — otherwise leave the gateway auth in place so the
+		// fleet surface is never unauthenticated.
+		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") && os.Getenv("DCLAW_FLEET_API_TOKEN") != "" {
 			next.ServeHTTP(w, r)
 			return
 		}

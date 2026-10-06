@@ -171,7 +171,7 @@ def edge_connector(
         "\n"
         "  Optional environment variables for edge devices:\n"
         "    DCLAW_OTA_KEY          — Ed25519 public key for OTA policy verification\n"
-        "    DCLAW_MQTT_BROKER_URL  — MQTT broker URL for cloud escalation\n"
+        "    DCLAW_BROKER_URL       — MQTT broker URL for cloud escalation\n"
     )
 
 

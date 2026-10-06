@@ -439,11 +439,10 @@ class EdgeConnector:
             content = json.dumps(arguments, default=str)
 
         try:
-            return self._backend.evaluate(
+            return self._evaluate_chunked(
                 tool_name=tool_name,
                 cap_flags=cap_flags,
                 destination=dest,
-                session_id=self._session_id,
                 content=content,
                 direction=dir_code,
             )
@@ -452,6 +451,55 @@ class EdgeConnector:
             if self._fail_open:
                 return Verdict.allow()
             return Verdict.error(f"ENGINE_ERROR: {exc}")
+
+    # Maximum content bytes the C-side buffer accepts per call.
+    _CONTENT_BUF_MAX = 511
+    # Overlap between consecutive content windows so patterns that span
+    # a window boundary are still caught.  64 bytes covers the longest
+    # built-in secret/PII regex pattern.
+    _CONTENT_OVERLAP = 64
+
+    def _evaluate_chunked(
+        self,
+        tool_name: str,
+        cap_flags: int,
+        destination: str,
+        content: Optional[str],
+        direction: int,
+    ) -> Verdict:
+        """Evaluate content in overlapping windows when it exceeds the
+        C-side 511-byte buffer, ensuring patterns past position 511 are
+        still scanned."""
+        # Short-circuit: content fits in a single buffer — no chunking.
+        if not content or len(content.encode("utf-8", errors="replace")) <= self._CONTENT_BUF_MAX:
+            return self._backend.evaluate(
+                tool_name=tool_name,
+                cap_flags=cap_flags,
+                destination=destination,
+                session_id=self._session_id,
+                content=content,
+                direction=direction,
+            )
+
+        encoded = content.encode("utf-8", errors="replace")
+        step = self._CONTENT_BUF_MAX - self._CONTENT_OVERLAP
+        offset = 0
+        while offset < len(encoded):
+            chunk = encoded[offset:offset + self._CONTENT_BUF_MAX]
+            chunk_str = chunk.decode("utf-8", errors="replace")
+            verdict = self._backend.evaluate(
+                tool_name=tool_name,
+                cap_flags=cap_flags,
+                destination=destination,
+                session_id=self._session_id,
+                content=chunk_str,
+                direction=direction,
+            )
+            if verdict.blocked:
+                return verdict
+            offset += step
+
+        return Verdict.allow()
 
     def shutdown(self) -> None:
         """Release resources held by the backend."""

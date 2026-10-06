@@ -132,10 +132,10 @@ static const uint8_t *get_device_key(size_t *out_key_len) {
     if (!s_device_key_loaded) {
         s_device_key_len = 0;
         if (hal_load_device_key(s_device_key, &s_device_key_len, sizeof(s_device_key)) != 0) {
-            /* Fallback: zero key — this will cause HMAC mismatches, which is safer
-             * than using a hardcoded key */
+            /* Fallback: 32-byte zero key (Comment 32 fix).
+             * Must match the Go side (bridge.go) which uses make([]byte, 32). */
             memset(s_device_key, 0, sizeof(s_device_key));
-            s_device_key_len = 16;
+            s_device_key_len = 32;
         }
         s_device_key_loaded = true;
     }
@@ -180,20 +180,21 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
 
     /* REQ-28: Deduplication — check if already resolved */
     bool found = false;
+    int slot_index = -1;
     for (int i = 0; i < DCLAW_PENDING_SLOTS; i++) {
         if (s->pending[i].request_id == request_id) {
             if (s->pending[i].resolved) {
                 return 0; /* Duplicate — silently discard */
             }
             found = true;
-            s->pending[i].resolved = true;
-            s->pending[i].resolved_at = hal_tick_ms();
+            slot_index = i;
             break;
         }
     }
     if (!found) return -1; /* Unknown request_id */
 
-    /* REQ-27: Verify HMAC tag */
+    /* REQ-27: Verify HMAC tag BEFORE marking as resolved (Comment 23 fix).
+     * If HMAC fails, the slot stays pending so a valid retry can still succeed. */
     uint8_t expected_hmac[4];
     size_t key_len;
     const uint8_t *device_key = get_device_key(&key_len);
@@ -203,12 +204,17 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                          request_id, action, pending_tool_hash, expected_hmac);
 
     if (!ct_compare(received_hmac, expected_hmac, 4)) {
-        /* REQ-29: HMAC verification failed */
+        /* REQ-29: HMAC verification failed — leave slot pending for valid retry */
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
                           0);
         return -1;
     }
+
+    /* HMAC verified — now mark as resolved and reclaim the slot (Comment 24 fix) */
+    s->pending[slot_index].resolved = true;
+    s->pending[slot_index].resolved_at = hal_tick_ms();
+    s->pending[slot_index].request_id = 0; /* Reclaim slot for reuse */
 
     /* REQ-25: Update clock from server_ts */
     if (server_ts > 0) {

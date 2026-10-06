@@ -59,10 +59,12 @@ static void test_duplicate_discarded(void) {
     uint8_t resp[16];
     build_valid_response(1, DCLAW_ACTION_ALLOW, tool_hash, resp);
 
-    /* Second response for same request_id should be silently discarded */
+    /* Second response for same request_id should be rejected.
+     * After Comment 24 fix, resolved slots have request_id cleared to 0
+     * for reuse, so a duplicate is treated as "unknown request_id" (-1). */
     int rc = dclaw_verdict_handle_response(resp, 16, tool_hash);
-    assert(rc == 0);
-    printf("  PASS: duplicate verdict response silently discarded\n");
+    assert(rc == -1);
+    printf("  PASS: duplicate verdict response rejected (slot reclaimed)\n");
 }
 
 static void test_invalid_hmac_rejected(void) {

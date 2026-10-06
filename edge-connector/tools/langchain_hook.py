@@ -123,7 +123,7 @@ class EdgeConnectorToolWrapper:
         return _Wrapped()
 
     def _invoke(self, *args: Any, **kwargs: Any) -> str:
-        ec = self._connector or get_connector(fail_open=True)
+        ec = self._connector or get_connector(fail_open=False)
         arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
         verdict = ec.evaluate(
             tool_name=self._tool.name,
@@ -180,7 +180,7 @@ def edge_connector_node(state: Dict[str, Any]) -> Dict[str, Any]:
         graph.add_edge("security_gate", "tools")
     """
     _import_langchain()
-    ec = get_connector(fail_open=True)
+    ec = get_connector(fail_open=False)
     messages = state.get("messages", [])
     if not messages:
         return state
@@ -191,6 +191,7 @@ def edge_connector_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return state
 
     new_messages: list = []
+    allowed_tool_calls: list = []
     for tc in tool_calls:
         name = tc.get("name", tc.get("function", {}).get("name", ""))
         args = tc.get("args", tc.get("function", {}).get("arguments", {}))
@@ -212,7 +213,15 @@ def edge_connector_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         tool_call_id=tool_call_id,
                     )
                 )
+        else:
+            allowed_tool_calls.append(tc)
 
     if new_messages:
-        return {"messages": messages + new_messages}
+        # Remove blocked tool_calls from the AIMessage so ToolNode does not
+        # execute them.  We mutate a shallow copy of the last message to avoid
+        # side-effects on the caller's original list.
+        import copy
+        patched_last = copy.copy(last)
+        patched_last.tool_calls = allowed_tool_calls
+        return {"messages": messages[:-1] + [patched_last] + new_messages}
     return state

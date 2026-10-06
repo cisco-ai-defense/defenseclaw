@@ -170,11 +170,10 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("read compiled policy: %w", err)
 	}
 
-	// The Python compiler appends a dev-stub signature (64 bytes).
-	// Strip it since we apply our own HMAC signature.
-	if len(blob) > 64 {
-		blob = blob[:len(blob)-64]
-	}
+	// The raw compiler output IS the policy binary (header + payload).
+	// Do NOT strip any bytes — the Python compiler's output is the
+	// complete policy blob. Sign() appends the real HMAC-SHA256
+	// signature when the caller is ready to distribute.
 
 	// Validate the header
 	if _, err := ParseHeader(blob); err != nil {
@@ -186,10 +185,12 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 }
 
 // Sign creates a signed policy blob by appending an HMAC-SHA256 signature
-// to the raw policy binary. The signed format is:
+// to the raw policy binary. The signed format matches the C-side 64-byte
+// signature field (dclaw_policy_header_t):
 //
-//	[0:N]    policy blob (header + payload)
-//	[N:N+32] HMAC-SHA256 signature
+//	[0:N]     policy blob (header + payload)
+//	[N:N+32]  HMAC-SHA256 signature
+//	[N+32:N+64] zero padding (Ed25519 slot reserved by the C struct)
 func (s *Service) Sign(policyBin []byte) ([]byte, error) {
 	if len(policyBin) < HeaderSize {
 		return nil, errors.New("policy binary too short to sign")
@@ -200,9 +201,17 @@ func (s *Service) Sign(policyBin []byte) ([]byte, error) {
 		return nil, fmt.Errorf("sign policy: %w", err)
 	}
 
-	signed := make([]byte, len(policyBin)+len(sig))
+	// Append exactly 64 bytes: 32-byte HMAC-SHA256 + 32 bytes zero
+	// padding, matching the C-side 64-byte signature field.
+	const sigFieldSize = 64
+	signed := make([]byte, len(policyBin)+sigFieldSize)
 	copy(signed, policyBin)
-	copy(signed[len(policyBin):], sig)
+	n := len(sig)
+	if n > 32 {
+		n = 32
+	}
+	copy(signed[len(policyBin):], sig[:n])
+	// signed[len(policyBin)+32 : len(policyBin)+64] stays zero — Ed25519 padding
 	return signed, nil
 }
 

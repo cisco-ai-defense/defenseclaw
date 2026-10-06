@@ -87,7 +87,7 @@ class BubbaloopAdapter:
         self.mcp_url = f"{self.base_url}{mcp_path}"
         self._auth_token = auth_token or os.environ.get("BUBBALOOP_TOKEN", "")
         self._connector = connector or EdgeConnector(
-            fail_open=True, tool_cap_map=BUBBALOOP_TOOL_CAP_MAP,
+            fail_open=False, tool_cap_map=BUBBALOOP_TOOL_CAP_MAP,
             session_id=session_id,
         )
         self._request_id = 0

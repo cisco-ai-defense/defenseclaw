@@ -72,10 +72,15 @@ func (a *API) Handler() http.Handler {
 }
 
 // authMiddleware wraps an http.HandlerFunc with Bearer token validation.
-// If token is empty, the handler is returned as-is (development mode).
+// When token is empty, ALL requests are blocked — the fleet API must never
+// be reachable without authentication.
 func authMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
 	if token == "" {
-		return next
+		return func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "fleet API authentication not configured (set DCLAW_FLEET_API_TOKEN)",
+			})
+		}
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
@@ -109,6 +114,7 @@ func (a *API) registerRoutes() {
 	a.mux.HandleFunc("POST /policy/emergency", wrap(a.pushEmergency))
 	a.mux.HandleFunc("POST /threat-intel/push", wrap(a.pushThreatIntel))
 	a.mux.HandleFunc("POST /devices/decommission-batch", wrap(a.decommissionBatch))
+	a.mux.HandleFunc("GET /metrics", wrap(MetricsHandler))
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
@@ -227,8 +233,16 @@ func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
 
 	commandID := uuid.New().String()
 
-	// Publish to MQTT if a client is available
-	if a.mqttClient != nil {
+	// MQTT is required to dispatch commands to devices.
+	if a.mqttClient == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "MQTT client not configured — cannot dispatch commands to devices",
+		})
+		return
+	}
+
+	// Publish to MQTT
+	{
 		topic := fmt.Sprintf("defenseclaw/%d/%d/%d/cmd/request",
 			dev.TenantID, dev.FleetID, uint32(dev.DeviceID))
 
@@ -376,6 +390,12 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 			"detail": err.Error(),
 		})
 		return
+	}
+
+	// Mark the policy version as distributed in the store so audit
+	// queries reflect the actual push state.
+	if err := a.policy.Store().MarkDistributed(req.TenantID, req.FleetID, version); err != nil {
+		log.Printf("[fleet-api] MarkDistributed(%d, %d, v%d) failed: %v", req.TenantID, req.FleetID, version, err)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

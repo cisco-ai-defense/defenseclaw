@@ -102,7 +102,7 @@ class EdgeConnectorMiddleware:
         excluded_paths: Optional[Set[str]] = None,
     ):
         self.app = app
-        self._connector = connector or EdgeConnector(fail_open=True)
+        self._connector = connector or EdgeConnector(fail_open=False)
         self._patterns = [
             re.compile(p) for p in (tool_patterns or DEFAULT_TOOL_PATTERNS)
         ]
@@ -204,7 +204,7 @@ def flask_edge_connector(
         tool_patterns: Regex patterns for paths to intercept.
         excluded_paths: Exact paths to skip.
     """
-    ec = connector or EdgeConnector(fail_open=True)
+    ec = connector or EdgeConnector(fail_open=False)
     patterns = [re.compile(p) for p in (tool_patterns or DEFAULT_TOOL_PATTERNS)]
     excluded = excluded_paths or set()
 

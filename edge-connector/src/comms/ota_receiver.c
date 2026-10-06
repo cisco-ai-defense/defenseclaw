@@ -27,6 +27,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 void dclaw_policy_rollback(void);
 void dclaw_canary_tick(void);
 void dclaw_canary_record_block(void);
+void dclaw_policy_reload_from_flash(void);
 
 /* Policy blob header format (first 8 bytes of blob) */
 typedef struct {
@@ -48,7 +49,11 @@ typedef struct {
 
 /* mbedTLS path — real Ed25519 signature verification */
 
-/* TweetNaCl Ed25519 verification — declaration for the inline/linked implementation */
+#if defined(HAVE_TWEETNACL)
+/*
+ * TweetNaCl Ed25519 verification (Comment 36 fix).
+ * Only available when TweetNaCl is linked (HAVE_TWEETNACL defined).
+ */
 extern int crypto_sign_ed25519_verify_detached(const uint8_t *sig,
                                                const uint8_t *msg,
                                                uint64_t msg_len,
@@ -61,6 +66,32 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
                                                (uint64_t)msg_len,
                                                pubkey) == 0;
 }
+
+#else /* HAVE_TWEETNACL not defined — fall through to HMAC-SHA256 path */
+
+/*
+ * Comment 36 fix: When mbedTLS is enabled but TweetNaCl is not linked,
+ * we cannot perform Ed25519 verification. Fall through to the HMAC-SHA256
+ * path which provides integrity verification with a pre-shared key.
+ */
+#pragma message "mbedTLS enabled but TweetNaCl not linked — using HMAC-SHA256 for OTA verification."
+
+#include "hmac_sha256.h"
+
+static bool verify_ed25519(const uint8_t *message, size_t msg_len,
+                           const uint8_t *signature,
+                           const uint8_t *pubkey) {
+    uint8_t expected[32];
+    dclaw_hmac_sha256(pubkey, ED25519_PUBKEY_LEN, message, msg_len, expected);
+
+    volatile uint8_t diff = 0;
+    for (int i = 0; i < 32; i++) {
+        diff |= signature[i] ^ expected[i];
+    }
+    return diff == 0;
+}
+
+#endif /* HAVE_TWEETNACL */
 
 #else /* Built-in HMAC-SHA256 verification — no external library required */
 
@@ -235,6 +266,14 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     /* Flush verdict cache — policy changed, cached verdicts may be stale */
     dclaw_cache_flush_all();
 
+    /* Reload policy tables from the new flash contents (Comment 22 fix).
+     * The compiled-in policy tables (deny_hashes, dest_allowlist, etc.) are
+     * static const arrays generated at build time and cannot be replaced at
+     * runtime without a restart. Log a warning so operators know a restart
+     * is needed for the new policy tables to take full effect.
+     * The version, cache flush, and canary protection ARE applied immediately. */
+    dclaw_policy_reload_from_flash();
+
     /* REQ-35: Enter canary window */
     s->canary.canary_active = true;
     s->canary.canary_started_at = hal_tick_ms();
@@ -379,6 +418,34 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
 
     dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_BLOCK, 0, 0);
     return 0;
+}
+
+/*
+ * Reload policy tables from flash after an OTA update (Comment 22 fix).
+ *
+ * LIMITATION: The current architecture uses static const arrays generated at
+ * compile time (deny_hashes, dest_allowlist, severity_rules, etc.). These
+ * cannot be dynamically replaced at runtime without a process restart.
+ *
+ * What IS applied immediately:
+ *   - Policy version number (anti-rollback)
+ *   - Verdict cache flush (stale verdicts purged)
+ *   - Canary monitoring (spike detection for auto-rollback)
+ *
+ * What requires a restart:
+ *   - Deny hash list changes
+ *   - Destination allowlist changes
+ *   - Severity rule changes
+ *   - Capability sequence rules
+ *
+ * TODO(Phase 2): Implement dynamic policy table loading from flash binary
+ *   blob format, parsing the same structures the compiler generates.
+ */
+void dclaw_policy_reload_from_flash(void) {
+    fprintf(stderr, "[DCLAW] WARNING: New policy written to flash but policy tables "
+            "are compiled-in. A process restart is required for deny-list, allowlist, "
+            "and rule changes to take effect. Version, cache, and canary protections "
+            "are active immediately.\n");
 }
 
 /* REQ-32: Check for emergency sequence gap on reconnect */

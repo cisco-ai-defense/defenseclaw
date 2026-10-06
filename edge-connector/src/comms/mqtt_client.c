@@ -616,16 +616,25 @@ int dclaw_mqtt_connect(void) {
     mqtt_ctx.last_attempt_tick = hal_tick_ms();
 
 #if DCLAW_HAS_MBEDTLS
-    /* Real implementation would:
-     * - Parse broker_url for host/port
-     * - TCP connect
-     * - mbedtls_ssl_handshake with device cert
-     * - Send MQTT CONNECT
-     * - Receive CONNACK, extract server timestamp from user property
-     * - Subscribe to verdict/resp, ota/policy, ota/firmware, cmd/request, broadcast
+    /* Comment 35 fix: mbedTLS TLS/mTLS MQTT path is not yet implemented.
+     * The -1 return is intentional — callers will fall through to the
+     * reconnect/backoff logic. For development and testing, build without
+     * DCLAW_HAS_MBEDTLS and use plaintext MQTT (mqtt:// URLs).
+     *
+     * TODO(Phase 2): Implement TLS handshake with mbedtls_ssl:
+     *   - Parse broker_url for host/port
+     *   - TCP connect
+     *   - mbedtls_ssl_handshake with device cert (mTLS)
+     *   - Send MQTT CONNECT over the TLS session
+     *   - Receive CONNACK, extract server timestamp
+     *   - Subscribe to verdict/resp, ota/policy, ota/emergency
      */
     (void)broker_url;
-    return -1; /* Not yet implemented with real TLS */
+    fprintf(stderr, "[DCLAW-MQTT] ERROR: TLS MQTT connection not yet implemented. "
+            "Build without DCLAW_HAS_MBEDTLS=1 and use mqtt:// URLs for "
+            "development/testing, or wait for Phase 2 TLS support.\n");
+    mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
+    return -1;
 #else
     /* Dev mode: real TCP + MQTT 3.1.1, but no TLS */
     char host[128];
@@ -696,8 +705,11 @@ int dclaw_mqtt_connect(void) {
     mqtt_ctx.recv_len = 0;
     dclaw_get_state()->online = true;
 
-    /* Generate pseudo session_id for HMAC derivation */
-    hal_random_bytes(mqtt_ctx.session_id, 16);
+    /* Use device ID as decimal string for session_id (Comment 32 fix).
+     * This must match the Go side (bridge.go) which uses
+     * fmt.Sprintf("%d", parts.DeviceID) for the HMAC session_id input. */
+    snprintf(mqtt_ctx.session_id, sizeof(mqtt_ctx.session_id), "%u",
+             dclaw_get_state()->device.device_id);
 
     fprintf(stderr, "[DCLAW-MQTT] Connected to %s:%u\n", host, port);
     return 0;

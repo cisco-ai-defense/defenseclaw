@@ -3,8 +3,10 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +17,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 )
 
+const testFleetToken = "test-token-for-fleet-api"
+
+// authedRequest creates an httptest request with the fleet API Bearer token.
+func authedRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Authorization", "Bearer "+testFleetToken)
+	return req
+}
+
 func setupAPI() *API {
+	os.Setenv("DCLAW_FLEET_API_TOKEN", testFleetToken)
+
 	mgr := manager.New(nil)
 	mgr.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 5, 0xFF)
 
@@ -28,7 +41,7 @@ func setupAPI() *API {
 
 func TestGetFleetHealth(t *testing.T) {
 	api := setupAPI()
-	req := httptest.NewRequest("GET", "/fleet/health", nil)
+	req := authedRequest("GET", "/fleet/health", nil)
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -43,7 +56,7 @@ func TestGetFleetHealth(t *testing.T) {
 
 func TestGetDeviceNotFound(t *testing.T) {
 	api := setupAPI()
-	req := httptest.NewRequest("GET", "/devices/999", nil)
+	req := authedRequest("GET", "/devices/999", nil)
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -55,7 +68,7 @@ func TestGetDeviceNotFound(t *testing.T) {
 
 func TestGetDeviceInvalidID(t *testing.T) {
 	api := setupAPI()
-	req := httptest.NewRequest("GET", "/devices/invalid", nil)
+	req := authedRequest("GET", "/devices/invalid", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusBadRequest {
@@ -68,7 +81,7 @@ func TestPushThreatIntel(t *testing.T) {
 	// Use valid 64-char hex strings (32 bytes decoded)
 	hash := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	body := `{"new_deny_hashes":["abc123"],"revoke_allow_hashes":["` + hash + `"],"emergency":false}`
-	req := httptest.NewRequest("POST", "/threat-intel/push", strings.NewReader(body))
+	req := authedRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -81,7 +94,7 @@ func TestPushThreatIntel(t *testing.T) {
 func TestPushThreatIntelInvalidHex(t *testing.T) {
 	api := setupAPI()
 	body := `{"new_deny_hashes":[],"revoke_allow_hashes":["not-valid-hex"],"emergency":false}`
-	req := httptest.NewRequest("POST", "/threat-intel/push", strings.NewReader(body))
+	req := authedRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -95,7 +108,7 @@ func TestPushThreatIntelWrongLength(t *testing.T) {
 	api := setupAPI()
 	// Valid hex but only 4 bytes, not 32
 	body := `{"new_deny_hashes":[],"revoke_allow_hashes":["deadbeef"],"emergency":false}`
-	req := httptest.NewRequest("POST", "/threat-intel/push", strings.NewReader(body))
+	req := authedRequest("POST", "/threat-intel/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -110,26 +123,21 @@ func TestSendCommand(t *testing.T) {
 	// Device 42 in tenant=1, fleet=1 has composite ID = ComposeID(1, 1, 42)
 	devID := manager.ComposeID(1, 1, 42)
 	body := `{"command":"reboot"}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
 
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202; body: %s", w.Code, w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"command_id"`) {
-		t.Fatalf("response missing command_id: %s", w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"dispatched"`) {
-		t.Fatalf("response missing dispatched status: %s", w.Body.String())
+	// Without an MQTT client, the command cannot be dispatched.
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body: %s", w.Code, w.Body.String())
 	}
 }
 
 func TestSendCommandNotFound(t *testing.T) {
 	api := setupAPI()
 	body := `{"command":"reboot"}`
-	req := httptest.NewRequest("POST", "/devices/999/command", strings.NewReader(body))
+	req := authedRequest("POST", "/devices/999/command", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -143,7 +151,7 @@ func TestSendCommandInvalid(t *testing.T) {
 	api := setupAPI()
 	devID := manager.ComposeID(1, 1, 42)
 	body := `{"command":"self-destruct"}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -157,7 +165,7 @@ func TestSendCommandEmpty(t *testing.T) {
 	api := setupAPI()
 	devID := manager.ComposeID(1, 1, 42)
 	body := `{"command":""}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -180,7 +188,7 @@ func TestSendCommandWithMQTT(t *testing.T) {
 
 	devID := manager.ComposeID(1, 1, 42)
 	body := `{"command":"diagnostics"}`
-	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	req := authedRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -218,7 +226,7 @@ func TestDecommissionBatch(t *testing.T) {
 	api := NewAPI(mgr, cache)
 
 	body := `{"devices":[{"tenant_id":1,"fleet_id":1,"device_id":10},{"tenant_id":1,"fleet_id":1,"device_id":20},{"tenant_id":1,"fleet_id":1,"device_id":999}]}`
-	req := httptest.NewRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
+	req := authedRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -243,7 +251,7 @@ func TestDecommissionBatch(t *testing.T) {
 func TestDecommissionBatchEmpty(t *testing.T) {
 	api := setupAPI()
 	body := `{"devices":[]}`
-	req := httptest.NewRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
+	req := authedRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -255,7 +263,7 @@ func TestDecommissionBatchEmpty(t *testing.T) {
 
 func TestListDevicesReturnsList(t *testing.T) {
 	api := setupAPI()
-	req := httptest.NewRequest("GET", "/devices", nil)
+	req := authedRequest("GET", "/devices", nil)
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
@@ -300,6 +308,8 @@ func (m *apiMockMQTTClient) Publish(_ context.Context, topic string, _ byte, pay
 func (m *apiMockMQTTClient) Disconnect() error { return nil }
 
 func setupAPIWithPolicy() *API {
+	os.Setenv("DCLAW_FLEET_API_TOKEN", testFleetToken)
+
 	mgr := manager.New(nil)
 	mgr.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 5, 0xFF)
 
@@ -318,7 +328,7 @@ func setupAPIWithPolicy() *API {
 func TestPolicyVersionsEndpoint(t *testing.T) {
 	api := setupAPIWithPolicy()
 
-	req := httptest.NewRequest("GET", "/policy/versions?tenant_id=1&fleet_id=1", nil)
+	req := authedRequest("GET", "/policy/versions?tenant_id=1&fleet_id=1", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -333,7 +343,7 @@ func TestPolicyVersionsEndpoint(t *testing.T) {
 func TestPolicyVersionsInvalidTenant(t *testing.T) {
 	api := setupAPIWithPolicy()
 
-	req := httptest.NewRequest("GET", "/policy/versions?tenant_id=abc&fleet_id=1", nil)
+	req := authedRequest("GET", "/policy/versions?tenant_id=abc&fleet_id=1", nil)
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -345,7 +355,7 @@ func TestPolicyVersionsInvalidTenant(t *testing.T) {
 func TestEmergencyEndpoint(t *testing.T) {
 	api := setupAPIWithPolicy()
 	body := `{"tenant_id":1,"fleet_id":2,"command":"FLUSH_CACHE"}`
-	req := httptest.NewRequest("POST", "/policy/emergency", strings.NewReader(body))
+	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -360,7 +370,7 @@ func TestEmergencyEndpoint(t *testing.T) {
 func TestEmergencyEndpointEnterLockdown(t *testing.T) {
 	api := setupAPIWithPolicy()
 	body := `{"tenant_id":1,"fleet_id":2,"command":"ENTER_LOCKDOWN"}`
-	req := httptest.NewRequest("POST", "/policy/emergency", strings.NewReader(body))
+	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -372,7 +382,7 @@ func TestEmergencyEndpointEnterLockdown(t *testing.T) {
 func TestEmergencyEndpointRevokeSessions(t *testing.T) {
 	api := setupAPIWithPolicy()
 	body := `{"tenant_id":1,"fleet_id":2,"command":"REVOKE_SESSIONS"}`
-	req := httptest.NewRequest("POST", "/policy/emergency", strings.NewReader(body))
+	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -384,7 +394,7 @@ func TestEmergencyEndpointRevokeSessions(t *testing.T) {
 func TestEmergencyEndpointUnknownCommand(t *testing.T) {
 	api := setupAPIWithPolicy()
 	body := `{"tenant_id":1,"fleet_id":2,"command":"SELF_DESTRUCT"}`
-	req := httptest.NewRequest("POST", "/policy/emergency", strings.NewReader(body))
+	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -396,7 +406,7 @@ func TestEmergencyEndpointUnknownCommand(t *testing.T) {
 func TestEmergencyEndpointMissingIDs(t *testing.T) {
 	api := setupAPIWithPolicy()
 	body := `{"command":"FLUSH_CACHE"}`
-	req := httptest.NewRequest("POST", "/policy/emergency", strings.NewReader(body))
+	req := authedRequest("POST", "/policy/emergency", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -408,7 +418,7 @@ func TestEmergencyEndpointMissingIDs(t *testing.T) {
 func TestPushPolicyMissingFields(t *testing.T) {
 	api := setupAPIWithPolicy()
 	body := `{"tenant_id":1,"fleet_id":2}`
-	req := httptest.NewRequest("POST", "/policy/push", strings.NewReader(body))
+	req := authedRequest("POST", "/policy/push", strings.NewReader(body))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 
@@ -434,9 +444,9 @@ func TestPolicyEndpointsWithoutService(t *testing.T) {
 	for _, tc := range tests {
 		var req *http.Request
 		if tc.body != "" {
-			req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req = authedRequest(tc.method, tc.path, strings.NewReader(tc.body))
 		} else {
-			req = httptest.NewRequest(tc.method, tc.path, nil)
+			req = authedRequest(tc.method, tc.path, nil)
 		}
 		w := httptest.NewRecorder()
 		api.Handler().ServeHTTP(w, req)
@@ -449,7 +459,7 @@ func TestPolicyEndpointsWithoutService(t *testing.T) {
 
 func TestSimulatePolicyWithoutService(t *testing.T) {
 	api := setupAPI()
-	req := httptest.NewRequest("POST", "/policy/simulate", strings.NewReader(`{}`))
+	req := authedRequest("POST", "/policy/simulate", strings.NewReader(`{}`))
 	w := httptest.NewRecorder()
 	api.Handler().ServeHTTP(w, req)
 

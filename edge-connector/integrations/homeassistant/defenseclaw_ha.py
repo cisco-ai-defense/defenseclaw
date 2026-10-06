@@ -104,7 +104,7 @@ class HomeAssistantAdapter:
         self.mcp_url = f"http://{host}:{mcp_port}{mcp_path}"
         self._access_token = access_token or os.environ.get("HA_ACCESS_TOKEN", "")
         self._connector = connector or EdgeConnector(
-            fail_open=True, tool_cap_map=HAMCP_TOOL_CAP_MAP, session_id=session_id,
+            fail_open=False, tool_cap_map=HAMCP_TOOL_CAP_MAP, session_id=session_id,
         )
         self._request_id = 0
 

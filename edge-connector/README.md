@@ -17,8 +17,8 @@ prompt injection, and dangerous commands before they leave the device.
 **Quick start:** Use the generic Python adapter (`tools/generic_hook.py`) — three lines to add
 security enforcement to any agent.
 
-**Architecture:** See `docs/architecture/edge-connector-iot-proposal.md` (v1.2)  
-**Spec:** See `docs/specs/001-edge-connector-phase1/`
+**Architecture:** See `docs-site/content/docs/edge-connector/architecture.mdx`  
+**Spec:** See `docs/specs/001-defenseclaw-lite-phase1/`
 
 ## Features
 
