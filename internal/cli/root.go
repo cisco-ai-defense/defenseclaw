@@ -340,7 +340,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	if err != nil {
 		return nil, nil, err
 	}
-	if candidate.ConfigVersion != config.ObservabilityV8ConfigVersion {
+	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
 		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw upgrade' first")
 	}
 	startup, err := prepareCompiledObservabilityV8Startup(candidate, loaded)
@@ -354,7 +354,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 // callers that already hold a proven v8 Config. Production startup uses
 // loadGatewayConfigV8 so strict parsing always precedes Config decoding.
 func prepareObservabilityV8Startup(c *config.Config) (*observabilityV8Startup, error) {
-	if c == nil || c.ConfigVersion != config.ObservabilityV8ConfigVersion {
+	if c == nil || !config.CurrentSchemaVersion(c.ConfigVersion) {
 		return nil, fmt.Errorf("schema version 8 is required")
 	}
 	sourceName := strings.TrimSpace(c.ConfigFilePath)

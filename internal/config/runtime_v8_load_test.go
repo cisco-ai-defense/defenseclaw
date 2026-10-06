@@ -314,8 +314,8 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
 		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
 	}
-	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 9\n"))
-	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 9)") {
+	_, err = ResolveObservabilityV8ManagedAIDOptionsForInspection("config.yaml", []byte("config_version: 10\n"))
+	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 10)") {
 		t.Fatalf("newer inspection error = %v, want newer-release guidance", err)
 	}
 }

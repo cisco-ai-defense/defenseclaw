@@ -68,8 +68,15 @@ const (
 // MaxSupportedConfigVersion is the newest config_version this build loads. A
 // newer file was written by a newer DefenseClaw and is refused instead of
 // being decoded without its new semantics. Raise it together with the CLI
-// migration that writes the new version.
-const MaxSupportedConfigVersion = 8
+// migration that writes the new version (MigrateV9 writes 9).
+const MaxSupportedConfigVersion = ConfigVersionV9
+
+// CurrentSchemaVersion reports whether config_version is one this build
+// loads through the v8 entrypoint (8, or 9 after the single-source
+// migration). The v8 runtime, observability and reload paths accept both.
+func CurrentSchemaVersion(version int) bool {
+	return version >= ObservabilityV8ConfigVersion && version <= MaxSupportedConfigVersion
+}
 
 // ObservabilityV8Source is the typed source form of the v8 observability block.
 // A nil *ObservabilityV8Source and an empty value compile identically.
