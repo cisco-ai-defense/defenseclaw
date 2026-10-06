@@ -9008,7 +9008,10 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.reload",
             reason_code="policy-reload-rejected",
-            remediation="Fix the change the error names in config.yaml or the policy asset; the gateway applies it once it builds",
+            remediation=(
+                "Fix the change the error names in config.yaml or the policy asset; "
+                "the gateway applies it once it builds"
+            ),
         )
         return
     local = _local_policy_digest(cfg)
@@ -9021,7 +9024,10 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.stale",
             reason_code="policy-stale",
-            remediation="Run `defenseclaw-gateway restart`, or check `defenseclaw-gateway status` for a rejected reload",
+            remediation=(
+                "Run `defenseclaw-gateway restart`, or check "
+                "`defenseclaw-gateway status` for a rejected reload"
+            ),
         )
         return
     if config_generation > 0 and policy.get("config_generation_recorded") is False:
@@ -9139,7 +9145,10 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.providers.overlay.derived",
             reason_code="derived-file-drift",
-            remediation="Run `defenseclaw doctor --fix` to regenerate it from config.yaml (change providers with `defenseclaw setup provider`)",
+            remediation=(
+                "Run `defenseclaw doctor --fix` to regenerate it from config.yaml "
+                "(change providers with `defenseclaw setup provider`)"
+            ),
         )
         return
     if not os.path.isfile(path):

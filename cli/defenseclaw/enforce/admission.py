@@ -212,7 +212,11 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
             data = loaded if isinstance(loaded, dict) else {}
             break
     flags = data.get("config") if isinstance(data.get("config"), dict) else {}
-    scan_on_install = flags["scan_on_install"] if isinstance(flags.get("scan_on_install"), bool) else out.scan_on_install
+    scan_on_install = (
+        flags["scan_on_install"]
+        if isinstance(flags.get("scan_on_install"), bool)
+        else out.scan_on_install
+    )
     bypass = (
         flags["allow_list_bypass_scan"]
         if isinstance(flags.get("allow_list_bypass_scan"), bool)
@@ -222,7 +226,8 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
     raw_actions = data.get("actions")
     if isinstance(raw_actions, dict) and raw_actions:
         actions = {}
-        overrides = (data.get("scanner_overrides") or {}).get(target_type) if isinstance(data.get("scanner_overrides"), dict) else None
+        by_type = data.get("scanner_overrides")
+        overrides = by_type.get(target_type) if isinstance(by_type, dict) else None
         for layer in (raw_actions, overrides if isinstance(overrides, dict) else {}):
             for sev, value in layer.items():
                 action = _data_json_action(value)

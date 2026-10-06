@@ -134,8 +134,6 @@ function pickVerdictEntrypoint(domain: string): string {
       return 'defenseclaw/firewall/action';
     case 'audit':
       return 'defenseclaw/audit/retain';
-    case 'skill_actions':
-      return 'defenseclaw/skill_actions/runtime_action';
     default:
       return `defenseclaw/${domain}/verdict`;
   }
@@ -151,8 +149,6 @@ function pickReasonEntrypoint(domain: string): string | null {
       return 'defenseclaw/firewall/rule_name';
     case 'audit':
       return 'defenseclaw/audit/retain_reason';
-    case 'skill_actions':
-      return null;
     default:
       return null;
   }
