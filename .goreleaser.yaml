@@ -265,6 +265,12 @@ nfpms:
         dst: /usr/lib/sysusers.d/defenseclaw.conf
       - src: packaging/systemd/defenseclaw.conf
         dst: /usr/lib/tmpfiles.d/defenseclaw.conf
+      # An rpm owns only the directories it lists, so without this entry an
+      # erase leaves /usr/share/doc/defenseclaw-enterprise behind, empty.
+      - dst: /usr/share/doc/defenseclaw-enterprise
+        type: dir
+        file_info:
+          mode: 0755
       - src: packaging/systemd/hook-guardian-targets.example.yaml
         dst: /usr/share/doc/defenseclaw-enterprise/hook-guardian-targets.example.yaml
       - src: LICENSE
