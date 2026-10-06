@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,50 +39,106 @@ func init() {
 }
 
 // policyDigestReport is the --json output: the computed policy and, with
-// --check-gateway, the digest the running gateway reports.
+// --check-gateway, what the running gateway reports. When the installed
+// config's policy cannot be built (a rule pack that no longer matches its
+// pin, for example) Error says why and the policy fields are empty, so the
+// lifecycle still learns what the gateway reports.
 type policyDigestReport struct {
 	gateway.EffectivePolicy
-	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+	GatewayReportedDigest  string `json:"gateway_reported_digest,omitempty"`
+	GatewayLastReloadError string `json:"gateway_last_reload_error,omitempty"`
+	Error                  string `json:"error,omitempty"`
 }
 
-// gatewayReportedPolicyDigest is policy.effective_digest from the gateway's
-// /health, "" when it does not answer or does not publish one.
-func gatewayReportedPolicyDigest(c *config.Config) string {
+// gatewayReportedPolicy is the policy object of the gateway's /health: zero
+// when it does not answer or does not publish one.
+func gatewayReportedPolicy(c *config.Config) gateway.PolicyHealth {
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(sidecarHealthURL(c))
 	if err != nil {
-		return ""
+		return gateway.PolicyHealth{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return ""
+		return gateway.PolicyHealth{}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, gatewayHealthDocumentMaxBytes+1))
 	if err != nil || len(body) > gatewayHealthDocumentMaxBytes {
-		return ""
+		return gateway.PolicyHealth{}
 	}
 	var health struct {
 		Policy *gateway.PolicyHealth `json:"policy"`
 	}
 	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
-		return ""
+		return gateway.PolicyHealth{}
 	}
-	return health.Policy.EffectiveDigest
+	return *health.Policy
 }
 
-// enterprisePolicyFromDigest turns `policy digest --json --check-gateway`
-// output into the lifecycle result's policy block; ok is false when the
-// output carries no digest (an earlier release, or unreadable inputs).
-func enterprisePolicyFromDigest(out []byte) (*enterprisestatus.PolicyState, bool) {
+// applyEnterprisePolicyReport turns `policy digest --json --check-gateway`
+// output into the lifecycle result's policy block and its warnings, and
+// returns the block (nil when the output carries none). change is true for
+// a changing action: only it warns when the gateway has not applied the
+// config yet. A reload the gateway rejected and a config.yaml edited
+// outside the lifecycle are reported for every action, so status and
+// verify do not read green over them.
+func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, change bool) *enterprisestatus.PolicyState {
 	var report policyDigestReport
-	if json.Unmarshal(out, &report) != nil || report.Digest == "" {
-		return nil, false
+	if json.Unmarshal(out, &report) != nil {
+		return nil
 	}
-	return &enterprisestatus.PolicyState{
+	reload := boundedPolicyMessage(report.GatewayLastReloadError)
+	if report.Digest == "" {
+		if report.Error != "" {
+			result.AddWarning("policy_not_buildable", fmt.Sprintf(
+				"the policy the installed config and its assets describe cannot be built (%s); the gateway keeps enforcing effective policy %s",
+				boundedPolicyMessage(report.Error), shortPolicyDigest(report.GatewayReportedDigest)))
+		}
+		return nil
+	}
+	state := &enterprisestatus.PolicyState{
 		EffectiveDigest:       report.Digest,
 		ConfigGeneration:      report.ConfigGeneration,
-		Applied:               report.Digest == report.GatewayReportedDigest,
+		Applied:               report.Digest == report.GatewayReportedDigest && reload == "",
 		GatewayReportedDigest: report.GatewayReportedDigest,
-	}, true
+		LastReloadError:       reload,
+		ConfigUnrecorded:      report.ConfigGeneration > 0 && !report.ConfigGenerationRecorded,
+	}
+	result.Policy = state
+	switch {
+	case reload != "":
+		result.AddWarning("policy_reload_rejected", "the gateway reports a policy error and keeps enforcing the policy it last built: "+reload+
+			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
+	case !state.Applied && change:
+		result.AddWarning("policy_not_applied", fmt.Sprintf(
+			"the gateway reports effective policy %s but the installed config computes to %s; it applies the config on its next reload",
+			shortPolicyDigest(state.GatewayReportedDigest), shortPolicyDigest(state.EffectiveDigest)))
+	}
+	if state.ConfigUnrecorded {
+		result.AddWarning("config_edited_outside_lifecycle", fmt.Sprintf(
+			"config.yaml was changed outside the DefenseClaw lifecycle (config generation %d does not record it) and the gateway may already enforce it; run ensure with the intended config to put the managed config back",
+			state.ConfigGeneration))
+	}
+	return state
+}
+
+// boundedPolicyMessage keeps a gateway or build error to one short line.
+func boundedPolicyMessage(message string) string {
+	message = strings.Join(strings.Fields(message), " ")
+	if len(message) > 300 {
+		message = message[:300] + "..."
+	}
+	return message
+}
+
+// shortPolicyDigest is "sha256:" and the first 12 hex digits, or "none".
+func shortPolicyDigest(digest string) string {
+	if digest == "" {
+		return "none"
+	}
+	if len(digest) > len("sha256:")+12 {
+		return digest[:len("sha256:")+12]
+	}
+	return digest
 }
 
 // policyDigestCmd computes the effective policy digest from config.yaml and
@@ -101,16 +158,25 @@ gateway applied this configuration.`,
 	PersistentPreRunE: policyConfigOnlyPreRunE,
 	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		out := cmd.OutOrStdout()
+		asJSON, _ := cmd.Flags().GetBool("json")
+		check, _ := cmd.Flags().GetBool("check-gateway")
+		report := policyDigestReport{}
+		if asJSON && check {
+			reported := gatewayReportedPolicy(cfg)
+			report.GatewayReportedDigest, report.GatewayLastReloadError = reported.EffectiveDigest, reported.LastReloadError
+		}
 		policy, err := gateway.ComputeEffectivePolicy(cmd.Context(), cfg)
 		if err != nil {
+			if asJSON && check {
+				// What the gateway reports still goes to the lifecycle.
+				report.Error = err.Error()
+				_ = json.NewEncoder(out).Encode(report)
+			}
 			return fmt.Errorf("policy digest: %w", err)
 		}
-		out := cmd.OutOrStdout()
-		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
-			report := policyDigestReport{EffectivePolicy: policy}
-			if check, _ := cmd.Flags().GetBool("check-gateway"); check {
-				report.GatewayReportedDigest = gatewayReportedPolicyDigest(cfg)
-			}
+		if asJSON {
+			report.EffectivePolicy = policy
 			enc := json.NewEncoder(out)
 			enc.SetIndent("", "  ")
 			return enc.Encode(report)

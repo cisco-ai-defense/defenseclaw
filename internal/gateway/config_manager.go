@@ -1351,7 +1351,7 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.GuardrailConfig) {
 	g.Host, g.Port, g.Enabled, g.Connector = running.Host, running.Port, running.Enabled, running.Connector
 	g.ScannerMode, g.RetainJudgeBodies = running.ScannerMode, running.RetainJudgeBodies
-	g.HookFailMode, g.HookSelfHeal, g.HookSelfHealDebounceMs = running.HookFailMode, running.HookSelfHeal, running.HookSelfHealDebounceMs
+	g.HookSelfHeal, g.HookSelfHealDebounceMs = running.HookSelfHeal, running.HookSelfHealDebounceMs
 	// The connector set (the keys of guardrail.connectors) is the set of
 	// connectors whose hooks are installed, so it stays as it runs too.
 	var connectors map[string]config.PerConnectorGuardrailConfig
@@ -1363,7 +1363,7 @@ func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.Guar
 		if !ok {
 			pc = was
 		}
-		pc.Enabled, pc.HookFailMode = was.Enabled, was.HookFailMode
+		pc.Enabled = was.Enabled
 		connectors[name] = pc
 	}
 	g.Connectors = connectors

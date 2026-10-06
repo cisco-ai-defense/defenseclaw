@@ -730,11 +730,14 @@ func (stub *ensureStub) install(t *testing.T) {
 	originalRunner := windowsEnterpriseStandaloneRunner
 	originalObserver := windowsEnterpriseStandaloneObserver
 	originalDrift := windowsEnterpriseEnsureDriftDetector
+	originalPolicy := windowsEnterprisePolicyDigest
 	t.Cleanup(func() {
 		windowsEnterpriseStandaloneRunner = originalRunner
 		windowsEnterpriseStandaloneObserver = originalObserver
 		windowsEnterpriseEnsureDriftDetector = originalDrift
+		windowsEnterprisePolicyDigest = originalPolicy
 	})
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }
 	windowsEnterpriseStandaloneObserver = func(*enterprisestatus.Result, *windowsEnterpriseLifecycleOptions) string { return "" }
 	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
 	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, _ string, args []string) (windowsEnterpriseStandaloneRun, error) {
@@ -1953,7 +1956,7 @@ func TestWindowsEnterprisePolicyReportsWhetherTheGatewayAppliedIt(t *testing.T) 
 	t.Cleanup(func() { windowsEnterprisePolicyDigest = previous })
 	report := func(computed, reported string) {
 		windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
-			return []byte(`{"effective_digest":"` + computed + `","config_generation":6,"gateway_reported_digest":"` + reported + `"}`), nil
+			return []byte(`{"effective_digest":"` + computed + `","config_generation":6,"config_generation_recorded":true,"gateway_reported_digest":"` + reported + `"}`), nil
 		}
 	}
 	run := func(action string, ready bool) *enterprisestatus.Result {
@@ -1976,6 +1979,48 @@ func TestWindowsEnterprisePolicyReportsWhetherTheGatewayAppliedIt(t *testing.T) 
 	}
 	if result := run("ensure", false); result.Policy != nil {
 		t.Fatalf("policy reported while the gateway is not ready: %+v", result.Policy)
+	}
+}
+
+// An applied change action records policy-state.json beside deployment.json;
+// status does not (GAP-0037).
+func TestWindowsEnterprisePolicyStateIsRecordedBesideTheDeployment(t *testing.T) {
+	directory := t.TempDir()
+	metadata := filepath.Join(directory, "deployment.json")
+	if err := os.WriteFile(metadata, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousDigest, previousInspector := windowsEnterprisePolicyDigest, windowsEnterpriseDeploymentInspector
+	t.Cleanup(func() {
+		windowsEnterprisePolicyDigest, windowsEnterpriseDeploymentInspector = previousDigest, previousInspector
+	})
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
+		return []byte(`{"effective_digest":"sha256:aa","config_generation":3,"config_generation_recorded":true,"gateway_reported_digest":"sha256:aa"}`), nil
+	}
+	windowsEnterpriseDeploymentInspector = func(string) (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, MetadataPath: metadata}, nil
+	}
+	run := func(action string) {
+		result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
+		result.Installed, result.Readiness.Gateway = true, true
+		applyWindowsEnterprisePolicy(context.Background(), result)
+		if len(result.Warnings) != 0 {
+			t.Fatalf("%s warnings = %+v", action, result.Warnings)
+		}
+	}
+	state := filepath.Join(directory, enterprisestatus.PolicyStateFileName)
+	run("status")
+	if _, err := os.Stat(state); err == nil {
+		t.Fatal("status recorded policy-state.json")
+	}
+	run("ensure")
+	raw, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatalf("ensure did not record policy-state.json: %v", err)
+	}
+	var record enterprisestatus.PolicyStateRecord
+	if err := json.Unmarshal(raw, &record); err != nil || record.EffectiveDigest != "sha256:aa" || record.ConfigGeneration != 3 || record.AppliedAt == "" {
+		t.Fatalf("policy-state.json = %s (%v)", raw, err)
 	}
 }
 

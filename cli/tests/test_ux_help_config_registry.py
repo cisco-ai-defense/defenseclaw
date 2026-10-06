@@ -136,6 +136,23 @@ def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: py
     assert source.exit_code == 1 and "Drop --source" in source.output
 
 
+def test_config_get_shows_the_scanner_gate_the_gateway_runs_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0068: blank gate and judge source, and the v8 migration keys, in a v9 dump.
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 9\ngateway: {}\nobservability: {}\n", encoding="utf-8")
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_effective({"destinations": []})),
+    ):
+        got = CliRunner().invoke(cmd_config.config_cmd, ["get", "scanners.skill_scanner", "--format", "json"])
+    assert got.exit_code == 0, got.output
+    skill = json.loads(got.stdout)
+    assert (skill["fail_on_severity"], skill["review_queue_min"], skill["judge_source"]) == ("HIGH", "MEDIUM", "inherit")
+    assert not {"binary", "use_virustotal", "use_aidefense", "virustotal_api_key"} & set(skill)
+
+
 def test_config_get_destinations_index_the_list_config_set_edits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

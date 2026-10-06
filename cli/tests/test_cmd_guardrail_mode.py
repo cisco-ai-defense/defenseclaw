@@ -68,6 +68,14 @@ def restarts(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def rerenders(monkeypatch):
+    """Connectors whose hook scripts were re-rendered in place."""
+    calls: list[str] = []
+    monkeypatch.setattr(cmd_guardrail, "reconcile_connector_registration", lambda _cfg, name: calls.append(name))
+    return calls
+
+
 def _run(app, *args):
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["mode", *args], obj=app, catch_exceptions=False)
     return result, (json.loads(result.stdout) if "--json" in args and result.stdout.strip() else None)
@@ -100,29 +108,42 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
     assert app.logger.log_config_change.call_args.args[0] == "guardrail-mode"  # a config-update mutation
 
 
-def test_global_switch_restarts_a_running_gateway(app, restarts) -> None:
+def test_global_switch_rerenders_hooks_without_a_restart(app, restarts, rerenders, monkeypatch) -> None:
     # codex inherits hook_fail_mode=closed, which only applies in action mode:
-    # observe -> action flips its hooks from fail-open to fail-closed.
+    # observe -> action flips its hooks from fail-open to fail-closed. The
+    # gateway reloads the mode hot and the script is re-rendered in place
+    # (GAP-0002); no restart.
     result, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir]
+    assert payload["gateway"] == "live" and rerenders == ["codex"] and restarts == []
     text, _ = _run(app, "observe")
     assert "fail open" in text.output
-    assert len(restarts) == 2
+    assert rerenders == ["codex", "codex"] and restarts == []
 
-    # Without a hook fail-mode flip the gateway reloads the mode hot.
+    # Without a hook fail-mode flip nothing is re-rendered.
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode="closed")}
     _, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "live" and len(restarts) == 2
+    assert payload["gateway"] == "live" and len(rerenders) == 2
+
+    # A failed re-render falls back to a restart, which re-bakes the script.
+    app.cfg.guardrail.connectors = {}
+    app.cfg.guardrail.mode = "observe"
+
+    def broken(_cfg, _name):
+        raise OSError("native defenseclaw-gateway executable not found")
+
+    monkeypatch.setattr(cmd_guardrail, "reconcile_connector_registration", broken)
+    _, payload = _run(app, "action", "--json")
+    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir]
 
 
-def test_connector_override_created_on_a_single_install(app, restarts) -> None:
+def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
     result, payload = _run(app, "action", "--connector", "codex", "--json")
     assert result.exit_code == 0, result.output
     assert (payload["scope"], payload["mode"], payload["mode_source"], payload["gateway"]) == (
         "codex",
         "action",
         "override",
-        "restarted",
+        "live",
     )
     gc = app.cfg.guardrail
     assert gc.mode == "observe" and gc.connectors["codex"].mode == "action"
@@ -132,7 +153,7 @@ def test_connector_override_created_on_a_single_install(app, restarts) -> None:
     _, payload = _run(app, "action", "--connector", "codex", "--no-restart", "--json")
     assert payload["changed"] is False  # already there
     _, payload = _run(app, "--clear", "--connector", "codex", "--no-restart", "--json")
-    assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "restart_needed")
+    assert (payload["mode"], payload["mode_source"], payload["gateway"]) == ("observe", "global", "live")
     assert gc.connectors["codex"].mode == ""
 
 
@@ -167,7 +188,9 @@ def test_usage_errors(app, args) -> None:
     app.cfg.save.assert_not_called()
 
 
-def test_action_switch_probes_versions_and_refuses_an_unverified_connector(app, restarts, version_checks) -> None:
+def test_action_switch_probes_versions_and_refuses_an_unverified_connector(
+    app, restarts, version_checks, rerenders
+) -> None:
     # GAP-1340/GAP-1362: after an observe-mode quickstart no agent version is
     # on record, so the action-mode gateway refused to start. The switch now
     # probes first and changes nothing when a connector can't be verified.
@@ -182,7 +205,7 @@ def test_action_switch_probes_versions_and_refuses_an_unverified_connector(app, 
 
     verdicts["codex"] = True
     result, payload = _run(app, "action", "--json")
-    assert result.exit_code == 0 and payload["gateway"] == "restarted"
+    assert result.exit_code == 0 and payload["gateway"] == "live"
     assert calls == ["codex", "codex"]
     # Switching back to observe needs no probe.
     _run(app, "observe", "--json")

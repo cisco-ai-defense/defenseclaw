@@ -155,7 +155,9 @@
         "effective_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "config_generation": { "type": "integer", "minimum": 0 },
         "applied": { "type": "boolean" },
-        "gateway_reported_digest": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$" }
+        "gateway_reported_digest": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$" },
+        "last_reload_error": { "type": "string", "description": "policy.last_reload_error from /health; set while the gateway keeps an older policy because it rejected the last reload." },
+        "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle and its generation is not recorded in config.generation.json. Absent otherwise." }
       }
     },
     "message": {

@@ -182,15 +182,20 @@ func TestWatcherMetricsNeverReachLegacyProvider(t *testing.T) {
 	w.recordWatcherError(ctx)
 	w.recordAdmission(ctx, "blocked", "skill")
 	w.recordScanError(ctx, "skill-scanner", "skill", "timeout")
-	w.emitQuarantineFailure(ctx, "/skills/example", context.DeadlineExceeded)
+	w.emitQuarantineFailure(ctx, InstallEvent{Type: InstallSkill, Path: "/skills/example"}, context.DeadlineExceeded)
 	w.recordBlockSLO(ctx, "skill", 12)
 	if err := logger.RecordProvenanceBumpMetric(ctx, "policy_files"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, generated := runtime.snapshot()
-	if len(generated) != 7 {
-		t.Fatalf("generated watcher metrics = %d, want 7", len(generated))
+	logs, generated := runtime.snapshot()
+	// GAP-0133: the failed move is an audit event, not only a log line.
+	if len(logs) != 1 {
+		t.Fatalf("audit records for the asset that could not be quarantined = %d, want 1", len(logs))
+	}
+	// Seven watcher metrics and the counter of the quarantine failure's audit record.
+	if len(generated) != 8 {
+		t.Fatalf("generated watcher metrics = %d, want 8", len(generated))
 	}
 }
 

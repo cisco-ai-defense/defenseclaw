@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -35,6 +36,11 @@ const (
 	infoPipePath      = "/org/freedesktop/sssd/infopipe"
 	infoPipeGetAttr   = "org.freedesktop.sssd.infopipe.GetUserAttr"
 	infoPipeUPNAttr   = "userPrincipalName"
+	infoPipeUsers     = "/org/freedesktop/sssd/infopipe/Users"
+	infoPipeFindUser  = "org.freedesktop.sssd.infopipe.Users.FindByName"
+	infoPipeUserIface = "org.freedesktop.sssd.infopipe.Users.User"
+	infoPipeDomIface  = "org.freedesktop.sssd.infopipe.Domains"
+	dbusPropertiesGet = "org.freedesktop.DBus.Properties.Get"
 	infoPipeCallLimit = 5 * time.Second
 )
 
@@ -57,6 +63,17 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		return record, nil
 	}
 	if facts.Source == useridentity.SourceSSSD {
+		if facts.Directory == "" {
+			// A domain realmd did not join, such as a plain LDAP directory
+			// or a cloud directory's LDAP interface: its SSSD id provider
+			// names the directory type.
+			callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
+			provider, providerErr := infoPipeDomainProvider(callCtx, nss.Name)
+			cancel()
+			if providerErr == nil {
+				facts.Directory = sssdProviderDirectory(provider)
+			}
+		}
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
 		upn, upnErr := infoPipeUPN(callCtx, nss.Name)
 		cancel()
@@ -99,4 +116,49 @@ func infoPipeUPN(ctx context.Context, name string) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("unexpected InfoPipe userPrincipalName type")
+}
+
+// infoPipeDomainProvider returns the id provider ("ldap", "ad", "ipa", ...)
+// of the SSSD domain that serves the account name.
+func infoPipeDomainProvider(ctx context.Context, name string) (string, error) {
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	var user dbus.ObjectPath
+	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindUser, 0, name).Store(&user); err != nil {
+		return "", err
+	}
+	var domain dbus.Variant
+	if err := conn.Object(infoPipeService, user).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeUserIface, "domain").Store(&domain); err != nil {
+		return "", err
+	}
+	domainPath, ok := domain.Value().(dbus.ObjectPath)
+	if !ok || !domainPath.IsValid() {
+		return "", errors.New("unexpected InfoPipe user domain")
+	}
+	var provider dbus.Variant
+	if err := conn.Object(infoPipeService, domainPath).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeDomIface, "provider").Store(&provider); err != nil {
+		return "", err
+	}
+	value, ok := provider.Value().(string)
+	if !ok {
+		return "", errors.New("unexpected InfoPipe domain provider type")
+	}
+	return value, nil
+}
+
+// sssdProviderDirectory maps the id provider of an SSSD domain to the
+// directory type: ad is Active Directory; ldap and ipa are LDAP directories,
+// the type an IPA realm gets from realmd too. Other providers (proxy, files)
+// name no directory and leave the type unset.
+func sssdProviderDirectory(provider string) useridentity.Directory {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "ad":
+		return useridentity.DirectoryActiveDirectory
+	case "ldap", "ipa":
+		return useridentity.DirectoryLDAP
+	}
+	return ""
 }

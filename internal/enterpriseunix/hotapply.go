@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -79,13 +78,8 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 		return false
 	}
 	changed, err := configwrite.ChangedPaths(previous, p.config.Raw)
-	if err != nil || len(changed) == 0 || len(configwrite.RestartRequired(changed)) > 0 {
+	if err != nil || len(changed) == 0 || len(configwrite.ManagedRestartRequired(changed)) > 0 {
 		return false
-	}
-	for _, path := range changed {
-		if enterpriseNeedsRestart(path) {
-			return false
-		}
 	}
 	gateway, ok := gatewayUnitOf(env.Services.Units())
 	if !ok || !env.Services.Active(ctx, gateway) {
@@ -93,17 +87,6 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	}
 	body, err := l.gatewayHealth(ctx, gateway, l.serviceUID)
 	return err == nil && gatewayPolicyDigest(body) != ""
-}
-
-// enterpriseNeedsRestart reports whether a changed config path is in the
-// enterprise block outside enterprise.inspection: the gateway reads
-// enrollment and the hook-socket authorizer built from it once, at start,
-// and its reload refuses such a change.
-func enterpriseNeedsRestart(path string) bool {
-	if path != "enterprise" && !strings.HasPrefix(path, "enterprise.") {
-		return false
-	}
-	return path != "enterprise.inspection" && !strings.HasPrefix(path, "enterprise.inspection.")
 }
 
 func gatewayUnitOf(units []Unit) (Unit, bool) {

@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -183,6 +184,41 @@ func (c *Config) ReferencedRulePackDirs() map[string]string {
 		out["guardrail.custom_packs."+name+".path"] = strings.TrimSpace(pack.Path)
 	}
 	return out
+}
+
+// RulePackCheckOrder orders the keys of ReferencedRulePackDirs for a check:
+// the global setting first (guardrail.rule_pack, else guardrail.rule_pack_dir),
+// then every other setting whose pack differs from it, by key. A connector
+// that only inherits the global pack is not checked again, so a refusal names
+// the key the administrator wrote. It used to name
+// guardrail.connectors.amp.rule_pack_dir, which sorts first, for a config
+// that never set it (GAP-1193, GAP-0039).
+func RulePackCheckOrder(dirs map[string]string) []string {
+	global := "guardrail.rule_pack_dir"
+	if _, ok := dirs["guardrail.rule_pack"]; ok {
+		global = "guardrail.rule_pack"
+	}
+	globalDir, hasGlobal := dirs[global]
+	globalDir = strings.TrimSpace(globalDir)
+	labels := make([]string, 0, len(dirs))
+	for label := range dirs {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	order := []string{}
+	if hasGlobal {
+		order = append(order, global)
+	}
+	for _, label := range labels {
+		if label == global {
+			continue
+		}
+		if dir := strings.TrimSpace(dirs[label]); hasGlobal && globalDir != "" && filepath.Clean(dir) == filepath.Clean(globalDir) {
+			continue
+		}
+		order = append(order, label)
+	}
+	return order
 }
 
 // EffectiveRulesForConnector returns the guardrail.rules layers that apply

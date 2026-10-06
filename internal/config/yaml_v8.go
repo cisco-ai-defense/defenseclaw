@@ -303,12 +303,18 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	case version > MaxSupportedConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
 			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
-			"upgrade DefenseClaw or restore ~/.defenseclaw/previous")
+			newerConfigAction)
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
 	}
 }
+
+// newerConfigAction is the way out of a config_version this release does not
+// read: a managed host keeps the pre-upgrade copy next to the config, a
+// per-user install in its previous folder.
+const newerConfigAction = "upgrade DefenseClaw, or restore the config saved before the upgrade " +
+	"(config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous on a per-user install)"
 
 // rejectV9RemovedKeys refuses, in a config_version 9 source, the v8 keys
 // that config_version 9 replaced. A v8 source keeps them: they are the
