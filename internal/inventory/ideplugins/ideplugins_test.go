@@ -222,43 +222,94 @@ func TestScanOtherEditors(t *testing.T) {
 	}
 }
 
-// A managed Windows gateway reads only the folders the enumerator grants it
-// (WindowsHomeDirs): every installation and plugin a Windows scan reports
-// must be inside one of them (GAP-0042).
-func TestWindowsHomeDirsCoverTheWindowsScan(t *testing.T) {
+// A managed Windows gateway reads only what the enumerator grants it
+// (WindowsHomeGrants): everything a Windows scan reports, Remote-SSH
+// servers, %LOCALAPPDATA%\JetBrains and Android Studio included, must be
+// granted, while the caches and other data beside those folders and a
+// linked folder are not (GAP-0042).
+func TestWindowsHomeGrantsCoverTheWindowsScan(t *testing.T) {
 	home := t.TempDir()
+	local, roaming := filepath.Join(home, "AppData", "Local"), filepath.Join(home, "AppData", "Roaming")
 	writeFile(t, filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.0.1", "package.json"),
 		`{"name":"claude-code","publisher":"anthropic","version":"2.0.1"}`)
-	writeFile(t, filepath.Join(home, "AppData", "Roaming", "Code", "User", "profiles", "a1b2", "extensions.json"),
+	writeFile(t, filepath.Join(roaming, "Code", "User", "profiles", "a1b2", "extensions.json"),
 		`[{"identifier":{"id":"anthropic.claude-code"},"version":"2.0.1","relativeLocation":"anthropic.claude-code-2.0.1"}]`)
-	writeJar(t, filepath.Join(home, "AppData", "Roaming", "JetBrains", "PyCharm2024.1", "plugins", "copilot", "lib", "copilot.jar"),
+	writeFile(t, filepath.Join(home, ".vscode-server", "extensions", "openai.chatgpt-1.0.0", "package.json"),
+		`{"name":"chatgpt","publisher":"openai","version":"1.0.0"}`)
+	writeFile(t, filepath.Join(home, ".vscode-server", "cli", "servers", "Stable-0a1b2c", "server", "package.json"), `{"version":"1.105.0"}`)
+	writeJar(t, filepath.Join(roaming, "JetBrains", "PyCharm2024.1", "plugins", "copilot", "lib", "copilot.jar"),
 		`<idea-plugin><id>com.github.copilot</id><version>1.5</version></idea-plugin>`)
-	writeFile(t, filepath.Join(home, "AppData", "Local", "Zed", "extensions", "installed", "html", "extension.toml"), "id = \"html\"\n")
-	writeFile(t, filepath.Join(home, "AppData", "Local", "nvim", "lazy-lock.json"), `{"copilot.lua":{"commit":"0123456789abcdef"}}`)
-
-	var granted []string
-	for _, dir := range WindowsHomeDirs() {
-		granted = append(granted, filepath.Join(home, filepath.FromSlash(strings.ReplaceAll(dir, `\`, "/"))))
+	writeJar(t, filepath.Join(local, "JetBrains", "IntelliJIdea2025.2", "plugins", "ai", "lib", "ai.jar"),
+		`<idea-plugin><id>com.intellij.ml.llm</id><version>252.1</version></idea-plugin>`)
+	writeFile(t, filepath.Join(local, "JetBrains", "RemoteDev", "dist", "a1_ideaIU-252", "product-info.json"), `{"version":"2025.2","productCode":"IU"}`)
+	writeJar(t, filepath.Join(roaming, "Google", "AndroidStudio2025.1", "plugins", "gemini", "lib", "gemini.jar"),
+		`<idea-plugin><id>com.google.gemini</id><version>1.0</version></idea-plugin>`)
+	writeFile(t, filepath.Join(roaming, "Google", "AndroidStudio2025.1", "disabled_plugins.txt"), "com.google.gemini\n")
+	writeJar(t, filepath.Join(local, "Google", "AndroidStudio2025.1", "plugins", "flutter.jar"),
+		`<idea-plugin><id>io.flutter</id><version>85.0</version></idea-plugin>`)
+	writeFile(t, filepath.Join(home, "eclipse", "java-2025-09", "eclipse", "configuration", "org.eclipse.equinox.simpleconfigurator", "bundles.info"),
+		"com.example.tool,1.2.0,plugins/com.example.tool_1.2.0.jar,4,false\n")
+	writeFile(t, filepath.Join(local, "Zed", "extensions", "installed", "html", "extension.toml"), "id = \"html\"\n")
+	writeFile(t, filepath.Join(local, "nvim", "lazy-lock.json"), `{"copilot.lua":{"commit":"0123456789abcdef"}}`)
+	private := []string{
+		filepath.Join(home, ".vscode-server", "data", "User", "History", "entries.json"),
+		filepath.Join(local, "JetBrains", "IntelliJIdea2025.2", "caches", "content.dat"),
+		filepath.Join(local, "Google", "Chrome", "User Data", "Local State"),
 	}
-	covered := func(path string) bool {
-		for _, dir := range granted {
-			if path == dir || strings.HasPrefix(path, dir+string(filepath.Separator)) {
+	for _, path := range private {
+		writeFile(t, path, "{}")
+	}
+	outside := t.TempDir()
+	writeJar(t, filepath.Join(outside, "plugins", "x", "lib", "x.jar"), `<idea-plugin><id>x.linked</id></idea-plugin>`)
+	// Without the symlink privilege (Windows) the link check is left out.
+	linkErr := os.Symlink(outside, filepath.Join(local, "JetBrains", "GoLand2025.1"))
+
+	grants := WindowsHomeGrants(home)
+	abs := func(rel string) string {
+		return filepath.Join(home, filepath.FromSlash(strings.ReplaceAll(rel, `\`, "/")))
+	}
+	under := func(path, dir string) bool { return strings.HasPrefix(path, dir+string(filepath.Separator)) }
+	readable := func(path string) bool {
+		for _, g := range grants {
+			if dir := abs(g.Path); path == dir || (g.Tree && under(path, dir)) {
 				return true
 			}
 		}
 		return false
 	}
-	installs := Scan(home, "windows", Limits{})
+	// A server build or remote-dev backend is read through one metadata
+	// file below its root.
+	grantedBelow := func(root string) bool {
+		for _, g := range grants {
+			if under(abs(g.Path), root) {
+				return true
+			}
+		}
+		return false
+	}
 	plugins := 0
-	for _, inst := range installs {
+	for _, inst := range Scan(home, "windows", Limits{}) {
+		if !readable(inst.Root) && !grantedBelow(inst.Root) {
+			t.Errorf("%s installation at %s is not granted", inst.Product, inst.Root)
+		}
 		for _, p := range inst.Plugins {
 			plugins++
-			if !covered(p.Path) {
-				t.Errorf("%s plugin %s at %s is outside the granted folders", inst.Product, p.ID, p.Path)
+			if !readable(p.Path) {
+				t.Errorf("%s plugin %s at %s is not granted", inst.Product, p.ID, p.Path)
 			}
 		}
 	}
-	if plugins < 5 {
-		t.Fatalf("the Windows fixture scan found %d plugins, want 5: %+v", plugins, installs)
+	if plugins != 10 {
+		t.Errorf("the Windows fixture scan found %d plugins, want 10", plugins)
+	}
+	for _, path := range private {
+		if readable(path) {
+			t.Errorf("%s is granted", path)
+		}
+	}
+	for _, g := range grants {
+		if linkErr == nil && strings.Contains(g.Path, "GoLand") {
+			t.Errorf("the linked folder is granted: %s", g.Path)
+		}
 	}
 }

@@ -22,14 +22,13 @@ import (
 )
 
 // inventoryDACLDotdirs enumerates the top-level user-profile subdirectories the
-// AI discovery scanner walks for skill, plugin, rule, and MCP-config signatures,
-// and the IDE folders the IDE plugin inventory reads (ideplugins.WindowsHomeDirs;
-// without them a managed host listed no IDE plugin for anyone, GAP-0042).
+// AI discovery scanner walks for skill, plugin, rule, and MCP-config signatures.
 // Kept in sync with the catalog under internal/inventory/ai_signatures.json —
 // this list covers the ancestor traversal that the scanner needs. Child ACEs
 // inherit from these parents via SUB_CONTAINERS_AND_OBJECTS_INHERIT so
-// per-file reads don't need a separate grant.
-var inventoryDACLDotdirs = append(append([]string{
+// per-file reads don't need a separate grant. The IDE plugin inventory's
+// folders are granted apart from these (inventoryDACLIDEGrants).
+var inventoryDACLDotdirs = append([]string{
 	".claude",
 	".codex",
 	".cursor",
@@ -53,7 +52,7 @@ var inventoryDACLDotdirs = append(append([]string{
 	// Hermes for any user.
 	`AppData\Local\hermes\skills`,
 	`AppData\Local\hermes\plugins`,
-}, legacyconnector.InventoryDotDirs...), ideplugins.WindowsHomeDirs()...)
+}, legacyconnector.InventoryDotDirs...)
 
 // inventoryDACLGuardianOwnedDotdirs maps a dotdir to the connectors whose
 // enrollment puts it on that user's managed hook path (Kiro: .kiro\settings;
@@ -115,11 +114,16 @@ const productionGatewayServiceName = "DefenseClawGateway"
 // re-tries. Per-directory errors are logged and do not abort the pass — one
 // user's misconfigured DACL should not block enrollment for the other users.
 //
+// ideInventory adds the IDE plugin inventory's folders (inventoryDACLIDEGrants).
+// The Secure Client profile passes false: its gateway keeps the historical
+// editor-extension detector and has no IDE inventory, so it gets no more
+// access than it always had.
+//
 // If gatewayServiceName is empty, discovers it via SCM enumeration (matches
 // the cert-scoped or production naming). Returns an error only if the pass
 // cannot even begin (SCM unavailable, service SID resolution fails); per-path
 // failures are logged and swallowed.
-func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName string, logf EnumerationLogger) error {
+func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName string, ideInventory bool, logf EnumerationLogger) error {
 	name := strings.TrimSpace(gatewayServiceName)
 	if name == "" {
 		discovered, err := discoverGatewayServiceName()
@@ -153,18 +157,17 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 			continue
 		}
 		seenHome[key] = struct{}{}
-		type grant struct {
-			dir    string
-			ensure func(string, *windows.SID) (inventoryDACLResult, error)
-		}
-		grants := make([]grant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
+		grants := make([]inventoryDACLGrant, 0, len(inventoryDACLDotdirs)+len(inventoryDACLListOnlyDirs))
 		for _, dotdir := range inventoryDACLDotdirs {
 			if _, owned := guardianOwned[key][dotdir]; !owned {
-				grants = append(grants, grant{dotdir, ensureInventoryReadACE})
+				grants = append(grants, inventoryDACLGrant{dotdir, ensureInventoryReadACE})
 			}
 		}
 		for _, dir := range inventoryDACLListOnlyDirs {
-			grants = append(grants, grant{dir, ensureInventoryListACE})
+			grants = append(grants, inventoryDACLGrant{dir, ensureInventoryListACE})
+		}
+		if ideInventory {
+			grants = append(grants, inventoryDACLIDEGrants(home)...)
 		}
 		for _, g := range grants {
 			dotdir := g.dir
@@ -214,6 +217,71 @@ func inventoryDACLGuardianOwnedByHome(manifest Manifest) map[string]map[string]s
 	return owned
 }
 
+// inventoryDACLGrant is one path of a profile, relative to it, and how it is
+// granted.
+type inventoryDACLGrant struct {
+	dir    string
+	ensure func(string, *windows.SID) (inventoryDACLResult, error)
+}
+
+// inventoryDACLIDEGrants lists the IDE folders and files of one profile that
+// the gateway's IDE plugin inventory reads (ideplugins.WindowsHomeGrants):
+// the same sources a per-user scan reads, Remote-SSH servers,
+// %LOCALAPPDATA%\JetBrains and Android Studio included. Without them a
+// managed host listed no IDE plugin for anyone (GAP-0042), and then none
+// from those folders (GAP-0156). A folder whose content the scan reads gets
+// the inherited read ACE; a folder it only lists, or one metadata file it
+// reads, gets a read ACE on that object alone, so the caches and other data
+// beside them stay out of reach. Nothing is granted through a link or other
+// reparse point below the profile.
+func inventoryDACLIDEGrants(home string) []inventoryDACLGrant {
+	grants := ideplugins.WindowsHomeGrants(home)
+	out := make([]inventoryDACLGrant, 0, len(grants))
+	for _, g := range grants {
+		ensure := ensureInventorySelfACE
+		if g.Tree {
+			ensure = ensureInventoryReadACE
+		}
+		rel := g.Path
+		out = append(out, inventoryDACLGrant{dir: rel, ensure: func(path string, sid *windows.SID) (inventoryDACLResult, error) {
+			if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+				return inventoryDACLSkippedMissing, err
+			}
+			return ensure(path, sid)
+		}})
+	}
+	return out
+}
+
+// errInventoryDACLLink reports a link or other reparse point on the way to a
+// grant: following it would grant the gateway another folder.
+var errInventoryDACLLink = errors.New("reparse point below the profile")
+
+// inventoryDACLRejectLinkBelow fails when any existing element of home\rel
+// below home is a reparse point. Missing elements pass: the grant then
+// skips the missing path.
+func inventoryDACLRejectLinkBelow(home, rel string) error {
+	current := home
+	for _, part := range strings.Split(rel, `\`) {
+		current = filepath.Join(current, part)
+		ptr, err := winpath.UTF16Ptr(current)
+		if err != nil {
+			return err
+		}
+		attributes, err := windows.GetFileAttributes(ptr)
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return errInventoryDACLLink
+		}
+	}
+	return nil
+}
+
 type inventoryDACLResult int
 
 const (
@@ -222,12 +290,36 @@ const (
 	inventoryDACLAlreadyPresent
 )
 
+// inventoryACE is one kind of inventory grant.
+type inventoryACE struct {
+	mask        windows.ACCESS_MASK
+	inheritance uint32
+	// files lets the grant go on a regular file as well as on a folder.
+	files   bool
+	present func(*windows.ACL, *windows.SID) bool
+}
+
+var (
+	inventoryReadACE = inventoryACE{
+		mask: windows.GENERIC_READ | windows.GENERIC_EXECUTE, inheritance: windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		present: daclContainsInventoryReadACE,
+	}
+	inventoryListACE = inventoryACE{
+		mask: inventoryListMask, inheritance: windows.NO_INHERITANCE,
+		present: daclContainsInventoryListACE,
+	}
+	inventorySelfACE = inventoryACE{
+		mask: inventorySelfMask, inheritance: windows.NO_INHERITANCE, files: true,
+		present: daclContainsInventorySelfACE,
+	}
+)
+
 // ensureInventoryReadACE adds an ACE granting Read+Execute+Traverse on `path`
 // to `sid`, inheriting to sub-containers and objects. If `path` doesn't exist
 // or isn't a directory, silently succeed — the user may not have started the
 // corresponding CLI yet; the next tick retries.
 func ensureInventoryReadACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
-	return ensureInventoryACE(path, sid, windows.GENERIC_READ|windows.GENERIC_EXECUTE, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	return ensureInventoryACE(path, sid, inventoryReadACE)
 }
 
 // inventoryListMask lets the service list a folder and read its own
@@ -237,10 +329,20 @@ const inventoryListMask = windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIB
 // ensureInventoryListACE grants `sid` inventoryListMask on `path` alone
 // (inventoryDACLListOnlyDirs).
 func ensureInventoryListACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
-	return ensureInventoryACE(path, sid, inventoryListMask, windows.NO_INHERITANCE)
+	return ensureInventoryACE(path, sid, inventoryListACE)
 }
 
-func ensureInventoryACE(path string, sid *windows.SID, mask windows.ACCESS_MASK, inheritance uint32) (inventoryDACLResult, error) {
+// inventorySelfMask lets the service read one folder's own listing or one
+// file's content, as Go's os.Open asks (GENERIC_READ), and nothing below.
+const inventorySelfMask = windows.FILE_GENERIC_READ
+
+// ensureInventorySelfACE grants `sid` inventorySelfMask on the folder or
+// regular file `path` alone (the IDE inventory's narrow grants).
+func ensureInventorySelfACE(path string, sid *windows.SID) (inventoryDACLResult, error) {
+	return ensureInventoryACE(path, sid, inventorySelfACE)
+}
+
+func ensureInventoryACE(path string, sid *windows.SID, kind inventoryACE) (inventoryDACLResult, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -248,7 +350,7 @@ func ensureInventoryACE(path string, sid *windows.SID, mask windows.ACCESS_MASK,
 		}
 		return inventoryDACLSkippedMissing, fmt.Errorf("stat: %w", err)
 	}
-	if !fi.IsDir() {
+	if !fi.IsDir() && !(kind.files && fi.Mode().IsRegular()) {
 		return inventoryDACLSkippedMissing, nil
 	}
 	extended, err := winpath.Extended(path)
@@ -279,17 +381,13 @@ func ensureInventoryACE(path string, sid *windows.SID, mask windows.ACCESS_MASK,
 	if existing == nil {
 		return inventoryDACLSkippedMissing, fmt.Errorf("null DACL on %s; refusing to replace with sole gateway-service ACE", path)
 	}
-	present := daclContainsInventoryReadACE(existing, sid)
-	if inheritance == windows.NO_INHERITANCE {
-		present = daclContainsInventoryListACE(existing, sid)
-	}
-	if present {
+	if kind.present(existing, sid) {
 		return inventoryDACLAlreadyPresent, nil
 	}
 	entry := windows.EXPLICIT_ACCESS{
-		AccessPermissions: mask,
+		AccessPermissions: kind.mask,
 		AccessMode:        windows.GRANT_ACCESS,
-		Inheritance:       inheritance,
+		Inheritance:       kind.inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_USER,
@@ -380,6 +478,30 @@ func daclContainsInventoryListACE(acl *windows.ACL, sid *windows.SID) bool {
 	return false
 }
 
+// daclContainsInventorySelfACE reports whether `acl` already grants `sid`
+// inventorySelfMask on the object itself, explicitly or inherited.
+func daclContainsInventorySelfACE(acl *windows.ACL, sid *windows.SID) bool {
+	if acl == nil || sid == nil {
+		return false
+	}
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil || ace == nil {
+			continue
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID != nil && windows.EqualSid(aceSID, sid) &&
+			mapWindowsUserPathGenericMask(ace.Mask)&inventorySelfMask == inventorySelfMask {
+			return true
+		}
+	}
+	return false
+}
+
 // sanitizeInventoryDACLError maps `err` to a short category label
 // safe to write into the enumeration log line. The Windows syscall
 // errors wrapped inside `ensureInventoryReadACE` failures often
@@ -394,6 +516,8 @@ func sanitizeInventoryDACLError(err error) string {
 		return ""
 	}
 	switch {
+	case errors.Is(err, errInventoryDACLLink):
+		return "reparse-point"
 	case errors.Is(err, os.ErrNotExist):
 		return "not-found"
 	case errors.Is(err, os.ErrPermission):

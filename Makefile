@@ -1410,16 +1410,13 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		rm -rf "$$stage"; \
 	done
 
-# The installers and the 0.8.x handoff, stamped with this version, and the
-# install-openshell-sandbox.sh stub that 0.x installers fetch with --sandbox
-# (it leaves the release, with the flag, in 1.1.0).
+# The installers and the 0.8.x handoff, stamped with this version.
 dist-installers:
 	@mkdir -p $(DIST_DIR)
 	@for script in install.sh install.ps1 defenseclaw-upgrade.sh; do \
 		sed 's/__DEFENSECLAW_VERSION__/$(VERSION)/g' scripts/$$script > $(DIST_DIR)/$$script; \
 	done
 	@chmod 755 $(DIST_DIR)/install.sh $(DIST_DIR)/defenseclaw-upgrade.sh
-	@cp scripts/install-openshell-sandbox.sh $(DIST_DIR)/install-openshell-sandbox.sh
 
 # Hash-pinned dependencies for the wheel, so installs never resolve live.
 dist-requirements:
