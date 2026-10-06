@@ -441,12 +441,6 @@ defenseclaw tui                                             # Live dashboard
 
 Audit export includes the legacy `details` text and, when present, first-class `structured` JSON from `audit_events.structured_json`. Connector hook rows use `schema: "defenseclaw.hook.v1"`; older parsers can still read the mirrored `details_json=` token inside `details`.
 
-### Guardrail profiles
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/v1/guardrail/profiles/resolve` | Which guardrail profile a subject (`user`, `connector`, `agent`) resolves to, with the match reason, digest and effective settings. Loopback only, with the gateway token; a hook credential is refused. Backs `defenseclaw guardrail profile explain`. |
-
 ### Runtime control and internal observability bridges
 
 These authenticated routes are narrow process/CLI integration seams rather
@@ -467,11 +461,9 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/v1/agents/discovery` | Receive an agent-discovery report from the on-host scanner. |
-| `GET` | `/api/v1/agents/identities` | Agent identities (`agt-...`) the gateway recorded, with their sessions and last seen time; filter with `user` and `connector`. Backs `defenseclaw agent identities`. |
 | `GET` | `/api/v1/ai-usage` | Current continuous-discovery snapshot (`summary` plus agent, process, endpoint, component, and local-model signals). Local responses retain each model's dedicated `model` block. |
 | `POST` | `/api/v1/ai-usage/scan` | Trigger an on-demand AI usage scan. |
 | `POST` | `/api/v1/ai-usage/discovery` | Ingest a validated external AI-discovery report. |
-| `GET` | `/api/v1/ai-usage/ide-plugins` | The last full scan's IDE extensions and plugins per user, filtered by `user`, `ide` and `ai_only`, paged with `limit` (default 500, at most 1000) and `cursor` (the previous page's `next_cursor`). Paths appear only as hashes. Backs `defenseclaw agent ide-plugins`. |
 | `GET` | `/api/v1/ai-usage/components` | Aggregated components across the active workspace. |
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/locations` | Where the component was detected. |
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/history` | Detection history for one component. |
@@ -479,6 +471,125 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
 | `GET` | `/api/v1/ai-usage/runtime` | Latest runtime-discovery snapshot: each runtime plane (what it can see and why) and scored findings. Returns `enabled: false` with empty lists when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime status` and `findings`. |
 | `POST` | `/api/v1/ai-usage/runtime/scan` | Poll the runtime planes now and return the new snapshot. Answers `503` when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime scan`. |
+
+### Identity, profiles and IDE inventory
+
+Three read-only routes back the identity features. They answer with the
+gateway token on loopback, like the rest of `/api/v1`. They are what
+`defenseclaw guardrail profile explain`, `defenseclaw agent identities` and
+`defenseclaw agent ide-plugins` call, and what the managed
+`enterprise <os> profile-explain`, `agent-identities` and `ide-plugins`
+commands read with the deployment's service token. See
+[Identity and authentication](/docs/enterprise/identity-and-authentication).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/guardrail/profiles/resolve` | Which guardrail profile a subject resolves to, and why. Query: `user` (account name, uid, SID or principal), `connector`, `agent` (`agt-` and 16 hex digits). Loopback only; a hook credential is refused with `403`. Answers `404` under the Secure Client integration, which rejects profiles. |
+| `GET` | `/api/v1/agents/identities` | The agent identities the gateway recorded. Query: `user` (account name or ID), `connector`. Under the Secure Client integration it answers `{"enabled": false, "identities": []}`. |
+| `GET` | `/api/v1/ai-usage/ide-plugins` | The last full scan's IDE installations and plugins. Query: `user`, `ide` (product or family), `ai_only` (`true` or `false`), `limit` (default 500, at most 1000) and `cursor` (the previous page's `next_cursor`). A bad `limit`, `cursor` or `ai_only` answers `400`. |
+
+`profiles/resolve` resolves the user through the operating system the way a
+live request does. With no `user`, no subject is resolved, so only
+`connectors` assignments and the default can apply, and `agent` is ignored.
+
+```json title="GET /api/v1/guardrail/profiles/resolve?user=alice@corp.example.com&connector=codex (trimmed)"
+{
+  "profiles_configured": true,
+  "user": "alice@corp.example.com",
+  "connector": "codex",
+  "subject": {
+    "user_id": "94401103",
+    "user_name": "alice",
+    "principal": "alice@corp.example.com",
+    "upn": "alice@CORP.EXAMPLE.COM",
+    "groups": ["ml-team@corp.example.com", "developers@corp.example.com"],
+    "group_count": 2
+  },
+  "profile": "ml-team",
+  "match": "group",
+  "matched_group": "ml-team@corp.example.com",
+  "digest": "sha256:4f460f32fe21aa052aa524027ba08c9f89fe695cbe39cea2fb0252e5e0a738bd",
+  "effective": {
+    "mode": "observe",
+    "block_at": "HIGH",
+    "alert_at": "MEDIUM",
+    "rule_pack_dir": "/etc/defenseclaw/policies/guardrail/default",
+    "hilt": {"enabled": false, "min_severity": "HIGH"}
+  },
+  "profiles": {"ml-team": "sha256:4f46...", "contractors": "sha256:98ab..."}
+}
+```
+
+`match` is `agent`, `user`, `group`, `connector`, `default`,
+`default_unverified` or `default_lookup_failed`. When the directory lookup
+failed, the answer adds `lookup_error`. `profiles` lists every configured
+profile with its digest. With no profiles configured the answer is
+`"profiles_configured": false` with an empty `profile` and the global
+settings under `effective`.
+
+```json title="GET /api/v1/agents/identities?user=alice (trimmed)"
+{
+  "enabled": true,
+  "persisted": true,
+  "identities": [
+    {
+      "agent_id": "agt-3f9c0a1b2c3d4e5f",
+      "user_id": "94401103",
+      "user_name": "alice@corp.example.com",
+      "connector": "codex",
+      "machine_hash": "…",
+      "first_seen": "2026-10-05T16:41:09Z",
+      "last_seen": "2026-10-06T10:32:15Z",
+      "last_session_id": "3034b58b-38bc-48da-bd70-efffc86bff40",
+      "sessions_seen": 4
+    }
+  ]
+}
+```
+
+Rows are most recently seen first. The gateway writes new rows to
+`inventory.db` in a batch every 30 seconds, and the route merges the rows it
+has not written yet, so a new agent shows at once. `sessions_seen` counts each
+chat once, also when it resumes after a gateway restart.
+
+```json title="GET /api/v1/ai-usage/ide-plugins?ai_only=true (trimmed)"
+{
+  "enabled": true,
+  "scope": "all",
+  "scan_id": "…",
+  "scanned_at": "2026-10-06T10:30:00Z",
+  "total": 1,
+  "next_cursor": "",
+  "counts": {"total": 1, "ai": 1, "disabled": 0, "users": 1, "installations": 1, "by_ide": {"vscode": 1}},
+  "installations": [
+    {"install_id": "…", "user": "alice", "ide_family": "vscode", "ide_product": "vscode", "channel": "stable", "path_hash": "…", "last_seen": "2026-10-06T10:30:00Z"}
+  ],
+  "plugins": [
+    {
+      "user": "alice",
+      "ide_family": "vscode",
+      "ide_product": "vscode",
+      "plugin_id": "github.copilot",
+      "display_name": "GitHub Copilot",
+      "publisher": "GitHub",
+      "version": "1.250.0",
+      "enabled": "enabled",
+      "enabled_source": "state_vscdb",
+      "scope": "user",
+      "is_ai": true,
+      "ai_signature_id": "…",
+      "path_hash": "…",
+      "last_seen": "2026-10-06T10:30:00Z"
+    }
+  ]
+}
+```
+
+`enabled` is `enabled`, `disabled`, `client_side_unknown` or `unknown`.
+`scope` in the response is the `ai_discovery.ide_inventory` setting; `off`
+returns no rows. `total` and `counts` describe the rows the filters select
+across all pages. Plugin and installation paths appear only as hashes. When AI
+discovery is off, `enabled` is `false` and the lists are empty.
 
 ### ACP guard
 

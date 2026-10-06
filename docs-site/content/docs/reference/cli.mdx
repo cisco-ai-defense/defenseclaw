@@ -316,7 +316,7 @@ Per-connector guardrail controls. `--connector X` is the explicit scope selector
 | `defenseclaw guardrail suppress add SUPPRESSION_ID --finding REGEX --reason TEXT [--entity REGEX] [--connector X] [--profile P] [--json]` / `suppress remove SUPPRESSION_ID` | Add or remove a finding suppression (`guardrail.rules.suppressions`). The reason is recorded in `config.yaml`. |
 | `defenseclaw guardrail allow-private-upstream [HOST\|IP ...] [--remove] [--no-restart]` | Let the guardrail proxy reach an LLM endpoint on a private address, such as an AWS PrivateLink (VPC interface) endpoint for Bedrock, whose hostname resolves to private IPs. A hostname is resolved now and its private addresses are stored in `guardrail.allow_private_upstreams`; run it again if the endpoint's addresses change. Run bare it lists the entries. Loopback, link-local and cloud metadata addresses are never allowed. A running gateway is restarted so the proxy uses the change at once (`--no-restart` to skip). |
 | `defenseclaw guardrail validate-pack PATH [--json]` | Validate a rule pack offline with the gateway's own validator. Exit `1` means invalid, `2` means the validator is unavailable. |
-| `defenseclaw guardrail profile list [--json]` | Read-only. Lists the identity-based guardrail profiles, their ordered assignments and the default profile. See [Guardrail profiles at scale](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale). |
+| `defenseclaw guardrail profile list [--json]` | Read-only. Lists the identity-based guardrail profiles, their ordered assignments and the default profile. See [User- and group-based policies](/docs/guardrail/user-and-group-policies). |
 | `defenseclaw guardrail profile show NAME [--json]` | Read-only. One profile's settings and the assignments that select it. |
 | `defenseclaw guardrail profile explain [--user U] [--connector C] [--agent agt-...] [--json]` | Ask the running gateway which profile a subject resolves to and why: the profile, the match reason (and matched group), the digest and the effective mode, levels, HILT and rule pack. `--user` takes an account name, uid or SID, resolved through the OS as for live requests. With no option it explains the account running it; `guardrail status`, `status` and `doctor` show that profile too. |
 | `defenseclaw guardrail judge add\|remove CONNECTOR` / `judge list` | Choose which hook connectors forward content to the LLM judge (`all` means every hook connector; `remove all` turns the hook-lane judge off). `add --enable` also turns the judge on, and `--timeout S` caps the judge round trip on hook calls (gateway default 8 s; hook scripts allow 10 s in total). `list` shows the gate and each connector's effective judge state. |
@@ -740,6 +740,9 @@ Every mutating action is a transaction that rolls back on failure. See
 | `rotate-credentials` | Replace the key every user's per-user credentials derive from. Every user moves to the new key before it takes effect. See [Rotate per-user credentials](/docs/enterprise/operations#rotate-per-user-credentials) |
 | `status` | Report the deployment state. Read-only |
 | `discovery` | Show the AI Discovery inventory the hook guardian's per-user scans recorded for each enrolled account, then the runtime discovery planes and findings from the local gateway. Read-only; `--user U` limits it to one account, `--json` prints every record |
+| `profile-explain` | Show which guardrail profile a user, connector or agent gets, and why, with every configured profile's digest. Read-only; prints JSON. `--user U` (account name, uid, SID or principal), `--connector C`, `--agent agt-...`. See [User- and group-based policies](/docs/guardrail/user-and-group-policies#deliver-it-to-managed-hosts) |
+| `agent-identities` | List the agent identities (`agt-...`) the gateway has seen, with their sessions. Read-only; prints JSON. `--user U`, `--connector C` |
+| `ide-plugins` | List the IDE extensions and plugins of the last AI Discovery scan, per user. Read-only; prints JSON. `--user U`, `--ide IDE`, `--ai-only`, `--cursor C` (the previous page's `next_cursor`). See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory) |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
 | `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw`. `--purge` removes everything, every enrolled account's data and binaries included |
 
@@ -758,6 +761,9 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
 | `--remove-service-account` | uninstall | Deprecated: uninstall deletes the gateway service account by default. Accepted with a `deprecated_option` warning; removed in the next minor release |
+| `--user <u>` | discovery, profile-explain, agent-identities, ide-plugins | Limit the view to one account (name, uid or SID) |
+| `--connector <c>`, `--agent <id>` | profile-explain (`--connector` also agent-identities) | The connector, or the `agt-` agent identity, to resolve or list |
+| `--ide <ide>`, `--ai-only`, `--cursor <c>` | ide-plugins | Limit to one IDE product or family, to AI plugins, or continue from the previous page |
 | `--json` | all | Print the lifecycle result as JSON |
 
 Exit codes: `0` success or no-op, `1` failure (already rolled back), `2`
@@ -781,6 +787,7 @@ its transaction on PowerShell 7, which must be installed.
 | `ensure` | Standalone only | Install, upgrade, or repair as needed. Refuses to downgrade (`downgrade_refused`) |
 | `reconcile` | Secure Client, standalone | Restart the guardian and wait for a fresh reconcile |
 | `status`, `verify` | Secure Client, standalone | Read-only state, and the full check |
+| `profile-explain`, `agent-identities`, `ide-plugins` | Standalone | Read-only views of the managed gateway's guardrail profile resolution, agent identities and IDE plugin inventory, as JSON. Flags as on Linux and macOS: `--user`, `--connector`, `--agent`, `--ide`, `--ai-only`, `--cursor` |
 | `uninstall` | Secure Client, standalone | Remove the services and every account's hooks. Standalone also removes the machine state; Secure Client keeps it unless `--purge`. Each account keeps `%USERPROFILE%\.defenseclaw` unless `--purge` |
 
 | Flag | Meaning |
