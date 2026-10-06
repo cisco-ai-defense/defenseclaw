@@ -75,13 +75,18 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
 # other tests in the same process (a pytest worker, a CI shard) can leave
 # narrowed. These tests assume 120 columns unless one patches it itself.
 _TERMINAL_WIDTH = patch("defenseclaw.commands.cmd_guardrail._terminal_width", return_value=120)
+# On Windows, enable verifies the agent executable first (GAP-0069); the CI
+# runner has none installed. Tests of that check patch it themselves.
+_AGENT_VERIFY = patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections", return_value=None)
 
 
 def setUpModule():
     _TERMINAL_WIDTH.start()
+    _AGENT_VERIFY.start()
 
 
 def tearDownModule():
+    _AGENT_VERIFY.stop()
     _TERMINAL_WIDTH.stop()
 
 
