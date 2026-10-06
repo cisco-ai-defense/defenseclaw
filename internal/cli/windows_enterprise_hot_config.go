@@ -73,7 +73,8 @@ var (
 // production deployment's config-only change: a healthy, idle deployment, a
 // supplied config, and nothing else asked for.
 func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions, status *windowsEnterpriseInstallerReport) bool {
-	return status != nil && status.OK && status.Installed && status.GatewayReady && !status.TransactionPending &&
+	return windowsEnterpriseIsElevated() &&
+		status != nil && status.OK && status.Installed && status.GatewayReady && !status.TransactionPending &&
 		strings.TrimSpace(opts.configPath) != "" &&
 		strings.TrimSpace(opts.manifestPath) == "" && strings.TrimSpace(opts.mode) == "" && strings.TrimSpace(opts.connector) == "" &&
 		!opts.noStart && strings.TrimSpace(opts.installRoot) == "" && strings.TrimSpace(opts.stateRoot) == "" &&
