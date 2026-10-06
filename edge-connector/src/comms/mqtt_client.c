@@ -592,6 +592,10 @@ static int mqtt_process_packet(const uint8_t *buf, size_t available) {
 
 /* === Public API === */
 
+/* Forward declaration — dclaw_mqtt_publish is defined below dclaw_mqtt_connect
+ * but is called during connection setup to send the registration message. */
+int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8_t qos);
+
 int dclaw_mqtt_init(void) {
     memset(&mqtt_ctx, 0, sizeof(mqtt_ctx));
     mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
@@ -710,6 +714,26 @@ int dclaw_mqtt_connect(void) {
      * fmt.Sprintf("%d", parts.DeviceID) for the HMAC session_id input. */
     snprintf(mqtt_ctx.session_id, sizeof(mqtt_ctx.session_id), "%u",
              dclaw_get_state()->device.device_id);
+
+    /* Step 5: Publish registration message so the fleet manager knows about
+     * this device immediately, without waiting for the first heartbeat.
+     * Uses the same 32-byte heartbeat wire format (device_id, fw_version,
+     * policy_version, capabilities, etc.) as the registration payload.
+     * QoS 1 ensures at-least-once delivery. */
+    {
+        uint8_t reg_buf[32];
+        size_t reg_len;
+        if (dclaw_cbor_encode_heartbeat(reg_buf, &reg_len, sizeof(reg_buf)) == 0) {
+            char reg_topic[128];
+            if (build_topic(reg_topic, sizeof(reg_topic), "register") == 0) {
+                if (dclaw_mqtt_publish(reg_topic, reg_buf, reg_len, 1 /* QoS 1 */) != 0) {
+                    fprintf(stderr, "[DCLAW-MQTT] Failed to publish registration message\n");
+                } else {
+                    fprintf(stderr, "[DCLAW-MQTT] Registration message sent on %s\n", reg_topic);
+                }
+            }
+        }
+    }
 
     fprintf(stderr, "[DCLAW-MQTT] Connected to %s:%u\n", host, port);
     return 0;

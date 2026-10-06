@@ -67,7 +67,8 @@ const (
 	AlertTamperDetect   AlertType = "tamper_detect"
 	AlertPolicyDrift    AlertType = "policy_drift"
 	AlertCanaryRollback AlertType = "canary_rollback"
-	AlertSEDegraded     AlertType = "se_degraded"
+	AlertSEDegraded         AlertType = "se_degraded"
+	AlertDeviceAutoReg      AlertType = "device_auto_registered"
 )
 
 // Alert represents a fleet alert to dispatch.
@@ -100,6 +101,10 @@ type FleetManager struct {
 	heartbeatInterval time.Duration
 	store             DeviceStore
 
+	// AutoRegister controls whether unknown devices are automatically
+	// registered on their first heartbeat. Defaults to true.
+	AutoRegister bool
+
 	// Metrics hooks (set externally to avoid circular imports)
 	onDeviceRegistered func()
 	onDeviceOffline    func()
@@ -112,6 +117,7 @@ func New(alertHandler AlertHandler) *FleetManager {
 		devices:           make(map[uint64]*Device),
 		alertHandler:      alertHandler,
 		heartbeatInterval: 30 * time.Second,
+		AutoRegister:      true,
 	}
 }
 
@@ -219,6 +225,9 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 }
 
 // ProcessHeartbeat updates device state from a heartbeat.
+// If the device is not registered and AutoRegister is true, it will be
+// auto-registered with a default "auto-discovered" profile before
+// processing the heartbeat.
 func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint32, hb *Heartbeat) {
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
@@ -227,7 +236,39 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 	dev, exists := fm.devices[fullID]
 	if !exists {
-		return
+		if !fm.AutoRegister {
+			return
+		}
+		// Auto-register the unknown device using heartbeat fields.
+		dev = &Device{
+			DeviceID:      fullID,
+			TenantID:      tenantID,
+			FleetID:       fleetID,
+			HWProfile:     "auto-discovered",
+			FWVersion:     fmt.Sprintf("%d", hb.FWVersion),
+			PolicyVersion: hb.PolicyVersion,
+			Capabilities:  0,
+			Status:        StatusOnline,
+			RegisteredAt:  time.Now(),
+			LastHeartbeat: time.Now(),
+		}
+		fm.devices[fullID] = dev
+		if fm.store != nil {
+			if err := fm.store.SaveDevice(dev); err != nil {
+				log.Printf("[fleet] store error on auto-register: %v", err)
+			}
+		}
+		if fm.onDeviceRegistered != nil {
+			fm.onDeviceRegistered()
+		}
+		log.Printf("[fleet] auto-registered device %d (tenant=%d fleet=%d) from heartbeat", deviceID, tenantID, fleetID)
+		fm.fireAlert(Alert{
+			Type:      AlertDeviceAutoReg,
+			DeviceID:  fullID,
+			Message:   fmt.Sprintf("Device auto-registered from first heartbeat (fw=%d, policy=%d)", hb.FWVersion, hb.PolicyVersion),
+			Severity:  "info",
+			Timestamp: time.Now(),
+		})
 	}
 
 	dev.LastHeartbeat = time.Now()

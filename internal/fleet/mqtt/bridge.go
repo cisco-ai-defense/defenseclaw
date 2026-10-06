@@ -84,7 +84,13 @@ func (b *Bridge) Start(ctx context.Context) error {
 		return fmt.Errorf("subscribe verdict/req: %w", err)
 	}
 
-	b.logger.Printf("[mqtt-bridge] subscribed to %s and %s", TopicHeartbeat, TopicVerdictReq)
+	// Subscribe to device registration topic
+	if err := b.client.Subscribe(ctx, TopicRegister, 1, b.handleRegistration); err != nil {
+		_ = b.client.Disconnect()
+		return fmt.Errorf("subscribe register: %w", err)
+	}
+
+	b.logger.Printf("[mqtt-bridge] subscribed to %s, %s, and %s", TopicHeartbeat, TopicVerdictReq, TopicRegister)
 
 	// Wait for context cancellation
 	<-ctx.Done()
@@ -164,6 +170,56 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 	b.mu.Lock()
 	b.heartbeatsProcessed++
 	b.mu.Unlock()
+}
+
+// handleRegistration processes a registration message from an edge device.
+// The payload uses the same 32-byte heartbeat wire format. Registration is
+// idempotent: if the device already exists, RegisterDevice updates safe fields
+// and returns ErrDeviceExists, which we silently ignore.
+func (b *Bridge) handleRegistration(msg Message) {
+	b.wg.Add(1)
+	defer b.wg.Done()
+
+	parts, err := ParseTopic(msg.Topic)
+	if err != nil {
+		b.logger.Printf("[mqtt-bridge] bad registration topic: %v", err)
+		b.incErrors()
+		return
+	}
+
+	if parts.Suffix != "register" {
+		b.logger.Printf("[mqtt-bridge] unexpected suffix %q for registration handler", parts.Suffix)
+		b.incErrors()
+		return
+	}
+
+	hw, err := DecodeHeartbeat(msg.Payload)
+	if err != nil {
+		b.logger.Printf("[mqtt-bridge] decode registration from device %d: %v", parts.DeviceID, err)
+		b.incErrors()
+		return
+	}
+
+	_, regErr := b.fleet.RegisterDevice(
+		parts.TenantID, parts.FleetID, parts.DeviceID,
+		"mqtt-registered",
+		fmt.Sprintf("%d", hw.FWVersion),
+		hw.PolicyVersion,
+		hw.CacheHitPct, // capabilities byte mapped from wire
+	)
+
+	if regErr != nil && regErr != manager.ErrDeviceExists {
+		b.logger.Printf("[mqtt-bridge] register device %d: %v", parts.DeviceID, regErr)
+		b.incErrors()
+		return
+	}
+
+	if regErr == manager.ErrDeviceExists {
+		b.logger.Printf("[mqtt-bridge] device %d re-registered (idempotent)", parts.DeviceID)
+	} else {
+		b.logger.Printf("[mqtt-bridge] device %d registered via MQTT (tenant=%d fleet=%d fw=%d policy=%d)",
+			parts.DeviceID, parts.TenantID, parts.FleetID, hw.FWVersion, hw.PolicyVersion)
+	}
 }
 
 // handleVerdictRequest processes a verdict request from an edge device.

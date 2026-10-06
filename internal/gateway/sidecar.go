@@ -6825,7 +6825,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// Wire the Edge Connector fleet management API. The manager and verdict
 	// cache are lightweight in-process singletons; metrics are connected once
 	// so Prometheus scrapes reflect live fleet state.
-	fleetMgr := fleetmanager.New(nil)
+	fleetMgr := fleetmanager.New(func(alert fleetmanager.Alert) {
+		fmt.Fprintf(os.Stderr, "[fleet-alert] type=%s device=%d severity=%s: %s\n",
+			alert.Type, alert.DeviceID, alert.Severity, alert.Message)
+	})
 	// Persist fleet device state to SQLite so data survives gateway
 	// restarts.  Falls back to in-memory (no persistence) if the DB
 	// cannot be opened.

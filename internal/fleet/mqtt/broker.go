@@ -50,6 +50,9 @@ const (
 
 	// TopicVerdictReq matches: defenseclaw/+/+/+/verdict/req
 	TopicVerdictReq = "defenseclaw/+/+/+/verdict/req"
+
+	// TopicRegister matches: defenseclaw/+/+/+/register
+	TopicRegister = "defenseclaw/+/+/+/register"
 )
 
 // ParseTopic extracts tenant_id, fleet_id, device_id and suffix from an
