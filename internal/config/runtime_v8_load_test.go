@@ -53,6 +53,22 @@ observability: {}
 	}
 }
 
+// signature_pack_digests is keyed by pack file path. A path has dots, which
+// Viper takes for a key path, so the config did not load (GAP-0118).
+func TestRuntimeV8LoadersKeepDottedSignaturePackPaths(t *testing.T) {
+	const pack = "/etc/defenseclaw/p0-sigpack.json"
+	digest := "sha256:" + strings.Repeat("ab", 32)
+	raw := []byte("config_version: 8\ndata_dir: /tmp/defenseclaw-v8\nai_discovery:\n  signature_packs: [" + pack + "]\n" +
+		"  signature_pack_digests:\n    " + pack + ": " + digest + "\nobservability: {}\n")
+	cfg, err := LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.AIDiscovery.SignaturePackDigests[pack]; got != digest || len(cfg.AIDiscovery.SignaturePackDigests) != 1 {
+		t.Fatalf("signature_pack_digests = %v, want {%s: %s}", cfg.AIDiscovery.SignaturePackDigests, pack, digest)
+	}
+}
+
 func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
 	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
 	raw := []byte(`config_version: 8

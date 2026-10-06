@@ -2918,6 +2918,20 @@ func loadConfigSourceChecked(
 		return nil, fmt.Errorf("config: parse otel.resource.attributes: %w", err)
 	}
 
+	// ai_discovery.signature_pack_digests is keyed by pack file path, and a
+	// path has dots: Viper would read "/etc/defenseclaw/pack.json" as a key
+	// path and nest it, and the map then fails to decode (GAP-0118). Read it
+	// with literal keys and keep it from Viper, as for the OTel attributes.
+	var packDigests map[string]string
+	if cleanedBytes != nil {
+		if packDigests, cleanedBytes, err = extractSignaturePackDigests(cleanedBytes); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "signature_pack_digests_parse")
+			}
+			return nil, fmt.Errorf("config: parse ai_discovery.signature_pack_digests: %w", err)
+		}
+	}
+
 	if sourceProvided || cleanedBytes != nil {
 		if err := viper.ReadConfig(bytes.NewReader(cleanedBytes)); err != nil {
 			if ReportConfigLoadError != nil {
@@ -2988,6 +3002,9 @@ func loadConfigSourceChecked(
 	// stripped before handing bytes to Viper.
 	if otelAttrs != nil {
 		cfg.OTel.Resource.Attributes = otelAttrs
+	}
+	if packDigests != nil {
+		cfg.AIDiscovery.SignaturePackDigests = packDigests
 	}
 
 	// migrateConfig stamps pre-v7 compatibility sources as v7, so the runtime
@@ -3470,6 +3487,48 @@ func extractOTelResourceAttributes(configFile string) (map[string]string, []byte
 		return nil, nil, fmt.Errorf("read %s: %w", configFile, err)
 	}
 	return extractOTelResourceAttributesBytes(data)
+}
+
+// extractSignaturePackDigests reads ai_discovery.signature_pack_digests with
+// literal keys and returns data without it. nil digests mean the key is
+// absent and data is returned as it came.
+func extractSignaturePackDigests(data []byte) (map[string]string, []byte, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, data, nil // ReadConfig reports the syntax error
+	}
+	doc := firstDocumentNode(&root)
+	if doc == nil || doc.Kind != yaml.MappingNode {
+		return nil, data, nil
+	}
+	discovery := mappingChild(doc, "ai_discovery")
+	if discovery == nil || discovery.Kind != yaml.MappingNode {
+		return nil, data, nil
+	}
+	node := mappingChild(discovery, "signature_pack_digests")
+	if node == nil {
+		return nil, data, nil
+	}
+	digests := map[string]string{}
+	switch {
+	case node.Kind == yaml.MappingNode:
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			key, value := node.Content[i], node.Content[i+1]
+			if key.Kind != yaml.ScalarNode || value.Kind != yaml.ScalarNode {
+				return nil, nil, fmt.Errorf("entry at line %d must map a pack path to a sha256 digest", key.Line)
+			}
+			digests[key.Value] = value.Value
+		}
+	case node.Kind == yaml.ScalarNode && node.Tag == "!!null":
+	default:
+		return nil, nil, fmt.Errorf("must be a mapping of pack path to sha256 digest, got %v", yamlKindName(node.Kind))
+	}
+	removeMappingChild(discovery, "signature_pack_digests")
+	cleaned, err := yaml.Marshal(&root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("yaml re-marshal: %w", err)
+	}
+	return digests, cleaned, nil
 }
 
 func extractOTelResourceAttributesBytes(data []byte) (map[string]string, []byte, error) {
