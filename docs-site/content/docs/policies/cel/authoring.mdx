@@ -253,7 +253,8 @@ expression. Validate the complete pack, then test real calls in observe mode.
 <Accordion title="For repository contributors">
 
 Add focused Go fixtures and run
-`go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`.
+`go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`
+(the gateway package runs longer than the default `go test` deadline).
 When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
 `make check-guardrail-catalog`.
 
