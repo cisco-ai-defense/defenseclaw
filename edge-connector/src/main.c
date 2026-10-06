@@ -21,6 +21,7 @@ extern int  dclaw_mqtt_init(void);
 extern int  dclaw_mqtt_connect(void);
 extern int  dclaw_mqtt_send_heartbeat(void);
 extern int  dclaw_mqtt_reconnect(void);
+extern int  dclaw_mqtt_poll(int timeout_ms);
 extern void dclaw_canary_tick(void);
 #endif
 extern int  dclaw_ipc_parse_request(const char *json, size_t json_len,
@@ -184,6 +185,11 @@ int main(void) {
                 write(client_fds[i], err, strlen(err));
             }
         }
+
+        /* MQTT: poll for incoming messages (non-blocking, 10ms max) */
+#if DCLAW_MQTT_ENABLED
+        dclaw_mqtt_poll(10);
+#endif
 
         /* Periodic tasks */
 #if DCLAW_MQTT_ENABLED

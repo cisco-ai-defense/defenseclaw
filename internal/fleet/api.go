@@ -3,25 +3,31 @@
 package fleet
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	"github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/policy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
+	"github.com/google/uuid"
 )
 
 // API handles fleet REST endpoints.
 type API struct {
-	manager *manager.FleetManager
-	cache   *verdict.Cache
-	policy  *policy.Service
-	mux     *http.ServeMux
+	manager    *manager.FleetManager
+	cache      *verdict.Cache
+	policy     *policy.Service
+	mqttClient mqtt.Client
+	mux        *http.ServeMux
 }
 
 // NewAPI creates the fleet API with its dependencies.
@@ -43,6 +49,20 @@ func WithPolicyService(svc *policy.Service) APIOption {
 	return func(a *API) {
 		a.policy = svc
 	}
+}
+
+// WithMQTTClient attaches an MQTT client so the API can publish commands to devices.
+func WithMQTTClient(client mqtt.Client) APIOption {
+	return func(a *API) {
+		a.mqttClient = client
+	}
+}
+
+// validDeviceCommands lists the commands accepted by the sendCommand endpoint.
+var validDeviceCommands = map[string]bool{
+	"reboot":         true,
+	"policy-refresh": true,
+	"diagnostics":    true,
 }
 
 // Handler returns the http.Handler for mounting.
@@ -90,11 +110,18 @@ func (a *API) registerRoutes() {
 }
 
 func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
+	devices := a.manager.ListDevices()
 	health := a.manager.GetFleetHealth()
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total":   health.TotalDevices,
-		"online":  health.Online,
-		"offline": health.Offline,
+		"devices": devices,
+		"summary": map[string]any{
+			"total":    health.TotalDevices,
+			"online":   health.Online,
+			"offline":  health.Offline,
+			"degraded": health.Degraded,
+			"lockdown": health.Lockdown,
+		},
 	})
 }
 
@@ -158,6 +185,14 @@ func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+
+	idStr := r.PathValue("id")
+	deviceFullID, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device_id"})
+		return
+	}
+
 	var req struct {
 		Command string `json:"command"`
 	}
@@ -169,9 +204,55 @@ func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, status, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{
-		"status":  "pending",
-		"command": req.Command,
+
+	if req.Command == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "command is required"})
+		return
+	}
+	if !validDeviceCommands[req.Command] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("unknown command %q: must be one of reboot, policy-refresh, diagnostics", req.Command),
+		})
+		return
+	}
+
+	// Verify the device exists
+	dev, ok := a.manager.GetDevice(deviceFullID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+		return
+	}
+
+	commandID := uuid.New().String()
+
+	// Publish to MQTT if a client is available
+	if a.mqttClient != nil {
+		topic := fmt.Sprintf("defenseclaw/%d/%d/%d/cmd/request",
+			dev.TenantID, dev.FleetID, uint32(dev.DeviceID))
+
+		payload, _ := json.Marshal(map[string]string{
+			"command_id": commandID,
+			"command":    req.Command,
+			"timestamp":  time.Now().UTC().Format(time.RFC3339),
+		})
+
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if err := a.mqttClient.Publish(ctx, topic, 1, payload); err != nil {
+			log.Printf("[fleet-api] MQTT publish to %s failed: %v", topic, err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error":  "failed to dispatch command",
+				"detail": err.Error(),
+			})
+			return
+		}
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"command_id": commandID,
+		"device_id":  deviceFullID,
+		"command":    req.Command,
+		"status":     "dispatched",
 	})
 }
 
@@ -450,11 +531,51 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"batch_id":         "pending",
-		"affected_devices": 0,
-		"status":           "decommission not yet implemented",
-	})
+
+	var req struct {
+		Devices []struct {
+			TenantID uint16 `json:"tenant_id"`
+			FleetID  uint16 `json:"fleet_id"`
+			DeviceID uint32 `json:"device_id"`
+		} `json:"devices"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "http: request body too large" {
+			status = http.StatusRequestEntityTooLarge
+		}
+		writeJSON(w, status, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if len(req.Devices) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "devices list is required and must not be empty"})
+		return
+	}
+
+	batchID := uuid.New().String()
+	decommissioned := 0
+	var notFound []uint64
+
+	for _, d := range req.Devices {
+		if a.manager.DecommissionDevice(d.TenantID, d.FleetID, d.DeviceID) {
+			decommissioned++
+		} else {
+			notFound = append(notFound, uint64(manager.ComposeID(d.TenantID, d.FleetID, d.DeviceID)))
+		}
+	}
+
+	resp := map[string]any{
+		"batch_id":         batchID,
+		"requested":        len(req.Devices),
+		"decommissioned":   decommissioned,
+		"status":           "completed",
+	}
+	if len(notFound) > 0 {
+		resp["not_found"] = notFound
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

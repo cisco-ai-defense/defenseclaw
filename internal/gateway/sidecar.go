@@ -6836,21 +6836,36 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	policySigner, _ := fleetpolicy.NewHMACSignerFromEnv()
 	policyStore := fleetpolicy.NewMemoryPolicyStore()
 	var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
-	policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, nil)
 
 	// Start the MQTT bridge if a broker URL is configured. The bridge
 	// subscribes to heartbeat and verdict-request topics from edge devices
 	// and routes them to the fleet manager / verdict cache.
 	if brokerURL := os.Getenv("DCLAW_MQTT_BROKER_URL"); brokerURL != "" {
-		// TODO: create a real Paho MQTT client from brokerURL and assign
-		// to fleetMQTTClient so the policy service can publish OTA updates.
-		// For now, log and skip — the bridge requires a concrete Client.
-		fmt.Fprintf(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL=%s — fleet MQTT bridge not yet wired (need Paho client)\n", brokerURL)
+		clientID := fmt.Sprintf("dclaw-sidecar-%d", os.Getpid())
+		tcpClient := fleetmqtt.NewTCPClient(brokerURL, clientID)
+		if err := tcpClient.Connect(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connect to %s failed: %v\n", brokerURL, err)
+		} else {
+			fleetMQTTClient = tcpClient
+			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+			go func() {
+				if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+				}
+			}()
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", brokerURL)
+		}
 	} else {
 		fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
 	}
 
-	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleet.WithPolicyService(policySvc)))
+	policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, nil)
+
+	fleetOpts := []fleet.APIOption{fleet.WithPolicyService(policySvc)}
+	if fleetMQTTClient != nil {
+		fleetOpts = append(fleetOpts, fleet.WithMQTTClient(fleetMQTTClient))
+	}
+	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleetOpts...))
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token

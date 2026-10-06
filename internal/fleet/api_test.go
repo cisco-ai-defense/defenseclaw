@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,14 +107,168 @@ func TestPushThreatIntelWrongLength(t *testing.T) {
 
 func TestSendCommand(t *testing.T) {
 	api := setupAPI()
+	// Device 42 in tenant=1, fleet=1 has composite ID = ComposeID(1, 1, 42)
+	devID := manager.ComposeID(1, 1, 42)
 	body := `{"command":"reboot"}`
-	req := httptest.NewRequest("POST", "/devices/123/command", strings.NewReader(body))
+	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
 	w := httptest.NewRecorder()
 
 	api.Handler().ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", w.Code)
+		t.Fatalf("status = %d, want 202; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"command_id"`) {
+		t.Fatalf("response missing command_id: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"dispatched"`) {
+		t.Fatalf("response missing dispatched status: %s", w.Body.String())
+	}
+}
+
+func TestSendCommandNotFound(t *testing.T) {
+	api := setupAPI()
+	body := `{"command":"reboot"}`
+	req := httptest.NewRequest("POST", "/devices/999/command", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestSendCommandInvalid(t *testing.T) {
+	api := setupAPI()
+	devID := manager.ComposeID(1, 1, 42)
+	body := `{"command":"self-destruct"}`
+	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestSendCommandEmpty(t *testing.T) {
+	api := setupAPI()
+	devID := manager.ComposeID(1, 1, 42)
+	body := `{"command":""}`
+	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestSendCommandWithMQTT(t *testing.T) {
+	mgr := manager.New(nil)
+	mgr.RegisterDevice(1, 1, 42, "sbc", "1.0.0", 5, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	mc := &apiMockMQTTClient{}
+	api := NewAPI(mgr, cache, WithMQTTClient(mc))
+
+	devID := manager.ComposeID(1, 1, 42)
+	body := `{"command":"diagnostics"}`
+	req := httptest.NewRequest("POST", fmt.Sprintf("/devices/%d/command", devID), strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body: %s", w.Code, w.Body.String())
+	}
+
+	mc.mu.Lock()
+	pubs := len(mc.published)
+	mc.mu.Unlock()
+	if pubs != 1 {
+		t.Fatalf("published messages = %d, want 1", pubs)
+	}
+
+	mc.mu.Lock()
+	topic := mc.published[0].Topic
+	mc.mu.Unlock()
+	expected := "defenseclaw/1/1/42/cmd/request"
+	if topic != expected {
+		t.Fatalf("topic = %q, want %q", topic, expected)
+	}
+}
+
+func TestDecommissionBatch(t *testing.T) {
+	mgr := manager.New(nil)
+	mgr.RegisterDevice(1, 1, 10, "sbc", "1.0.0", 5, 0xFF)
+	mgr.RegisterDevice(1, 1, 20, "mcu", "1.0.0", 5, 0x0F)
+	mgr.RegisterDevice(1, 1, 30, "sbc", "2.0.0", 5, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	api := NewAPI(mgr, cache)
+
+	body := `{"devices":[{"tenant_id":1,"fleet_id":1,"device_id":10},{"tenant_id":1,"fleet_id":1,"device_id":20},{"tenant_id":1,"fleet_id":1,"device_id":999}]}`
+	req := httptest.NewRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"decommissioned":2`) {
+		t.Fatalf("expected 2 decommissioned: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"not_found"`) {
+		t.Fatalf("expected not_found in response: %s", w.Body.String())
+	}
+
+	// Verify devices are actually removed
+	devices := mgr.ListDevices()
+	if len(devices) != 1 {
+		t.Fatalf("remaining devices = %d, want 1", len(devices))
+	}
+}
+
+func TestDecommissionBatchEmpty(t *testing.T) {
+	api := setupAPI()
+	body := `{"devices":[]}`
+	req := httptest.NewRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestListDevicesReturnsList(t *testing.T) {
+	api := setupAPI()
+	req := httptest.NewRequest("GET", "/devices", nil)
+	w := httptest.NewRecorder()
+
+	api.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	// Must contain both "devices" array and "summary" object
+	if !strings.Contains(w.Body.String(), `"devices"`) {
+		t.Fatalf("response missing devices key: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"summary"`) {
+		t.Fatalf("response missing summary key: %s", w.Body.String())
 	}
 }
 

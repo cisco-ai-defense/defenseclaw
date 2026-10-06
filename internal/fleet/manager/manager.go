@@ -309,6 +309,36 @@ func (fm *FleetManager) GetDevice(fullID uint64) (Device, bool) {
 	return *dev, true
 }
 
+// ListDevices returns a snapshot copy of all registered devices.
+func (fm *FleetManager) ListDevices() []Device {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+
+	result := make([]Device, 0, len(fm.devices))
+	for _, dev := range fm.devices {
+		result = append(result, *dev)
+	}
+	return result
+}
+
+// DecommissionDevice removes a device from the in-memory registry and from the
+// backing store (if configured). Returns true if the device existed.
+func (fm *FleetManager) DecommissionDevice(tenantID, fleetID uint16, deviceID uint32) bool {
+	fullID := ComposeID(tenantID, fleetID, deviceID)
+
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	if _, ok := fm.devices[fullID]; !ok {
+		return false
+	}
+	delete(fm.devices, fullID)
+	if fm.store != nil {
+		_ = fm.store.DeleteDevice(tenantID, fleetID, deviceID)
+	}
+	return true
+}
+
 // GetFleetHealth returns aggregate fleet statistics.
 func (fm *FleetManager) GetFleetHealth() FleetHealth {
 	fm.mu.RLock()
