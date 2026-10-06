@@ -717,6 +717,23 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 	}
 	diff := diffConfigs(oldCfg, next)
+	// In hot mode a restart-required edit (a listener, the hook settings
+	// setup bakes in, a section still read once at start) keeps its running
+	// value and is reported as pending, so the rest of the edit, and every
+	// later one, still applies instead of each reload failing until the
+	// gateway restarts. Secure Client keeps its behaviour.
+	var pendingRestart []string
+	if len(diff.RestartRequired) > 0 && configReloadMode(next) != "restart" &&
+		!oldCfg.SecureClientIntegration() && !next.SecureClientIntegration() {
+		if held := holdRestartRequired(oldCfg, next, diff.RestartRequired); held != nil {
+			if heldDiff := diffConfigs(oldCfg, held); len(heldDiff.RestartRequired) == 0 {
+				pendingRestart = diff.RestartRequired
+				next, diff = held, heldDiff
+				fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
+					strings.Join(pendingRestart, ", "))
+			}
+		}
+	}
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
@@ -742,6 +759,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 				"generation": m.gen.Load(),
 				"reason":     reason,
 				"changed":    []string{},
+			}
+			if len(pendingRestart) > 0 {
+				detail["restart_required"] = pendingRestart
 			}
 			m.health.SetConfig(state, msg, detail)
 		}
@@ -792,7 +812,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			"generation":       gen,
 			"reason":           reason,
 			"changed":          diff.Changed,
-			"restart_required": diff.RestartRequired,
+			"restart_required": append(append([]string(nil), diff.RestartRequired...), pendingRestart...),
 			"last_success":     time.Now().UTC().Format(time.RFC3339),
 		}
 		m.health.SetConfig(state, msg, detail)
@@ -1238,6 +1258,76 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		restart = append(restart, "guardrail.connectors")
 	}
 	return ConfigDiff{Changed: changed, RestartRequired: sortedUniqueStrings(restart)}
+}
+
+// holdRestartRequired returns next with every restart-required section at
+// its running value, or nil when a path can not be held (storage paths, the
+// legacy sandbox mode): such a reload still fails as restart-required.
+func holdRestartRequired(running, next *config.Config, restart []string) *config.Config {
+	if running == nil || next == nil {
+		return nil
+	}
+	held := cloneConfig(next)
+	for _, path := range restart {
+		switch path {
+		case "claw":
+			held.Claw = running.Claw
+		case "agent":
+			held.Agent = running.Agent
+		case "routing":
+			held.Routing = running.Routing
+		case "application_protection":
+			held.ApplicationProtection = running.ApplicationProtection
+		case "cisco_ai_defense":
+			held.CiscoAIDefense = running.CiscoAIDefense
+		case "environment":
+			held.Environment = running.Environment
+		case "tenant_id":
+			held.TenantID = running.TenantID
+		case "workspace_id":
+			held.WorkspaceID = running.WorkspaceID
+		case "discovery_source":
+			held.DiscoverySource = running.DiscoverySource
+		case "deployment_mode":
+			held.DeploymentMode = running.DeploymentMode
+		case "enterprise", "enterprise.network":
+			inspection := held.Enterprise.Inspection
+			held.Enterprise = running.Enterprise
+			held.Enterprise.Inspection = inspection
+		case "gateway", "gateway.device_key_file":
+			reload, watcher := held.Gateway.ConfigReload, held.Gateway.Watcher
+			held.Gateway = running.Gateway
+			held.Gateway.ConfigReload, held.Gateway.Watcher = reload, watcher
+		case "guardrail", "guardrail.retain_judge_bodies", "guardrail.scanner_mode", "guardrail.connectors":
+			holdGuardrailProcessSettings(&held.Guardrail, running.Guardrail)
+		default:
+			return nil
+		}
+	}
+	return held
+}
+
+// holdGuardrailProcessSettings puts the guardrailNeedsRestart fields of g
+// back to their running values; the policy keys keep the new values.
+func holdGuardrailProcessSettings(g *config.GuardrailConfig, running config.GuardrailConfig) {
+	g.Host, g.Port, g.Enabled, g.Connector = running.Host, running.Port, running.Enabled, running.Connector
+	g.ScannerMode, g.RetainJudgeBodies = running.ScannerMode, running.RetainJudgeBodies
+	g.HookFailMode, g.HookSelfHeal, g.HookSelfHealDebounceMs = running.HookFailMode, running.HookSelfHeal, running.HookSelfHealDebounceMs
+	// The connector set (the keys of guardrail.connectors) is the set of
+	// connectors whose hooks are installed, so it stays as it runs too.
+	var connectors map[string]config.PerConnectorGuardrailConfig
+	if running.Connectors != nil {
+		connectors = make(map[string]config.PerConnectorGuardrailConfig, len(running.Connectors))
+	}
+	for name, was := range running.Connectors {
+		pc, ok := g.Connectors[name]
+		if !ok {
+			pc = was
+		}
+		pc.Enabled, pc.HookFailMode = was.Enabled, was.HookFailMode
+		connectors[name] = pc
+	}
+	g.Connectors = connectors
 }
 
 // effectiveGatewayConfigForDiff compares operator-controlled gateway state.

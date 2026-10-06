@@ -844,6 +844,28 @@ func TestDiffConfigsV8ResourceIdentityRequiresRestart(t *testing.T) {
 	}
 }
 
+// TestHoldRestartRequiredAppliesTheRest: a hook_fail_mode edit needs a
+// restart, so it keeps its running value while an admission edit in the
+// same (or a later) reload still applies hot.
+func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.HookFailMode = "closed"
+	newCfg.Guardrail.BlockAt = "HIGH"
+	newCfg.Admission.Skill.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
+
+	diff := diffConfigs(oldCfg, newCfg)
+	held := holdRestartRequired(oldCfg, newCfg, diff.RestartRequired)
+	if !slices.Contains(diff.RestartRequired, "guardrail") || held == nil {
+		t.Fatalf("restart_required = %v, held = %v", diff.RestartRequired, held != nil)
+	}
+	heldDiff := diffConfigs(oldCfg, held)
+	if len(heldDiff.RestartRequired) != 0 || !slices.Contains(heldDiff.Changed, "admission") ||
+		held.Guardrail.HookFailMode != oldCfg.Guardrail.HookFailMode || held.Guardrail.BlockAt != "HIGH" {
+		t.Fatalf("held diff = %+v hook_fail_mode=%q block_at=%q", heldDiff, held.Guardrail.HookFailMode, held.Guardrail.BlockAt)
+	}
+}
+
 func TestDiffConfigsAllowsHotGuardrailPolicyFields(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)

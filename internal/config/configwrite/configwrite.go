@@ -293,17 +293,24 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	}, nil
 }
 
-// restartKeys are the process-level keys a running gateway can not apply
-// without a restart (spec section 4); everything else is hot.
+// restartKeys are the keys a running gateway applies only after a restart:
+// the process-level keys of spec section 4, plus what its reload still
+// treats as restart-required (internal/gateway diffConfigs and
+// guardrailNeedsRestart): the sections read once at start, the guardrail
+// listener and enablement, and the hook settings setup bakes into the
+// installed hooks. "*" matches one segment. Everything else is hot; a
+// running gateway keeps a restart-required value at its running value and
+// applies the rest of the change.
 var restartKeys = []string{
 	"data_dir",
 	"observability.local.path",
 	"observability.local.judge_bodies_path",
-	"gateway.host", "gateway.port", "gateway.api_port", "gateway.api_bind",
-	"gateway.tls", "gateway.tls_skip_verify", "gateway.device_key_file",
-	"gateway.token", "gateway.token_env", "gateway.fleet_mode",
-	"gateway.config_reload.mode",
-	"guardrail.host", "guardrail.port",
+	"gateway",
+	"guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
+	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
+	"guardrail.hook_fail_mode", "guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
+	"guardrail.connectors.*.enabled", "guardrail.connectors.*.hook_fail_mode",
+	"claw", "agent", "routing", "application_protection", "cisco_ai_defense",
 	"deployment_mode", "enterprise.profile", "enterprise.network",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 }
@@ -312,12 +319,55 @@ var restartKeys = []string{
 func RestartRequired(changed []string) []string {
 	var out []string
 	for _, path := range changed {
+		segs := restartSegments(path)
+		if hotGatewayPath(segs) {
+			continue
+		}
 		for _, key := range restartKeys {
-			if path == key || strings.HasPrefix(path, key+".") || strings.HasPrefix(path, key+"[") ||
-				strings.HasPrefix(key, path+".") {
+			if restartKeyMatches(segs, strings.Split(key, ".")) {
 				out = append(out, path)
 				break
 			}
+		}
+	}
+	return out
+}
+
+// hotGatewayPath reports the gateway keys a reload applies in place: the
+// install watcher settings and every config_reload key but its mode.
+func hotGatewayPath(segs []string) bool {
+	if len(segs) >= 3 && segs[0] == "gateway" && segs[1] == "config_reload" {
+		return segs[2] != "mode"
+	}
+	return len(segs) >= 2 && segs[0] == "gateway" && segs[1] == "watcher"
+}
+
+// restartKeyMatches reports whether a change at path touches key: path is
+// key, under it, or an ancestor of it.
+func restartKeyMatches(path, key []string) bool {
+	n := len(path)
+	if len(key) < n {
+		n = len(key)
+	}
+	for i := 0; i < n; i++ {
+		if key[i] != "*" && key[i] != path[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// restartSegments splits a change path into its key segments, dropping list
+// indexes and quoting (a.b[0]["c.d"] is a, b, c.d).
+func restartSegments(path string) []string {
+	parts, err := parsePath(path)
+	if err != nil {
+		return strings.Split(path, ".")
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if !part.isIdx {
+			out = append(out, part.key)
 		}
 	}
 	return out

@@ -80,25 +80,32 @@ MANAGED_REFUSAL = (
     "(MDM or management plane), not on the device"
 )
 
-# Process-level keys a running gateway can not apply without a restart
-# (internal/config/configwrite restartKeys); everything else is hot.
+# Keys a running gateway applies only after a restart: the process-level
+# keys, plus what its reload still treats as restart-required (the sections
+# read once at start, the guardrail listener and enablement, the hook
+# settings setup bakes into the hooks). "*" matches one segment. Everything
+# else is hot. Mirrors internal/config/configwrite restartKeys.
 RESTART_KEYS = (
     "data_dir",
     "observability.local.path",
     "observability.local.judge_bodies_path",
-    "gateway.host",
-    "gateway.port",
-    "gateway.api_port",
-    "gateway.api_bind",
-    "gateway.tls",
-    "gateway.tls_skip_verify",
-    "gateway.device_key_file",
-    "gateway.token",
-    "gateway.token_env",
-    "gateway.fleet_mode",
-    "gateway.config_reload.mode",
+    "gateway",
     "guardrail.host",
     "guardrail.port",
+    "guardrail.enabled",
+    "guardrail.connector",
+    "guardrail.scanner_mode",
+    "guardrail.retain_judge_bodies",
+    "guardrail.hook_fail_mode",
+    "guardrail.hook_self_heal",
+    "guardrail.hook_self_heal_debounce_ms",
+    "guardrail.connectors.*.enabled",
+    "guardrail.connectors.*.hook_fail_mode",
+    "claw",
+    "agent",
+    "routing",
+    "application_protection",
+    "cisco_ai_defense",
     "deployment_mode",
     "enterprise.profile",
     "enterprise.network",
@@ -200,8 +207,15 @@ def restart_required(changed: list[str]) -> list[str]:
     """Return the paths in ``changed`` that need a gateway restart."""
     out = []
     for path in changed:
+        try:
+            segs = [str(p) for p in parse_path(path) if not isinstance(p, int)]
+        except ValueError:
+            segs = path.split(".")
+        if segs[:2] == ["gateway", "watcher"] or (segs[:2] == ["gateway", "config_reload"] and segs[2:3] not in ([], ["mode"])):
+            continue
         for key in RESTART_KEYS:
-            if path == key or path.startswith((key + ".", key + "[")) or key.startswith(path + "."):
+            parts = key.split(".")
+            if all(k in ("*", p) for k, p in zip(parts, segs)):
                 out.append(path)
                 break
     return out
