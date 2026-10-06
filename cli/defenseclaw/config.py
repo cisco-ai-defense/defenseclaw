@@ -6630,6 +6630,34 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
+#: The Linux and macOS managed standalone layouts: config path -> the
+#: root-owned vendor policy folder an omitted policy_dir resolves to there,
+#: as in Go (managed.StandaloneLayoutFor, applyRuntimeV8DataDirDefaults).
+_STANDALONE_VENDOR_POLICY_DIRS = {
+    "/etc/defenseclaw/config.yaml": "/opt/defenseclaw/share/policies",
+    "/opt/cisco/defenseclaw/etc/config.yaml": "/opt/cisco/defenseclaw/share/policies",
+}
+
+
+def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
+    """policy_dir when the config omits it: ``<data_dir>/policies``, or the
+    vendor policy folder the gateway loads on a managed standalone layout."""
+    import posixpath
+
+    vendor = _STANDALONE_VENDOR_POLICY_DIRS.get(posixpath.normpath(cfg_file)) if cfg_file.startswith("/") else None
+    if vendor:
+        from defenseclaw.config_writer import standalone_managed
+
+        try:
+            with open(cfg_file, "rb") as handle:
+                raw = handle.read(4 * 1024 * 1024)
+        except OSError:
+            raw = b""
+        if standalone_managed(raw):
+            return vendor
+    return os.path.join(data_dir, "policies")
+
+
 def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     """Load config from the active config path, applying defaults.
 
@@ -6702,7 +6730,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         audit_db=audit_db,
         quarantine_dir=raw.get("quarantine_dir", os.path.join(data_dir, "quarantine")),
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),
-        policy_dir=raw.get("policy_dir", os.path.join(data_dir, "policies")),
+        policy_dir=raw["policy_dir"] if "policy_dir" in raw else _default_policy_dir(cfg_file, data_dir),
         environment=raw.get("environment", detect_environment()),
         tenant_id=raw.get("tenant_id", ""),
         workspace_id=raw.get("workspace_id", ""),

@@ -2102,5 +2102,20 @@ class TestWebhookConfig(unittest.TestCase):
                 self.assertEqual(cfg.webhooks[0].min_severity, "LOW")
 
 
+class TestPolicyDirDefault(unittest.TestCase):
+    def test_managed_standalone_layout_defaults_to_the_vendor_policy_folder(self):
+        # Go resolves an omitted policy_dir there to the root-owned vendor
+        # folder the gateway loads; Python reads the same tree.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}),
+                patch.dict(config_mod._STANDALONE_VENDOR_POLICY_DIRS, {path: "/opt/vendor/share/policies"}),
+            ):
+                self.assertEqual(load(data_dir=tmpdir).policy_dir, "/opt/vendor/share/policies")
+
+
 if __name__ == "__main__":
     unittest.main()
