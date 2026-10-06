@@ -17,6 +17,7 @@
 package scanner
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -95,6 +96,19 @@ func TestSkillScanner_BuildArgsJudgeForEveryProvider(t *testing.T) {
 		if env := strings.Join(ss.scanEnv(), "\n"); !strings.Contains(env, tc.wantEnv) {
 			t.Fatalf("%s: env missing %s", tc.llm.Provider, tc.wantEnv)
 		}
+	}
+}
+
+// enable_meta without a usable judge must not pass --enable-meta: the pinned
+// skill-scanner exits 2 without an LLM key, and the watcher fails closed.
+func TestSkillScanner_BuildArgsMetaNeedsTheJudge(t *testing.T) {
+	cfg := config.SkillScannerConfig{UseLLM: true, EnableMeta: true}
+	if args := NewSkillScannerFromLLM(cfg, config.LLMConfig{}, config.CiscoAIDefenseConfig{}).buildArgs("/tmp/skill", "quiet"); slices.Contains(args, "--enable-meta") {
+		t.Fatalf("--enable-meta without a judge: %v", args)
+	}
+	judge := config.LLMConfig{Provider: "anthropic", Model: "claude-sonnet-5-5", APIKey: "k"}
+	if args := NewSkillScannerFromLLM(cfg, judge, config.CiscoAIDefenseConfig{}).buildArgs("/tmp/skill", "quiet"); !slices.Contains(args, "--enable-meta") {
+		t.Fatalf("--enable-meta missing with a judge: %v", args)
 	}
 }
 
