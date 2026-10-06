@@ -21,6 +21,16 @@ The guided trace normalizes a connector event, matches a bundled rule, skips sup
 
 <Cards>
   <Card
+    title="Thresholds: block_at and alert_at"
+    href="/docs/policies/thresholds"
+    description="The single threshold model: global, connector and profile scopes, precedence, the rule pack's default, and how to read and set the levels."
+  />
+  <Card
+    title="Rules and custom packs"
+    href="/docs/policies/rules"
+    description="Choose a rule pack, pin your own by digest, and turn rules off, change severities or add suppressions with guardrail.rules."
+  />
+  <Card
     title="Deterministic detection reference"
     href="/docs/policies/deterministic-detection"
     description="Inventory every shipped deterministic layer: ActionFacts, CEL, regex, exact semantic proofs, YARA, bounded chains, profiles, and protection packs."
@@ -86,40 +96,136 @@ enforcement-safe synchronous pre-tool final step can deny, and only when the
 active profile maps the chain's severity to `block`. OPA/Rego continues to
 power admission, firewall, audit, and direct guardrail-policy evaluation.
 
-## Layer 1 — Repo policies (OPA / Rego)
+## Layer 1 — Admission policy and the OPA engine
 
-The top-level policy file (`policies/default.yaml` and friends) is the source used to generate the active OPA data document. It declares admission behavior, severity-to-action mappings, scanner overrides, guardrail thresholds, firewall policy, audit settings, and related operator defaults:
+The named policies (`default`, `strict`, `permissive`, and any you create with `defenseclaw policy create`) are **presets**. A preset is a YAML file under `policies/` that bundles admission behaviour, severity-to-action mappings, scanner overrides, guardrail thresholds and a few operator defaults. The gateway never reads it at runtime. `defenseclaw policy activate <name>` copies the preset into `config.yaml` in one validated write, and `config.yaml` is the only thing the gateway enforces.
 
-```yaml title="policies/default.yaml (excerpt)"
-name: default
-admission:
-  scan_on_install: true
-  allow_list_bypass_scan: true
-
-skill_actions:
-  critical:
-    file: quarantine
-    runtime: disable
-    install: block
-  high:
-    file: quarantine
-    runtime: disable
-    install: block
-
-guardrail:
-  block_threshold: 4
-  alert_threshold: 2
-  hilt:
-    enabled: false
-    min_severity: HIGH
-  cisco_trust_level: full
-
-firewall:
-  default_action: deny
-  allowed_ports: [443, 80]
+```bash
+defenseclaw policy list
+defenseclaw policy show strict
+defenseclaw policy activate strict
 ```
 
-`defenseclaw policy activate <name>` writes this YAML into `config.yaml`: its actions into `admission:` and its thresholds into `guardrail.block_at` / `alert_at`. `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input (no `data.json` since `config_version: 9`). Each package exposes domain-specific results rather than one universal decision object:
+```text title="defenseclaw policy list"
+Available policies:
+
+    default [built-in]
+      Balanced security policy for standard deployments
+    permissive [built-in]
+      Permissive policy for development and testing
+    strict [built-in]
+      Maximum security policy for high-risk environments
+
+  Activate a policy: defenseclaw policy activate <name>
+  Show details:      defenseclaw policy show <name>
+```
+
+```text title="defenseclaw policy show strict (abridged)"
+Policy: strict
+  Maximum security policy for high-risk environments
+
+Admission:
+  scan_on_install:        True
+  allow_list_bypass_scan: False
+
+Severity Actions:
+  CRITICAL    install=block  file=quarantine  runtime=disable
+  HIGH        install=block  file=quarantine  runtime=disable
+  MEDIUM      install=block  file=quarantine  runtime=disable
+  LOW         install=none   file=none        runtime=enable
+  INFO        install=none   file=none        runtime=enable
+...
+Guardrail:
+  block_threshold:    MEDIUM (2)
+  alert_threshold:    LOW (1)
+  (activation writes them to guardrail.block_at / alert_at)
+```
+
+After `policy activate strict`, these keys are in `config.yaml` (excerpt; the other severities and asset types follow the same shape):
+
+```yaml title="~/.defenseclaw/config.yaml (added by policy activate strict)"
+guardrail:
+  block_at: MEDIUM
+  alert_at: LOW
+admission:
+  defaults:
+    scan_on_install: true
+    allow_list_bypass_scan: false
+    actions:
+      critical:
+        install: block
+        file: quarantine
+        runtime: disable
+      # high and medium match critical; low and info are install: none, file: none, runtime: enable
+  skill:
+    actions:
+      # the same severity actions as defaults
+    first_party_allow_list:
+      - name: codeguard
+        source_path_contains:
+          - .claude/skills/codeguard
+        reason: first-party DefenseClaw skill
+  mcp:
+    actions:
+      medium:
+        install: block
+        file: quarantine
+        runtime: disable
+      low:
+        install: none
+        file: none
+        runtime: disable
+  plugin:
+    actions:
+      high:
+        install: block
+        file: quarantine
+        runtime: disable
+      medium:
+        install: none
+        file: none
+        runtime: enable
+watch:
+  rescan_interval_min: 30
+```
+
+Read the result back the way the gateway sees it:
+
+```bash
+defenseclaw config get guardrail.block_at --effective
+defenseclaw config get admission.skill --effective
+```
+
+```text title="Terminal output (abridged)"
+(source: config:guardrail.block_at)
+MEDIUM
+(source: config:admission.skill.actions)
+actions:
+  critical: quarantine
+  high: quarantine
+  info: warn
+...
+```
+
+What activation copies, and where it goes:
+
+| In the preset file | In `config.yaml` |
+| --- | --- |
+| `admission.scan_on_install`, `allow_list_bypass_scan` | `admission.defaults.scan_on_install`, `allow_list_bypass_scan` |
+| `skill_actions` | `admission.defaults.actions` and `admission.skill.actions` |
+| `scanner_overrides.<type>` | `admission.<type>.actions` |
+| `first_party_allow_list` | `admission.<type>.first_party_allow_list` |
+| `guardrail.block_threshold`, `alert_threshold` | `guardrail.block_at`, `alert_at`, only where the preset's level differs from the default of the selected rule pack ([Thresholds](/docs/policies/thresholds)) |
+| `guardrail.cisco_trust_level` | `guardrail.cisco_trust_level` (left unset for `full`) |
+| `watch` | `watch.rescan_enabled`, `watch.rescan_interval_min` |
+| `cisco_ai_defense.endpoint`, `api_key_env` | the same keys, when the preset carries them |
+| `webhooks` | added to `webhooks`; an existing webhook is never removed or rewritten |
+
+The preset's `hilt`, `patterns`, `severity_mappings`, `firewall`, `enforcement` and `audit` sections are not copied: HITL has its own command ([HITL](/docs/hitl)), and the rule pack carries the patterns. Activation **replaces the whole `admission:` section**, so re-apply any hand-tuned admission entries afterwards, or edit the live policy with `defenseclaw policy edit` or `defenseclaw config set` instead of activating again. The `admission` keys are described on the [admission policy](/docs/policies/admission) page.
+
+The running gateway applies the new policy without a restart. If the preset also changes `watch` or `cisco_ai_defense` settings, `policy activate` restarts the gateway itself.
+
+`config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. There is no `data.json` since `config_version: 9`; a leftover one is ignored and reported by `defenseclaw doctor`. Each package exposes domain-specific results rather than one universal decision object:
 
 | Rego package | Primary outputs |
 | --- | --- |
@@ -128,7 +234,7 @@ firewall:
 | `defenseclaw.firewall` | `action`, `rule_name` |
 | `defenseclaw.audit` | `retain`, `retain_reason`, `export_to` |
 
-You can hand-edit the Rego — the engine is just OPA — but most operators stay in the YAML layer because the bundled Rego covers the common cases.
+You can hand-edit the Rego — the engine is just OPA — but most operators stay in `config.yaml` because the bundled Rego covers the common cases.
 
 ### How the engine evaluates
 
@@ -151,7 +257,8 @@ Guardrail scanner and hook events separately preserve matching rule IDs, evaluat
 
 The guardrail rule pack is the *content* the gateway evaluates against — the
 [tool-call CEL expressions](/docs/policies/cel/authoring) and bounded regex fallbacks,
-judge prompts, and category taxonomies. Three packs ship out of the box:
+judge prompts, and category taxonomies. Three packs ship out of the box, and each one also sets
+the default [`block_at` and `alert_at`](/docs/policies/thresholds) for the scopes that use it:
 
 <Cards>
   <Card title="permissive" href="/docs/policies/defaults" description="Permissive runtime posture: CRITICAL blocks, HIGH alerts, and lower severities allow. Pair with observe mode for a non-enforcing pilot." />
@@ -191,7 +298,7 @@ policies/guardrail/<pack>/
 Your own rules go in a pack you copy, in a file of their own such as
 `rules/my-org.yaml` (see [Authoring custom rule packs](#authoring-custom-rule-packs)).
 
-Switch packs with `use-pack`. It validates the pack first and writes nothing if the pack is invalid:
+Switch packs with `use-pack`. It validates the pack first and writes nothing if the pack is invalid. The running gateway applies the change on its next reload; nothing is restarted:
 
 ```bash
 defenseclaw guardrail use-pack strict                    # every connector
@@ -199,7 +306,7 @@ defenseclaw guardrail use-pack strict --connector codex  # one connector
 defenseclaw guardrail list-packs                         # presets, custom packs, and who uses which
 ```
 
-`use-pack` accepts a bundled profile (`default`, `strict`, `permissive`), the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory path. A global switch removes per-connector overrides; `--clear --connector X` returns one connector to the global pack. `defenseclaw setup guardrail --rule-pack` still works at setup time. See [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full custom-pack workflow.
+`use-pack` accepts a bundled profile (`default`, `strict`, `permissive`), the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory path. It writes `guardrail.rule_pack`; a custom directory is also pinned in `guardrail.custom_packs` by its content digest. A global switch removes per-connector overrides; `--clear --connector X` returns one connector to the global pack. `defenseclaw setup guardrail --rule-pack` still works at setup time. See [Authoring custom rule packs](#authoring-custom-rule-packs) below for the custom-pack workflow, and [Rules and custom packs](/docs/policies/rules) for `guardrail.rules`, which turns rules off, changes severities and adds suppressions without copying a pack.
 
 ### Rule shape
 
@@ -370,6 +477,10 @@ and telemetry, see [Redaction](/docs/observability/redaction).
 
 The [suppression cookbook](/docs/policies/suppression-cookbook) covers each
 layer, its matching rules and the shipped examples.
+To add a finding suppression without copying a pack, put it in
+`guardrail.rules.suppressions` in `config.yaml` or run
+`defenseclaw guardrail suppress add`; see
+[Rules and custom packs](/docs/policies/rules#customise-a-pack-with-guardrailrules).
 
 ## Layer 5 — Session correlator
 
@@ -489,10 +600,11 @@ the expression schema and authoring examples.
     unavailable validator.
   </Step>
   <Step>
-    **Apply the validated directory and verify the effective connector packs.**
+    **Pin and apply the validated directory, then verify the effective connector packs.**
     `use-pack` validates the directory again and writes `guardrail.rule_pack`
-    and its `guardrail.custom_packs` entry; the running gateway loads the pack
-    on its next reload (a stopped gateway loads it when it starts):
+    and its `guardrail.custom_packs` entry with the pack's content digest. The
+    running gateway loads the pack on its next reload, without a restart (a
+    stopped gateway loads it when it starts):
 
     ```bash
     defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
@@ -502,23 +614,24 @@ the expression schema and authoring examples.
 
     Add `--connector X` to switch only one connector.
 
-    DefenseClaw does not watch rule-pack files. After editing the active pack
-    in place, run `defenseclaw-gateway restart`;
-    `defenseclaw-gateway policy reload` reloads OPA policy, not rule packs.
-    [Validate rule packs](/docs/policies/rulepack-validation) has the full
-    command contract.
+    The gateway watches pack directories, and a pinned pack that no longer
+    matches its digest is rejected: the previous generation keeps running and
+    `doctor` fails. After editing the active pack, validate it and pin the new
+    digest as [Rules and custom packs](/docs/policies/rules#change-a-pinned-pack)
+    shows. [Validate rule packs](/docs/policies/rulepack-validation) has the
+    full command contract.
   </Step>
 </Steps>
 
 ## Operator commands
 
-The `policy` group manages **named OPA / asset policies** (stored under `~/.defenseclaw/policies/`) — different surface from the guardrail rule packs above. Subcommands:
+The `policy` group manages **named policies** (presets stored under `~/.defenseclaw/policies/`) and applies them to `config.yaml` — a different surface from the guardrail rule packs above. Subcommands:
 
 ```bash
 defenseclaw policy list                       # every named policy on disk
 defenseclaw policy show my-policy             # normalized summary of one policy
 defenseclaw policy create my-policy -d "Production policy"
-defenseclaw policy activate my-policy         # set as active
+defenseclaw policy activate my-policy         # copy its settings into config.yaml
 defenseclaw policy delete my-policy           # remove
 defenseclaw policy validate                   # compiles the Rego modules
 defenseclaw policy test --verbose             # runs any *_test.rego files (none ship)
@@ -526,7 +639,10 @@ defenseclaw policy edit actions --severity high --runtime disable --policy-name 
 ```
 
 `policy show` and `policy activate` take a policy name. `policy show` prints a
-normalized summary rather than the source YAML. `policy validate` checks that
+normalized summary rather than the source YAML. Without `--policy-name`, the
+`policy edit` subcommands change the live policy in `config.yaml` (admission
+and the guardrail levels) and the running gateway applies it; with it, they
+save a named preset for a later `policy activate`. `policy validate` checks that
 the Rego modules compile; the admission policy itself is in `config.yaml`,
 which `defenseclaw config validate` checks. `policy test` runs Rego unit tests placed next to your policies; the
 installed copy ships none, so it reports that there is nothing to run. Both
@@ -536,6 +652,9 @@ directory.
 
 ## See also
 
+- [Thresholds](/docs/policies/thresholds) — `block_at` and `alert_at`: scopes, precedence and the rule pack's default
+- [Rules and custom packs](/docs/policies/rules) — `guardrail.rules`, `rule_pack` and packs pinned by digest
+- [User- and group-based policies](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale) — give users, groups, connectors or agents their own levels, rules and rule pack through guardrail profiles
 - [Defaults](/docs/policies/defaults) — what each shipped rule pack actually sets, and how to pick one based on risk tolerance
 - [Setup Guardrail](/docs/guardrail) — the CLI that wires the chosen pack into your connectors
 - [Unified LLM key](/docs/guardrail/unified-llm-key) — how the LLM judge resolves its provider key
