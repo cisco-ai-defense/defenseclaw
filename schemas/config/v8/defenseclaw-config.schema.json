@@ -756,26 +756,6 @@
             }
           }
         },
-        "virustotal": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "api_key_env": {
-              "$ref": "#/$defs/envNameOrEmpty",
-              "default": "VIRUSTOTAL_API_KEY"
-            },
-            "upload_files": {
-              "type": "boolean",
-              "default": false
-            },
-            "max_files": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 10000,
-              "default": 10
-            }
-          }
-        },
         "timeouts": {
           "$ref": "#/$defs/mcpScannerTimeouts"
         }
@@ -5527,15 +5507,12 @@
         "yara",
         "llm",
         "behavioral",
-        "virustotal",
-        "readiness",
-        "vulnerable_package",
-        "prompt_defense"
+        "readiness"
       ]
     },
     "mcpScannerAnalyzerList": {
       "type": "array",
-      "maxItems": 8,
+      "maxItems": 5,
       "uniqueItems": true,
       "items": {
         "$ref": "#/$defs/mcpScannerAnalyzer"

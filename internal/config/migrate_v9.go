@@ -1332,6 +1332,12 @@ func (m *v9Migrator) migrateScanners(root *yaml.Node) error {
 // v9MCPAnalyzers turns the v8 CSV (or a list) into the v9 list: "auto" or
 // empty alone is [] (auto), and "auto" inside a list - which the setup
 // wizard produced and which dropped YARA - becomes yara plus the rest.
+// v9MCPScannerAnalyzers are the analyzers the pinned mcp-scanner has
+// (schema $defs.mcpScannerAnalyzer).
+var v9MCPScannerAnalyzers = map[string]bool{"api": true, "yara": true, "llm": true, "behavioral": true, "readiness": true}
+
+// v9MCPAnalyzers is the v9 list of a v8 analyzers value; a name the pinned
+// mcp-scanner does not have is dropped (it ignored it at scan time).
 func v9MCPAnalyzers(items []string) []string {
 	out := []string{}
 	seen := map[string]bool{}
@@ -1342,6 +1348,7 @@ func v9MCPAnalyzers(items []string) []string {
 		case item == "":
 		case item == "auto":
 			hasAuto = true
+		case !v9MCPScannerAnalyzers[item]:
 		case !seen[item]:
 			seen[item] = true
 			out = append(out, item)

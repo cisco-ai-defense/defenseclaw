@@ -1224,13 +1224,6 @@ class MCPScannerYARAConfig:
 
 
 @dataclass
-class MCPScannerVirusTotalConfig:
-    api_key_env: str = ""
-    upload_files: bool = False
-    max_files: int = 0
-
-
-@dataclass
 class MCPScannerTimeouts:
     stdio_s: int = 0
     remote_s: int = 0
@@ -1294,7 +1287,6 @@ class MCPScannerConfig:
     judge_source: str = ""
     api: MCPScannerAPIConfig = field(default_factory=MCPScannerAPIConfig)
     yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
-    virustotal: MCPScannerVirusTotalConfig = field(default_factory=MCPScannerVirusTotalConfig)
     timeouts: MCPScannerTimeouts = field(default_factory=MCPScannerTimeouts)
 
 
@@ -5747,7 +5739,6 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
             judge_source=str(raw.get("judge_source", "") or ""),
             api=_merge_mcp_scanner_api(raw.get("api")),
             yara=_merge_mcp_scanner_yara(raw.get("yara")),
-            virustotal=_merge_mcp_scanner_virustotal(raw.get("virustotal")),
             timeouts=_merge_mcp_scanner_timeouts(raw.get("timeouts")),
         )
     return MCPScannerConfig()
@@ -5967,15 +5958,6 @@ def _merge_mcp_scanner_yara(raw: Any) -> MCPScannerYARAConfig:
     return MCPScannerYARAConfig(
         include_bundled=_optional_bool(raw.get("include_bundled")),
         extra_rules=[_merge_asset_file_ref(entry) for entry in raw.get("extra_rules") or [] if isinstance(entry, dict)],
-    )
-
-
-def _merge_mcp_scanner_virustotal(raw: Any) -> MCPScannerVirusTotalConfig:
-    raw = _mapping(raw)
-    return MCPScannerVirusTotalConfig(
-        api_key_env=str(raw.get("api_key_env", "") or ""),
-        upload_files=raw.get("upload_files") is True,
-        max_files=_int_or_zero(raw.get("max_files")),
     )
 
 

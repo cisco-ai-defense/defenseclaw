@@ -1540,11 +1540,10 @@ type MCPScannerConfig struct {
 	LLM LLMConfig `mapstructure:"llm"               yaml:"llm,omitempty"`
 
 	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
-	JudgeSource string                     `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
-	API         MCPScannerAPIConfig        `mapstructure:"api"          yaml:"api,omitempty"`
-	YARA        MCPScannerYARAConfig       `mapstructure:"yara"         yaml:"yara,omitempty"`
-	VirusTotal  MCPScannerVirusTotalConfig `mapstructure:"virustotal"   yaml:"virustotal,omitempty"`
-	Timeouts    MCPScannerTimeouts         `mapstructure:"timeouts"     yaml:"timeouts,omitempty"`
+	JudgeSource string               `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
+	API         MCPScannerAPIConfig  `mapstructure:"api"          yaml:"api,omitempty"`
+	YARA        MCPScannerYARAConfig `mapstructure:"yara"         yaml:"yara,omitempty"`
+	Timeouts    MCPScannerTimeouts   `mapstructure:"timeouts"     yaml:"timeouts,omitempty"`
 }
 
 // AnalyzersArg renders EffectiveAnalyzers as the scanner's comma-separated

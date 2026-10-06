@@ -48,7 +48,7 @@ scanners:
     use_virustotal: true
     virustotal_api_key_env: VT_KEY
   mcp_scanner:
-    analyzers: auto,llm
+    analyzers: auto,llm,prompt_defense
 observability: {}
 `
 	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {

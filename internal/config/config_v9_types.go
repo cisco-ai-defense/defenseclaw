@@ -181,13 +181,6 @@ type MCPScannerYARAConfig struct {
 	ExtraRules     []AssetFileRef `mapstructure:"extra_rules"     yaml:"extra_rules,omitempty"`
 }
 
-// MCPScannerVirusTotalConfig is scanners.mcp_scanner.virustotal.
-type MCPScannerVirusTotalConfig struct {
-	APIKeyEnv   string `mapstructure:"api_key_env"  yaml:"api_key_env,omitempty"`
-	UploadFiles bool   `mapstructure:"upload_files" yaml:"upload_files,omitempty"`
-	MaxFiles    int    `mapstructure:"max_files"    yaml:"max_files,omitempty"`
-}
-
 // MCPScannerTimeouts are in seconds; zero uses the defaults (60, 120, 30).
 type MCPScannerTimeouts struct {
 	StdioS  int `mapstructure:"stdio_s"  yaml:"stdio_s,omitempty"`
