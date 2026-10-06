@@ -121,9 +121,12 @@ func TestRecordsCarryTheSandboxsBindingUserAndSession(t *testing.T) {
 // upstream failure as failed (timed out on a 504), and the proxy's refusals
 // of invalid credentials as paced degraded health.
 func TestEgressEndsAndCredentialRefusals(t *testing.T) {
-	e := liveEnv(t, "endbox", nil)
-	id := e.binding("endbox").ID
+	e := newEnv(t, nil)
 	ctx, now := context.Background(), time.Now()
+	// The clock is swapped before the sandbox's goroutines read it.
+	now2, advance := e.fakeClock(now)
+	e.live(sandboxapi.CreateRequest{Name: "endbox"})
+	id := e.binding("endbox").ID
 	e.m.egressEvent(ctx, egress.Event{Kind: egress.EventClosed, Time: now, BindingID: id, SandboxName: "endbox", Method: "CONNECT",
 		Host: "registry.npmjs.org", Port: 443, BytesUp: 1200, BytesDown: 98000, Duration: 2 * time.Second, RemoteAddr: "104.16.0.1:443"}, 0)
 	e.m.egressEvent(ctx, egress.Event{Kind: egress.EventFailed, Time: now, BindingID: id, SandboxName: "endbox", Method: "CONNECT",
@@ -140,7 +143,6 @@ func TestEgressEndsAndCredentialRefusals(t *testing.T) {
 		t.Fatalf("failed = %+v", f)
 	}
 
-	now2, advance := e.fakeClock(now)
 	authFailed := func() {
 		e.m.egressEvent(ctx, egress.Event{Kind: egress.EventAuthFailed, Time: now2(), Method: "CONNECT", Host: "x.example", Port: 443}, 0)
 	}
@@ -167,10 +169,12 @@ func TestEgressEndsAndCredentialRefusals(t *testing.T) {
 // OpenShell's process, SSH and inference records become sandbox activity
 // records; process records are paced per sandbox.
 func TestOCSFActivityRecords(t *testing.T) {
-	e := liveEnv(t, "actbox", nil)
+	e := newEnv(t, nil)
 	at := time.Now()
-	// No refill while the records go in.
+	// No refill while the records go in. The clock is swapped before the
+	// sandbox's goroutines read it.
 	e.fakeClock(at)
+	e.live(sandboxapi.CreateRequest{Name: "actbox"})
 	for _, line := range []string{
 		"PROC:LAUNCH [INFO] python3(42) [cmd:python3 /work/app/main.py dccert-block-marker]",
 		"PROC:TERMINATE [INFO] python3(42) [exit:3]",
