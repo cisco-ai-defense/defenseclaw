@@ -1429,6 +1429,37 @@ func TestDoctorFixNamesChecksAsItAsked(t *testing.T) {
 	lacks(t, ta.output(), "gateway-version:", "fixed mtls-permissions")
 }
 
+// TestDoctorFixRecordsItsGatewayEdit: the bind-mount fix's gateway.toml
+// edit goes in setup's receipt, so teardown restores the file from setup's
+// first backup instead of leaving it as someone else's change, and the copy
+// mode setup recorded without bind mounts goes (GAP-0089).
+func TestDoctorFixRecordsItsGatewayEdit(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "  workdir:\n    mode: copy\n")
+	ta.Cfg.OpenShell.Workdir.Mode = config.OpenShellWorkdirCopy
+	toml := filepath.Join(t.TempDir(), "gateway.toml")
+	writeFile(t, toml, "setup's edit\n")
+	ta.ok(t, ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml, Backup: toml + ".first.bak"}}}))
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		return hostReport(func(r *openshell.DoctorReport) {
+			r.Get(openshell.CheckIDBindMounts).Fix = &openshell.Fix{Summary: "let sandboxes mount the project folder", Automatic: true,
+				Apply: func(context.Context) error {
+					writeFile(t, toml, "doctor's edit\n")
+					d.GatewayApplied(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml, Backup: toml + ".second.bak"}}, Restarted: true})
+					return nil
+				}}
+		})(ctx, d)
+	}
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	sum, err := fileSHA256(toml)
+	if r, rerr := ta.loadReceipt(); err != nil || rerr != nil || len(r.GatewayFiles) != 1 || r.GatewayFiles[0].Backup != toml+".first.bak" || r.GatewayFiles[0].SHA256 != sum {
+		t.Fatalf("receipt = %+v, %v, %v", r, rerr, err)
+	}
+	if mode := loadConfig(t, ta).OpenShell.Workdir.Mode; mode != "" {
+		t.Fatalf("openshell.workdir.mode = %q after the bind-mount fix", mode)
+	}
+}
+
 // TestDoctorVerdict pins the doctor's last line: not "ready" while
 // sandboxes are turned off, and no image to build for a harness the
 // organization forbids.
