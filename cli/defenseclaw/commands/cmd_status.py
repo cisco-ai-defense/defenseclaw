@@ -475,6 +475,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
         _print_hook_guardian(cfg)
+        _print_fleet_health(client)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -516,6 +517,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
+        _print_fleet_health(client)
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -1691,9 +1693,57 @@ def _status_payload(app) -> dict:
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
+    payload["fleet"] = _fleet_health_payload(client)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
+
+
+def _fetch_fleet_health(client) -> dict | None:
+    """GET /api/v1/fleet/fleet/health from the gateway; None when unavailable."""
+    try:
+        resp = client._session.get(
+            f"{client.base_url}/api/v1/fleet/fleet/health",
+            timeout=client.timeout,
+            allow_redirects=False,
+        )
+        if resp.status_code in (404, 503):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 - status is observational; fleet is optional
+        return None
+
+
+def _print_fleet_health(client) -> None:
+    """Render a Fleet row when the fleet API is reachable."""
+    data = _fetch_fleet_health(client)
+    if data is None:
+        _status_row("Fleet", ux.dim("not configured"))
+        return
+    online = int(data.get("online", 0))
+    offline = int(data.get("offline", 0))
+    total = online + offline
+    if total == 0:
+        _status_row("Fleet", ux.dim("no devices registered"))
+        return
+    online_text = ux._style(f"{online} devices online", fg="green") if online else ux.dim("0 devices online")
+    offline_text = ux._style(f"{offline} offline", fg="yellow") if offline else ux.dim("0 offline")
+    _status_row("Fleet", f"{online_text}, {offline_text}")
+
+
+def _fleet_health_payload(client) -> dict:
+    """Fleet health as a JSON-friendly dict for ``status --json``."""
+    data = _fetch_fleet_health(client)
+    if data is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "online": int(data.get("online", 0)),
+        "offline": int(data.get("offline", 0)),
+        "devices": data.get("devices", []),
+    }
 
 
 def _sandboxes_enabled(cfg) -> bool:

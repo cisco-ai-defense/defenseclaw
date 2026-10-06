@@ -355,22 +355,89 @@ Each tool must map to a capability that determines how the Edge Connector handle
 | `EXEC_SHELL` | `0x04` | sync_block | Block without cloud (code execution) |
 | `WRITE_FS` | `0x02` | sync_block | Block without cloud (data modification) |
 
+## MQTT broker setup
+
+The Edge Connector uses MQTT 3.1.1 for cloud escalation (device to gateway) and command dispatch (gateway to device). Any standards-compliant broker works; Eclipse Mosquitto is recommended for simplicity.
+
+**Quick start with Docker:**
+
+```bash
+docker run -d --name mosquitto -p 1883:1883 eclipse-mosquitto:2
+```
+
+<Callout type="info">
+For production, configure TLS on the broker and use `mqtts://` or `ssl://` URIs. See the Mosquitto documentation for TLS listener setup.
+</Callout>
+
+**Configure the gateway (Go fleet server):**
+
+```bash
+export DCLAW_MQTT_BROKER_URL=tcp://broker-host:1883
+```
+
+**Configure edge devices (C edge connector):**
+
+```bash
+export DCLAW_BROKER_URL=mqtt://broker-host:1883
+```
+
+Both sides must point to the same broker. The gateway publishes commands and policy updates; devices publish heartbeats and escalation requests.
+
 ## Environment variables
 
-**Runtime environment variables** (read by the Python hook at startup):
+### Server-side (Go fleet gateway)
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DCLAW_FLEET_API_TOKEN` | yes | Bearer token for authenticating Fleet API requests. If unset, all API requests are rejected. |
+| `DCLAW_MQTT_BROKER_URL` | yes | MQTT broker connection URI (e.g., `tcp://broker-host:1883`). Used for command dispatch, policy distribution, and heartbeat ingestion. |
+| `DCLAW_OTA_KEY` | yes | Ed25519 private key (hex-encoded) for signing OTA policy updates. Devices verify signatures using the corresponding public key. |
+
+### Device-side (C edge connector and Python hooks)
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
-| `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
+| `DCLAW_TENANT_ID` | (none) | Tenant identifier for this device. |
+| `DCLAW_FLEET_ID` | (none) | Fleet identifier for this device. |
+| `DCLAW_DEVICE_ID` | (none) | Unique device identifier within the fleet. |
+| `DCLAW_BROKER_URL` | (none) | MQTT broker URI (e.g., `mqtt://broker-host:1883`). Used for heartbeats and cloud escalation. |
+| `DCLAW_OTA_KEY` | (none) | Ed25519 public key (hex-encoded) for verifying OTA policy signatures. |
+| `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to the Edge Connector shared library. |
+| `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file path. |
+| `DCLAW_AUDIT_KEY` | (none) | HMAC key for the tamper-evident audit chain. If unset, audit entries are not cryptographically chained. |
 
-**Compile-time constants** (set in `CMakeLists.txt`; changing these requires rebuilding):
+### Compile-time constants
+
+Set in `CMakeLists.txt`; changing these requires rebuilding the C library:
 
 | Constant | Default | Description |
 | --- | --- | --- |
 | `DCLAW_POLICY_PATH` | (embedded in binary) | Policy tables compiled into binary via `policy_tables.h` |
 | `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Flash emulation directory (CMake variable) |
 | `DCLAW_ESCALATION_PAYLOAD_MAX` | `1024` | Max content snippet size for cloud escalation (set in `config.h.in`) |
+
+## Grafana dashboard
+
+A pre-built Grafana dashboard is included at `edge-connector/dashboards/fleet-dashboard.json`. It visualizes device status, verdict rates, cache performance, and alert history.
+
+**Import the dashboard:**
+
+1. Open Grafana and go to **Dashboards** > **Import**.
+2. Click **Upload JSON file** and select `edge-connector/dashboards/fleet-dashboard.json`, or paste the file contents directly.
+3. When prompted, select your Prometheus data source for the `DS_PROMETHEUS` variable.
+4. Click **Import**.
+
+<Callout type="warn">
+The dashboard expects the `DS_PROMETHEUS` datasource variable to be configured. It queries the Prometheus metrics exposed by the fleet gateway at `GET /metrics` (see the [API reference](/docs/edge-connector/api-reference#prometheus-metrics)). Ensure your Prometheus instance is scraping the fleet gateway endpoint with the correct `Authorization` header.
+</Callout>
+
+The dashboard includes panels for:
+- Devices online/offline/degraded/lockdown (gauge)
+- Heartbeat rate (time series)
+- Block vs. allow verdict rates (time series)
+- Verdict cache hit ratio (stat)
+- Audit chain integrity (alert panel)
+- Policy rollback and emergency command counters
 
 ## Benchmark
 
