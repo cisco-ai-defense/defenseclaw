@@ -5,6 +5,7 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -17,8 +18,10 @@ func TestScannersValidateCrossFieldRules(t *testing.T) {
 		"inherit with a block":   {MCPScanner: MCPScannerConfig{JudgeSource: ScannerJudgeInherit, LLM: LLMConfig{Model: "m"}}},
 	}
 	for name, cfg := range cases {
-		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scanners.") {
-			t.Errorf("%s: Validate() = %v, want a scanners error", name, err)
+		err := cfg.Validate()
+		var semantic *V8SemanticError
+		if !errors.As(err, &semantic) || !strings.HasPrefix(semantic.Path, "$.scanners.") || semantic.Summary == "" {
+			t.Errorf("%s: Validate() = %v, want a *V8SemanticError at a $.scanners key (GAP-0128)", name, err)
 		}
 	}
 	if err := (ScannersConfig{}).Validate(); err != nil {
