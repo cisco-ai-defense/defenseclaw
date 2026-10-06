@@ -200,7 +200,7 @@ enum CommandRegistry {
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
-        CommandDefinition(id: 2, title: "quickstart", binary: "defenseclaw", arguments: ["quickstart", "--non-interactive", "--yes"], summary: "Compatibility first-run wrapper", category: "setup", requiresInput: false, usage: ""),
+        CommandDefinition(id: 2, title: "quickstart", binary: "defenseclaw", arguments: ["quickstart"], summary: "Compatibility first-run wrapper", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 3, title: "setup llm", binary: "defenseclaw", arguments: ["setup", "llm"], summary: "Configure the unified LLM interactively", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 4, title: "setup llm show", binary: "defenseclaw", arguments: ["setup", "llm", "--show"], summary: "Show unified LLM settings", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 5, title: "setup migrate-llm", binary: "defenseclaw", arguments: ["setup", "migrate-llm"], summary: "Migrate legacy LLM config into unified llm: block", category: "setup", requiresInput: false, usage: ""),
@@ -413,7 +413,7 @@ enum CommandRegistry {
         CommandDefinition(id: 222, title: "mcps", binary: "defenseclaw", arguments: ["mcp", "list"], summary: "List MCP servers", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 223, title: "plugins", binary: "defenseclaw", arguments: ["plugin", "list"], summary: "List plugins", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 224, title: "tools", binary: "defenseclaw", arguments: ["tool", "list"], summary: "List tools", category: "info", requiresInput: false, usage: ""),
-        CommandDefinition(id: 225, title: "alerts", binary: "defenseclaw", arguments: ["alerts", "--no-tui"], summary: "List alerts", category: "info", requiresInput: false, usage: ""),
+        CommandDefinition(id: 225, title: "alerts", binary: "defenseclaw", arguments: ["alerts"], summary: "List alerts", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 226, title: "alerts acknowledge", binary: "defenseclaw", arguments: ["alerts", "acknowledge"], summary: "Acknowledge alerts by severity", category: "enforce", requiresInput: true, usage: "--severity HIGH"),
         CommandDefinition(id: 227, title: "alerts dismiss", binary: "defenseclaw", arguments: ["alerts", "dismiss"], summary: "Dismiss alerts by severity", category: "enforce", requiresInput: true, usage: "--severity HIGH"),
         CommandDefinition(id: 228, title: "audit log-activity", binary: "defenseclaw", arguments: ["audit", "log-activity"], summary: "Log operator activity (payload via --payload-file)", category: "other", requiresInput: true, usage: "--payload-file <path>"),

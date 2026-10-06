@@ -4419,11 +4419,6 @@ def _refuse_rotate_token_on_managed_host() -> None:
     ),
 )
 @click.option(
-    "--no-restart",
-    is_flag=True,
-    help="Deprecated unsafe mode; retained only to return a fail-closed migration error.",
-)
-@click.option(
     "--yes",
     "--non-interactive",
     "--accept-defaults",
@@ -4432,7 +4427,7 @@ def _refuse_rotate_token_on_managed_host() -> None:
     help="Skip the confirmation prompt and rotate immediately (--non-interactive and --accept-defaults are aliases).",
 )
 @pass_ctx
-def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
+def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     """Rotate the gateway token and connector-scoped hook credentials.
 
     Generates distinct 32-byte CSPRNG values, verifies and stops gateway A,
@@ -4451,10 +4446,6 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     _refuse_rotate_token_on_managed_host()
     dotenv_path = _rotate_token_dotenv_path(app)
-    if no_restart:
-        raise click.ClickException(
-            "--no-restart is not safe for token rotation; the daemon must cross the verified A/B lifecycle boundary."
-        )
     token_env = str(getattr(app.cfg.gateway, "token_env", "") or "").strip()
     canonical_token_env = (
         token_env.casefold() == _GATEWAY_TOKEN_ENV.casefold() if os.name == "nt" else token_env == _GATEWAY_TOKEN_ENV

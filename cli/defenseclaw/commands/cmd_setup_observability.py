@@ -87,16 +87,6 @@ from defenseclaw.platform_support import (
     local_splunk_stack_supported,
 )
 
-# All prompt keys across all presets. Exposed as Click options so the
-# same command surface covers every preset; the writer ignores unknown
-# keys per preset.
-_ALL_PROMPT_FLAGS = (
-    "realm", "site", "region", "dataset",
-    "endpoint", "protocol", "project", "logstream",
-    "host", "port", "index", "source", "sourcetype",
-    "url", "method", "url_path", "verify_tls",
-)
-
 _LEGACY_GENERATED_GALILEO_SEND = {
     "signals": ["traces"],
     "buckets": ["*"],
@@ -158,7 +148,6 @@ def observability() -> None:
 @click.option("--sourcetype", default=None, help="Splunk HEC sourcetype field")
 @click.option("--url", default=None, help="Webhook URL, https only (webhook)")
 @click.option("--method", default=None, help="Webhook HTTP method: POST, PUT or PATCH (webhook)")
-@click.option("--url-path", "url_path", default=None, hidden=True, help="Ignored; kept for older scripts")
 @click.option("--verify-tls/--no-verify-tls", "verify_tls", default=None,
               help="Verify the Splunk HEC TLS certificate (default: off for splunk-hec, on for splunk-enterprise)")
 @click.option(
@@ -192,7 +181,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     realm, site, region, dataset,
     endpoint, protocol, project, logstream,
     host, port, index, source, sourcetype,
-    url, method, url_path, verify_tls,
+    url, method, verify_tls,
     allow_private_networks,
     plaintext,
     environment,
@@ -235,7 +224,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         "project": project, "logstream": logstream,
         "host": host, "port": port, "index": index, "source": source,
         "sourcetype": sourcetype,
-        "url": url, "method": method, "url_path": url_path,
+        "url": url, "method": method,
     }
     if verify_tls is not None:
         raw_inputs["verify_tls"] = "true" if verify_tls else "false"

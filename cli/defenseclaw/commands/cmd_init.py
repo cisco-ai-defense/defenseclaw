@@ -63,12 +63,6 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
     help="Skip scanner and built-in guardrail availability checks (legacy option name).",
 )
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
-@click.option(
-    "--sandbox",
-    is_flag=True,
-    hidden=True,
-    help="Deprecated and ignored: the legacy openshell-sandbox mode was removed.",
-)
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
@@ -211,7 +205,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     app: AppContext,
     skip_install: bool,
     enable_guardrail: bool,
-    sandbox: bool,
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
@@ -269,7 +262,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         skip_install=skip_install,
         non_interactive=non_interactive,
         yes=yes,
-        sandbox=sandbox,
         observe_all=observe_all,
         action_connectors=action_connectors,
         start_gateway=start_gateway,
@@ -289,7 +281,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         skip_install=skip_install,
         non_interactive=non_interactive,
         yes=yes,
-        sandbox=sandbox,
         observe_all=observe_all,
         action_connectors=action_connectors,
         start_gateway=start_gateway,
@@ -338,7 +329,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             _run_first_run_cmd(
                 skip_install=skip_install,
                 enable_guardrail=enable_guardrail,
-                sandbox=sandbox,
                 non_interactive=non_interactive,
                 yes=yes,
                 rescan_agents=rescan_agents,
@@ -366,7 +356,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             )
         return
 
-    from defenseclaw.bootstrap import SANDBOX_FLAG_DEPRECATION
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -377,9 +366,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     )
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
-
-    if sandbox:
-        click.echo(f"  warning: {SANDBOX_FLAG_DEPRECATION}", err=True)
 
     ux.banner("Environment")
 
@@ -587,7 +573,6 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     *,
     skip_install: bool,
     enable_guardrail: bool,
-    sandbox: bool,
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
@@ -745,7 +730,6 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         with_judge=with_judge,
         judge_hook_connectors=judge_hook_connectors,
         skip_install=skip_install,
-        sandbox=sandbox,
         start_gateway=(False if defer_gateway else start_gateway),
         verify=verify,
         verbose=verbose,
@@ -2465,7 +2449,6 @@ def _native_setup_copilot_invocation_allowed(
     skip_install: bool,
     non_interactive: bool,
     yes: bool,
-    sandbox: bool,
     observe_all: bool,
     action_connectors: str,
     start_gateway: bool | None,
@@ -2480,7 +2463,6 @@ def _native_setup_copilot_invocation_allowed(
         and skip_install
         and non_interactive
         and yes
-        and not sandbox
         and not observe_all
         and not action_connectors.strip()
         and start_gateway is False
@@ -2495,7 +2477,6 @@ def _native_setup_antigravity_invocation_allowed(
     skip_install: bool,
     non_interactive: bool,
     yes: bool,
-    sandbox: bool,
     observe_all: bool,
     action_connectors: str,
     start_gateway: bool | None,
@@ -2511,7 +2492,6 @@ def _native_setup_antigravity_invocation_allowed(
         and skip_install
         and non_interactive
         and yes
-        and not sandbox
         and not observe_all
         and not action_connectors.strip()
         and start_gateway is False

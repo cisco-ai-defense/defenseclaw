@@ -1198,7 +1198,7 @@ function Install-New {
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
         if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
-        $migrateArgs = @("migrate", "--yes")
+        $migrateArgs = @("migrate")
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
         if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $migrateArgs) -ne 0) { return $false }
@@ -1566,7 +1566,7 @@ function Invoke-FirstInstallExtras {
         if (-not $Connector -or $Connector -eq "none") {
             Write-Warn "Quickstart needs a connector; run 'defenseclaw init' when ready"
         } else {
-            $quickstartArgs = @("quickstart", "--non-interactive", "--yes", "--connector", $Connector)
+            $quickstartArgs = @("quickstart", "--connector", $Connector)
             if ($QuickstartMode) { $quickstartArgs += @("--mode", $QuickstartMode) }
             $quickstartRc = Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs
             if ($quickstartRc -ne 0) {
