@@ -455,6 +455,7 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		gatewayconnector.SetStrictHookContractResolution(true)
 	}
 	if cfg.StandaloneEnterprise() {
+		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
 	return validateEnterpriseConfig(cfg)
@@ -534,6 +535,25 @@ func standaloneRulePackDefault(cfg *Config, dataDir, goos string) {
 		}
 	}
 	cfg.Guardrail.RulePackDir = path.Join(layout.VendorPolicyDir, "guardrail", "default")
+}
+
+// standalonePolicyDirDefault clears a Windows standalone policy_dir that
+// names the data_dir policies folder. The Setup ships no Rego bundle and the
+// gateway service can write data_dir, so that folder never holds
+// administrator policy: the gateway uses its built-in policy instead of
+// reporting a missing data.json on every start. Like rule_pack_dir, an
+// explicit value equal to the implicit path is treated the same way.
+func standalonePolicyDirDefault(cfg *Config, dataDir, goos string) {
+	if goos != "windows" || strings.TrimSpace(dataDir) == "" {
+		return
+	}
+	if _, onLayout := standaloneUnixLayoutForConfig(cfg.ConfigFilePath); onLayout {
+		return
+	}
+	if policyDir := strings.TrimSpace(cfg.PolicyDir); policyDir != "" &&
+		filepath.Clean(policyDir) == filepath.Join(dataDir, "policies") {
+		cfg.PolicyDir = ""
+	}
 }
 
 // standaloneUnixLayoutForConfig returns the Linux or macOS standalone layout

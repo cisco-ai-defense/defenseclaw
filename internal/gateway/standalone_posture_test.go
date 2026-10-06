@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	osuser "os/user"
@@ -131,8 +132,13 @@ func TestNewSidecarPublishesTheProfilePosture(t *testing.T) {
 
 	for _, test := range profilePostures {
 		t.Run(test.name, func(t *testing.T) {
-			bootProfileSidecar(t, test)
+			stderr := captureStderr(t, func() { bootProfileSidecar(t, test) })
 			assertProfilePosture(t, test)
+			// A managed standalone gateway is hook-only: it must not
+			// announce a fleet client it never dials.
+			if test.name == "standalone" && strings.Contains(stderr, "initializing client") {
+				t.Fatalf("hook-only boot announced the fleet client:\n%s", stderr)
+			}
 		})
 	}
 }

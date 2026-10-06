@@ -242,8 +242,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		return nil, fmt.Errorf("sidecar: prepare guardrail local-pattern activation: %w", err)
 	}
 	initialHarnessRules := prepareInitialSandboxHarnessRules(cfg)
-	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
-		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+	// A hook-only topology (managed standalone, no OpenClaw fleet) never
+	// dials gateway.host:port, so only announce the fleet client when the
+	// gateway loop will actually use it; the device identity still loads.
+	if RequiresFleetGateway(cfg) {
+		fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
+			cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
+	}
 
 	// Mint a per-process agent instance id immediately so every
 	// audit row that fires during sidecar boot (device-identity
