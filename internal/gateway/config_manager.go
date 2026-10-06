@@ -132,6 +132,12 @@ type ConfigManager struct {
 	// a REWRITTEN file, not a deletion.
 	envOverlayApplied atomic.Bool
 
+	// rejected is set (under mu) when the last reload this manager ran was
+	// refused, and cleared by the next one that builds. While it stands the
+	// next reload rebuilds the generation even without a config or asset
+	// diff, since the repair is exactly what the diff cannot see.
+	rejected bool
+
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
@@ -595,6 +601,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)
 	if err != nil {
+		m.rejected = true
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "candidate_invalid")
 		if m.health != nil {
@@ -739,7 +746,11 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
-	if len(diff.Changed) == 0 && assets {
+	// A standing rejection also forces a rebuild: the repair (an asset
+	// restored, a bad config edit reverted) changes nothing the diff sees,
+	// and without the rebuild the error would stay until some unrelated
+	// change.
+	if len(diff.Changed) == 0 && (assets || m.rejected) {
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
@@ -776,9 +787,25 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
 	if errors.Is(applyErr, errGenerationUnchanged) {
+		// The rebuild succeeded and matches the live generation: nothing to
+		// swap, but any earlier rejection is over.
+		m.rejected = false
+		clearGenerationBuildError()
+		recordHandEdit(ctx, next, m.path, source.raw)
+		refreshConfigGeneration(source.raw)
+		version.SetContentHash(source.raw)
+		if m.health != nil {
+			m.health.SetConfig(StateRunning, "", map[string]interface{}{
+				"path":       m.path,
+				"generation": m.gen.Load(),
+				"reason":     reason,
+				"changed":    []string{},
+			})
+		}
 		return nil
 	}
 	if applyErr != nil {
+		m.rejected = true
 		recordGenerationBuildError(applyErr)
 		m.recordLoadError(ctx, "apply_rejected")
 		if m.health != nil {
@@ -792,6 +819,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 		return applyErr
 	}
+	m.rejected = false
 	gen := m.gen.Add(1)
 	m.current.Store(cloneConfig(next))
 	recordHandEdit(ctx, next, m.path, source.raw)

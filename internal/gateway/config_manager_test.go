@@ -1243,8 +1243,12 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	}
 	var diffs []ConfigDiff
 	unchanged := false
+	var rejected error
 	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
 		diffs = append(diffs, diff)
+		if rejected != nil {
+			return rejected
+		}
 		if unchanged {
 			return errGenerationUnchanged
 		}
@@ -1268,6 +1272,25 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || mgr.gen.Load() != gen {
 		t.Fatalf("unchanged asset rebuild = %v, generation %d -> %d", err, gen, mgr.gen.Load())
 	}
+
+	// A rejected reload leaves an error behind. Once the repair builds the
+	// generation already live, even a plain reload rebuilds and ends it
+	// (GAP-0131, GAP-0027).
+	rejected = errors.New("rejected")
+	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
+		t.Fatal("a rejected asset reload returned no error")
+	}
+	rejected = nil
+	t.Cleanup(clearGenerationBuildError)
+	if err := mgr.Reload(context.Background(), "test"); err != nil || mgr.rejected || hasRejection() {
+		t.Fatalf("reload after the repair = %v, rejection still standing (manager %v)", err, mgr.rejected)
+	}
+}
+
+// hasRejection reports a standing policy.last_reload_error.
+func hasRejection() bool {
+	msg, _ := liveReloadError.Load().(string)
+	return msg != ""
 }
 
 // A config_version 8 file whose in-memory migration fails is refused, not
