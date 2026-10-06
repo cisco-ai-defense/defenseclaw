@@ -1637,8 +1637,10 @@ func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *
 	if err := os.WriteFile(fixture.configPath, candidateRaw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A config_version 8 candidate meets the invalid pack in its in-memory
+	// migration, which refuses it before the preflight.
 	reloadErr := mgr.Reload(t.Context(), "test")
-	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "rule pack preflight") {
+	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "rule pack yaml_invalid") {
 		t.Fatalf("invalid rule-pack reload error = %v", reloadErr)
 	}
 	if helperCalls != 0 {
