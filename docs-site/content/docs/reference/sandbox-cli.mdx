@@ -135,7 +135,7 @@ defenseclaw sandbox setup --non-interactive --skip-images
 | --- | --- | --- | --- |
 | `--harness` | text, repeatable or comma-separated |  | Harness to set up, added to openshell.harnesses (repeatable; default: openshell.harnesses, else claude and codex). |
 | `--install-openshell` | switch |  | Install OpenShell with NVIDIA's pinned, sha256-verified installer (uses sudo). |
-| `--no-mounts` | switch |  | Leave bind mounts off (Linux); every run then works on a copy. |
+| `--no-mounts` | switch |  | Leave bind mounts off (Linux); no Claude Code or Codex sandbox can then start, a --copy run included, and other harnesses run on a copy. |
 | `--no-wrappers` | switch |  | Do not offer the shell wrappers. |
 | `--non-interactive` | switch |  | Never prompt: take the defaults and skip steps that need consent. |
 | `--restart-gateway` | switch |  | Restart the OpenShell gateway to apply its configuration even while sandboxes run on it. |
