@@ -1,25 +1,25 @@
 ---
 title: Skill scanner
-description: Scan connector skills on demand and whenever one is installed or changed. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same skill_actions admission policy as the watcher.
+description: Scan connector skills on demand and whenever one is installed or changed. DefenseClaw wraps cisco-ai-skill-scanner and writes its verdicts into the same admission policy as the watcher.
 keywords:
   - DefenseClaw skill scanner
   - cisco-ai-skill-scanner
   - skill admission
   - Claude skills security
   - OpenClaw skills
-  - skill_actions
+  - admission policy
   - install watcher
 ---
 
 Agents are getting comfortable installing skills. A "skill" is a small bundle — instructions, optional tools, sometimes auto-applied — that an LLM picks up and follows. The same shape is also a great place to hide a prompt-injection or an exfiltration tool.
 
-DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so operator-installed and modified skills get a deterministic + LLM-assisted review. Verdicts feed the `skill_actions` admission policy by severity bucket, and the install watcher scans every new or changed skill and quarantines it when the policy says so. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
+DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://github.com/cisco-ai-defense/skill-scanner) so operator-installed and modified skills get a deterministic + LLM-assisted review. Verdicts feed the `admission` policy in `config.yaml` by severity, and the install watcher scans every new or changed skill and quarantines it when the policy says so. Exact proven vendor bundles remain visible as discovery-only inventory and do not enter scanner or enforcement paths.
 
 <DefenseClawDemo scenario="skill-quarantine" variant="critical" />
 
 ## What you just saw
 
-The watcher scanned a new skill where it was installed. Deterministic checks and optional LLM-assisted intent analysis produced a CRITICAL result, which `skill_actions` mapped to quarantine (the files move out of the skill folder), disabled runtime, blocked installation, and an audit event.
+The watcher scanned a new skill where it was installed. Deterministic checks and optional LLM-assisted intent analysis produced a CRITICAL result, which the admission policy mapped to quarantine (the files move out of the skill folder), disabled runtime, blocked installation, and an audit event.
 
 ## What it scans
 
@@ -134,13 +134,13 @@ Running a one-shot scan is a starting point. The real value is the **install wat
 
 <Flow
   direction="TB"
-  caption="What the watcher does with a new or changed skill. The skill stays in its folder while it is scanned; it moves to the quarantine folder only on a block-list match, a failed scan, or a skill_actions verdict that blocks it (HIGH and CRITICAL in the default policy). Every outcome is written to the audit log. The scanner is cisco-ai-skill-scanner; the policy step is OPA, with a built-in fallback."
+  caption="What the watcher does with a new or changed skill. The skill stays in its folder while it is scanned; it moves to the quarantine folder only on a block-list match, a failed scan, or an admission verdict that blocks it (HIGH and CRITICAL by default). Every outcome is written to the audit log. The scanner is cisco-ai-skill-scanner; the policy step is OPA, with a built-in fallback."
 >
   <Node id="new" kind="datastore">{`New or changed skill\nin a watched folder`}</Node>
   <Node id="lists" kind="decision">{`Block or allow list?\nchecked before scanning`}</Node>
   <Node id="ok" kind="generic">{`Allowed\nnot scanned`}</Node>
   <Node id="scan" kind="generic">{`Skill scanner\nstatic + optional LLM`}</Node>
-  <Node id="policy" kind="policy">{`skill_actions\nmaps the top severity`}</Node>
+  <Node id="policy" kind="policy">{`admission policy\nmaps the top severity`}</Node>
   <Node id="keep" kind="generic">{`Stays installed\nclean, or a warning`}</Node>
   <Node id="q" kind="gateway">{`Quarantined\nand install blocked`}</Node>
   <Edge from="new" to="lists" label="watcher checks" />
@@ -159,49 +159,44 @@ You don't have to wire any of that yourself. To record the severity verdicts wit
 
 ## Configure the action mapping
 
-The scanner's verdict is a *severity*. What that severity *does* lives in the active OPA policy file (`policies/<name>.yaml`) under `skill_actions`. The schema is real per-severity buckets (not threshold floors):
+The scanner's verdict is a *severity*. What that severity *does* is set in `~/.defenseclaw/config.yaml` under `admission:`. For a skill, each severity resolves, first match wins:
 
-```yaml title="policies/default.yaml (excerpt)"
+1. `admission.skill.actions`;
+2. the scanner gate: severities at or above `scanners.skill_scanner.fail_on_severity` (default `HIGH`) quarantine, those from `review_queue_min` (default `MEDIUM`) up to it warn, and lower ones are allowed;
+3. `admission.defaults.actions`, which every asset type inherits.
+
+With the defaults, CRITICAL and HIGH findings quarantine the skill, MEDIUM findings admit it with a warning, and LOW and INFO findings allow it.
+
+```yaml title="~/.defenseclaw/config.yaml (excerpt)"
 admission:
-  scan_on_install: true
-  allow_list_bypass_scan: true                # first-party skills bypass scanning when the allow_list matches
-
-skill_actions:
-  critical:
-    file:    quarantine
-    runtime: disable
-    install: block
-  high:
-    file:    quarantine
-    runtime: disable
-    install: block
-  medium:
-    file:    none                              # no filesystem action
-    runtime: enable                            # agent can still call it
-    install: none
-  low:
-    file:    none
-    runtime: enable
-    install: none
-  info:
-    file:    none
-    runtime: enable
-    install: none
-
-first_party_allow_list:
-  - target_type: skill
-    target_name: codeguard
-    reason: first-party DefenseClaw skill
-    source_path_contains: [".openclaw/workspace/skills/codeguard", ".openclaw/skills/codeguard", ".zeptoclaw/skills/codeguard", ".claude/skills/codeguard"]
+  defaults:
+    scan_on_install: true
+    allow_list_bypass_scan: true          # first-party skills bypass scanning when the allow list matches
+  skill:
+    actions:                              # severities left out follow the scanner gate
+      medium: quarantine
+      low: {install: none, file: none, runtime: enable}
+    first_party_allow_list:
+      - name: codeguard
+        source_path_contains: [.openclaw/workspace/skills/codeguard, .openclaw/skills/codeguard, .zeptoclaw/skills/codeguard, .claude/skills/codeguard]
 ```
 
-Each severity bucket has three independent actions:
+An action is a shorthand or the exact triple:
+
+| Shorthand | `install` | `file` | `runtime` | Verdict |
+|---|---|---|---|---|
+| `block` | block | none | disable | rejected |
+| `quarantine` | block | quarantine | disable | rejected |
+| `warn` | none | none | enable | warning |
+| `allow` | none | none | enable | allowed |
+
+The triple has three independent actions:
 
 - **`file`** — `none` or `quarantine`. Whether to move the skill bundle out of the agent's skill directory.
 - **`runtime`** — `enable` or `disable`. Whether the agent can invoke the skill at all.
 - **`install`** — `none` or `block`. Whether to refuse a fresh install.
 
-`first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. The shipped file also lists the first-party DefenseClaw plugin. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/policies/defaults) for what each shipped rule pack sets these to.
+A `first_party_allow_list` entry exempts a skill whose name matches and whose path contains one of the listed folders. `admission.skill.scanner_overrides.<scanner>` refines the map for one scanner's results (keyed by the scanner name, for example `skill-scanner`). Run `defenseclaw config get admission.skill --effective` to see the map in force and where it comes from. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/policies/defaults) for what each shipped policy sets.
 
 <Callout title="Vendor-bundled skills are inventory only">
 A few skill folders hold copies the agent vendor ships, and DefenseClaw lists
@@ -214,7 +209,7 @@ bundled source exactly; modified, extra or unverifiable copies are scanned.
 `aibom scan` counts these skills as discovery-only.
 </Callout>
 
-To switch profiles for the entire `skill_actions` table:
+A named policy sets these actions for every asset type at once:
 
 ```bash
 defenseclaw policy activate strict       # quarantines medium+ — see Defaults page for the diff
@@ -268,18 +263,18 @@ defenseclaw skill enable my-skill
 defenseclaw skill info my-skill                       # detailed view
 ```
 
-To install a skill through the scanner, use `defenseclaw skill install <name>`. It installs a copy into each configured connector's skill directory and scans each copy. By default it only reports findings; pass `--action` to apply `skill_actions`. Pass `--force` to overwrite an existing skill and `--connector` to install for one connector. `defenseclaw skill search <query>` searches the ClawHub registry with a locally installed or npx-cached `clawhub` client. Add `--allow-remote-fetch` only if you accept that npx downloads and runs the `clawhub` package from the npm registry.
+To install a skill through the scanner, use `defenseclaw skill install <name>`. It installs a copy into each configured connector's skill directory and scans each copy. By default it only reports findings; pass `--action` to apply the admission actions. Pass `--force` to overwrite an existing skill and `--connector` to install for one connector. `defenseclaw skill search <query>` searches the ClawHub registry with a locally installed or npx-cached `clawhub` client. Add `--allow-remote-fetch` only if you accept that npx downloads and runs the `clawhub` package from the npm registry.
 
 Without `--connector`, policy and runtime commands apply to matching configured connector copies where present or the unscoped fallback policy where that command uses one. Pass `--connector <name>` when the same skill exists under more than one connector and you want only that connector's copy.
 
-`skill list`, `skill info`, `skill scan` and the AIBOM inventory report the same policy verdict: `blocked`, `quarantined` or `allowed` from an explicit action, otherwise `rejected`, `warning` or `clean` from the latest scan and the `skill_actions` mapping. The list's Status column only says whether the skill is loaded (`ready`), removed from disk (`removed`) or missing. A `rejected` verdict means the policy refuses the skill at install time. A copy that is already on disk stays loaded until you run `skill block`, `skill disable` or `skill quarantine`, or accept it with `skill allow`.
+`skill list`, `skill info`, `skill scan` and the AIBOM inventory report the same policy verdict: `blocked`, `quarantined` or `allowed` from an explicit action, otherwise `rejected`, `warning` or `clean` from the latest scan and the admission actions. The list's Status column only says whether the skill is loaded (`ready`), removed from disk (`removed`) or missing. A `rejected` verdict means the policy refuses the skill at install time. A copy that is already on disk stays loaded until you run `skill block`, `skill disable` or `skill quarantine`, or accept it with `skill allow`.
 
 Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
 
 ## See also
 
-- [MCP scanner](/docs/scanning/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `mcp_actions`
+- [MCP scanner](/docs/scanning/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `admission.mcp`
 - [Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
-- [Defaults](/docs/policies/defaults) — the `skill_actions` table for each shipped rule pack
+- [Defaults](/docs/policies/defaults) — the admission actions of each shipped policy
 - [Policies](/docs/policies) — the layered architecture (admission → scanner → action mapping)
 - [Reference → CLI](/docs/reference/cli) — full `defenseclaw skill` subcommand reference

@@ -20,7 +20,7 @@ is compiled into DefenseClaw.
 
 <Callout type="info" title="No data leaves the page">
 The wizard ships compiled WebAssembly copies of the bundled Rego (admission, guardrail, firewall,
-audit, skill_actions). OPA evaluation happens entirely in your browser — your draft policy and the
+audit). OPA evaluation happens entirely in your browser — your draft policy and the
 inputs you test against are never uploaded. Saved progress lives in `localStorage`. The Live Test
 does not execute ActionFacts parsers, CEL, regex, YARA, or bounded tool-call chains.
 </Callout>
@@ -49,7 +49,7 @@ These small affordances exist on top of the two main tabs to shorten the most co
 
 | Feature | Where | What it does |
 | --- | --- | --- |
-| **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that evaluates the in-progress admission, guardrail, firewall, audit, or skill-actions Rego policy against canned scenarios. |
+| **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that evaluates the in-progress admission, guardrail, firewall, or audit Rego policy against canned scenarios. |
 | **Custom test input** | Live Test pane (in the drawer or on the Review step) | Switch the OPA/Rego input source from "canned scenario" to "custom input" and paste your own JSON. Per-domain drafts persist to `localStorage`. Re-evaluates 250 ms after you stop typing. |
 | **`⌘K` / `Ctrl-K` palette** | Playground | Fuzzy-search every section and knob ("hilt severity", "splunk hec token", "block threshold"). Selecting a result expands the matching section, scrolls to it, and flashes a brief outline. |
 | **Syntax-highlighted Rego editor** | Playground → Custom Rego | Zero-dependency editor: transparent textarea over a tokenized overlay. Tab inserts 2 spaces, Shift-Tab dedents. Highlighting is presentation-only — `opa check` runs on your host at install time. |
@@ -132,8 +132,9 @@ Secrets are referenced by env var name only — never typed inline.
 CRITICAL secret in a skill, an MCP install with a sketchy domain, a quarantined plugin), see the
 verdict (`blocked` / `allowed` / `quarantined`), and tweak earlier steps until it matches intent.
 Then **Open in Playground →** hands you off to the full editor with everything pre-filled. The
-Review section there renders every YAML file plus `data.json`; copy them into
-`~/.defenseclaw/policies/` (or run the bundled install script) and activate the policy:
+Review section there renders every YAML file; copy them into
+`~/.defenseclaw/policies/` (or run the bundled install script) and activate the policy, which
+writes it into `config.yaml`:
 
 ```bash
 defenseclaw policy activate my-policy
@@ -161,7 +162,7 @@ throwaway home first with [Verify a policy locally](/docs/policies/verify-locall
 | Section          | Backed by                                                                                                                              |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
-| Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>`.                                     |
+| Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-type `scanner_overrides.<type>.<sev>`; activation writes them to `admission.defaults`, `admission.skill` and `admission.<type>.actions`. |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
 | Guardrail        | `guardrail.block_threshold` / `alert_threshold`, `guardrail.hilt`, `guardrail.patterns`, `severity_mappings`, Cisco trust level.       |
 | Rule pack        | Per-file regex rules and CEL candidate expressions, including `tool_call_only` scoping (`policies/guardrail/<pack>/rules/<filename>.yaml`). |
@@ -178,12 +179,13 @@ throwaway home first with [Verify a policy locally](/docs/policies/verify-locall
 | Scanner profiles | `scanners.<scanner>` profile selection (codeguard / plugin-scanner / skill-scanner).                                                   |
 | Cisco AI Defense (optional · enterprise) | `cisco_ai_defense.enabled` / `endpoint` / `api_key_env` / `scan_hook_surface` — the optional remote lane read by `internal/config`. |
 | Custom Rego      | Per-snippet `package defenseclaw.custom.<name>` modules emitted into `policies/rego/custom-<name>.rego`.                               |
-| Review & export  | Renders every YAML file the engine needs + `policies/rego/data.json` + a copy-pasteable bash install script.                           |
+| Review & export  | Renders every YAML file the engine needs + a copy-pasteable bash install script that activates the policy.                             |
 
 ## Limits to know about
 
-- **Live Test is OPA/Rego-only.** It evaluates the five bundled WASM policy domains: admission,
-  guardrail, firewall, audit, and skill actions. It does not run the Go ActionFacts parser, compile
+- **Live Test is OPA/Rego-only.** It evaluates the four bundled WASM policy domains: admission,
+  guardrail, firewall, and audit, with the policy as `input.admission` and `input.thresholds`
+  the way the gateway compiles it from `config.yaml`. It does not run the Go ActionFacts parser, compile
   CEL, execute RE2 rules, scan MCP descriptions with YARA, or replay bounded chains. Use the exported
   policy on a DefenseClaw host and run the repository test/benchmark harness for those lanes.
 - **Fixed deterministic detectors are read-only.** The 26 bounded chains and ten YARA signatures
@@ -197,8 +199,8 @@ throwaway home first with [Verify a policy locally](/docs/policies/verify-locall
   a complete code-owned proof pinned to the same rule ID. Unsupported, ambiguous, conditional, or
   over-budget facts remain detection-only. Browser validation is preflight only; final CEL
   compilation and admission happen on the DefenseClaw host.
-- **Rego compilation is offline.** The wizard exports `data.json` (read by the bundled Rego at runtime)
-  and any custom snippets you author. It does *not* recompile the shipped Rego — for that you still
+- **Rego compilation is offline.** The wizard exports the policy YAML (which `policy activate` writes
+  into `config.yaml`) and any custom snippets you author. It does *not* recompile the shipped Rego — for that you still
   need `opa build` on the host. The lint in the Custom Rego section catches the obvious shape
   mistakes (`package` header, balanced braces, `:=` vs `=`).
 - **Regex parity.** The browser uses V8 regex; the engine uses Go's `regexp` (RE2). The validator

@@ -76,7 +76,8 @@ and other fields that activation loaded.
 
 ## 4. Validate and test the active Rego
 
-`policy validate` checks the generated `data.json` shape and compiles the Rego.
+`policy validate` compiles the Rego modules. The admission policy itself is in
+`config.yaml`: check it with `defenseclaw config get admission.skill --effective`.
 `policy test` runs any Rego unit tests (`*_test.rego`) in the same directory.
 The installed policy directories ship without unit tests, so there it reports
 that there is nothing to run and exits 0.
@@ -158,9 +159,8 @@ DefenseClaw data directory.
 
 - **`policy activate` cannot find the policy** — confirm the generated script
   and the CLI see the same `DEFENSECLAW_HOME`.
-- **`policy validate` cannot find `data.json`** — activation did not complete,
-  or `--rego-dir` does not point at
-  `$DEFENSECLAW_HOME/policies/rego`.
+- **`policy validate` cannot find the Rego modules** — `--rego-dir` does not
+  point at `$DEFENSECLAW_HOME/policies/rego`.
 - **The dry run differs from the creator preview** — compare
   `defenseclaw policy show my-policy` with the creator's review pane, then test
   the exact severity and target type used by the preview.

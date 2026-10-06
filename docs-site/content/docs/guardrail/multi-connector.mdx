@@ -31,7 +31,7 @@ guardrail:
   enabled: true
   mode: action                 # global default — inherited by any connector that doesn't override
   hook_fail_mode: closed
-  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
+  rule_pack: default            # default | strict | permissive, or a guardrail.custom_packs name
 
   connectors:
     codex:
@@ -119,7 +119,7 @@ The fields you can override per connector mirror the global guardrail knobs:
 | `hook_fail_mode` | `open` / `closed` — what to do when hook delivery/authentication fails or the gateway response is invalid. | global `guardrail.hook_fail_mode` |
 | `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
 | `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
-| `rule_pack_dir` | Path to the rule pack this connector scans against. | global `guardrail.rule_pack_dir` |
+| `rule_pack` | The rule pack this connector scans against: a preset or a `guardrail.custom_packs` name. | global `guardrail.rule_pack` |
 | `block_at` | Lowest severity that blocks: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. | global `guardrail.block_at`, then the rule pack's level |
 | `alert_at` | Lowest severity that alerts, same values; never above the block level. | global `guardrail.alert_at`, then the rule pack's level |
 

@@ -17,7 +17,7 @@ DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, o
 
 ## What you just saw
 
-The guided trace normalizes a connector event, matches a bundled rule, skips suppressions (they filter only LLM-judge findings), skips the optional judge because it is off, assigns severity, and resolves the action. Under the default pack, a HIGH finding alerts; the strict pack, or `guardrail block-at HIGH`, would block it. Runtime guardrail actions are separate from the `skill_actions` and `mcp_actions` admission mappings used by scanners.
+The guided trace normalizes a connector event, matches a bundled rule, skips suppressions (they filter only LLM-judge findings), skips the optional judge because it is off, assigns severity, and resolves the action. Under the default pack, a HIGH finding alerts; the strict pack, or `guardrail block-at HIGH`, would block it. Runtime guardrail actions are separate from the `admission` mappings (`admission.skill`, `admission.mcp`) used by scanners.
 
 <Cards>
   <Card
@@ -33,7 +33,7 @@ The guided trace normalizes a connector event, matches a bundled rule, skips sup
   <Card
     title="Policy creator"
     href="/docs/policies/creator"
-    description="Build a complete policy from a preset, see live OPA-WASM verdicts in your browser, and export every YAML / data.json / Rego file ready to paste into ~/.defenseclaw/policies/."
+    description="Build a complete policy from a preset, see live OPA-WASM verdicts in your browser, and export the policy YAML and Rego files, with an install script that activates the policy."
   />
   <Card
     title="Recipes"
@@ -119,7 +119,7 @@ firewall:
   allowed_ports: [443, 80]
 ```
 
-`defenseclaw policy activate <name>` normalizes this YAML into the active `data.json` consumed by the bundled Rego modules. Each package exposes domain-specific results rather than one universal decision object:
+`defenseclaw policy activate <name>` writes this YAML into `config.yaml`: its actions into `admission:` and its thresholds into `guardrail.block_at` / `alert_at`. `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input (no `data.json` since `config_version: 9`). Each package exposes domain-specific results rather than one universal decision object:
 
 | Rego package | Primary outputs |
 | --- | --- |
@@ -127,23 +127,21 @@ firewall:
 | `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
 | `defenseclaw.firewall` | `action`, `rule_name` |
 | `defenseclaw.audit` | `retain`, `retain_reason`, `export_to` |
-| `defenseclaw.skill_actions` | runtime/file/install actions and boolean helpers |
 
 You can hand-edit the Rego — the engine is just OPA — but most operators stay in the YAML layer because the bundled Rego covers the common cases.
 
 ### How the engine evaluates
 
 <Sequence
-  caption="The policy engine is OPA embedded in the gateway process, not a separate service. It keeps data.json in memory (loaded at start and on reload) and reads the .rego modules from the policy directory on each query. Each package returns its own result shape. If a query fails, admission denies by default and the guardrail falls back to the active profile's severity mapping."
+  caption="The policy engine is OPA embedded in the gateway process, not a separate service. It prepares the .rego modules once per configuration generation (at start and on each reload) and passes the policy compiled from config.yaml as each query's input. Each package returns its own result shape. If a query fails, admission denies by default and the guardrail falls back to the active profile's severity mapping."
   participants={[
     { id: 'gw',     label: 'Gateway',       kind: 'gateway' },
     { id: 'engine', label: 'Policy engine', kind: 'policy' },
     { id: 'files',  label: 'Policy files',  kind: 'datastore' },
   ]}
 >
-  <Message from="engine" to="files"  label="loads data.json at start and reload" />
-  <Message from="gw"     to="engine" label="asks a package, with input" />
-  <Message from="engine" to="files"  label="reads the .rego modules" />
+  <Message from="engine" to="files"  label="prepares the .rego modules at start and reload" />
+  <Message from="gw"     to="engine" label="asks a package, with input compiled from config.yaml" />
   <Message from="engine" to="gw"     kind="return" label="returns that package's result" />
 </Sequence>
 
@@ -444,7 +442,7 @@ Ways to act on correlations without changing the gateway runtime:
 ## Authoring custom rule packs
 
 The path of least resistance is to extend rather than replace. Custom rule
-packs live on disk and are selected through `guardrail.rule_pack_dir`. Before
+packs live on disk and are selected through `guardrail.rule_pack` (a custom pack is a `guardrail.custom_packs` entry pinned by digest). Before
 switching the gateway, run the built-in offline validator: it uses the same Go
 loader as the gateway, compiles every CEL expression, and rejects the complete
 candidate on any invalid component. See [Validate rule packs](/docs/policies/rulepack-validation)
@@ -492,9 +490,9 @@ the expression schema and authoring examples.
   </Step>
   <Step>
     **Apply the validated directory and verify the effective connector packs.**
-    `use-pack` validates the directory again, writes `rule_pack_dir`, and
-    restarts a running gateway so it loads the pack (pass `--no-restart` to
-    skip; a stopped gateway loads it when it starts):
+    `use-pack` validates the directory again and writes `guardrail.rule_pack`
+    and its `guardrail.custom_packs` entry; the running gateway loads the pack
+    on its next reload (a stopped gateway loads it when it starts):
 
     ```bash
     defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/my-org
@@ -522,16 +520,15 @@ defenseclaw policy show my-policy             # normalized summary of one policy
 defenseclaw policy create my-policy -d "Production policy"
 defenseclaw policy activate my-policy         # set as active
 defenseclaw policy delete my-policy           # remove
-defenseclaw policy validate                   # checks data.json and compiles the Rego
+defenseclaw policy validate                   # compiles the Rego modules
 defenseclaw policy test --verbose             # runs any *_test.rego files (none ship)
 defenseclaw policy edit actions --severity high --runtime disable --policy-name my-policy
 ```
 
 `policy show` and `policy activate` take a policy name. `policy show` prints a
 normalized summary rather than the source YAML. `policy validate` checks that
-`data.json` parses, that every severity tier in `actions` and
-`scanner_overrides` has the required fields, and that the Rego modules
-compile. `policy test` runs Rego unit tests placed next to your policies; the
+the Rego modules compile; the admission policy itself is in `config.yaml`,
+which `defenseclaw config validate` checks. `policy test` runs Rego unit tests placed next to your policies; the
 installed copy ships none, so it reports that there is nothing to run. Both
 use `opa` when it is on `PATH` and otherwise the engine built into
 `defenseclaw-gateway`, and both take `--rego-dir` to point at another Rego

@@ -225,13 +225,12 @@ and policies directories. `ensure` re-applies when the config or a secret
 changed, when an installed file, binary or machine-policy entry drifted, or
 when the rule pack a setting resolves to changed (for example a
 `<policy_dir>/guardrail/default` you created for a config that leaves
-`rule_pack_dir` out), but it does not track the contents of the files under
-`policies`. The
-gateway reads rule packs and policies when it starts, so after you edit a
-rule pack or policy in place,
-[restart the managed gateway](#restart-the-managed-gateway). A config change
-that points `guardrail.rule_pack_dir` at another folder is applied by
-`ensure` like any other config change; see
+`rule_pack` unset), but it does not track the contents of the files under
+`policies`. The gateway reloads a rule pack when its files change; a custom
+pack edited in place no longer matches its pinned digest and is refused
+until the config pins the new one. A config change that points
+`guardrail.rule_pack` at another pack is applied by `ensure` like any other
+config change; see
 [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
 
 A change to `enterprise.network` (the outbound proxy) takes effect only when

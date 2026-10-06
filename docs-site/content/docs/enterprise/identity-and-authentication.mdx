@@ -158,7 +158,7 @@ guardrail:
       block_at: MEDIUM
       alert_at: LOW
       hilt: {enabled: true, min_severity: HIGH}
-      rule_pack_dir: /etc/defenseclaw/rulepacks/strict
+      rule_pack: strict
       connectors:
         codex: {mode: observe}
     ml-team:
@@ -242,7 +242,7 @@ For one connector, the most specific value wins:
 5. the global `guardrail.*` value.
 
 A profile accepts `description`, `mode`, `block_at`, `alert_at`, `hilt`,
-`rule_pack_dir`, `block_message` and `connectors`. `enabled` and
+`rule_pack`, `rules`, `block_message` and `connectors`. `enabled` and
 `hook_fail_mode` are rejected, in a profile and in its connector entries,
 because both are built into the hooks installed on the machine.
 `hilt.min_severity` is stored in upper case (`HIGH`). Profile names are lower

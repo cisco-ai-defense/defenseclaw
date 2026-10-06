@@ -37,7 +37,7 @@ before locating or editing Windows state.
     <File name="doctor_cache.json" />
     <File name="picked_connector" />
     <File name="hook_contract_lock.json" />
-    <File name="custom-providers.json (optional)" />
+    <File name="custom-providers.json (derived from llm_providers)" />
     <File name="judge_bodies.db (when judge bodies are retained)" />
     <File name="gateway.log" />
     <File name="watchdog.log" />
@@ -152,7 +152,7 @@ section (each field with its allowed values). `defenseclaw config validate`
 points to the JSON schema when a field is wrong.
 
 ```yaml
-config_version: 8             # strict current schema; upgrade migrates supported v7 files
+config_version: 9             # strict current schema; upgrade migrates v8 files (the old file stays as config.yaml.v8.bak)
 
 claw:
   mode: claudecode             # the primary connector; setup aliases select this with --connector.
@@ -173,11 +173,11 @@ gateway:
     enabled: true
     skill:
       enabled: true
-      take_action: true        # apply skill_actions (quarantine/block) to a rejected new skill; false = alert only
+      take_action: true        # apply the admission actions (quarantine/block) to a rejected new skill; false = alert only
       dirs: []                 # non-empty replaces the connector's own skill folders
     plugin:
       enabled: true
-      take_action: true        # same for new plugins (plugin_actions)
+      take_action: true        # same for new plugins (admission.plugin)
       dirs: []
     mcp:
       take_action: true        # block a rejected new MCP server in the connector's MCP config
@@ -270,7 +270,7 @@ llm:
   api_key_env: DEFENSECLAW_LLM_KEY
   base_url: ""                 # optional override; LiteLLM picks a default per provider
   role: unified                # unified | agent | judge
-  instance_name: ""            # binds to a ~/.defenseclaw/custom-providers.json entry; required with provider: custom
+  instance_name: ""            # binds to an llm_providers.custom entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
   # forward_custom_headers controls whether the guardrail gateway
   # forwards inbound HTTP headers from the agent to the upstream LLM
@@ -352,7 +352,7 @@ guardrail:
   connector: claudecode        # actively enforced connector
   mode: action                 # observe | action (default observe)
   scanner_mode: local          # local | remote | both (default both)
-  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
+  rule_pack: default           # default | strict | permissive, or a guardrail.custom_packs name (guardrail use-pack)
   block_at: ""                 # CRITICAL | HIGH | MEDIUM | LOW; empty -> the rule pack's level
   alert_at: ""                 # same values; never above block_at
   port: 4000                   # guardrail proxy port
@@ -395,7 +395,7 @@ guardrail:
       mode: action             # observe | action; inherits guardrail.mode when unset
       hook_fail_mode: closed   # open | closed; inherits guardrail.hook_fail_mode
       block_message: ""        # custom; inherits guardrail.block_message
-      rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict  # inherits guardrail.rule_pack_dir
+      rule_pack: strict        # inherits guardrail.rule_pack
       block_at: HIGH           # inherits guardrail.block_at, then the rule pack's level
       hilt:
         enabled: true
@@ -444,7 +444,7 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `guardrail.profiles.<name>` | none | A named set of guardrail overrides. `<name>` is lower case, at most 64 characters. Allowed keys: `description`, `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack_dir`, `block_message` and `connectors`. Each `connectors.<connector>` entry allows `mode`, `hilt`, `block_message`, `rule_pack_dir`, `block_at` and `alert_at`. `enabled` and `hook_fail_mode` are rejected at both levels. |
+| `guardrail.profiles.<name>` | none | A named set of guardrail overrides. `<name>` is lower case, at most 64 characters. Allowed keys: `description`, `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `block_message` and `connectors`. Each `connectors.<connector>` entry allows `mode`, `hilt`, `block_message`, `rule_pack`, `block_at` and `alert_at`. `enabled` and `hook_fail_mode` are rejected at both levels. |
 | `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. |
 | `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. |
@@ -910,7 +910,7 @@ A single gateway can enforce guardrail policy for several **hook** connectors at
 | `mode` | `observe` \| `action` | `guardrail.mode` |
 | `hook_fail_mode` | `open` \| `closed` | `guardrail.hook_fail_mode` |
 | `block_message` | string | `guardrail.block_message` |
-| `rule_pack_dir` | path | `guardrail.rule_pack_dir` |
+| `rule_pack` | a preset (`default`, `strict`, `permissive`) or a `guardrail.custom_packs` name | `guardrail.rule_pack` |
 | `block_at` | `CRITICAL` \| `HIGH` \| `MEDIUM` \| `LOW` (any case) — lowest severity that blocks | `guardrail.block_at`, then the rule pack's level |
 | `alert_at` | same values — lowest severity that alerts; never above the block level | `guardrail.alert_at`, then the rule pack's level |
 | `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
@@ -962,73 +962,49 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 How each OS applies these keys to each connector is on
 [Machine policy](/docs/enterprise/machine-policy).
 
-The standalone lifecycle on Linux and macOS also requires `config_version: 8`,
+The standalone lifecycle on Linux and macOS also requires `config_version: 9` (a `config_version: 8` file is migrated when it is applied),
 `enterprise.profile: standalone` if you set it, and `data_dir` set to exactly
 `/var/lib/defenseclaw` (Linux) or `/opt/cisco/defenseclaw/runtime` (macOS). If
 you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
 `18970`. Connectors are enabled by `guardrail.connectors`, as in any other
 config; see [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 
-## Custom-provider overlay (`~/.defenseclaw/custom-providers.json`)
+## Custom LLM providers (`llm_providers.custom`)
 
-Custom-provider instances live in a separate JSON overlay so the same instance definition can be shared across roles (agent, judge) and across hosts. The Python merger (`_apply_instance_overlay`) and the Go dispatcher (`buildProviderFromEffective`) both apply the same rule: **the role wins; the overlay fills blanks**.
+Custom-provider instances are defined once in `config.yaml` under `llm_providers.custom`, so the same instance definition can be shared across roles (agent, judge). A role selects one with `instance_name`; **the role wins and the instance fills blanks**. `defenseclaw setup provider add` writes these entries; a `custom-providers.json` written before `llm_providers` existed is moved here by the next `setup provider` change.
 
-```json
-{
-  "providers": [
-    {
-      "name": "acme-internal-bedrock",
-      "base_provider_type": "bedrock",
-      "base_url": "https://llm.internal:8443",
-      "domains": ["llm.internal"],
-      "env_key": "ACME_BEDROCK_KEY",
-      "allowed_request_types": ["chat", "embedding"],
-      "available_models": ["us.anthropic.claude-sonnet-4-6"],
-      "request_path_overrides": {
-        "chat": "/openai/v1/chat/completions"
-      },
-
-      "tls": {
-        "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...",
-        "insecure_skip_verify": false
-      },
-
-      "bedrock": {
-        "region": "us-east-1",
-        "auth_mode": "iam_credentials",
-        "access_key_env": "AWS_ACCESS_KEY_ID",
-        "secret_key_env": "AWS_SECRET_ACCESS_KEY",
-        "session_token_env": "AWS_SESSION_TOKEN",
-        "profile_name": "",
-        "inference_profile": "us.",
-        "deployment_aliases": {
-          "fast": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-        }
-      },
-
-      "vertex": {
-        "project_id": "acme-prod-vertex",
-        "region": "us-central1",
-        "auth_mode": "service_account",
-        "service_account_json_env": "GOOGLE_APPLICATION_CREDENTIALS"
-      },
-
-      "azure": {
-        "endpoint": "https://my-resource.openai.azure.com",
-        "api_version": "2024-10-21",
-        "auth_mode": "api_key",
-        "deployment_aliases": {
-          "gpt-5.4": "prod-gpt54-eus"
-        }
-      }
-    }
-  ]
-}
+```yaml
+llm_providers:
+  custom:
+    - name: acme-internal-bedrock
+      base_provider_type: bedrock
+      base_url: https://llm.internal:8443
+      domains: [llm.internal]
+      env_keys: [ACME_BEDROCK_KEY]
+      allowed_requests: [chat, embedding]
+      available_models: [us.anthropic.claude-sonnet-4-6]
+      request_path_overrides:
+        chat: /openai/v1/chat/completions
+      tls:
+        ca_cert_file: /etc/acme/ca.pem       # a file, not inline PEM
+        insecure_skip_verify: false
+      bedrock:
+        region: us-east-1
+        auth_mode: iam_credentials
+        access_key_env: AWS_ACCESS_KEY_ID
+        secret_key_env: AWS_SECRET_ACCESS_KEY
+        session_token_env: AWS_SESSION_TOKEN
+        inference_profile: "us."
+        deployment_aliases:
+          fast: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  ollama_ports: [11434]
 ```
 
-In practice an entry only carries the sub-block matching its `base_provider_type` — extras are ignored at dispatch time but `defenseclaw doctor` warns about family mismatches (e.g. `bedrock` block with `base_provider_type: openai`), unknown `auth_mode` values, and dead overlay fields the role-level config already shadows. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure).
+An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching its `base_provider_type`; `defenseclaw doctor` warns about family mismatches and unknown `auth_mode` values. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure).
 
-The `domains` array drives the gateway's URL → overlay lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this overlay entry's TLS, base_url, and sub-block posture. Any entry that declares `base_url` should also list the matching host in `domains`; `defenseclaw doctor` warns when the two diverge.
+The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
+
+`~/.defenseclaw/custom-providers.json` is derived from this section on every config write, for tools that read the file. Do not edit it: a hand edit is never read back (doctor reports an edited derived file). Change `llm_providers` with `defenseclaw setup provider` or `defenseclaw config set` instead.
 
 ## Environment variables
 

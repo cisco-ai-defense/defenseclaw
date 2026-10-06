@@ -160,11 +160,11 @@ never treats directory presence as proof that the pack is valid.
 
 Validation is a preflight; it does not change the running gateway. Switch to
 the validated pack with `defenseclaw guardrail use-pack`, which validates the
-pack again and then writes the global or one connector's `rule_pack_dir`. An
-invalid pack changes nothing. A running gateway loads a new `rule_pack_dir`
-only when it starts, so `use-pack` restarts a running gateway (pass
-`--no-restart` to skip; a stopped gateway is never started), and startup
-validates the pack with the same strict validator.
+pack again and then writes the global or one connector's `rule_pack` (a
+custom directory is also pinned as a `guardrail.custom_packs` entry with its
+digest). An invalid pack changes nothing. The running gateway loads the new
+pack on its next reload, validating it with the same strict validator; if it
+is refused, the previous configuration keeps running.
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org

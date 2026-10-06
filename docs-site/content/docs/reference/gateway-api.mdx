@@ -391,7 +391,7 @@ deployment; elsewhere they return `404`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET`, `HEAD` | `/v1/config/providers` | Return the merged built-in and operator provider registry plus overlay status. |
-| `POST` | `/v1/config/providers/reload` | Reload the built-in registry and `custom-providers.json` overlay. |
+| `POST` | `/v1/config/providers/reload` | Rebuild the provider registry from the built-in providers and `config.yaml` `llm_providers`. |
 
 ### Policy
 

@@ -1,13 +1,13 @@
 ---
 title: MCP scanner
-description: Behavioural scan of every Model Context Protocol server an agent might call. DefenseClaw wraps cisco-ai-mcp-scanner to surface hidden tool intents and shadow capabilities, and maps each verdict through the mcp_actions admission policy.
+description: Behavioural scan of every Model Context Protocol server an agent might call. DefenseClaw wraps cisco-ai-mcp-scanner to surface hidden tool intents and shadow capabilities, and maps each verdict through the admission policy in config.yaml.
 keywords:
   - DefenseClaw MCP scanner
   - cisco-ai-mcp-scanner
   - Model Context Protocol security
   - MCP server scan
   - tool poisoning
-  - mcp_actions
+  - admission policy
   - mcpServers
 ---
 
@@ -15,13 +15,13 @@ The Model Context Protocol (MCP) is becoming the default way for agents to acqui
 
 That tool list is also a perfect place to hide a "shadow capability" — a tool whose description claims to read calendar events but whose implementation actually exfiltrates files, or a `safe_lookup` tool that quietly modifies a database. Static metadata isn't enough; you need to *look at what the server will say it can do, and what its implementations imply*.
 
-DefenseClaw integrates Cisco's open-source [`cisco-ai-mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner) for exactly that. Verdicts feed the `mcp_actions` admission policy by severity bucket — same shape as `skill_actions`.
+DefenseClaw integrates Cisco's open-source [`cisco-ai-mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner) for exactly that. Verdicts feed the `admission` policy in `config.yaml` by severity, the same way as skills.
 
 <DefenseClawDemo scenario="mcp-shadow-capability" />
 
 ## What you just saw
 
-A locally configured stdio server advertised a read-only-looking tool whose description and schema implied filesystem and outbound-network side effects. DefenseClaw held admission, started the server in a short-lived scan subprocess to read its tool list, resolved `mcp_actions.high`, disabled the runtime, and blocked installation. Remote URL scans use a different path and do not add the server to a connector.
+A locally configured stdio server advertised a read-only-looking tool whose description and schema implied filesystem and outbound-network side effects. DefenseClaw held admission, started the server in a short-lived scan subprocess to read its tool list, resolved the admission action for HIGH, disabled the runtime, and blocked installation. Remote URL scans use a different path and do not add the server to a connector.
 
 ## What it scans
 
@@ -133,9 +133,9 @@ and rescanned on a schedule:
     A scan failure stops the add.
   </Step>
   <Step>
-    **Act on the verdict.** The top severity maps through `mcp_actions` (below):
-    in the default policy, HIGH and CRITICAL block the install and disable the
-    server.
+    **Act on the verdict.** The top severity maps through `admission.mcp` (below):
+    with the built-in defaults, MEDIUM and above block the install and disable
+    the server.
   </Step>
   <Step>
     **Rescan.** The gateway re-checks configured servers on a schedule
@@ -152,48 +152,19 @@ observability destination.
 
 ## Configure the action mapping
 
-The scanner produces a *severity*. What that severity *does* lives under `mcp_actions` in `~/.defenseclaw/config.yaml` — per-severity buckets, identical in shape to `skill_actions`. The defaults block the install of critical and high servers and leave everything else alone:
+The scanner produces a *severity*. What that severity *does* is set in `~/.defenseclaw/config.yaml` under `admission:`: `admission.mcp.actions` first, then `admission.defaults.actions`, which every asset type inherits. The built-in defaults quarantine CRITICAL, HIGH and MEDIUM servers, disable LOW ones at runtime, and admit INFO findings with a warning:
 
-```yaml title="~/.defenseclaw/config.yaml (defaults)"
-mcp_actions:
-  critical:
-    file:    none
-    runtime: enable
-    install: block
-  high:
-    file:    none
-    runtime: enable
-    install: block
-  medium:
-    file:    none
-    runtime: enable
-    install: none
-  low:
-    file:    none
-    runtime: enable
-    install: none
-  info:
-    file:    none
-    runtime: enable
-    install: none
-```
-
-The policy file can tighten this for MCP findings under `scanner_overrides.mcp`. Keys are uppercase severities and `runtime` is `block` or `allow`. The shipped default policy sets:
-
-```yaml title="policies/default.yaml (excerpt)"
-scanner_overrides:
+```yaml title="~/.defenseclaw/config.yaml (the built-in defaults, written out)"
+admission:
+  defaults:
+    actions: {critical: quarantine, high: quarantine, medium: warn, low: warn, info: warn}
   mcp:
-    MEDIUM:
-      runtime: block
-      file: quarantine
-      install: block
-    LOW:
-      runtime: block
-      file: none
-      install: none
+    actions:
+      medium: quarantine
+      low: {install: none, file: none, runtime: disable}
 ```
 
-`defenseclaw policy activate <name>` rewrites only `skill_actions`; it does not change `mcp_actions`. See [Defaults](/docs/policies/defaults) for each shipped policy.
+An action is `block`, `quarantine`, `warn` or `allow`, or the exact `{install, file, runtime}` triple (see [Skill scanner](/docs/scanning/skill-scanner#configure-the-action-mapping)). `defenseclaw policy edit scanner --type mcp -s <severity> ...` edits `admission.mcp.actions`, and `defenseclaw policy activate <name>` writes a named policy's actions for every asset type. Run `defenseclaw config get admission.mcp --effective` to see the map in force. See [Defaults](/docs/policies/defaults) for each shipped policy.
 
 ## Block / allow individual servers
 
@@ -299,8 +270,8 @@ isn't present; it never crashes the gateway.
 
 ## See also
 
-- [Skill scanner](/docs/scanning/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `skill_actions`
+- [Skill scanner](/docs/scanning/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `admission.skill`
 - [Unified LLM key](/docs/guardrail/unified-llm-key) — the env var the LLM-assisted analysis reads
-- [Defaults](/docs/policies/defaults) — the `mcp_actions` table for each shipped rule pack
+- [Defaults](/docs/policies/defaults) — the admission actions of each shipped policy
 - [Policies](/docs/policies) — the layered architecture
 - [Reference → CLI](/docs/reference/cli) — full `defenseclaw mcp` subcommand reference

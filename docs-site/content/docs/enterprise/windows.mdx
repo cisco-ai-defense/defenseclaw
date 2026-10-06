@@ -173,8 +173,9 @@ config with no connectors protects nothing. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
-Without `guardrail.rule_pack_dir` or `policy_dir`, as here, the gateway uses
-the rule packs built into it. A rule-pack directory you name must exist, be
+Without `guardrail.rule_pack` or `policy_dir`, as here, the gateway uses
+the rule packs built into it. A rule-pack directory you name (a
+`guardrail.custom_packs` entry, or `<policy_dir>/guardrail/<preset>`) must exist, be
 writable only by administrators, and be readable by the gateway service
 account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
 `Users` read and execute entry in place, and add no Deny entry for that

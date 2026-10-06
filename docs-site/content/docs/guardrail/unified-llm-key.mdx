@@ -365,10 +365,12 @@ defenseclaw setup guardrail \
 ## Custom providers for internal or self-hosted endpoints
 
 Internal LLM gateways (a corporate vLLM cluster, an isolated Bedrock
-mirror, a lab vending machine) plug in via the
-`~/.defenseclaw/custom-providers.json` overlay. Each entry exposes
-its own `base_url`, env keys, allowed request types, and per-instance
-TLS posture.
+mirror, a lab vending machine) plug in as `llm_providers.custom`
+entries in `config.yaml` (see the
+[configuration reference](/docs/reference/configuration#custom-llm-providers-llm_providerscustom)).
+Each entry exposes its own `base_url`, env keys, allowed request types,
+and per-instance TLS posture. `~/.defenseclaw/custom-providers.json` is
+derived from that section; edit `llm_providers`, not the file.
 
 ```bash
 defenseclaw setup provider add \
@@ -482,12 +484,12 @@ The same shape works for Vertex AI (`--vertex-project-id`,
 (`--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`,
 `--azure-deployment-alias model=deployment`).
 
-#### Role wins, overlay fills blanks
+#### Role wins, the provider entry fills blanks
 
-When the resolved role *and* the overlay both declare a sub-block,
-the role's fields win and the overlay only supplies values the role
-omitted. The example below pins region on the role but inherits
-auth mode and the deployment alias table from the overlay:
+When the resolved role *and* its `llm_providers.custom` entry both
+declare a sub-block, the role's fields win and the entry only supplies
+values the role omitted. The example below pins region on the role but
+inherits auth mode and the deployment alias table from the entry:
 
 ```yaml
 # ~/.defenseclaw/config.yaml
@@ -495,34 +497,25 @@ llm:
   provider: custom
   instance_name: acme-bedrock-prod
   bedrock:
-    region: us-west-2          # overrides overlay's us-east-2
-```
+    region: us-west-2          # overrides the entry's us-east-2
 
-```json
-# ~/.defenseclaw/custom-providers.json
-{
-  "providers": [
-    {
-      "name": "acme-bedrock-prod",
-      "base_provider_type": "bedrock",
-      "bedrock": {
-        "region": "us-east-2",                  // shadowed by role above
-        "auth_mode": "iam_credentials",         // inherited
-        "access_key_env": "ACME_AWS_AKID",      // inherited
-        "secret_key_env": "ACME_AWS_SECRET",    // inherited
-        "deployment_aliases": {                 // inherited
-          "fast": "anthropic.claude-3-haiku-20240307-v1:0",
-          "heavy": "anthropic.claude-3-opus-20240229-v1:0"
-        }
-      }
-    }
-  ]
-}
+llm_providers:
+  custom:
+    - name: acme-bedrock-prod
+      base_provider_type: bedrock
+      bedrock:
+        region: us-east-2                    # shadowed by the role above
+        auth_mode: iam_credentials           # inherited
+        access_key_env: ACME_AWS_AKID        # inherited
+        secret_key_env: ACME_AWS_SECRET      # inherited
+        deployment_aliases:                  # inherited
+          fast: anthropic.claude-3-haiku-20240307-v1:0
+          heavy: anthropic.claude-3-opus-20240229-v1:0
 ```
 
 Effective dispatch posture: region `us-west-2`, IAM-credentials auth
-from `ACME_AWS_*`, alias table from the overlay. `defenseclaw doctor`
-flags overlay fields that the role silently shadows so the dead config
+from `ACME_AWS_*`, alias table from the entry. `defenseclaw doctor`
+flags entry fields that the role silently shadows so the dead config
 can be pruned.
 
 ## Regional providers (Bedrock, Vertex AI, Azure OpenAI)

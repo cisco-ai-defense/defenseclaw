@@ -39,7 +39,7 @@ in-flight guardrail detection are independent layers.
 
 ## OPA admission policy — what each profile ships
 
-The OPA policy file (`policies/<name>.yaml`) drives admission decisions: what happens to a finding by severity, whether the allow-list lets first-party assets bypass scanning, and what threshold a [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) verdict has to clear before it blocks.
+A policy file (`policies/<name>.yaml`) sets admission decisions: what happens to a finding by severity, whether the allow-list lets first-party assets bypass scanning, and what threshold a [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) verdict has to clear before it blocks. `defenseclaw policy activate <name>` writes them into `config.yaml`, which is what the gateway enforces: the file's `skill_actions` become `admission.defaults.actions` and `admission.skill.actions`, `scanner_overrides.<type>` becomes `admission.<type>.actions`, and the guardrail thresholds become `guardrail.block_at` and `alert_at`. The keys below are policy-file keys; `skill_actions` and the other v8 keys are not valid in `config.yaml` since `config_version: 9`.
 
 | Knob | `permissive` | `default` | `strict` |
 | --- | --- | --- | --- |

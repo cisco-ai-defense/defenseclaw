@@ -360,7 +360,7 @@ fact and use closed CEL/ActionFacts proofs instead of resource-name guesses.
 
 The SSH contract intentionally abstains today because the public CEL activation
 does not expose file content or a trusted fingerprint allowlist parameter. It
-must not be selected as a rule pack (`rule_pack_dir`) until that binding exists. Dynamic paths,
+must not be selected as a rule pack (`guardrail.rule_pack`) until that binding exists. Dynamic paths,
 malformed keys, missing policy, failed writes, and unresolved homes already
 fail closed to abstention in its ActionFacts helper.
 

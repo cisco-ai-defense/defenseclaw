@@ -261,15 +261,17 @@ are on each [connector page](/docs/connectors#platform-support).
 
 The administrator config is one YAML file. The example below protects Codex
 and Claude Code in observe mode, so policy verdicts do not block yet, and
-installs as written with `ensure --config`. `rule_pack_dir: ""` selects the
-rule packs built into the gateway; to use your own, see
-[Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
+installs as written with `ensure --config`. With `guardrail.rule_pack` unset
+the gateway uses the rule packs built into it; to use your own, see
+[Custom rule packs](/docs/enterprise/configuration#custom-rule-packs). A
+`config_version: 8` file from an earlier release is still accepted: `ensure`
+migrates it to 9.
 
 <Tabs items={['Linux', 'macOS', 'Windows']}>
   <Tab value="Linux">
 
 ```yaml title="/etc/defenseclaw/config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw          # must be exactly this path
 policy_dir: /etc/defenseclaw/policies
@@ -280,7 +282,6 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
-  rule_pack_dir: ""                     # use the built-in rule packs
   mode: observe                         # observe | action
   connectors:
     codex: {}
@@ -291,7 +292,7 @@ guardrail:
   <Tab value="macOS">
 
 ```yaml title="/opt/cisco/defenseclaw/etc/config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime   # must be exactly this path
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -302,7 +303,6 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
-  rule_pack_dir: ""                        # use the built-in rule packs
   mode: observe                            # observe | action
   connectors:
     codex: {}
@@ -313,7 +313,7 @@ guardrail:
   <Tab value="Windows">
 
 ```yaml title="config.yaml (Windows)"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 # Leave data_dir unset: the services use C:\ProgramData\Cisco\DefenseClaw\runtime.
 enterprise:
@@ -323,7 +323,6 @@ gateway:
   api_port: 18970
 guardrail:
   enabled: true
-  rule_pack_dir: ""                        # use the built-in rule packs
   mode: observe                            # observe | action
   connectors:
     codex: {}
