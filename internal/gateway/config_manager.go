@@ -177,11 +177,13 @@ func (m *ConfigManager) getEnvConfigPath() string {
 // config_version 8 file is migrated in memory first (read-only), so it runs
 // as `defenseclaw migrate` would write it: its data.json admission and
 // thresholds and, on a per-user install, its audit.db block/allow entries
-// keep applying.
+// keep applying. A file whose migration fails is refused.
 func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
 	migrated, err := config.MigrateV8InMemory(source, raw, guardrail.RulePackDigest)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[config] %s is config_version 8 and the in-memory config_version 9 migration failed (%v); it loads as config_version 8. Run `defenseclaw migrate`.\n", source, err)
+		// Refused: the previous generation keeps running. As raw v8 the file
+		// would drop its data.json admission and audit.db block/allow policy.
+		return nil, config.InMemoryMigrationError(source, err)
 	}
 	return config.LoadRuntimeV8CandidateFromBytes(source, migrated)
 }

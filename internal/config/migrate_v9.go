@@ -244,8 +244,8 @@ func NeedsMigrationV9(raw []byte) bool {
 // on a per-user install, the operator rows of audit.db keep applying until
 // the file is migrated. Nothing is written. raw comes back unchanged for a
 // config_version 9 file and on a Secure Client host, whose path does not
-// change; on a migration error it comes back unchanged with the error, for
-// the caller to report.
+// change; on a migration error it comes back unchanged with the error, and
+// the caller refuses the file (InMemoryMigrationError).
 func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
 	if !NeedsMigrationV9(raw) {
 		return raw, nil
@@ -289,6 +289,15 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 		_ = os.Setenv(result.EnvKey, result.EnvValue)
 	}
 	return result.Migrated, nil
+}
+
+// InMemoryMigrationError is the load error for a config_version 8 file whose
+// in-memory migration failed. The file is refused rather than run as v8:
+// from config_version 9 on enforcement reads admission and the block/allow
+// lists only from config, so a raw v8 document would silently drop its
+// data.json admission policy and its audit.db block/allow entries.
+func InMemoryMigrationError(configFile string, err error) error {
+	return fmt.Errorf("config: %s is config_version 8 and its config_version 9 migration failed, so it is not loaded (its admission and block/allow policy would not apply): %w; fix the cause, then run `defenseclaw migrate`", configFile, err)
 }
 
 // MigratedFrom reports whether the config at configPath is still the

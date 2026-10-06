@@ -1234,3 +1234,24 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 		t.Fatalf("unchanged asset rebuild = %v, generation %d -> %d", err, gen, mgr.gen.Load())
 	}
 }
+
+// A config_version 8 file whose in-memory migration fails is refused, not
+// run as raw v8 without its data.json admission and audit.db block/allow
+// policy (the reload keeps the previous generation).
+func TestLoadRuntimeConfigCandidateRefusesAFailedV8Migration(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	dataJSON := filepath.Join(dir, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {},}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if cfg, err := loadRuntimeConfigCandidate(source, raw); err == nil || cfg != nil {
+		t.Fatalf("loadRuntimeConfigCandidate = %v, %v; want the failed migration refused", cfg, err)
+	}
+}

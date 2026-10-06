@@ -340,9 +340,11 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	}
 	// An un-migrated config_version 8 file runs as the v9 migration would
 	// write it (read-only), so its data.json and audit.db policy still apply.
-	raw, migrateErr := config.MigrateV8InMemory(loaded.source, loaded.raw, guardrail.RulePackDigest)
-	if migrateErr != nil {
-		fmt.Fprintf(os.Stderr, "[config] %s is config_version 8 and the in-memory config_version 9 migration failed (%v); it loads as config_version 8. Run `defenseclaw migrate`.\n", loaded.source, migrateErr)
+	// A failed migration refuses the file: run as raw v8 it would drop the
+	// data.json admission policy and the audit.db block/allow entries.
+	raw, err := config.MigrateV8InMemory(loaded.source, loaded.raw, guardrail.RulePackDigest)
+	if err != nil {
+		return nil, nil, config.InMemoryMigrationError(loaded.source, err)
 	}
 	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, raw)
 	if err != nil {
