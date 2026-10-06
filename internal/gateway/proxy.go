@@ -6413,8 +6413,8 @@ func providerRequestOverridesForTarget(targetURL string) map[string]interface{} 
 		return nil
 	}
 
-	cfg, err := configs.LoadProviders()
-	if err != nil || cfg == nil {
+	cfg, _, _ := providerRegistrySnapshot()
+	if cfg == nil {
 		return nil
 	}
 
