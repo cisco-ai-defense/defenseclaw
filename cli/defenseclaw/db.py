@@ -30,6 +30,7 @@ import stat
 import threading
 import time
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -1984,12 +1985,29 @@ class Store:
             connectors=connectors,
         )
 
-    def get_counts(self, *, alert_count_seconds: float | None = None) -> Counts:
+    def _with_operator_lists(self, counts: Counts, cfg: Any) -> Counts:
+        """``counts`` with the skill and MCP block/allow counts of the list
+        views: the operator decisions in asset_policy are not audit.db rows."""
+        if cfg is None:
+            return counts
+        from defenseclaw.enforce.asset_lists import install_counts
+
+        blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = install_counts(self, cfg)
+        return replace(
+            counts,
+            blocked_skills=blocked_skills,
+            allowed_skills=allowed_skills,
+            blocked_mcps=blocked_mcps,
+            allowed_mcps=allowed_mcps,
+        )
+
+    def get_counts(self, *, alert_count_seconds: float | None = None, cfg: Any = None) -> Counts:
         """Return status counters.
 
         With ``alert_count_seconds``, ``alerts`` is None when counting them
         takes longer: the alert predicate reads every audit row, which takes
-        minutes on a large or not yet migrated audit database.
+        minutes on a large or not yet migrated audit database. With ``cfg``,
+        the block/allow counts include the operator lists in its asset_policy.
         """
 
         def _count(sql: str) -> int:
@@ -1998,14 +2016,19 @@ class Store:
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
         alert_where = self._alert_where_clause(actionable=False)
-        return Counts(
-            blocked_skills=_count(q_skill + "'block'"),
-            allowed_skills=_count(q_skill + "'allow'"),
-            blocked_mcps=_count(q_mcp + "'block'"),
-            allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=self._count_within(f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds),
-            total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+        return self._with_operator_lists(
+            Counts(
+                blocked_skills=_count(q_skill + "'block'"),
+                allowed_skills=_count(q_skill + "'allow'"),
+                blocked_mcps=_count(q_mcp + "'block'"),
+                allowed_mcps=_count(q_mcp + "'allow'"),
+                alerts=self._count_within(
+                    f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds
+                ),
+                total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+                blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+            ),
+            cfg,
         )
 
     def _count_within(self, sql: str, seconds: float | None) -> int | None:
@@ -2024,7 +2047,7 @@ class Store:
         finally:
             self.db.set_progress_handler(None, 0)
 
-    def get_enforcement_counts(self) -> Counts:
+    def get_enforcement_counts(self, cfg: Any = None) -> Counts:
         """Return cheap Overview enforcement counters.
 
         This intentionally leaves ``alerts`` at zero. Exact alert counts scan
@@ -2058,13 +2081,16 @@ class Store:
                WHERE target_type IN ('skill', 'mcp')"""
         ).fetchone()
         blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
-        return Counts(
-            blocked_skills=blocked_skills,
-            allowed_skills=allowed_skills,
-            blocked_mcps=blocked_mcps,
-            allowed_mcps=allowed_mcps,
-            total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+        return self._with_operator_lists(
+            Counts(
+                blocked_skills=blocked_skills,
+                allowed_skills=allowed_skills,
+                blocked_mcps=blocked_mcps,
+                allowed_mcps=allowed_mcps,
+                total_scans=_count("SELECT COUNT(*) FROM scan_results"),
+                blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+            ),
+            cfg,
         )
 
     # -- Row converters --

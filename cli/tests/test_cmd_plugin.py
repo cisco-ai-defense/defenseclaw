@@ -2763,12 +2763,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_action_strict_config_quarantines_critical(self, mock_fetch, mock_scan, mock_disable):
-        """--action on CRITICAL quarantines and records the scan block."""
-        from defenseclaw.config import PluginActionsConfig, SeverityAction
-        self.app.cfg.plugin_actions = PluginActionsConfig(
-            critical=SeverityAction(file="quarantine", runtime="disable", install="block"),
-            high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
+        """--action on CRITICAL quarantines (admission default) and records the scan block."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("strict-danger-pkg")
         mock_fetch.return_value = src
@@ -2780,8 +2775,8 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         self.assertIn("quarantined", result.output)
         self.assertIn("block list", result.output)
         # A scan verdict's install block is enforcement journal, not policy.
-        pe = PolicyEngine(self.app.store, self.app.cfg)
-        self.assertTrue(pe.journal_install_blocked("plugin", "strict-danger-pkg", "openclaw"))
+        journal = self.app.store.get_action("plugin", "strict-danger-pkg", "openclaw")
+        self.assertEqual(journal.actions.install if journal else None, "block")
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")

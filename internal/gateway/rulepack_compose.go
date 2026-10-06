@@ -119,7 +119,9 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		return nil, err
 	}
 	if custom, ok := cfg.Guardrail.CustomPacks[s.ref.Name]; ok && s.ref.Name != "" {
-		got := "sha256:" + base.Summary().Digest
+		// The pin covers the pack's own files (FilesDigest), not the
+		// embedded defaults it inherits for missing components.
+		got := "sha256:" + base.FilesDigest()
 		if !strings.EqualFold(strings.TrimSpace(custom.Digest), got) {
 			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest",
 				scope, s.ref.Name, got, s.ref.Name)

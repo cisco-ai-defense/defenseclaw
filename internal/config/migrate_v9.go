@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
@@ -39,7 +41,8 @@ import (
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
 // admission and guardrail values, the *_actions keys,
 // watch.allow_list_bypass_scan, rule_pack_dir, the v8 scanner keys,
-// update_check and (OSS only) the operator block/allow rows of audit.db.
+// update_check and (OSS only) the operator block/allow rows of audit.db and a
+// legacy custom-providers.json overlay.
 // It is the one implementation: `defenseclaw-gateway config migrate --to 9`,
 // the Python CONFIG_MIGRATIONS[8] step and enterprise ensure all call it,
 // and the gateway runs it in memory (read-only) on a v8 file at load.
@@ -91,8 +94,8 @@ type MigrateV9Input struct {
 	// InMemory migrates for a read-only load: nothing is written and
 	// audit.db is only read.
 	InMemory bool
-	// RulePackDigest returns the hex RulePackSummary digest of a rule-pack
-	// directory (guardrail.LoadRulePack(dir).Summary().Digest). The config
+	// RulePackDigest returns the hex pin digest of a rule-pack directory
+	// (guardrail.RulePackDigest: the pack's own files). The config
 	// package can not import the guardrail package, so callers that may meet
 	// a custom rule_pack_dir pass it; without it such a directory is a
 	// migration error.
@@ -148,7 +151,7 @@ type MigrationRecord struct {
 
 // MigrationMove is one value moved from a v8 source to a v9 key.
 type MigrationMove struct {
-	// Source is "config", "data.json" or "audit.db".
+	// Source is "config", "data.json", "audit.db" or "custom-providers.json".
 	Source string `json:"source"`
 	// From is the source path, for example skill_actions.high or
 	// data.json:config.scan_on_install or actions:<id>.
@@ -244,8 +247,8 @@ func NeedsMigrationV9(raw []byte) bool {
 // on a per-user install, the operator rows of audit.db keep applying until
 // the file is migrated. Nothing is written. raw comes back unchanged for a
 // config_version 9 file and on a Secure Client host, whose path does not
-// change; on a migration error it comes back unchanged with the error, for
-// the caller to report.
+// change; on a migration error it comes back unchanged with the error, and
+// the caller refuses the file (InMemoryMigrationError).
 func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
 	if !NeedsMigrationV9(raw) {
 		return raw, nil
@@ -289,6 +292,15 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 		_ = os.Setenv(result.EnvKey, result.EnvValue)
 	}
 	return result.Migrated, nil
+}
+
+// InMemoryMigrationError is the load error for a config_version 8 file whose
+// in-memory migration failed. The file is refused rather than run as v8:
+// from config_version 9 on enforcement reads admission and the block/allow
+// lists only from config, so a raw v8 document would silently drop its
+// data.json admission policy and its audit.db block/allow entries.
+func InMemoryMigrationError(configFile string, err error) error {
+	return fmt.Errorf("config: %s is config_version 8 and its config_version 9 migration failed, so it is not loaded (its admission and block/allow policy would not apply): %w; fix the cause, then run `defenseclaw migrate`", configFile, err)
 }
 
 // MigratedFrom reports whether the config at configPath is still the
@@ -356,6 +368,10 @@ type v9Migrator struct {
 	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
 	// replaces with the shipped module (nil data retires the file).
 	rego []v9RegoRefresh
+	// providersOverlay is the legacy custom-providers.json folded into
+	// llm_providers; commit writes providerCAs and retires the file.
+	providersOverlay string
+	providerCAs      []v9RegoRefresh
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
@@ -420,6 +436,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
+	m.migrateCustomProviders(root)
 	if err := m.planRegoRefresh(); err != nil {
 		return nil, false, err
 	}
@@ -439,8 +456,8 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 }
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
-// config (generation +1), the record, the data.json rename, the inline key
-// move and finally the audit.db rows.
+// config (generation +1), the record, the data.json rename (not on a
+// managed host), the inline key move and finally the audit.db rows.
 func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]string, error) {
 	txn, err := cfgtxn.Begin(ctx, m.configPath, 0)
 	if err != nil {
@@ -471,7 +488,9 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return written, err
 	}
 	written = append(written, m.configPath)
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" {
+	// On a managed host the admin owns policy_dir (as planRegoRefresh
+	// reports): its data.json stays, so a rollback to the v8 config finds it.
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed {
 		if _, statErr := os.Stat(dj); statErr == nil {
 			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
@@ -486,6 +505,9 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			continue
 		}
 		written = append(written, module.path+DataJSONMigratedSuffix)
+	}
+	if m.providersOverlay != "" {
+		m.retireProvidersOverlay(&written)
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
@@ -1057,6 +1079,7 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		v9Set(root, v9Scalar(name), "guardrail", item.key)
 		m.moved("data.json", "data.json:guardrail."+strings.Replace(item.key, "_at", "_threshold", 1), "guardrail."+item.key, name)
 		guardrail = v8YAMLMapValue(root, "guardrail")
+		m.pinStricterScopePostures(guardrail, item.key, *item.value)
 	}
 	if level := strings.TrimSpace(data.Guardrail.CiscoTrustLevel); level != "" && level != "full" {
 		v9Set(root, v9Scalar(level), "guardrail", "cisco_trust_level")
@@ -1070,6 +1093,49 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 			}
 		}
 	}
+}
+
+// pinStricterScopePostures keeps a connector or profile pack posture that is
+// stricter than the data.json level just written to the global key. In v8
+// that scope's hook prompts and tool calls took its own pack posture; in v9
+// the global key would win over the pack default, so the posture level is
+// pinned at the scope (spec 2.2 precedence).
+func (m *v9Migrator) pinStricterScopePostures(guardrail *yaml.Node, key string, rank int) {
+	for _, scope := range v9GuardrailScopes(guardrail)[1:] {
+		posture := m.scopePackPosture(guardrail, scope.node)
+		if posture == "" || strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, key))) != "" {
+			continue
+		}
+		block, alert := v9PostureRanks(posture)
+		own := block
+		if key == "alert_at" {
+			own = alert
+		}
+		if own >= rank {
+			continue
+		}
+		v9Set(scope.node, v9Scalar(v9RankNames[own]), key)
+		m.moved("config", scope.name+".rule_pack", scope.name+"."+key, v9RankNames[own])
+		m.note("%s.%s is pinned to the %s pack posture (%s) so the global guardrail.%s from data.json does not loosen it",
+			scope.name, key, posture, v9RankNames[own], key)
+	}
+}
+
+// scopePackPosture is the posture of the pack a scope selects ("" when it
+// selects none and inherits): a preset's own name, else the posture of the
+// custom pack's directory.
+func (m *v9Migrator) scopePackPosture(guardrail, scope *yaml.Node) string {
+	name := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope, "rule_pack")))
+	switch {
+	case name == "":
+		return ""
+	case v9BuiltinPacks[name]:
+		return name
+	}
+	if path := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(guardrail, "custom_packs"), name), "path"))); path != "" {
+		return v9DirPosture(expandPath(path))
+	}
+	return ""
 }
 
 func v9AnyThresholdSet(guardrail *yaml.Node) bool {
@@ -1124,6 +1190,23 @@ var (
 	v9PackNameUnsafe = regexp.MustCompile(`[^a-z0-9_-]+`)
 )
 
+// v9GuardrailScopes are the guardrail scopes that select a pack and
+// thresholds: global, guardrail.connectors.<c>, guardrail.profiles.<p> and
+// guardrail.profiles.<p>.connectors.<c>. The global scope is first.
+func v9GuardrailScopes(guardrail *yaml.Node) []v9NamedNode {
+	scopes := []v9NamedNode{{"guardrail", guardrail}}
+	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
+		scopes = append(scopes, v9NamedNode{"guardrail.connectors." + c.name, c.node})
+	}
+	for _, p := range v9ChildMappings(v8YAMLMapValue(guardrail, "profiles")) {
+		scopes = append(scopes, v9NamedNode{"guardrail.profiles." + p.name, p.node})
+		for _, c := range v9ChildMappings(v8YAMLMapValue(p.node, "connectors")) {
+			scopes = append(scopes, v9NamedNode{"guardrail.profiles." + p.name + ".connectors." + c.name, c.node})
+		}
+	}
+	return scopes
+}
+
 // migrateRulePacks turns every rule_pack_dir into rule_pack (+ rules and
 // custom_packs).
 func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
@@ -1131,59 +1214,59 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 	if guardrail == nil || guardrail.Kind != yaml.MappingNode {
 		return nil
 	}
-	scopes := []struct {
-		path string
-		node *yaml.Node
-	}{{"guardrail", guardrail}}
-	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
-		scopes = append(scopes, struct {
-			path string
-			node *yaml.Node
-		}{"guardrail.connectors." + c.name, c.node})
-	}
-	for _, p := range v9ChildMappings(v8YAMLMapValue(guardrail, "profiles")) {
-		scopes = append(scopes, struct {
-			path string
-			node *yaml.Node
-		}{"guardrail.profiles." + p.name, p.node})
-		for _, c := range v9ChildMappings(v8YAMLMapValue(p.node, "connectors")) {
-			scopes = append(scopes, struct {
-				path string
-				node *yaml.Node
-			}{"guardrail.profiles." + p.name + ".connectors." + c.name, c.node})
-		}
-	}
-	for _, scope := range scopes {
+	for _, scope := range v9GuardrailScopes(guardrail) {
 		node := v9Pop(scope.node, "rule_pack_dir")
 		if node == nil {
 			continue
 		}
 		dir := strings.TrimSpace(node.Value)
 		if dir == "" {
-			m.record.Removed = append(m.record.Removed, scope.path+".rule_pack_dir")
+			m.record.Removed = append(m.record.Removed, scope.name+".rule_pack_dir")
+			if scope.name == "guardrail" && m.embeddedPackDropped() {
+				m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+					To: "guardrail.rule_pack", Kept: "pack-default:default", Lost: "config:guardrail.rule_pack_dir:embedded",
+					Reason: "an empty rule_pack_dir selected the gateway's embedded rule packs; config_version 9 selects the default pack of policy_dir (or the shipped default pack), whose rules, suppressions and judge prompts differ. Review that pack, or set guardrail.rule_pack",
+				})
+			}
+			continue
+		}
+		if name := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, "rule_pack"))); name != "" {
+			// At one scope rule_pack wins over rule_pack_dir (the loader's
+			// rulePackRefOf), so the directory never applied.
+			m.record.Removed = append(m.record.Removed, scope.name+".rule_pack_dir")
+			m.note("%s.rule_pack_dir (%s) was dropped: %s.rule_pack (%s) already selects the pack", scope.name, dir, scope.name, name)
 			continue
 		}
 		name, protections, err := m.rulePackFor(guardrail, dir)
 		if err != nil {
-			return fmt.Errorf("config: %s.rule_pack_dir: %w", scope.path, err)
+			return fmt.Errorf("config: %s.rule_pack_dir: %w", scope.name, err)
 		}
-		if scope.path == "guardrail" {
+		if scope.name == "guardrail" {
 			// A custom pack keeps the posture of its folder, which its new
 			// name (custom-strict, a stem) no longer shows.
 			m.globalPackPosture = v9DirPosture(expandPath(dir))
 		}
 		v9Set(scope.node, v9Scalar(name), "rule_pack")
-		m.moved("config", scope.path+".rule_pack_dir", scope.path+".rule_pack", name)
+		m.moved("config", scope.name+".rule_pack_dir", scope.name+".rule_pack", name)
 		if len(protections) > 0 {
 			list := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
 			for _, p := range protections {
 				list.Content = append(list.Content, v9Scalar(p))
 			}
 			v9Set(scope.node, list, "rules", "protections")
-			m.moved("config", scope.path+".rule_pack_dir", scope.path+".rules.protections", protections)
+			m.moved("config", scope.name+".rule_pack_dir", scope.name+".rules.protections", protections)
 		}
 	}
 	return nil
+}
+
+// embeddedPackDropped reports whether dropping an empty rule_pack_dir changes
+// the pack: config_version 9 keeps the embedded packs only for a standalone
+// Windows host without a policy_dir of its own (standaloneRulePackDefault);
+// everywhere else the implicit default pack is a folder.
+func (m *v9Migrator) embeddedPackDropped() bool {
+	return !(runtime.GOOS == "windows" && m.in.Managed &&
+		strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir"))) == "")
 }
 
 // v9DirPosture is the posture the gateway gives a rule-pack directory: the
@@ -1239,6 +1322,21 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	}
 	if v9BuiltinPacks[base] && v9SameDir(clean, filepath.Join(m.policyDir(), "guardrail", filepath.Base(clean))) {
 		return base, nil, nil
+	}
+	if v9BuiltinPacks[base] {
+		// The shipped pack of the standalone layout is product-owned: a
+		// package update replaces it, so it is never pinned by digest. The
+		// preset name resolves to it while policy_dir has no such folder
+		// (Config.ResolveRulePackDir).
+		if layout, ok := standaloneUnixLayoutForConfig(m.configPath); ok &&
+			v9SameDir(clean, filepath.Join(layout.VendorPolicyDir, "guardrail", filepath.Base(clean))) {
+			shadow := filepath.Join(m.policyDir(), "guardrail", base)
+			if _, err := os.Stat(shadow); errors.Is(err, fs.ErrNotExist) {
+				return base, nil, nil
+			}
+			m.note("%s is the shipped %s pack, but %s exists and the %s name selects it; the shipped pack is pinned as a custom pack, which a package update that changes it refuses until it is pinned again",
+				dir, base, shadow, base)
+		}
 	}
 	if strings.HasPrefix(parent, "protected-") && v9BuiltinPacks[base] {
 		var manifest struct {
@@ -1500,6 +1598,143 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
 }
 
 // ---------------------------------------------------------------------------
+// custom-providers.json
+
+// ProvidersOverlayFile is the operator provider overlay in data_dir. From
+// config_version 9 on it is derived from llm_providers (spec section 6).
+const ProvidersOverlayFile = "custom-providers.json"
+
+// migrateCustomProviders folds a legacy operator overlay (one without
+// _derived_from) into llm_providers, so config.yaml is the one provider
+// list: the gateway and the Python readers then see the same providers.
+// An inline CA bundle moves to <data_dir>/provider-ca/<name>.pem. The
+// in-memory load leaves it alone (the gateway still merges a legacy overlay
+// itself), as does a managed host, whose provider list is the admin's. An
+// overlay that uses request_overrides, which config can not hold, stays a
+// live input and is reported.
+func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
+	if m.in.InMemory {
+		return
+	}
+	path := filepath.Join(m.dataDir(), ProvidersOverlayFile)
+	raw, err := os.ReadFile(path) // #nosec G304 -- the data_dir provider overlay.
+	if err != nil {
+		return
+	}
+	var overlay configs.ProvidersConfig
+	if err := json.Unmarshal(raw, &overlay); err != nil {
+		m.note("%s is not valid JSON (%v); its providers were not moved to llm_providers", path, err)
+		return
+	}
+	if overlay.DerivedFrom != "" || (len(overlay.Providers) == 0 && len(overlay.OllamaPorts) == 0) {
+		return
+	}
+	if m.in.Managed {
+		m.note("%s is a local provider overlay; on a managed host llm_providers comes from the admin config, so it was not moved", path)
+		return
+	}
+	for _, p := range overlay.Providers {
+		if len(p.RequestOverrides) > 0 {
+			m.note("%s sets request_overrides for %q, which llm_providers can not hold; the file stays a live input", path, p.Name)
+			return
+		}
+	}
+	existing := map[string]bool{}
+	for _, item := range v9SeqItems(v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")) {
+		existing[strings.ToLower(yamlScalarValue(v8YAMLMapValue(item, "name")))] = true
+	}
+	var custom []LLMCustomProvider
+	var names []string
+	for _, p := range overlay.Providers {
+		name := strings.TrimSpace(p.Name)
+		if name == "" || existing[strings.ToLower(name)] {
+			continue
+		}
+		existing[strings.ToLower(name)] = true
+		entry := LLMCustomProvider{
+			Name: name, Domains: p.Domains, EnvKeys: p.EnvKeys, BaseProviderType: p.BaseProviderType,
+			BaseURL: p.BaseURL, AllowedRequests: p.AllowedRequests, AvailableModels: p.AvailableModels,
+			RequestPathOverrides: p.RequestPathOverrides, ExtraHeaders: p.ExtraHeaders,
+		}
+		if p.ProfileID != nil {
+			entry.ProfileID = *p.ProfileID
+		}
+		if t := p.TLS; t != nil {
+			entry.TLS = &LLMCustomProviderTLS{InsecureSkipVerify: t.InsecureSkipVerify}
+			if pem := strings.TrimSpace(t.CACertPEM); pem != "" {
+				ca := filepath.Join(m.dataDir(), "provider-ca", v9PackNameUnsafe.ReplaceAllString(strings.ToLower(name), "_")+".pem")
+				entry.TLS.CACertFile = ca
+				m.providerCAs = append(m.providerCAs, v9RegoRefresh{path: ca, data: []byte(t.CACertPEM)})
+			}
+		}
+		if b := p.Bedrock; b != nil {
+			entry.Bedrock = &BedrockKeyConfig{Region: b.Region, AuthMode: b.AuthMode, AccessKeyEnv: b.AccessKeyEnv,
+				SecretKeyEnv: b.SecretKeyEnv, SessionTokenEnv: b.SessionTokenEnv, ProfileName: b.ProfileName,
+				InferenceProfile: b.InferenceProfile, DeploymentAliases: b.DeploymentAliases}
+		}
+		if v := p.Vertex; v != nil {
+			entry.Vertex = &VertexKeyConfig{ProjectID: v.ProjectID, Region: v.Region, AuthMode: v.AuthMode,
+				ServiceAccountJSONEnv: v.ServiceAccountJSONEnv}
+		}
+		if a := p.Azure; a != nil {
+			entry.Azure = &AzureKeyConfig{Endpoint: a.Endpoint, APIVersion: a.APIVersion, AuthMode: a.AuthMode,
+				DeploymentAliases: a.DeploymentAliases}
+		}
+		custom = append(custom, entry)
+		names = append(names, name)
+	}
+	if len(custom) > 0 {
+		list := v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "custom")
+		if list == nil || list.Kind != yaml.SequenceNode {
+			list = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+			v9Set(root, list, "llm_providers", "custom")
+		}
+		for _, entry := range custom {
+			var node yaml.Node
+			if err := node.Encode(entry); err != nil {
+				m.note("could not move provider %q from %s: %v", entry.Name, path, err)
+				return
+			}
+			list.Content = append(list.Content, &node)
+		}
+		m.moved(ProvidersOverlayFile, path, "llm_providers.custom", names)
+	}
+	if len(overlay.OllamaPorts) > 0 && v8YAMLMapValue(v8YAMLMapValue(root, "llm_providers"), "ollama_ports") == nil {
+		ports := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+		for _, port := range overlay.OllamaPorts {
+			ports.Content = append(ports.Content, v9Scalar(port))
+		}
+		v9Set(root, ports, "llm_providers", "ollama_ports")
+		m.moved(ProvidersOverlayFile, path+":ollama_ports", "llm_providers.ollama_ports", overlay.OllamaPorts)
+	}
+	m.providersOverlay = path
+}
+
+// retireProvidersOverlay writes the moved CA bundles and renames the legacy
+// overlay once its providers are in the committed config; the next config
+// write renders the derived file. A CA bundle that can not be written
+// leaves the overlay in place.
+func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
+	for _, ca := range m.providerCAs {
+		if err := func() error {
+			if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
+				return err
+			}
+			return cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600)
+		}(); err != nil {
+			m.note("could not write the provider CA bundle %s: %v; %s stays in place", ca.path, err, m.providersOverlay)
+			return
+		}
+		*written = append(*written, ca.path)
+	}
+	if err := os.Rename(m.providersOverlay, m.providersOverlay+DataJSONMigratedSuffix); err != nil {
+		m.note("could not rename %s: %v", m.providersOverlay, err)
+		return
+	}
+	*written = append(*written, m.providersOverlay+DataJSONMigratedSuffix)
+}
+
+// ---------------------------------------------------------------------------
 // audit.db actions rows
 
 type v9ActionRow struct {
@@ -1529,6 +1764,15 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 			LocalEnforcementEntriesIgnored, path, err)
 		return nil
 	}
+	if err != nil && m.in.InMemory && v9AuditDBDamaged(err) {
+		// A damaged store is the daemon's to repair: it moves the file aside
+		// and carries the entries over (audit.OpenDaemonStore), and the next
+		// reload migrates them. Refusing here would stop that repair, and a
+		// damaged store must not stop teardown either. Any other read error
+		// still refuses the file, and a persisted migration always does.
+		m.note("%s is damaged (%v); its block/allow entries are not migrated until the store is repaired", path, err)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
 	}
@@ -1553,6 +1797,14 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 	}
 	m.record.ActionsRowsMoved = len(m.rows)
 	return nil
+}
+
+// v9AuditDBDamaged reports whether err says the audit.db file itself is
+// damaged, as opposed to busy, missing or not permitted (audit.isSQLiteCorrupt).
+func v9AuditDBDamaged(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database disk image is malformed") ||
+		strings.Contains(message, "file is not a database")
 }
 
 // v9SecureClientDocument reports whether the document is a managed

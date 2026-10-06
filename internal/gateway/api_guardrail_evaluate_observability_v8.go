@@ -401,6 +401,8 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 			DefenseClawGuardrailDecision:        observability.Present(facts.decision),
 			DefenseClawGuardrailEffectiveAction: observability.Present(facts.effectiveAction),
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
+			DefenseClawPolicyEffectiveDigest:    livePolicyDigestV8(),
+			DefenseClawPolicyGeneration:         livePolicyGenerationV8(),
 		},
 	)
 	if err != nil {

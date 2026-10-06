@@ -1347,7 +1347,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     _emit(
         "pass",
         "Config file",
-        f"{cfg_path}; canonical schema v8 valid",
+        f"{cfg_path}; canonical schema valid",
         r=r,
         check_id="doctor.config.canonical-v8",
     )
@@ -1489,7 +1489,7 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
             "run `defenseclaw config validate` before applying repairs"
         )
         return RepairDecision("blocked", reason, blockers=("canonical-v8 validation unavailable",))
-    return RepairDecision("noop", f"{config_path}; canonical schema v8 valid")
+    return RepairDecision("noop", f"{config_path}; canonical schema valid")
 
 
 def _fix_canonical_config_preflight(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -9050,7 +9050,7 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
 
     data_dir = getattr(cfg, "data_dir", "") or ""
-    if getattr(cfg, "config_version", 0) >= CONFIG_VERSION_V9:
+    if getattr(cfg, "_source_config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
         stale = []
         # data-sandbox.json stays: `defenseclaw-gateway policy domains` and

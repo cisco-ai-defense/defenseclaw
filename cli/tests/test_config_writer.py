@@ -124,3 +124,37 @@ def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, m
 
     on_disk = config_module.load(data_dir=str(tmp_path)).asset_policy.skill.denied
     assert [rule.name for rule in on_disk] == ["evil-a", "evil-b"]
+
+
+def test_only_the_writer_writes_config_yaml():
+    """Spec section 3 guard: config.yaml is written through config_writer
+    (which takes config.yaml.lock, validates and records the generation).
+    The modules listed here are that writer, its callers' shared helpers and
+    the 0.x import steps, which lock and record the generation themselves."""
+    import pathlib
+    import re
+
+    package = pathlib.Path(config_writer.__file__).resolve().parent
+    allowed = {
+        "config.py",
+        "config_writer.py",
+        "migrations.py",
+        "observability/v8_writer.py",
+        "commands/cmd_setup.py",  # setup rollback: replace_document, or a recorded exact restore
+    }
+    names = r"(?:config_path|cfg_path|config_file|CONFIG_PATH)"
+    direct = re.compile(
+        rf"open\([^)\n]*\b{names}\b[^)\n]*,\s*[\"'][wax]"
+        rf"|os\.replace\([^)\n]*,\s*{names}\s*\)"
+        rf"|\b\w*atomic_write\w*\(\s*{names}\b"
+        rf"|\b{names}\.write_(?:text|bytes)\("
+    )
+    offenders = []
+    for path in package.rglob("*.py"):
+        rel = path.relative_to(package).as_posix()
+        if rel in allowed:
+            continue
+        match = direct.search(path.read_text(encoding="utf-8"))
+        if match:
+            offenders.append(f"{rel}: {match.group(0)}")
+    assert not offenders, "config.yaml written outside config_writer: " + "; ".join(offenders)

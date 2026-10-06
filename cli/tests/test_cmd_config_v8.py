@@ -151,6 +151,32 @@ def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) ->
     assert "--reveal works only for pre-v8 configurations" in reveal.output
 
 
+def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+
+    def run(*args: str):
+        with (
+            patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+            patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        ):
+            return CliRunner().invoke(cmd_config.config_cmd, list(args))
+
+    assert run("set", "asset_policy.skill.denied[0]", "--json", '{"name": "evil", "reason": "x"}').exit_code == 0
+    got = run("get", "asset_policy.skill.denied[0].name")
+    assert got.exit_code == 0 and got.output.strip() == "evil"
+
+    # An admission key config.yaml leaves out prints the policy the gateway enforces, not null.
+    scan = run("get", "admission.skill.scan_on_install")
+    assert scan.exit_code == 0 and "true" in scan.output and "null" not in scan.output
+    assert run("get", "admission", "--effective").exit_code == 0
+
+    typo = run("unset", "guardrail.blockat")
+    assert typo.exit_code == 1 and "not a configuration key" in typo.output
+    default = run("unset", "guardrail.block_at")
+    assert default.exit_code == 0 and "default already applies" in default.output
+
+
 def test_v8_provenance_view_exposes_only_canonical_go_annotations(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")

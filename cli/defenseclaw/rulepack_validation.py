@@ -47,7 +47,8 @@ _SUMMARY_COUNT_FIELDS: Final = (
     "suppression_count",
     "sensitive_tool_count",
 )
-_SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, "digest"))
+_SUMMARY_DIGEST_FIELDS: Final = ("digest", "files_digest")
+_SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, *_SUMMARY_DIGEST_FIELDS))
 _ERROR_FIELDS: Final = frozenset({"path", "code", "reason"})
 _SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SHA256_DIGEST = re.compile(r"^[a-f0-9]{64}$")
@@ -250,10 +251,13 @@ def _decode_summary(value: Any) -> dict[str, int | str]:
         if type(count) is not int or count < 0:
             raise _protocol_error()
         summary[field] = count
-    digest = value.get("digest")
-    if not isinstance(digest, str) or _SHA256_DIGEST.fullmatch(digest) is None:
-        raise _protocol_error()
-    summary["digest"] = digest
+    # digest fingerprints the loaded pack; files_digest covers only the
+    # pack's own files and is what guardrail.custom_packs pins.
+    for field in _SUMMARY_DIGEST_FIELDS:
+        digest = value.get(field)
+        if not isinstance(digest, str) or _SHA256_DIGEST.fullmatch(digest) is None:
+            raise _protocol_error()
+        summary[field] = digest
     return summary
 
 

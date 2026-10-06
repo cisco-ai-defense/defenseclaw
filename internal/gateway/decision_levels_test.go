@@ -18,10 +18,13 @@ package gateway
 
 import (
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 const (
@@ -279,6 +282,23 @@ func TestSecureClientContentKeepsPackLevels(t *testing.T) {
 	cfg.DeploymentMode = ""
 	if got := guardrailContentAction(cfg, "", "HIGH", false); got != guardrailActionBlock {
 		t.Errorf("OSS content HIGH = %q, want block (one threshold model)", got)
+	}
+}
+
+// TestConfigThresholdsReadTheCustomPackManifestPosture: `policy show` runs
+// where no generation build recorded the pack's manifest posture, so it reads
+// the manifest itself and reports the levels the gateway enforces.
+func TestConfigThresholdsReadTheCustomPackManifestPosture(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, guardrail.PackManifestFile), []byte(`{"posture":"strict"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = "acme-manifest-posture"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"acme-manifest-posture": {Path: dir}}
+	got := ConfigThresholds(cfg, "")
+	if got.Block != "MEDIUM" || got.Source != "pack-default:acme-manifest-posture" {
+		t.Fatalf("policy show levels = %+v, want block MEDIUM from the strict manifest posture", got)
 	}
 }
 

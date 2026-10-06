@@ -435,8 +435,6 @@ deployment; elsewhere they return `404`.
 | `POST` | `/v1/guardrail/evaluate` | Combine caller-supplied, precomputed `local_result` / `cisco_result` values with required `evaluation_id`, `direction`, and `mode`, plus optional model/scanner/content/timing metadata. It does not scan arbitrary content and returns a `GuardrailOutput` with `action`, `severity`, `reason`, and `scanner_sources`. |
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
 
-Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
-
 ### Block and allow lists
 
 These endpoints read and change the block and allow lists, which are the

@@ -406,7 +406,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # exit-0 (it is an informational command parsed by the TUI/scripts and
         # should not hard-fail on a transient DB read); the error is visible.
         try:
-            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS, cfg=app.cfg)
         except Exception as exc:  # noqa: BLE001 — surface the error, don't hide it
             counts = None
             db_error = str(exc)
@@ -1676,7 +1676,7 @@ def _status_payload(app) -> dict:
 
     if app.store:
         try:
-            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS, cfg=app.cfg)
         except Exception as exc:  # noqa: BLE001 — surface, don't hide (SU-05)
             payload["enforcement"] = None
             payload["activity"] = None

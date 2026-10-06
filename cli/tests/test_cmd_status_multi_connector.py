@@ -767,7 +767,8 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("not counted", result.output)
         self.assertIn("defenseclaw alerts", result.output)
         self.assertEqual(
-            self.app.store.get_counts.call_args.kwargs, {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS}
+            self.app.store.get_counts.call_args.kwargs,
+            {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS, "cfg": self.app.cfg},
         )
 
     def test_healthy_db_shows_counts(self):

@@ -318,7 +318,6 @@ class TestSkillScan(SkillCommandTestBase):
                 },
                 f,
             )
-        self.app.cfg.skill_actions.high = SeverityAction(file="none", runtime="enable", install="block")
         skill_dir = os.path.join(self.tmp_dir, "dirty-skill")
         os.makedirs(skill_dir)
         result = ScanResult(

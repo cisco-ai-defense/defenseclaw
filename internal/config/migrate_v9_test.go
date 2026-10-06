@@ -21,13 +21,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
@@ -77,6 +80,12 @@ observability: {}
 	// init seeded the 1.0 admission.rego, which reads data.config.
 	staleRego := filepath.Join(dir, "policies", "rego", "admission.rego")
 	if err := os.WriteFile(staleRego, []byte("package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"allowed\" if data.config.scan_on_install == false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A hand-written provider overlay (no _derived_from) with an inline CA.
+	overlay := filepath.Join(dir, ProvidersOverlayFile)
+	if err := os.WriteFile(overlay, []byte(`{"providers": [{"name": "acme", "domains": ["llm.acme.internal"],
+	  "env_keys": ["ACME_KEY"], "tls": {"ca_cert_pem": "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"}}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	auditDB := filepath.Join(dir, "audit.db")
@@ -144,6 +153,8 @@ observability: {}
 		"asset_policy.mcp":                                        nil,
 		"ai_discovery.signature_packs":                            []any{installedPack},
 		"asset_policy.tool.denied":                                []any{map[string]any{"name": "rm", "connector": "codex"}},
+		"llm_providers.custom": []any{map[string]any{"name": "acme", "domains": []any{"llm.acme.internal"}, "env_keys": []any{"ACME_KEY"},
+			"tls": map[string]any{"ca_cert_file": filepath.Join(dir, "provider-ca", "acme.pem")}}},
 	} {
 		if got, _ := json.Marshal(get(path)); string(got) != mustJSON(t, want) {
 			t.Errorf("%s = %s, want %s", path, got, mustJSON(t, want))
@@ -176,6 +187,12 @@ observability: {}
 	}
 	if _, err := os.Stat(dataJSON + DataJSONMigratedSuffix); err != nil {
 		t.Errorf("data.json was not renamed: %v", err)
+	}
+	if _, err := os.Stat(overlay); !os.IsNotExist(err) {
+		t.Errorf("the legacy custom-providers.json is still a live input: %v", err)
+	}
+	if pem, _ := os.ReadFile(filepath.Join(dir, "provider-ca", "acme.pem")); !strings.Contains(string(pem), "BEGIN CERTIFICATE") {
+		t.Error("the inline provider CA was not moved to provider-ca/acme.pem")
 	}
 	if refreshed, _ := os.ReadFile(staleRego); v9LegacyRegoData.Match(refreshed) || !strings.Contains(string(refreshed), "input.admission") {
 		t.Error("the pre-9 admission.rego was not replaced with the shipped module")
@@ -283,6 +300,54 @@ func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 	}
 	if strings.Contains(string(result.Migrated), "block_at") {
 		t.Errorf("a data.json level looser than the custom strict pack became block_at:\n%s", result.Migrated)
+	}
+
+	// A data.json HIGH stricter than the global default pack becomes the
+	// global block_at, and a connector on a stricter pack keeps its MEDIUM.
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  connectors:\n    codex:\n      rule_pack_dir: " +
+		edited + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 3, "alert_threshold": 2}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return digest, nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9 (stricter connector pack): %v", err)
+	}
+	var pinned struct {
+		Guardrail struct {
+			BlockAt    string `yaml:"block_at"`
+			Connectors map[string]struct {
+				BlockAt string `yaml:"block_at"`
+			} `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &pinned); err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Guardrail.BlockAt != "HIGH" || pinned.Guardrail.Connectors["codex"].BlockAt != "MEDIUM" {
+		t.Errorf("block_at global %q codex %q; want HIGH and the strict pack's MEDIUM:\n%s",
+			pinned.Guardrail.BlockAt, pinned.Guardrail.Connectors["codex"].BlockAt, result.Migrated)
+	}
+
+	// rule_pack wins over rule_pack_dir at one scope, so the directory is
+	// dropped instead of replacing the selected pack.
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack: strict\n  rule_pack_dir: " +
+		filepath.Join(dir, "policies", "guardrail", "default") + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9 (rule_pack and rule_pack_dir): %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "rule_pack: default") {
+		t.Errorf("rule_pack_dir replaced the selected rule_pack:\n%s", got)
 	}
 }
 
@@ -419,6 +484,23 @@ func TestMigrateV9ManagedToleratesAnUnreadableAuditDB(t *testing.T) {
 	if notes := strings.Join(result.Record.Notes, "\n"); !strings.Contains(notes, LocalEnforcementEntriesIgnored) {
 		t.Fatalf("notes = %q", notes)
 	}
+
+	// A committing managed migration (Windows ensure) leaves the admin's
+	// data.json in place, so a rollback to the v8 config still finds it.
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {"MEDIUM": {"install": "block"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, Managed: true}); err != nil {
+		t.Fatalf("MigrateV9 (managed commit): %v", err)
+	}
+	if _, err := os.Stat(dataJSON); err != nil {
+		t.Errorf("the managed migration moved the admin data.json: %v", err)
+	}
 }
 
 // TestMigrateV9ReportsAStricterProxyThreshold: block_at set in config wins,
@@ -442,5 +524,81 @@ func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
 	if !strings.Contains(string(result.Migrated), "block_at: HIGH") || len(result.Record.Conflicts) != 1 ||
 		result.Record.Conflicts[0].To != "guardrail.block_at" || !strings.HasSuffix(result.Record.Conflicts[0].Lost, ":MEDIUM") {
 		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
+
+// TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected: an explicit
+// empty rule_pack_dir selected the embedded packs in v8; v9 has no such key,
+// so the switch to the default pack folder is a recorded conflict, not silent.
+func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a standalone Windows host without policy_dir keeps the embedded packs")
+	}
+	source := "config_version: 8\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n"
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Source: []byte(source), InMemory: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if strings.Contains(string(result.Migrated), "rule_pack_dir") || len(result.Record.Conflicts) != 1 ||
+		result.Record.Conflicts[0].To != "guardrail.rule_pack" {
+		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
+
+// TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon: a damaged audit.db
+// is repaired by the daemon's store open, so the in-memory migration notes it
+// and goes on; a persisted migration, which would lose the rows for good,
+// still refuses.
+func TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auditDB := filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(auditDB, []byte(strings.Repeat("not a database ", 512)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := MigrateV9Input{ConfigPath: configPath, Source: []byte(source), AuditDBPath: auditDB, InMemory: true}
+	result, err := MigrateV9(context.Background(), input)
+	if err != nil || len(result.Record.Notes) == 0 {
+		t.Fatalf("in-memory migration of a damaged audit.db: err=%v notes=%v", err, result.Record.Notes)
+	}
+	input.InMemory = false
+	if _, err := MigrateV9(context.Background(), input); err == nil {
+		t.Fatal("a persisted migration must refuse a damaged audit.db")
+	}
+}
+
+// TestMigrateV9KeepsTheShippedPackAPreset: a v8 rule_pack_dir naming the
+// standalone layout's shipped strict pack, with policy_dir elsewhere, stays
+// the strict preset (which resolves to that pack) instead of a custom pack
+// pinned to files the next package replaces.
+func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyDir := t.TempDir()
+	shipped := path.Join(layout.VendorPolicyDir, "guardrail", "strict")
+	source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\npolicy_dir: " +
+		policyDir + "\nguardrail:\n  rule_pack_dir: " + shipped + "\nobservability: {}\n"
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: layout.ConfigPath, Source: []byte(source), PolicyDir: policyDir, Managed: true, InMemory: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "custom_packs") {
+		t.Fatalf("the shipped strict pack did not stay the preset:\n%s", got)
+	}
+	cfg := &Config{PolicyDir: policyDir, ConfigFilePath: layout.ConfigPath, DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	if got := cfg.ResolveRulePackDir(RulePackRef{Name: "strict"}); got != shipped {
+		t.Fatalf("strict resolves to %q, want the shipped %s while policy_dir has none", got, shipped)
 	}
 }

@@ -80,6 +80,16 @@ func TestBuildGenerationComposesRulesPreparesOPAAndPinsCustomPacks(t *testing.T)
 	if _, err := build(custom); err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") {
 		t.Fatalf("custom pack with a stale digest = %v, want a digest mismatch", err)
 	}
+	// The pin is the digest of the pack's own files (the one use-pack and
+	// the migration write), not of the embedded defaults it inherits.
+	pin, err := guardrail.RulePackDigest(custom.Guardrail.CustomPacks["acme"].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom.Guardrail.CustomPacks["acme"] = config.CustomRulePack{Path: custom.Guardrail.CustomPacks["acme"].Path, Digest: "sha256:" + pin}
+	if _, err := build(custom); err != nil {
+		t.Fatalf("custom pack pinned by its files digest: %v", err)
+	}
 }
 
 func packRule(rp *guardrail.RulePack, id string) *guardrail.RuleDefYAML {

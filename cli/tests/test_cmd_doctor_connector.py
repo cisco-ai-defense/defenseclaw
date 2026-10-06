@@ -1631,6 +1631,7 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
             "suppression_count": 3,
             "sensitive_tool_count": 5,
             "digest": "a" * 64,
+            "files_digest": "b" * 64,
         }
         summary.update(overrides)
         return RulePackValidationResult(

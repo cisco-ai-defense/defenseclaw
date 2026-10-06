@@ -63,7 +63,7 @@ def env(tmp_path, monkeypatch):
         rulepack_validation,
         "validate_rule_pack",
         lambda _path, **_k: rulepack_validation.RulePackValidationResult(
-            wire_version=1, kind="validation", valid=True, summary={"rule_count": 1, "digest": "a" * 64}
+            wire_version=1, kind="validation", valid=True, summary={"rule_count": 1, "digest": "c" * 64, "files_digest": "a" * 64}
         ),
     )
     return app, root, writes
