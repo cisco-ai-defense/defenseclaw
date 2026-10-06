@@ -20,6 +20,13 @@ import (
 	"strings"
 )
 
+// maxDirectoryGroups bounds how many group ids are named per account. An
+// Active Directory token holds about a thousand groups at most; an account
+// past the bound has no facts (the lookup fails, and the default profile
+// applies as default_lookup_failed) instead of facts with some of its
+// groups missing, which would select a profile on part of its membership.
+const maxDirectoryGroups = 2048
+
 // ErrNotFound is the definitive "no such account or group" answer.
 var ErrNotFound = errors.New("unixidentity: not found")
 
