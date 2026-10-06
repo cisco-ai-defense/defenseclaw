@@ -371,3 +371,28 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 		t.Fatalf("subject = %+v, %v; want a failed lookup that names its reason and has no groups", subject, err)
 	}
 }
+
+// TestAssignmentsIgnoreUnicodeNormalisationForm pins GAP-0154: an assignment
+// typed with a combining accent (decomposed, NFD) matches the precomposed
+// (NFC) group, user and principal the directory holds, and the reverse.
+func TestAssignmentsIgnoreUnicodeNormalisationForm(t *testing.T) {
+	const (
+		groupNFC, groupNFD = "dc-\u00e9quipe@dclab.test", "dc-e\u0301quipe@dclab.test"
+		userNFC, userNFD   = "dcad-zo\u00eb@dclab.test", "dcad-zoe\u0308@dclab.test"
+	)
+	for _, tc := range []struct{ held, spelled string }{{groupNFC, groupNFD}, {groupNFD, groupNFC}} {
+		subject := &profileSubject{UserID: "94401117", Groups: []string{tc.held}}
+		if _, group, ok := assignmentMatches(config.ProfileMatch{Groups: []string{strings.ToUpper(tc.spelled)}}, subject,
+			&subjectGroups{list: subject.Groups}, true, "", ""); !ok || group == "" {
+			t.Errorf("group %+q does not match the held %+q", tc.spelled, tc.held)
+		}
+	}
+	for _, tc := range []struct{ held, spelled string }{{userNFC, userNFD}, {userNFD, userNFC}} {
+		for _, subject := range []*profileSubject{{UserID: "94401117", UserName: tc.held}, {UserID: "94401117", Principal: tc.held}, {UserID: "94401117", UPN: tc.held}} {
+			if _, _, ok := assignmentMatches(config.ProfileMatch{Users: []string{tc.spelled}}, subject,
+				&subjectGroups{}, true, "", ""); !ok {
+				t.Errorf("user %+q does not match the held %+q (%+v)", tc.spelled, tc.held, subject)
+			}
+		}
+	}
+}

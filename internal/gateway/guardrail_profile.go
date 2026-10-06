@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"unicode"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -698,7 +700,10 @@ func (g *subjectGroups) build() {
 
 // foldKey maps every rune to the smallest rune of its case-folding orbit,
 // so two strings have the same key exactly when strings.EqualFold says
-// they are equal.
+// they are equal, after both are put in Unicode normalization form C: an
+// assignment typed or pasted with a combining accent (e plus U+0301) names
+// the group the directory holds precomposed (U+00E9), and must match it
+// (GAP-0154).
 func foldKey(s string) string {
 	return strings.Map(func(r rune) rune {
 		smallest := r
@@ -706,7 +711,7 @@ func foldKey(s string) string {
 			smallest = min(smallest, f)
 		}
 		return smallest
-	}, s)
+	}, norm.NFC.String(s))
 }
 
 func anyMatches(values []string, pred func(string) bool) bool {
@@ -724,7 +729,7 @@ func anyEqualFold(have []string, want string) bool {
 		return false
 	}
 	for _, value := range have {
-		if value = strings.TrimSpace(value); value != "" && strings.EqualFold(value, want) {
+		if value = strings.TrimSpace(value); value != "" && useridentity.EqualFold(value, want) {
 			return true
 		}
 	}

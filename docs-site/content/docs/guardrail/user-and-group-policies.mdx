@@ -127,9 +127,12 @@ How the keys combine:
   means "in group a or b, **and** using Codex".
 - **First match wins.** Put the narrowest assignment first (an agent or a user
   and connector), the broad group assignments after it.
-- **Case does not matter.** Groups, account names, principals and UPNs compare
-  without regard to case, so `alice@CORP.EXAMPLE.COM` and
-  `alice@corp.example.com` are the same user.
+- **Case and accents' encoding do not matter.** Groups, account names,
+  principals and UPNs compare without regard to case, so
+  `alice@CORP.EXAMPLE.COM` and `alice@corp.example.com` are the same user. They
+  also compare as the same text whether an accented letter is typed
+  precomposed (`é`) or as a letter plus a combining accent, as some editors and
+  copy-paste sources produce it.
 - **An account name is not unique.** It is the name without its domain, so
   `alice` matches a local account `alice` and a directory account
   `alice@corp.example.com` alike. Use the principal, the uid or the SID to
