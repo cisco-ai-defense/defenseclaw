@@ -96,7 +96,7 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 	}
 	future := requireV8YAMLError(t, []byte("config_version: 10\n"), V8YAMLErrorVersionUnsupported)
 	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 10)") ||
-		!strings.Contains(future.Error(), "restore ~/.defenseclaw/previous") {
+		!strings.Contains(future.Error(), "config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous") {
 		t.Fatalf("newer config error = %q, want newer-release guidance", future.Error())
 	}
 }
@@ -250,8 +250,8 @@ func TestParseV8YAMLTargetedLegacyDiagnostics(t *testing.T) {
 			if err.Path != test.path {
 				t.Fatalf("Path = %q, want %q", err.Path, test.path)
 			}
-			if !strings.Contains(err.Action, "defenseclaw upgrade") || !strings.Contains(err.Action, test.target) {
-				t.Fatalf("Action = %q, want upgrade guidance with %q", err.Action, test.target)
+			if !strings.Contains(err.Action, test.target) {
+				t.Fatalf("Action = %q, want the replacement %q", err.Action, test.target)
 			}
 		})
 	}

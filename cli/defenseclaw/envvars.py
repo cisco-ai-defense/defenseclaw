@@ -437,6 +437,28 @@ def managed_standalone() -> bool:
     return standalone_managed(raw)
 
 
+#: Variables only a Secure Client host reads. Every other host ignores them;
+#: the registry purpose of each names the config key that replaces it.
+_SECURE_CLIENT_ONLY = ("DEFENSECLAW_JUDGE_TRACE",)
+
+
+def ignored_off_secure_client(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of set Secure-Client-only variables on a host that is not one."""
+    from defenseclaw.config import config_path
+    from defenseclaw.config_writer import secure_client_managed
+
+    environ = os.environ if env is None else env
+    set_names = sorted(name for name in _SECURE_CLIENT_ONLY if str(environ.get(name) or "").strip())
+    if not set_names:
+        return []
+    try:
+        with open(config_path(), "rb") as handle:
+            raw = handle.read(4 * 1024 * 1024)
+    except (OSError, RuntimeError):  # RuntimeError: no home directory to look in
+        raw = b""
+    return [] if secure_client_managed(raw) else set_names
+
+
 def lookup(name: str, env: Mapping[str, str] | None = None, *, managed: bool | None = None) -> str | None:
     """``os.environ.get`` under the managed-mode policy.
 

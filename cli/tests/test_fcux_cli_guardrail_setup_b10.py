@@ -39,9 +39,11 @@ def test_enable_header_names_only_the_connectors_it_sets_up(
     # GAP-1809: the header listed codex although it stays disabled.
     cfg, _home = _codex_off(monkeypatch, tmp_path)
     cfg.guardrail.enabled = False
+    # Windows verifies the Claude Code executable first; the runner has none.
     with (
         patch.object(cmd_guardrail, "_resolve_active_connector", return_value="claudecode"),
         patch.object(cmd_setup, "_restart_services"),
+        patch.object(cmd_setup, "_record_windows_setup_agent_selections", return_value=None),
     ):
         result = CliRunner().invoke(cmd_guardrail.enable_cmd, ["--yes", restart], obj=_app(cfg))
     assert result.exit_code == 0, result.output

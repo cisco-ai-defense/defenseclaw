@@ -143,7 +143,7 @@ func TestGatewayV8LoaderRejectsV7AtStrictEntryPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, startup, err := loadGatewayConfigV8(configPath)
-	if err == nil || !strings.Contains(err.Error(), "upgrade") {
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw migrate") {
 		t.Fatalf("v7 strict startup error = %v", err)
 	}
 	if loaded != nil || startup != nil {
@@ -182,7 +182,7 @@ func TestBootstrapConfiguredObservabilityRuntimeRejectsV7(t *testing.T) {
 		nil,
 		recorder,
 	)
-	if err == nil || !strings.Contains(err.Error(), "upgrade") {
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw migrate") {
 		t.Fatalf("v7 bootstrap error = %v", err)
 	}
 	if recorder.called {

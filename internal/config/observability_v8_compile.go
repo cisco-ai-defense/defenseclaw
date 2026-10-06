@@ -1120,6 +1120,12 @@ func compileObservabilityV8PushDefaults(
 	if !httpOnly && result.TLS.InsecureSkipVerify {
 		return fmt.Errorf("%s.tls.insecure_skip_verify: valid only for HTTP push destinations", path)
 	}
+	// The push transport refuses a certificate option on a plain-http endpoint,
+	// and only at gateway start; fail here with the field named instead.
+	if httpOnly && result.TLS.InsecureSkipVerify &&
+		!strings.HasPrefix(strings.ToLower(strings.TrimSpace(result.Endpoint)), "https://") {
+		return fmt.Errorf("%s.tls.insecure_skip_verify: valid only with an https endpoint", path)
+	}
 	if !httpOnly && result.TLS.CACert != "" && !filepath.IsAbs(result.TLS.CACert) {
 		return fmt.Errorf("%s.tls.ca_cert: must be an absolute path", path)
 	}
@@ -1238,7 +1244,7 @@ func validateObservabilityV8ResolvedOTLPEndpoints(
 				return fmt.Errorf("%s: OTLP endpoints must not contain query or fragment data", endpointPath)
 			}
 			if (parsed.Scheme == "http") != observabilityV8TransportTLSInsecure(transport) {
-				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree", endpointPath)
+				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (use https://, or set tls.insecure: true for an http:// endpoint)", endpointPath)
 			}
 			if (transport.Protocol == "grpc" || transport.Protocol == "grpc/protobuf") && parsed.EscapedPath() != "" && parsed.EscapedPath() != "/" {
 				return fmt.Errorf("%s: gRPC OTLP endpoints must not contain a path", endpointPath)

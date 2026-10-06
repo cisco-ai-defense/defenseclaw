@@ -302,7 +302,7 @@ func bootstrapConfiguredObservabilityRuntime(
 		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
 	}
 	if !config.CurrentSchemaVersion(c.ConfigVersion) {
-		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw migrate' first")
 	}
 	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {
 		return fmt.Errorf("sidecar: observability v8 bootstrap state is incomplete")
@@ -329,14 +329,14 @@ func sidecarDiagEnabled() bool {
 	return false
 }
 
+// tokenStatus says whether the gateway has a token, never any part of it: the
+// banner reaches the service journal and the lifecycle copies journal lines
+// into the package manager's log.
 func tokenStatus(token string) string {
 	if token == "" {
 		return "none (will use device identity only)"
 	}
-	if len(token) > 8 {
-		return token[:4] + "..." + token[len(token)-4:]
-	}
-	return "***"
+	return "set"
 }
 
 // fleetBannerLine names the OpenClaw gateway the sidecar dials, or says it

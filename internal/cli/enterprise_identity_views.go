@@ -55,6 +55,7 @@ var enterpriseIdentityViews = []enterpriseIdentityView{
 		flags: [][3]string{
 			{"user", "user", "only this account (name or id)"},
 			{"connector", "connector", "only this connector"},
+			{"cursor", "cursor", "the next_cursor of the previous page"},
 		},
 	},
 	{

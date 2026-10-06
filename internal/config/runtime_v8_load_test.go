@@ -53,8 +53,7 @@ observability: {}
 	}
 }
 
-func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
-	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
+func TestLoadRuntimeV8FromBytesRetainsConnectorWebhookOverride(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw-v8
 observability:
@@ -66,21 +65,9 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OTel.Enabled || len(cfg.OTel.Destinations) != 0 {
-		t.Fatalf("target runtime retained legacy OTel config: %+v", cfg.OTel)
-	}
-	if cfg.AuditSinks != nil {
-		t.Fatalf("target runtime retained global legacy audit sinks: %+v", cfg.AuditSinks)
-	}
-	if cfg.AIDiscovery.EmitOTel {
-		t.Fatal("target runtime retained ai_discovery.emit_otel")
-	}
 	connector, ok := cfg.Observability.Connectors["codex"]
 	if !ok || connector.Webhooks == nil {
 		t.Fatalf("v8 connector webhook override was not retained: %+v", cfg.Observability.Connectors)
-	}
-	if connector.AuditSinks != nil {
-		t.Fatalf("target runtime retained connector legacy audit sinks: %+v", connector.AuditSinks)
 	}
 }
 
@@ -292,8 +279,8 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		{version: MaxSupportedConfigVersion},
 		{
 			version: MaxSupportedConfigVersion + 1,
-			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); "+
-				"upgrade DefenseClaw or restore ~/.defenseclaw/previous", MaxSupportedConfigVersion+1),
+			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); %s",
+				MaxSupportedConfigVersion+1, newerConfigAction),
 		},
 	} {
 		err := checkRuntimeConfigVersion(test.version)
@@ -380,6 +367,9 @@ llm_providers:
 update: {check: false}
 scanners:
   mcp_scanner: {analyzers: "yara,llm"}
+ai_discovery:
+  signature_packs: [/home/u/.defenseclaw/signature-packs/p.json]
+  signature_pack_digests: {/home/u/.defenseclaw/signature-packs/p.json: "sha256:0000000000000000000000000000000000000000000000000000000000000001"}
 observability: {}
 `)
 	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
@@ -424,6 +414,11 @@ observability: {}
 	if cfg.Update.CheckEnabled() {
 		t.Error("update.check false must disable the update notice")
 	}
+	// A pack's pin is keyed by its file path, whose dots Viper would split (GAP-0066).
+	pins := cfg.AIDiscovery.SignaturePackDigests
+	if pins["/home/u/.defenseclaw/signature-packs/p.json"] != "sha256:0000000000000000000000000000000000000000000000000000000000000001" {
+		t.Errorf("signature_pack_digests = %v, want the pin keyed by the full path", pins)
+	}
 	if got := cfg.Scanners.MCPScanner.Analyzers; !reflect.DeepEqual(got, []string{"yara", "llm"}) {
 		t.Errorf("v8 analyzers CSV = %v, want [yara llm]", got)
 	}
@@ -450,6 +445,46 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 				t.Errorf("v9 %s: got %v", path, err)
 			}
 		}
+	}
+}
+
+// A destination key that `defenseclaw keys set` stored in the data dir's .env
+// resolves for the candidate validator, as it does for `config validate` and
+// the gateway. The 8 -> 9 migration check used to refuse the config of a user
+// who had set the key it asked for (GAP-0173).
+func TestValidateCandidateResolvesDestinationSecretsFromTheDataDirDotEnv(t *testing.T) {
+	const name = "DEFENSECLAW_TEST_GAP0173_KEY"
+	dir := t.TempDir()
+	raw := []byte("config_version: 9\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"  - name: galileo\n    kind: otlp\n    preset: galileo\n    enabled: true\n    protocol: http/protobuf\n" +
+		"    endpoint: https://api.galileo.ai/otel/traces\n    headers:\n      Galileo-API-Key:\n        env: " + name + "\n" +
+		"      project: defenseclaw\n      logstream: production\n" +
+		"    send:\n      signals:\n      - traces\n      buckets:\n      - agent.lifecycle\n")
+	t.Setenv(name, "")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	previous := dotEnvLoader
+	t.Cleanup(func() { dotEnvLoader = previous })
+	RegisterDotEnvLoader(func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		if key, value, ok := strings.Cut(strings.TrimSpace(string(data)), "="); ok && os.Getenv(key) == "" {
+			_ = os.Setenv(key, value)
+		}
+	})
+
+	configFile := filepath.Join(dir, "config.yaml")
+	if err := ValidateCandidate(configFile, raw); err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("without the key: %v, want an unset-variable error naming %s", err, name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(name+"=probe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCandidate(configFile, raw); err != nil {
+		t.Fatalf("with the key in .env: %v", err)
 	}
 }
 

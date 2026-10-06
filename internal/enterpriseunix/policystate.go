@@ -34,6 +34,10 @@ import (
 // effective policy than the committed config computes to.
 const codePolicyNotApplied = "policy_not_applied"
 
+// codePolicyReloadRejected warns, on every action, that the gateway rejected
+// its last policy reload and keeps enforcing the previous policy.
+const codePolicyReloadRejected = "policy_reload_rejected"
+
 // The effective policy (spec P0 section 5) is reported on every lifecycle
 // result: the digest the committed config computes to, its
 // config_generation, and whether the running gateway reports the same
@@ -69,18 +73,19 @@ func (e *Env) savePolicyState(record enterprisestatus.PolicyStateRecord) error {
 	return e.writeFileAtomic(e.policyStatePath(), append(data, '\n'), 0o600, rootOwner())
 }
 
-// gatewayPolicyDigest is policy.effective_digest from a /health body, ""
-// when the gateway does not publish it.
-func gatewayPolicyDigest(body []byte) string {
+// gatewayPolicyHealth is policy.effective_digest and policy.last_reload_error
+// from a /health body, "" for what the gateway does not publish.
+func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 	var health struct {
 		Policy *struct {
 			EffectiveDigest string `json:"effective_digest"`
+			LastReloadError string `json:"last_reload_error"`
 		} `json:"policy"`
 	}
 	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
-		return ""
+		return "", ""
 	}
-	return health.Policy.EffectiveDigest
+	return health.Policy.EffectiveDigest, health.Policy.LastReloadError
 }
 
 // computePolicy runs the installed gateway's `policy digest` with the
@@ -102,13 +107,21 @@ func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGen
 	return report.EffectiveDigest, report.ConfigGeneration, true
 }
 
+// gatewayPolicyDigest is policy.effective_digest from a /health body.
+func gatewayPolicyDigest(body []byte) string {
+	digest, _ := gatewayPolicyHealth(body)
+	return digest
+}
+
 // describePolicy fills Result.Policy. The digest is computed from the
 // installed config (computePolicy); when that is not possible the last
 // applied record stands in. A change action records policy-state.json once the gateway reports
-// the computed digest, and warns when it reports another one.
-func (l *lifecycle) describePolicy(ctx context.Context, reported string) {
+// the computed digest, and warns when it reports another one. A reload the
+// gateway rejected (reloadError) is never "applied", and every action warns
+// about it: the gateway keeps enforcing the previous policy.
+func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError string) {
 	env, r := l.env, l.result
-	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported}
+	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported, LastReloadError: reloadError}
 	computed := false
 	if digest, generation, ok := l.computePolicy(ctx); ok {
 		state.EffectiveDigest, state.ConfigGeneration, computed = digest, generation, true
@@ -121,8 +134,12 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported string) {
 	if state.EffectiveDigest == "" && reported == "" {
 		return
 	}
-	state.Applied = state.EffectiveDigest != "" && state.EffectiveDigest == reported
+	state.Applied = state.EffectiveDigest != "" && state.EffectiveDigest == reported && reloadError == ""
 	r.Policy = state
+	if reloadError != "" {
+		r.AddWarning(codePolicyReloadRejected, "the gateway reports a policy error and keeps enforcing the policy it last built: "+reloadError+
+			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
+	}
 	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify || !computed || !r.Readiness.Gateway {
 		return
 	}

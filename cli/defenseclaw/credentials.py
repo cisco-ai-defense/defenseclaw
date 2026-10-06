@@ -379,10 +379,9 @@ def _load_v8_observability_credential_refs(
 ) -> _ObservabilityCredentialRefs:
     """Return validated enabled destination refs, or ``None`` off the v8 path.
 
-    The legacy Python dataclass intentionally does not model the canonical v8
+    The Python dataclass intentionally does not model the canonical v8
     destination graph. Read the active source through the existing offline v8
-    validator instead of guessing from retired Splunk/OTel compatibility DTOs.
-    Validation retains environment-reference names while masking literal header
+    validator. Validation retains environment-reference names while masking literal header
     values and performs no secret resolution or network I/O.
     """
 
@@ -459,55 +458,24 @@ def _v8_observability_credential_refs(
 def _v8_refs_for_feature(
     cfg: Config,
     feature: str,
-) -> tuple[_ObservabilityCredentialRef, ...] | None:
+) -> tuple[_ObservabilityCredentialRef, ...]:
     refs = _v8_observability_credential_refs(cfg)
     if refs is None:
-        return None
+        return ()
     return tuple(ref for ref in refs if ref.feature == feature)
 
 
 def _splunk_token(cfg: Config) -> Requirement:
-    refs = _v8_refs_for_feature(cfg, "observability.splunk")
-    if refs is not None:
-        return Requirement.REQUIRED if refs else Requirement.NOT_USED
-    # Upgrade/preview compatibility for callers still holding a v7 DTO.
-    sp = getattr(cfg, "splunk", None)
-    if sp is None or not getattr(sp, "enabled", False):
-        return Requirement.NOT_USED
-    return Requirement.REQUIRED
+    return Requirement.REQUIRED if _v8_refs_for_feature(cfg, "observability.splunk") else Requirement.NOT_USED
 
 
 def _galileo_key(cfg: Config) -> Requirement:
-    refs = _v8_refs_for_feature(cfg, "observability.galileo")
-    if refs is not None:
-        return Requirement.REQUIRED if refs else Requirement.NOT_USED
-    # Upgrade/preview compatibility for callers still holding a v7 DTO.
-    otel = getattr(cfg, "otel", None)
-    if not getattr(otel, "enabled", False):
-        return Requirement.NOT_USED
-    for destination in getattr(otel, "destinations", ()) or ():
-        if (
-            getattr(destination, "preset", "") == "galileo"
-            and getattr(destination, "enabled", False)
-        ):
-            return Requirement.REQUIRED
-    return Requirement.NOT_USED
+    return Requirement.REQUIRED if _v8_refs_for_feature(cfg, "observability.galileo") else Requirement.NOT_USED
 
 
 def _galileo_endpoint(cfg: Config) -> str:
     refs = _v8_refs_for_feature(cfg, "observability.galileo")
-    if refs is not None:
-        return refs[0].endpoint if refs else ""
-    otel = getattr(cfg, "otel", None)
-    if not getattr(otel, "enabled", False):
-        return ""
-    for destination in getattr(otel, "destinations", ()) or ():
-        if (
-            getattr(destination, "preset", "") == "galileo"
-            and getattr(destination, "enabled", False)
-        ):
-            return str(getattr(destination, "endpoint", "") or "")
-    return ""
+    return refs[0].endpoint if refs else ""
 
 
 def _inspect_llm_key(cfg: Config) -> Requirement:
@@ -572,17 +540,12 @@ def _virustotal_env(cfg: Config) -> str:
 
 def _splunk_env(cfg: Config) -> str:
     refs = _v8_refs_for_feature(cfg, "observability.splunk")
-    if refs is not None:
-        return refs[0].env_name if refs else ""
-    sp = getattr(cfg, "splunk", None)
-    return getattr(sp, "hec_token_env", "") if sp is not None else ""
+    return refs[0].env_name if refs else ""
 
 
 def _galileo_env(cfg: Config) -> str:
     refs = _v8_refs_for_feature(cfg, "observability.galileo")
-    if refs is not None:
-        return refs[0].env_name if refs else ""
-    return ""
+    return refs[0].env_name if refs else ""
 
 
 def _inspect_llm_env(cfg: Config) -> str:
@@ -716,8 +679,6 @@ def _observability_ref_predicate(
 ) -> Callable[[Config], Requirement]:
     def _check(cfg: Config) -> Requirement:
         refs = _v8_refs_for_feature(cfg, feature)
-        if refs is None:
-            return Requirement.NOT_USED
         return (
             Requirement.REQUIRED
             if any(ref.env_name == env_name for ref in refs)
@@ -732,10 +693,7 @@ def _observability_ref_endpoint(
     env_name: str,
 ) -> Callable[[Config], str]:
     def _resolve(cfg: Config) -> str:
-        refs = _v8_refs_for_feature(cfg, feature)
-        if refs is None:
-            return ""
-        for ref in refs:
+        for ref in _v8_refs_for_feature(cfg, feature):
             if ref.env_name == env_name:
                 return ref.endpoint
         return ""

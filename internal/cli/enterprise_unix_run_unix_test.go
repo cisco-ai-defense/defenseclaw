@@ -179,6 +179,16 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(result, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("not installed: %q, want no repair advice", err)
 	}
+	// A gateway whose config the installed binary refuses is not helped by
+	// repair, which applies the same config again (GAP-0151).
+	refused := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "linux", "1.0.0")
+	refused.Installed = true
+	refused.AddError("verify_failed", "defenseclaw-gateway.service is not active")
+	refused.AddError("config_refused", "the installed gateway refuses the configuration: sidecar: init: bad pin")
+	refused.Finish("linux", 0)
+	if err := lifecycleFailure(refused, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("config_refused: %q, want no repair advice", err)
+	}
 	// GAP-2246: a status that found another run in progress checked nothing.
 	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
 	busy.Installed = true

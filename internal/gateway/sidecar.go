@@ -226,7 +226,7 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 // NewSidecar creates a sidecar instance ready to connect.
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*Sidecar, error) {
 	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) {
-		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
+		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw migrate' first")
 	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
@@ -1720,6 +1720,13 @@ func buildInitialSidecarJudge(
 	return judge, nil
 }
 
+// generationUnchanged reports a rebuild that matches the live generation: the
+// same effective digest and the same reason (if any) the Rego policy did not
+// load, so a new failure to load it is published, not swallowed.
+func generationUnchanged(live, next *Generation) bool {
+	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError
+}
+
 func (s *Sidecar) applyConfigReloadSnapshot(
 	ctx context.Context,
 	oldCfg, newCfg *config.Config,
@@ -1728,7 +1735,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 ) error {
 	if oldCfg == nil || newCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(newCfg.ConfigVersion) {
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 	}
 	v8PlanChanged := false
 	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||
@@ -1833,21 +1840,23 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	// The candidate generation compiles everything a request reads: the
 	// composed rule packs, profiles, the prepared OPA queries and the
-	// resolved thresholds. A Rego module that worked in the previous
-	// generation and no longer loads rejects the reload.
+	// resolved thresholds. A Rego module that does not load rejects the
+	// reload and keeps the previous generation, so last_reload_error names it
+	// until it is fixed. A generation that already runs without Rego because
+	// its modules did not load (the boot fallback) keeps the lenient build,
+	// so a config change is not held back by a module it never used.
 	nextGen, err := buildGeneration(ctx, generationInputs{
 		cfg:       cloneConfig(&next),
 		raw:       source.raw,
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
-		strictOPA: previousGen != nil && previousGen.OPA != nil,
+		strictOPA: previousGen != nil && previousGen.opaError == "",
 	})
 	if err != nil {
 		recordGenerationBuildError(err)
 		return fmt.Errorf("config reload generation: %w", err)
 	}
-	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets &&
-		previousGen != nil && previousGen.Digest == nextGen.Digest {
+	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
 	}
 	// Rule packs and the judge (which embeds the active pack's judge
@@ -1946,6 +1955,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		previousProfiles := api.guardrailProfileSet()
 		api.setGuardrailProfiles(profileCandidate)
 		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+		if profileCandidate != nil {
+			go profileCandidate.logUnknownGroups()
+		}
 	}
 	if s.router != nil {
 		if rulePackChanged {
@@ -2140,10 +2152,10 @@ func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
 
 // guardrailNeedsRestart reports a guardrail change that only a new gateway
 // process applies: the proxy listener, the guardrail and connector
-// enablement and the hook settings that setup bakes into the installed
-// hooks, and judge-body retention (its store opens at startup). Policy keys
-// (levels, packs, rules, profiles, judge, mode, HILT, trust level) reload
-// through the generation.
+// enablement and the hook self-heal settings, and judge-body retention (its
+// store opens at startup). Policy keys (levels, packs, rules, profiles,
+// judge, mode, hook fail mode, HILT, trust level) reload through the
+// generation: the hook guard reads the fail mode from the live config.
 func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
@@ -2152,17 +2164,19 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	return oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
 		oldG.Connector != newG.Connector || oldG.ScannerMode != newG.ScannerMode ||
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
-		oldG.HookFailMode != newG.HookFailMode || oldG.HookSelfHeal != newG.HookSelfHeal ||
+		oldG.HookSelfHeal != newG.HookSelfHeal ||
 		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
 		!reflect.DeepEqual(connectorHookSettings(oldG.Connectors), connectorHookSettings(newG.Connectors))
 }
 
-// connectorHookSettings keeps, per connector, only what setup bakes into
-// its hooks (membership, enablement and hook fail mode).
+// connectorHookSettings keeps, per connector, only whether its hooks are
+// installed (membership and enablement).
 func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailConfig) map[string]config.PerConnectorGuardrailConfig {
 	out := make(map[string]config.PerConnectorGuardrailConfig, len(connectors))
 	for name, pc := range connectors {
-		out[name] = config.PerConnectorGuardrailConfig{Enabled: pc.Enabled, HookFailMode: pc.HookFailMode}
+		// An unset enabled is enabled, so enabled: true is not a change.
+		enabled := pc.Enabled == nil || *pc.Enabled
+		out[name] = config.PerConnectorGuardrailConfig{Enabled: &enabled}
 	}
 	return out
 }
@@ -6921,6 +6935,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
+	if set := api.guardrailProfileSet(); set != nil {
+		go set.logUnknownGroups()
+	}
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward

@@ -1150,6 +1150,28 @@ def test_both_legacy_tls_insecure_aliases_are_materialized(alias: str) -> None:
     assert _destination(_document(result), "generic-otlp")["tls"]["insecure"] is True
 
 
+def test_sink_certificate_opt_out_is_kept_only_on_https_endpoints() -> None:
+    # The v8 runtime refuses a certificate option on a plain-http endpoint, and
+    # a v7 sink ignored it there, so only the https sink keeps the opt-out.
+    result = _convert(
+        """config_version: 7
+audit_sinks:
+  - name: plain
+    kind: http_jsonl
+    enabled: true
+    http_jsonl: {url: http://127.0.0.1:9000/ingest, insecure_skip_verify: true}
+  - name: secure
+    kind: http_jsonl
+    enabled: true
+    http_jsonl: {url: https://siem.example.test/ingest, insecure_skip_verify: true}
+"""
+    )
+    document = _document(result)
+    assert "tls" not in _destination(document, "plain")
+    assert _destination(document, "secure")["tls"] == {"insecure_skip_verify": True}
+    assert "legacy_insecure_skip_verify_ignored:plain" in result.warnings
+
+
 def test_plaintext_flat_otel_endpoint_materializes_v8_tls_mode() -> None:
     result = _convert(
         """config_version: 7

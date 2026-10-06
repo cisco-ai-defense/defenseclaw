@@ -276,9 +276,8 @@ for an unknown section. With `--effective`, `config get` resolves a guardrail le
 `admission.<type>` key to the value the gateway enforces and prints where it
 comes from. `config show` also takes `--source` for the masked source
 document as written, `--effective` for the resolved observability section
-alone, or `--effective --provenance` for explicit compiler annotations. V8
-rejects `--reveal`; neither source nor effective output resolves secret
-values.
+alone, or `--effective --provenance` for explicit compiler annotations. Secret
+values are always masked; neither source nor effective output resolves them.
 
 `policy show <name>` prints a normalized summary of the named file (`default`,
 `strict`, `permissive`, or any custom `policies/<name>.yaml` you've added).

@@ -443,14 +443,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     store.init()
     click.echo(f"  Audit DB:      {cfg.audit_db}")
 
-    # Only a genuinely new/pre-v8 initialization lacks a canonical graph.
-    # Re-running init against v8 uses the process owner and fails closed if it
-    # is unavailable instead of silently dropping setup mutations.
-    logger = (
-        Logger.no_runtime()
-        if is_new_config or not is_current_schema(getattr(cfg, "_source_config_version", None))
-        else Logger.from_config(cfg)
-    )
+    # Only a genuinely new initialization lacks a canonical graph. Re-running
+    # init against v8 uses the process owner and fails closed if it is
+    # unavailable instead of silently dropping setup mutations.
+    logger = Logger.no_runtime() if is_new_config else Logger.from_config(cfg)
     logger.log_action("init", cfg.data_dir, f"environment={env}")
 
     ux.banner("Scanners")
@@ -2393,7 +2389,7 @@ def _activate_additional_connectors(
 
 
 # Per-connector guardrail settings init never prompts for (GAP-1713).
-_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "block_at", "alert_at", "block_message")
+_KEPT_CONNECTOR_FIELDS = ("rule_pack_dir", "rule_pack", "block_at", "alert_at", "block_message")
 
 
 def _saved_connector_overrides() -> dict[str, object]:

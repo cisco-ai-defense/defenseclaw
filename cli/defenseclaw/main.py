@@ -111,10 +111,10 @@ SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "version"
 
 # These commands are the only top-level boundaries permitted to operate on an
 # existing pre-v8 document. They either create/replace a configuration,
-# migrate or replace the installation, remove it, or (for ``config``)
-# delegate the read-only/mutation boundary to that group's subcommand guard.
-# Every other group preflights the raw schema discriminator before a Python
-# compatibility dataclass can be constructed.
+# migrate or replace the installation, remove it, or (for ``config``) hand the
+# decision to that group's own guard, which lets only ``validate`` explain such
+# a file. Every other group preflights the raw schema discriminator and stops
+# with one instruction, `defenseclaw migrate`.
 LEGACY_CONFIG_BOUNDARY_COMMANDS = {
     "config",
     "init",
@@ -132,6 +132,25 @@ LEGACY_CONFIG_BOUNDARY_COMMANDS = {
 ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "tui"}
 
 
+def _cli_audit_db(cfg) -> str:
+    """The audit database this CLI opens: ``cfg.audit_db``, except in the
+    managed configuration folder.
+
+    The enterprise lifecycle owns that folder (root, 0755, read by every
+    enrolled user's hooks). A CLI pointed at it with ``DEFENSECLAW_HOME`` would
+    create an ``audit.db`` there, and the store drops the folder's world bits
+    when it creates one, so it gets an in-memory store instead (GAP-0062).
+    """
+
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    descriptor = managed_descriptor()
+    audit_db = cfg.audit_db
+    if descriptor and os.path.dirname(os.path.abspath(audit_db)) == os.path.dirname(descriptor):
+        return ":memory:"
+    return audit_db
+
+
 def _is_help_invocation(ctx: click.Context) -> bool:
     # Allow `defenseclaw --help` and `<cmd> --help` to work even before init.
     if getattr(ctx, "resilient_parsing", False):
@@ -140,26 +159,38 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
-def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
-    """Return whether the nested command is ``guardrail validate-pack``.
+def _guardrail_child(ctx: click.Context) -> str:
+    """The exact ``guardrail`` subcommand token, or "" for anything else.
 
     Click exposes only the top-level ``guardrail`` name while the root callback
     is running. Use that parsed name as the trust anchor, then locate its exact
     argv token so root-option and ``--`` prefixes do not change the result. The
-    next token must be the exact nested command; intervening options or a
-    different subcommand do not receive the config-independent bypass.
+    next token must be the nested command; intervening options or a different
+    subcommand do not receive a bypass.
     """
     if ctx.invoked_subcommand != "guardrail":
-        return False
+        return ""
     argv = sys.argv[1:]
     try:
         guardrail_index = argv.index("guardrail")
     except ValueError:
-        return False
-    return (
-        guardrail_index + 1 < len(argv)
-        and argv[guardrail_index + 1] == "validate-pack"
-    )
+        return ""
+    return argv[guardrail_index + 1] if guardrail_index + 1 < len(argv) else ""
+
+
+def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail validate-pack``."""
+    return _guardrail_child(ctx) == "validate-pack"
+
+
+def _is_pack_repin(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail use-pack``.
+
+    It re-pins an edited custom pack, so it must run while config.yaml still
+    carries the stale digest. It loads the config but skips the pre-command
+    validation; the writer validates the candidate it saves.
+    """
+    return _guardrail_child(ctx) == "use-pack"
 
 
 def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
@@ -335,7 +366,8 @@ def cli(ctx: click.Context) -> None:
         # A missing config is represented by an in-memory source version of
         # zero. Do not create audit/runtime state before the setup group proves
         # that the requested child is the trusted-paths bootstrap. Config.save
-        # will promote this fresh document to v8 while holding its file lock.
+        # will write this fresh document at the current version while holding
+        # its file lock.
         app.preinit_setup_bootstrap = True
         return
 
@@ -343,7 +375,7 @@ def cli(ctx: click.Context) -> None:
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
     # doesn't lock them out of the tools that would fix it.
-    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup":
+    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup" and not _is_pack_repin(ctx):
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
@@ -386,7 +418,7 @@ def cli(ctx: click.Context) -> None:
         return
 
     try:
-        app.store = Store(app.cfg.audit_db)
+        app.store = Store(_cli_audit_db(app.cfg))
         app.store.init()
     except Exception as exc:
         ux.echo(f"Failed to open audit store: {exc}", err=True)

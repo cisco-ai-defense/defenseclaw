@@ -104,6 +104,7 @@ const (
 	codePayload             = "payload_invalid"
 	codePackageOwned        = "package_owned_binaries"
 	codeConfig              = "config_invalid"
+	codeConfigRefused       = "config_refused"
 	codeAccount             = "service_account"
 	codeApply               = "apply_failed"
 	codeActivate            = "activation_failed"
@@ -727,12 +728,16 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err := env.checkRulePacksReadable(v9, account); err != nil {
 			return nil, &codedError{code: codeConfig, err: err}
 		}
-		if fromInstalled && config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
+		if fromInstalled && record != nil && record.ProductVersion == p.version &&
+			config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
 			// Configuration management put back the v8 file this host
 			// already migrated. Rewriting it again would fight that tool on
 			// every run, so its bytes stay, as for any in-place edit (the
 			// gateway migrates a v8 file in memory), and only the v9 checks
-			// apply.
+			// apply. This is only for a run that keeps the version: after a
+			// rollback the earlier release put the v8 file back and recorded
+			// its own version, so the upgrade migrates it again and replaces
+			// the stale migration record (GAP-0113).
 			v9.Raw, v9.SHA = validated.Raw, validated.SHA
 		} else {
 			v9.Migration = &configMigration{
@@ -743,6 +748,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 			fromInstalled = false
 		}
 		validated = v9
+	}
+	if err := env.checkCandidateAssets(validated); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
 	p.config = validated
@@ -1021,7 +1029,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			l.restoreNewerConfig(record, newerConfig)
 		}
 		if err != nil {
-			r.AddError(codeRollbackFailed, err.Error())
+			message := err.Error()
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				message += "; the restored deployment's gateway refuses the configuration the same way: " + refusal
+			}
+			r.AddError(codeRollbackFailed, message)
 		} else {
 			r.AddWarning(codeRolledBack, "restored the previous deployment")
 		}
@@ -1112,6 +1124,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 					err = fmt.Errorf("%w; %s", err, held)
 				}
 			}
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
+			}
 			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
 				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
 					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
@@ -1186,6 +1201,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
+	l.clearSupersededFailures()
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}
