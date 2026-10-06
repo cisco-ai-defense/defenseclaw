@@ -263,33 +263,46 @@ def _is_within(path: str, directory: str) -> bool:
     return real_path == real_dir or real_path.startswith(real_dir + os.sep)
 
 
-def _data_json_candidates(policy_dir: str | os.PathLike[str] | None) -> list[str]:
-    out: list[str] = []
-    if policy_dir:
-        out.append(os.path.join(os.fspath(policy_dir), "rego", "data.json"))
-    bundled = _bundled_dir()
-    if bundled:
-        out.append(os.path.join(bundled, "rego", "data.json"))
-    return out
+def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> str:
+    """The named policy ``cfg`` runs ("" when none matches or there is no config).
 
-
-def active_policy_name(policy_dir: str | os.PathLike[str] | None) -> str:
-    """Return ``config.policy_name`` from the OPA data.json ("" if unknown).
-
-    Reads ``<policy_dir>/rego/data.json`` (where ``policy activate`` writes),
-    falling back to the bundled copy — the same order the CLI always used.
+    Since config_version 9 a named policy is a preset: ``policy activate``
+    writes its admission, guardrail levels and Cisco trust level as config
+    keys and records nothing else, so the active policy is the one whose
+    values the config holds now. A config that sets none of them runs the
+    shipped defaults, which is the ``default`` policy.
     """
-    for candidate in _data_json_candidates(policy_dir):
-        if not os.path.isfile(candidate):
+    if cfg is None or getattr(cfg, "guardrail", None) is None:
+        return ""
+    import copy
+
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+    from defenseclaw.config import AdmissionConfig
+
+    def keys(config: Any) -> tuple[Any, ...]:
+        g = config.guardrail
+        trust = str(getattr(g, "cisco_trust_level", "") or "").strip() or "full"
+        return (
+            getattr(config, "admission", None),
+            level_value(getattr(g, "block_at", "")),
+            level_value(getattr(g, "alert_at", "")),
+            trust,
+        )
+
+    current = keys(cfg)
+    sources = _policy_sources(policy_dir)
+    if current == (AdmissionConfig(), "", "", "full") and "default" in sources:
+        return "default"
+    for stem, (path, _bundled) in sorted(sources.items()):
+        data = load_policy_yaml(path)
+        if data is None or not is_named_policy(data):
             continue
-        try:
-            with open(candidate, encoding="utf-8") as fh:
-                data = json.load(fh)
-        except (OSError, ValueError, UnicodeDecodeError):
-            continue
-        cfg = data.get("config") if isinstance(data, dict) else None
-        name = cfg.get("policy_name") if isinstance(cfg, dict) else None
-        return name if isinstance(name, str) else ""
+        preset = copy.copy(cfg)
+        preset.guardrail = copy.copy(cfg.guardrail)
+        preset.admission = _admission_from_policy(data)
+        _apply_policy_guardrail(preset, data)
+        if keys(preset) == current:
+            return stem
     return ""
 
 
@@ -306,26 +319,18 @@ def _policy_sources(policy_dir: str | os.PathLike[str] | None) -> dict[str, tupl
     return sources
 
 
-def _summaries(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]:
-    active = active_policy_name(policy_dir)
+def _summaries(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> list[PolicySummary]:
+    active = active_policy_name(policy_dir, cfg)
     loaded: list[tuple[str, dict[str, Any], str, bool]] = []
     for stem, (path, is_bundled) in sorted(_policy_sources(policy_dir).items()):
         data = load_policy_yaml(path)
         if data is None or not is_named_policy(data):
             continue
         loaded.append((stem, data, path, is_bundled))
-    stems = {stem for stem, *_ in loaded}
     bundled_stems = set(_yaml_files(_bundled_dir()))
     out: list[PolicySummary] = []
     for stem, data, path, is_bundled in loaded:
-        if stem == active:
-            is_active = True
-        elif active and active not in stems:
-            # data.json records the policy's ``name:`` field, which may
-            # differ from its file name.
-            is_active = data.get("name") == active
-        else:
-            is_active = False
+        is_active = stem == active
         out.append(
             summarize_policy(
                 stem,
@@ -339,20 +344,21 @@ def _summaries(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]
     return out
 
 
-def list_named_policies(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]:
-    """All named policies (user dir + bundled), sorted by name, active marked."""
-    return _summaries(policy_dir)
+def list_named_policies(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> list[PolicySummary]:
+    """All named policies (user dir + bundled), sorted by name, the one
+    ``cfg`` runs marked active."""
+    return _summaries(policy_dir, cfg)
 
 
 def _safe_policy_name(name: str) -> bool:
     return bool(name) and os.path.basename(name) == name and ".." not in name and "/" not in name and "\\" not in name
 
 
-def get_policy(name: str, policy_dir: str | os.PathLike[str] | None) -> PolicySummary | None:
+def get_policy(name: str, policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> PolicySummary | None:
     """Return the named policy's summary, or ``None`` if absent / not a policy."""
     if not isinstance(name, str) or not _safe_policy_name(name):
         return None
-    for summary in _summaries(policy_dir):
+    for summary in _summaries(policy_dir, cfg):
         if summary.name == name:
             return summary
     return None

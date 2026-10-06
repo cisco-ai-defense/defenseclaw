@@ -129,7 +129,7 @@ def _not_a_policy_error(name: str, data: object) -> None:
 def _policy_not_found(app: AppContext, name: str) -> NoReturn:
     """Report an unknown policy name with the valid names, then exit 1 (GAP-1818)."""
     try:
-        names = [p.name for p in policy_catalog.list_named_policies(_policies_dir(app))]
+        names = [p.name for p in policy_catalog.list_named_policies(_policies_dir(app), app.cfg)]
     except Exception:  # noqa: BLE001 - the hint is best effort
         names = []
     msg = f"Error: policy '{name}' not found."
@@ -294,8 +294,8 @@ def create(
 @pass_ctx
 def list_policies(app: AppContext, json_out: bool) -> None:
     """List all available policies (built-in and custom)."""
-    policies = policy_catalog.list_named_policies(_policies_dir(app))
-    active = policy_catalog.active_policy_name(_policies_dir(app))
+    policies = policy_catalog.list_named_policies(_policies_dir(app), app.cfg)
+    active = policy_catalog.active_policy_name(_policies_dir(app), app.cfg)
 
     if json_out:
         click.echo(
@@ -345,7 +345,7 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
         _policy_not_found(app, name)
 
     if json_out:
-        summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app))
+        summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app), app.cfg)
         if summary is None:
             click.echo(f"error: policy '{name}' could not be read", err=True)
             raise SystemExit(1)

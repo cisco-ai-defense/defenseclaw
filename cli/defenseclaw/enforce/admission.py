@@ -225,8 +225,6 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
                 for e in entries
             }
             break
-    if target_type == "tool":
-        first_party = {}
     return CompiledAdmission(
         scan_on_install=scan_on_install,
         allow_list_bypass_scan=bypass,

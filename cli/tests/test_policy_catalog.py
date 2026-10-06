@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -21,17 +20,10 @@ from defenseclaw import policy_catalog as pc
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 
 
-def _write_active(policy_dir: Path, name: str) -> None:
-    rego = policy_dir / "rego"
-    rego.mkdir(parents=True, exist_ok=True)
-    (rego / "data.json").write_text(json.dumps({"config": {"policy_name": name}}))
-
-
 @pytest.fixture
 def policy_dir(tmp_path: Path) -> Path:
     d = tmp_path / "policies"
     d.mkdir()
-    _write_active(d, "strict")
     return d
 
 
@@ -74,10 +66,20 @@ def test_firewall_template_is_not_a_named_policy(policy_dir: Path) -> None:
     assert not pc.is_named_policy(["not", "a", "mapping"])  # type: ignore[arg-type]
 
 
-def test_active_marked_and_name(policy_dir: Path) -> None:
-    assert pc.active_policy_name(policy_dir) == "strict"
-    active = [p.name for p in pc.list_named_policies(policy_dir) if p.active]
-    assert active == ["strict"]
+def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
+    # config_version 9 records no active policy: it is the preset whose
+    # keys the config holds (no keys set is the shipped default).
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+
+    cfg = default_config()
+    cfg.policy_dir = str(policy_dir)
+    assert pc.active_policy_name(policy_dir, cfg) == "default"
+    strict = pc.load_policy_yaml(pc.policy_file("strict", policy_dir))
+    cfg.admission = _admission_from_policy(strict)
+    _apply_policy_guardrail(cfg, strict)
+    assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["strict"]
+    cfg.guardrail.block_at = "LOW"
+    assert pc.active_policy_name(policy_dir, cfg) == ""
 
 
 def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> None:
@@ -125,14 +127,6 @@ def test_get_policy_rejects_traversal(policy_dir: Path) -> None:
     assert pc.get_policy("", policy_dir) is None
     assert pc.get_policy("nope", policy_dir) is None
     assert pc.get_policy("default", policy_dir) is not None
-
-
-def test_active_name_empty_when_data_json_unreadable(tmp_path: Path, monkeypatch) -> None:
-    d = tmp_path / "p"
-    (d / "rego").mkdir(parents=True)
-    (d / "rego" / "data.json").write_text("{not json")
-    monkeypatch.setattr(pc, "_bundled_dir", lambda: "")
-    assert pc.active_policy_name(d) == ""
 
 
 # ---------------------------------------------------------------------------

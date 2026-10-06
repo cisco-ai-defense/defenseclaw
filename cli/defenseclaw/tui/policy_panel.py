@@ -164,7 +164,7 @@ def read_policy_catalog(config: object | None) -> PolicyCatalogRead:
     read = PolicyCatalogRead()
     policy_dir = getattr(config, "policy_dir", None)
     try:
-        read.policies = policy_catalog.list_named_policies(policy_dir)
+        read.policies = policy_catalog.list_named_policies(policy_dir, config)
     except Exception as exc:  # noqa: BLE001 - a bad policy dir is panel state
         read.error = str(exc) or type(exc).__name__
     try:
