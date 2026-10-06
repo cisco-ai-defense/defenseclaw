@@ -78,3 +78,22 @@ def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
 
     assert result.generation == 1 and result.changed == ["guardrail.mode"]
     assert "mode: action # keep" in open(path, encoding="utf-8").read()
+
+
+def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, monkeypatch):
+    # Two processes load the same config, then each blocks a different skill:
+    # the second write is made against the file on disk, so both stay blocked.
+    from defenseclaw import config as config_module
+    from defenseclaw.enforce import asset_lists
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    _config(tmp_path)
+    first = config_module.load(data_dir=str(tmp_path))
+    second = config_module.load(data_dir=str(tmp_path))
+
+    for cfg, name in ((first, "evil-a"), (second, "evil-b")):
+        asset_lists.write_operator_decision(cfg, op=asset_lists.OP_BLOCK, target_type="skill", name=name)
+
+    on_disk = config_module.load(data_dir=str(tmp_path)).asset_policy.skill.denied
+    assert [rule.name for rule in on_disk] == ["evil-a", "evil-b"]

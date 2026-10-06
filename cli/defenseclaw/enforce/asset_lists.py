@@ -191,34 +191,73 @@ def write_operator_decision(
     A block or allow first drops every rule for the same name and connector
     from both lists, then appends the new rule (an allow is pinned to
     ``source_path`` when given); an unblock drops only the denied rule and a
-    clear drops both. The change is saved with ``Config.save()``, which is
-    the single config writer. Refuses on a managed standalone device.
+    clear drops both. The edit is made under the config writer lock against
+    the lists on disk, not the ones loaded when this process started, so a
+    concurrent block or allow (another CLI, the REST API, the TUI) is never
+    lost; ``Config.save()`` then writes it. Refuses on a managed standalone
+    device.
     """
-    from defenseclaw.config import AssetPolicyRule, AssetPolicyToolRule
+    from defenseclaw import config_writer
+    from defenseclaw.config import AssetPolicyRule, AssetPolicyToolRule, config_path_for_data_dir
 
     if getattr(cfg, "asset_policy", None) is None:
         raise ValueError("an operator block or allow needs the loaded config.yaml")
     refuse_if_managed(cfg)
     if target_type not in TARGET_TYPES:
         raise ValueError(f"target type must be one of {', '.join(TARGET_TYPES)}")
-    holder = getattr(cfg.asset_policy, target_type)
-    denied = [r for r in holder.denied if not _same_asset(r, name, connector)]
-    allowed = [r for r in holder.allowed if not _same_asset(r, name, connector)]
+    path = str(config_path_for_data_dir(cfg.data_dir))
+    with config_writer.hold_lock(path):
+        holder = getattr(cfg.asset_policy, target_type)
+        _reload_lists_from_disk(cfg, holder, target_type, path)
+        denied = [r for r in holder.denied if not _same_asset(r, name, connector)]
+        allowed = [r for r in holder.allowed if not _same_asset(r, name, connector)]
+        if target_type == "tool":
+            rule: Any = AssetPolicyToolRule(name=name, connector=connector, reason=reason)
+        else:
+            rule = AssetPolicyRule(
+                name=name, connector=connector, reason=reason,
+                source_path_contains=[source_path] if source_path and op == OP_ALLOW else [],
+            )
+        if op == OP_BLOCK:
+            denied.append(rule)
+        elif op == OP_ALLOW:
+            allowed.append(rule)
+        elif op == OP_UNBLOCK:
+            allowed = list(holder.allowed)
+        holder.denied, holder.allowed = denied, allowed
+        cfg.save()
+
+
+def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) -> None:
+    """Replace ``holder``'s denied/allowed lists, and their save baseline,
+    with the ones in config.yaml now (the caller holds the writer lock)."""
+    import copy
+    import os
+
+    from defenseclaw.config import (
+        _config_to_dict,
+        _load_existing_config_yaml,
+        _merge_asset_rules,
+        _merge_asset_tool_policy,
+    )
+
+    if not os.path.isfile(path):
+        return
+    raw = _load_existing_config_yaml(path).get("asset_policy")
+    section = raw.get(target_type) if isinstance(raw, dict) else None
+    section = section if isinstance(section, dict) else {}
     if target_type == "tool":
-        rule: Any = AssetPolicyToolRule(name=name, connector=connector, reason=reason)
+        fresh = _merge_asset_tool_policy(section)
+        holder.denied, holder.allowed = fresh.denied, fresh.allowed
     else:
-        rule = AssetPolicyRule(
-            name=name, connector=connector, reason=reason,
-            source_path_contains=[source_path] if source_path and op == OP_ALLOW else [],
-        )
-    if op == OP_BLOCK:
-        denied.append(rule)
-    elif op == OP_ALLOW:
-        allowed.append(rule)
-    elif op == OP_UNBLOCK:
-        allowed = list(holder.allowed)
-    holder.denied, holder.allowed = denied, allowed
-    cfg.save()
+        holder.denied = _merge_asset_rules(section.get("denied"))
+        holder.allowed = _merge_asset_rules(section.get("allowed"))
+    snapshot = getattr(cfg, "_loaded_v8_modeled_snapshot", None)
+    if isinstance(snapshot, dict):
+        current = _config_to_dict(cfg).get("asset_policy", {}).get(target_type, {})
+        base = snapshot.setdefault("asset_policy", {}).setdefault(target_type, {})
+        for key in ("denied", "allowed"):
+            base[key] = copy.deepcopy(current.get(key, []))
 
 
 def has_entry(cfg: Any, store: Any, target_type: str, name: str, connector: str, decision: str) -> bool:
