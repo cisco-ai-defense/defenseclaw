@@ -4410,7 +4410,7 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         click.echo(f"      {ux.dim('none')}")
     for index, assignment in enumerate(gc.profile_assignments, start=1):
         match = "; ".join(f"{key}={','.join(values)}" for key, values in _assignment_json(assignment)["match"].items())
-        click.echo(f"      {index}. {assignment.profile} ← {match}")
+        ux.echo(f"      {index}. {assignment.profile} ← {match}")
     default = gc.default_profile or ux.dim("none (guardrail.* applies)")
     ux.echo(f"  • {ux._style('default:', fg='bright_black', bold=True)} {default}")
     click.echo()
