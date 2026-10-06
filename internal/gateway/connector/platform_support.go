@@ -108,6 +108,10 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Status: PlatformUnsupported,
 		Reason: "ZeptoClaw publishes macOS/Linux builds and its DefenseClaw integration requires the guardrail proxy.",
 	},
+	"muse": {
+		Status: PlatformUnsupported,
+		Reason: "Muse Gadget SDK targets Linux and ESP32 devices; native Windows is not a supported gadget platform.",
+	},
 }
 
 // IsProxyConnector reports whether name is a proxy/chat connector (as opposed

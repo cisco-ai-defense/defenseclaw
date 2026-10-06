@@ -131,6 +131,49 @@ guardrail:
     secrets: MEDIUM
     exfiltration: HIGH
 
+iot_extensions:
+  muse_gadget:
+    description: "Muse Gadget SDK command governance for ESP32 and Linux devices"
+    destination_allowlist:
+      - "api.openai.com"
+      - "*.anthropic.com"
+      - "*.cisco.com"
+      - "hatch.metaaivm.com"
+    capability_sequences:
+      - sequence: [net_fetch, exec_shell]
+        action: block
+        reason: "network fetch followed by shell execution is a lateral movement indicator"
+      - sequence: [read_fs, net_fetch]
+        action: block
+        reason: "file read followed by network fetch is a data exfiltration indicator"
+      - sequence: [exec_shell, write_fs, exec_shell]
+        action: block
+        reason: "shell-write-shell sequence suggests staged payload execution"
+    escalation_mode:
+      actuate: sync_block
+      exec_shell: sync_block
+      write_fs: sync_block
+      net_fetch: speculative
+      sensor_read: speculative
+      read_fs: speculative
+    command_policy:
+      "system.run":
+        default_action: escalate
+        max_rate_per_minute: 30
+        content_scan: true
+      "file.write":
+        default_action: escalate
+        max_rate_per_minute: 20
+        content_scan: true
+      "file.read":
+        default_action: allow
+        max_rate_per_minute: 60
+        content_scan: false
+      "device.health":
+        default_action: allow
+        max_rate_per_minute: 120
+        content_scan: false
+
 firewall:
   default_action: deny
   blocked_destinations:
@@ -144,6 +187,7 @@ firewall:
     - "registry.npmjs.org"
     - "pypi.org"
     - "files.pythonhosted.org"
+    - "hatch.metaaivm.com"
   allowed_ports:
     - 443
 

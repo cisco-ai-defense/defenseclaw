@@ -1,0 +1,132 @@
+# DefenseClaw Muse Gadget Policy
+# Purpose-built policy for Muse Gadget SDK devices (ESP32, Raspberry Pi, Linux)
+name: muse-gadget
+description: IoT-optimized policy for Meta Muse AI-controlled gadgets
+
+admission:
+  scan_on_install: true
+  allow_list_bypass_scan: false
+
+# Muse commands map directly to DefenseClaw capabilities:
+#   system.run  → DCLAW_CAP_EXEC_SHELL (0x04)
+#   file.read   → DCLAW_CAP_READ_FS    (0x01)
+#   file.write  → DCLAW_CAP_WRITE_FS   (0x02)
+#   file.list   → DCLAW_CAP_READ_FS    (0x01)
+#   device.health → DCLAW_CAP_SENSOR_READ (0x40)
+#   /link-tunnel  → DCLAW_CAP_NET_FETCH   (0x08)
+
+iot_extensions:
+  muse_gadget:
+    description: "Muse Gadget SDK command governance"
+    destination_allowlist:
+      - "*.cisco.com"
+      - "hatch.metaaivm.com"
+      - "api.muse.ai"
+    capability_sequences:
+      - sequence: [net_fetch, exec_shell]
+        action: block
+        reason: "network fetch → shell execution is a lateral movement vector"
+      - sequence: [read_fs, net_fetch]
+        action: block
+        reason: "file read → network fetch is a data exfiltration vector"
+      - sequence: [exec_shell, write_fs, exec_shell]
+        action: block
+        reason: "shell-write-shell is a staged payload indicator"
+      - sequence: [exec_shell, net_fetch]
+        action: block
+        reason: "shell execution → network fetch suggests command-and-control"
+    escalation_mode:
+      actuate: sync_block
+      exec_shell: sync_block
+      write_fs: sync_block
+      net_fetch: speculative
+      sensor_read: speculative
+      read_fs: speculative
+    command_policy:
+      "system.run":
+        default_action: escalate
+        max_rate_per_minute: 30
+        content_scan: true
+        blocked_patterns:
+          - "rm -rf /"
+          - "dd if=/dev"
+          - "mkfs"
+          - "wget.*|.*sh"
+          - "curl.*|.*bash"
+          - "nc -l"
+          - "ncat"
+          - "socat"
+      "file.write":
+        default_action: escalate
+        max_rate_per_minute: 20
+        content_scan: true
+        protected_paths:
+          - "/etc/passwd"
+          - "/etc/shadow"
+          - "/etc/sudoers"
+          - "/var/lib/musegadget/sdk_token"
+          - "/boot/"
+          - "/sys/"
+          - "/proc/"
+      "file.read":
+        default_action: allow
+        max_rate_per_minute: 60
+        content_scan: false
+        protected_paths:
+          - "/etc/shadow"
+          - "/var/lib/musegadget/sdk_token"
+      "device.health":
+        default_action: allow
+        max_rate_per_minute: 120
+        content_scan: false
+
+guardrail:
+  block_threshold: 2
+  alert_threshold: 1
+  patterns:
+    injection:
+      - "ignore previous"
+      - "ignore all instructions"
+      - "bypass"
+      - "jailbreak"
+      - "act as root"
+      - "sudo su"
+    secrets:
+      - "mgst_"
+      - "sdk_token"
+      - "device_token"
+      - "-----begin rsa"
+      - "-----begin private"
+      - "aws_access_key"
+      - "password="
+    exfiltration:
+      - "/etc/shadow"
+      - "base64 -d"
+      - "curl http"
+      - "nc "
+      - "send to"
+  severity_mappings:
+    injection: HIGH
+    secrets: HIGH
+    exfiltration: CRITICAL
+
+firewall:
+  default_action: deny
+  blocked_destinations:
+    - "169.254.169.254"
+    - "fd00:ec2::254"
+  allowed_domains:
+    - "hatch.metaaivm.com"
+    - "api.muse.ai"
+    - "*.cisco.com"
+  allowed_ports:
+    - 443
+    - 8883
+
+enforcement:
+  max_enforcement_delay_seconds: 0
+
+audit:
+  log_all_actions: true
+  log_scan_results: true
+  retention_days: 365
