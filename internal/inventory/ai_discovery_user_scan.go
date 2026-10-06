@@ -50,10 +50,8 @@ const (
 	// authorization directory.
 	UserScanDirName = "ai-discovery"
 	// UserScanRecordVersion is the spool record schema. Version 2 added the
-	// report's IDE inventory; the gateway reads both.
+	// report's IDE inventory.
 	UserScanRecordVersion = 2
-	// userScanRecordVersionV1 is the schema before the IDE inventory.
-	userScanRecordVersionV1 = 1
 	// MaxUserScanSignals bounds one user's report.
 	MaxUserScanSignals = 1024
 
@@ -196,7 +194,7 @@ func ReadUserScanPass(path string) (UserScanPass, error) {
 	if err := decoder.Decode(&pass); err != nil {
 		return UserScanPass{}, fmt.Errorf("parse pass record: %w", err)
 	}
-	if (pass.Version != UserScanRecordVersion && pass.Version != userScanRecordVersionV1) || pass.LastPassSeconds < 0 {
+	if pass.Version != UserScanRecordVersion || pass.LastPassSeconds < 0 {
 		return UserScanPass{}, errors.New("unsupported pass record")
 	}
 	return pass, nil
@@ -567,14 +565,7 @@ func readUserScanRecord(path string) (UserScanRecord, error) {
 	if err := decoder.Decode(&record); err != nil {
 		return record, fmt.Errorf("parse record: %w", err)
 	}
-	switch record.Version {
-	case UserScanRecordVersion:
-	case userScanRecordVersionV1:
-		// A guardian from before the IDE inventory; its records carry none.
-		if record.Report.IDEInventory != nil {
-			return record, errors.New("a version 1 record carries no IDE inventory")
-		}
-	default:
+	if record.Version != UserScanRecordVersion {
 		return record, fmt.Errorf("unsupported record version %d", record.Version)
 	}
 	return record, nil
