@@ -277,3 +277,17 @@ func TestSecureClientContentKeepsPackLevels(t *testing.T) {
 		t.Errorf("OSS content HIGH = %q, want block (one threshold model)", got)
 	}
 }
+
+// TestPackPostureFollowsTheReloadedPack: a reload that points a pack name at
+// a pack without a manifest posture drops the posture the old pack had.
+func TestPackPostureFollowsTheReloadedPack(t *testing.T) {
+	ref := config.RulePackRef{Name: "posture-reload-test"}
+	rememberPackPosture(ref, "/packs/a", "strict")
+	if got := packPosture(ref, "/packs/a"); got != "strict" {
+		t.Fatalf("posture = %q, want strict", got)
+	}
+	rememberPackPosture(ref, "/packs/b", "")
+	if got := packPosture(ref, "/packs/b"); got != "default" {
+		t.Fatalf("posture after the reload = %q, want default", got)
+	}
+}

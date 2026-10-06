@@ -32,15 +32,14 @@ import (
 // layers); a level left unset takes the selected rule pack's posture
 // default. The alert level is clamped to the block level.
 
-// packPostures caches the manifest posture of every pack the current
-// generation loaded, keyed by RulePackRef.Key() and by directory, so
-// resolution on the request path never reads a file.
+// packPostures caches the manifest posture of every pack a generation
+// loaded, keyed by RulePackRef.Key() and by directory, so resolution on the
+// request path never reads a file. A pack without a manifest posture is
+// recorded as "", so a reload that points a name at such a pack (or drops
+// the field) replaces the posture it had.
 var packPostures sync.Map // string -> string
 
 func rememberPackPosture(ref config.RulePackRef, dir, posture string) {
-	if posture == "" {
-		return
-	}
 	packPostures.Store(ref.Key(), posture)
 	if dir = strings.TrimSpace(dir); dir != "" {
 		packPostures.Store("dir:"+dir, posture)
@@ -51,11 +50,11 @@ func rememberPackPosture(ref config.RulePackRef, dir, posture string) {
 // generation recorded one, a built-in pack's own name, else the folder-name
 // table (guardrailProfileForDir).
 func packPosture(ref config.RulePackRef, dir string) string {
-	if v, ok := packPostures.Load(ref.Key()); ok {
+	if v, ok := packPostures.Load(ref.Key()); ok && v.(string) != "" {
 		return v.(string)
 	}
 	if dir = strings.TrimSpace(dir); dir != "" {
-		if v, ok := packPostures.Load("dir:" + dir); ok {
+		if v, ok := packPostures.Load("dir:" + dir); ok && v.(string) != "" {
 			return v.(string)
 		}
 	}
