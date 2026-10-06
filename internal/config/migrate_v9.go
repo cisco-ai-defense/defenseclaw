@@ -1506,6 +1506,13 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 		return nil
 	}
 	rows, err := readV9ActionRows(path)
+	if err != nil && m.in.Managed {
+		// A managed host never moves the rows, it only counts them, so an
+		// unreadable audit.db does not stop the admin config.
+		m.note("%s: could not count the local block/allow entries in %s (%v); the admin config is the policy",
+			LocalEnforcementEntriesIgnored, path, err)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
 	}

@@ -399,6 +399,28 @@ func TestMigrateV9InlineKeyGoesToTheRuntimeDataDir(t *testing.T) {
 	}
 }
 
+// TestMigrateV9ManagedToleratesAnUnreadableAuditDB: a managed host only
+// counts the operator rows, so a corrupt audit.db does not fail the admin
+// config's migration.
+func TestMigrateV9ManagedToleratesAnUnreadableAuditDB(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	auditDB := filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(auditDB, []byte("not a database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(dir, "config.yaml"), Source: []byte("config_version: 8\nobservability: {}\n"),
+		AuditDBPath: auditDB, Managed: true, InMemory: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if notes := strings.Join(result.Record.Notes, "\n"); !strings.Contains(notes, LocalEnforcementEntriesIgnored) {
+		t.Fatalf("notes = %q", notes)
+	}
+}
+
 // TestMigrateV9ReportsAStricterProxyThreshold: block_at set in config wins,
 // but the stricter data.json level the LLM proxy used is a recorded conflict.
 func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
