@@ -618,6 +618,11 @@ def profile_status_text(cfg, result: dict) -> str:
     user = str(result.get("user") or "this account")
     if result.get("error"):
         count = len(getattr(cfg.guardrail, "profiles", {}) or {})
+        if result.get("timed_out"):
+            return (
+                f"unknown for {user}: the gateway is running but did not answer in time; "
+                f"the directory lookup may be slow ({count} profile(s) configured)"
+            )
         return f"unknown for {user}: the gateway did not answer ({count} profile(s) configured)"
     name = str(result.get("profile") or "")
     if not name:
@@ -860,6 +865,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.warn("connector limitation: " + limit_row, indent="  ")
     if profile is not None:
         ux.echo(f"  • {ux._style('profile:', fg='bright_black', bold=True)}    {profile_status_text(app.cfg, profile)}")
+        for note in profile.get("warnings") or []:
+            ux.warn(str(note), indent="    ")
+        if (profile.get("directory") or {}).get("message"):
+            ux.warn(str(profile["directory"]["message"]), indent="    ")
         if profile.get("profile") or profile.get("overrides"):
             ux.subhead(
                 "The table shows guardrail.*; the profile settings above decide for you. "
@@ -4604,6 +4613,31 @@ def _assignment_json(assignment) -> dict:
     return {"profile": assignment.profile, "match": match}
 
 
+def _gateway_profile_warnings(app: AppContext) -> list[str]:
+    """What the running gateway warns about the configured assignments.
+
+    Empty when the gateway is not running: ``profile list`` works from the
+    config file alone and only adds what the gateway can see (a group the
+    host no longer knows).
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=5,
+        )
+        try:
+            result = client.guardrail_profile_resolve()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no gateway, no extra warnings.
+        return []
+    return [str(note) for note in result.get("warnings") or []]
+
+
 @profile_group.command("list")
 @click.option("--json", "json_out", is_flag=True, help="Print the profiles as JSON.")
 @pass_ctx
@@ -4616,6 +4650,9 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         "assignments": [_assignment_json(a) for a in gc.profile_assignments],
         "default_profile": gc.default_profile,
     }
+    warnings = _gateway_profile_warnings(app) if gc.profile_assignments else []
+    if warnings:
+        payload["warnings"] = warnings
     if json_out:
         click.echo(json.dumps(payload, indent=2))
         return
@@ -4642,6 +4679,8 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         ux.echo(f"      {index}. {assignment.profile} ← {match}")
     default = gc.default_profile or ux.dim("none (guardrail.* applies)")
     ux.echo(f"  • {ux._style('default:', fg='bright_black', bold=True)} {default}")
+    for note in warnings:
+        ux.warn(note, indent="  ")
     click.echo()
 
 
@@ -4680,6 +4719,18 @@ def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
     click.echo()
 
 
+def _age_text(seconds) -> str:
+    """A short age such as ``45s`` or ``7m``."""
+    seconds = int(seconds or 0)
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
+
+
+# How long explain waits for the gateway. The gateway looks the user up in the
+# directory before it answers, and that lookup is bounded at 20 s (and the
+# account lookup before it at 10 s), so the client waits longer than both.
+PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
+
+
 @profile_group.command("explain")
 @click.option("--user", "user", default="", help="Account name, uid or SID to resolve (default: you).")
 @click.option("--connector", "connector", default="", help="Connector the request would come from.")
@@ -4696,6 +4747,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     """
     import getpass
 
+    import requests
+
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
     if not user:
@@ -4711,12 +4764,20 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             host=gateway_api_client_host(app.cfg),
             port=app.cfg.gateway.api_port,
             token=app.cfg.gateway.resolved_token(),
-            timeout=5,
+            timeout=PROFILE_EXPLAIN_TIMEOUT_SECONDS,
         )
         try:
             result = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
         finally:
             client.close()
+    except requests.exceptions.ReadTimeout:
+        # The gateway took the connection and is still resolving the user: it
+        # is running, so "start it" would send the operator the wrong way.
+        ux.err(
+            f"The gateway did not answer within {PROFILE_EXPLAIN_TIMEOUT_SECONDS:g} s; "
+            f"the directory lookup for {user or 'this account'} may be slow (SSSD or the domain controller). Try again."
+        )
+        raise SystemExit(1) from None
     except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
         ux.err(f"Could not ask the gateway: {exc}")
         ux.subhead("Start it with: defenseclaw-gateway start", indent="  ")
@@ -4730,7 +4791,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     subject = result.get("subject") or {}
     if subject:
         who = subject.get("upn") or subject.get("principal") or subject.get("user_name") or user
-        click.echo(f"  user:    {who} ({int(subject.get('group_count') or 0)} group(s))")
+        groups = "groups unknown" if result.get("lookup_error") else f"{int(subject.get('group_count') or 0)} group(s)"
+        click.echo(f"  user:    {who} ({groups})")
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
     if result.get("match"):
@@ -4740,8 +4802,21 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         click.echo(f"  match:   {reason}")
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
+    cache = result.get("cache") or {}
+    if cache:
+        age = int(cache.get("age_seconds") or 0)
+        lifetime = age + int(cache.get("refresh_after_seconds") or 0)
+        click.echo(
+            f"  cache:   requests use directory facts {_age_text(age)} old "
+            f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')}); "
+            f"the gateway refreshes them after {_age_text(lifetime)}"
+        )
     if result.get("lookup_error"):
         ux.warn(f"user lookup failed: {result['lookup_error']}")
+    for note in result.get("warnings") or []:
+        ux.warn(str(note))
+    if (result.get("directory") or {}).get("message"):
+        ux.warn(str(result["directory"]["message"]))
     effective = result.get("effective") or {}
     if effective:
         scope = result.get("connector") or "global"
