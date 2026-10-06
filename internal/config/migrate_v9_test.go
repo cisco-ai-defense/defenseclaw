@@ -285,6 +285,39 @@ func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 		t.Errorf("a data.json level looser than the custom strict pack became block_at:\n%s", result.Migrated)
 	}
 
+	// A data.json HIGH stricter than the global default pack becomes the
+	// global block_at, and a connector on a stricter pack keeps its MEDIUM.
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  connectors:\n    codex:\n      rule_pack_dir: " +
+		edited + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 3, "alert_threshold": 2}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return digest, nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9 (stricter connector pack): %v", err)
+	}
+	var pinned struct {
+		Guardrail struct {
+			BlockAt    string `yaml:"block_at"`
+			Connectors map[string]struct {
+				BlockAt string `yaml:"block_at"`
+			} `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &pinned); err != nil {
+		t.Fatal(err)
+	}
+	if pinned.Guardrail.BlockAt != "HIGH" || pinned.Guardrail.Connectors["codex"].BlockAt != "MEDIUM" {
+		t.Errorf("block_at global %q codex %q; want HIGH and the strict pack's MEDIUM:\n%s",
+			pinned.Guardrail.BlockAt, pinned.Guardrail.Connectors["codex"].BlockAt, result.Migrated)
+	}
+
 	// rule_pack wins over rule_pack_dir at one scope, so the directory is
 	// dropped instead of replacing the selected pack.
 	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack: strict\n  rule_pack_dir: " +

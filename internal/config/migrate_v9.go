@@ -1057,6 +1057,7 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		v9Set(root, v9Scalar(name), "guardrail", item.key)
 		m.moved("data.json", "data.json:guardrail."+strings.Replace(item.key, "_at", "_threshold", 1), "guardrail."+item.key, name)
 		guardrail = v8YAMLMapValue(root, "guardrail")
+		m.pinStricterScopePostures(guardrail, item.key, *item.value)
 	}
 	if level := strings.TrimSpace(data.Guardrail.CiscoTrustLevel); level != "" && level != "full" {
 		v9Set(root, v9Scalar(level), "guardrail", "cisco_trust_level")
@@ -1070,6 +1071,49 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 			}
 		}
 	}
+}
+
+// pinStricterScopePostures keeps a connector or profile pack posture that is
+// stricter than the data.json level just written to the global key. In v8
+// that scope's hook prompts and tool calls took its own pack posture; in v9
+// the global key would win over the pack default, so the posture level is
+// pinned at the scope (spec 2.2 precedence).
+func (m *v9Migrator) pinStricterScopePostures(guardrail *yaml.Node, key string, rank int) {
+	for _, scope := range v9GuardrailScopes(guardrail)[1:] {
+		posture := m.scopePackPosture(guardrail, scope.node)
+		if posture == "" || strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, key))) != "" {
+			continue
+		}
+		block, alert := v9PostureRanks(posture)
+		own := block
+		if key == "alert_at" {
+			own = alert
+		}
+		if own >= rank {
+			continue
+		}
+		v9Set(scope.node, v9Scalar(v9RankNames[own]), key)
+		m.moved("config", scope.name+".rule_pack", scope.name+"."+key, v9RankNames[own])
+		m.note("%s.%s is pinned to the %s pack posture (%s) so the global guardrail.%s from data.json does not loosen it",
+			scope.name, key, posture, v9RankNames[own], key)
+	}
+}
+
+// scopePackPosture is the posture of the pack a scope selects ("" when it
+// selects none and inherits): a preset's own name, else the posture of the
+// custom pack's directory.
+func (m *v9Migrator) scopePackPosture(guardrail, scope *yaml.Node) string {
+	name := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope, "rule_pack")))
+	switch {
+	case name == "":
+		return ""
+	case v9BuiltinPacks[name]:
+		return name
+	}
+	if path := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(guardrail, "custom_packs"), name), "path"))); path != "" {
+		return v9DirPosture(expandPath(path))
+	}
+	return ""
 }
 
 func v9AnyThresholdSet(guardrail *yaml.Node) bool {
@@ -1124,6 +1168,23 @@ var (
 	v9PackNameUnsafe = regexp.MustCompile(`[^a-z0-9_-]+`)
 )
 
+// v9GuardrailScopes are the guardrail scopes that select a pack and
+// thresholds: global, guardrail.connectors.<c>, guardrail.profiles.<p> and
+// guardrail.profiles.<p>.connectors.<c>. The global scope is first.
+func v9GuardrailScopes(guardrail *yaml.Node) []v9NamedNode {
+	scopes := []v9NamedNode{{"guardrail", guardrail}}
+	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
+		scopes = append(scopes, v9NamedNode{"guardrail.connectors." + c.name, c.node})
+	}
+	for _, p := range v9ChildMappings(v8YAMLMapValue(guardrail, "profiles")) {
+		scopes = append(scopes, v9NamedNode{"guardrail.profiles." + p.name, p.node})
+		for _, c := range v9ChildMappings(v8YAMLMapValue(p.node, "connectors")) {
+			scopes = append(scopes, v9NamedNode{"guardrail.profiles." + p.name + ".connectors." + c.name, c.node})
+		}
+	}
+	return scopes
+}
+
 // migrateRulePacks turns every rule_pack_dir into rule_pack (+ rules and
 // custom_packs).
 func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
@@ -1131,63 +1192,41 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 	if guardrail == nil || guardrail.Kind != yaml.MappingNode {
 		return nil
 	}
-	scopes := []struct {
-		path string
-		node *yaml.Node
-	}{{"guardrail", guardrail}}
-	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
-		scopes = append(scopes, struct {
-			path string
-			node *yaml.Node
-		}{"guardrail.connectors." + c.name, c.node})
-	}
-	for _, p := range v9ChildMappings(v8YAMLMapValue(guardrail, "profiles")) {
-		scopes = append(scopes, struct {
-			path string
-			node *yaml.Node
-		}{"guardrail.profiles." + p.name, p.node})
-		for _, c := range v9ChildMappings(v8YAMLMapValue(p.node, "connectors")) {
-			scopes = append(scopes, struct {
-				path string
-				node *yaml.Node
-			}{"guardrail.profiles." + p.name + ".connectors." + c.name, c.node})
-		}
-	}
-	for _, scope := range scopes {
+	for _, scope := range v9GuardrailScopes(guardrail) {
 		node := v9Pop(scope.node, "rule_pack_dir")
 		if node == nil {
 			continue
 		}
 		dir := strings.TrimSpace(node.Value)
 		if dir == "" {
-			m.record.Removed = append(m.record.Removed, scope.path+".rule_pack_dir")
+			m.record.Removed = append(m.record.Removed, scope.name+".rule_pack_dir")
 			continue
 		}
 		if name := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, "rule_pack"))); name != "" {
 			// At one scope rule_pack wins over rule_pack_dir (the loader's
 			// rulePackRefOf), so the directory never applied.
-			m.record.Removed = append(m.record.Removed, scope.path+".rule_pack_dir")
-			m.note("%s.rule_pack_dir (%s) was dropped: %s.rule_pack (%s) already selects the pack", scope.path, dir, scope.path, name)
+			m.record.Removed = append(m.record.Removed, scope.name+".rule_pack_dir")
+			m.note("%s.rule_pack_dir (%s) was dropped: %s.rule_pack (%s) already selects the pack", scope.name, dir, scope.name, name)
 			continue
 		}
 		name, protections, err := m.rulePackFor(guardrail, dir)
 		if err != nil {
-			return fmt.Errorf("config: %s.rule_pack_dir: %w", scope.path, err)
+			return fmt.Errorf("config: %s.rule_pack_dir: %w", scope.name, err)
 		}
-		if scope.path == "guardrail" {
+		if scope.name == "guardrail" {
 			// A custom pack keeps the posture of its folder, which its new
 			// name (custom-strict, a stem) no longer shows.
 			m.globalPackPosture = v9DirPosture(expandPath(dir))
 		}
 		v9Set(scope.node, v9Scalar(name), "rule_pack")
-		m.moved("config", scope.path+".rule_pack_dir", scope.path+".rule_pack", name)
+		m.moved("config", scope.name+".rule_pack_dir", scope.name+".rule_pack", name)
 		if len(protections) > 0 {
 			list := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
 			for _, p := range protections {
 				list.Content = append(list.Content, v9Scalar(p))
 			}
 			v9Set(scope.node, list, "rules", "protections")
-			m.moved("config", scope.path+".rule_pack_dir", scope.path+".rules.protections", protections)
+			m.moved("config", scope.name+".rule_pack_dir", scope.name+".rules.protections", protections)
 		}
 	}
 	return nil
