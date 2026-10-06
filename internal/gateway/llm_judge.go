@@ -52,11 +52,20 @@ func isJudgeActive(ctx context.Context) bool {
 	return v
 }
 
-// judgeLogTrace returns true when DEFENSECLAW_JUDGE_TRACE=1 is set. Raw
-// model responses may contain PII echoed back by the judge — they must
-// never be logged at info level. Operators can opt into trace logs in
-// non-production environments for debugging.
+// judgeLogTrace reports whether guardrail.judge.trace is on in the live
+// generation. Raw model responses may contain PII echoed back by the judge
+// — they must never be logged at info level. Operators can opt into trace
+// logs in non-production environments for debugging; validation refuses
+// the key on a managed device. The Secure Client integration keeps reading
+// DEFENSECLAW_JUDGE_TRACE, as it always has.
 func judgeLogTrace() bool {
+	g := currentGeneration()
+	if g == nil || g.Config == nil {
+		return false
+	}
+	if !g.Config.SecureClientIntegration() {
+		return g.Config.Guardrail.Judge.Trace
+	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_TRACE"))) {
 	case "1", "true", "yes", "on":
 		return true
@@ -562,7 +571,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		// shared logs never leak the raw literal. redaction.Reveal() is
 		// honored here so operators debugging with
 		// DEFENSECLAW_REVEAL_PII=1 see judge bodies without needing to
-		// also flip DEFENSECLAW_JUDGE_TRACE.
+		// also turn on guardrail.judge.trace.
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] injection raw response: %s\n",
 			redaction.MessageContent(truncateJudgeLog(rawResponse, 500)))
 	}
@@ -600,7 +609,8 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 
 // judgeRawForEmit returns the raw judge body only when the operator
 // has explicitly opted in to retention via one of:
-//   - DEFENSECLAW_JUDGE_TRACE=1 (ephemeral, session-only)
+//   - guardrail.judge.trace = true (config; DEFENSECLAW_JUDGE_TRACE=1 under
+//     the Secure Client integration)
 //   - DEFENSECLAW_REVEAL_PII=1  (ephemeral, local triage; also flips
 //     operator-facing log redaction off)
 //   - guardrail.retain_judge_bodies = true (durable, config)
@@ -621,8 +631,7 @@ func judgeRawForEmit(raw string) string {
 	return ""
 }
 
-// retainJudgeBodies is the durable-config counterpart to the
-// DEFENSECLAW_JUDGE_TRACE env flag. Wired from
+// retainJudgeBodies is the durable counterpart to guardrail.judge.trace. Wired from
 // config.GuardrailConfig.RetainJudgeBodies at sidecar startup via
 // SetRetainJudgeBodies. Kept package-level + atomic so the check
 // costs a single load on the hot path.
@@ -1252,7 +1261,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 	rawResponse = resp.Choices[0].Message.Content
 	// The raw response echoes the detected PII values back (that's how the
 	// prompt is structured). Never log it at info — operators can enable
-	// DEFENSECLAW_JUDGE_TRACE=1 or DEFENSECLAW_REVEAL_PII=1 in non-
+	// guardrail.judge.trace or DEFENSECLAW_REVEAL_PII=1 in non-
 	// production if they need the payload. Always run it through
 	// redaction.MessageContent before printing — under REVEAL the redactor
 	// passes through; under TRACE it still scrubs any secondary sensitive
@@ -1409,7 +1418,7 @@ func (j *LLMJudge) piiToVerdict(data map[string]interface{}, direction, toolName
 		for _, s := range suppressed {
 			// Never log the raw entity value at info level — it's PII
 			// by definition here. Operators can enable trace logging
-			// (DEFENSECLAW_JUDGE_TRACE=1) when debugging false positives,
+			// (guardrail.judge.trace) when debugging false positives,
 			// but even under trace we run the value through the
 			// redactor so leaked log shares don't expose matched
 			// tokens. Reason strings routinely include the matched
@@ -1515,7 +1524,7 @@ func parseJudgeJSON(raw string) map[string]interface{} {
 				redaction.MessageContent(preview))
 		} else {
 			fmt.Fprintf(defaultLogWriter,
-				"  [llm-judge] parseJudgeJSON: failed to parse response (%d bytes; set DEFENSECLAW_JUDGE_TRACE=1 for redacted preview)\n",
+				"  [llm-judge] parseJudgeJSON: failed to parse response (%d bytes; set guardrail.judge.trace for a redacted preview)\n",
 				len(raw))
 		}
 		return nil

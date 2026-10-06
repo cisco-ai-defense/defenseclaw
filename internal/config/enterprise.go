@@ -688,6 +688,11 @@ func validateEnterpriseConfig(cfg *Config) error {
 		}
 		return nil
 	}
+	// Judge trace logs raw prompts and model responses; a managed device
+	// never writes them.
+	if cfg.Guardrail.Judge.Trace {
+		return fmt.Errorf("config: guardrail.judge.trace is not allowed on a managed device")
+	}
 	ai := e.Inspection.AIDefense
 	if ai.Enabled {
 		if !ValidEnterpriseCredentialName(ai.Credential) {
