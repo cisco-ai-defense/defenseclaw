@@ -183,3 +183,21 @@ func mustJSON(t *testing.T, value any) string {
 	}
 	return string(raw)
 }
+
+func TestV9SecureClientDocumentKeepsRows(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	for source, want := range map[string]bool{
+		"deployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\n": true,
+		"deployment_mode: managed_enterprise\nenterprise: {profile: standalone}\n":    false,
+		"config_version: 8\n": false,
+	} {
+		var doc yaml.Node
+		if err := yaml.Unmarshal([]byte(source), &doc); err != nil {
+			t.Fatal(err)
+		}
+		if got := v9SecureClientDocument(v8DocumentRoot(&doc)); got != want {
+			t.Errorf("v9SecureClientDocument(%q) = %v, want %v", source, got, want)
+		}
+	}
+}

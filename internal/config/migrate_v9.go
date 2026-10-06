@@ -25,12 +25,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
@@ -1168,6 +1170,12 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 	if _, err := os.Stat(path); err != nil {
 		return nil
 	}
+	// A Secure Client gateway keeps reading operator rows from the table
+	// (PolicyEngine.legacyOperatorRows), so they stay there untouched.
+	if v9SecureClientDocument(root) {
+		m.note("Secure Client host: the operator block/allow entries in audit.db stay in place")
+		return nil
+	}
 	rows, err := readV9ActionRows(path)
 	if err != nil {
 		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
@@ -1193,6 +1201,25 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 	}
 	m.record.ActionsRowsMoved = len(m.rows)
 	return nil
+}
+
+// v9SecureClientDocument reports whether the document is a managed
+// deployment on the Secure Client profile (pinned or configured).
+func v9SecureClientDocument(root *yaml.Node) bool {
+	mode := normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
+	if env := strings.TrimSpace(os.Getenv(managed.DeploymentModeEnv)); env != "" {
+		mode = normalizeDeploymentMode(env)
+	}
+	if !managed.IsManagedEnterprise(mode) {
+		return false
+	}
+	declared := yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "profile"))
+	profile, err := managed.ResolveEnterpriseProfile(runtime.GOOS, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
+	if err != nil {
+		// An unresolvable pin is never treated as permission to move rows.
+		return !managed.IsStandaloneProfile(managed.NormalizeEnterpriseProfile(declared))
+	}
+	return managed.IsSecureClientProfile(profile)
 }
 
 func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list string) bool {
