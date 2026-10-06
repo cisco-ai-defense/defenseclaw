@@ -201,3 +201,43 @@ func TestPrepareRefusesPre9Modules(t *testing.T) {
 		t.Fatal("Prepare accepted a module that reads data.guardrail")
 	}
 }
+
+// TestSecureClientAdmissionKeepsTheDataJSON: a Secure Client config stays
+// config_version 8, so its admission is the 1.0 one: <policy_dir>/rego/
+// data.json over the shipped defaults, a finding below the block level is a
+// warning (no scanner-gate "allowed"), and a tightened data.json applies.
+func TestSecureClientAdmissionKeepsTheDataJSON(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	eng := repoEngine(t)
+	policyDir := t.TempDir()
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: policyDir}
+	cfg.Enterprise.Profile = "secure_client"
+	if !cfg.SecureClientIntegration() {
+		t.Fatal("test config is not Secure Client")
+	}
+	verdict := func(sev string) string {
+		in := AdmissionInput{TargetType: "skill", TargetName: "s", Path: "/x/s",
+			ScanResult: &ScanResultInput{MaxSeverity: sev, TotalFindings: 1, ScannerName: "skill-scanner"}}
+		in.Admission = AdmissionFor(CompileAdmission(cfg), "skill")
+		out, err := eng.Evaluate(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Verdict
+	}
+	if got := verdict("LOW"); got != "warning" {
+		t.Fatalf("LOW without data.json = %q, want warning", got)
+	}
+	if err := os.MkdirAll(filepath.Join(policyDir, "rego"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"actions": {"MEDIUM": {"install": "block", "file": "none", "runtime": "block"},
+	  "LOW": {"install": "none", "file": "none", "runtime": "allow"}}}`
+	if err := os.WriteFile(filepath.Join(policyDir, "rego", "data.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := verdict("MEDIUM"); got != "rejected" {
+		t.Fatalf("MEDIUM with a tightened data.json = %q, want rejected", got)
+	}
+}

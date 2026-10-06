@@ -17,6 +17,9 @@
 package policy
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -82,7 +85,13 @@ func builtinAdmission(assetType string) CompiledAdmission {
 // quarantine, [review_queue_min, gate) warn and lower ones allow. A nil
 // first_party_allow_list inherits; an empty one clears the list. A severity
 // nothing covers fails closed in Rego and the fallback.
+//
+// A Secure Client host keeps the 1.0 admission instead: see
+// secureClientAdmission.
 func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return secureClientAdmission(cfg.PolicyDir)
+	}
 	var adm config.AdmissionConfig
 	if cfg != nil {
 		adm = cfg.Admission
@@ -110,6 +119,75 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 		ScannerOverrides: adm.Tool.ScannerOverrides,
 	}, adm.Defaults, nil)
 	out[config.AdmissionTypeTool] = tool
+	return out
+}
+
+// secureClientDataJSON is the admission part of the 1.0 policies data.json.
+type secureClientDataJSON struct {
+	Config struct {
+		AllowListBypassScan *bool `json:"allow_list_bypass_scan"`
+		ScanOnInstall       *bool `json:"scan_on_install"`
+	} `json:"config"`
+	Actions             map[string]CompiledAction            `json:"actions"`
+	ScannerOverrides    map[string]map[string]CompiledAction `json:"scanner_overrides"`
+	FirstPartyAllowList []struct {
+		TargetType         string   `json:"target_type"`
+		TargetName         string   `json:"target_name"`
+		SourcePathContains []string `json:"source_path_contains"`
+	} `json:"first_party_allow_list"`
+}
+
+// secureClientAdmission is the Secure Client admission, unchanged from 1.0
+// (spec section 10): a Secure Client config stays config_version 8 with no
+// admission block, so the actions, per-type overrides, first-party list and
+// scan flags come from <policy_dir>/rego/data.json (or <policy_dir>/data.json)
+// when it is there, over the shipped defaults, with no scanner-gate
+// derivation. Its actions carry no verdict, so a finding below the block
+// level is a warning, as it was.
+func secureClientAdmission(policyDir string) map[string]CompiledAdmission {
+	var data secureClientDataJSON
+	if dir := strings.TrimSpace(policyDir); dir != "" {
+		for _, path := range []string{filepath.Join(dir, "rego", "data.json"), filepath.Join(dir, "data.json")} {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			if json.Unmarshal(raw, &data) != nil {
+				data = secureClientDataJSON{}
+			}
+			break
+		}
+	}
+	out := make(map[string]CompiledAdmission, 4)
+	for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin, config.AdmissionTypeTool} {
+		c := builtinAdmission(assetType)
+		if assetType == config.AdmissionTypeTool {
+			c.FirstPartyAllowList = nil
+		}
+		c.ScanOnInstall = firstBool(c.ScanOnInstall, data.Config.ScanOnInstall)
+		c.AllowListBypassScan = firstBool(c.AllowListBypassScan, data.Config.AllowListBypassScan)
+		if len(data.Actions) > 0 {
+			c.Actions = map[string]CompiledAction{}
+			for sev, a := range data.Actions {
+				c.Actions[strings.ToUpper(sev)] = a
+			}
+			for sev, a := range data.ScannerOverrides[assetType] {
+				c.Actions[strings.ToUpper(sev)] = a
+			}
+			c.Source = "data.json"
+		}
+		if data.FirstPartyAllowList != nil && assetType != config.AdmissionTypeTool {
+			c.FirstPartyAllowList = nil
+			for _, entry := range data.FirstPartyAllowList {
+				if entry.TargetType == assetType {
+					c.FirstPartyAllowList = append(c.FirstPartyAllowList, CompiledFirstParty{
+						Name: entry.TargetName, SourcePathContains: append([]string(nil), entry.SourcePathContains...),
+					})
+				}
+			}
+		}
+		out[assetType] = c
+	}
 	return out
 }
 
