@@ -4045,22 +4045,24 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 	)
 	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
-			a.scannerCfg.Scanners.SkillScanner,
-			a.scannerCfg.ResolveLLM("scanners.skill"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.SkillScanner,
+			cfg.ResolveLLM("scanners.skill"),
+			cfg.CiscoAIDefense,
 		)
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
-		ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(
-			a.scannerCfg.Scanners.MCPScanner,
-			a.scannerCfg.ResolveLLM("scanners.mcp"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.MCPScanner,
+			cfg.ResolveLLM("scanners.mcp"),
+			cfg.CiscoAIDefense,
 		)
 		result, err = ms.Scan(scanCtx, target)
 	default:

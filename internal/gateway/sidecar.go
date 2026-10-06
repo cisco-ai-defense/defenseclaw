@@ -2199,9 +2199,7 @@ func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.Watch, newCfg.Watch) ||
 		!reflect.DeepEqual(oldCfg.Scanners, newCfg.Scanners) ||
-		!reflect.DeepEqual(oldCfg.SkillActions, newCfg.SkillActions) ||
-		!reflect.DeepEqual(oldCfg.MCPActions, newCfg.MCPActions) ||
-		!reflect.DeepEqual(oldCfg.PluginActions, newCfg.PluginActions) ||
+		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission) ||
 		!reflect.DeepEqual(oldCfg.AssetPolicy, newCfg.AssetPolicy) ||
 		oldCfg.Claw != newCfg.Claw
 }

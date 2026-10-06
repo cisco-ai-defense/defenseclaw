@@ -1068,9 +1068,6 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	newEffectiveGateway := effectiveGatewayConfigForDiff(newCfg.Gateway)
 	add("gateway", oldEffectiveGateway, newEffectiveGateway)
 	add("openshell", oldCfg.OpenShell, newCfg.OpenShell)
-	add("skill_actions", oldCfg.SkillActions, newCfg.SkillActions)
-	add("mcp_actions", oldCfg.MCPActions, newCfg.MCPActions)
-	add("plugin_actions", oldCfg.PluginActions, newCfg.PluginActions)
 	add("admission", oldCfg.Admission, newCfg.Admission)
 	add("asset_policy", oldCfg.AssetPolicy, newCfg.AssetPolicy)
 	add("registries", oldCfg.Registries, newCfg.Registries)
@@ -1081,7 +1078,6 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
 	add("routing", oldCfg.Routing, newCfg.Routing)
-	add("admission", oldCfg.Admission, newCfg.Admission)
 	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
 	add("update", oldCfg.Update, newCfg.Update)
 	add("environment", oldCfg.Environment, newCfg.Environment)
@@ -1148,6 +1144,14 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		"asset_policy":  {},
 		"llm_providers": {},
 		"update":        {},
+		// The judge is rebuilt from llm (judgeChanged), the install watcher
+		// restarts in-process for llm, watch and scanners (watcherRestart),
+		// and the API and hook scans build their scanners from the live
+		// config per request. connector_hooks has no gateway reader.
+		"llm":             {},
+		"scanners":        {},
+		"watch":           {},
+		"connector_hooks": {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)

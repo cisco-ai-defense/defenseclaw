@@ -2621,10 +2621,12 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	// applied on top. ``NewSkillScannerFromLLM`` is the post-v5
 	// constructor; the legacy ``NewSkillScanner`` path is kept alive
 	// only for tests that still pass ``InspectLLMConfig``.
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
 	ss := scanner.NewSkillScannerFromLLM(
-		a.scannerCfg.Scanners.SkillScanner,
-		a.scannerCfg.ResolveLLM("scanners.skill"),
-		a.scannerCfg.CiscoAIDefense,
+		cfg.Scanners.SkillScanner,
+		cfg.ResolveLLM("scanners.skill"),
+		cfg.CiscoAIDefense,
 	)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
@@ -2794,10 +2796,12 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
 	ms := scanner.NewMCPScannerFromLLM(
-		a.scannerCfg.Scanners.MCPScanner,
-		a.scannerCfg.ResolveLLM("scanners.mcp"),
-		a.scannerCfg.CiscoAIDefense,
+		cfg.Scanners.MCPScanner,
+		cfg.ResolveLLM("scanners.mcp"),
+		cfg.CiscoAIDefense,
 	)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)

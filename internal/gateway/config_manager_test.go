@@ -922,14 +922,17 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 }
 
+// llm and scanner edits reload hot: the judge is rebuilt, the install
+// watcher restarts in-process and API scans read the live config.
 func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{}
 	oldCfg.LLM.Model = "openai/gpt-4o-mini"
 	newCfg.LLM.Model = "openai/gpt-4.1-mini"
+	newCfg.Scanners.SkillScanner.FailOnSeverity = "MEDIUM"
 
-	if diff := diffConfigs(oldCfg, newCfg); !slices.Contains(diff.RestartRequired, "llm") {
-		t.Fatalf("llm change diff = %+v, want llm to require a restart", diff)
+	if diff := diffConfigs(oldCfg, newCfg); len(diff.RestartRequired) != 0 {
+		t.Fatalf("llm and scanners diff = %+v, want a hot reload", diff)
 	}
 	if !watcherNeedsRestart(oldCfg, newCfg) {
 		t.Fatal("watcherNeedsRestart returned false for llm change")
