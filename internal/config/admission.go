@@ -32,6 +32,8 @@ const (
 )
 
 // Admission asset types: the keys of admission: besides defaults.
+// AdmissionTypeTool names the asset_policy.tool lists; tool definitions have
+// no admission: block, since no enforcement path admits a tool.
 const (
 	AdmissionTypeSkill  = "skill"
 	AdmissionTypeMCP    = "mcp"
@@ -51,9 +53,6 @@ type AdmissionConfig struct {
 	Skill    AdmissionAssetType `yaml:"skill,omitempty"`
 	MCP      AdmissionAssetType `yaml:"mcp,omitempty"`
 	Plugin   AdmissionAssetType `yaml:"plugin,omitempty"`
-	// Tool covers tool definitions scanned by mcp-scanner; there is no
-	// install event, so only actions and scanner overrides apply.
-	Tool AdmissionToolType `yaml:"tool,omitempty"`
 }
 
 // AdmissionAssetType is one asset type's admission policy. Nil pointers and
@@ -66,12 +65,6 @@ type AdmissionAssetType struct {
 	// virustotal) and wins over Actions for that scanner's findings.
 	ScannerOverrides    map[string]AdmissionActionMap `yaml:"scanner_overrides,omitempty"`
 	FirstPartyAllowList []AdmissionFirstParty         `yaml:"first_party_allow_list,omitempty"`
-}
-
-// AdmissionToolType is admission.tool.
-type AdmissionToolType struct {
-	Actions          AdmissionActionMap            `yaml:"actions,omitempty"`
-	ScannerOverrides map[string]AdmissionActionMap `yaml:"scanner_overrides,omitempty"`
 }
 
 // AdmissionActionMap maps a finding severity to an action. A nil entry is

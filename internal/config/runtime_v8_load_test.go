@@ -447,3 +447,13 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 		}
 	}
 }
+
+// TestRuntimeV8RejectsAdmissionTool: no enforcement path admits a tool
+// definition, so admission.tool is not a setting that validates and does
+// nothing; tool block/allow is asset_policy.tool.
+func TestRuntimeV8RejectsAdmissionTool(t *testing.T) {
+	raw := []byte("config_version: 9\nadmission:\n  tool:\n    actions: {medium: block}\nobservability: {}\n")
+	if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err == nil {
+		t.Fatal("admission.tool loaded; want a validation error")
+	}
+}

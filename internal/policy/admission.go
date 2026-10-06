@@ -74,7 +74,7 @@ func builtinAdmission(assetType string) CompiledAdmission {
 }
 
 // CompileAdmission compiles config admission: into the input.admission
-// object for every asset type (skill, mcp, plugin, tool). Each field and
+// object for every asset type (skill, mcp, plugin). Each field and
 // each severity resolves, first match wins:
 //
 //	admission.<type>  >  (skill only) the scanner gate  >  admission.defaults  >  built-in
@@ -96,7 +96,7 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 	if cfg != nil {
 		adm = cfg.Admission
 	}
-	out := make(map[string]CompiledAdmission, 4)
+	out := make(map[string]CompiledAdmission, 3)
 	for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {
 		var own config.AdmissionAssetType
 		switch assetType {
@@ -114,11 +114,6 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 		}
 		out[assetType] = compileAssetType(assetType, own, adm.Defaults, derived)
 	}
-	tool := compileAssetType(config.AdmissionTypeTool, config.AdmissionAssetType{
-		Actions:          adm.Tool.Actions,
-		ScannerOverrides: adm.Tool.ScannerOverrides,
-	}, adm.Defaults, nil)
-	out[config.AdmissionTypeTool] = tool
 	return out
 }
 
@@ -158,12 +153,9 @@ func secureClientAdmission(policyDir string) map[string]CompiledAdmission {
 			break
 		}
 	}
-	out := make(map[string]CompiledAdmission, 4)
-	for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin, config.AdmissionTypeTool} {
+	out := make(map[string]CompiledAdmission, 3)
+	for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {
 		c := builtinAdmission(assetType)
-		if assetType == config.AdmissionTypeTool {
-			c.FirstPartyAllowList = nil
-		}
 		c.ScanOnInstall = firstBool(c.ScanOnInstall, data.Config.ScanOnInstall)
 		c.AllowListBypassScan = firstBool(c.AllowListBypassScan, data.Config.AllowListBypassScan)
 		if len(data.Actions) > 0 {
@@ -176,7 +168,7 @@ func secureClientAdmission(policyDir string) map[string]CompiledAdmission {
 			}
 			c.Source = "data.json"
 		}
-		if data.FirstPartyAllowList != nil && assetType != config.AdmissionTypeTool {
+		if data.FirstPartyAllowList != nil {
 			c.FirstPartyAllowList = nil
 			for _, entry := range data.FirstPartyAllowList {
 				if entry.TargetType == assetType {
@@ -247,10 +239,6 @@ func compileAssetType(assetType string, own, defaults config.AdmissionAssetType,
 
 	if list := firstParty(own.FirstPartyAllowList, defaults.FirstPartyAllowList); list != nil {
 		out.FirstPartyAllowList = list
-	}
-	if assetType == config.AdmissionTypeTool {
-		// Tool definitions have no install event or on-disk provenance.
-		out.FirstPartyAllowList = nil
 	}
 	return out
 }

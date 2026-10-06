@@ -1097,12 +1097,6 @@ class AdmissionAssetType:
 
 
 @dataclass
-class AdmissionToolType:
-    actions: dict[str, Any] = field(default_factory=dict)
-    scanner_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-
-@dataclass
 class AdmissionConfig:
     """``admission:``. Mirrors ``config.AdmissionConfig``."""
 
@@ -1110,7 +1104,6 @@ class AdmissionConfig:
     skill: AdmissionAssetType = field(default_factory=AdmissionAssetType)
     mcp: AdmissionAssetType = field(default_factory=AdmissionAssetType)
     plugin: AdmissionAssetType = field(default_factory=AdmissionAssetType)
-    tool: AdmissionToolType = field(default_factory=AdmissionToolType)
 
 
 @dataclass
@@ -5789,16 +5782,11 @@ def _merge_admission_asset_type(raw: Any) -> AdmissionAssetType:
 
 def _merge_admission(raw: Any) -> AdmissionConfig:
     raw = _mapping(raw)
-    tool = _mapping(raw.get("tool"))
     return AdmissionConfig(
         defaults=_merge_admission_asset_type(raw.get("defaults")),
         skill=_merge_admission_asset_type(raw.get("skill")),
         mcp=_merge_admission_asset_type(raw.get("mcp")),
         plugin=_merge_admission_asset_type(raw.get("plugin")),
-        tool=AdmissionToolType(
-            actions=_merge_admission_actions(tool.get("actions")),
-            scanner_overrides=_merge_admission_scanner_overrides(tool.get("scanner_overrides")),
-        ),
     )
 
 

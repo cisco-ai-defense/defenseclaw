@@ -5105,18 +5105,6 @@
         }
       }
     },
-    "admissionToolType": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "actions": {
-          "$ref": "#/$defs/admissionActionMap"
-        },
-        "scanner_overrides": {
-          "$ref": "#/$defs/admissionScannerOverrides"
-        }
-      }
-    },
     "admission": {
       "type": "object",
       "additionalProperties": false,
@@ -5133,9 +5121,6 @@
         },
         "plugin": {
           "$ref": "#/$defs/admissionAssetType"
-        },
-        "tool": {
-          "$ref": "#/$defs/admissionToolType"
         }
       }
     },

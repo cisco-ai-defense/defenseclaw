@@ -86,7 +86,7 @@ var policyValidateCmd = &cobra.Command{
 		}
 		fmt.Println("All Rego modules compiled successfully.")
 
-		for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin, config.AdmissionTypeTool} {
+		for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {
 			compiled := policy.CompileAdmission(cfg)[assetType]
 			fmt.Printf("admission.%s: actions from %s\n", assetType, compiled.Source)
 		}
