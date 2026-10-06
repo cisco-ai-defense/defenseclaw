@@ -279,14 +279,20 @@ func TestSecureClientContentKeepsPackLevels(t *testing.T) {
 }
 
 // TestPackPostureFollowsTheReloadedPack: a reload that points a pack name at
-// a pack without a manifest posture drops the posture the old pack had.
+// a pack without a manifest posture drops the posture the old pack had, and
+// a candidate that points the name elsewhere (then is rejected) leaves the
+// running generation's directory, and so its levels, alone.
 func TestPackPostureFollowsTheReloadedPack(t *testing.T) {
 	ref := config.RulePackRef{Name: "posture-reload-test"}
-	rememberPackPosture(ref, "/packs/a", "strict")
+	rememberPackPosture("/packs/a", "strict")
 	if got := packPosture(ref, "/packs/a"); got != "strict" {
 		t.Fatalf("posture = %q, want strict", got)
 	}
-	rememberPackPosture(ref, "/packs/b", "")
+	rememberPackPosture("/packs/rejected", "permissive")
+	if got := packPosture(ref, "/packs/a"); got != "strict" {
+		t.Fatalf("posture after a rejected candidate = %q, want strict", got)
+	}
+	rememberPackPosture("/packs/b", "")
 	if got := packPosture(ref, "/packs/b"); got != "default" {
 		t.Fatalf("posture after the reload = %q, want default", got)
 	}

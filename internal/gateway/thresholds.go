@@ -32,39 +32,51 @@ import (
 // layers); a level left unset takes the selected rule pack's posture
 // default. The alert level is clamped to the block level.
 
-// packPostures caches the manifest posture of every pack a generation
-// loaded, keyed by RulePackRef.Key() and by directory, so resolution on the
-// request path never reads a file. A pack without a manifest posture is
-// recorded as "", so a reload that points a name at such a pack (or drops
-// the field) replaces the posture it had.
-var packPostures sync.Map // string -> string
+// packPostures caches the manifest posture of every pack directory a
+// generation build loaded, so resolution on the request path never reads a
+// file. It is keyed by directory only, never by pack name: a name resolves
+// to its directory through the configuration of the generation asking, so a
+// reload candidate that points a name at another pack and is then rejected
+// does not change the running generation's levels. A pack without a
+// manifest posture is recorded as "", so a pack whose manifest drops the
+// field falls back to the folder-name table again.
+var packPostures sync.Map // directory -> posture
 
-func rememberPackPosture(ref config.RulePackRef, dir, posture string) {
-	packPostures.Store(ref.Key(), posture)
+func rememberPackPosture(dir, posture string) {
 	if dir = strings.TrimSpace(dir); dir != "" {
-		packPostures.Store("dir:"+dir, posture)
+		packPostures.Store(dir, posture)
 	}
 }
 
-// packPosture returns a pack's posture: its manifest posture when the
-// generation recorded one, a built-in pack's own name, else the folder-name
+// packPosture returns the posture of ref's pack at dir (its resolved
+// directory; "" uses ref.Dir): the manifest posture a generation recorded
+// for that directory, a built-in pack's own name, else the folder-name
 // table (guardrailProfileForDir).
 func packPosture(ref config.RulePackRef, dir string) string {
-	if v, ok := packPostures.Load(ref.Key()); ok && v.(string) != "" {
-		return v.(string)
+	if dir = strings.TrimSpace(dir); dir == "" {
+		dir = strings.TrimSpace(ref.Dir)
 	}
-	if dir = strings.TrimSpace(dir); dir != "" {
-		if v, ok := packPostures.Load("dir:" + dir); ok && v.(string) != "" {
+	if dir != "" {
+		if v, ok := packPostures.Load(dir); ok && v.(string) != "" {
 			return v.(string)
 		}
 	}
 	if ref.Name != "" && config.IsBuiltinRulePack(ref.Name) {
 		return ref.Name
 	}
-	if dir == "" {
-		dir = ref.Dir
-	}
 	return guardrailProfileForDir(dir)
+}
+
+// guardrailRulePackDir is the directory of ref for a caller that holds only
+// the guardrail block: a custom_packs entry's path, else ref.Dir (a built-in
+// name needs policy_dir and keeps its own posture).
+func guardrailRulePackDir(gc *config.GuardrailConfig, ref config.RulePackRef) string {
+	if gc != nil && ref.Name != "" {
+		if custom, ok := gc.CustomPacks[ref.Name]; ok {
+			return strings.TrimSpace(custom.Path)
+		}
+	}
+	return ref.Dir
 }
 
 func packLabel(ref config.RulePackRef, posture string) string {
@@ -102,7 +114,7 @@ func resolveGuardrailThresholds(gc *config.GuardrailConfig, connector string) Re
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := gc.EffectiveRulePackRef(connector)
-	return thresholdsFromLevels(gc, connector, packPosture(ref, ref.Dir), ref)
+	return thresholdsFromLevels(gc, connector, packPosture(ref, guardrailRulePackDir(gc, ref)), ref)
 }
 
 func thresholdsFromLevels(gc *config.GuardrailConfig, connector, posture string, ref config.RulePackRef) ResolvedThresholds {

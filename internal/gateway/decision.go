@@ -161,7 +161,7 @@ func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, connector, s
 		posture := "default"
 		if gc != nil {
 			ref := gc.EffectiveRulePackRef("")
-			posture = packPosture(ref, ref.Dir)
+			posture = packPosture(ref, guardrailRulePackDir(gc, ref))
 		}
 		blockThreshold, alertThreshold := guardrailProfileThresholds(posture)
 		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
