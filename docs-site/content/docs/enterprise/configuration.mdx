@@ -47,6 +47,27 @@ write (`mdm_untrusted_input`); see [Deliver the config](/docs/enterprise/mdm#del
 installed copy and reapplies it when it differs. Do not edit the installed
 copy in place: ensure only compares the file you supply.
 
+## Files next to the config
+
+The config is the only file you write. The lifecycle keeps these records next
+to it. They are evidence of what was applied; nothing reads them back as policy,
+and you do not edit them:
+
+| File | What it holds |
+| --- | --- |
+| `config.generation.json` | The config generation: `generation`, `config_sha256`, `actor` (`lifecycle`, `migration`, or a user), `reason` and `written_at`. Every config write updates it |
+| `config.yaml.lock` | The lock every config writer takes |
+| `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only). Pass it as `--config` to go back to a release that reads version 8 |
+| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --ack` marks it read |
+
+They sit in `/etc/defenseclaw` on Linux, `/opt/cisco/defenseclaw/etc` on macOS
+and `C:\ProgramData\Cisco\DefenseClaw\etc` on Windows. On Linux and macOS the
+lifecycle directory also holds `committed-config.yaml` (a copy of the last
+applied config), `rejected-config.yaml` (an in-place edit that was reverted) and
+`policy-state.json` (the last applied effective policy digest). See
+[What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config)
+and [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+
 ## Required keys
 
 Set these keys in every standalone config. On Linux and macOS the lifecycle
@@ -83,7 +104,8 @@ refuses conflicting values:
   `permissive`) selects `<policy_dir>/guardrail/<name>`; any other name must
   be a `guardrail.custom_packs` entry, a directory that only administrators
   may be able to write, pinned by its digest. (`config_version: 8` named the
-  directory in `rule_pack_dir`; `ensure` migrates it.)
+  directory in `rule_pack_dir`; `ensure` migrates it, and a version 9 file
+  that sets `rule_pack_dir` is rejected.)
   - Linux and macOS: when you leave the key out, the gateway uses
     `<policy_dir>/guardrail/default` if you created that folder, and
     otherwise the default pack DefenseClaw ships
@@ -162,6 +184,45 @@ set `enterprise.machine_policy.connectors.<name>.ownership: "off"`.
 
 The older single-agent key `guardrail.connector` also selects an agent.
 Use the map instead.
+
+## Policy in the config
+
+The config also holds the policy the gateway enforces. On a managed host these
+are the only places to change it: the local config tools refuse, and the
+lifecycle validates the whole file before it applies it. Every key here is a
+standard DefenseClaw key; the pages linked below describe it.
+
+| What | Keys | Details |
+| --- | --- | --- |
+| Severity thresholds | `guardrail.block_at` and `alert_at`, and the same keys under `guardrail.connectors.<name>`, `guardrail.profiles.<name>` and `guardrail.profiles.<name>.connectors.<name>` | The only threshold source. [Thresholds](/docs/policies/thresholds) |
+| Rules and rule packs | `guardrail.rules`, `guardrail.rule_pack`, `guardrail.custom_packs` | [Rules](/docs/policies/rules) and [Custom rule packs](#custom-rule-packs) below |
+| Block and allow lists | `asset_policy.skill`, `.mcp`, `.plugin` and `.tool`, with `denied` and `allowed` rules | The only block and allow list. [Admission](/docs/policies/admission) |
+| Admission of skills, MCP servers and plugins | `admission.skill`, `.mcp`, `.plugin` and `.defaults` | Scan on install and the action per severity. [Admission](/docs/policies/admission) |
+| Policy per user or group | `guardrail.profiles`, `guardrail.profile_assignments` and `guardrail.default_profile` | [Guardrail profiles at scale](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale) |
+| Release source | `update.source` (an `https://` URL), `update.check`, `update.channel` | Changes where bytes are fetched, never who must have signed them. [Where releases come from](/docs/enterprise/rollout#where-releases-come-from) |
+
+For example, to block a skill and raise the blocking level of one agent:
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  block_at: HIGH
+  alert_at: MEDIUM
+  connectors:
+    codex:
+      block_at: CRITICAL
+asset_policy:
+  skill:
+    denied:
+      - name: acme-unapproved-skill
+        reason: not approved
+```
+
+A threshold comes from the most specific place that sets it: profile
+connector, profile, `guardrail.connectors`, application protection, global,
+then the rule pack's default. The whole file is checked against the closed config schema: a key
+that does not exist, or that a version 9 file no longer accepts (for example
+`skill_actions`, `mcp_actions`, `plugin_actions` or `guardrail.rule_pack_dir`),
+fails validation and the host keeps its current config.
 
 ## Settings reference
 
@@ -319,7 +380,8 @@ rules on Linux and macOS:
    MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only
    CRITICAL findings and alerts on HIGH ones, and any other pack blocks
    CRITICAL findings and alerts on MEDIUM and above. `guardrail.block_at` and
-   `alert_at` (or a connector's own) override them.
+   `alert_at` (or a connector's own) override them; see
+   [Thresholds](/docs/policies/thresholds).
 3. **Validate the pack** with the gateway's own loader:
 
    ```bash

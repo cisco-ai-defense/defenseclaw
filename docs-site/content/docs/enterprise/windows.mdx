@@ -153,7 +153,7 @@ The config is an ordinary DefenseClaw `config.yaml` with the standalone
 profile. This example protects Codex and Claude Code in observe mode:
 
 ```yaml title="config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 enterprise:
   profile: standalone
@@ -307,6 +307,12 @@ for these fields:
 | `security_complete` | `true`: see below |
 | `enrollment.targets` | The number of entries (one per user and connector) in the target manifest. `0` means nobody is protected yet. |
 | `errors` | Empty |
+
+Windows results carry no `policy` object in this release. To read the
+effective policy digest and the config generation of the installed config, run
+`defenseclaw.exe enterprise policy show`: it prints
+`Effective policy sha256:<12 hex>, config generation N` (and `policy` in
+`--json`). See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
 
 On Windows, `security_complete` needs at least one of Codex, Claude Code or
 Cursor enabled, and no agent reported as `agent_unprotected` or

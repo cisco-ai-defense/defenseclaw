@@ -116,12 +116,22 @@ Replace `FILE` with the artifact you deploy. On a Mac, use `shasum -a 256 -c`
 in place of `sha256sum --check`. Signature-based trust is optional
 and is covered in the kit's `signing/README.md`.
 
+The identity in the `cosign verify-blob` command is the release identity that
+the installers compile in. If you stage releases on an internal mirror, copy
+`checksums.txt` and `checksums.txt.bundle` with the files, unchanged, and
+verify them the same way: a mirror changes where the bytes come from, not who
+must have signed them. See
+[Where releases come from](/docs/enterprise/rollout#where-releases-come-from).
+
 ## Deliver the config
 
-The config decides which agents are protected and how. Its content is
-described in [Configuration](/docs/enterprise/configuration#settings-reference);
+The config decides which agents are protected and how, and it is the only
+policy a managed host enforces: thresholds and block and allow lists live in
+it too ([Policy in the config](/docs/enterprise/configuration#policy-in-the-config)).
+Its content is described in [Configuration](/docs/enterprise/configuration#settings-reference);
 start with [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
-The lifecycle installs it at a fixed path:
+A `config_version: 8` file is accepted and migrated to 9 when the lifecycle
+applies it. The lifecycle installs it at a fixed path:
 
 | OS | Installed config |
 | --- | --- |
@@ -519,7 +529,10 @@ upgrades as supersedence, make the new version supersede the old one
 *without* uninstalling it first. On Linux, a package manager upgrade works
 too: the package's post-install step runs `ensure`. Keep each host on one
 channel: a host installed from the deb or rpm refuses a payload-archive
-upgrade (`package_owned_binaries`).
+upgrade (`package_owned_binaries`). The first `ensure` of a new release also
+migrates a `config_version: 8` config to 9 and, on Linux and macOS, reports the
+applied policy in the result's `policy` object
+([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
 
 **Roll back.** Every lifecycle refuses an older release than the installed one
 unless you ask for the rollback (`downgrade_refused`; exit `1603` on Windows).

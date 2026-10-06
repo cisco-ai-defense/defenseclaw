@@ -191,7 +191,7 @@ The full layout of each OS is on its install page:
 
 | What | Administrator or MDM | DefenseClaw services | Standard user, and any agent they run |
 | --- | --- | --- | --- |
-| Config and policies | Writes | The gateway reads them | No write |
+| Config and policies, including thresholds and the block and allow lists | Writes | The gateway reads them; the lifecycle is the only writer of `config.yaml` | No write; the local config tools refuse |
 | Secrets | Writes | The gateway reads the one it needs | No access |
 | Binaries and services | Installs, upgrades, removes | Run them | Runs the hook; cannot stop, change or replace a service |
 | Per-user hook config | Not needed: the guardian manages DefenseClaw's entries | The guardian writes DefenseClaw's entries, as the user | Owns the files; the guardian repairs its entries, and the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) handles hooks the user adds |
@@ -225,12 +225,102 @@ administrator.
   ([peer verification](/docs/enterprise/concepts#peer-verification)).
 - Run a second, per-user DefenseClaw. On a managed computer the per-user
   installer, `defenseclaw upgrade`, and the per-user gateway refuse to run.
+- Change policy from the computer. The config is the only policy, so the
+  local config tools, the block and allow commands and the gateway's
+  enforcement API all refuse ([below](#policy-changes-on-a-managed-host)).
 
 A user can still edit or delete files they own, such as a per-user hook
 registration. The guardian repairs DefenseClaw's entries on its next pass.
 Vendor machine policy has no such window. The
 [threat model](/docs/enterprise/threat-model#what-a-standard-user-can-and-cannot-do)
 has the full list and the risks that remain.
+
+## Policy changes on a managed host
+
+On a managed standalone host `config.yaml` and the policy assets it names are
+the only policy. The config is written only by the lifecycle (and by a
+migration it runs), under the same lock and with the same validation as every
+other config write, so no local tool, API call or environment variable can
+change what the host enforces. This section is about what happens when
+someone tries. Under the Secure Client profile none of it applies: the profile
+keeps its own behavior, and the gateway does not report a policy digest.
+
+### Local writers refuse
+
+These commands write `config.yaml` through the config writer, which refuses
+every writer but the lifecycle and a migration. They refuse for root too, and
+they write nothing:
+
+| Command | Result |
+| --- | --- |
+| `defenseclaw config set KEY VALUE`, `config unset KEY` | Exit `3`: `error: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device` |
+| `defenseclaw skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock` | Exit `3`: `This device is managed: add it to asset_policy in the admin config (MDM or management plane)` |
+| `defenseclaw guardrail block-at`, `policy activate`, the `setup` commands that write config, and the TUI's config editor | Refused by the same writer; nothing is written. The TUI shows `Config save failed:` and the message |
+| `POST` or `DELETE` on the gateway's `/enforce/block` and `POST` on `/enforce/allow` | HTTP `403` with `{"error": "managed_device", "detail": "policy changes are made in the management plane"}` |
+
+The gateway records each refused attempt in the audit log with
+`outcome=refused reason=managed_device`, and the CLI does the same when it can
+reach the gateway. The enterprise packages ship no
+`defenseclaw` CLI, so these commands matter where an earlier per-user install
+left one behind; the gateway's API refuses regardless of the client.
+
+To block or allow an asset on a managed host, add it to `asset_policy` in the
+admin config and apply the config, for example:
+
+```yaml title="config.yaml (excerpt)"
+asset_policy:
+  skill:
+    denied:
+      - name: acme-unapproved-skill
+        reason: not approved
+```
+
+### Runtime actions stay allowed
+
+Quarantine and restore, runtime disable and enable, approvals (HITL) and
+discovery are runtime state, not policy. They are not written to
+`config.yaml`, the managed gate does not touch them, and they are recorded as
+before.
+
+### The environment cannot weaken the host
+
+Every `DEFENSECLAW_*` variable in the registry has a `managed` setting.
+On a managed standalone host:
+
+- **`ignore`** variables read as unset, from the process environment and from
+  `.env` files. This covers every security opt-out except two, and also debug,
+  telemetry, test fixture, AI Discovery and Splunk bridge variables, most of the
+  upgrade internals, `DEFENSECLAW_REPO`, and the variables that select the
+  deployment, `DEFENSECLAW_DEPLOYMENT_MODE` and
+  `DEFENSECLAW_ENTERPRISE_PROFILE`.
+- **`tighten_only`** variables (`DEFENSECLAW_FAIL_MODE`,
+  `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) are honored
+  only when they make the setting stricter.
+- **`allow`** variables are read as set: runtime paths, credentials, and the
+  values DefenseClaw's own hooks pass between processes.
+
+A forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`
+cannot turn a managed host into a local one: the host is managed because
+`config.yaml` says so, and the writer's test reads the file as well as the
+environment. A `.env` file cannot set the profile at all. `defenseclaw doctor` names the
+ignored variables, never their values, in the row
+`Ignored environment overrides`, for example:
+
+```text
+[PASS] Ignored environment overrides  —  this device is managed, so these have no effect: DEFENSECLAW_REVEAL_PII, DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN
+```
+
+The full list is the registry's `managed` field in
+[Environment variables](/docs/reference/env-vars).
+
+### Local block and allow rows are ignored
+
+Releases before `config_version: 9` kept operator block and allow entries in
+the `actions` table of `audit.db`. A managed host never reads them: the
+gateway decides from `asset_policy` in the config. When `ensure` migrates a
+version 8 config on a host that holds such entries, it counts them, leaves
+them in place and adds the warning `local_enforcement_entries_ignored`. To
+keep one, add it to `asset_policy` in the admin config.
 
 ## Supported platforms and agents
 
