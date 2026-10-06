@@ -30,7 +30,6 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.context import AppContext, pass_ctx
 
 _TOKEN_ENV = "DCLAW_FLEET_API_TOKEN"

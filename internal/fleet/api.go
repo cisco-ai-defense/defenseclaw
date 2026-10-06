@@ -379,12 +379,12 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":    version,
-		"blob_size":  len(signed),
-		"tenant_id":  req.TenantID,
-		"fleet_id":   req.FleetID,
-		"profile":    req.Profile,
-		"status":     "distributed",
+		"version":   version,
+		"blob_size": len(signed),
+		"tenant_id": req.TenantID,
+		"fleet_id":  req.FleetID,
+		"profile":   req.Profile,
+		"status":    "distributed",
 	})
 }
 
@@ -566,10 +566,10 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"batch_id":         batchID,
-		"requested":        len(req.Devices),
-		"decommissioned":   decommissioned,
-		"status":           "completed",
+		"batch_id":       batchID,
+		"requested":      len(req.Devices),
+		"decommissioned": decommissioned,
+		"status":         "completed",
 	}
 	if len(notFound) > 0 {
 		resp["not_found"] = notFound

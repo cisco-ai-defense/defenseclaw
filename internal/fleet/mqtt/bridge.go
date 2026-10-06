@@ -18,10 +18,10 @@ import (
 // It subscribes to device heartbeat and verdict-request topics, decodes the
 // binary/CBOR payloads, and routes them to the appropriate handlers.
 type Bridge struct {
-	client  Client
-	fleet   *manager.FleetManager
-	cache   *verdict.Cache
-	logger  *log.Logger
+	client   Client
+	fleet    *manager.FleetManager
+	cache    *verdict.Cache
+	logger   *log.Logger
 	cancelMu sync.Mutex
 	cancel   context.CancelFunc
 	wg       sync.WaitGroup

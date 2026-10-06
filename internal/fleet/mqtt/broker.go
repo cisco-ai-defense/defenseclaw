@@ -470,4 +470,3 @@ func EncodeVerdictRequestCBOR(vr *VerdictRequest) []byte {
 	buf = append(buf, encodeCBORUint(0, uint64(vr.Findings))...)
 	return buf
 }
-

@@ -530,9 +530,9 @@ func TestFullSignDistributeRoundTrip(t *testing.T) {
 		0x02,       // 2 severity rules
 		0x04, 0x01, // critical -> block
 		0x03, 0x01, // high -> block
-		0x00,                               // 0 sequence rules
-		0x01,                               // 1 destination
-		0x0F,                               // length 15
+		0x00, // 0 sequence rules
+		0x01, // 1 destination
+		0x0F, // length 15
 		'a', 'p', 'i', '.', 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
 		0x00, // content_inspection disabled
 		0x00, // 0 content rules
@@ -602,8 +602,8 @@ func TestDecodeHex(t *testing.T) {
 		{"DEADBEEF", []byte{0xde, 0xad, 0xbe, 0xef}, false},
 		{"00ff", []byte{0x00, 0xff}, false},
 		{"", []byte{}, false},
-		{"0", nil, true},   // odd length
-		{"zz", nil, true},  // invalid char
+		{"0", nil, true},  // odd length
+		{"zz", nil, true}, // invalid char
 	}
 
 	for _, tc := range tests {

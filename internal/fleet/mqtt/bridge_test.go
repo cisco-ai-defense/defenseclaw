@@ -139,11 +139,11 @@ func makeHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16,
 	binary.BigEndian.PutUint16(data[8:10], policyVer)
 	binary.BigEndian.PutUint16(data[10:12], 1) // fw_version
 	binary.BigEndian.PutUint16(data[12:14], deniedCount)
-	binary.BigEndian.PutUint16(data[14:16], 100)   // allowed
+	binary.BigEndian.PutUint16(data[14:16], 100)    // allowed
 	binary.BigEndian.PutUint16(data[16:18], 5)      // warned
 	binary.BigEndian.PutUint16(data[18:20], 2)      // escalated
-	data[20] = 85                                    // cache_hit_pct
-	data[21] = 3                                     // session_count
+	data[20] = 85                                   // cache_hit_pct
+	data[21] = 3                                    // session_count
 	binary.BigEndian.PutUint64(data[22:30], 0xDEAD) // audit hmac
 	data[30] = flags
 	data[31] = 0 // reserved
@@ -171,11 +171,11 @@ func makeVerdictRequestPayload(requestID uint16, toolName string) []byte {
 
 func TestParseTopicValid(t *testing.T) {
 	tests := []struct {
-		topic    string
-		tenant   uint16
-		fleet    uint16
-		device   uint32
-		suffix   string
+		topic  string
+		tenant uint16
+		fleet  uint16
+		device uint32
+		suffix string
 	}{
 		{"defenseclaw/1/2/42/heartbeat", 1, 2, 42, "heartbeat"},
 		{"defenseclaw/100/200/999/verdict/req", 100, 200, 999, "verdict/req"},

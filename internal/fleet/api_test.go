@@ -282,7 +282,7 @@ type apiMockMQTTClient struct {
 	}
 }
 
-func (m *apiMockMQTTClient) Connect(_ context.Context) error   { return nil }
+func (m *apiMockMQTTClient) Connect(_ context.Context) error { return nil }
 func (m *apiMockMQTTClient) Subscribe(_ context.Context, _ string, _ byte, _ func(fleetmqtt.Message)) error {
 	return nil
 }

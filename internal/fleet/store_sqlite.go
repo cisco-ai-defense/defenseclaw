@@ -173,10 +173,10 @@ type scanner interface {
 
 func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 	var (
-		dev         manager.Device
-		status      string
-		lastHB      string
-		hmacHex     string
+		dev          manager.Device
+		status       string
+		lastHB       string
+		hmacHex      string
 		registeredAt string
 	)
 
