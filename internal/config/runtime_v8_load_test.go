@@ -279,8 +279,8 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		{version: MaxSupportedConfigVersion},
 		{
 			version: MaxSupportedConfigVersion + 1,
-			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); "+
-				"upgrade DefenseClaw or restore ~/.defenseclaw/previous", MaxSupportedConfigVersion+1),
+			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); %s",
+				MaxSupportedConfigVersion+1, newerConfigAction),
 		},
 	} {
 		err := checkRuntimeConfigVersion(test.version)
@@ -444,6 +444,46 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 				t.Errorf("v9 %s: got %v", path, err)
 			}
 		}
+	}
+}
+
+// A destination key that `defenseclaw keys set` stored in the data dir's .env
+// resolves for the candidate validator, as it does for `config validate` and
+// the gateway. The 8 -> 9 migration check used to refuse the config of a user
+// who had set the key it asked for (GAP-0173).
+func TestValidateCandidateResolvesDestinationSecretsFromTheDataDirDotEnv(t *testing.T) {
+	const name = "GAP0173_TEST_GALILEO_API_KEY"
+	dir := t.TempDir()
+	raw := []byte("config_version: 9\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"  - name: galileo\n    kind: otlp\n    preset: galileo\n    enabled: true\n    protocol: http/protobuf\n" +
+		"    endpoint: https://api.galileo.ai/otel/traces\n    headers:\n      Galileo-API-Key:\n        env: " + name + "\n" +
+		"      project: defenseclaw\n      logstream: production\n" +
+		"    send:\n      signals:\n      - traces\n      buckets:\n      - agent.lifecycle\n")
+	t.Setenv(name, "")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	previous := dotEnvLoader
+	t.Cleanup(func() { dotEnvLoader = previous })
+	RegisterDotEnvLoader(func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		if key, value, ok := strings.Cut(strings.TrimSpace(string(data)), "="); ok && os.Getenv(key) == "" {
+			_ = os.Setenv(key, value)
+		}
+	})
+
+	configFile := filepath.Join(dir, "config.yaml")
+	if err := ValidateCandidate(configFile, raw); err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("without the key: %v, want an unset-variable error naming %s", err, name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(name+"=probe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCandidate(configFile, raw); err != nil {
+		t.Fatalf("with the key in .env: %v", err)
 	}
 }
 

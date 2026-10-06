@@ -40,6 +40,31 @@ func messagesOf(messages []enterprisestatus.Message, code string) string {
 	return joined
 }
 
+// A package manager that replaced the binaries while the package's own install
+// run failed leaves the record at the previous version. verify names that
+// state once instead of calling each binary modified after install
+// (GAP-0111).
+func TestVerifyNamesAPackageUpgradeThatDidNotFinishApplying(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	writeFreshLedger(t, h)
+	requireOK(t, h.run(Options{Action: ActionVerify}))
+	bin := h.env.P(h.env.Layout.BinDir)
+	newer := h.payload("1.1.0")
+	for _, name := range []string{binGateway, binHook, binSensorHelper} {
+		if err := h.env.copyFileAtomic(filepath.Join(newer, name), filepath.Join(bin, name), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := h.run(Options{Action: ActionVerify})
+	requireError(t, r, codeVerify)
+	got := messagesOf(r.Errors, codeVerify)
+	if !strings.Contains(got, "installed package is version 1.1.0 but the deployment applied 1.0.0") ||
+		!strings.Contains(got, "--from-package") || strings.Contains(got, "was modified after install") {
+		t.Fatalf("verify after a package replaced the binaries: %s", got)
+	}
+}
+
 // Verify promises every file and permission, but compared only digests: a
 // loosened config.yaml (0644) and an installed binary any account could
 // replace (0757) went unreported, while repair fixed the first and refused

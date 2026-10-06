@@ -7971,6 +7971,12 @@ function New-DefenseClawTransaction {
         }
         $destinations.Add([string]$destination)
     }
+    # Standalone only: the Secure Client snapshot is unchanged.
+    if (Test-DefenseClawStandaloneProfile) {
+        foreach ($destination in @(Get-DefenseClawConfigSidecarPaths -Layout $Layout)) {
+            $destinations.Add([string]$destination)
+        }
+    }
     # Uninstall creates its teardown journal only after this transaction has
     # stopped the guardian. Excluding that live journal is what makes every
     # crash phase recoverable: generic restore may restore a deleted gateway
@@ -9725,6 +9731,15 @@ function Restore-DefenseClawTransaction {
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
         -GuardianServiceName ([string]$snapshot.guardian_service)
+    $configSidecars = @()
+    if (Test-DefenseClawStandaloneProfile) {
+        $configSidecars = @(
+            Get-DefenseClawConfigSidecarPaths -Layout $Layout |
+                Microsoft.PowerShell.Core\ForEach-Object {
+                    [IO.Path]::GetFullPath([string]$_).TrimEnd('\')
+                }
+        )
+    }
     foreach ($file in $snapshot.files) {
         $destination = [IO.Path]::GetFullPath([string]$file.path)
         $isManagedHooksLifecycleJournal = [string]::Equals(
@@ -9777,6 +9792,15 @@ function Restore-DefenseClawTransaction {
                 -Source $backup `
                 -Destination $destination `
                 -SkipIfContentMatches
+            if ($configSidecars -contains $destination.TrimEnd('\')) {
+                # The temp file inherited the directory's access, which
+                # leaves the gateway service unable to read its own record.
+                Set-DefenseClawPathAcl `
+                    -Path $destination `
+                    -Kind ConfigFile `
+                    -GatewayServiceSID (Get-DefenseClawDeterministicServiceSID `
+                        -ServiceName ([string]$snapshot.gateway_service))
+            }
             $securityProperty = $file.PSObject.Properties['security_descriptor']
             if ($isSharedCodexFile -and
                 $null -ne $securityProperty -and
@@ -15653,6 +15677,24 @@ function Get-DefenseClawManagedHooksLegacyActivationClassification {
         throw 'managed-hook activation classifier returned an invalid state'
     }
     return [string]$classifiedProperty.Value
+}
+
+function Get-DefenseClawConfigSidecarPaths {
+    <#
+        The files the Go config step writes beside config.yaml inside the
+        standalone lifecycle transaction: the writer's generation record and
+        lock, and the pre-migration backup and migration record of a
+        config_version 8 config. A rollback restores config.yaml, so it
+        restores these with it: the record of a rejected run (GAP-0038) must
+        not outlive the config it describes.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    return @(
+        (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'config.generation.json'),
+        (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'config.yaml.lock'),
+        (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'config.yaml.v8.bak'),
+        (Microsoft.PowerShell.Management\Join-Path $Layout.ConfigDirectory 'migration-v9.json')
+    )
 }
 
 function Get-DefenseClawTransactionFileSnapshotEntry {

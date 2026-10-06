@@ -21,7 +21,7 @@ const profileExplainLookupTimeout = 10 * time.Second
 // resolver the hook path uses: NSS on Linux, so directory accounts resolve
 // even where os/user reads only the local files, and Open Directory on macOS,
 // which has no getent.
-func profileExplainAccount(name string) (id, userName string, ok bool) {
+var profileExplainAccount = func(name string) (id, userName string, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
 	resolver := unixidentity.Default(ctx)
@@ -40,6 +40,6 @@ func profileExplainAccount(name string) (id, userName string, ok bool) {
 
 // profileExplainDirectoryFacts resolves the facts a verified request from
 // uid carries: the account database plus the guardian identity spool.
-func profileExplainDirectoryFacts(id string) (useridentity.DirectoryFacts, error) {
+var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
 	return resolvePeerDirectoryFacts(id)
 }

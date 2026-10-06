@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -79,27 +78,22 @@ var standaloneServiceCanReadTree = func(root, label, serviceAccount string) erro
 type standaloneRulePack struct{ label, dir string }
 
 // standaloneGatewayRulePackDirs lists the distinct rule pack directories the
-// gateway loads for cfg: the global one and every connector's. An empty
-// directory selects the embedded packs and is always loadable.
+// gateway loads for cfg: the global one, every connector's and every
+// profile's, each under the config key the administrator wrote
+// (config.RulePackCheckOrder). A custom_packs entry that nothing selects is
+// not loaded. An empty directory selects the embedded packs and is always
+// loadable.
 func standaloneGatewayRulePackDirs(cfg *config.Config) []standaloneRulePack {
+	dirs := cfg.ReferencedRulePackDirs()
 	seen := map[string]bool{}
 	packs := []standaloneRulePack{}
-	add := func(label, dir string) {
-		dir = strings.TrimSpace(dir)
-		if dir == "" || seen[dir] {
-			return
+	for _, label := range config.RulePackCheckOrder(dirs) {
+		dir := strings.TrimSpace(dirs[label])
+		if dir == "" || seen[dir] || strings.HasPrefix(label, "guardrail.custom_packs.") {
+			continue
 		}
 		seen[dir] = true
 		packs = append(packs, standaloneRulePack{label: label, dir: dir})
-	}
-	add("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir)
-	names := make([]string, 0, len(cfg.Guardrail.Connectors))
-	for name := range cfg.Guardrail.Connectors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		add("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name))
 	}
 	return packs
 }

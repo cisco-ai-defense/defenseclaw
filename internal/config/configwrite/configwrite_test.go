@@ -154,3 +154,14 @@ func TestOnlyTheWriterWritesConfigYAML(t *testing.T) {
 		})
 	}
 }
+
+// A managed host restarts for the enterprise block outside
+// enterprise.inspection, which the gateway reads once at start (GAP-0135).
+func TestManagedRestartRequiredCountsTheEnterpriseBlockOutsideInspection(t *testing.T) {
+	got := ManagedRestartRequired([]string{
+		"guardrail.mode", "enterprise.inspection.mode", "enterprise.enrollment.home_roots", "gateway.api_port",
+	})
+	if want := "gateway.api_port,enterprise.enrollment.home_roots"; strings.Join(got, ",") != want {
+		t.Fatalf("ManagedRestartRequired = %v, want %s", got, want)
+	}
+}

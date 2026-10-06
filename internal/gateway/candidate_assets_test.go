@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -51,6 +52,15 @@ func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(path); string(after) != string(before) {
 		t.Fatal("a refused change modified config.yaml")
+	}
+	// A webhook the dispatcher would drop is refused the same way, naming it
+	// but not its URL (GAP-0094).
+	for _, url := range []string{"not a url", "http://127.0.0.1:19999/hook?token=s3cret"} {
+		hook := []any{map[string]any{"name": "p0bad", "url": url, "type": "generic", "enabled": true}}
+		_, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: "webhooks", Value: hook}}, opt)
+		if err == nil || !strings.Contains(err.Error(), `webhook "p0bad"`) || strings.Contains(err.Error(), "s3cret") {
+			t.Fatalf("webhook url %q: err = %v, want a refusal naming the webhook and not the URL", url, err)
+		}
 	}
 	if _, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: "guardrail.mode", Value: "action"}}, opt); err != nil {
 		t.Fatalf("a valid change was refused: %v", err)

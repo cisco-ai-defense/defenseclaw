@@ -789,7 +789,7 @@ def _check_generated_hook_freshness(
                 f"{label} freshness",
                 "a generated script is not the one setup rendered (an edit, or a copy from another build)",
                 r=r,
-                remediation="run 'defenseclaw-gateway restart' to render the scripts again",
+                remediation="run 'defenseclaw doctor --fix' to render the scripts again",
             )
             return
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)
@@ -2249,8 +2249,30 @@ def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
             check_id="doctor.guardrail.profile",
             remediation="defenseclaw guardrail profile explain",
         )
-        return
-    _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
+    else:
+        _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
+    # A directory that does not answer leaves only default_lookup_failed on
+    # each record otherwise (GAP-0145).
+    directory = (result.get("directory") or {}).get("message")
+    if directory:
+        _emit(
+            "warn",
+            "Directory lookups",
+            str(directory),
+            r=r,
+            check_id="doctor.guardrail.directory",
+            remediation="getent passwd $USER; on SSSD hosts also: sssctl domain-status",
+        )
+    # What the decision alone does not show: a warning, never a failure.
+    for note in result.get("warnings") or []:
+        _emit(
+            "warn",
+            "Guardrail assignments",
+            str(note),
+            r=r,
+            check_id="doctor.guardrail.assignments",
+            remediation="defenseclaw guardrail profile explain",
+        )
 
 
 def _check_device_identity(cfg, r: _DoctorResult) -> None:
