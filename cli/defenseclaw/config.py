@@ -3809,7 +3809,7 @@ class Config:
                 raise ConfigVersionError("acp must be a mapping")
             acp_document["default_profile"] = self.acp.default_profile
         if version >= CONFIG_VERSION_V9:
-            _project_v9_modeled_keys(merged)
+            _project_v9_modeled_keys(merged, self.policy_dir)
         return merged
 
 
@@ -3862,15 +3862,26 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
 _V9_PRESET_PACKS = ("default", "strict", "permissive")
 
 
-def _v9_rule_pack_for_dir(directory: str) -> tuple[str, list[str]]:
-    """Map a v8 rule_pack_dir to a v9 rule_pack name (and protections)."""
+def _v9_same_dir(a: str, b: str) -> bool:
+    a, b = os.path.normpath(os.path.expanduser(a)), os.path.normpath(os.path.expanduser(b))
+    return os.path.normcase(a) == os.path.normcase(b)
+
+
+def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[str]]:
+    """Map a v8 rule_pack_dir to a v9 rule_pack name (and protections).
+
+    A preset name resolves to ``<policy_dir>/guardrail/<name>``, so only that
+    directory is the preset; an edited copy elsewhere is a custom pack.
+    """
     clean = os.path.normpath(directory)
     base = os.path.basename(clean).lower()
     parent = os.path.basename(os.path.dirname(clean))
-    if base == "balanced":
-        base = "default"
-    if base in _V9_PRESET_PACKS and parent == "guardrail":
-        return base, []
+    preset = "default" if base == "balanced" else base
+    if preset in _V9_PRESET_PACKS and policy_dir and _v9_same_dir(
+        clean, os.path.join(policy_dir, "guardrail", os.path.basename(clean))
+    ):
+        return preset, []
+    base = preset
     if base in _V9_PRESET_PACKS and parent.startswith("protected-"):
         try:
             with open(os.path.join(clean, "defenseclaw-pack.json"), encoding="utf-8") as handle:
@@ -3885,7 +3896,7 @@ def _v9_rule_pack_for_dir(directory: str) -> tuple[str, list[str]]:
     )
 
 
-def _project_v9_modeled_keys(merged: dict[str, Any]) -> None:
+def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> None:
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
     Setup commands that still set a v8 field (``rule_pack_dir``, the
@@ -3913,7 +3924,7 @@ def _project_v9_modeled_keys(merged: dict[str, Any]) -> None:
         for scope in scopes:
             directory = scope.pop("rule_pack_dir", None)
             if isinstance(directory, str) and directory.strip():
-                name, protections = _v9_rule_pack_for_dir(directory.strip())
+                name, protections = _v9_rule_pack_for_dir(directory.strip(), policy_dir)
                 scope["rule_pack"] = name
                 if protections:
                     scope.setdefault("rules", {})["protections"] = protections

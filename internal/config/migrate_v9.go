@@ -70,6 +70,11 @@ type MigrateV9Input struct {
 	Source []byte
 	// DataJSONPath is <policy_dir>/rego/data.json; "" or missing is skipped.
 	DataJSONPath string
+	// PolicyDir is the resolved policy_dir. A v8 rule_pack_dir is a preset
+	// only when it is <PolicyDir>/guardrail/<name>, which is where the v9
+	// rule_pack name resolves; any other directory becomes a custom pack.
+	// Empty derives it from DataJSONPath, then from the document.
+	PolicyDir string
 	// AuditDBPath is audit.db, whose operator actions rows move into
 	// asset_policy. Empty skips them; managed standalone always skips them
 	// and reports the count as a local_enforcement_entries_ignored warning.
@@ -240,6 +245,7 @@ func writeMigrationRecord(path string, record MigrationRecord) error {
 type v9Migrator struct {
 	in         MigrateV9Input
 	configPath string
+	root       *yaml.Node
 	record     MigrationRecord
 	// rows are the audit.db rows moved into asset_policy, cleared after the
 	// config commit.
@@ -265,6 +271,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if root == nil || root.Kind != yaml.MappingNode {
 		return nil, false, fmt.Errorf("config: %s root must be a mapping", m.configPath)
 	}
+	m.root = root
 	versionNode := v8YAMLMapValue(root, "config_version")
 	var version int
 	if versionNode == nil || versionNode.Decode(&version) != nil {
@@ -929,6 +936,32 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 	return nil
 }
 
+// policyDir is the policy_dir the v9 preset names resolve under.
+func (m *v9Migrator) policyDir() string {
+	if dir := strings.TrimSpace(m.in.PolicyDir); dir != "" {
+		return dir
+	}
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" {
+		return filepath.Dir(filepath.Dir(dj))
+	}
+	if dir := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir"))); dir != "" {
+		return dir
+	}
+	dataDir := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "data_dir")))
+	if dataDir == "" {
+		dataDir = filepath.Dir(m.configPath)
+	}
+	return filepath.Join(dataDir, "policies")
+}
+
+func v9SameDir(a, b string) bool {
+	a, b = filepath.Clean(expandPath(a)), filepath.Clean(expandPath(b))
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []string, error) {
 	clean := filepath.Clean(dir)
 	base := strings.ToLower(filepath.Base(clean))
@@ -936,7 +969,7 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	if base == "balanced" {
 		base = "default"
 	}
-	if v9BuiltinPacks[base] && parent == "guardrail" {
+	if v9BuiltinPacks[base] && v9SameDir(clean, filepath.Join(m.policyDir(), "guardrail", filepath.Base(clean))) {
 		return base, nil, nil
 	}
 	if strings.HasPrefix(parent, "protected-") && v9BuiltinPacks[base] {

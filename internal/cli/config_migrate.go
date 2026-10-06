@@ -158,6 +158,7 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		input.Managed = config.StandaloneManagedSource(raw)
 	}
 	if policyDir != "" {
+		input.PolicyDir = policyDir
 		input.DataJSONPath = filepath.Join(policyDir, "rego", "data.json")
 	}
 	input.AuditDBPath = auditDB

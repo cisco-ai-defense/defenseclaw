@@ -184,6 +184,62 @@ func mustJSON(t *testing.T, value any) string {
 	return string(raw)
 }
 
+// TestMigrateV9KeepsThePackPosture: selecting the strict pack in v8 left the
+// shipped data.json thresholds alone, so they must not override the strict
+// posture the hook paths used; and a strict-named pack outside
+// <policy_dir>/guardrail is an edited copy, not the preset.
+func TestMigrateV9KeepsThePackPosture(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	edited := filepath.Join(dir, "elsewhere", "guardrail", "strict")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " +
+		filepath.Join(dir, "policies", "guardrail", "strict") + "\n  connectors:\n    codex:\n      rule_pack_dir: " +
+		edited + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataJSON := filepath.Join(dir, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 4, "alert_threshold": 2}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return digest, nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	var doc struct {
+		Guardrail struct {
+			RulePack    string `yaml:"rule_pack"`
+			BlockAt     string `yaml:"block_at"`
+			AlertAt     string `yaml:"alert_at"`
+			CustomPacks map[string]struct {
+				Path string `yaml:"path"`
+			} `yaml:"custom_packs"`
+			Connectors map[string]struct {
+				RulePack string `yaml:"rule_pack"`
+			} `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	g := doc.Guardrail
+	if g.RulePack != "strict" || g.BlockAt != "" || g.AlertAt != "" {
+		t.Errorf("guardrail = rule_pack %q block_at %q alert_at %q; want strict with the pack posture", g.RulePack, g.BlockAt, g.AlertAt)
+	}
+	codex := g.Connectors["codex"].RulePack
+	if codex == "strict" || g.CustomPacks[codex].Path != edited {
+		t.Errorf("codex rule_pack = %q (custom_packs %+v); want a custom pack for %s", codex, g.CustomPacks, edited)
+	}
+}
+
 func TestV9SecureClientDocumentKeepsRows(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
