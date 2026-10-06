@@ -416,9 +416,9 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
             path=path,
         )
     except config_writer.ManagedConfigWriteError as exc:
-        from defenseclaw.enforce.asset_lists import audit_managed_refusal
+        from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
 
-        audit_managed_refusal("config-update", key or "config", f"verb={verb}")
+        audit_managed_config_refusal(key or "config", f"config {verb}")
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(MANAGED_EXIT_CODE) from exc
     except config_writer.ConfigConflictError as exc:

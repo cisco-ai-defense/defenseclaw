@@ -158,9 +158,10 @@ def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     monkeypatch.setattr(config_module, "load", lambda: object())
     monkeypatch.setattr(logger_module.Logger, "from_config", staticmethod(lambda _cfg: audit))
     with click.Context(click.Command("set"), obj=AppContext()):
-        asset_lists.audit_managed_refusal("config-update", "guardrail.mode", "verb=set")
+        asset_lists.audit_managed_config_refusal("guardrail.mode", "config set")
+    # Not config-update: the gateway would record that as an applied change.
     audit.log_action.assert_called_once_with(
-        "config-update", "guardrail.mode", "outcome=refused reason=managed_device verb=set"
+        "action", "guardrail.mode", "outcome=refused reason=managed_device command=config set"
     )
 
 

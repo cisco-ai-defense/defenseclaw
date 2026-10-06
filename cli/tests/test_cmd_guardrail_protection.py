@@ -152,7 +152,7 @@ def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
     assert result.exit_code == 3
     assert "managed" in result.output
     app.logger.log_action.assert_called_once_with(
-        "guardrail-config",
+        "action",
         "guardrail.rules.protections",
         f"outcome=refused reason=managed_device command=guardrail protection enable {DB}",
     )
