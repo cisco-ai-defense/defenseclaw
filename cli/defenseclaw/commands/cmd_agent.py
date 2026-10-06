@@ -5765,6 +5765,7 @@ def _error_class(error: str) -> str:
 @agent.command("identities")
 @click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
 @click.option("--connector", "connector_name", default=None, help="Only this connector.")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Only the N most recently seen.")
 @click.option("--json", "as_json", is_flag=True, help="Output the identities as JSON.")
 @click.option("--gateway-host", default=None, help="Sidecar API host override.")
 @click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
@@ -5778,6 +5779,7 @@ def identities(
     app: AppContext,
     user: str | None,
     connector_name: str | None,
+    limit: int | None,
     as_json: bool,
     gateway_host: str | None,
     gateway_port: int | None,
@@ -5788,6 +5790,7 @@ def identities(
     The ID (agt-...) is derived from the machine id, the verified user,
     the connector and its config root, so it is stable across sessions
     and gateway restarts. Each session of an agent has its own ais- id.
+    Every identity is listed, most recently seen first.
     """
     client = _usage_client(
         app,
@@ -5796,7 +5799,7 @@ def identities(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.agent_identities(user=user, connector=connector_name)
+        payload = client.agent_identities_all(user=user, connector=connector_name, limit=limit or 0)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -5806,9 +5809,16 @@ def identities(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     rows = [row for row in payload.get("identities", []) or [] if isinstance(row, Mapping)]
+    total = payload.get("total")
+    total = total if isinstance(total, int) and total > len(rows) else len(rows)
+    next_cursor = str(payload.get("next_cursor") or "")
+    if next_cursor:
+        hint = "" if limit else " Narrow the list with --user or --connector."
+        click.echo(f"Showing the {len(rows)} most recently seen of {total} agent identities.{hint}", err=True)
     if as_json:
         click.echo(json.dumps(
-            {"enabled": bool(payload.get("enabled", False)), "identities": rows},
+            {"enabled": bool(payload.get("enabled", False)), "identities": rows,
+             "total": total, "next_cursor": next_cursor},
             indent=2, sort_keys=True))
         return
     if payload.get("enabled") is False:

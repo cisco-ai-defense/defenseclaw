@@ -126,7 +126,7 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     owners: dict[str, str] | None = None
     if any(a.match.agents for a in scoped):
         try:
-            rows = client.agent_identities(user=user).get("identities") or []
+            rows = client.agent_identities_all(user=user).get("identities") or []
             owners = {str(r.get("agent_id")): normalize(str(r.get("connector") or "")) for r in rows}
         except Exception:  # noqa: BLE001 - unknown owners: probe without a connector.
             owners = None
@@ -785,11 +785,15 @@ class OrchestratorClient:
         return resp.json()
 
     def agent_identities(
-        self, *, user: str | None = None, connector: str | None = None,
+        self, *, user: str | None = None, connector: str | None = None, cursor: str = "", limit: int = 0,
     ) -> dict[str, Any]:
-        """Fetch agent identities (``GET /api/v1/agents/identities``),
+        """Fetch one page of agent identities (``GET /api/v1/agents/identities``),
         optionally narrowed to one user or one connector."""
-        params = {key: value for key, value in (("user", user), ("connector", connector)) if value}
+        params = {
+            key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value
+        }
+        if limit > 0:
+            params["limit"] = str(limit)
         resp = self._session.get(
             f"{self.base_url}/api/v1/agents/identities",
             params=params,
@@ -798,6 +802,42 @@ class OrchestratorClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def agent_identities_all(
+        self, *, user: str | None = None, connector: str | None = None, limit: int = 0, max_pages: int = 64,
+    ) -> dict[str, Any]:
+        """Fetch every page of agent identities, or the ``limit`` most recently
+        seen, into one payload.
+
+        Rows can move up between pages when an agent is seen again, so a row
+        already listed is not listed twice. A repeated or missing cursor ends
+        the walk, and ``max_pages`` bounds it. ``next_cursor`` stays set when
+        rows were left out, and ``total`` says how many there are.
+        """
+        rows: list[dict[str, Any]] = []
+        listed: set[str] = set()
+        seen: set[str] = set()
+        cursor = ""
+        pages = 0
+        while True:
+            extra: dict[str, Any] = {"cursor": cursor} if cursor else {}
+            if limit > 0:
+                extra["limit"] = limit - len(rows)
+            payload = self.agent_identities(user=user, connector=connector, **extra)
+            pages += 1
+            for row in payload.get("identities") or []:
+                agent_id = str(row.get("agent_id") or "") if isinstance(row, dict) else ""
+                if agent_id and agent_id not in listed:
+                    listed.add(agent_id)
+                    rows.append(row)
+            seen.add(cursor)
+            cursor = str(payload.get("next_cursor") or "")
+            if not cursor or cursor in seen or pages >= max_pages or 0 < limit <= len(rows):
+                break
+        out = dict(payload)
+        out["identities"] = rows
+        out["next_cursor"] = "" if cursor in seen else cursor
+        return out
 
     def ai_usage(self) -> dict[str, Any]:
         resp = self._session.get(
