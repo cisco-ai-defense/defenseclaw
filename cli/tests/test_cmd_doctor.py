@@ -87,6 +87,23 @@ class DoctorPolicyStateTests(unittest.TestCase):
             self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
 
 
+class DoctorRetiredPolicyDataTests(unittest.TestCase):
+    def test_only_data_json_is_retired(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as policy_dir:
+            os.makedirs(os.path.join(policy_dir, "rego"))
+            for name in ("data.json", "data-sandbox.json"):
+                with open(os.path.join(policy_dir, "rego", name), "w", encoding="utf-8") as f:
+                    f.write("{}")
+            result = _DoctorResult()
+            cfg = SimpleNamespace(config_version=9, policy_dir=policy_dir, data_dir="")
+            cmd_doctor._check_policy_evidence_files(cfg, result)
+        detail = result.checks[0]["detail"]
+        self.assertIn("data.json", detail)
+        self.assertNotIn("data-sandbox.json", detail)
+
+
 class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""
 

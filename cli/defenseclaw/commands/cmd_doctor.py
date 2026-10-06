@@ -9030,11 +9030,12 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     if getattr(cfg, "config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
         stale = []
-        for name in ("data.json", "data-sandbox.json"):
-            for base in (os.path.join(policy_dir, "rego"), policy_dir):
-                candidate = os.path.join(base, name)
-                if policy_dir and os.path.isfile(candidate) and candidate not in stale:
-                    stale.append(candidate)
+        # data-sandbox.json stays: `defenseclaw-gateway policy domains` and
+        # `policy evaluate-firewall` still read it.
+        for base in (os.path.join(policy_dir, "rego"), policy_dir):
+            candidate = os.path.join(base, "data.json")
+            if policy_dir and os.path.isfile(candidate) and candidate not in stale:
+                stale.append(candidate)
         if stale:
             _emit(
                 "warn",
