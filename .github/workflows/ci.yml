@@ -596,6 +596,7 @@ jobs:
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
               "aiohttp": ">=3.14.3,<4",
+              "multidict": ">=6.9.1,<7",
               "pyjwt": ">=2.15.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
