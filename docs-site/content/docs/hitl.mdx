@@ -73,6 +73,8 @@ defenseclaw setup guardrail \
 
 With the default rule pack, CRITICAL blocks, HIGH can become `confirm` when HITL is on, MEDIUM alerts, and LOW is allowed. Without HITL, HIGH is an alert rather than a block. The strict pack, a custom pack, or `defenseclaw guardrail block-at` and `alert-at` change those levels; [Thresholds](/docs/policies/thresholds) explains which scope wins. A guardrail profile can give a user or group its own levels and HITL setting ([User- and group-based policies](/docs/guardrail/user-and-group-policies)).
 
+Only a finding that can block can pause for approval. A rule that only alerts never does, whatever its severity: the shell `eval` rule (`CMD-EVAL`) is the example, because the operand of an `eval` is known only when it runs. To see the prompt on a tool call, use a command with a HIGH finding that enforcement can act on, or a HIGH rule of your own in a custom pack.
+
 Already set up? Turn HITL on or off without re-running setup:
 
 ```bash
