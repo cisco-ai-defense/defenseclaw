@@ -356,8 +356,8 @@ func nonNegativeAlertInteger(value any) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
-	parsed, err := number.Int64()
-	return parsed, err == nil && parsed >= 0
+	parsed, ok := observability.ExactInt64(number)
+	return parsed, ok && parsed >= 0
 }
 
 func nilAlertDependency(value any) bool {
