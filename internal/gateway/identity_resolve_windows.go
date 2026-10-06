@@ -29,6 +29,12 @@ func windowsDirectoryFacts(sid string, block bool) (useridentity.DirectoryFacts,
 	if !strings.HasPrefix(sid, "S-1-") {
 		return useridentity.DirectoryFacts{}, false
 	}
+	return peerDirectoryCache().get(sid, block)
+}
+
+// peerDirectoryCache is the cache the hook path reads directory facts from,
+// created on first use.
+func peerDirectoryCache() *identityDirectoryCache {
 	windowsDirectoriesOnce.Do(func() {
 		windowsDirectories = newIdentityDirectoryCache(func(sid string) (useridentity.DirectoryFacts, error) {
 			wait := time.Duration(0)
@@ -39,7 +45,7 @@ func windowsDirectoryFacts(sid string, block bool) (useridentity.DirectoryFacts,
 		})
 		windowsDirectories.incomplete = adWithoutUPN
 	})
-	return windowsDirectories.get(sid, block)
+	return windowsDirectories
 }
 
 // windowsUPNWait is how long a lookup waits for an AD account's UPN when a

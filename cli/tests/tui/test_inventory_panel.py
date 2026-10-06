@@ -624,6 +624,12 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert panel.data_table_rows()[1] == ("codex", "bob", "agt-0123456789abcdef", "agent identity", "", "", "")
     panel.set_cursor(1)
     assert dict(panel.detail_info().fields)["Sessions"] == "3"
+    # GAP-0152: a list cut at its bound says so on the sub-tab.
+    panel.apply_agent_identities(json.dumps({"enabled": True, "total": 9, "next_cursor": "3", "identities": [
+        identity("agt-0123456789abcdef", "bob"),
+    ]}))
+    assert next(info for info in panel.subtab_info() if info.subtab == "agents").display_label == "Agents (2+)"
+    assert "newest 1 of 9" in panel.handle_key("h").hint + panel.handle_key("l").hint
 
     # A missing or failing `agent identities` command leaves only inventory rows.
     panel.apply_agent_identities("Error: No such command 'identities'.")
