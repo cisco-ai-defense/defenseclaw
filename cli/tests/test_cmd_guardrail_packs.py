@@ -129,6 +129,21 @@ def test_connector_scope_leaves_peers_alone(env):
     ]
 
 
+def test_custom_pack_key_selects_its_directory(env):
+    # GAP-0068: use-pack took a directory or a preset, but not the key a
+    # custom pack is pinned under in guardrail.custom_packs.
+    from defenseclaw.config import CustomRulePack
+
+    app, _root, custom, writes = env
+    app.cfg.guardrail.custom_packs = {"acme": CustomRulePack(path=str(custom), digest="sha256:" + "0" * 64)}
+    result = _run(app, ["use-pack", "acme", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["path"] == str(custom)
+    pin = next(c for c in writes[-1] if c.path.startswith("guardrail.custom_packs."))
+    assert pin.path == "guardrail.custom_packs.acme" and pin.value == {"path": str(custom), "digest": "sha256:" + "a" * 64}
+    assert ("guardrail.rule_pack", "acme") in [(c.path, c.value) for c in writes[-1]]
+
+
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
     """GAP-1576: an unrelated ./vsg2 folder does not shadow the installed vsg2 pack."""
     app, root, _custom, writes = env

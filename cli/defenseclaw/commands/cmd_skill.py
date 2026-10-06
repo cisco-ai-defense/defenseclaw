@@ -2292,7 +2292,7 @@ def _scan_one_local_skill(
         as_json=as_json,
         where=_scan_ui.WHERE_ADHOC_PATH if adhoc else "",
     )
-    _scan_ui.render_preamble(ctx, target_count=1)
+    _scan_ui.render_preamble(ctx, target_count=1, scanner=scanner)
 
     captured_stdout = None
     try:

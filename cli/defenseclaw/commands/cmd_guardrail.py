@@ -3307,8 +3307,9 @@ def use_pack_cmd(
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
 
-    PACK is a built-in preset (default, strict, permissive), the name of a
-    pack under ``<policy_dir>/guardrail/``, or a directory path (``./NAME``
+    PACK is a built-in preset (default, strict, permissive), a
+    ``guardrail.custom_packs`` key, the name of a pack under
+    ``<policy_dir>/guardrail/``, or a directory path (``./NAME``
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
     ``guardrail.custom_packs.NAME`` with its validated digest, so an edited
@@ -3422,12 +3423,17 @@ def use_pack_cmd(
         pack_name, kind = raw, "preset"
     else:
         candidate = policy_catalog.normalize_pack_path(raw)
+        # A guardrail.custom_packs key selects its own directory, whatever the
+        # directory is called (GAP-0068).
+        key_entry = (getattr(gc, "custom_packs", None) or {}).get(raw)
+        if key_entry is not None:
+            candidate = policy_catalog.normalize_pack_path(str(getattr(key_entry, "path", "") or ""))
         # A bare name is the installed pack of that name even when the current
         # directory has a folder called NAME; ./NAME selects the folder (GAP-1576).
         bare = not (os.sep in raw or (os.altsep and os.altsep in raw) or raw.startswith(("~", ".")))
         named = (
             [p for p in policy_catalog.discover_rule_packs(app.cfg) if p.name == raw and os.path.isdir(p.path)]
-            if bare
+            if bare and key_entry is None
             else []
         )
         if named:
@@ -3496,6 +3502,8 @@ def use_pack_cmd(
         name = _RULE_PACK_NAME.sub("-", pack_name.lower()).strip("-_")[:64] or "custom"
         if name in policy_catalog.RULE_PACK_PRESETS:
             name = f"custom-{name}"
+        if raw in (getattr(gc, "custom_packs", None) or {}):
+            name = raw
         changes.append(
             config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
         )

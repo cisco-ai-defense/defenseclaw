@@ -129,6 +129,11 @@ class SkillScannerWrapper:
     def name(self) -> str:
         return "skill-scanner"
 
+    def summary(self) -> str:
+        """The policy and judge model the next scan runs with, for the scan banner."""
+        model = litellm_model(self._llm) if self.config.use_llm else ""
+        return f"policy {settings.effective_policy(self.config)}; judge {model or 'off'}"
+
     def batch_workers(self, **_scan_options) -> int:
         """Items ``skill scan --all`` may scan at once (GAP-2643).
 
