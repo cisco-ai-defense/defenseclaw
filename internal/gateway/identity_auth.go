@@ -5,7 +5,10 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,32 +86,53 @@ func (a *APIServer) attachProcessOwnerSubject(ctx context.Context) context.Conte
 }
 
 // identityObservedState remembers when each user's identity.observed record
-// was last emitted, so the low-rate record goes out once per user per
-// identity cache lifetime.
+// was last emitted and for which facts, so the low-rate record goes out once
+// per user per identity cache lifetime, and again as soon as a request
+// carries changed facts (a group added or removed in the directory).
 var identityObservedState = struct {
 	sync.Mutex
-	last map[string]time.Time
-}{last: map[string]time.Time{}}
+	last map[string]identityObservedMark
+}{last: map[string]identityObservedMark{}}
+
+type identityObservedMark struct {
+	at          time.Time
+	fingerprint string
+}
 
 const identityObservedMaxUsers = 4096
 
-func identityObservedDue(userID string, now time.Time) bool {
+func identityObservedDue(userID string, facts useridentity.DirectoryFacts, now time.Time) bool {
+	fingerprint := identityFactsFingerprint(facts)
 	identityObservedState.Lock()
 	defer identityObservedState.Unlock()
-	if last, ok := identityObservedState.last[userID]; ok && now.Sub(last) < identityDirectoryTTL {
+	if last, ok := identityObservedState.last[userID]; ok && last.fingerprint == fingerprint && now.Sub(last.at) < identityDirectoryTTL {
 		return false
 	}
 	if len(identityObservedState.last) >= identityObservedMaxUsers {
-		identityObservedState.last = map[string]time.Time{}
+		identityObservedState.last = map[string]identityObservedMark{}
 	}
-	identityObservedState.last[userID] = now
+	identityObservedState.last[userID] = identityObservedMark{at: now, fingerprint: fingerprint}
 	return true
+}
+
+// identityFactsFingerprint digests the directory facts an identity.observed
+// record reports or derives from, groups in sorted order.
+func identityFactsFingerprint(facts useridentity.DirectoryFacts) string {
+	groups := append([]string(nil), facts.Groups...)
+	sort.Strings(groups)
+	digest := sha256.New()
+	for _, part := range append([]string{facts.Principal, facts.UPN, facts.Domain, facts.Realm,
+		string(facts.Directory), facts.TenantID, facts.Source}, groups...) {
+		digest.Write([]byte(part))
+		digest.Write([]byte{0})
+	}
+	return hex.EncodeToString(digest.Sum(nil)[:12])
 }
 
 // observeIdentity emits identity.observed for a verified subject whose
 // directory facts resolved. It carries the group count, never the names.
 func (a *APIServer) observeIdentity(ctx context.Context, subject VerifiedSubject, session useridentity.SessionFacts) {
-	if subject.Directory.Empty() || !identityObservedDue(subject.UserID, time.Now()) {
+	if subject.Directory.Empty() || !identityObservedDue(subject.UserID, subject.Directory, time.Now()) {
 		return
 	}
 	emitter := a.observabilityV8RuntimeEmitter()

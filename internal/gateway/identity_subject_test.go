@@ -116,25 +116,35 @@ func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 }
 
 // A verified subject with resolved directory facts emits one
-// identity.observed record carrying the group count (GAP-0060).
+// identity.observed record carrying the group count (GAP-0060). The same
+// facts again within the cache lifetime emit nothing, but changed facts (a
+// group added in the directory) emit at once, not up to 15 minutes later.
 func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(false) })
 	capture := &endpointInventoryCapture{}
-	(&APIServer{observabilityV8: capture}).observeIdentity(context.Background(), VerifiedSubject{
-		UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
-		Directory: useridentity.DirectoryFacts{
-			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
-			Groups: []string{"dc-ml-team@dclab.test", "dc-devs@dclab.test"}, Source: useridentity.SourceSSSDInfoPipe,
-			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(),
-		},
-	}, useridentity.SessionFacts{})
-	records := capture.snapshot()
-	if len(records) != 1 || string(records[0].EventName()) != observability.TelemetryEventIdentityObserved {
-		t.Fatalf("records = %d, want one identity.observed", len(records))
+	server := &APIServer{observabilityV8: capture}
+	observe := func(groups ...string) {
+		server.observeIdentity(context.Background(), VerifiedSubject{
+			UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
+			Directory: useridentity.DirectoryFacts{
+				Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+				Groups: groups, Source: useridentity.SourceSSSDInfoPipe,
+				Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(),
+			},
+		}, useridentity.SessionFacts{})
 	}
-	if got := fmt.Sprint(canonicalBody(t, records[0])[observability.TelemetryAttributeDefenseClawUserGroupCount]); got != "2" {
-		t.Fatalf("group_count = %s, want 2", got)
+	observe("dc-ml-team@dclab.test", "dc-devs@dclab.test")
+	observe("dc-devs@dclab.test", "dc-ml-team@dclab.test")
+	observe("dc-ml-team@dclab.test", "dc-devs@dclab.test", "dc-sre@dclab.test")
+	records := capture.snapshot()
+	if len(records) != 2 || string(records[0].EventName()) != observability.TelemetryEventIdentityObserved {
+		t.Fatalf("records = %d, want two identity.observed", len(records))
+	}
+	for i, want := range []string{"2", "3"} {
+		if got := fmt.Sprint(canonicalBody(t, records[i])[observability.TelemetryAttributeDefenseClawUserGroupCount]); got != want {
+			t.Fatalf("record %d group_count = %s, want %s", i, got, want)
+		}
 	}
 }
 
