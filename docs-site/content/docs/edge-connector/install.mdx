@@ -6,6 +6,8 @@ keywords:
   - build from source
   - Raspberry Pi
   - PicoClaw integration
+  - MCP proxy
+  - Model Context Protocol
   - LangChain
   - LangGraph
   - FastAPI
@@ -168,6 +170,66 @@ if verdict.blocked:
 ```
 
 Auto-detects FFI (ctypes) first, falls back to Unix socket. Configure fail-open/fail-closed with `DCLAW_FAIL_OPEN=1`.
+
+### MCP proxy (Model Context Protocol)
+
+A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server. Intercepts every `tools/call` request and evaluates it through the 8-stage pipeline. All other MCP messages pass through unchanged.
+
+```
+LLM Client (Claude, Codex)
+    | MCP (stdio / HTTP)
+    v
+Edge Connector MCP Proxy
+    | evaluates via EdgeConnector.evaluate()
+    | MCP (stdio / HTTP)
+    v
+Real MCP Server (ESP-Claw, HA-MCP, etc.)
+```
+
+Quick start (stdio):
+
+```bash
+DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
+  python3 -m mcp_proxy
+```
+
+With a config file:
+
+```bash
+python3 -m mcp_proxy --config tools/mcp_proxy_config.yaml
+```
+
+HTTP transport (remote servers):
+
+```bash
+DCLAW_MCP_UPSTREAM="http://192.168.1.100:8088/mcp" \
+DCLAW_MCP_TRANSPORT=http \
+  python3 -m mcp_proxy
+```
+
+Use with Claude Desktop or Claude Code by adding the proxy to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "esp-claw-secured": {
+      "command": "python3",
+      "args": ["-m", "mcp_proxy"],
+      "env": {
+        "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
+        "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
+      }
+    }
+  }
+}
+```
+
+| MCP Method | Action | Description |
+| --- | --- | --- |
+| `tools/call` | Evaluate | Full 8-stage pipeline. Blocked calls return an MCP error with the reason. |
+| `tools/list`, `resources/*`, `prompts/*`, `initialize`, etc. | Passthrough | Forwarded unchanged to the real server. |
+
+Environment variables: `DCLAW_MCP_UPSTREAM` (target command or URL), `DCLAW_MCP_TRANSPORT` (`stdio` or `http`), `DCLAW_MCP_PORT` (default 8089). All standard Edge Connector env vars are passed through.
 
 ### LangChain / LangGraph
 

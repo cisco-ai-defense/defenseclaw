@@ -180,6 +180,7 @@ The Edge Connector is framework-agnostic. Pick the integration method that fits 
 | Method | Best For | File |
 |--------|----------|------|
 | **Generic Python adapter** | Any Python agent | `tools/generic_hook.py` |
+| **MCP proxy** | MCP-based agents (Claude, Codex, ESP-Claw, HA-MCP) | `tools/mcp_proxy.py` |
 | **LangChain / LangGraph** | LangChain-based agents | `tools/langchain_hook.py` |
 | **HTTP middleware** | FastAPI, Flask, any HTTP API | `tools/http_middleware.py` |
 | **PicoClaw hook** | PicoClaw robot agents | `tools/picoclaw_hook.py` |
@@ -230,6 +231,82 @@ ec = EdgeConnector(
 ```
 
 Or via environment variables: `DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`.
+
+---
+
+### MCP Proxy (Model Context Protocol)
+
+A transparent MCP proxy that sits between an LLM client (Claude, Codex, etc.) and a real MCP server, intercepting every `tools/call` request and evaluating it through the 8-stage pipeline. All other MCP messages (`tools/list`, `resources/read`, `prompts/get`, etc.) pass through unchanged.
+
+```
+LLM Client (Claude, Codex)
+    | MCP (stdio / HTTP)
+    v
+Edge Connector MCP Proxy (mcp_proxy.py)
+    | evaluates via EdgeConnector.evaluate()
+    | MCP (stdio / HTTP)
+    v
+Real MCP Server (ESP-Claw, HA-MCP, etc.)
+```
+
+**Quick start (stdio transport):**
+
+```bash
+# Proxy an MCP server that speaks stdio
+DCLAW_MCP_UPSTREAM='["python3", "-m", "esp_claw.mcp_server"]' \
+  python3 -m mcp_proxy
+```
+
+**With a config file:**
+
+```bash
+python3 -m mcp_proxy --config tools/mcp_proxy_config.yaml
+```
+
+**HTTP transport (for remote MCP servers):**
+
+```bash
+DCLAW_MCP_UPSTREAM="http://192.168.1.100:8088/mcp" \
+DCLAW_MCP_TRANSPORT=http \
+  python3 -m mcp_proxy
+```
+
+**Using with Claude Desktop or Claude Code:**
+
+Add the proxy to your MCP client configuration. Instead of pointing directly at the MCP server, point at the proxy and configure it to forward to the real server:
+
+```json
+{
+  "mcpServers": {
+    "esp-claw-secured": {
+      "command": "python3",
+      "args": ["-m", "mcp_proxy"],
+      "env": {
+        "DCLAW_MCP_UPSTREAM": "[\"python3\", \"-m\", \"esp_claw.mcp_server\"]",
+        "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so"
+      }
+    }
+  }
+}
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `DCLAW_MCP_UPSTREAM` | (none) | Target server: JSON array of command (stdio) or URL (HTTP) |
+| `DCLAW_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `DCLAW_MCP_PORT` | `8089` | HTTP port when proxy serves HTTP |
+| `DCLAW_MCP_CONFIG` | (none) | Path to YAML config file |
+
+All standard Edge Connector env vars (`DCLAW_LIB_PATH`, `DCLAW_SOCKET_PATH`, `DCLAW_FAIL_OPEN`) are passed through.
+
+**What gets intercepted:**
+
+| MCP Method | Action | Description |
+|---|---|---|
+| `tools/call` | Evaluate | Full 8-stage pipeline (input validation, rate limit, content scan, deny-list, dest filter + SSRF, sequence, cache, escalation). Blocked calls return an MCP error. |
+| `tools/list`, `resources/*`, `prompts/*`, `initialize`, etc. | Passthrough | Forwarded unchanged to the real server. |
 
 ---
 
@@ -378,6 +455,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
 | Framework | Type | Integration Point | Status |
 |-----------|------|-------------------|--------|
 | **Generic Python** | Any Python agent | `EdgeConnector.evaluate()` | **Available** |
+| **MCP Proxy** | Any MCP-based agent (Claude, Codex, ESP-Claw, HA-MCP) | Transparent proxy with tools/call interception | **Available** |
 | **LangChain / LangGraph** | Python agent framework | Tool wrapper / graph node | **Available** |
 | **HTTP Middleware** | FastAPI, Flask, ASGI/WSGI | Request interception | **Available** |
 | **PicoClaw** | Robot agent (JSON-RPC hooks) | Process hook system | **Available** |
@@ -580,3 +658,25 @@ sudo make install
 | Enriched cloud escalation with content | Max escalation payload size |
 | Response interception | — |
 | Pre-built adapters (Generic Python, LangChain, HTTP, PicoClaw) | Custom hooks for other frameworks |
+
+---
+
+## Framework Integrations
+
+Pre-built adapters for physical AI frameworks are available in the [`integrations/`](integrations/) directory. Each adapter connects to the framework's MCP endpoint and routes every tool call through the Edge Connector policy engine.
+
+| Framework | Tools | Platform | Directory |
+|-----------|-------|----------|-----------|
+| **ESP-Claw** (Espressif) | GPIO, I2C, SPI, Lua scripting | ESP32 | [`integrations/espclaw/`](integrations/espclaw/) |
+| **Bubbaloop** (Kornia) | 47 tools: vision, robotics, fleet mgmt | Jetson, RPi | [`integrations/bubbaloop/`](integrations/bubbaloop/) |
+| **Home Assistant MCP** | 87 tools: smart home control | RPi, NUC, VM | [`integrations/homeassistant/`](integrations/homeassistant/) |
+
+All adapters import from `tools/generic_hook.py` and share the same interface:
+
+```python
+result = adapter.call_tool("tool_name", {"arg": "value"})
+if not result["allowed"]:
+    print(f"Blocked: {result['verdict']['reason']}")
+```
+
+See each integration's README for setup instructions and capability mappings.
