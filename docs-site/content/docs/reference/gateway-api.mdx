@@ -451,6 +451,7 @@ Audit export includes the legacy `details` text and, when present, first-class `
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/config/patch` | Bridge `{path, value}` to the connected upstream agent gateway's WebSocket `config.patch` RPC. It does not write DefenseClaw's `config.yaml`; an absent client returns `503`, while an RPC/disconnection failure returns `502`. |
+| `GET` | `/api/v1/guardrail/profiles/resolve` | Which guardrail profile a subject (`user`, `connector`, `agent`) resolves to, with the match reason, digest and effective settings. Loopback only, with the gateway token; a hook credential is refused. Backs `defenseclaw guardrail profile explain`. |
 
 ### Runtime control and internal observability bridges
 
@@ -472,9 +473,11 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/v1/agents/discovery` | Receive an agent-discovery report from the on-host scanner. |
+| `GET` | `/api/v1/agents/identities` | Agent identities (`agt-...`) the gateway recorded, with their sessions and last seen time; filter with `user` and `connector`. Backs `defenseclaw agent identities`. |
 | `GET` | `/api/v1/ai-usage` | Current continuous-discovery snapshot (`summary` plus agent, process, endpoint, component, and local-model signals). Local responses retain each model's dedicated `model` block. |
 | `POST` | `/api/v1/ai-usage/scan` | Trigger an on-demand AI usage scan. |
 | `POST` | `/api/v1/ai-usage/discovery` | Ingest a validated external AI-discovery report. |
+| `GET` | `/api/v1/ai-usage/ide-plugins` | The last full scan's IDE extensions and plugins per user, filtered by `user`, `ide` and `ai_only`, paged with `limit` (default 500, at most 1000) and `cursor` (the previous page's `next_cursor`). Paths appear only as hashes. Backs `defenseclaw agent ide-plugins`. |
 | `GET` | `/api/v1/ai-usage/components` | Aggregated components across the active workspace. |
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/locations` | Where the component was detected. |
 | `GET` | `/api/v1/ai-usage/components/{ecosystem}/{name}/history` | Detection history for one component. |

@@ -341,6 +341,19 @@ _IDE_PLUGIN_ENABLED_LABELS = {
 }
 
 
+# IDE cell suffix for a plugin of a remote install (the TUI mirrors it).
+_IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
+
+
+def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
+    """IDE cell: the product, plus where it runs for a remote install."""
+    product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    kind = str(item.get("remote_kind") or "")
+    if kind:
+        return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
+    return f"{product} (remote)" if item.get("scope") == "remote" else product
+
+
 def ide_plugin_enabled_label(value: object) -> str:
     """Short Enabled cell for an IDE plugin row (shared with the TUI)."""
     text = str(value or "unknown")
@@ -359,7 +372,7 @@ def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
             plugin = f"{plugin} ({name})" if plugin else name
         rows.append([
             str(item.get("user") or item.get("user_id") or "-"),
-            str(item.get("ide_product") or item.get("ide_family") or "-"),
+            ide_plugin_ide_label(item),
             plugin or "-",
             str(item.get("version") or "-"),
             ide_plugin_enabled_label(item.get("enabled")),
@@ -394,7 +407,7 @@ def ide_plugins(
 ) -> None:
     """List the extensions and plugins installed in each user's IDEs.
 
-    Covers VS Code and its forks (Cursor, Windsurf, Kiro and others,
+    Covers VS Code and its forks (Cursor, Devin Desktop, Kiro and others,
     including remote SSH servers), JetBrains IDEs, Visual Studio, Zed,
     Eclipse and Vim/Neovim, with each plugin's enabled state and an AI flag.
     The running gateway collects the list during AI discovery.
@@ -1063,11 +1076,11 @@ def confidence_policy_validate(
 # ---------------------------------------------------------------------------
 # agent discovery — one-shot toggle for the sidecar AI-discovery service.
 #
-# Background: ``ai_discovery.enabled`` is read once at sidecar boot
-# (``inventory.NewContinuousDiscoveryService`` returns nil otherwise),
-# so flipping the flag on disk is necessary but not sufficient. The
-# operator-friendly path is "flip + save + restart + (optional) scan",
-# and the previous workflow required three separate commands plus
+# Background: a running gateway hot-reloads ``ai_discovery``, but the
+# reload is asynchronous, so the operator-friendly path stays "flip +
+# save + restart + (optional) scan": the restart waits for the new
+# gateway before the scan runs. The previous workflow required three
+# separate commands plus
 # manual YAML editing. These subcommands fold all of that into one
 # step and stay parameter-compatible with ``defenseclaw guardrail
 # {enable,disable}`` so muscle memory transfers.
@@ -3507,6 +3520,7 @@ def _trigger_post_enable_scan(
 
     delays = (0.5, 1.0, 2.0, 3.0)
     last_err = ""
+    discovery_off = False
     for delay in delays:
         time.sleep(delay)
         try:
@@ -3531,8 +3545,11 @@ def _trigger_post_enable_scan(
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else "unknown"
             last_err = f"sidecar rejected scan: HTTP {status}"
-            # 503 right after restart is expected; keep retrying.
-            if status != 503:
+            # 503 is the endpoint's "AI discovery is off in this gateway".
+            # The restart already waited for the new gateway, so a 503 that
+            # survives the retries is a config disagreement, not a slow start.
+            discovery_off = status == 503
+            if not discovery_off:
                 break
         except requests.RequestException as exc:
             last_err = f"sidecar request failed: {exc}"
@@ -3540,6 +3557,14 @@ def _trigger_post_enable_scan(
         except click.ClickException as exc:
             last_err = str(exc.message)
             break
+    if discovery_off:
+        ux.warn(
+            "Could not run an initial scan: the restarted gateway reports AI "
+            "discovery as disabled. Run 'defenseclaw agent discovery status' "
+            "to compare the saved config with the gateway.",
+            indent="  ",
+        )
+        return
     ux.warn(
         f"Could not run an initial scan ({last_err or 'sidecar unreachable'}). "
         "Re-run with 'defenseclaw agent usage --refresh' once the sidecar is up.",

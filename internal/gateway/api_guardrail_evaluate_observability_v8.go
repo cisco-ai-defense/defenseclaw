@@ -293,7 +293,7 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 		envelope.ObservedAt = observability.Present(facts.completedAt)
 		envelope.Correlation.EvaluationID = facts.request.EvaluationID
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
@@ -340,7 +340,9 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			DefenseClawGuardrailReason:          facts.reason,
 			GenAIRequestModel:                   facts.model,
 			ConditionSecuritySeverityAvailable:  true,
-		})
+		}
+		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
 }
@@ -405,7 +407,7 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 	}
 	events = append(events, decisionEvent)
 	profileTelemetry := guardrailProfileTelemetryFor(ctx)
-	return observability.SpanGuardrailApplyInput{
+	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
@@ -466,5 +468,7 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		DefenseClawGuardrailReason:          facts.reason,
 		ConditionConnectorKnown:             facts.routeConnector() != "",
 		ConditionOperationTerminal:          true,
-	}, true
+	}
+	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	return input, true
 }

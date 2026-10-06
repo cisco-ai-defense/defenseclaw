@@ -42,6 +42,13 @@
       "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",
       "icon": "external link",
       "targetBlank": false
+    },
+    {
+      "title": "Identity & Users",
+      "type": "link",
+      "url": "/d/defenseclaw-identity?${__url_time_range}&${user:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
     }
   ],
   "templating": {
@@ -124,6 +131,26 @@
         ],
         "skipUrlSync": false,
         "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
       }
     ]
   },
@@ -155,7 +182,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (connector, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\" | gen_ai_agent_id!=\"\" [5m]))) or vector(0)",
+          "expr": "count(sum by (connector, gen_ai_agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\" | gen_ai_agent_id!=\"\" [5m]))) or vector(0)",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -182,7 +209,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_instance_id=\"{{.body_defenseclaw_agent_instance_id}}\" | agent_instance_id != \"\" [5m])))",
+          "expr": "count(sum by (agent_instance_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_instance_id=\"{{or .body_defenseclaw_agent_instance_id .correlation_agent_instance_id}}\" | agent_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -214,7 +241,7 @@
       },
       "targets": [
         {
-          "expr": "count(sum by (sidecar_instance_id) (count_over_time({service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | label_format sidecar_instance_id=\"{{.correlation_sidecar_instance_id}}\" | sidecar_instance_id != \"\" [5m])))",
+          "expr": "count(sum by (sidecar_instance_id) (count_over_time({service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | label_format sidecar_instance_id=\"{{.correlation_sidecar_instance_id}}\" | sidecar_instance_id != \"\" [5m])))",
           "refId": "A",
           "instant": true
         }
@@ -392,7 +419,7 @@
       },
       "targets": [
         {
-          "expr": "count by (agent_name) (sum by (agent_name, agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\", agent_id=\"{{.body_gen_ai_agent_id}}\" | agent_id != \"\" [$__interval])))",
+          "expr": "count by (agent_name) (sum by (agent_name, agent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\", agent_id=\"{{.body_gen_ai_agent_id}}\" | agent_id != \"\" [$__interval])))",
           "legendFormat": "{{agent_name}}",
           "refId": "A",
           "datasource": {
@@ -423,7 +450,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" | body_gen_ai_agent_id != \"\" [$__interval])) / sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" [$__interval]))",
+          "expr": "sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" | body_gen_ai_agent_id != \"\" [$__interval])) / sum by (agent_name) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | label_format agent_name=\"{{.body_gen_ai_agent_name}}\" [$__interval]))",
           "legendFormat": "{{agent_name}}",
           "refId": "A",
           "datasource": {
@@ -828,7 +855,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"agent[.]discovery[.].*|ai[.]discovery[.].*|ai_component[.].*\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"agent[.]discovery[.].*|ai[.]discovery[.].*|ai_component[.].*\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -871,7 +898,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, gen_ai_agent_type, defenseclaw_agent_root_id, defenseclaw_agent_parent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | connector=~\"$connector\" | body_gen_ai_agent_id!=\"\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", gen_ai_agent_type=\"{{if .body_defenseclaw_agent_type}}{{.body_defenseclaw_agent_type}}{{else}}unreported{{end}}\", defenseclaw_agent_root_id=\"{{.body_defenseclaw_agent_root_id}}\", defenseclaw_agent_parent_id=\"{{.body_defenseclaw_agent_parent_id}}\" [$__range]))",
+          "expr": "sum by (connector, gen_ai_agent_id, gen_ai_agent_name, gen_ai_agent_type, defenseclaw_agent_root_id, defenseclaw_agent_parent_id) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | connector=~\"$connector\" | body_gen_ai_agent_id!=\"\" | label_format gen_ai_agent_id=\"{{.body_gen_ai_agent_id}}\", gen_ai_agent_name=\"{{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}unreported{{end}}\", gen_ai_agent_type=\"{{if .body_defenseclaw_agent_type}}{{.body_defenseclaw_agent_type}}{{else}}unreported{{end}}\", defenseclaw_agent_root_id=\"{{.body_defenseclaw_agent_root_id}}\", defenseclaw_agent_parent_id=\"{{.body_defenseclaw_agent_parent_id}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",

@@ -20,7 +20,7 @@ func profileExplainAccount(name string) (id, userName string, ok bool) {
 			return "", "", false
 		}
 	}
-	return strings.ToUpper(account.Uid), bareAccountName(account.Username), true
+	return strings.ToUpper(account.Uid), useridentity.BareAccountName(account.Username), true
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from

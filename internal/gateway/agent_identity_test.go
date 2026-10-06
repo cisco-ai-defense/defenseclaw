@@ -81,8 +81,17 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 		t.Fatalf("instance after restart = %q, want %q", restarted.AgentInstanceID, first.AgentInstanceID)
 	}
 
+	// An agent id correlation minted for the main agent (not in the
+	// payload) keeps the session's instance.
+	mintedAgent := req
+	mintedAgent.AgentID = "019a0000-0000-7000-8000-000000000001"
+	if got := agentIdentityForGenericHook(alice, mintedAgent).AgentInstanceID; got != first.AgentInstanceID {
+		t.Fatalf("minted agent id moved the instance: %q, want %q", got, first.AgentInstanceID)
+	}
+
 	sub := req
 	sub.AgentID = "subagent-1"
+	sub.Payload = map[string]interface{}{"agent_id": "subagent-1"}
 	if got := agentIdentityForGenericHook(alice, sub).AgentInstanceID; got != agentidentity.SubagentInstanceID(first.AgentInstanceID, "subagent-1") {
 		t.Fatalf("sub-agent instance = %q", got)
 	}

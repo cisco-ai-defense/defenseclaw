@@ -2451,7 +2451,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"if [ -x /usr/bin/id ]; then\n" +
 		"  USER_ID=$(/usr/bin/id -u 2>/dev/null || true)\n" +
 		"  case \"${USER_ID}\" in ''|*[!0-9]*) ;; *) IDENTITY_HEADERS+=(--header \"X-DefenseClaw-User-Id: ${USER_ID}\") ;; esac\n" +
-		"  USER_NAME=$(/usr/bin/id -un 2>/dev/null || true)\n" +
+		"  USER_NAME=$(/usr/bin/id -un 2>/dev/null || true); USER_NAME=\"${USER_NAME%%@*}\"\n" +
 		"  case \"${USER_NAME}\" in ''|*[!A-Za-z0-9._-]*) ;; *) IDENTITY_HEADERS+=(--header \"X-DefenseClaw-User-Name: ${USER_NAME}\") ;; esac\n" +
 		"fi\n" +
 		// Claimed session facts (SSH and logind), the same header the hook

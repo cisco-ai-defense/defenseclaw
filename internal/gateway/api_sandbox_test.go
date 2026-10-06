@@ -283,7 +283,7 @@ func TestSandboxAPIRoutes(t *testing.T) {
 
 // The status names the uid the daemon runs as, for the doctor's same-user
 // check, whether or not the sandbox subsystem runs; while it does not, the
-// other routes say whether it is disabled or unavailable.
+// other routes say whether it is off or unavailable.
 func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
@@ -308,7 +308,9 @@ func TestSandboxAPIStatusNamesTheDaemonUID(t *testing.T) {
 			continue
 		}
 		w = serve(h, sandboxRequest(http.MethodGet, sandboxapi.PathSandboxes, ""))
-		if w.Code != http.StatusServiceUnavailable || decodeSandboxError(t, w).Code != tc.listCode {
+		// GAP-0008: one wording for sandboxes that are off, as sandbox run says it.
+		if e := decodeSandboxError(t, w); w.Code != http.StatusServiceUnavailable || e.Code != tc.listCode ||
+			(e.Code == sandboxapi.CodeDisabled && e.Message != sandboxapi.DisabledMessage) {
 			t.Fatalf("%s: list = %d %s", tc.name, w.Code, w.Body.String())
 		}
 	}

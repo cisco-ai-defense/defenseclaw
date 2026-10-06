@@ -163,7 +163,6 @@ class OverviewConfig:
     guardrail_rule_pack_dir: str = ""
     guardrail_port: int = 0
     guardrail_model: str = ""
-    guardrail_strategy: str = "default"
     guardrail_judge_enabled: bool = False
     guardrail_judge_model: str = ""
     hilt_enabled: bool = False
@@ -186,7 +185,7 @@ class OverviewConfig:
     # ``(connector, mode)`` keep working untouched. Empty for single-connector
     # installs. Surfaced on the roster rows so the Overview reflects that
     # connectors can enforce different packs (block thresholds), which the
-    # process-global ``guardrail_strategy`` posture line cannot show.
+    # process-global posture line cannot show.
     connector_packs: tuple[tuple[str, str], ...] = ()
     # Connectors that are configured + still in the roster (so their history
     # stays filterable) but have enforcement turned off via
@@ -615,6 +614,9 @@ class OverviewPanelModel:
         self.observability_status: V8OperatorStatus | None = None
         self.observability_status_error = ""
         self.native_delivery_summary: NativeDeliverySummary | None = None
+        # The guardrail profile the gateway resolves for this account
+        # (``current_user_guardrail_profile``); None without profiles.
+        self.guardrail_profile: dict[str, Any] | None = None
         self.runtime = RuntimeOverview()
         # True until the first audit-history read finishes; a large audit.db
         # can take a minute, and the counts read 0 until then (GAP-1240).
@@ -632,6 +634,19 @@ class OverviewPanelModel:
 
     def set_health(self, health: HealthSnapshot | None) -> None:
         self.health = health
+
+    def set_guardrail_profile(self, result: dict[str, Any] | None) -> None:
+        self.guardrail_profile = result
+
+    def _applied_profile(self) -> tuple[str, dict[str, Any]] | None:
+        """(name, effective settings) of the profile that decides for you."""
+
+        result = self.guardrail_profile or {}
+        name = str(result.get("profile") or "")
+        if not name or result.get("error"):
+            return None
+        effective = result.get("effective")
+        return name, effective if isinstance(effective, dict) else {}
 
     def set_gateway_probe(self, state: str, detail: str = "") -> None:
         """Record the latest authenticated sidecar API probe result."""
@@ -1586,6 +1601,11 @@ class OverviewPanelModel:
         if self.cfg is None:
             return ""
         base = (self.cfg.guardrail_mode or "").strip()
+        # A matching profile replaces guardrail.* for you: "observe" while
+        # every decision was the profile's action read wrong (GAP-0050).
+        if not connector and (applied := self._applied_profile()):
+            name, effective = applied
+            return f"{str(effective.get('mode') or base).strip()}, profile {name}"
         modes = {c.strip().lower(): (m or base).strip() for c, m in self.cfg.connector_modes if c}
         if connector:
             return modes.get(connector.strip().lower(), base)
@@ -1607,9 +1627,9 @@ class OverviewPanelModel:
             parts.append(mode)
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
-        # The rule pack, not guardrail_strategy: that is read from a
-        # "strategy" key the config doesn't have, so it always said "default".
-        pack = _rule_pack_label(self.cfg.guardrail_rule_pack_dir)
+        applied = self._applied_profile()
+        pack_dir = str(applied[1].get("rule_pack_dir") or "") if applied else self.cfg.guardrail_rule_pack_dir
+        pack = _rule_pack_label(pack_dir)
         if pack:
             parts.append(f"{pack} pack")
         if self.cfg.guardrail_judge_enabled and self.cfg.guardrail_judge_model:

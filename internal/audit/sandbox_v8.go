@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 	"golang.org/x/net/idna"
 )
@@ -226,6 +227,10 @@ type SandboxEgressEvent struct {
 	// Severity overrides the default (MEDIUM when blocked, INFO when allowed).
 	Severity  string
 	Timestamp time.Time
+	// UserID and UserName are the host account the sandbox runs as: a POSIX
+	// uid and its bare account name.
+	UserID   string
+	UserName string
 }
 
 // SandboxApprovalStage selects approval.requested or approval.resolved.
@@ -702,6 +707,9 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 				GenAIConversationID:         conversationID,
 				GenAIAgentID:                agentID,
+				UserID:                      optionalNetworkIdentifier(input.UserID),
+				DefenseClawUserIDKind:       optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
+				DefenseClawUserName:         optionalNetworkIdentifier(input.UserName),
 				DefenseClawNetworkTargetRef: host, DefenseClawNetworkTargetPath: path,
 				DefenseClawNetworkResolvedIp: resolvedIP, DefenseClawNetworkPolicyOutcome: policyOutcome,
 				DefenseClawNetworkDecision: observability.Present(decision), DefenseClawNetworkDecisionCode: decisionCode,
@@ -720,7 +728,9 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 			return builder.BuildLogEgressBlocked(observability.LogEgressBlockedInput{
 				Envelope: allowed.Envelope, Severity: allowed.Severity, LogLevel: allowed.LogLevel,
 				Outcome: allowed.Outcome, GenAIConversationID: allowed.GenAIConversationID,
-				GenAIAgentID:                allowed.GenAIAgentID,
+				GenAIAgentID: allowed.GenAIAgentID,
+				UserID:       allowed.UserID, DefenseClawUserIDKind: allowed.DefenseClawUserIDKind,
+				DefenseClawUserName:         allowed.DefenseClawUserName,
 				DefenseClawNetworkTargetRef: host, DefenseClawNetworkTargetPath: path,
 				DefenseClawNetworkResolvedIp: resolvedIP, DefenseClawNetworkPolicyOutcome: policyOutcome,
 				DefenseClawNetworkDecision: allowed.DefenseClawNetworkDecision, DefenseClawNetworkDecisionCode: decisionCode,

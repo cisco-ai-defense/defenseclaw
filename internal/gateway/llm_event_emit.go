@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 const (
@@ -84,12 +85,15 @@ type llmEventMeta struct {
 	UserName          string
 	UserEmail         string
 	Identity          *llmEventIdentity
-	PolicyID          string
-	DestinationApp    string
-	ToolName          string
-	ToolID            string
-	ToolIDReported    bool
-	FinishReasons     []string
+	// Profile is the guardrail profile that decided the request; the hook
+	// model and tool spans carry it as correlation.guardrail.profile.
+	Profile        guardrailProfileTelemetry
+	PolicyID       string
+	DestinationApp string
+	ToolName       string
+	ToolID         string
+	ToolIDReported bool
+	FinishReasons  []string
 	// TraceEventID scopes the short OTel anchor used for one hook delivery.
 	// Session and agent identifiers remain stable across deliveries, but a
 	// backend must not be asked to append children to a trace it has already
@@ -601,6 +605,7 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 		UserName:       user.Name,
 		UserEmail:      user.Email,
 		Identity:       user.Identity,
+		Profile:        guardrailProfileTelemetryFor(r.Context()),
 		PolicyID:       firstNonEmpty(env.PolicyID, p.defaultPolicyID),
 		DestinationApp: env.DestinationApp,
 	}
@@ -608,17 +613,26 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 	return meta
 }
 
+// streamLLMEventMeta describes an OpenClaw stream record. The stream names
+// no caller, so its user is the gateway's own account: a per-user gateway
+// runs as the person using OpenClaw, and a service-account gateway names
+// nobody (localProcessUser).
 func streamLLMEventMeta(r *EventRouter, sessionID, runID, provider, model, agentName string) llmEventMeta {
+	userID, userName := localProcessUser()
 	return llmEventMeta{
-		Source:    "openclaw",
-		Provider:  provider,
-		Model:     telemetryModelID(model),
-		SessionID: sessionID,
-		RunID:     firstNonEmpty(runID, gatewaylog.ProcessRunID()),
-		AgentID:   SharedAgentRegistry().AgentID(),
-		AgentName: r.agentNameForStream(agentName),
-		AgentType: r.agentNameForStream(agentName),
-		PolicyID:  r.defaultPolicyID,
+		Source:     "openclaw",
+		Provider:   provider,
+		Model:      telemetryModelID(model),
+		SessionID:  sessionID,
+		RunID:      firstNonEmpty(runID, gatewaylog.ProcessRunID()),
+		AgentID:    SharedAgentRegistry().AgentID(),
+		AgentName:  r.agentNameForStream(agentName),
+		AgentType:  r.agentNameForStream(agentName),
+		PolicyID:   r.defaultPolicyID,
+		UserID:     userID,
+		UserIDKind: useridentity.KindForID(userID),
+		UserName:   userName,
+		Identity:   processOwnerIdentity(userID),
 	}
 }
 
@@ -1067,6 +1081,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		UserEmail:           user.Email,
 		AgentIdentityID:     agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
 		Identity:            user.Identity,
+		Profile:             guardrailProfileTelemetryFor(ctx),
 	}
 }
 

@@ -364,11 +364,11 @@ func (a *APIServer) enrichInboundWithHookLifecycleV8(
 		return fields, false, nil
 	}
 	// An agent or turn the native rail only inferred from the durable prompt
-	// cursor is not a sender report. The cursor carries the correlation
-	// ledger's agent, while the live hook snapshot carries the telemetry agent
-	// every hook record of this conversation uses, so the two differ by design.
-	// The exact conversation join makes the snapshot the authority: take it
-	// instead of dropping the record as invalid_mapped_field (GAP-1331).
+	// cursor is not a sender report, and it can differ from the live hook
+	// snapshot every hook record of this conversation uses (a cursor minted
+	// before the ledger took the telemetry root agent, GAP-0031). The exact
+	// conversation join makes the snapshot the authority: take it instead of
+	// dropping the record as invalid_mapped_field (GAP-1331).
 	derived := nativeOTLPCursorDerivedTargetsV8(ctx, authenticatedSource)
 	mergeCorrelation := func(current *string, source string, target connector.CorrelationTarget) bool {
 		if source == "" {

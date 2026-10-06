@@ -336,6 +336,7 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-connectors",
     "defenseclaw-findings",
     "defenseclaw-hitl",
+    "defenseclaw-identity",
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",

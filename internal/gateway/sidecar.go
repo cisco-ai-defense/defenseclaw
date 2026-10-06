@@ -3081,6 +3081,18 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 }
 
 // runWatcher starts the skill/MCP install watcher if enabled in config.
+// watcherUsesConnectorDirs reports whether the watcher may watch the
+// connector's (or the OpenClaw default's) folders in the gateway's own home.
+// Not when no connector is configured (init --connector none, or setup remove
+// of the last one): the empty name resolves to the OpenClaw default and
+// watching its folders would create ~/.openclaw (GAP-1056). Not on a managed
+// enterprise service either: its home is the service profile, which never
+// holds a user's skills or plugins (GAP-0026). Explicit gateway.watcher dirs
+// apply in both cases.
+func watcherUsesConnectorDirs(cfg *config.Config) bool {
+	return cfg.HasConnectorConfigured() && !managed.IsManagedEnterprise(cfg.DeploymentMode)
+}
+
 func (s *Sidecar) runWatcher(ctx context.Context) error {
 	wcfg := s.currentConfig().Gateway.Watcher
 
@@ -3107,11 +3119,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	}
 
 	skillDirs, pluginDirs, src := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
-	if cfg := s.currentConfig(); cfg != nil && !cfg.HasConnectorConfigured() {
-		// No connector configured (init --connector none, or setup remove of
-		// the last one): there is no agent to watch. The empty name resolves
-		// to the OpenClaw default, and watching its folders would create
-		// ~/.openclaw (GAP-1056). Explicit gateway.watcher dirs still apply.
+	if cfg := s.currentConfig(); cfg != nil && !watcherUsesConnectorDirs(cfg) {
 		if src.Skill != watcherDirsFromConfig {
 			skillDirs = nil
 		}

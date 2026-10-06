@@ -928,10 +928,12 @@ class IDEPluginsTests(unittest.TestCase):
         pages = {
             "": {"enabled": True, "scope": "all", "next_cursor": "c2",
                  "counts": {"total": 2, "ai": 1, "disabled": 1, "users": 2},
+                 "installations": [{"install_id": "i2", "remote_kind": "ssh_server"}],
                  "plugins": [{"user": "bob", "ide_product": "pycharm", "plugin_id": "org.rust.lang",
                               "display_name": "Rust", "version": "0.4", "enabled": "disabled"}]},
             "c2": {"enabled": True, "scope": "all", "next_cursor": "",
-                   "plugins": [{"user": "alice", "ide_product": "vscode-server", "plugin_id": "github.copilot",
+                   "plugins": [{"user": "alice", "ide_product": "vscode", "install_id": "i2",
+                                "plugin_id": "github.copilot",
                                 "version": "1.250.0", "enabled": "client_side_unknown", "is_ai": True}]},
         }
         calls = []
@@ -957,6 +959,8 @@ class IDEPluginsTests(unittest.TestCase):
             lines = result.output.splitlines()
             alice = next(line for line in lines if "github.copilot" in line)
             self.assertIn("client side", alice)
+            # The install on a later page is marked as the SSH server one (GAP-0055).
+            self.assertIn("vscode (ssh)", alice)
             self.assertIn("org.rust.lang (Rust)", result.output)
             self.assertLess(result.output.index("alice"), result.output.index("bob"))
             self.assertIn("2 plugin(s) shown; 2 in total, 1 AI, 1 disabled, 2 user(s)", result.output)

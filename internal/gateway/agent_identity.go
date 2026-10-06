@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFromContext returns the agent identity
@@ -93,7 +94,7 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
-		UserName:    user.Name,
+		UserName:    useridentity.BareAccountName(user.Name),
 		Connector:   connectorName,
 		InstallFP:   agentIdentityInstallFP(connectorName, user),
 	}
@@ -154,7 +155,7 @@ func gatewaySelfUser() agentIdentityUser {
 	gatewaySelf.once.Do(func() {
 		self := agentIdentityUser{Self: true, Verified: true}
 		if current, err := osuser.Current(); err == nil && current != nil {
-			self.ID, self.Name, self.Home = current.Uid, current.Username, current.HomeDir
+			self.ID, self.Name, self.Home = current.Uid, useridentity.BareAccountName(current.Username), current.HomeDir
 		}
 		if self.ID == "" {
 			if uid := os.Getuid(); uid >= 0 {
@@ -224,9 +225,12 @@ func claimedInstallHint(payload map[string]interface{}) string {
 	}
 	hint := firstString(payload, "config_dir", "configDir", "claude_config_dir", "codex_home")
 	if hint == "" {
-		transcript := strings.ReplaceAll(firstString(payload, "transcript_path", "transcriptPath"), `\`, "/")
+		// Find the marker on a slash-normalized copy but cut the original, so a
+		// Windows hint keeps its backslashes like the install root beside it.
+		transcript := firstString(payload, "transcript_path", "transcriptPath")
+		normalized := strings.ReplaceAll(transcript, `\`, "/")
 		for _, marker := range []string{"/projects/", "/sessions/"} {
-			if i := strings.Index(transcript, marker); i > 0 {
+			if i := strings.Index(normalized, marker); i > 0 {
 				hint = transcript[:i]
 				break
 			}
@@ -253,7 +257,15 @@ func hookSubagentID(req agentHookRequest) string {
 	case event == "subagentstart" || event == "subagentstop":
 		return agentID
 	case req.CorrelationProfileVersion == connector.CorrelationProfileClaudeCodeV1:
-		return agentID
+		// Claude Code reports agent_id only inside a sub-agent. Any other
+		// agent id is one correlation minted or restored for the main agent
+		// on a session or turn boundary; keying the instance on it moved
+		// ais- whenever a new one was minted, as on a resume after a
+		// gateway restart.
+		if reported, _, _ := extractAgentIdentityFromHookPayload(req.Payload); strings.TrimSpace(reported) == agentID {
+			return agentID
+		}
+		return ""
 	case strings.TrimSpace(req.ParentAgentID) != "" && strings.TrimSpace(req.ParentAgentID) != agentID:
 		return agentID
 	}
@@ -275,6 +287,25 @@ func agentIdentityV8(id string) observability.Optional[string] {
 func agentIdentityV8FromContext(ctx context.Context) observability.Optional[string] {
 	id, _ := agentIdentityFromContext(ctx)
 	return agentIdentityV8(id)
+}
+
+// inventoryAgentIdentityID is the agent identity of userID's install of
+// connectorName: the ID the hook path derives for that user's hooks, so an
+// inventory record joins the agent's decisions. "" when it cannot be derived.
+func inventoryAgentIdentityID(connectorName, userID string) string {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	if ManagedEnterpriseActive() || connectorName == "" || userID == "" {
+		return ""
+	}
+	user := agentIdentityUser{ID: userID, Home: userScopedIdentityHome(userID)}
+	if self := gatewaySelfUser(); !gatewayRunsAsServiceAccount() && self.ID == userID {
+		user = self
+	}
+	machine, _ := agentidentity.HostMachineHash()
+	return agentidentity.AgentID(agentidentity.Inputs{
+		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID),
+		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
+	})
 }
 
 // agentIdentityIDForTraffic is the agent identity of a request outside the

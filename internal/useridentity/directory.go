@@ -96,8 +96,8 @@ type DirectoryFacts struct {
 	// UPN is the userPrincipalName when the directory exposes one (SSSD
 	// InfoPipe, the Windows identity store, TranslateNameW).
 	UPN string `json:"upn,omitempty"`
-	// Domain is the DNS or NetBIOS domain of the account, as the OS
-	// reports it (defenseclaw.user.domain).
+	// Domain is the account's domain in lower case, by its DNS name where
+	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).
 	Domain string `json:"domain,omitempty"`
 	// Realm is the Kerberos realm, usually the upper-case DNS domain.
 	Realm string `json:"realm,omitempty"`
@@ -106,9 +106,6 @@ type DirectoryFacts struct {
 	// TenantID is the cloud tenant (for example the Entra tenant GUID)
 	// from the OS join state (defenseclaw.user.tenant_id).
 	TenantID string `json:"tenant_id,omitempty"`
-	// JoinType is the machine join state the facts came from: "ad",
-	// "entra", "hybrid", "workgroup" or empty when not applicable.
-	JoinType string `json:"join_type,omitempty"`
 	// Groups are the account's group identifiers (SIDs on Windows, group
 	// names or gids elsewhere). Telemetry carries only their count.
 	Groups []string `json:"groups,omitempty"`

@@ -31,10 +31,11 @@ func currentSessionFactsHeader(now time.Time) string {
 	key := strings.Join([]string{
 		ccname, mtime, os.Getenv("XDG_SESSION_ID"), os.Getenv("SSH_CONNECTION"), os.Getenv("SSH_TTY"),
 	}, "|")
+	envKey := SessionFactsEnvKey(os.Getenv)
 	cachePath := ""
 	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
 		cachePath = filepath.Join(home, ".defenseclaw", SessionFactsCacheFileName)
-		if header, ok := cachedSessionFactsHeader(cachePath, key, now); ok {
+		if header, ok := cachedSessionFactsHeader(cachePath, key, envKey, now); ok {
 			return header
 		}
 	}
@@ -50,7 +51,7 @@ func currentSessionFactsHeader(now time.Time) string {
 	}
 	header := EncodeSessionFactsHeader(ClaimedSessionHeader{Session: facts})
 	if cachePath != "" {
-		_ = writeSessionFactsCache(cachePath, key, header, now)
+		_ = writeSessionFactsCache(cachePath, key, envKey, header, now)
 	}
 	return header
 }

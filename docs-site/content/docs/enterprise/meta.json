@@ -16,6 +16,7 @@
     "---Configure---",
     "enrollment",
     "machine-policy",
+    "identity-and-authentication",
     "foreign-hook-guard",
     "ai-defense-key",
     "---Operate---",

@@ -35,11 +35,18 @@ func (a *APIServer) attachVerifiedSubject(ctx context.Context, userID, userName,
 	subject := VerifiedSubject{
 		UserID:    userID,
 		IDKind:    useridentity.KindForID(userID),
-		UserName:  userName,
+		UserName:  useridentity.BareAccountName(userName),
 		Directory: facts,
 		Source:    source,
 	}
 	ctx = withVerifiedSubject(ctx, subject)
+	// The correlation middleware ran before authentication and took the
+	// user from the loopback X-DefenseClaw-User-* headers, which any local
+	// caller holding the token can set. The verified subject replaces that
+	// claim, so audit and telemetry name the account that was proved.
+	id := AgentIdentityFromContext(ctx)
+	id.UserID, id.UserIDKind, id.UserName = subject.UserID, subject.IDKind, subject.UserName
+	ctx = ContextWithAgentIdentity(ctx, id)
 	var session useridentity.SessionFacts
 	if subject.IDKind == useridentity.KindPOSIXUID {
 		if claimed, ok := claimedSessionFromContext(ctx); ok {
@@ -108,9 +115,12 @@ func (a *APIServer) observeIdentity(ctx context.Context, subject VerifiedSubject
 	if emitter == nil {
 		return
 	}
+	// identity.observed belongs to the gateway activity producer's
+	// compliance.activity set; no producer is registered under "identity",
+	// so classifying under that key failed and nothing was ever emitted.
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
-		observability.ProducerKey("identity"),
+		observability.ProducerKey(gatewaylog.EventActivity),
 		observability.ClassificationContext{
 			Bucket:      observability.BucketComplianceActivity,
 			EventName:   observability.EventName(observability.TelemetryEventIdentityObserved),

@@ -167,6 +167,7 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
+    _rule_pack_label,
     format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
@@ -1559,6 +1560,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # selected on behalf of the app so delayed sync messages cannot bounce
         # the operator back to an older tab after rapid mouse clicks.
         self._suppressed_tab_activations: dict[str, int] = {}
+        # When the guardrail profile for this account was last asked for.
+        self._guardrail_profile_at = float("-inf")
+        # The Inventory sub-tab the button bar last scrolled to.
+        self._inventory_bar_subtab = ""
         # Auto-dismissing toast queue. Mirrors the Go TUI's
         # ToastManager: cap of MAX_TOASTS (3), TTLs of 4s/4s/6s/8s for
         # info/success/warn/error. The widget itself is mounted in
@@ -5169,6 +5174,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.body_text
         if self.active_panel == "inventory":
             self._sync_catalog_connector_filters()
+            # The IDE plugins table fits its cells to the terminal width.
+            self.inventory_model.set_size(
+                int(getattr(self.size, "width", 0) or 0), int(getattr(self.size, "height", 0) or 0)
+            )
             self._table_columns = self.inventory_model.data_table_columns()
             self._table_rows = self.inventory_model.data_table_rows()
             empty = self.inventory_model.empty_state()
@@ -5632,6 +5641,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _sync_inventory_controls(self) -> None:
         for tab in self.inventory_model.subtab_info():
             self._set_button_active(f"#inventory-tab-{tab.subtab}", tab.active)
+        # At 80 columns the bar scrolls sideways and IDE plugins, All scope,
+        # Fast and Refresh sat behind "… more" (GAP-0020). Bring the active
+        # sub-tab into view when it changes; a manual scroll stays put.
+        if self._inventory_bar_subtab != self.inventory_model.active_sub:
+            self._inventory_bar_subtab = self.inventory_model.active_sub
+            self.call_after_refresh(self._scroll_inventory_bar_to_active)
         self._set_button_active("#inventory-scope-all", not bool(self.inventory_model.category_scope))
         self._set_button_active("#inventory-scope-fast", self.inventory_model.is_fast_scan())
         active_filter = self.inventory_model.filter or "all"
@@ -5987,6 +6002,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         model.set_filter(value)
         self._render_chrome()
+
+    def _scroll_inventory_bar_to_active(self) -> None:
+        try:
+            bar = self.query_one("#inventory-controls", Horizontal)
+            button = self.query_one(f"#inventory-tab-{self.inventory_model.active_sub}", Button)
+        except NoMatches:
+            return
+        # Leave a fully visible tab alone; otherwise put it at the left edge,
+        # which at the end of the bar shows the last buttons whole.
+        region = button.virtual_region
+        left = bar.scroll_x
+        if not (left <= region.x and region.right <= left + bar.scrollable_content_region.width):
+            bar.scroll_to(x=region.x, animate=False)
+        self.call_after_refresh(self._mark_overflowing_controls)
 
     def _set_button_active(self, selector: str, active: bool) -> None:
         try:
@@ -15110,6 +15139,21 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         finally:
             self._ai_usage_poll_running = False
 
+    async def _refresh_guardrail_profile(self) -> None:
+        """Ask, at most once a minute, which guardrail profile decides for you."""
+
+        now = monotonic()
+        if now - self._guardrail_profile_at < 60:
+            return
+        self._guardrail_profile_at = now
+        from defenseclaw.gateway import current_user_guardrail_profile
+
+        try:
+            result = await asyncio.to_thread(current_user_guardrail_profile, self.config)
+        except Exception:  # noqa: BLE001 - the profile line is informational.
+            result = None
+        self.overview_model.set_guardrail_profile(result)
+
     async def _poll_health(self) -> None:
         result = await asyncio.to_thread(_fetch_gateway_health, self.config)
         # Compatibility for tests/extensions that replace the fetcher with
@@ -15129,6 +15173,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if snapshot is not None:
             self.overview_model.set_health(snapshot)
             self._propagate_connector(snapshot)
+            await self._refresh_guardrail_profile()
         # Mirror Go: clear the queued-restart banner once the gateway
         # has actually restarted (its StartedAt moved). Without this
         # the banner sticks around forever even though the restart
@@ -16230,7 +16275,6 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         guardrail_rule_pack_dir=effective_rule_pack_dir,
         guardrail_port=int(getattr(guardrail, "port", 0) or 0),
         guardrail_model=str(getattr(guardrail, "model", "") or ""),
-        guardrail_strategy=str(getattr(guardrail, "strategy", "") or "default"),
         guardrail_judge_enabled=bool(getattr(guardrail, "judge_enabled", False)),
         guardrail_judge_model=str(getattr(guardrail, "judge_model", "") or ""),
         hilt_enabled=bool(getattr(effective_hilt, "enabled", False)),
@@ -17038,7 +17082,7 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
     if cfg is None:
         return "unknown"
     mode = cfg.guardrail_mode or "observe"
-    scanner = cfg.guardrail_strategy or "default"
+    rule_pack = _rule_pack_label(cfg.guardrail_rule_pack_dir) or "default"
     # Multi-connector: each connector can carry its own rule pack (and thus
     # its own block threshold), so naming one global pack would be wrong.
     # Detect whether the connectors actually diverge; if they do, point the
@@ -17048,12 +17092,12 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
         modes = {m for _conn, m in cfg.connector_modes if m}
         if len(packs) > 1 or len(modes) > 1:
             return "per-connector (see roster)"
-        only_pack = next(iter(packs)) if packs else scanner
+        only_pack = next(iter(packs)) if packs else rule_pack
         only_mode = next(iter(modes)) if modes else mode
         return f"all connectors: {only_mode} ({only_pack})"
     if mode == "action":
-        return f"action: block CRIT, alert MED+ ({scanner})"
-    return f"balanced: block CRIT, alert MED+ ({scanner})"
+        return f"action: block CRIT, alert MED+ ({rule_pack})"
+    return f"balanced: block CRIT, alert MED+ ({rule_pack})"
 
 
 def _enforcement_label(cfg: OverviewConfig | None) -> str:

@@ -57,6 +57,10 @@ const (
 	CodeInternal = "internal"
 )
 
+// DisabledMessage is what every surface says while openshell.enabled is
+// false: sandbox run, connect and list, the gateway API and the manager.
+const DisabledMessage = "OpenShell sandboxes are off; run `defenseclaw sandbox setup` to turn them on"
+
 // AdminMessage is the sentence every admin refusal starts with.
 const AdminMessage = "blocked by your organization's DefenseClaw policy"
 

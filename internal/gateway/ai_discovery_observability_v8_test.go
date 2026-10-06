@@ -559,7 +559,15 @@ func TestContinuousAIDiscoveryV8EmitsIDEPluginLifecycle(t *testing.T) {
 			gauges++
 		}
 	}
-	if gauges != 2 {
-		t.Fatalf("ide_plugins gauge records = %d, want one per (product, ai, enabled) of the current list", gauges)
+	// Every (enabled, ai) series of each IDE is recorded, zeros included, so
+	// pycharm, whose only plugin was removed, drops to 0 instead of keeping
+	// its last value (GAP-0014).
+	if gauges != 2*len(ideGaugeEnabledStates)*2 {
+		t.Fatalf("ide_plugins gauge records = %d, want every (enabled, ai) series of vscode and pycharm", gauges)
+	}
+	_, counts := ideGaugePoints(report.IDEInventory)
+	if counts[ideGaugeKey{"pycharm", "enabled", true}] != 0 || counts[ideGaugeKey{"vscode", "enabled", true}] != 1 ||
+		counts[ideGaugeKey{"vscode", "disabled", false}] != 1 {
+		t.Fatalf("ide_plugins gauge points = %v", counts)
 	}
 }

@@ -63,6 +63,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-connectors",
     "defenseclaw-findings",
     "defenseclaw-hitl",
+    "defenseclaw-identity",
     "defenseclaw-overview",
     "defenseclaw-policy-decisions",
     "defenseclaw-runtime",

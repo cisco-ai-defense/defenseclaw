@@ -312,7 +312,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		ev := audit.SandboxEgressEvent{
 			Sandbox: id, Source: audit.SandboxEgressSourceOpenShell, Host: host, Port: r.Port, Path: r.Path,
 			Blocked: r.Denied(), Reason: truncate(firstNonEmpty(r.Reason, r.Message), 512), PolicyOutcome: truncate(r.Policy, 256),
-			Timestamp: at,
+			Timestamp: at, UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"

@@ -489,6 +489,8 @@ func applyHookModelV8ModelFacts(input *observability.SpanModelChatInput, observa
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
 	meta.Identity.applyTo(input)
+	input.DefenseClawGuardrailProfileName, input.DefenseClawGuardrailProfileDigest = meta.Profile.Name, meta.Profile.Digest
+	input.DefenseClawGuardrailProfileMatch, input.DefenseClawGuardrailProfileMatchedGroup = meta.Profile.Match, meta.Profile.MatchedGroup
 	input.DefenseClawPolicyID = hookModelV8OptionalID(meta.PolicyID)
 	input.DefenseClawDestinationApp = hookModelV8OptionalID(meta.DestinationApp)
 	input.GenAIConversationID = hookModelV8OptionalID(observation.sessionID)

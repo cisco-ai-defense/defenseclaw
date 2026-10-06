@@ -65,6 +65,39 @@ def alert_disposition_timeout_seconds(target_count: int) -> int:
     )
 
 
+def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str, Any] | None:
+    """Ask the gateway which guardrail profile applies to the account running this.
+
+    The gateway resolves the account through the OS the way it does for live
+    requests (``guardrail profile explain``). ``None`` when no profiles are
+    configured; when the gateway cannot answer, the result has ``error``.
+    """
+    if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
+        return None
+    import getpass
+
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
+        user = ""
+    if not user:
+        return {"user": "", "error": "the account name is unknown"}
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(cfg),
+            port=cfg.gateway.api_port,
+            token=cfg.gateway.resolved_token(),
+            timeout=timeout,
+        )
+        try:
+            result = client.guardrail_profile_resolve(user=user)
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
+        return {"user": user, "error": str(exc)}
+    return {**result, "user": user}
+
+
 def gateway_api_client_host(cfg: Any) -> str:
     """Return a connectable host for the configured sidecar API bind."""
     from defenseclaw.config import api_bind_host
@@ -849,6 +882,18 @@ class OrchestratorClient:
             plugins.extend(page.get("plugins") or [])
             cursor = str(page.get("next_cursor") or "")
             pages += 1
+        # A plugin names its install; copy the install's remote kind onto it
+        # so a ~/.vscode-server row reads differently from the ~/.vscode one.
+        remote = {
+            str(inst.get("install_id") or ""): str(inst.get("remote_kind") or "")
+            for inst in payload.get("installations") or []
+            if isinstance(inst, dict)
+        }
+        for plugin in plugins:
+            if isinstance(plugin, dict) and not plugin.get("remote_kind"):
+                kind = remote.get(str(plugin.get("install_id") or ""), "")
+                if kind:
+                    plugin["remote_kind"] = kind
         out = dict(payload)
         out["plugins"] = plugins
         out["next_cursor"] = cursor if pages >= max_pages else ""

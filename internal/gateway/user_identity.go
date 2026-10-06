@@ -74,12 +74,14 @@ func gatewayRunsAsServiceAccount() bool {
 
 // resolveHookUserIdentity determines which end user a hook event belongs to.
 //
-// Precedence is deliberate. The identity headers come from the hook process,
-// which is the only participant that runs inside the user's session, so they
-// are preferred. The hook payload is agent-controlled and is consulted only as
-// a fallback for connectors that report a user natively. Both are attribution
-// evidence, not authentication: the gateway's loopback listener is reachable by
-// any local process.
+// Precedence is deliberate. An authenticated request's verified subject is
+// bound onto its agent identity (attachVerifiedSubject) and always wins.
+// Otherwise the identity headers come from the hook process, which is the
+// only participant that runs inside the user's session, so they are
+// preferred. The hook payload is agent-controlled and is consulted only as a
+// fallback for connectors that report a user natively. Both are attribution
+// evidence, not authentication: the gateway's loopback listener is reachable
+// by any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
 	if isSandboxHookRequest(ctx) {
@@ -123,7 +125,14 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 		userID, _, userName := sandboxBindingUser(binding)
 		return newLLMEventUser(userID, userName, userID != "")
 	}
-	user := resolveHTTPUser(r, rawBody)
+	var user llmEventUser
+	if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
+		// An authenticated caller's headers and body are claims; the
+		// verified subject is who it is.
+		user = newTrustedLLMEventUser(subject.UserID, subject.UserName)
+	} else {
+		user = resolveHTTPUser(r, rawBody)
+	}
 	user.Identity = requestIdentityFor(r.Context(), user.ID)
 	return user
 }
@@ -179,6 +188,10 @@ func newUntrustedLLMEventUser(userID, userName string) llmEventUser {
 func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userID = sanitizeLLMEventUser(userID)
 	userName = sanitizeLLMEventUser(userName)
+	if trustedID {
+		// An OS-derived name may be fully qualified (SSSD's alice@realm).
+		userName = useridentity.BareAccountName(userName)
+	}
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
 		trustedID = userID != ""
@@ -212,19 +225,7 @@ func localProcessUser() (string, string) {
 		return "", ""
 	}
 	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(bareAccountName(current.Username), current.Name, current.Uid))
-}
-
-// bareAccountName drops the domain or host prefix Windows puts on an account
-// name ("HOST\user" becomes "user"). The prefixed form fails the v8 identifier
-// pattern, so defenseclaw.user.name would be dropped, and the hook path
-// already reports the bare name (useridentity.accountNameForSID).
-func bareAccountName(name string) string {
-	name = strings.TrimSpace(name)
-	if idx := strings.LastIndexByte(name, '\\'); idx >= 0 && idx+1 < len(name) {
-		return name[idx+1:]
-	}
-	return name
+		sanitizeLLMEventUser(firstNonEmpty(useridentity.BareAccountName(current.Username), current.Name, current.Uid))
 }
 
 // userFieldsFromHookPayload pulls the user fields a connector may report in

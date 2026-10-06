@@ -266,6 +266,26 @@
         ],
         "skipUrlSync": false,
         "hide": 0
+      },
+      {
+        "name": "user",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "hide": 0
       }
     ]
   },
@@ -1130,10 +1150,454 @@
     },
     {
       "type": "row",
-      "title": "Operational health (files / dedupe / errors)",
+      "title": "IDE plugins",
+      "collapsed": false,
       "gridPos": {
         "x": 0,
         "y": 68,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "IDE plugins installed",
+      "description": "Current count of IDE extensions and plugins across every inventoried user, from the newest `defenseclaw.inventory.ide_plugins` sample per gateway. `ai_discovery.ide_inventory: ai_only` narrows this to AI plugins; `off` reports nothing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(defenseclaw_inventory_ide_plugins)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "AI plugins",
+      "description": "Plugins flagged as AI assistants or agents (`ai=\"true\"`).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 69,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(defenseclaw_inventory_ide_plugins{ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Disabled plugins",
+      "description": "Plugins the IDE reports as disabled. Remote IDE servers report `client_side_unknown`, because the client keeps that state.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 69,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(defenseclaw_inventory_ide_plugins{enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins) * 0)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "Plugins by IDE",
+      "description": "Current plugin count per IDE product (`ide` label: vscode, cursor, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 69,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (ide) (defenseclaw_inventory_ide_plugins))",
+          "legendFormat": "{{ide}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "AI vs other plugins by IDE",
+      "description": "Current plugin count per IDE, split by the AI flag and the enabled state.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 73,
+        "w": 12,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (ide, ai, enabled) (defenseclaw_inventory_ide_plugins))",
+          "format": "table",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "exported_job": true,
+              "service_namespace": true,
+              "service_name": true,
+              "service": true,
+              "service_version": true,
+              "deployment_environment": true,
+              "host_name": true,
+              "host_arch": true,
+              "os_type": true
+            },
+            "indexByName": {
+              "ide": 0,
+              "ai": 1,
+              "enabled": 2,
+              "Value": 3
+            },
+            "renameByName": {
+              "ide": "IDE",
+              "ai": "AI",
+              "enabled": "Enabled",
+              "Value": "Plugins"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "custom": {
+            "align": "left"
+          }
+        }
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "AI vs other plugins",
+      "description": "Share of current plugins flagged as AI.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (ai) (defenseclaw_inventory_ide_plugins)",
+          "legendFormat": "ai={{ai}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "piechart",
+      "title": "Plugins by enabled state",
+      "description": "Share of current plugins per enabled state: enabled, disabled, client_side_unknown (remote IDE server) or unknown.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 77,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (enabled) (defenseclaw_inventory_ide_plugins)",
+          "legendFormat": "{{enabled}}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No IDE inventory sample (inventory off, or no scan has reported)",
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "table",
+      "title": "IDE plugins per user (records in range)",
+      "description": "One row per user, IDE and plugin from the `ide.plugin.discovered`, `ide.plugin.changed` and `ide.plugin.removed` records in the selected range. The Record column shows which change was seen; widen the range to include the first scan for a full list, or use `defenseclaw agent ide-plugins` for the current inventory.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 85,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
+          "queryType": "instant",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value #A": true,
+              "Value": true
+            },
+            "indexByName": {
+              "user_name": 0,
+              "user_id": 1,
+              "ide": 2,
+              "plugin": 3,
+              "version": 4,
+              "enabled": 5,
+              "ai": 6,
+              "record": 7
+            },
+            "renameByName": {
+              "user_name": "User",
+              "user_id": "User ID",
+              "ide": "IDE",
+              "plugin": "Plugin",
+              "version": "Version",
+              "enabled": "Enabled",
+              "ai": "AI",
+              "record": "Record"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No IDE plugin records in range",
+          "custom": {
+            "align": "auto"
+          }
+        }
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Operational health (files / dedupe / errors)",
+      "gridPos": {
+        "x": 0,
+        "y": 95,
         "w": 24,
         "h": 1
       },
@@ -1149,7 +1613,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 69,
+        "y": 96,
         "w": 12,
         "h": 8
       },
@@ -1182,7 +1646,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 69,
+        "y": 96,
         "w": 12,
         "h": 8
       },
@@ -1209,7 +1673,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 77,
+        "y": 104,
         "w": 24,
         "h": 8
       },
@@ -1256,7 +1720,7 @@
       "title": "Recent scan traces (Tempo)",
       "gridPos": {
         "x": 0,
-        "y": 85,
+        "y": 112,
         "w": 24,
         "h": 1
       },
@@ -1272,7 +1736,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 86,
+        "y": 113,
         "w": 24,
         "h": 12
       },
@@ -1331,7 +1795,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 98,
+        "y": 125,
         "w": 24,
         "h": 10
       },
@@ -1385,7 +1849,7 @@
       "title": "Recent events (Loki)",
       "gridPos": {
         "x": 0,
-        "y": 108,
+        "y": 135,
         "w": 24,
         "h": 1
       },
@@ -1401,7 +1865,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 109,
+        "y": 136,
         "w": 24,
         "h": 10
       },
@@ -1432,13 +1896,13 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 119,
+        "y": 146,
         "w": 24,
         "h": 10
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1463,13 +1927,13 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 129,
+        "y": 156,
         "w": 24,
         "h": 12
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],
@@ -1497,7 +1961,7 @@
   "timepicker": {},
   "timezone": "",
   "title": "DefenseClaw \u2014 AI Agent Usage & Detection",
-  "description": "Continuous AI inventory and discovery health: active signals, vendor/product attribution, confidence, detector throughput, errors, logs, and Tempo scan traces. No series means discovery is disabled or has not reported a scan; it is distinct from a measured zero.",
+  "description": "Continuous AI inventory and discovery health: active signals, vendor/product attribution, confidence, detector throughput, IDE plugin inventory, errors, logs, and Tempo scan traces. No series means discovery is disabled or has not reported a scan; it is distinct from a measured zero.",
   "uid": "defenseclaw-ai-discovery",
   "version": 3,
   "weekStart": ""

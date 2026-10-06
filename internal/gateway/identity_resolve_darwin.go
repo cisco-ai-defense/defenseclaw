@@ -6,21 +6,35 @@
 package gateway
 
 import (
-	"errors"
 	"time"
+
+	osuser "os/user"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// resolvePeerDirectoryFacts returns the root enumerator's Open Directory
-// facts for a verified uid. A Mac gateway has no NSS to ask, so without a
-// guardian record (a per-user install) there are no verified facts.
+// resolvePeerDirectoryFacts returns a verified uid's directory facts: the
+// root enumerator's Open Directory record when the guardian wrote one (a
+// managed install), otherwise the account's groups from the system account
+// database, which on macOS answers through Open Directory. The fallback
+// keeps users and groups assignments working on a per-user install, and
+// matches what guardrail profile explain resolves there.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
-	record, ok := readIdentitySpoolFacts(key, time.Now().UTC())
-	if !ok {
-		return useridentity.DirectoryFacts{}, errors.New("no identity spool record")
+	now := time.Now().UTC()
+	if record, ok := readIdentitySpoolFacts(key, now); ok {
+		facts := record.Facts
+		facts.Assurance = useridentity.AssuranceVerified
+		return facts, nil
 	}
-	facts := record.Facts
-	facts.Assurance = useridentity.AssuranceVerified
-	return facts, nil
+	account, err := osuser.LookupId(key)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, err
+	}
+	return useridentity.DirectoryFacts{
+		Directory:  useridentity.DirectoryLocal,
+		Source:     useridentity.SourceMacOSOpenDirectory,
+		Groups:     localAccountGroups(account),
+		Assurance:  useridentity.AssuranceVerified,
+		ResolvedAt: now,
+	}, nil
 }

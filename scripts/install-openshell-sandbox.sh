@@ -5,7 +5,8 @@
 # DefenseClaw no longer installs the standalone openshell-sandbox binary. This
 # stub stays in the release so installers cached from earlier releases that
 # still fetch it with --sandbox finish instead of failing. It prints a notice,
-# changes nothing, and exits 0.
+# changes nothing, and exits 0. It leaves the release, with install.sh's
+# --sandbox flag, in 1.1.0.
 #
 set -euo pipefail
 

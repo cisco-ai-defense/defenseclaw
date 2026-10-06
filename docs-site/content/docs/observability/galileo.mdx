@@ -363,6 +363,21 @@ also sends the decision as the OpenInference `metadata` attribute, which
 Galileo shows as the span's metadata: the three guardrail fields, the user,
 and `status: ERROR` for a block. Filter Galileo spans on those metadata keys.
 
+The same metadata names who and what the span belongs to, when the span
+carries it:
+
+| Metadata key | Value | Spans |
+| --- | --- | --- |
+| `user.id`, `defenseclaw.user.name` | The account's uid or SID and name | Agent, model and tool |
+| `defenseclaw.user.principal`, `defenseclaw.user.domain` | The directory principal and domain, for example `alice@CORP.EXAMPLE.COM` and `corp.example.com`. The principal is sent only with `ai_discovery.include_user_principal` | Agent, model and tool |
+| `defenseclaw.agent.identity.id` | The stable agent identity (`agt-`) | Agent, model and tool |
+| `defenseclaw.guardrail.profile.name` | The guardrail profile that decided | Model and tool |
+
+Filter on `defenseclaw.agent.identity.id` to see one agent across all its
+sessions, or on `defenseclaw.guardrail.profile.name` to review one profile's
+decisions. The principal is an identifier, so redaction profiles keep it; see
+[Identity and authentication](/docs/enterprise/identity-and-authentication).
+
 Decisions that do not belong to a tool call, such as a blocked prompt, produce
 an `apply_guardrail` span with the same status, event, and attributes. Galileo
 has no span type for it, so it reaches local observability and other OTLP

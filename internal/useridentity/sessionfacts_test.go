@@ -6,7 +6,12 @@ package useridentity
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"testing"
+	"time"
 )
 
 func ccachePrincipalBytes(realm string, components ...string) []byte {
@@ -87,5 +92,39 @@ func TestSessionFactsHeaderAllowlist(t *testing.T) {
 	if !ok || parsed.Session.TTY != "" || parsed.Session.ClientAddr != "" || parsed.Session.Kind != "" ||
 		parsed.Session.KerberosPrincipal != "bob@CORP.EXAMPLE" || parsed.Session.Assurance != AssuranceClaimed {
 		t.Fatalf("parsed = %+v, %v", parsed, ok)
+	}
+}
+
+// The Linux and macOS shell hooks cannot read a credential cache: they send
+// the value `hook session-facts` cached for the same session variables, so
+// the Kerberos principal reaches the gateway from them too (GAP-0027).
+func TestShellHookSendsTheCachedKerberosPrincipal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows hooks read the logon session in-process")
+	}
+	home := t.TempDir()
+	var cache bytes.Buffer
+	cache.Write([]byte{5, 4, 0, 0})
+	cache.Write(ccachePrincipalBytes("corp.example", "alice"))
+	ccache := filepath.Join(home, "krb5cc")
+	if err := os.WriteFile(ccache, cache.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("KRB5CCNAME", "FILE:"+ccache)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
+	t.Setenv("SSH_TTY", "/dev/pts/3")
+	t.Setenv("XDG_SESSION_ID", "12")
+	want := currentSessionFactsHeader(time.Now())
+	if want != "v1;k=ssh;tty=pts/3;ls=12;ca=192.0.2.10;krb=alice@CORP.EXAMPLE;cc=FILE" {
+		t.Fatalf("header = %q", want)
+	}
+	helper := filepath.Join("..", "gateway", "connector", "hooks", "_hardening.sh")
+	command := exec.Command("/bin/bash", "-c", `source "$0"; defenseclaw_session_facts_value`, helper)
+	// No gateway binary on PATH: the value must come from the cache.
+	command.Env = append(os.Environ(), "PATH=/usr/bin:/bin")
+	out, err := command.CombinedOutput()
+	if err != nil || string(out) != want {
+		t.Fatalf("shell hook sent %q (%v), want the cached %q", out, err, want)
 	}
 }

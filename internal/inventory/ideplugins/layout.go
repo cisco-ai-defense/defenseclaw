@@ -45,3 +45,30 @@ func newLayout(home, goos string, limits Limits) layout {
 	}
 	return l
 }
+
+// WindowsHomeDirs lists the folders Scan reads in a Windows home with the
+// default %APPDATA% and %LOCALAPPDATA%, relative to the home. A managed
+// Windows gateway runs as a service account with no access to user
+// profiles, and the SYSTEM enumerator grants it read access to these
+// (enterprisehooks inventoryDACLDotdirs). Remote-SSH server folders,
+// %LOCALAPPDATA%\JetBrains (index caches) and Android Studio are left out:
+// they are rare on a Windows desktop and large.
+func WindowsHomeDirs() []string {
+	var dirs []string
+	for _, product := range vscodeProducts {
+		for _, dot := range product.dotDirs {
+			dirs = append(dirs, dot+`\extensions`)
+		}
+		user := `AppData\Roaming\` + product.dataName + `\User`
+		dirs = append(dirs, user+`\globalStorage`, user+`\profiles`)
+	}
+	return append(dirs,
+		`AppData\Roaming\JetBrains`,
+		`AppData\Local\Microsoft\VisualStudio`,
+		`AppData\Local\Zed\extensions\installed`,
+		`AppData\Local\nvim`,
+		`AppData\Local\nvim-data`,
+		`vimfiles`,
+		`.eclipse`,
+	)
+}

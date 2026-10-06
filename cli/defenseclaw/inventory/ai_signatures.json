@@ -362,18 +362,7 @@
         "AGENT.md",
         "AGENTS.local.md"
       ],
-      "extension_ids": [
-        "codeium.codeium"
-      ],
-      "jetbrains_plugin_ids": [
-        "com.codeium.intellij"
-      ],
-      "vim_plugins": [
-        "codeium.vim",
-        "codeium.nvim",
-        "windsurf.vim",
-        "windsurf.nvim"
-      ],
+      "extension_ids": [],
       "mcp_paths": [
         "$APPDATA/devin/mcp_config.json",
         "~/.config/devin/mcp_config.json",

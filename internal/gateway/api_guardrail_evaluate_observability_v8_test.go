@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestNewAPIGuardrailEvaluateV8RequestFactsRejectsInvalidSourceFacts(t *testing.T) {
@@ -71,6 +72,13 @@ func TestAPIGuardrailEvaluateV8CompletionRejectsInvalidPolicyOutput(t *testing.T
 func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T) {
 	api, capture := newGuardrailEventV8TestAPI(t)
 	ctx, parent := platformHealthCorrelatedContext(t)
+	// The verified caller's directory facts ride the evaluation record and
+	// its span as correlation.identity (GAP-0009).
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	ctx = withVerifiedSubject(withManagedHookPeer(ctx, managedHookPeer{UID: 1201, Name: "dcad-alice"}), VerifiedSubject{
+		UserID: "1201", Directory: useridentity.DirectoryFacts{Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory},
+	})
 	body, err := json.Marshal(guardrailEvaluateRequest{
 		EvaluationID: "eval-rich-opa", Direction: "prompt", Model: "gpt-4",
 		Mode: "action", ScannerMode: "both", ContentLength: 512, ElapsedMs: 7.25,
@@ -107,6 +115,7 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		row.Body["defenseclaw.guardrail.reason"] != "built-in fallback (no policy configured)" ||
 		row.Body["defenseclaw.guardrail.finding_count"] != float64(2) ||
 		row.Body["defenseclaw.guardrail.detector.name"] != "opa-guardrail" ||
+		row.Body["defenseclaw.user.directory"] != "active_directory" ||
 		!ok || len(sources) != 1 || sources[0] != "scanner" ||
 		!rulesOK || len(rules) != 2 || rules[0] != "SEC-LOCAL" || rules[1] != "SEC-CISCO" {
 		t.Fatalf("generated OPA guardrail row=%+v", row)
@@ -155,7 +164,8 @@ func TestHandleGuardrailEvaluateEmitsOneRichCorrelatedV8Evaluation(t *testing.T)
 		attributes["defenseclaw.evaluation.id"] != "eval-rich-opa" ||
 		attributes["defenseclaw.guardrail.phase"] != "policy" ||
 		attributes["defenseclaw.guardrail.detector.name"] != "opa-guardrail" ||
-		attributes["defenseclaw.guardrail.mode"] != "enforce" {
+		attributes["defenseclaw.guardrail.mode"] != "enforce" ||
+		attributes["defenseclaw.user.domain"] != "dclab.test" {
 		t.Fatalf("generated OPA span parent=%s/%t record=%v", spanParent, hasParent, attributes)
 	}
 }

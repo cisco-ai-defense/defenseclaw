@@ -222,7 +222,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector and the verified
-		// subject (never the payload). No-op without profiles.
+		// subject (never the payload). No-op without profiles. The agent
+		// identity is folded in by enrichAgentHookContext.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
@@ -1407,6 +1408,7 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
+	ctx = refreshGuardrailProfileForAgent(ctx)
 	// Refresh the audit correlation envelope with payload-derived
 	// correlation. CorrelationMiddleware snapshots the envelope
 	// from the HTTP headers BEFORE this handler runs; for hook
@@ -2191,11 +2193,13 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// verdicts only. The audit row + notification dispatched above keep the
 	// original verdict reason, so telemetry retains the "why" while the agent
 	// shows the operator's message. Resolved per connector.
-	responseReason := resolveHookBlockReasonForConfig(a.decisionConfig(ctx), req.ConnectorName, action, reason)
-	resp := agentHookResponseForProfile(
-		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps,
-		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	responseReason, responsePolicy := resolveHookBlockReasonForConfig(
+		a.decisionConfig(ctx), req.ConnectorName, action, reason, sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
+	resp := agentHookResponseForProfile(
+		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps, responsePolicy,
+	)
+	resp.SourceReason = reason
 	// Stamp the unified-pipeline correlation keys so the HTTP
 	// response, the audit envelope (HookAuditEnvelope.EvaluationID
 	// / RuleIDs), and the scan_finding events all join on the same
@@ -2851,34 +2855,26 @@ func promptNoticeOnlyEvent(connectorName, event string) bool {
 // renders inside an OS-level approval prompt where long sentences
 // get truncated. tool may be empty (e.g. UserPromptSubmit-class
 // events); in that case we fall back to a tool-agnostic phrase.
-// resolveHookBlockReason returns the user-facing reason for a hook response.
-// For block verdicts it lets a configured block message replace the verdict
-// text — a per-connector guardrail.connectors[X].block_message override takes
-// precedence over the global guardrail.block_message, resolved via
-// EffectiveBlockMessage. This mirrors the proxy path's blockMessage()
-// semantics (a configured message replaces the default). For non-block actions
-// or when no message is configured, the original reason passes through
-// unchanged, so existing behavior (surfacing the live verdict reason) is
-// preserved. A nil config or empty connector resolves to the global value,
-// keeping single-connector installs unaffected.
-func resolveHookBlockReason(gc *config.GuardrailConfig, connector, action, reason string) string {
-	if action != "block" || gc == nil {
-		return reason
-	}
-	if custom := strings.TrimSpace(gc.EffectiveBlockMessage(connector)); custom != "" {
-		return custom
-	}
-	return reason
-}
-
-func resolveHookBlockReasonForConfig(cfg *config.Config, connector, action, reason string) string {
+// resolveHookBlockReasonForConfig returns the agent-facing reason and sink
+// policy for a hook verdict. On a block, a configured block message replaces
+// the verdict reason, resolved for the request's guardrail profile, then
+// guardrail.connectors.<c>.block_message, then guardrail.block_message, as
+// the proxy's blockMessage() does. The message is operator-authored, not
+// scanned content, so the default projection shows it verbatim; an explicit
+// managed redaction directive still applies. Other actions, and a block with
+// no configured message, keep the verdict reason and policy.
+func resolveHookBlockReasonForConfig(cfg *config.Config, connector, action, reason string, policy redaction.SinkPolicy) (string, redaction.SinkPolicy) {
 	if action != "block" || cfg == nil {
-		return reason
+		return reason, policy
 	}
-	if custom := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector)); custom != "" {
-		return custom
+	custom := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector))
+	if custom == "" {
+		return reason, policy
 	}
-	return reason
+	if policy == redaction.SinkPolicyDefault {
+		policy = redaction.SinkPolicyRaw
+	}
+	return custom, policy
 }
 
 func connectorReason(connectorName, action, tool, reason string) string {

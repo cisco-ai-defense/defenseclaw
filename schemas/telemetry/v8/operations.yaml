@@ -4451,7 +4451,7 @@ attributes:
     overrides:
       max_utf8_bytes: 64
       pattern: '^[a-z0-9][a-z0-9_.-]{0,63}$'
-    notes: bounded lowercase product token such as vscode, vscode_insiders, cursor, windsurf, kiro, intellij_idea, pycharm, android_studio, visual_studio, zed, eclipse, neovim or a connector name for connector plugins
+    notes: bounded lowercase product token such as vscode, vscode-insiders, cursor, devin-desktop, kiro, intellij_idea, pycharm, android_studio, visual_studio, zed, eclipse, neovim or a connector name for connector plugins
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ide.plugin.id
   type: string

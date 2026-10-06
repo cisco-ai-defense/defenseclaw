@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -694,6 +695,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: blocked,
 			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
+			UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 		}
 		if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
 			m.logf("egress telemetry: %v", err)
@@ -775,6 +777,7 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 		Scheme: egressScheme(e), ResolvedIP: remoteIP(e.RemoteAddr), Blocked: true,
 		DecisionCode: decisionCode(e), Reason: truncate(e.Reason, 512),
 		PolicyOutcome: policyOutcome(e), Severity: "HIGH", Timestamp: e.Time,
+		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 	}); err != nil {
 		m.logf("egress telemetry: %v", err)
 	}

@@ -800,9 +800,11 @@ def test_policy_posture_multi_connector() -> None:
     )
     assert _policy_posture(uniform) == "all connectors: action (strict)"
 
-    # Single-connector wording is unchanged.
-    single = OverviewConfig(guardrail_mode="action", guardrail_strategy="default")
+    # Single-connector: the fallback names the configured rule pack.
+    single = OverviewConfig(guardrail_mode="action")
     assert _policy_posture(single) == "action: block CRIT, alert MED+ (default)"
+    strict = OverviewConfig(guardrail_mode="action", guardrail_rule_pack_dir="/etc/policies/guardrail/strict")
+    assert _policy_posture(strict) == "action: block CRIT, alert MED+ (strict)"
 
 
 def test_enforcement_label_multi_connector() -> None:

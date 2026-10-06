@@ -86,6 +86,15 @@ func SplitQualifiedName(name string) (account, domain string) {
 	return name, ""
 }
 
+// BareAccountName is the account part of an NSS or Windows account name,
+// the value defenseclaw.user.name carries: "alice@corp.example.com" and
+// "CORP\alice" both give "alice". The qualified form is the principal,
+// reported separately, and it fails the field's identifier syntax.
+func BareAccountName(name string) string {
+	account, _ := SplitQualifiedName(name)
+	return account
+}
+
 func plausiblePrincipal(value string) bool {
 	if value == "" || len(value) > maxPrincipalLength {
 		return false

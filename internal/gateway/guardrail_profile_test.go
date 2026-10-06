@@ -51,6 +51,7 @@ func profileSecurityConfig() *config.Config {
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@CORP.EXAMPLE"}}},
 		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`CORP\Contractors`}}},
+		{Profile: "tooling", Match: config.ProfileMatch{Groups: []string{"dcidr-grp"}}},
 		{Profile: "tooling", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
 	}
 	cfg.Guardrail.DefaultProfile = "watch"
@@ -87,6 +88,7 @@ func TestGuardrailProfileSelectionIgnoresClaimedIdentity(t *testing.T) {
 	}{
 		{name: "verified UPN in any case", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1001", UPN: "Alice@corp.example"})}, connector: "cursor", profile: "strict", match: profileMatchUser},
 		{name: "verified group", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1002", Groups: []string{"S-1-5-21-1", `corp\contractors`}})}, connector: "cursor", profile: "strict", match: profileMatchGroup, group: `CORP\Contractors`},
+		{name: "verified Windows group by bare name", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "S-1-5-21-7-1001", Groups: []string{"S-1-5-21-7-1037", `HOST\DCIDR-grp`}})}, connector: "cursor", profile: "tooling", match: profileMatchGroup, group: "dcidr-grp"},
 		{name: "verified other user keeps default", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"})}, connector: "cursor", profile: "watch", match: profileMatchDefault},
 		{name: "claimed headers alone", ctx: []func(context.Context) context.Context{claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefaultUnverified},
 		{name: "claimed headers over a verified other user", ctx: []func(context.Context) context.Context{verified(profileSubject{UserID: "1003", UserName: "bob"}), claimedAlice}, connector: "cursor", profile: "watch", match: profileMatchDefault},
@@ -178,6 +180,26 @@ func TestGuardrailProfileSelectsVerifiedDirectoryGroup(t *testing.T) {
 	}
 	t.Run("verified group", func(t *testing.T) {
 		check(t, withVerifiedSubject(context.Background(), alice), "ml", profileMatchGroup, "DC-ML-Team@dclab.test")
+	})
+	t.Run("agent assignment on the hook path", func(t *testing.T) {
+		// The profile is resolved at authentication, before the hook path
+		// derives the agent identity; enrichAgentHookContext must re-resolve.
+		req := agentHookRequest{ConnectorName: "codex", SessionID: "s-agentpin"}
+		agent, verified := agentIdentityFromContext(enrichAgentHookContext(context.Background(), req))
+		if agent == "" || !verified {
+			t.Skip("no verified agent identity on this host (machine id unreadable)")
+		}
+		pinned := &config.Config{}
+		pinned.Guardrail.Profiles = map[string]config.GuardrailProfile{"agentpin": {Mode: "action"}, "ml": {Mode: "action"}}
+		pinned.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+			{Profile: "agentpin", Match: config.ProfileMatch{Agents: []string{agent}}},
+			{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}},
+		}
+		pinnedAPI := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, pinned)
+		ctx := pinnedAPI.withGuardrailProfileDecision(withVerifiedSubject(context.Background(), alice), "codex")
+		if got := pinnedAPI.resolveProfile(enrichAgentHookContext(ctx, req)); got.Name != "agentpin" || got.Match != profileMatchAgent {
+			t.Fatalf("resolveProfile = %+v, want agentpin by agent", got)
+		}
 	})
 	t.Run("unresolved lookup", func(t *testing.T) {
 		check(t, withVerifiedSubject(context.Background(), unresolved), "watch", profileMatchDefaultLookupFailed, "")
