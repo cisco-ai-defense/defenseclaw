@@ -4,6 +4,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,41 @@ func TestFailedActivationKeepsTheGatewayOutput(t *testing.T) {
 	kept, err := os.ReadFile(h.env.activationFailurePath())
 	if err != nil || !strings.Contains(string(kept), "invalid severity") {
 		t.Fatalf("gateway output not kept after rollback: %v %q", err, kept)
+	}
+}
+
+// A managed upgrade whose new binary refuses the installed config used to
+// leave the gateway crash-looping behind a bare "see journalctl" error:
+// journalctl had no command candidate, so the gateway's output never reached
+// the result (GAP-0151). The activation error, the rollback error and status
+// now name the refusal and the fix, and status does not send the
+// administrator to repair, which applies the same config again.
+func TestLinuxGatewayRefusingTheConfigIsNamedByEveryResult(t *testing.T) {
+	if _, ok := commandCandidates["journalctl"]; !ok {
+		t.Fatal("journalctl has no command candidate, so the gateway journal is never read")
+	}
+	const refusal = `sidecar: init: global rule pack "acme": digest sha256:aaaa does not match guardrail.custom_packs.acme.digest`
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.runner.replies = map[string]fakeReply{
+		"journalctl --unit " + unitGateway + " --lines 40 --no-pager --output cat": {result: CommandResult{Stdout: []byte("starting\nError: " + refusal + "\n")}},
+		binGateway + " policy digest --json":                                       {result: CommandResult{ExitCode: 1, Stderr: []byte("[sidecar] OPA policy unavailable\nError: policy digest: " + refusal + "\n")}, err: errors.New("exit 1")},
+	}
+	h.services.failStart[unitGateway] = errors.New("systemctl start: exit 1: see journalctl -xeu")
+	r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("2.0.0")})
+	requireError(t, r, codeActivate)
+	requireError(t, r, codeRollbackFailed)
+	for _, code := range []string{codeActivate, codeRollbackFailed} {
+		if got := messagesOf(r.Errors, code); !strings.Contains(got, refusal) {
+			t.Fatalf("%s does not name the refusal: %q", code, got)
+		}
+	}
+	if got := messagesOf(r.Errors, codeActivate); !strings.Contains(got, "Error: "+refusal) || !strings.Contains(got, "ensure --config") || !strings.Contains(got, "repair applies the same configuration again") {
+		t.Fatalf("activation error lacks the gateway journal or the fix: %q", got)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if got := messagesOf(status.Errors, codeConfigRefused); !strings.Contains(got, refusal) {
+		t.Fatalf("status does not name the refusal: %+v", status.Errors)
 	}
 }
 

@@ -5815,7 +5815,7 @@ def identities(
         click.echo("Agent identities are not recorded on this deployment.")
         return
     if not rows:
-        click.echo("No agent identities seen yet. They appear after an agent's first hook.")
+        click.echo("No agent identities seen yet. They appear after an agent's first hook or LLM proxy request.")
         return
     click.echo(_render_agent_identities(rows))
 

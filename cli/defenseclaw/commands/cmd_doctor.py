@@ -12719,12 +12719,31 @@ class _UnexpectedRulePackValidatorFailure:
         )
 
 
+def _selected_rule_pack(gc: object, connector: str) -> tuple[str, str]:
+    """The ``guardrail.rule_pack`` name a connector uses and, for a custom pack, its pinned digest.
+
+    Returns ``("", "")`` when the connector selects no pack by name.
+    """
+    resolve = getattr(gc, "effective_rule_pack", None)
+    packs = getattr(gc, "custom_packs", None)
+    try:
+        name = resolve(connector) if callable(resolve) else ""
+    except Exception:  # noqa: BLE001 - doctor must still report the row.
+        name = ""
+    if not isinstance(name, str) or not name:
+        return "", ""
+    custom = packs.get(name) if isinstance(packs, dict) else None
+    digest = getattr(custom, "digest", "")
+    return name, digest.strip() if isinstance(digest, str) else ""
+
+
 def _emit_rule_pack_row(
     path: str,
     kind: str,
     r: _DoctorResult,
     *,
     validation_cache: dict[str, object] | None = None,
+    pack: tuple[str, str] = ("", ""),
 ) -> None:
     """Authoritatively validate a resolved rule pack and emit one doctor row.
 
@@ -12735,7 +12754,9 @@ def _emit_rule_pack_row(
     usable during an incomplete upgrade without claiming enforcement is sound.
     A valid partial overlay with no direct rule-category overrides also WARNs;
     compiled categories remain active, but the row does not claim that the
-    overlay itself enables rules.
+    overlay itself enables rules. *pack* is the selected ``(name, pinned
+    digest)``: a custom pack whose files no longer match its pin FAILs, because
+    the gateway refuses the edit and keeps the pack it loaded before.
     """
     cache_key = _rule_pack_cache_key(path)
     outcome: object
@@ -12799,6 +12820,21 @@ def _emit_rule_pack_row(
         return
 
     summary = outcome.summary or {}
+    pack_name, pinned = pack
+    files_digest = str(summary.get("files_digest", "") or "")
+    if pinned and files_digest and pinned.lower().removeprefix("sha256:") != files_digest.lower():
+        # The gateway refuses a custom pack whose files no longer match the
+        # pin and keeps enforcing the previous one; a green row hid that.
+        _emit(
+            "fail",
+            "Rule pack",
+            f"{kind} {shown_path}: the pack files no longer match guardrail.custom_packs.{pack_name}.digest "
+            f"(pinned {pinned.lower().removeprefix('sha256:')[:12]}, files {files_digest[:12]}); "
+            "the gateway keeps enforcing the pack it loaded before the edit",
+            r=r,
+            remediation=f"defenseclaw guardrail use-pack {shown_path}",
+        )
+        return
     enabled_rule_count = summary.get("enabled_rule_count", 0)
     rule_count = summary.get("rule_count", 0)
     digest = summary.get("digest", "")
@@ -12964,7 +13000,7 @@ def _check_connector_inventory(
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
     # Effective rule pack for this connector (falls back to built-in defaults
-    # when no rule_pack_dir is configured). The offline Go loader validates
+    # when no rule pack is configured). The offline Go loader validates
     # the resolved pack; Python filesystem presence is never treated as proof.
     if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
         try:
@@ -12972,14 +13008,16 @@ def _check_connector_inventory(
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
         if rule_pack_dir:
+            pack = _selected_rule_pack(gc, connector)
             _emit_rule_pack_row(
                 rule_pack_dir,
-                "configured rule_pack_dir",
+                f'configured rule pack "{pack[0]}"' if pack[0] else "configured rule pack",
                 r,
                 validation_cache=rule_pack_validation_cache,
+                pack=pack,
             )
         else:
-            # No explicit rule_pack_dir → the gateway resolves the built-in
+            # No explicit rule pack → the gateway resolves the built-in
             # default to <data_dir>/policies/guardrail/default and loads packs
             # from there (Go: config.go cfg.Guardrail.RulePackDir fallback +
             # the viper default). Validate THAT resolved path rather than
