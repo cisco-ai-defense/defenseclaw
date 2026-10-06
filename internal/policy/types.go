@@ -91,12 +91,13 @@ type GuardrailInput struct {
 	CiscoResult   *GuardrailScanResult `json:"cisco_result"`
 	ContentLength int                  `json:"content_length"`
 	// HILT carries the live human-in-the-loop configuration from
-	// config.yaml so the Rego policy can decide `confirm` vs `alert`
-	// without needing data.json to be kept in sync. When non-nil the
-	// Rego policy reads `input.hilt`; when nil it falls back to
-	// `data.guardrail.hilt` for backward compatibility with callers
-	// that still drive policies through `opa eval` against data.json.
+	// config.yaml so the Rego policy can decide `confirm` vs `alert`.
+	// Absent means HILT is off.
 	HILT *GuardrailHILTInput `json:"hilt,omitempty"`
+	// Thresholds are the resolved block/alert ranks and the Cisco AI
+	// Defense trust level for the request's connector and profile.
+	// Absent means CRITICAL blocks, MEDIUM alerts and full trust.
+	Thresholds *ThresholdsInput `json:"thresholds,omitempty"`
 }
 
 // GuardrailHILTInput is the gateway-provided HILT view passed to the

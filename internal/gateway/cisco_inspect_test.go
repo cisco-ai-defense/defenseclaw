@@ -234,7 +234,7 @@ func TestCiscoInspectGeneratedLatencyJoinsExactAIDPhaseSpan(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	client := newCiscoInspectTestClient(t, srv.URL, "TEST_CISCO_PHASE_JOIN")
 	client.client = srv.Client()
-	inspector := NewGuardrailInspector("remote", client, nil, "")
+	inspector := NewGuardrailInspector("remote", client, nil)
 	configureGuardrailInspectorObservabilityV8(inspector, runtime, func() string { return "codex" })
 
 	ctx, _ := ciscoCorrelatedContext(t)

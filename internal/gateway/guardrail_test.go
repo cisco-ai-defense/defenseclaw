@@ -235,7 +235,7 @@ func TestMergeVerdictDispatch_OpensourceLocalBlockStillEnforces(t *testing.T) {
 // wrapping a nil pointer), so downstream `g.ciscoClient != nil` guards
 // still short-circuit correctly.
 func TestNewGuardrailInspector_NilInspectorInterface(t *testing.T) {
-	g := NewGuardrailInspector("remote", nil, nil, "")
+	g := NewGuardrailInspector("remote", nil, nil)
 	if g.ciscoClient != nil {
 		t.Fatalf("g.ciscoClient must be a nil interface when NewGuardrailInspector is called with a nil *CiscoInspectClient; got %#v (interface holds concrete type %T)",
 			g.ciscoClient, g.ciscoClient)

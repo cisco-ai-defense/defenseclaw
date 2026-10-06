@@ -192,12 +192,10 @@ func TestEngine_EvaluateGuardrail_InputHILTDisablesData(t *testing.T) {
 	}
 }
 
-// TestEngine_EvaluateGuardrail_NilInputHILTFallsBackToData covers the
-// backward-compat fallback. Older callers (api.go before this change,
-// direct `opa eval` users, integration tests that build GuardrailInput
-// without HILT) must keep working: a nil input.HILT means the policy
-// reads data.guardrail.hilt as before.
-func TestEngine_EvaluateGuardrail_NilInputHILTFallsBackToData(t *testing.T) {
+// TestEngine_EvaluateGuardrail_NilInputHILTIsOff pins that the policy reads
+// only input: a nil input.HILT means no confirmation, whatever a leftover
+// data.json says.
+func TestEngine_EvaluateGuardrail_NilInputHILTIsOff(t *testing.T) {
 	dir := setupHILTRegoDir(t, map[string]interface{}{
 		"enabled":      true,
 		"min_severity": "HIGH",
@@ -213,14 +211,14 @@ func TestEngine_EvaluateGuardrail_NilInputHILTFallsBackToData(t *testing.T) {
 		Mode:          "action",
 		ScannerMode:   "local",
 		LocalResult:   highLocal(),
-		HILT:          nil, // no input override -> fall back to data.json
+		HILT:          nil, // data.json is not consulted
 		ContentLength: 200,
 	})
 	if err != nil {
 		t.Fatalf("EvaluateGuardrail: %v", err)
 	}
-	if out.Action != "confirm" {
-		t.Errorf("nil input.HILT should fall back to data.guardrail.hilt.enabled=true; got action=%q (want confirm)", out.Action)
+	if out.Action != "alert" {
+		t.Errorf("nil input.HILT must not read data.guardrail.hilt; got action=%q (want alert)", out.Action)
 	}
 }
 

@@ -388,7 +388,6 @@ func NewGuardrailProxy(
 	store *audit.Store,
 	dataDir string,
 	gatewayToken string,
-	policyDir string,
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
 	judgeLLM config.LLMConfig,
@@ -404,12 +403,7 @@ func NewGuardrailProxy(
 	providers, _, _ := providerRegistrySnapshot()
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
-	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
-	connectorName := ""
-	if conn != nil {
-		connectorName = conn.Name()
-	}
-	inspector.SetFallbackProfile(guardrailProfileForConnector(cfg, connectorName))
+	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge)
 	inspector.SetDetectionStrategy(
 		cfg.DetectionStrategy,
 		cfg.DetectionStrategyPrompt,
@@ -551,20 +545,35 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
 		p.switchConnectorLocked(strings.ToLower(newName))
 	}
-	p.applyInspectorFallbackProfileLocked()
 	p.rtMu.Unlock()
 }
 
-func (p *GuardrailProxy) applyInspectorFallbackProfileLocked() {
-	setter, ok := p.inspector.(interface{ SetFallbackProfile(string) })
-	if !ok {
+// toolCallAction maps tool calls found in a response with the thresholds of
+// the request's connector and verified profile.
+func (p *GuardrailProxy) toolCallAction(ctx context.Context, findings []RuleFinding) string {
+	connectorName := thresholdConnectorFrom(ctx)
+	if ManagedEnterpriseActive() {
+		// The Secure Client integration keeps the global levels here.
+		connectorName = ""
+	}
+	if cfg := requestPolicyConfig(ctx); cfg != nil {
+		return guardrailActionForConnectorFindings(cfg, connectorName, findings, false)
+	}
+	p.rtMu.RLock()
+	gc := p.cfg
+	p.rtMu.RUnlock()
+	return guardrailActionForGuardrailFindings(gc, connectorName, findings, false)
+}
+
+// SetJudge replaces the inspector's LLM judge with the generation's shared
+// judge (nil disables it).
+func (p *GuardrailProxy) SetJudge(judge *LLMJudge) {
+	if p == nil {
 		return
 	}
-	connectorName := ""
-	if p.connector != nil {
-		connectorName = p.connector.Name()
+	if setter, ok := p.inspector.(interface{ SetJudge(*LLMJudge) }); ok {
+		setter.SetJudge(judge)
 	}
-	setter.SetFallbackProfile(guardrailProfileForConnector(p.cfg, connectorName))
 }
 
 // StartHookConfigGuard launches the connector hook self-heal guard bound to
@@ -667,7 +676,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
 	// handlers as fetch-interceptor traffic.
 	stripped := connectorPrefixStripper(mux, p.registry)
-	limited := p.rateLimitMiddleware(stripped)
+	scoped := p.thresholdScopeMiddleware(stripped)
+	limited := p.rateLimitMiddleware(scoped)
 	logged := p.requestLogger(limited)
 	// Middleware ordering matters for v7 correlation: request_id
 	// must be in the context BEFORE CorrelationMiddleware freezes
@@ -768,6 +778,21 @@ func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
 // Security: the connector name must pass charset validation AND exist in
 // the registry. Paths containing percent-encoded slashes (%2f/%2F) or
 // dot-dot segments are rejected before any stripping occurs.
+// thresholdScopeMiddleware records the connector this proxy serves (the
+// server-side active connector, never a URL or header value) so guardrail
+// decisions resolve that connector's thresholds.
+func (p *GuardrailProxy) thresholdScopeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.rtMu.RLock()
+		name := ""
+		if p.connector != nil {
+			name = p.connector.Name()
+		}
+		p.rtMu.RUnlock()
+		next.ServeHTTP(w, r.WithContext(withThresholdConnector(r.Context(), name)))
+	})
+}
+
 func connectorPrefixStripper(next http.Handler, reg *connector.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
@@ -4479,7 +4504,6 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	p.connector = newConn
-	p.applyInspectorFallbackProfileLocked()
 	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}
@@ -5309,9 +5333,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := guardrailToolCallActionForGuardrailFindings(
-		p.cfg, allFindings, false,
-	)
+	action := p.toolCallAction(ctx, allFindings)
 	if action == guardrailActionConfirm {
 		action = guardrailActionAlert
 	}

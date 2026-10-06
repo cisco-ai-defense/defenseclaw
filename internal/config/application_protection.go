@@ -363,12 +363,7 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 	if c == nil {
 		return ""
 	}
-	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
-		if strings.TrimSpace(pc.RulePackDir) != "" {
-			return pc.RulePackDir
-		}
-	}
-	return c.Guardrail.EffectiveRulePackDir(connector)
+	return c.ResolveRulePackDir(c.EffectiveRulePackRefForConnector(connector))
 }
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {

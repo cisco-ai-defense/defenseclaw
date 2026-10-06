@@ -424,7 +424,7 @@ func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *c
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	action := guardrailRuntimeActionForFindings(
+	action := guardrailContentActionForFindings(
 		cfg, "", ruleFindings, confirmable,
 	)
 

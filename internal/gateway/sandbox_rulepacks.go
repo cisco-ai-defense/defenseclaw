@@ -64,7 +64,7 @@ func ruleManagedConnectors(cfg *config.Config) []string {
 // loadSandboxHarnessRulePack loads and validates a sandbox harness
 // connector's effective rule pack.
 func loadSandboxHarnessRulePack(cache *guardrail.RulePackCache, cfg *config.Config, name string) (*guardrail.RulePack, error) {
-	return loadValidatedRulePack(cache, cfg.EffectiveRulePackDirForConnector(name), "sandbox harness "+name)
+	return loadConnectorRulePack(cache, cfg, name, "sandbox harness "+name)
 }
 
 // prepareInitialSandboxHarnessRules compiles the cold-start rule sets of the

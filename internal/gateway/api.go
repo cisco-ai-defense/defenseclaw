@@ -208,9 +208,18 @@ type APIServer struct {
 	hookRegistrationRepairMu sync.RWMutex
 	hookRegistrationRepair   func(context.Context, string) error
 
-	// policyReloader, when set, is called by the /policy/reload handler
-	// to atomically refresh the shared OPA engine used by the watcher.
+	// policyReloader, when set, is called by the /policy/reload handler to
+	// rebuild the configuration generation now.
 	policyReloader func() error
+
+	// generationSource returns the sidecar's live configuration generation;
+	// decisions and policy evaluation read it. Nil for an API server the
+	// sidecar does not own (tests, embedders), which decides with its
+	// start-time configuration and prepares its policy once.
+	generationSource func() *Generation
+	ownPolicyOnce    sync.Once
+	ownPolicy        *policy.Prepared
+	ownPolicyErr     error
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
@@ -770,6 +779,42 @@ func connectorNameForConfig(cfg *config.Config) string {
 		}
 	}
 	return "unknown"
+}
+
+// SetGenerationSource connects the API server to the sidecar's live
+// configuration generation.
+func (a *APIServer) SetGenerationSource(source func() *Generation) {
+	if a == nil {
+		return
+	}
+	a.generationSource = source
+}
+
+func (a *APIServer) generation() *Generation {
+	if a == nil || a.generationSource == nil {
+		return nil
+	}
+	return a.generationSource()
+}
+
+// preparedPolicy returns the OPA queries decisions evaluate: the live
+// generation's, or for an API server without one, queries prepared once
+// from its start-time policy_dir.
+func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
+	if a.generationSource != nil {
+		g := a.generation()
+		if g == nil || g.OPA == nil {
+			if g != nil && g.opaError != "" {
+				return nil, errors.New(g.opaError)
+			}
+			return nil, errors.New("policy is not loaded")
+		}
+		return g.OPA, nil
+	}
+	a.ownPolicyOnce.Do(func() {
+		a.ownPolicy, a.ownPolicyErr = policy.Prepare(ctx, a.scannerCfg.PolicyDir)
+	})
+	return a.ownPolicy, a.ownPolicyErr
 }
 
 // SetPolicyReloader registers a callback that atomically reloads the
@@ -3017,6 +3062,13 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 			Enabled:     hilt.Enabled,
 			MinSeverity: minSev,
 		}
+		decisionCfg := a.decisionConfig(r.Context())
+		block, alert := guardrailThresholdRanks(resolveThresholds(decisionCfg, profileRequestConnector(r.Context())))
+		input.Thresholds = &policy.ThresholdsInput{
+			Block:           block,
+			Alert:           alert,
+			CiscoTrustLevel: decisionCfg.Guardrail.EffectiveCiscoTrustLevel(),
+		}
 	}
 
 	startedAt := time.Now().UTC()
@@ -3101,12 +3153,12 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	// action mode (and an explicit alert in observe mode for
 	// audit visibility).
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
+		prepared, err := a.preparedPolicy(ctx)
 		if err != nil {
 			return policyOutageVerdict(input,
 				fmt.Sprintf("policy engine load failed: %v", err)), nil
 		}
-		out, evalErr := engine.EvaluateGuardrail(ctx, input)
+		out, evalErr := prepared.EvaluateGuardrail(ctx, input)
 		if evalErr != nil {
 			return policyOutageVerdict(input,
 				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
@@ -3771,12 +3823,8 @@ func (a *APIServer) policyListEntries(blocked bool) []policy.ListEntry {
 
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err == nil {
-			out, evalErr := engine.Evaluate(ctx, input)
-			if evalErr == nil {
-				return out, nil
-			}
+		if prepared, err := a.preparedPolicy(ctx); err == nil {
+			return prepared.EvaluateAdmission(ctx, input)
 		}
 	}
 
@@ -3980,35 +4028,19 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
 	}
 
-	// If a shared OPA engine is wired, use its atomic Reload(); otherwise
-	// validate by constructing a throwaway engine (backward-compatible).
-	if a.policyReloader != nil {
-		if err := a.policyReloader(); err != nil {
-			recordFailure(err.Error())
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error":  "reload failed: " + err.Error(),
-				"status": "failed",
-			})
-			return
-		}
-	} else {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err != nil {
-			recordFailure(err.Error())
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error":  "reload failed: " + err.Error(),
-				"status": "failed",
-			})
-			return
-		}
-		if err := engine.Compile(); err != nil {
-			recordFailure(err.Error())
-			a.writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error":  "compilation failed: " + err.Error(),
-				"status": "failed",
-			})
-			return
-		}
+	// Rebuild the configuration generation now: Rego modules and rule packs
+	// are prepared once and swapped atomically, or the live generation stays.
+	if a.policyReloader == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy reload is not available"})
+		return
+	}
+	if err := a.policyReloader(); err != nil {
+		recordFailure(err.Error())
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error":  "reload failed: " + err.Error(),
+			"status": "failed",
+		})
+		return
 	}
 
 	// Any cached LLM-judge verdict was rendered under the previous

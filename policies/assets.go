@@ -28,6 +28,39 @@ import (
 //go:embed rego/*.rego rego/data.json *.yaml guardrail/default guardrail/strict guardrail/permissive
 var files embed.FS
 
+// protectionFiles holds the built-in protection (use-case) packs. They are
+// composed in memory from guardrail.rules.protections and never installed,
+// so Files does not list them.
+//
+//go:embed guardrail-use-cases/*/rules/*.yaml
+var protectionFiles embed.FS
+
+// ProtectionPackRules returns the rules/*.yaml files of the named built-in
+// protection pack, sorted by name. An unknown name is an error.
+func ProtectionPackRules(name string) ([]File, error) {
+	if name == "" || strings.ContainsAny(name, "/\\.") {
+		return nil, fmt.Errorf("unknown protection pack %q", name)
+	}
+	dir := path.Join("guardrail-use-cases", name, "rules")
+	entries, err := fs.ReadDir(protectionFiles, dir)
+	if err != nil {
+		return nil, fmt.Errorf("unknown protection pack %q", name)
+	}
+	var out []File
+	for _, entry := range entries {
+		if entry.IsDir() || path.Ext(entry.Name()) != ".yaml" {
+			continue
+		}
+		data, err := protectionFiles.ReadFile(path.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, File{Path: entry.Name(), Data: data})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
+}
+
 // File is one embedded policy file; Path is slash-separated and relative to
 // the policy directory root.
 type File struct {

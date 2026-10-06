@@ -16,7 +16,11 @@
 
 package gateway
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/policy"
+)
 
 // TestGuardrailFallbackActionForSeverity pins the contract used by
 // every gateway path that doesn't go through the Rego engine:
@@ -25,8 +29,8 @@ import "testing"
 //   - the API server's evaluate endpoint when no engine is wired
 //     (api.go::evaluateGuardrailPolicy)
 //
-// The chain mirrors the canonical Rego defaults
-// (block_threshold=4, alert_threshold=2, see policies/rego/data.json):
+// The chain is the default rule pack's posture (block CRITICAL, alert
+// MEDIUM), the same levels guardrail.rego applies without input.thresholds:
 //
 //	CRITICAL          -> block
 //	HIGH, MEDIUM      -> alert   (HIGH does NOT hard-block here)
@@ -41,11 +45,8 @@ import "testing"
 // posture (a HIGH finding is not block-worthy by itself) while
 // still giving CRITICAL findings the brake they need.
 //
-// If you intentionally change this mapping, also update:
-//   - policies/rego/data.json (block_threshold / alert_threshold)
-//   - the comment block above guardrailFallbackActionForSeverity in
-//     internal/gateway/guardrail.go
-//   - the documentation for `defenseclaw guardrail status`
+// If you intentionally change this mapping, also update the guardrail.rego
+// defaults and the documentation for `defenseclaw guardrail status`.
 func TestGuardrailFallbackActionForSeverity(t *testing.T) {
 	cases := []struct {
 		severity string
@@ -75,6 +76,10 @@ func TestGuardrailFallbackActionForSeverity(t *testing.T) {
 	}
 }
 
+// defaultFallbackThresholds are the default pack's levels (block CRITICAL,
+// alert MEDIUM).
+var defaultFallbackThresholds = policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium}
+
 // TestFallbackGuardrailVerdict_PreservesScannerMetadata covers the
 // wrapper used to coerce a scanner verdict's action to the canonical
 // fallback chain without losing the rest of the verdict (severity,
@@ -91,7 +96,7 @@ func TestFallbackGuardrailVerdict_PreservesScannerMetadata(t *testing.T) {
 		Scanner:  "regex",
 	}
 
-	out := fallbackGuardrailVerdict(in)
+	out := fallbackGuardrailVerdictForThresholds(in, defaultFallbackThresholds)
 	if out == nil {
 		t.Fatal("fallbackGuardrailVerdict(non-nil) returned nil")
 	}
@@ -126,9 +131,9 @@ func TestFallbackGuardrailVerdict_PreservesScannerMetadata(t *testing.T) {
 // keeps the fallback path safe for call sites that haven't decided
 // whether the scanner produced anything yet.
 func TestFallbackGuardrailVerdict_NilInput(t *testing.T) {
-	out := fallbackGuardrailVerdict(nil)
+	out := fallbackGuardrailVerdictForThresholds(nil, defaultFallbackThresholds)
 	if out == nil {
-		t.Fatal("fallbackGuardrailVerdict(nil) must return a usable allow verdict, not nil")
+		t.Fatal("fallbackGuardrailVerdictForThresholds(nil, defaultFallbackThresholds) must return a usable allow verdict, not nil")
 	}
 	if out.Action != "allow" || out.Severity != "NONE" {
 		t.Errorf("nil verdict should map to allow/NONE; got action=%q severity=%q",

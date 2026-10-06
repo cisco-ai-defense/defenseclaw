@@ -757,11 +757,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := guardrailToolCallActionForFindings(
+		runtimeAction := guardrailActionForConnectorFindings(
 			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
 		if enforceableSeverity != "NONE" {
-			codeGuardAction := guardrailToolCallActionForConnector(
+			codeGuardAction := guardrailActionForConnector(
 				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
@@ -1048,7 +1048,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailToolCallActionForConnector(a.decisionConfig(ctx), req.Connector, enforceableSeverity, true)
+		action = guardrailActionForConnector(a.decisionConfig(ctx), req.Connector, enforceableSeverity, true)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
@@ -1185,7 +1185,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 
 		action := guardrailActionAllow
 		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
-			action = guardrailRuntimeActionForConnector(
+			action = guardrailContentAction(
 				a.decisionConfig(ctx),
 				req.Connector,
 				HighestSeverity(enforceable),

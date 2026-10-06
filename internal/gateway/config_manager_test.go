@@ -927,8 +927,8 @@ func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	oldCfg.LLM.Model = "openai/gpt-4o-mini"
 	newCfg.LLM.Model = "openai/gpt-4.1-mini"
 
-	if !guardrailNeedsRestart(oldCfg, newCfg) {
-		t.Fatal("guardrailNeedsRestart returned false for llm change")
+	if diff := diffConfigs(oldCfg, newCfg); !slices.Contains(diff.RestartRequired, "llm") {
+		t.Fatalf("llm change diff = %+v, want llm to require a restart", diff)
 	}
 	if !watcherNeedsRestart(oldCfg, newCfg) {
 		t.Fatal("watcherNeedsRestart returned false for llm change")
@@ -1159,5 +1159,46 @@ func TestDiffConfigsRegistrySourcesHotReloadAssetPolicyNeedsRestart(t *testing.T
 	diff = diffConfigs(oldCfg, newCfg)
 	if !slices.Contains(diff.RestartRequired, "asset_policy") {
 		t.Fatalf("restart_required=%v, missing asset_policy", diff.RestartRequired)
+	}
+}
+
+// TestConfigManagerAssetReloadAppliesWithoutConfigDiff pins the asset path
+// of the one watcher: a referenced asset changing (or /policy/reload)
+// rebuilds the generation even though config.yaml is unchanged, and an
+// unchanged rebuild swaps nothing.
+func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	var diffs []ConfigDiff
+	unchanged := false
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+		diffs = append(diffs, diff)
+		if unchanged {
+			return errGenerationUnchanged
+		}
+		return nil
+	})
+	if err := mgr.Reload(context.Background(), "settle"); err != nil {
+		t.Fatalf("settle reload: %v", err)
+	}
+	diffs = nil
+	if err := mgr.Reload(context.Background(), "test"); err != nil || len(diffs) != 0 {
+		t.Fatalf("plain reload of an unchanged file = %v, applied %v", err, diffs)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil {
+		t.Fatalf("asset reload: %v", err)
+	}
+	if len(diffs) != 1 || !slices.Equal(diffs[0].Changed, []string{configDiffAssets}) || len(diffs[0].RestartRequired) != 0 {
+		t.Fatalf("asset reload diffs = %+v, want one hot %q diff", diffs, configDiffAssets)
+	}
+	gen := mgr.gen.Load()
+	unchanged = true
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || mgr.gen.Load() != gen {
+		t.Fatalf("unchanged asset rebuild = %v, generation %d -> %d", err, gen, mgr.gen.Load())
 	}
 }

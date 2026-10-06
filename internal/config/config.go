@@ -1892,6 +1892,10 @@ type GuardrailConfig struct {
 	// guardrail.connectors. It is unexported, so it never reaches YAML,
 	// JSON or a cloned configuration.
 	profileConnectors map[string]PerConnectorGuardrailConfig
+	// profileRules is the profile's own guardrail.profiles.<p>.rules on a
+	// derived configuration; EffectiveRulesForConnector layers it over the
+	// global and connector rules. Unexported like profileConnectors.
+	profileRules *GuardrailRulesConfig
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy

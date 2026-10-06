@@ -26,10 +26,10 @@ import (
 
 func TestGuardrailRuntimeActionBalanced(t *testing.T) {
 	cfg := &config.Config{}
-	if got := guardrailRuntimeAction(cfg, "HIGH", true); got != "alert" {
+	if got := guardrailActionForConnector(cfg, "", "HIGH", true); got != "alert" {
 		t.Fatalf("HIGH balanced action = %q, want alert", got)
 	}
-	if got := guardrailRuntimeAction(cfg, "CRITICAL", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "", "CRITICAL", true); got != "block" {
 		t.Fatalf("CRITICAL balanced action = %q, want block", got)
 	}
 }
@@ -38,13 +38,13 @@ func TestGuardrailRuntimeActionHILT(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.HILT.Enabled = true
 	cfg.Guardrail.HILT.MinSeverity = "HIGH"
-	if got := guardrailRuntimeAction(cfg, "HIGH", true); got != "confirm" {
+	if got := guardrailActionForConnector(cfg, "", "HIGH", true); got != "confirm" {
 		t.Fatalf("HIGH HILT confirmable action = %q, want confirm", got)
 	}
-	if got := guardrailRuntimeAction(cfg, "HIGH", false); got != "alert" {
+	if got := guardrailActionForConnector(cfg, "", "HIGH", false); got != "alert" {
 		t.Fatalf("HIGH HILT unsupported action = %q, want alert", got)
 	}
-	if got := guardrailRuntimeAction(cfg, "CRITICAL", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "", "CRITICAL", true); got != "block" {
 		t.Fatalf("CRITICAL HILT action = %q, want block", got)
 	}
 }
@@ -54,10 +54,10 @@ func TestGuardrailRuntimeActionStrictBlocksBeforeHILT(t *testing.T) {
 	cfg.Guardrail.RulePackDir = "/tmp/policies/guardrail/strict"
 	cfg.Guardrail.HILT.Enabled = true
 	cfg.Guardrail.HILT.MinSeverity = "HIGH"
-	if got := guardrailRuntimeAction(cfg, "MEDIUM", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "", "MEDIUM", true); got != "block" {
 		t.Fatalf("MEDIUM strict action = %q, want block", got)
 	}
-	if got := guardrailRuntimeAction(cfg, "HIGH", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "", "HIGH", true); got != "block" {
 		t.Fatalf("HIGH strict action = %q, want block", got)
 	}
 }
@@ -75,27 +75,27 @@ func TestGuardrailRuntimeActionPerConnectorPosture(t *testing.T) {
 	}
 
 	// codex has no override → inherits global strict → MEDIUM/HIGH block.
-	if got := guardrailRuntimeActionForConnector(cfg, "codex", "MEDIUM", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "codex", "MEDIUM", true); got != "block" {
 		t.Fatalf("codex (strict) MEDIUM = %q, want block", got)
 	}
-	if got := guardrailRuntimeActionForConnector(cfg, "codex", "HIGH", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "codex", "HIGH", true); got != "block" {
 		t.Fatalf("codex (strict) HIGH = %q, want block", got)
 	}
 
 	// claudecode override → permissive → HIGH is alert (not block), but
 	// CRITICAL still blocks.
-	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "HIGH", true); got != "alert" {
+	if got := guardrailActionForConnector(cfg, "claudecode", "HIGH", true); got != "alert" {
 		t.Fatalf("claudecode (permissive) HIGH = %q, want alert", got)
 	}
-	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "allow" {
+	if got := guardrailActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "allow" {
 		t.Fatalf("claudecode (permissive) MEDIUM = %q, want allow", got)
 	}
-	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "CRITICAL", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "claudecode", "CRITICAL", true); got != "block" {
 		t.Fatalf("claudecode (permissive) CRITICAL = %q, want block", got)
 	}
 
 	// Empty connector resolves to the global pack (single-connector parity).
-	if got := guardrailRuntimeActionForConnector(cfg, "", "MEDIUM", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "", "MEDIUM", true); got != "block" {
 		t.Fatalf("empty connector MEDIUM = %q, want block (global strict)", got)
 	}
 }
@@ -161,31 +161,31 @@ func TestGuardrailRuntimeActionPerConnectorHILT(t *testing.T) {
 	}
 
 	// claudecode has no hilt override → inherits global ON@HIGH.
-	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "HIGH", true); got != "confirm" {
+	if got := guardrailActionForConnector(cfg, "claudecode", "HIGH", true); got != "confirm" {
 		t.Fatalf("claudecode (inherit HILT) HIGH = %q, want confirm", got)
 	}
 	// Global min is HIGH, so MEDIUM stays below the confirm threshold and
 	// falls through to the balanced pack's alert tier (NOT confirm).
-	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "alert" {
+	if got := guardrailActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "alert" {
 		t.Fatalf("claudecode (inherit HILT) MEDIUM = %q, want alert", got)
 	}
 
 	// codex override disables HILT → HIGH confirmable falls through to alert.
-	if got := guardrailRuntimeActionForConnector(cfg, "codex", "HIGH", true); got != "alert" {
+	if got := guardrailActionForConnector(cfg, "codex", "HIGH", true); got != "alert" {
 		t.Fatalf("codex (HILT off) HIGH = %q, want alert", got)
 	}
 	// HILT off must NOT disable hard blocks: CRITICAL still blocks.
-	if got := guardrailRuntimeActionForConnector(cfg, "codex", "CRITICAL", true); got != "block" {
+	if got := guardrailActionForConnector(cfg, "codex", "CRITICAL", true); got != "block" {
 		t.Fatalf("codex (HILT off) CRITICAL = %q, want block", got)
 	}
 
 	// antigravity override lowers the confirm threshold to MEDIUM.
-	if got := guardrailRuntimeActionForConnector(cfg, "antigravity", "MEDIUM", true); got != "confirm" {
+	if got := guardrailActionForConnector(cfg, "antigravity", "MEDIUM", true); got != "confirm" {
 		t.Fatalf("antigravity (HILT@MEDIUM) MEDIUM = %q, want confirm", got)
 	}
 
 	// Empty connector resolves to the global HILT (single-connector parity).
-	if got := guardrailRuntimeActionForConnector(cfg, "", "HIGH", true); got != "confirm" {
+	if got := guardrailActionForConnector(cfg, "", "HIGH", true); got != "confirm" {
 		t.Fatalf("empty connector HIGH = %q, want confirm (global HILT)", got)
 	}
 }

@@ -317,6 +317,9 @@ type guardrailPolicyDigestView struct {
 	AlertAt           string                                 `json:"alert_at"`
 	HILT              HILTConfig                             `json:"hilt"`
 	RulePackDir       string                                 `json:"rule_pack_dir"`
+	RulePack          string                                 `json:"rule_pack,omitempty"`
+	Rules             *GuardrailRulesConfig                  `json:"rules,omitempty"`
+	ProfileRules      *GuardrailRulesConfig                  `json:"profile_rules,omitempty"`
 	BlockMessage      string                                 `json:"block_message"`
 	Connectors        map[string]PerConnectorGuardrailConfig `json:"connectors"`
 	ProfileConnectors map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
@@ -341,6 +344,8 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 		AlertAt:        canonicalGuardrailLevel(g.AlertAt),
 		HILT:           g.HILT,
 		RulePackDir:    g.RulePackDir,
+		RulePack:       g.RulePack,
+		ProfileRules:   g.profileRules,
 		BlockMessage:   g.BlockMessage,
 		Connectors:     g.Connectors,
 		AutoProtection: cfg.ApplicationProtection.Guardrail,
@@ -348,6 +353,10 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 			"claude_code": cfg.ClaudeCode.Mode,
 			"codex":       cfg.Codex.Mode,
 		},
+	}
+	if !g.Rules.IsZero() {
+		rules := g.Rules
+		view.Rules = &rules
 	}
 	if len(g.profileConnectors) > 0 {
 		view.ProfileConnectors = g.profileConnectors
@@ -377,6 +386,7 @@ func (p GuardrailProfile) policyFields() PerConnectorGuardrailConfig {
 		HILT:         p.HILT,
 		BlockMessage: p.BlockMessage,
 		RulePackDir:  p.RulePackDir,
+		RulePack:     p.RulePack,
 		BlockAt:      p.BlockAt,
 		AlertAt:      p.AlertAt,
 	}
@@ -397,8 +407,15 @@ func overlayGuardrailPolicy(dst, src PerConnectorGuardrailConfig, withLevels boo
 	if src.BlockMessage != "" {
 		dst.BlockMessage = src.BlockMessage
 	}
+	// One scope selects one pack: a rule_pack replaces an inherited
+	// rule_pack_dir and the other way round.
 	if strings.TrimSpace(src.RulePackDir) != "" {
 		dst.RulePackDir = src.RulePackDir
+		dst.RulePack = ""
+	}
+	if strings.TrimSpace(src.RulePack) != "" {
+		dst.RulePack = src.RulePack
+		dst.RulePackDir = ""
 	}
 	if withLevels {
 		if level := canonicalGuardrailLevel(src.BlockAt); level != "" {
@@ -427,6 +444,16 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 	}
 	if strings.TrimSpace(fields.RulePackDir) != "" {
 		g.RulePackDir = fields.RulePackDir
+		g.RulePack = ""
+	}
+	if strings.TrimSpace(fields.RulePack) != "" {
+		g.RulePack = fields.RulePack
+		g.RulePackDir = ""
+	}
+	g.profileRules = nil
+	if profile.Rules != nil && !profile.Rules.IsZero() {
+		rules := *profile.Rules
+		g.profileRules = &rules
 	}
 	if level := canonicalGuardrailLevel(fields.BlockAt); level != "" {
 		g.BlockAt = level
@@ -455,7 +482,9 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		if g.profileConnectors == nil {
 			g.profileConnectors = make(map[string]PerConnectorGuardrailConfig, len(profile.Connectors))
 		}
-		g.profileConnectors[key] = overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
+		entry := overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
+		entry.Rules = pc.Rules
+		g.profileConnectors[key] = entry
 		if strings.TrimSpace(pc.Mode) != "" {
 			clearHookModes(out, key)
 		}
