@@ -63,15 +63,17 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 
 // windowsEnterpriseHookFailMode is the authoritative managed-native hook
 // policy used by rendering, lock publication, and verification. The protected
-// Windows deployment never permits Codex or Claude hooks to inherit a
-// fail-open normal-mode setting.
+// Windows deployment uses the same default for every connector, independent
+// of inherited normal-mode settings.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "codex", "claudecode", "cursor":
-		return "closed"
-	default:
-		return strings.TrimSpace(configured)
-	}
+	return connector.ManagedEnterpriseHookFailMode
+}
+
+// Protected legacy contracts remain readable during upgrade. New writers use
+// the enterprise default; the sidecars must still agree with their own lock.
+func validWindowsManagedHookFailMode(mode string) bool {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	return mode == "open" || mode == "closed"
 }
 
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {

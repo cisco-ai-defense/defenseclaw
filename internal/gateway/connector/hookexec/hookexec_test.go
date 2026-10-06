@@ -191,7 +191,7 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 			t.Fatalf("write scoped token: %v", err)
 		}
 		opts.ManagedEnterprise = true
-		opts.FailMode = "open"
+		opts.FailMode = "closed"
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
@@ -1390,7 +1390,7 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 					Home:               home,
 					HookDir:            filepath.Join(home, "hooks"),
 					Token:              "target-readable-token",
-					FailMode:           "open",
+					FailMode:           "closed",
 					ManagedEnterprise:  true,
 					StrictAvailability: false,
 					Stdin:              strings.NewReader("{}"),
@@ -1422,7 +1422,7 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 		Home:                  home,
 		HookDir:               filepath.Join(home, "hooks"),
 		Token:                 "target-readable-token",
-		FailMode:              "open",
+		FailMode:              "closed",
 		ManagedEnterprise:     true,
 		ManagedRuntimeFailure: "enterprise_managed_sid_unregistered",
 		Stdin:                 strings.NewReader("{}"),

@@ -158,7 +158,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		}
 		setup := connector.SetupOpts{
 			APIAddr:           apiAddr,
-			HookFailMode:      "closed",
+			HookFailMode:      connector.ManagedEnterpriseHookFailMode,
 			ManagedEnterprise: true,
 			HookExecutable:    hookExecutable,
 			DataDir:           target.dataDir,

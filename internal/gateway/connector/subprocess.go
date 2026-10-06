@@ -29,6 +29,7 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"gopkg.in/yaml.v3"
 )
 
@@ -71,6 +72,9 @@ type templateData struct {
 // runtime, or through the per-connector setup flow (which also
 // persists to guardrail.hook_fail_mode in config.yaml).
 const defaultHookFailMode = "closed"
+
+// ManagedEnterpriseHookFailMode applies to every enterprise connector.
+const ManagedEnterpriseHookFailMode = hookexec.ManagedEnterpriseFailMode
 
 // cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
 // request budget while staying inside Cursor's 30-second command-hook timeout.
@@ -643,14 +647,14 @@ func ReconcileManagedNativeHookRuntime(
 		hookDir,
 		apiAddr,
 		name,
-		"closed",
+		ManagedEnterpriseHookFailMode,
 		true,
 		writeFile,
 	)
 }
 
 // ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
-// endpoint agreement, connector closed mode, flat record, and scoped token.
+// endpoint agreement, a known connector mode, matching flat record, and token.
 func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
 ) error {
@@ -685,12 +689,13 @@ func ValidateManagedNativeHookRuntime(
 			apiAddr,
 		)
 	}
-	if state.FailModes[name] != "closed" {
+	mode := state.FailModes[name]
+	if mode != "closed" && mode != "open" {
 		return fmt.Errorf(
 			"managed hook connector %s fail mode %q, want %q",
 			name,
 			state.FailModes[name],
-			"closed",
+			"open or closed",
 		)
 	}
 	flat, _, err := readStableHookRuntimeSidecar(
@@ -704,8 +709,8 @@ func ValidateManagedNativeHookRuntime(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
-		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != mode {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, mode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
 	if err != nil {
@@ -1289,7 +1294,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     vendor fail-closed fields.
 //
 // Transport-layer failures (gateway unreachable / timeout / 5xx) follow
-// FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
+// FailMode too. Outside managed mode, DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
 // force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
@@ -1320,8 +1325,12 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 // The explicit string in opts.HookFailMode always wins; an empty
 // value falls back to the connector-default and is upgraded to
 // "closed" when the operator has set the matching enforcement flag
-// for codex / claudecode (avarice F-0681).
+// for codex / claudecode (avarice F-0681). Managed enterprise setup uses
+// its shared infrastructure default before considering normal-mode settings.
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if opts.ManagedEnterprise {
+		return ManagedEnterpriseHookFailMode
+	}
 	if strings.TrimSpace(opts.HookFailMode) != "" {
 		return normalizeHookFailMode(opts.HookFailMode)
 	}

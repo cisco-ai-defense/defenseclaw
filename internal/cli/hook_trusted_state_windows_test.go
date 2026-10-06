@@ -177,7 +177,7 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 		opts.ManagedGatewayServiceName != "DefenseClawGateway" ||
 		opts.AuthenticatedManagedToken == nil ||
 		*opts.AuthenticatedManagedToken != "authenticated-generation-token" ||
-		opts.FailMode != "closed" {
+		opts.FailMode != "open" || opts.StrictAvailability {
 		t.Fatalf("enterprise runtime options = %+v", opts)
 	}
 }
@@ -222,8 +222,8 @@ func TestBuildHookOptionsEnterpriseManagedRejectsIncompleteAuthenticatedGenerati
 			opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
 			if opts.ManagedRuntimeFailure != "enterprise_managed_runtime_state_invalid" ||
 				opts.AuthenticatedManagedToken != nil ||
-				opts.FailMode != "closed" || !opts.StrictAvailability {
-				t.Fatalf("incomplete authenticated generation did not fail closed: %+v", opts)
+				opts.FailMode != "open" || opts.StrictAvailability {
+				t.Fatalf("incomplete authenticated generation lost its failure diagnostic or default mode: %+v", opts)
 			}
 		})
 	}
@@ -239,12 +239,12 @@ func TestBuildHookOptionsEnterpriseManagedWithoutPreflightCannotReadLegacyRuntim
 	opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
 	if opts.ManagedRuntimeFailure != "enterprise_managed_runtime_state_invalid" ||
 		opts.AuthenticatedManagedToken != nil || opts.APIAddr != "127.0.0.1:1" ||
-		opts.FailMode != "closed" || !opts.StrictAvailability {
-		t.Fatalf("managed options without authenticated preflight did not fail closed: %+v", opts)
+		opts.FailMode != "open" || opts.StrictAvailability {
+		t.Fatalf("managed options without authenticated preflight lost their failure diagnostic or default mode: %+v", opts)
 	}
 }
 
-func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing.T) {
+func TestBuildHookOptionsEnterpriseManagedReturnsOwnershipErrorBeforeContact(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "open")
 	userRuntime := filepath.Join(t.TempDir(), ".defenseclaw")
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
@@ -259,12 +259,12 @@ func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
 	if opts.Home != "" || opts.HookDir != "" ||
-		opts.FailMode != "closed" || !opts.StrictAvailability {
-		t.Fatalf("invalid managed runtime did not fail closed: %+v", opts)
+		opts.FailMode != "open" || opts.StrictAvailability {
+		t.Fatalf("invalid managed runtime did not preserve rejection before contact: %+v", opts)
 	}
 }
 
-func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T) {
+func TestEnterpriseManagedHookRuntimeReturnsUnregisteredSIDBeforeContact(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "closed")
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 		return enterprisehooks.WindowsManagedHookRuntime{
@@ -277,9 +277,9 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 		t.Fatal("unregistered SID was incorrectly treated as a no-op")
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
-	if opts.FailMode != "closed" || !opts.StrictAvailability || !opts.ManagedEnterprise ||
+	if opts.FailMode != "open" || opts.StrictAvailability || !opts.ManagedEnterprise ||
 		opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason {
-		t.Fatalf("unregistered managed SID did not force closed options: %+v", opts)
+		t.Fatalf("unregistered managed SID lost its diagnostic or default mode: %+v", opts)
 	}
 }
 
@@ -349,7 +349,7 @@ func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.
 	}
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
 	if opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason ||
-		opts.APIAddr != "" || opts.FailMode != "closed" || !opts.StrictAvailability {
+		opts.APIAddr != "" || opts.FailMode != "open" || opts.StrictAvailability {
 		t.Fatalf("de-enrolled runtime was not rejected before gateway lookup: %+v", opts)
 	}
 }
@@ -396,7 +396,7 @@ func TestEnterpriseProgramFilesCommandDoesNotClaimPerUserTombstoneNoop(t *testin
 	}
 }
 
-func TestCodexManagedActiveMissingStateFailsClosed(t *testing.T) {
+func TestCodexManagedActiveMissingStateReturnsBeforeContact(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "closed")
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 		return enterprisehooks.WindowsManagedHookRuntime{
@@ -409,8 +409,8 @@ func TestCodexManagedActiveMissingStateFailsClosed(t *testing.T) {
 	}
 	opts := buildHookOptionsForRuntime("codex", "BeforeAgent", "", "open", true)
 	if opts.ManagedRuntimeFailure != "enterprise_managed_runtime_state_invalid" ||
-		opts.FailMode != "closed" || !opts.StrictAvailability {
-		t.Fatalf("active Codex state damage did not fail closed: %+v", opts)
+		opts.FailMode != "open" || opts.StrictAvailability {
+		t.Fatalf("active Codex state damage lost its diagnostic or default mode: %+v", opts)
 	}
 }
 

@@ -206,7 +206,7 @@ func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err != nil {
 		return rollback(fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err))
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := resolveHookFailMode(opts, c)
 	rendered := renderOmnigentPolicy(string(templateBytes), opts.APIAddr, tokenPath, failMode)
 	if err := atomicWriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 		return rollback(fmt.Errorf("omnigent write policy module: %w", err))

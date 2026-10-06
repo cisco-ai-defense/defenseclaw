@@ -126,6 +126,11 @@ defenseclaw_harden_resources() {
 # spawns sees a known-good search path (no $HOME/bin first, no agent-
 # injected entries) and a git that ignores user / system config.
 defenseclaw_harden_env() {
+  # Managed hooks use one infrastructure default until central policy exists.
+  # Inherited project settings cannot select a different managed failure mode.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+    export DEFENSECLAW_FAIL_MODE=open
+  fi
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
@@ -271,14 +276,15 @@ defenseclaw_shared_hook_token_file() {
 
 # Resolve the selected connector's fail mode from the connector-aware shared
 # runtime state.  An explicit process value still wins for non-managed
-# ephemeral shells; guardian-managed hooks trust only installer-owned state.
-# Malformed, ambiguous, or missing state fails closed.
+# ephemeral shells. Managed hooks use the enterprise open default until
+# central policy exists. Unmanaged invalid or missing state remains closed.
 defenseclaw_shared_runtime_fail_mode() {
   local hook_dir="$1"
   local connector="${2:-}"
   local mode="${DEFENSECLAW_FAIL_MODE:-}"
   if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
-    mode=""
+    printf open
+    return 0
   fi
   local config="${hook_dir}/.hookcfg"
   local flat_config="${hook_dir}/.hookcfg.legacy"
@@ -713,16 +719,16 @@ defenseclaw_response_failure_reason() {
 }
 
 # defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
-# connector's effective fail mode is closed, for guardian-installed managed
-# hooks, or when strict availability is enabled. Fail mode therefore has one
+# connector's effective fail mode is closed or strict availability is enabled
+# outside managed mode. Fail mode therefore has one
 # consistent meaning across malformed responses, auth failures, and transport
 # failures instead of silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
   case "${FAIL_MODE:-open}" in
     closed) return 0 ;;
-  esac
-  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 0 ;;
   esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;

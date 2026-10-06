@@ -59,7 +59,7 @@ func installWindowsCodexManagedResult(
 			target.conn.Name(),
 		)
 	}
-	target.setup.HookFailMode = "closed"
+	target.setup.HookFailMode = connector.ManagedEnterpriseHookFailMode
 	machineOpts, err := windowsCodexRequirementsOptionsResolver(
 		target.hookExecutable,
 		target.setup.APIAddr,
@@ -151,7 +151,7 @@ func installWindowsCodexManagedResult(
 					err,
 				))
 			}
-			lockEntry.HookFailMode = "closed"
+			lockEntry.HookFailMode = connector.ManagedEnterpriseHookFailMode
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{
 				HookConfigPaths: []string{requirementsPath},
@@ -226,7 +226,7 @@ func installWindowsCodexManagedResult(
 	}
 	// Publish this SID only after its target-owned runtime has been hardened and
 	// verified. Until this atomic protected-registry update succeeds, direct
-	// managed invocation remains fail-closed as an unregistered SID.
+	// managed invocation reports an unregistered SID before gateway contact.
 	currentTargets, err := connector.ReadWindowsCodexManagedRuntimeTargets(
 		target.hookExecutable,
 	)
@@ -298,7 +298,7 @@ func verifyWindowsCodexManagedResult(
 	if err != nil {
 		return InstallResult{}, err
 	}
-	target.setup.HookFailMode = "closed"
+	target.setup.HookFailMode = connector.ManagedEnterpriseHookFailMode
 	machineOpts, err := windowsCodexRequirementsOptionsResolver(
 		target.hookExecutable,
 		target.setup.APIAddr,
@@ -455,7 +455,7 @@ func verifyWindowsCodexUserRuntime(
 		len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], requirementsPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		!validWindowsManagedHookFailMode(lock.HookFailMode) {
 		return errors.New("enterprise hooks: Codex managed hook contract does not identify only machine requirements")
 	}
 	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {

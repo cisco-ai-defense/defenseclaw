@@ -21,7 +21,7 @@
 //
 // The behavior here mirrors the .sh hooks under internal/gateway/connector/hooks:
 // the same gateway endpoint, per-connector stdout shape and exit code, and the
-// same fail-open-on-outage / fail-closed-on-misconfig policy. Native transport
+// same selected failure mode for outages and invalid responses. Native transport
 // deadlines may follow the agent's registered event budget. Unix keeps using
 // the .sh hooks unchanged; golden tests pin the shared decision contract.
 package hookexec
@@ -64,6 +64,11 @@ var (
 
 const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
 
+// ManagedEnterpriseFailMode is the infrastructure failure default for every
+// enterprise connector until an administrator-controlled policy is available.
+// Explicit gateway policy decisions are still enforced.
+const ManagedEnterpriseFailMode = "open"
+
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
 // matrix can be exercised without a real gateway or agent.
@@ -95,7 +100,7 @@ type Options struct {
 	// endpoint and service identity. A non-nil value is an explicit mode
 	// assertion: ManagedEnterprise execution must use this snapshot directly
 	// and must not probe or reread mutable legacy token sidecars. A nil value
-	// preserves the legacy resolution path; a non-nil empty value fails closed.
+	// preserves the legacy resolution path; a non-nil empty value prevents contact.
 	// It is ignored outside ManagedEnterprise mode.
 	AuthenticatedManagedToken *string
 
@@ -103,8 +108,8 @@ type Options struct {
 	// transport failures and a missing token fail closed instead of open.
 	StrictAvailability bool
 	// ManagedEnterprise marks an administrator-enrolled native hook. User
-	// deletion of Home or creation of Home\.disabled is tampering, not an
-	// operator-requested no-op, and must therefore fail closed.
+	// deletion of Home or creation of Home\.disabled returns before contact
+	// and follows the configured infrastructure failure mode.
 	ManagedEnterprise bool
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
@@ -159,21 +164,21 @@ func Run(ctx context.Context, opts Options) int {
 		return failUnreachable(
 			opts,
 			sp,
-			"closed",
+			failMode,
 			strings.TrimSpace(opts.ManagedRuntimeFailure),
 		)
 	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
 	// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
-	// (and invalid runtimes also set StrictAvailability), so a missing or
-	// disabled machine-policy home must block instead of bypassing enforcement.
+	// so a missing or disabled machine-policy home is logged and handled by
+	// the effective failure mode without contacting the gateway.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
 		if opts.ManagedEnterprise {
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				failMode,
 				"enterprise_managed_runtime_home_missing",
 			)
 		}
@@ -184,7 +189,7 @@ func Run(ctx context.Context, opts Options) int {
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				failMode,
 				"enterprise_managed_runtime_disable_sentinel_forbidden",
 			)
 		}
@@ -213,7 +218,7 @@ func Run(ctx context.Context, opts Options) int {
 				opts.ManagedGatewayServiceName,
 			)
 			if err != nil {
-				return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+				return failUnreachable(opts, sp, failMode, managedGatewayPeerUnverifiedReason)
 			}
 		} else {
 			opts.HTTPClient = defaultHTTPClient(requestTimeout)
@@ -244,7 +249,7 @@ func Run(ctx context.Context, opts Options) int {
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				failMode,
 				"authenticated managed runtime token is empty",
 			)
 		}
@@ -268,16 +273,16 @@ func Run(ctx context.Context, opts Options) int {
 			if readErr != nil && opts.ManagedEnterprise {
 				// Managed enterprise mode must not silently omit Authorization when
 				// the token sidecar is present but unreadable, malformed, or fails a
-				// stability/identity check. Fail closed so unauthenticated loopback
+				// stability/identity check. Return before contact so unauthenticated
 				// requests never sneak past connector-side auth.
-				return failUnreachable(opts, sp, "closed", "managed hook token unreadable")
+				return failUnreachable(opts, sp, failMode, "managed hook token unreadable")
 			}
 			if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
 				// An empty sidecar parses without error but sendHookRequest would
 				// then omit Authorization entirely and the connector-side loopback
 				// path would accept the credential-less request. Managed mode has
-				// no no-auth path, so fail closed here.
-				return failUnreachable(opts, sp, "closed", "managed hook token empty")
+				// no no-auth path, so return before contact here.
+				return failUnreachable(opts, sp, failMode, "managed hook token empty")
 			}
 			token = loaded
 		}
@@ -395,11 +400,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if err != nil {
 		reason := "gateway unreachable"
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
-			// Managed peer-verification failure must fail closed on the transport
-			// surface too, mirroring the up-front client-build path. A managed
-			// hook launched with FailMode="open" must not let an unverified
-			// gateway peer surface as an allow-by-default.
-			return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+			// Peer verification still prevents sending any HTTP bytes or token.
+			// The agent action follows the same failure mode as other outages.
+			return failUnreachable(opts, sp, failMode, managedGatewayPeerUnverifiedReason)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -533,12 +536,12 @@ func (sp spec) decide(opts Options, body []byte) int {
 // handleMissingToken mirrors defenseclaw_handle_missing_token: log the bypass,
 // then allow (exit 0) by default or block (exit 2) under strict availability.
 // Managed enterprise mode has no unauthenticated path, so a missing token is
-// always fatal there regardless of the caller-supplied fail mode.
+// handled before gateway contact according to the selected fail mode.
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed" {
+	if opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
@@ -547,7 +550,7 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 }
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
-	if opts.StrictAvailability || opts.ManagedEnterprise {
+	if opts.StrictAvailability || (opts.ManagedEnterprise && normalizeFailMode(opts.FailMode) == "closed") {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
 	}

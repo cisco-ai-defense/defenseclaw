@@ -753,7 +753,7 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 			want.GatewayServiceName = "DefenseClawGateway-Other"
 		}},
 		{name: "fail mode", mutate: func(got *windowsManagedRuntimeBundle, _ *WindowsManagedRuntimeGenerationDesired) {
-			got.FailMode = "open"
+			got.FailMode = "closed"
 		}},
 		{name: "scoped token", mutate: func(_ *windowsManagedRuntimeBundle, want *WindowsManagedRuntimeGenerationDesired) {
 			want.ScopedToken = "different-scoped-codex-token"

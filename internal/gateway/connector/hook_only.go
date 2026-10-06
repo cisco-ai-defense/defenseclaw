@@ -879,7 +879,7 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err != nil {
 		return fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := resolveHookFailMode(opts, c)
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}
@@ -1244,6 +1244,9 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 
 func (c *hookOnlyConnector) effectiveFailClosed(opts SetupOpts) bool {
 	cap := c.HookCapabilities(opts)
+	if opts.ManagedEnterprise {
+		return cap.SupportsFailClosed && ManagedEnterpriseHookFailMode == "closed"
+	}
 	return cap.SupportsFailClosed && strings.TrimSpace(opts.HookFailMode) == "closed"
 }
 
