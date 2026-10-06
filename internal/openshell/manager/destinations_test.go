@@ -233,3 +233,26 @@ func TestDestinationsAreBounded(t *testing.T) {
 		t.Fatalf("rows %d dropped %d", len(d.Destinations), d.Dropped)
 	}
 }
+
+// A table full of made-up inference-shaped names still records a catalogued
+// AI provider, in place of the oldest of them, and reports it.
+func TestDestinationsFullOfUnknownAIStillReportAProvider(t *testing.T) {
+	e := liveEnv(t, "fullbox", nil)
+	at := time.Now()
+	for i := range sandboxapi.MaxDestinations {
+		at = at.Add(time.Second)
+		e.ocsf("fullbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> n"+strconv.Itoa(i)+"-llm.example:443/tcp [policy:allow_x engine:opa]", at)
+	}
+	before := len(e.tel.findingsOf(audit.SandboxFindingShadowAI))
+	e.ocsf("fullbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> n9999-llm.example:443/tcp [policy:allow_x engine:opa]", at.Add(time.Second))
+	e.ocsf("fullbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> api.openai.com:443/tcp [policy:allow_x engine:opa]", at.Add(2*time.Second))
+	rows := destinationKinds(t, e, "fullbox")
+	if len(rows) != sandboxapi.MaxDestinations || rows["api.openai.com"].Kind != sandboxapi.DestinationOtherAI ||
+		rows["n0-llm.example"].Host != "" || rows["n9999-llm.example"].Host != "" {
+		t.Fatalf("%d rows, api.openai.com %+v", len(rows), rows["api.openai.com"])
+	}
+	shadow := e.tel.findingsOf(audit.SandboxFindingShadowAI)
+	if len(shadow) != before+1 || shadow[len(shadow)-1].TargetRef != "api.openai.com" {
+		t.Fatalf("findings before %d, after %+v", before, shadow[before:])
+	}
+}

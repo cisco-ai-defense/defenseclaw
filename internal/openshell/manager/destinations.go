@@ -229,32 +229,49 @@ func (m *Manager) tableLocked(name string) *destTable {
 	return t
 }
 
-// row returns host's row, adding it (at, at the cap, in place of the least
-// recently seen row that is no AI destination); nil when there is no room.
+// row returns host's row, adding it (at; at the cap in place of another,
+// evictable); nil when there is no room.
 func (t *destTable) row(m *Manager, host string, at time.Time, harnessName string) *destRow {
 	if r := t.rows[host]; r != nil {
 		return r
 	}
+	r := &destRow{Host: host, FirstSeen: at, LastSeen: at}
+	r.lookup(m.destinationCatalog())
 	if len(t.rows) >= sandboxapi.MaxDestinations {
-		var oldest *destRow
-		for _, r := range t.rows {
-			if kind, _, _ := r.classify(harnessName); isAIKind(kind) {
-				continue
-			}
+		t.dropped++
+		victim := t.evictable(harnessName, r.hit != nil)
+		if victim == nil {
+			return nil
+		}
+		delete(t.rows, victim.Host)
+	}
+	t.rows[host] = r
+	return r
+}
+
+// evictable is the row a new one takes the place of at the cap: the least
+// recently seen that is no AI destination, else, for a catalogued AI
+// provider, the least recently seen unknown_ai row. A workload can make up
+// any number of inference-shaped names, but not catalogued providers, so a
+// table full of made-up names still records (and reports) a real one.
+func (t *destTable) evictable(harnessName string, catalogued bool) *destRow {
+	var oldest, oldestUnknown *destRow
+	for _, r := range t.rows {
+		switch kind, _, _ := r.classify(harnessName); {
+		case !isAIKind(kind):
 			if oldest == nil || r.LastSeen.Before(oldest.LastSeen) {
 				oldest = r
 			}
+		case catalogued && kind == sandboxapi.DestinationUnknownAI:
+			if oldestUnknown == nil || r.LastSeen.Before(oldestUnknown.LastSeen) {
+				oldestUnknown = r
+			}
 		}
-		t.dropped++
-		if oldest == nil {
-			return nil
-		}
-		delete(t.rows, oldest.Host)
 	}
-	r := &destRow{Host: host, FirstSeen: at, LastSeen: at}
-	r.lookup(m.destinationCatalog())
-	t.rows[host] = r
-	return r
+	if oldest != nil {
+		return oldest
+	}
+	return oldestUnknown
 }
 
 func (r *destRow) lookup(c *catalog.Catalog) {

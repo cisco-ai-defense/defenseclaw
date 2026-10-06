@@ -974,7 +974,9 @@ With the [process tree](/docs/sandboxes/policy-packs) on, `--output json`
 adds the process and its parents (`lineage`). A second table lists the
 models OpenShell's inference route reported calls to. The view survives
 daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
-AI destinations make room), and is removed with the sandbox. The `Egress`
+AI destinations make room; when every row is one, a provider the catalog
+knows takes the place of the oldest **shadow AI?** host), and is removed
+with the sandbox. The `Egress`
 line of `sandbox status NAME` sums it up.
 
 ```bash
