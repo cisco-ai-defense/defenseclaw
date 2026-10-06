@@ -146,11 +146,8 @@ func platformDiscoveryHomeOwners(standalone bool) []discoveryHomeOwner {
 // folder's name when the account cannot be looked up.
 func windowsProfileAccountName(sid, home string) string {
 	if parsed, err := windows.StringToSid(sid); err == nil {
-		if account, domain, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
-			// DOMAIN\name, as agent identities and hook records spell it.
-			if domain = strings.TrimSpace(domain); domain != "" {
-				return domain + `\` + account
-			}
+		// The bare account name, as agent identities and hook records spell it.
+		if account, _, _, err := parsed.LookupAccount(""); err == nil && strings.TrimSpace(account) != "" {
 			return account
 		}
 	}
