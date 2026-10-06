@@ -1218,10 +1218,14 @@ def _prompt_connector_selection(
             )
             return names
     disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
-    if disc.cache_hit and _active_not_installed(_with_config_state(disc, data_dir)):
+    if disc.cache_hit:
+        cached = _with_config_state(disc, data_dir)
         # GAP-1869: an agent installed after the cache was written showed as
         # not installed, was not offered, and init removed its connector.
-        disc = agent_discovery.discover_agents(refresh=True, data_dir=data_dir)
+        # GAP-0092: a cache with no hook connector at all (written before the
+        # agents were on PATH) is as stale, and rescanning it costs little.
+        if _active_not_installed(cached) or not _installed_hook_connectors(cached):
+            disc = agent_discovery.discover_agents(refresh=True, data_dir=data_dir)
     disc = _prompt_trust_discovery_prefixes(
         disc,
         data_dir=data_dir,
