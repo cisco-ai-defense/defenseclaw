@@ -1193,7 +1193,8 @@ deleted.
   duration from `1m` to `24h`, `10m` in every built-in pack). When the
   harness of a user-tier sandbox (OpenCode, Kiro CLI, Amp, Devin CLI,
   Antigravity, Hermes, OpenHands), whose hook registration the agent can
-  edit, works that long without one hook request reaching DefenseClaw,
+  edit, works that long (an idle stretch that long starts the count over)
+  without one hook request reaching DefenseClaw,
   `stop` (the default in `balanced` and `strict`) stops the sandbox the way
   a hook tamper does, and `alert` (the default in `open`) keeps it running.
   Both raise the HIGH `hook_silence` finding, whose evidence names the

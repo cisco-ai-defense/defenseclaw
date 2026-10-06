@@ -95,8 +95,12 @@ type box struct {
 	guard       *guardRun
 	guardEnding chan struct{}
 
-	hooks       hookStats
+	hooks hookStats
+	// activeAt is the harness's latest activity and activeSince the start
+	// of its current run of activity (noteActiveLocked), which the hook
+	// silence check measures.
 	activeAt    time.Time
+	activeSince time.Time
 	silentSince time.Time
 	// reach is whether the current session's hooks reach the ingress
 	// (reach.go); it starts over whenever the sandbox becomes ready.

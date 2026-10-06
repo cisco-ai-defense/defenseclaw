@@ -653,7 +653,10 @@ one hook request reaching DefenseClaw raises a HIGH `hook_silence` finding,
 and `defenseclaw sandbox list` shows `silent!` in its HOOKS column. A
 switched-off hook registration looks like that, and a user-tier harness's
 registration is the agent's to edit, so for those the pack's
-`hooks.on_silence` decides what follows:
+`hooks.on_silence` decides what follows. Only work that goes on that long
+counts: an idle stretch as long as `silence_after` starts the count over, so
+a sandbox left idle is not flagged when its harness wakes up (a new prompt,
+a background request).
 
 ```text
 14:21:07 myapp-7f3a ⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)

@@ -89,7 +89,7 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 		// exports OTLP from its start, before the first prompt that fires
 		// its hooks. A model call is (watch.go).
 		box.hooks.lastOTLP = now
-		box.activeAt = now
+		box.noteActiveLocked(now)
 	}
 	name := box.rec.Name
 	m.mu.Unlock()
@@ -551,14 +551,42 @@ type silenceAlarm struct {
 	stop, stopping bool
 }
 
+// silenceRef is when the box's hooks were last heard from: the session's
+// last hook request, or its start when none came yet.
+func (b *box) silenceRef() time.Time {
+	if b.hooks.lastHook.After(b.started) {
+		return b.hooks.lastHook
+	}
+	return b.started
+}
+
+// noteActiveLocked records the harness's activity at `at`. Activity goes on
+// one run while each event follows the last by less than the box's
+// hooks.silence_after; a run starts over at the first activity after a hook
+// request (or the session's start), and after an idle stretch that long.
+// So a harness idle for longer than silence_after that wakes for a moment
+// (a new prompt before its first hook, a background request) is no silence.
+// Callers hold Manager.mu.
+func (b *box) noteActiveLocked(at time.Time) {
+	if !at.After(b.activeAt) {
+		return
+	}
+	_, after := silenceResponse(b.rec.TamperTier, b.eff)
+	if b.activeSince.Before(b.silenceRef()) || at.Sub(b.activeAt) >= after {
+		b.activeSince = at
+	}
+	b.activeAt = at
+}
+
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
-// harness was active (OCSF process or network events of the harness's own
-// binaries, its connections to the egress proxy among them, native OTLP)
-// for longer than the pack's hooks.silence_after since its last hook
-// request, or since it became ready when no hook ever arrived. A tampered or
-// disabled hook registration looks exactly like that. A user-tier harness
-// under hooks.on_silence: stop (balanced and strict) is stopped, as a hook
-// tamper is; every other one alerts (silenceResponse).
+// harness has been at work (OCSF process or network events of the harness's
+// own binaries, its connections to the egress proxy among them, native
+// OTLP) for the pack's hooks.silence_after, with no idle stretch that long,
+// since its last hook request, or since it became ready when no hook ever
+// arrived (noteActiveLocked). A tampered or disabled hook registration
+// looks exactly like that. A user-tier harness under hooks.on_silence: stop
+// (balanced and strict) is stopped, as a hook tamper is; every other one
+// alerts (silenceResponse).
 func (m *Manager) checkHookSilence(ctx context.Context) {
 	now := m.now()
 	var out []silenceAlarm
@@ -568,11 +596,8 @@ func (m *Manager) checkHookSilence(ctx context.Context) {
 			continue
 		}
 		response, after := silenceResponse(b.rec.TamperTier, b.eff)
-		ref := b.started
-		if b.hooks.lastHook.After(ref) {
-			ref = b.hooks.lastHook
-		}
-		if ref.IsZero() || !b.activeAt.After(ref.Add(after)) {
+		ref := b.silenceRef()
+		if ref.IsZero() || b.activeSince.Before(ref) || b.activeAt.Sub(b.activeSince) < after {
 			continue
 		}
 		if b.silentSince.IsZero() {
@@ -583,7 +608,7 @@ func (m *Manager) checkHookSilence(ctx context.Context) {
 		}
 		b.silenceSent = true
 		a := silenceAlarm{id: b.identity(), name: b.rec.Name, bindingID: b.rec.BindingID, tier: b.rec.TamperTier,
-			response: response, since: ref, after: after}
+			response: response, since: b.activeSince, after: after}
 		if response == packs.OnSilenceStop {
 			a.stop, a.stopping = !b.tamperStop, b.tamperStop
 			b.tamperStop = true

@@ -23,12 +23,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -706,44 +708,72 @@ func TestHookEventCapCoversEveryContract(t *testing.T) {
 	}
 }
 
-// The harness active long after its last hook raises one hook_silence finding
-// until the next hook; commands it did not run and an idle harness never do.
+// The harness at work for silence_after since its last hook raises one
+// hook_silence finding until the next hook. Commands it did not run, an idle
+// harness, one that wakes for a moment after a long idle stretch, and work
+// broken by an idle stretch that long never do.
 func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	e := newEnv(t, nil)
 	now, advance := e.fakeClock(time.Now())
 	e.create(sandboxapi.CreateRequest{Name: "quietbox"})
 	b := e.boxOf("quietbox")
-	advance(15 * time.Minute)
 	silence := func() int {
 		e.m.checkHookSilence(t.Context())
 		return len(e.tel.findingsOf(audit.SandboxFindingHookSilence))
 	}
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassProcess, Binary: "/usr/bin/git"}, now())
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: "example.org", Port: 443}, now())
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/opt/defenseclaw-harness-evil/bin/claude", Host: "example.org", Port: 443}, now())
-	// Certification AG-MAC-F4: a `sandbox exec` curl through the egress
-	// proxy, with no harness running, raised the alarm. Neither the
-	// proxy's own events nor OpenShell's record of curl's connection to
-	// the proxy are the harness's.
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: openshellHostAlias, Port: testEgressPort,
-		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
-	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now(), FirstSeen: true}, 0)
-	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventClosed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now()}, 0)
+	// work feeds r now and then once a minute for the given minutes.
+	work := func(minutes int, r ocsf.Record) int {
+		e.m.ocsfEvent(t.Context(), b, r, now())
+		for range minutes {
+			advance(time.Minute)
+			e.m.ocsfEvent(t.Context(), b, r, now())
+		}
+		return silence()
+	}
+	for range 16 {
+		advance(time.Minute)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassProcess, Binary: "/usr/bin/git"}, now())
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: "example.org", Port: 443}, now())
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/opt/defenseclaw-harness-evil/bin/claude", Host: "example.org", Port: 443}, now())
+		// Certification AG-MAC-F4: a `sandbox exec` curl through the egress
+		// proxy, with no harness running, raised the alarm. Neither the
+		// proxy's own events nor OpenShell's record of curl's connection to
+		// the proxy are the harness's.
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: openshellHostAlias, Port: testEgressPort,
+			Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now(), FirstSeen: true}, 0)
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventClosed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now()}, 0)
+	}
 	if n := silence(); n != 0 {
 		t.Fatalf("commands outside the harness raised %d hook_silence finding(s)", n)
 	}
-	// The harness's own connection to the proxy is its activity.
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
-		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
-	silence()
-	if silence() != 1 || !e.get("quietbox").Hooks.Silent {
-		t.Fatal("the harness active without hooks raised no single hook_silence finding")
+	// The harness's own connection to the proxy is its activity. Idle for
+	// 16 minutes, it wakes (a harness such as Kiro CLI sends no hook when it
+	// starts): one event is no work without hooks, and neither is work cut
+	// by an idle stretch of silence_after.
+	proxy := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
+		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}
+	if work(0, proxy) != 0 || work(5, proxy) != 0 {
+		t.Fatal("a harness that woke after an idle stretch raised hook_silence")
+	}
+	advance(10 * time.Minute)
+	if work(5, proxy) != 0 || e.get("quietbox").Hooks.Silent {
+		t.Fatal("work broken by an idle stretch of silence_after raised hook_silence")
+	}
+	if work(5, proxy) != 1 || silence() != 1 || !e.get("quietbox").Hooks.Silent {
+		t.Fatal("the harness at work for silence_after without hooks raised no single hook_silence finding")
+	}
+	if f := e.tel.findingsOf(audit.SandboxFindingHookSilence); !strings.Contains(f[0].Description, "doing work for 10m0s") {
+		t.Fatalf("description = %q, want the 10 minutes of work", f[0].Description)
 	}
 	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
 	advance(15 * time.Minute)
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
-	if silence() != 2 || !e.get("quietbox").Hooks.Silent {
-		t.Fatal("the harness active long after its last hook raised no second hook_silence finding")
+	model := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}
+	if work(0, model) != 1 {
+		t.Fatal("a harness that woke long after its last hook raised hook_silence")
+	}
+	if work(10, model) != 2 || !e.get("quietbox").Hooks.Silent {
+		t.Fatal("the harness at work long after its last hook raised no second hook_silence finding")
 	}
 	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
 	if e.get("quietbox").Hooks.Silent {
@@ -756,40 +786,63 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 }
 
 // Under hooks.on_silence: stop (balanced, strict) a user-tier harness that
-// works for hooks.silence_after without one hook is stopped, as a tampered
-// one is, and its next session is watched again; under alert (open) it keeps
-// running, and a managed-tier harness only alerts whatever the pack says.
+// works for the pack's hooks.silence_after without one hook is stopped, as a
+// tampered one is, and its next session is watched again; under alert (open)
+// it keeps running, and a managed-tier harness only alerts whatever the pack
+// says. A harness that wakes for a moment after an idle stretch longer than
+// silence_after is neither.
 func TestHookSilenceResponse(t *testing.T) {
+	quick := t.TempDir()
+	writeFile(t, filepath.Join(quick, "quick", "pack.yaml"), strings.Replace(strings.Replace(teamPack, "name: team", "name: quick", 1),
+		"hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_silence: stop, silence_after: 2m}", 1))
 	for _, tc := range []struct {
 		name, pack, tier, response, outcome string
+		after                               time.Duration
 	}{
-		{"balanced user tier", "balanced", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)"},
-		{"open user tier", "open", "user", "alert", "; the sandbox keeps running (hooks.on_silence: alert)"},
-		{"strict managed tier", "strict", "managed", "alert", "; the sandbox keeps running"},
+		{"balanced user tier", "balanced", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)", 10 * time.Minute},
+		{"strict user tier", "strict", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)", 10 * time.Minute},
+		{"open user tier", "open", "user", "alert", "; the sandbox keeps running (hooks.on_silence: alert)", 10 * time.Minute},
+		{"strict managed tier", "strict", "managed", "alert", "; the sandbox keeps running", 10 * time.Minute},
+		{"a custom pack's silence_after", "quick", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)", 2 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			e := newEnv(t, nil)
+			e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = quick })
 			now, advance := e.fakeClock(time.Now())
 			e.create(sandboxapi.CreateRequest{Name: "silentbox", Pack: tc.pack})
 			b := e.boxOf("silentbox")
 			e.m.mu.Lock()
 			b.rec.TamperTier = tc.tier
 			e.m.mu.Unlock()
-			if h := e.get("silentbox").Hooks; h.OnSilence != tc.response || h.SilenceAfter != "10m" {
-				t.Fatalf("hooks = %+v, want on_silence %s after 10m", h, tc.response)
+			after := packs.ShortDuration(tc.after)
+			if h := e.get("silentbox").Hooks; h.OnSilence != tc.response || h.SilenceAfter != after {
+				t.Fatalf("hooks = %+v, want on_silence %s after %s", h, tc.response, after)
 			}
-			silentFor := func(d time.Duration) []audit.SandboxFindingEvent {
-				advance(d)
-				e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+			findings := func() []audit.SandboxFindingEvent {
 				e.m.checkHookSilence(t.Context())
 				return e.tel.findingsOf(audit.SandboxFindingHookSilence)
 			}
-			if f := silentFor(9 * time.Minute); len(f) != 0 {
+			// work keeps the harness busy for d, an event a minute from now.
+			work := func(d time.Duration) []audit.SandboxFindingEvent {
+				e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+				for range int(d / time.Minute) {
+					advance(time.Minute)
+					e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+				}
+				return findings()
+			}
+			// Ready but idle for longer than silence_after, then the
+			// harness's first event (Kiro CLI sends no hook when it starts).
+			advance(tc.after + time.Minute)
+			if f := work(0); len(f) != 0 || stopped(t, e, "silentbox") {
+				t.Fatalf("a harness that woke after an idle stretch: findings %+v, stopped %v", f, stopped(t, e, "silentbox"))
+			}
+			advance(tc.after)
+			if f := work(tc.after - time.Minute); len(f) != 0 {
 				t.Fatalf("findings before silence_after: %+v", f)
 			}
-			f := silentFor(2 * time.Minute)
+			f := work(time.Minute)
 			feed := e.events("silentbox", sandboxapi.ActivityFinding, string(audit.SandboxFindingHookSilence))
-			if len(f) != 1 || f[0].Evidence != "on_silence="+tc.response+" silence_after=10m tier="+tc.tier ||
+			if len(f) != 1 || f[0].Evidence != "on_silence="+tc.response+" silence_after="+after+" tier="+tc.tier ||
 				len(feed) != 1 || !strings.HasSuffix(feed[0].Message, tc.outcome) {
 				t.Fatalf("findings %+v, feed %+v", f, feed)
 			}
@@ -800,7 +853,8 @@ func TestHookSilenceResponse(t *testing.T) {
 				return
 			}
 			e.startBox("silentbox", sandboxapi.StartRequest{})
-			if f := silentFor(11 * time.Minute); len(f) != 2 || !stopped(t, e, "silentbox") {
+			advance(time.Minute)
+			if f := work(tc.after); len(f) != 2 || !stopped(t, e, "silentbox") {
 				t.Fatalf("the next silent session: findings %+v, stopped %v", f, stopped(t, e, "silentbox"))
 			}
 		})

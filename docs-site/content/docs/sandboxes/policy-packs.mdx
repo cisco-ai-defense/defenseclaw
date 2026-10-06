@@ -219,7 +219,9 @@ These are the settings each pack controls. The
   `hook_silence` finding and keeps it running. A managed-tier harness, whose
   hooks are root-owned, only alerts. `open` alerts; `balanced` and `strict`
   stop. `silence_after` is 10 minutes in every built-in pack, long enough
-  for a slow model turn without a tool call.
+  for a slow model turn without a tool call. An idle stretch as long as
+  `silence_after` starts the count over, so a harness that wakes up after
+  one is not flagged for it.
 
 Hooks are DefenseClaw's judgment inside the sandbox boundary, and the
 workload runs as the same user as the hooks, so it could stop a hook

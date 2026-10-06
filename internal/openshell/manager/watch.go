@@ -752,9 +752,7 @@ func harnessActivity(harnessName, binary string) bool {
 
 func (m *Manager) markActive(b *box, at time.Time) {
 	m.mu.Lock()
-	if at.After(b.activeAt) {
-		b.activeAt = at
-	}
+	b.noteActiveLocked(at)
 	m.mu.Unlock()
 }
 

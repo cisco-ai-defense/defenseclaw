@@ -1846,7 +1846,10 @@ compromised hook shows:
   network events of the harness's own binaries under its install root,
   their connections to the egress proxy included, native OTLP) for the
   pack's `hooks.silence_after` (10 minutes in the built-in packs, 1 minute
-  to 24 hours) without a single hook request. Commands the harness did not
+  to 24 hours) without a single hook request: one run of activity since the
+  last hook (or the session's start) that no idle stretch of `silence_after`
+  breaks (`noteActiveLocked`), so a harness that wakes up after a long idle
+  stretch, before its first hook, is no alarm. Commands the harness did not
   start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
   events, which cannot tell the harness's requests from theirs. For a
