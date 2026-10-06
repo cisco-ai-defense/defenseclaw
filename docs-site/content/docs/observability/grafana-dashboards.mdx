@@ -131,9 +131,10 @@ DefenseClaw does not invent telemetry.
 If the Connector list is empty and every connector- or scanner-filtered panel
 shows no data while Loki and Tempo have events, check the destination name.
 The dashboards read the short `local-observability-v1` metric labels
-(`connector`, `scanner`, `target_type`), which the gateway exports only to the
-OTLP destination named `local-observability`. Any other name gets the canonical
-v8 labels (`defenseclaw_connector_source`, ...). See
+(`connector`, `scanner`, `target_type`, and `ide`, `ai`, `enabled` on the IDE
+plugin gauge), which the gateway exports only to the OTLP destination named
+`local-observability`. Any other name gets the canonical v8 labels
+(`defenseclaw_connector_source`, `defenseclaw_ide_product`, ...). See
 [Local observability](/docs/observability/local-observability) for pointing a
 gateway on another computer at the stack.
 
