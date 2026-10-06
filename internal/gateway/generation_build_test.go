@@ -137,3 +137,21 @@ func TestBuildGenerationTreatsMissingRegoAsNoOPA(t *testing.T) {
 		}
 	}
 }
+
+// A corrupt Rego module rejects a (strict) reload build, so the previous
+// generation stays and last_reload_error names the file; boot falls back
+// (GAP-0043).
+func TestBuildGenerationRejectsACorruptModuleOnlyWhenStrict(t *testing.T) {
+	policyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(policyDir, "bad.rego"), []byte("package defenseclaw\nnot rego {"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{PolicyDir: policyDir}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictOPA: true}); err == nil || !strings.Contains(err.Error(), "bad.rego") {
+		t.Fatalf("strict build with a corrupt module = %v, want a parse error naming the file", err)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg})
+	if err != nil || g.opaError == "" {
+		t.Fatalf("boot build with a corrupt module: err=%v opaError=%q, want the fallback with its reason", err, g.opaError)
+	}
+}

@@ -1833,14 +1833,15 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	// The candidate generation compiles everything a request reads: the
 	// composed rule packs, profiles, the prepared OPA queries and the
-	// resolved thresholds. A Rego module that worked in the previous
-	// generation and no longer loads rejects the reload.
+	// resolved thresholds. A Rego module that does not load rejects the
+	// reload and keeps the previous generation, so last_reload_error names it
+	// until it is fixed.
 	nextGen, err := buildGeneration(ctx, generationInputs{
 		cfg:       cloneConfig(&next),
 		raw:       source.raw,
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
-		strictOPA: previousGen != nil && previousGen.OPA != nil,
+		strictOPA: true,
 	})
 	if err != nil {
 		recordGenerationBuildError(err)
