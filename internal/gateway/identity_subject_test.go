@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -48,7 +49,7 @@ func identityTestRequest(t *testing.T) (got map[string]any) {
 	request.Header.Set(llmEventUserIDHeader, "0")
 	got = map[string]any{}
 	handler := CorrelationMiddleware(nil)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		ctx := (&APIServer{}).attachVerifiedSubject(r.Context(), "1201", "dcad-alice", subjectSourcePeerCredentials)
+		ctx := attachVerifiedSubject(r.Context(), nil, "1201", "dcad-alice", subjectSourcePeerCredentials)
 		subject, ok := verifiedSubjectFromContext(ctx)
 		got["subject_ok"], got["subject"] = ok, subject
 		got["verified"] = requestIdentityFor(ctx, "1201")
@@ -121,7 +122,7 @@ func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
 	setIdentityFactsEnabled(true)
 	t.Cleanup(func() { setIdentityFactsEnabled(false) })
 	capture := &endpointInventoryCapture{}
-	(&APIServer{observabilityV8: capture}).observeIdentity(context.Background(), VerifiedSubject{
+	observeIdentity(context.Background(), capture, VerifiedSubject{
 		UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
 		Directory: useridentity.DirectoryFacts{
 			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
@@ -199,5 +200,71 @@ func TestParseUtmp(t *testing.T) {
 	if len(entries) != 1 || entries[0].Line != "pts/3" || entries[0].User != "dcad-alice@dclab.test" ||
 		entries[0].PID != 4242 || entries[0].Addr.String() != "192.0.2.10" {
 		t.Fatalf("utmp entries = %+v", entries)
+	}
+}
+
+// GAP-0147: the LLM proxy and the ACP routes bind the per-user gateway's own
+// account as the verified subject, as the hook routes do, so a loopback
+// X-DefenseClaw-User-* pair never names the user there. The proxy, which no
+// hook helper calls, drops the pair.
+func TestProxyAndACPBindProcessOwnerOverClaimedUser(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	owner, _ := localProcessUser()
+	if owner == "" {
+		t.Skip("the test account has no passwd entry")
+	}
+	correlate := CorrelationMiddleware(NewAgentRegistry("", ""))
+	forged := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Header.Set(llmEventUserIDHeader, "4242")
+			r.Header.Set(llmEventUserNameHeader, "forged")
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(writePrivateACPToken(t, token), "")}
+	acpUser := make(chan string, 1)
+	server := httptest.NewServer(forged(correlate(api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/acp/evaluate" {
+			acpUser <- AgentIdentityFromContext(r.Context()).UserID
+			api.handleACPEvaluate(w, r)
+			return
+		}
+		api.handleACPChallenge(w, r)
+	}))))))
+	defer server.Close()
+	evaluator, err := acp.NewHTTPEvaluator(server.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation()); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-acpUser; got != owner {
+		t.Fatalf("ACP user.id = %q, want the gateway owner %q", got, owner)
+	}
+
+	proxyUser := func(p *GuardrailProxy, dcAuth string) (user string) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		if dcAuth != "" {
+			req.Header.Set("X-DC-Auth", "Bearer "+dcAuth)
+		}
+		forged(dropProxyUserClaims(correlate(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			if authenticated, ok := p.authenticateRequest(r); ok {
+				user = AgentIdentityFromContext(authenticated.Context()).UserID
+			}
+		})))).ServeHTTP(httptest.NewRecorder(), req)
+		return user
+	}
+	if got := proxyUser(&GuardrailProxy{gatewayToken: "gateway-token"}, "gateway-token"); got != owner {
+		t.Fatalf("proxy user.id = %q, want the gateway owner %q", got, owner)
+	}
+	// A request admitted without an owner credential proves nothing about
+	// who sent it: it keeps neither the claim nor a verified owner.
+	if got := proxyUser(&GuardrailProxy{skipAuthForTest: true}, ""); got != "" {
+		t.Fatalf("credential-less proxy user.id = %q, want none", got)
 	}
 }
