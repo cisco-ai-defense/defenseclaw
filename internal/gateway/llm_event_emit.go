@@ -1014,10 +1014,16 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 	}
 	// A connector-supplied agent ID is not, by itself, proof that this is a
 	// child agent: several connectors assign an opaque ID to the root agent.
-	// Infer the root parent only for explicit subagent lifecycle events. Later
-	// child events inherit the relationship from the retained lifecycle trace.
+	// Infer the root parent for explicit subagent lifecycle events, and for
+	// every hook of a connector that reports agent_id only inside a sub-agent
+	// (Claude Code, Codex). Without the second case a sub-agent hook that
+	// arrives with no retained lifecycle, as after a gateway restart or from
+	// an agent that never had a SubagentStart, was recorded as a second root
+	// at depth 0 (GAP-0161, GAP-0162). Other child events inherit the
+	// relationship from the retained lifecycle trace.
 	if parentAgentID == "" && agentID != rootAgentID &&
-		(lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop") {
+		(lifecycleEvent == "subagent_start" || lifecycleEvent == "subagent_stop" ||
+			(reportedRootAgentID != agentID && payloadNamesSubagent(source, agentID, payload))) {
 		parentAgentID = rootAgentID
 	}
 	rootAgentID = firstNonEmpty(

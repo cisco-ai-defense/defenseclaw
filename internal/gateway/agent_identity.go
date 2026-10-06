@@ -294,6 +294,18 @@ func subagentOnlyAgentIDConnector(name string) bool {
 	return false
 }
 
+// payloadNamesSubagent reports whether a hook of source names agentID in its
+// own payload and source reports agent_id only inside a sub-agent. An agent
+// id that correlation minted or restored for the main agent is not in the
+// payload, so it never counts.
+func payloadNamesSubagent(source, agentID string, payload map[string]interface{}) bool {
+	if agentID == "" || !subagentOnlyAgentIDConnector(source) {
+		return false
+	}
+	reported, _, _ := extractAgentIdentityFromHookPayload(payload)
+	return strings.TrimSpace(reported) == agentID
+}
+
 var agentIdentityIDPattern = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
 
 // agentIdentityV8 is defenseclaw.agent.identity.id for a generated record,

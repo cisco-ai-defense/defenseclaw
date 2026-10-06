@@ -33,6 +33,53 @@ func hookSpawnTestChild(source, sessionID, agentID string) llmEventMeta {
 	}
 }
 
+// A hook that names an agent no SubagentStart announced (the hooks that follow
+// a gateway restart, or an agent the connector started on its own) belongs to
+// a child of the session's main agent: depth 1 under it, not a second root at
+// depth 0 (GAP-0161, GAP-0162).
+func TestUnannouncedSubagentHooksAreChildrenOfTheMainAgent(t *testing.T) {
+	for _, source := range []string{"claudecode", "codex"} {
+		t.Run(source, func(t *testing.T) {
+			api := &APIServer{}
+			sessionID := source + "-unannounced-agent"
+			mainAgent := stableLLMEventID("agent", source, sessionID, "root")
+			emit := func(payload map[string]any) {
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if source == "codex" {
+					api.emitCodexHookLLMEvent(t.Context(), decodeCodexRequestFromBytes(raw, payload), nil, raw)
+					return
+				}
+				api.emitClaudeCodeHookLLMEvent(t.Context(), decodeClaudeCodeRequestFromBytes(raw, payload), nil, raw)
+			}
+			tool := func(event, agentID, toolID string) map[string]any {
+				payload := map[string]any{
+					"hook_event_name": event, "session_id": sessionID, "tool_name": "Bash",
+					"tool_use_id": toolID, "tool_input": map[string]any{"command": "true"},
+				}
+				if agentID != "" {
+					payload["agent_id"] = agentID
+				}
+				return payload
+			}
+			emit(tool("PreToolUse", "", "tool-main"))
+			emit(tool("PreToolUse", "agent-unannounced", "tool-child"))
+			emit(tool("PostToolUse", "agent-unannounced", "tool-child"))
+
+			child, ok := api.hookLifecycleSnapshot(source, sessionID, "agent-unannounced")
+			if !ok || child.AgentDepth != 1 || child.ParentAgentID != mainAgent || child.RootAgentID != mainAgent {
+				t.Fatalf("unannounced agent lineage = %+v (retained %v), want depth 1 under %s", child, ok, mainAgent)
+			}
+			main, ok := api.hookLifecycleSnapshot(source, sessionID, mainAgent)
+			if !ok || main.AgentDepth != 0 || main.ParentAgentID != "" {
+				t.Fatalf("main agent lineage = %+v (retained %v), want depth 0", main, ok)
+			}
+		})
+	}
+}
+
 func hookSpawnIntentCount(api *APIServer) int {
 	api.llmPromptMu.Lock()
 	defer api.llmPromptMu.Unlock()
