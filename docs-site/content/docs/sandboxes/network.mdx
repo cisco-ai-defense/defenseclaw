@@ -261,16 +261,38 @@ this machine's loopback address, lets the sandbox reach only what its policy
 allows, and stops working when the sandbox is deleted.
 </Callout>
 
+## Destinations and shadow AI
+
+DefenseClaw keeps a list of every site each sandbox reached or tried to
+reach, through the proxy or around it, and says what each one is: the
+sandbox's model provider, an AI API of the harness's own vendor, another AI
+provider (shadow AI), a host that looks like an inference endpoint, or an
+ordinary site. Shadow AI is code in the sandbox calling a model the harness
+does not use, with keys of its own. Each shadow AI provider raises a
+`shadow_ai` finding and a ⚠ in the feed once per session: MEDIUM when the
+sandbox reached it, LOW when the policy refused it.
+
+```text
+⚠ shadow AI: reached api.openai.com (Codex)
+```
+
+The list survives daemon restarts and stops and is deleted with the
+sandbox. A site a sandbox reached in an earlier session is not first-seen
+for the [large-upload](#large-uploads) check after a daemon restart either.
+
 ## See what happened
 
 ```bash
 defenseclaw sandbox activity -f
 defenseclaw sandbox status myapp-7f3a
+defenseclaw sandbox destinations myapp-7f3a
 defenseclaw sandbox policy explain
 ```
 
 `activity` is the live feed of sites, blocks, asks and findings. The
 `Egress` row of `status` counts the sites contacted and blocked and the
-bytes sent and received. `policy explain` shows each effective setting and
-the layer it came from: the pack, your config, a run option or your
-organization.
+bytes sent and received, and sums up the AI sites. `destinations` lists
+every site with its kind, its requests and refusals, the bytes sent and the
+program that made the connection. `policy explain` shows each effective
+setting and the layer it came from: the pack, your config, a run option or
+your organization.

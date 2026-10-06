@@ -33,6 +33,7 @@ values are omitted, never inferred. They are never metric labels.
 | `defenseclaw.sandbox.pack` | Policy pack name |
 | `defenseclaw.sandbox.phase` | Lifecycle phase (below) |
 | `defenseclaw.sandbox.workdir.mode` | `mount` or `copy` |
+| `defenseclaw.sandbox.binding.id` | The DefenseClaw ingress binding the sandbox's hooks and egress proxy credential authenticate with (`sb_<hex>`; never the token) |
 
 Phases are the OpenShell `SandboxPhase` values (`provisioning`, `starting`,
 `ready`, `stopping`, `stopped`, `completed`, `error`, `deleting`, `unknown`)
@@ -45,11 +46,21 @@ sandbox) and `deleted` (after it is gone).
 | --- | --- | --- | --- | --- |
 | `RecordSandboxLifecycle` | `sandbox-lifecycle` | `log.sandbox.lifecycle` | `agent.lifecycle` | No |
 | `RecordSandboxWorkspace` | `sandbox-workspace` | `log.sandbox.workspace` | `enforcement.action` | State changes and flagged changes (below) |
-| `RecordSandboxEgress` | `sandbox-egress` | `log.egress.allowed`, `log.egress.blocked` | `network.egress` | Blocked (`enforced_outcome`) |
+| `RecordSandboxEgress` | `sandbox-egress` | `log.egress.allowed`, `log.egress.blocked`, `log.egress.completed`, `log.egress.failed` | `network.egress` | Blocked (`enforced_outcome`) |
 | `RecordSandboxApproval` | `sandbox-approval` | `log.approval.requested`, `log.approval.resolved` | `compliance.activity` | Resolved (`approval_resolution`) |
 | `RecordSandboxPolicy` | `sandbox-policy` | `log.policy.updated` | `compliance.activity` | Always (`control_plane_mutation`) |
 | `RecordSandboxHealth` | `sandbox-health` | `log.subsystem.lifecycle`, `.ready`, `.degraded`, `.restored` | `platform.health` | Always (`durable_health_transition`) |
 | `RecordSandboxFinding` | `sandbox-finding` | `log.finding.observed` | `security.finding` | No |
+| `RecordSandboxActivity` | `sandbox-activity` | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` | `tool.activity`, `compliance.activity`, `model.io` | No |
+
+The manager stamps every record with what it knows of the sandbox and the
+producer does not: the launching host account as `user.id`,
+`defenseclaw.user.id_kind` and `defenseclaw.user.name` (the daemon's own
+user, which the sandbox's binding stores too) on egress, approval, finding,
+process, SSH and inference records, and on egress, approval, process and
+inference records the harness session the sandbox's hooks last named as
+`gen_ai.conversation.id` (it wins over the request envelope's session; a
+new session starts without one until its first hook).
 
 `RecordSandboxPolicy` records name the changed host or egress pattern in `defenseclaw.admin.target_ref`: a wildcard such as `*.example.com` is recorded as `suffix:example.com`, a leading `::` as `0::` (`::/0` becomes `0::/0`), and a name whose first label starts with `_` as `host:` plus the name (`_x.example` becomes `host:_x.example`), because a reference must start with a letter or digit.
 
@@ -123,6 +134,39 @@ A denied connection to a host port is recorded with `server.address`
 `host.openshell.internal`, not OpenShell's synthetic address. A sandbox
 whose policy turned its web egress off while it ran is refused by the proxy
 with category `egress_off` (decision code `SANDBOX_EGRESS_EGRESS_OFF`).
+OpenShell's allowed connections to a host port other than this install's
+own (a `--host-port` service, a local model endpoint) are recorded as
+allowed with `server.address` `host.openshell.internal`.
+
+An OpenShell record names the process that made the connection:
+`defenseclaw.sandbox.process.executable` and `defenseclaw.sandbox.process.pid`.
+Both are what the process claims, display text the workload chooses.
+
+The end of every tunnel or forwarded request the proxy allowed is a second
+record: `log.egress.completed` with `defenseclaw.network.bytes_up`,
+`.bytes_down` and `.duration_ms` (decision code `SANDBOX_EGRESS_ALLOWED`; a
+connection a recheck ended names why in `.reason`), or `log.egress.failed`
+when DNS, the connect, TLS or the upstream failed and the sandbox got a 502
+(outcome `failed`) or 504 (`timed_out`), with `.duration_ms` and the bounded
+error (decision code `SANDBOX_EGRESS_UPSTREAM_FAILED`). Neither counts
+toward `defenseclaw.egress.events`: the decision did.
+
+### Activity
+
+OpenShell's OCSF records of what runs in a sandbox and what reaches into
+it. A workload can start processes, and a client open SSH sessions, as fast
+as it likes, so the manager paces each sandbox's process and SSH records (a
+burst of 200, then 20 a second); the daemon log says how many the pacing
+held back. Model calls are not paced.
+
+| Family | From | Carries | Outcome |
+| --- | --- | --- | --- |
+| `log.sandbox.process` | `PROC:LAUNCH`, `PROC:TERMINATE` | `defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`openshell`; `sampled` is the opt-in process tree's), `.pid`, `.executable`, `.command_line` (start only), `.exit_code` (exit only) | `attempted` for a start, `completed` for exit code 0, `failed` otherwise |
+| `log.sandbox.ssh` | `SSH:*` (`sandbox connect`, `exec`, uploads and pulls) | `defenseclaw.sandbox.ssh.activity` (`LISTEN`, `OPEN`, ...), `.auth`, the peer address as `client.address` | `allowed`, `blocked` (OpenShell denied it) or `completed` |
+| `log.sandbox.inference` | `API:INFERENCE` | `gen_ai.provider.name`, `gen_ai.request.model`, `defenseclaw.sandbox.inference.status`, `.latency_ms`, `.operation`; never model content | `completed` for `Success`, `failed` otherwise |
+
+The command line is the agent's argument vector, so it is content class: each
+destination's redaction profile governs whether it leaves the host.
 
 ### Approvals
 
@@ -186,6 +230,20 @@ field holds only stable tokens. The summary goes in
 `defenseclaw.health.error_summary`. A health record about the integration as a
 whole (for example the watch stream) has no sandbox name.
 
+Two `degraded` records are the manager's own:
+
+- `openshell_egress_auth_failed`: the egress proxy refused requests that
+  presented an invalid proxy credential (malformed, unknown, revoked or
+  wrong; a request with none is the normal first leg of the handshake). The
+  credential names no sandbox, so the first refusal is reported at once and
+  later ones at most once a minute, with their count and the last
+  destination.
+- `openshell_telemetry_failed`: the recorder refused a sandbox record. The
+  first refusal of a streak is recorded (through the same recorder, so a
+  runtime that is down refuses this too) and logged; every refusal is
+  counted in `GET /api/v1/sandbox/status` (`telemetry_failures`,
+  `telemetry_error`) and on `defenseclaw sandbox status`.
+
 ### Findings
 
 `defenseclaw.finding.category` is `sandbox.<kind>`:
@@ -193,11 +251,11 @@ whole (for example the watch stream) has no sandbox name.
 | Kind | Meaning | Default rule ID |
 | --- | --- | --- |
 | `ocsf_finding` | An OpenShell OCSF `FINDING` event | `SANDBOX-OCSF-FINDING` |
-| `binary_drift` | A harness binary whose hash left its pin | `SANDBOX-BINARY-DRIFT` |
-| `tamper_attempt` | An attempt to alter hooks or managed config | `SANDBOX-TAMPER-ATTEMPT` |
 | `hook_silence` | Harness activity with no hook traffic | `SANDBOX-HOOK-SILENCE` |
 | `hook_tamper` | A tool that ran without a DefenseClaw verdict: a `PostToolUse` whose `PreToolUse` was denied or never arrived | `SANDBOX-HOOK-TAMPER` |
 | `large_upload` | A large upload to a first-seen host | `SANDBOX-LARGE-UPLOAD` |
+| `nested_repo` | A repository that appeared inside a live-mounted project during a session | `SANDBOX-NESTED-REPO` |
+| `shadow_ai` | An AI API the sandbox reached (MEDIUM) or tried to reach (LOW) that is neither its model provider nor its harness's vendor: a catalogued AI provider or an inference-shaped host. Once per provider per session; the target is the host | `SANDBOX-SHADOW-AI` |
 
 A finding requires a severity (INFO, LOW, MEDIUM, HIGH or CRITICAL). A
 missing finding ID is generated; confidence, when reported, is in (0, 1].
@@ -219,10 +277,11 @@ sandbox, such as Codex notify and inspect calls, carry `sandbox_id` and
 | --- | --- | --- |
 | `defenseclaw.sandbox.transitions` (counter) | `defenseclaw.connector.source`, `defenseclaw.sandbox.phase.from`, `defenseclaw.sandbox.phase.to` | Emitted with a lifecycle record whose phase changed |
 | `defenseclaw.sandbox.active` (gauge) | `defenseclaw.connector.source` | Sandboxes provisioning, starting, ready, or stopping, per connector |
-| `defenseclaw.egress.events` (counter) | `defenseclaw.metric.decision` (`allow`, `block`), `defenseclaw.metric.source` (`openshell`, `dc-egress-proxy`) | The existing egress metric |
+| `defenseclaw.egress.events` (counter) | `defenseclaw.metric.decision` (`allow`, `block`), `defenseclaw.metric.source` (`openshell`, `dc-egress-proxy`), `defenseclaw.connector.source` (the sandbox's harness connector) | The existing egress metric; one point per decision, none for an end |
 
 The local-observability profile projects `defenseclaw.connector.source` as
-the `connector` label and the egress attributes as `decision` and `source`.
+the `connector` label (on the egress metric too) and the egress attributes
+as `decision` and `source`.
 Sandbox identities are never labels.
 
 The recorder keeps the last recorded phase of each sandbox name and uses it as
@@ -261,10 +320,16 @@ record:
 - A finding `target_ref` is cut to its registered 256 bytes; one that is not
   an identifier is omitted.
 - The session and agent IDs come from the correlation envelope, which the
-  agent fills through its session header and hook payload. Egress and
-  approval records carry them as `gen_ai.conversation.id` and
-  `gen_ai.agent.id` only when they are registered identifiers (trimmed, at
-  most 256 bytes); any other value is omitted.
+  agent fills through its session header and hook payload, and the session
+  from the sandbox's last hook. Egress, approval, process and inference
+  records carry them as `gen_ai.conversation.id` and `gen_ai.agent.id` only
+  when they are registered identifiers (trimmed, at most 256 bytes); any
+  other value is omitted.
+- An actor's or process's executable is cut to 1024 bytes and its process
+  ID kept only in 1 to 4194304; an executable that is not UTF-8 is omitted.
+  A process command line is cut to 4096 bytes. SSH and inference tokens
+  (activity, auth, status, operation, model) that are not identifiers are
+  omitted, and an SSH peer that is not an IP address is.
 
 ## Retired legacy events
 

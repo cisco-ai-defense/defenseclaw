@@ -2740,19 +2740,36 @@ on metrics.
 | Source | Producer | Family |
 | --- | --- | --- |
 | Phase changes (initiated or watched) | `RecordSandboxLifecycle` | `log.sandbox.lifecycle`, `metric.defenseclaw.sandbox.transitions`, `metric.defenseclaw.sandbox.active` |
-| Proxy and OpenShell network decisions | `RecordSandboxEgress` | `log.egress.allowed`, `log.egress.blocked`, `metric.defenseclaw.egress.events` |
+| Proxy and OpenShell network decisions, and the end of each allowed proxy connection | `RecordSandboxEgress` | `log.egress.allowed`, `log.egress.blocked`, `log.egress.completed`, `log.egress.failed`, `metric.defenseclaw.egress.events` (labelled with the connector) |
 | Draft proposals and host-port consents | `RecordSandboxApproval` | `log.approval.requested`, `log.approval.resolved` |
 | Policy applies, rule changes, unblocks | `RecordSandboxPolicy` | `log.policy.updated` |
-| Integration health | `RecordSandboxHealth` | `log.subsystem.*`, subsystem `openshell` |
-| OCSF findings, binary drift, tamper, hook silence, large uploads | `RecordSandboxFinding` | `log.finding.observed` |
+| Integration health, refused proxy credentials, refused telemetry records | `RecordSandboxHealth` | `log.subsystem.*`, subsystem `openshell` |
+| OCSF findings, hook silence and tamper, large uploads, nested repositories, shadow AI | `RecordSandboxFinding` | `log.finding.observed` |
 | Snapshot, undo, mask, review, upload, pull | `RecordSandboxWorkspace` | `log.sandbox.workspace` |
+| OpenShell `PROC`, `SSH` and `API:INFERENCE` records | `RecordSandboxActivity` | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` |
 
 Hook decisions from a sandbox carry the sandbox ID and name taken from the
-binding that authenticated them. Nothing calls the producers yet. The manager
-must build one `audit.NewSandboxRecorder` for the process and share it with
-the watcher, the egress proxy sink, approvals and workspace code, and on
-daemon start emit a lifecycle event for every existing sandbox so the active
-gauge is republished.
+binding that authenticated them. The gateway sidecar builds one
+`audit.NewSandboxRecorder` for the process and hands it to the manager,
+which wraps it (`manager/telemetry.go`): every record gets the sandbox's
+binding ID, the launching host account and the session its hooks last
+named, and a refused record is logged, counted on `sandbox status` and
+recorded as degraded health once per streak, so no producer swallows a
+failure. On daemon start the reconcile pass records a lifecycle event for
+every existing sandbox, so the active gauge is republished. The field-level
+reference is [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
+
+Each sandbox's destinations (`manager/destinations.go`, `GET
+/api/v1/sandbox/sandboxes/{name}/destinations`, `defenseclaw sandbox
+destinations NAME`) merge the egress proxy counter's rows with OpenShell's
+NET, HTTP and API records per host, classify each host (model provider by
+its provider rule, the harness's vendor, shadow AI by the AI provider
+catalog in `internal/sensor/catalog` or an inference-shaped name, else the
+proxy's category, blocked or other), keep at most 512 hosts in
+`<data_dir>/sandboxes/<name>/destinations.json` across restarts, and seed
+the proxy counter's first-seen check with the hosts reached in earlier
+sessions (`egress.CounterOptions.KnownHost`). A delete removes them and
+the counter's rows for the binding (`Counter.Forget`).
 
 The watcher side exists. `internal/openshell/stream` follows one sandbox
 through the raw `WatchSandbox` RPC on its own connection (the SDK's watch

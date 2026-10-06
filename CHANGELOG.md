@@ -64,6 +64,41 @@ stopped`. Nothing is changed; use the install command above.
 - A once-a-day, TTY-only "new release available" notice in the CLI and TUI.
   Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check: false`.
 
+### Sandbox telemetry and destinations
+
+- `defenseclaw sandbox destinations NAME` (and `GET
+  /api/v1/sandbox/sandboxes/{name}/destinations`) lists every host a sandbox
+  reached or tried to reach, through the egress proxy or around it, with its
+  kind: model provider, the harness's vendor, shadow AI (another AI provider,
+  or an inference-shaped host), the egress category, blocked or other. It
+  shows the requests, refusals, bytes and the binary that connected, survives
+  daemon restarts and stops, keeps at most 512 hosts, and is deleted with the
+  sandbox. The `Egress` line of `sandbox status NAME` and the TUI's sandbox
+  detail sum it up; the detail lists the hosts.
+- New finding `shadow_ai`: once per AI provider and session a sandbox reaches
+  (MEDIUM) or tries to reach (LOW) that is neither its model provider nor its
+  harness's vendor, also on the activity feed.
+- New v8 records: `log.egress.completed` (bytes and duration) and
+  `log.egress.failed` (upstream failures and timeouts) for every allowed
+  proxy connection; `log.sandbox.process`, `log.sandbox.ssh` and
+  `log.sandbox.inference` from OpenShell's PROC, SSH and API:INFERENCE
+  records (process records are paced per sandbox; command lines are content
+  class); allowed connections to host ports. Sandbox records now carry the
+  binding ID (`defenseclaw.sandbox.binding.id`), the launching host user and
+  the session the hooks last named (`gen_ai.conversation.id`); OpenShell's
+  egress records carry the connecting binary and PID.
+- `defenseclaw.egress.events` gains the `connector` label (the sandbox's
+  harness).
+- Refused proxy credentials are reported as degraded sandbox health
+  (`openshell_egress_auth_failed`, at most once a minute), and refused
+  telemetry records are no longer silently dropped: they are logged, counted
+  on `sandbox status` and reported as degraded health
+  (`openshell_telemetry_failed`).
+- After a daemon restart, a host a sandbox reached in an earlier session is
+  no longer first-seen for the large-upload check.
+- Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
+  which nothing produced.
+
 ## [Unreleased] — Enterprise hardening
 
 Entries that name the enterprise standalone profile apply only there; the
