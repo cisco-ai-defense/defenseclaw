@@ -117,7 +117,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 | --- | --- | --- |
 | `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. macOS: the group name `id -Gn` prints. |
 | `users` | The verified user | A uid or SID, the account name, or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
-| `connectors` | The connector the request comes from | `codex`, `claudecode`, `cursor` and the others. |
+| `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
 
 How the keys combine:
@@ -263,6 +263,13 @@ Copy the `agt-` ID into an `agents` assignment. The ID names one connector
 install for one user on one machine and stays the same across sessions,
 restarts and upgrades. See [Agent identity](/docs/enterprise/identity-and-authentication#agent-identity).
 
+The pin applies to every decision the gateway makes for that install: its
+hooks, its `/api/v1/inspect` calls and, for OpenClaw and ZeptoClaw, its LLM
+traffic through the guardrail proxy. The proxy attributes each request to the
+connector it serves and to that connector's install for the user the gateway
+runs as, so an OpenClaw or ZeptoClaw install appears in
+`defenseclaw agent identities` after its first proxied request.
+
 ## Try it and read the result
 
 ### Ask the gateway
@@ -291,7 +298,7 @@ with the subject and the effective settings. `guardrail status`, `status` and
 
 ### Read the decision record
 
-Every hook decision carries the profile and the reason:
+Every hook and LLM proxy decision carries the profile and the reason:
 
 | Attribute | Meaning |
 | --- | --- |
