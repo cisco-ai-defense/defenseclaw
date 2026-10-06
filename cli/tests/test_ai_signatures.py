@@ -233,7 +233,7 @@ def test_codex_signature_tracks_current_official_asset_layouts():
     } <= set(codex.skill_paths)
 
 
-def test_custom_signature_pack_loads_from_managed_dir(tmp_path):
+def test_custom_signature_pack_loads_only_when_configured(tmp_path):
     pack_dir = tmp_path / "signature-packs"
     pack_dir.mkdir()
     pack = pack_dir / "custom.json"
@@ -252,11 +252,13 @@ def test_custom_signature_pack_loads_from_managed_dir(tmp_path):
         encoding="utf-8",
     )
 
-    signatures = load_ai_signatures(data_dir=tmp_path, disabled_signature_ids=["codex"])
+    signatures = load_ai_signatures(signature_packs=[str(pack)], disabled_signature_ids=["codex"])
     ids = {sig.id for sig in signatures}
 
     assert "custom-ai" in ids
     assert "codex" not in ids
+    # The managed folder is not globbed: an unlisted pack there is ignored.
+    assert "custom-ai" not in {sig.id for sig in load_ai_signatures()}
 
 
 def test_workspace_signature_pack_requires_opt_in(tmp_path):

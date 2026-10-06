@@ -3607,7 +3607,6 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     try:
         sigs = ai_signatures.load_ai_signatures(
-            data_dir=cfg.data_dir,
             signature_packs=cfg.ai_discovery.signature_packs,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
@@ -3643,13 +3642,20 @@ def signatures_validate(pack_path: Path, as_json: bool) -> None:
 @click.option("--replace", is_flag=True, help="Replace an installed pack with the same pack id.")
 @pass_ctx
 def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
-    """Install a validated pack into the managed signature-pack directory."""
-    cfg = _load_config_best_effort(app)
+    """Install a validated pack into the managed signature-pack directory and
+    add it to ai_discovery.signature_packs, the only packs discovery loads."""
+    cfg = _require_loaded_config(app)
+    configured = list(getattr(cfg.ai_discovery, "signature_packs", []) or [])
     try:
-        dest = ai_signatures.install_signature_pack(pack_path, data_dir=cfg.data_dir, replace=replace)
+        dest = ai_signatures.install_signature_pack(
+            pack_path, data_dir=cfg.data_dir, signature_packs=configured, replace=replace
+        )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Installed signature pack: {dest}")
+    if str(dest) not in configured:
+        cfg.ai_discovery.signature_packs = [*configured, str(dest)]
+        cfg.save()
+    click.echo(f"Installed signature pack: {dest} (added to ai_discovery.signature_packs)")
 
 
 @signatures.command("disable")

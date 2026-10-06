@@ -362,6 +362,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err := m.migrateScanners(root); err != nil {
 		return nil, false, err
 	}
+	m.migrateSignaturePacks(root)
 	if node := v9Pop(root, "update_check"); node != nil {
 		var check bool
 		if node.Decode(&check) == nil {
@@ -1322,6 +1323,46 @@ func v9NonEmptyLLM(node *yaml.Node) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// AI discovery signature packs
+
+// migrateSignaturePacks lists the packs installed under
+// <data_dir>/signature-packs in ai_discovery.signature_packs: v8 loaded that
+// folder implicitly, and since 9 only configured packs load.
+func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
+	dataDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "data_dir"))))
+	if dataDir == "" {
+		dataDir = filepath.Dir(m.configPath)
+	}
+	installed, _ := filepath.Glob(filepath.Join(dataDir, "signature-packs", "*.json"))
+	if len(installed) == 0 {
+		return
+	}
+	discovery := v8YAMLMapValue(root, "ai_discovery")
+	listed := map[string]bool{}
+	packs := v8YAMLMapValue(discovery, "signature_packs")
+	for _, item := range v9SeqItems(packs) {
+		listed[filepath.Clean(expandPath(item.Value))] = true
+	}
+	var added []string
+	for _, path := range installed {
+		if !listed[filepath.Clean(path)] {
+			added = append(added, path)
+		}
+	}
+	if len(added) == 0 {
+		return
+	}
+	if packs == nil || packs.Kind != yaml.SequenceNode {
+		packs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		v9Set(root, packs, "ai_discovery", "signature_packs")
+	}
+	for _, path := range added {
+		packs.Content = append(packs.Content, v9Scalar(path))
+	}
+	m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
 }
 
 // ---------------------------------------------------------------------------

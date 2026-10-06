@@ -719,7 +719,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		ProcessInterval:             time.Duration(ad.ProcessIntervalSec) * time.Second,
 		ScanRoots:                   append([]string{}, ad.ScanRoots...),
 		SignaturePacks:              append([]string{}, ad.SignaturePacks...),
-		AllowWorkspaceSignatures:    ad.AllowWorkspaceSignatures,
+		AllowWorkspaceSignatures:    WorkspaceSignaturesAllowed(cfg),
 		DisabledSignatureIDs:        append([]string{}, ad.DisabledSignatureIDs...),
 		IncludeShellHistory:         ad.IncludeShellHistory,
 		IncludePackageManifests:     ad.IncludePackageManifests,

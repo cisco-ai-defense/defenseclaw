@@ -64,6 +64,14 @@ observability: {}
 	if err := os.WriteFile(dataJSON, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// A pack installed in the folder v8 loaded implicitly.
+	installedPack := filepath.Join(dir, "signature-packs", "custom.json")
+	if err := os.MkdirAll(filepath.Dir(installedPack), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(installedPack, []byte(`{"version": 1, "signatures": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	// init seeded the 1.0 admission.rego, which reads data.config.
 	staleRego := filepath.Join(dir, "policies", "rego", "admission.rego")
 	if err := os.WriteFile(staleRego, []byte("package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"allowed\" if data.config.scan_on_install == false\n"), 0o644); err != nil {
@@ -132,6 +140,7 @@ observability: {}
 		"asset_policy.skill.denied":                               []any{map[string]any{"name": "bad-skill", "reason": "operator"}},
 		"asset_policy.plugin.allowed":                             []any{map[string]any{"name": "ok", "reason": "operator", "source_path_contains": []any{"/p/ok"}}},
 		"asset_policy.mcp":                                        nil,
+		"ai_discovery.signature_packs":                            []any{installedPack},
 		"asset_policy.tool.denied":                                []any{map[string]any{"name": "rm", "connector": "codex"}},
 	} {
 		if got, _ := json.Marshal(get(path)); string(got) != mustJSON(t, want) {

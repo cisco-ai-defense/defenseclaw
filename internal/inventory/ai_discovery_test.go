@@ -426,8 +426,10 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
   }]
 }`)
 
+	// A pack loads only when configured; another file in the folder does not.
+	mustWrite(t, filepath.Join(packDir, "unlisted.json"), `{"version": 1, "signatures": [{"id": "unlisted-ai", "name": "Unlisted", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`)
 	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
-		DataDir:              tmp,
+		SignaturePacks:       []string{filepath.Join(packDir, "custom.json")},
 		DisabledSignatureIDs: []string{"codex"},
 	})
 	if err != nil {
@@ -442,6 +444,9 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 	if seen["codex"] {
 		t.Fatalf("disabled built-in signature still present")
+	}
+	if seen["unlisted-ai"] {
+		t.Fatalf("an unlisted pack under signature-packs/ was loaded")
 	}
 }
 
@@ -458,7 +463,7 @@ func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
   }]
 }`)
 
-	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{DataDir: tmp})
+	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "dup.json")}})
 	if err == nil || !strings.Contains(err.Error(), "duplicate id") {
 		t.Fatalf("expected duplicate id error, got %v", err)
 	}
@@ -519,7 +524,8 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 	cfg := &config.Config{
 		DataDir: tmp,
 		AIDiscovery: config.AIDiscoveryConfig{
-			Enabled: true,
+			Enabled:        true,
+			SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "custom.json")},
 		},
 	}
 	svc, err := NewContinuousDiscoveryService(cfg)

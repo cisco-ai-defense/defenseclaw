@@ -171,10 +171,10 @@ func LoadAISignatures() ([]AISignature, error) {
 }
 
 // AISignatureLoadOptions controls runtime catalog merging. The embedded
-// catalog is always loaded first, followed by managed packs under DataDir,
-// explicit pack paths/globs, and optional workspace-local packs.
+// catalog is always loaded first, followed by the configured pack paths and
+// globs (ai_discovery.signature_packs, the only operator source since
+// config_version 9) and optional workspace-local packs.
 type AISignatureLoadOptions struct {
-	DataDir                  string
 	SignaturePacks           []string
 	AllowWorkspaceSignatures bool
 	ScanRoots                []string
@@ -195,9 +195,8 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 	home, _ := platformDiscoveryHomeDir()
 	wd, _ := os.Getwd()
 	return LoadAISignaturesWithOptions(AISignatureLoadOptions{
-		DataDir:                  cfg.DataDir,
 		SignaturePacks:           append([]string{}, cfg.AIDiscovery.SignaturePacks...),
-		AllowWorkspaceSignatures: cfg.AIDiscovery.AllowWorkspaceSignatures,
+		AllowWorkspaceSignatures: WorkspaceSignaturesAllowed(cfg),
 		ScanRoots:                append([]string{}, cfg.AIDiscovery.ScanRoots...),
 		DisabledSignatureIDs:     append([]string{}, cfg.AIDiscovery.DisabledSignatureIDs...),
 		HomeDir:                  home,
@@ -305,13 +304,15 @@ type signaturePackCandidate struct {
 	required bool
 }
 
+// WorkspaceSignaturesAllowed is ai_discovery.allow_workspace_signatures,
+// forced off on a managed standalone host: a workspace pack is
+// user-controlled input, and there the administrator config is the policy.
+func WorkspaceSignaturesAllowed(cfg *config.Config) bool {
+	return cfg != nil && cfg.AIDiscovery.AllowWorkspaceSignatures && !cfg.StandaloneEnterprise()
+}
+
 func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
 	var candidates []signaturePackCandidate
-	if opts.DataDir != "" {
-		candidates = append(candidates, signaturePackCandidate{
-			path: filepath.Join(opts.DataDir, "signature-packs", "*.json"),
-		})
-	}
 	for _, p := range opts.SignaturePacks {
 		candidates = append(candidates, signaturePackCandidate{path: p, required: true})
 	}

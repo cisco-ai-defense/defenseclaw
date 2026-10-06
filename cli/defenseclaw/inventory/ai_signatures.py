@@ -125,13 +125,14 @@ class AISignature:
 
 def load_ai_signatures(
     *,
-    data_dir: str | Path | None = None,
     signature_packs: list[str] | tuple[str, ...] = (),
     allow_workspace_signatures: bool = False,
     scan_roots: list[str] | tuple[str, ...] = (),
     disabled_signature_ids: list[str] | tuple[str, ...] = (),
 ) -> list[AISignature]:
-    """Load the built-in catalog plus configured operator signature packs."""
+    """Load the built-in catalog plus the configured operator signature packs
+    (``ai_discovery.signature_packs``, the only operator source since
+    config_version 9; the managed folder is not globbed)."""
     builtins = _parse_catalog_text(_catalog_text(), source="builtin")
     disabled = {_normalize_id(s) for s in disabled_signature_ids if _normalize_id(s)}
     merged: list[AISignature] = []
@@ -143,7 +144,6 @@ def load_ai_signatures(
         seen[sig.id] = sig.source
 
     pack_paths = _signature_pack_paths(
-        data_dir=data_dir,
         signature_packs=signature_packs,
         allow_workspace_signatures=allow_workspace_signatures,
         scan_roots=scan_roots,
@@ -185,9 +185,14 @@ def install_signature_pack(
     source: str | Path,
     *,
     data_dir: str | Path,
+    signature_packs: list[str] | tuple[str, ...] = (),
     replace: bool = False,
 ) -> Path:
-    """Install *source* into the managed pack directory after validation."""
+    """Install *source* into the managed pack directory after validation.
+
+    The caller adds the returned path to ``ai_discovery.signature_packs``;
+    *signature_packs* are the packs already configured, checked for id
+    conflicts."""
     src = Path(source).expanduser()
     pack = _load_pack_payload(src)
     pack_id = _normalize_id(str(pack.get("id") or src.stem))
@@ -201,7 +206,7 @@ def install_signature_pack(
         raise SignaturePackError(f"signature pack already installed: {dest}")
 
     dest_resolved = dest.resolve() if dest.exists() else dest.absolute()
-    existing = load_ai_signatures(data_dir=data_dir, signature_packs=())
+    existing = load_ai_signatures(signature_packs=[p for p in signature_packs if Path(p).expanduser() != dest])
     existing_ids = {sig.id: sig.source for sig in existing if Path(sig.source) != dest_resolved}
     conflicts = sorted(sig.id for sig in signatures if sig.id in existing_ids)
     if conflicts:
@@ -384,14 +389,11 @@ def _validate_signature(sig: AISignature) -> None:
 
 def _signature_pack_paths(
     *,
-    data_dir: str | Path | None,
     signature_packs: list[str] | tuple[str, ...],
     allow_workspace_signatures: bool,
     scan_roots: list[str] | tuple[str, ...],
 ) -> list[Path]:
     candidates: list[tuple[str, bool]] = []
-    if data_dir:
-        candidates.append((str(signature_pack_dir(data_dir) / "*.json"), False))
     for pack in signature_packs:
         candidates.append((str(pack), True))
     if allow_workspace_signatures:
