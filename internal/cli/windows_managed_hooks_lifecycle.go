@@ -305,6 +305,16 @@ func runWindowsManagedHooksLifecycle(
 		if err != nil {
 			return fail(err)
 		}
+		// Mirror of the Cursor reclaim invariant: Capture may reclaim an
+		// identity-drifted Claude managed policy, in which case the returned
+		// snapshot has PolicyExisted=false even though `prior` was computed
+		// from the pre-reclaim active state. The journal validator enforces
+		// (Claude.PolicyExisted == (len(PriorClaudeTargetSIDs) != 0)); align
+		// them by zeroing `prior` when the snapshot is empty. The subsequent
+		// Claude install re-publishes targets fresh.
+		if !snapshot.PolicyExisted {
+			prior = prior[:0]
+		}
 		currentCursor, cursorActive, restored, err := readWindowsManagedHooksLifecycleCursorTargets(ctx.opts.HookBinary)
 		report.CursorAdapterRestored = restored
 		if err != nil {
@@ -323,6 +333,16 @@ func runWindowsManagedHooksLifecycle(
 		)
 		if err != nil {
 			return fail(err)
+		}
+		// Capture may reclaim an identity-drifted Cursor managed policy, in
+		// which case the returned snapshot has PolicyActive=false even though
+		// priorCursor was computed from the pre-reclaim active state. The
+		// journal validator in validateWindowsManagedHooksLifecycleJournal
+		// enforces (cursorActive == (len(PriorCursorTargets) != 0)), so
+		// re-align the two by zeroing priorCursor when the snapshot is
+		// inactive. The subsequent Cursor install re-publishes targets fresh.
+		if !cursorSnapshot.PolicyActive {
+			priorCursor = []enterprisehooks.WindowsCursorManagedRuntimeTarget{}
 		}
 		runtimeSelectors, err := captureWindowsManagedHooksLifecycleSelectors()
 		if err != nil {

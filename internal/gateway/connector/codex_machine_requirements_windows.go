@@ -22,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"github.com/pelletier/go-toml/v2"
 	"golang.org/x/sys/windows"
 )
 
@@ -137,24 +138,104 @@ func ReconcileWindowsCodexMachineRequirements(
 		report.ManagedStateExisted = managedState.existed
 
 		var state windowsCodexMachineOwnership
+		ownershipAdopted := !ownership.existed
 		if ownership.existed {
 			state, err = parseWindowsCodexMachineOwnership(ownership.data)
 			if err != nil {
-				return fmt.Errorf("parse Codex requirements ownership: %w", err)
+				// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+				// refuses to silently seed fresh ownership on top of an
+				// unparseable record. The parse failure is the same
+				// forensic tamper signal operators configure strict mode
+				// to catch (prior install wrote a corrupted record or an
+				// external process tampered with the JSON).
+				if managed.TrustStrictAncestors() {
+					return fmt.Errorf("enterprise hooks: parse Codex machine ownership: %w", err)
+				}
+				// Bulldoze: ownership JSON is on disk but unparseable (prior
+				// install wrote a partial file, or disk corruption). Treat
+				// as adoptable and seed fresh ownership from the current
+				// wire shape. Same posture as the ownership-absent branch
+				// below.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming unparseable Codex ownership at %s: %v\n",
+					opts.OwnershipPath, err)
+				ownershipAdopted = true
+				state = windowsCodexMachineOwnership{}
+			} else if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
+				// Strict mode (DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1)
+				// preserves refuse-on-drift: a hardened deployment must
+				// NOT silently adopt a mismatched ownership record,
+				// because that masks exactly the tamper signal operators
+				// configure strict mode to catch (a prior install's
+				// scoped layout surviving into a new scope).
+				if managed.TrustStrictAncestors() {
+					return err
+				}
+				// Bulldoze: ownership metadata is a valid DefenseClaw record
+				// but belongs to a prior install with a different ManagedDir
+				// / HookBinary / RequirementsPath (common cause: an unsigned
+				// certification install at a scoped path that was
+				// uninstalled, leaving C:\ProgramData\OpenAI\Codex\* with
+				// the old bin path baked in). Refusing here strands the
+				// current install's reconcile. Treat the ownership as
+				// adoptable: discard the mismatched record and fall through
+				// to the fresh-ownership seed path below, which also
+				// surgically removes any orphan managed-hook entries from
+				// the preimage.
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] reclaiming identity-drifted Codex "+
+						"ownership at %s (prior install's layout does not "+
+						"match current scope): %v\n",
+					opts.OwnershipPath, err)
+				ownershipAdopted = true
+				state = windowsCodexMachineOwnership{}
 			}
-			if err := validateWindowsCodexMachineOwnership(state, opts); err != nil {
-				return err
-			}
-		} else {
-			contains, markerErr := windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
-			if markerErr != nil {
-				return fmt.Errorf("inspect unowned Codex requirements: %w", markerErr)
+		}
+		if ownershipAdopted {
+			// Managed-mode trust posture: the ownership JSON being absent while
+			// a DefenseClaw hook or managed-state file is present is the signature
+			// of a prior failed install/uninstall that got partway through writing
+			// the pre-reconcile side (requirements.toml) and never finished writing
+			// the post-reconcile side (ownership + managed runtime state). Refusing
+			// here strands the user: install can't adopt what it finds, and
+			// uninstall can't clean what install won't adopt. The product
+			// invariant is "canonical state after install, not refuse-on-drift" —
+			// treat the orphan hook / state as adoptable and seed fresh ownership
+			// metadata from the current wire shape. The reconcile pass below
+			// writes the canonical ACL (via Set-DefenseClawPathAcl's own self-heal
+			// chain) so the resulting trio is internally consistent.
+			//
+			// If an orphan canonical hook is already in requirements.toml, strip
+			// it from the preimage we persist. Otherwise an eventual uninstall
+			// would restore the preimage, see the canonical hook still present,
+			// and refuse to commit ("exact DefenseClaw Codex managed hooks
+			// would remain after removal"). The uninstall path invokes
+			// `removeWindowsCodexRequirementsOwnedChanges(current, baseline, ...)`
+			// to reduce the candidate to the baseline minus owned changes; we
+			// mirror the same cleanup here using a baseline that preserves
+			// administrator-set `features.hooks` and `allow_managed_hooks_only`
+			// (an empty baseline would strip them, which would wipe shared
+			// isolation controls the administrator configured before
+			// DefenseClaw installed).
+			preimage := append([]byte(nil), requirements.data...)
+			contains, detectErr := windowsCodexRequirementsContainExactManagedHook(requirements.data, opts)
+			if detectErr != nil {
+				return fmt.Errorf("detect adopted Codex managed hooks: %w", detectErr)
 			}
 			if contains {
-				return errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
-			}
-			if managedState.existed {
-				return errors.New("Codex managed runtime state exists without protected requirements ownership")
+				baselineBytes, baselineErr := windowsCodexAdoptPreimageBaseline(requirements.data)
+				if baselineErr != nil {
+					return fmt.Errorf("build adopted Codex preimage baseline: %w", baselineErr)
+				}
+				cleaned, _, cleanupErr := removeWindowsCodexRequirementsOwnedChanges(
+					requirements.data,
+					baselineBytes,
+					opts,
+				)
+				if cleanupErr != nil {
+					return fmt.Errorf("prepare adopted Codex requirements preimage: %w", cleanupErr)
+				}
+				preimage = cleaned
 			}
 			state = windowsCodexMachineOwnership{
 				SchemaVersion:    windowsCodexMachineRequirementsSchema,
@@ -162,8 +243,8 @@ func ReconcileWindowsCodexMachineRequirements(
 				ManagedDir:       opts.ManagedDir,
 				HookBinary:       opts.HookBinary,
 				PreimageExisted:  requirements.existed,
-				Preimage:         append([]byte(nil), requirements.data...),
-				PreimageSHA256:   windowsCodexMachineHash(requirements.data),
+				Preimage:         preimage,
+				PreimageSHA256:   windowsCodexMachineHash(preimage),
 			}
 		}
 		report.PreimageSHA256 = state.PreimageSHA256
@@ -905,6 +986,39 @@ func ReadWindowsCodexManagedRuntimeTargets(
 		return nil, err
 	}
 	return registry.Targets, nil
+}
+
+// windowsCodexAdoptPreimageBaseline synthesizes a minimal baseline TOML that
+// preserves the administrator-set shared isolation controls (features.hooks
+// and allow_managed_hooks_only) when adopting an orphan DefenseClaw managed
+// hook in the ownership-absent reconcile path. Running
+// removeWindowsCodexRequirementsOwnedChanges with this baseline strips the
+// orphan hook groups while keeping those two keys in the cleaned preimage, so
+// a subsequent uninstall that restores the preimage does not inadvertently
+// delete isolation controls the administrator configured before DefenseClaw
+// installed.
+func windowsCodexAdoptPreimageBaseline(current []byte) ([]byte, error) {
+	cfg, err := parseWindowsCodexRequirements(current)
+	if err != nil {
+		return nil, fmt.Errorf("parse Codex requirements for baseline synthesis: %w", err)
+	}
+	baseline := map[string]interface{}{}
+	if value, ok := cfg["allow_managed_hooks_only"]; ok {
+		baseline["allow_managed_hooks_only"] = value
+	}
+	if features, ok := cfg["features"].(map[string]interface{}); ok {
+		if hookValue, hookOk := features["hooks"]; hookOk {
+			baseline["features"] = map[string]interface{}{"hooks": hookValue}
+		}
+	}
+	if len(baseline) == 0 {
+		return nil, nil
+	}
+	rendered, err := toml.Marshal(baseline)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Codex adopt baseline: %w", err)
+	}
+	return rendered, nil
 }
 
 func windowsCodexMachinePathExists(path string) (bool, error) {

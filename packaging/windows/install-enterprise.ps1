@@ -3659,10 +3659,24 @@ elseif ($Json) {
     $result | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12 -Compress
 }
 else {
+    $resultState = if ($null -ne $result.PSObject.Properties['ok'] -and
+        -not [bool]$result.ok) {
+        'INCOMPLETE'
+    }
+    else {
+        'OK'
+    }
     Microsoft.PowerShell.Utility\Write-Host (
-        "DefenseClaw Windows enterprise {0}: OK" -f
-        $Action.ToLowerInvariant()
+        "DefenseClaw Windows enterprise {0}: {1}" -f
+        $Action.ToLowerInvariant(), $resultState
     )
+    if ($resultState -eq 'INCOMPLETE') {
+        foreach ($message in @($result.errors)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$message)) {
+                Microsoft.PowerShell.Utility\Write-Warning -Message ([string]$message)
+            }
+        }
+    }
     if ($null -ne $result.gateway_service_state) {
         Microsoft.PowerShell.Utility\Write-Host (
             "  Gateway service: {0}" -f $result.gateway_service_state

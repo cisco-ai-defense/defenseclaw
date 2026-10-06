@@ -596,7 +596,7 @@ jobs:
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
               "aiohttp": ">=3.14.3,<4",
-              "pyjwt": ">=2.15.0",
+              "pyjwt": ">=2.15.1",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
               # Keep the portable LiteLLM line in wheel metadata. A tool.uv
@@ -1228,7 +1228,7 @@ jobs:
       # pyproject.toml:
       #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
-      # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265), pyjwt>=2.15.0
+      # aiohttp>=3.14.3 (CVE-2026-34993, CVE-2026-47265), pyjwt>=2.15.1
       # (PYSEC-2026-175/177/178/179, CVE-2026-101917, CVE-2026-102265..102274,
       # CVE-2026-101918) and urllib3>=2.8.0 (CVE-2026-97687/97688/97689) are
       # likewise pinned in pyproject.toml.
@@ -1268,6 +1268,11 @@ jobs:
           --ignore-vuln GHSA-537c-gmf6-5ccf
           --ignore-vuln GHSA-6v7p-g79w-8964
           --ignore-vuln GHSA-4xgf-cpjx-pc3j
+          # TODO: Remove --ignore-vuln CVE-2026-104874 once uv.lock
+          # upgrades multidict from 6.7.1 to >= 6.9.1. Transitive dep;
+          # OSV published this CVE 2026-10-06 (passed on 2026-10-05
+          # with identical lockfile).
+          --ignore-vuln CVE-2026-104874
 
   ts-build-test:
     name: TypeScript Build & Test

@@ -54,7 +54,7 @@ WHEEL_SECURITY_FLOOR_CONTRACT = {
     "idna": (">=3.15", None),
     "pydantic-settings": (">=2.14.2", None),
     "aiohttp": (">=3.14.3,<4", None),
-    "pyjwt": (">=2.15.0", None),
+    "pyjwt": (">=2.15.1", None),
     "starlette": (">=1.3.1,<1.4", None),
     "fastapi": (">=0.137.1,<0.138", None),
 }
@@ -191,7 +191,7 @@ def test_lock_records_the_same_runtime_and_security_contracts() -> None:
     assert locked["cisco-ai-skill-scanner"] == SKILL_SCANNER_VERSION
     assert locked["cisco-ai-mcp-scanner"] == MCP_SCANNER_VERSION
     assert locked["textual"] == TEXTUAL_LOCKED_VERSION
-    assert Version(locked["litellm"]) >= Version("1.84.0")
+    assert Version(locked["litellm"]) >= Version("1.91.5")
     assert Version(locked["importlib-metadata"]) >= Version("8.7.1")
     assert Version(locked["rich"]) in Requirement("rich>=14.2,<15").specifier
 

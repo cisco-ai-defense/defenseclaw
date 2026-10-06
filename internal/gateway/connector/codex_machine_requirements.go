@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -381,12 +383,30 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 			return fmt.Errorf("hooks.%s has unsupported type %T", l.managedDirKey, existing)
 		}
 		if !l.samePath(value, l.managedDir) {
-			return fmt.Errorf(
-				"hooks.%s=%q conflicts with protected managed directory %q",
-				l.managedDirKey,
-				value,
-				l.managedDir,
-			)
+			// Strict mode preserves refuse-on-drift: a hardened
+			// deployment MUST refuse a stale hooks.<managed_dir>
+			// value instead of silently overwriting it. The managed-
+			// hooks adoptable fix in codex_machine_requirements_
+			// windows.go also honors strict mode for the ownership
+			// record; this is its on-wire mirror.
+			if managed.TrustStrictAncestors() {
+				return fmt.Errorf(
+					"hooks.%s=%q conflicts with protected managed directory %q",
+					l.managedDirKey,
+					value,
+					l.managedDir,
+				)
+			}
+			// Bulldoze: a prior unsigned certification install at a
+			// scoped path left the managed-dir value pointing at its
+			// (now stale) bin directory. Refusing stranded the current
+			// install. Overwrite with the current install's canonical
+			// managedDir (the next statement already does this) and
+			// emit a diagnostic so a DART review can grep the recovery.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming stale Codex hooks.%s = %q, "+
+					"overwriting with current install's canonical managedDir %q\n",
+				l.managedDirKey, value, l.managedDir)
 		}
 	}
 	hooks[l.managedDirKey] = l.managedDir
