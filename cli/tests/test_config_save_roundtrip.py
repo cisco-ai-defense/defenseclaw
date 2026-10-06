@@ -200,7 +200,7 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             with open(os.path.join(tmpdir, "config.yaml"), encoding="utf-8") as stream:
                 persisted = yaml.safe_load(stream)
 
-            self.assertEqual(persisted["config_version"], 8)
+            self.assertEqual(persisted["config_version"], 9)
             self.assertEqual(persisted["guardrail"]["mode"], "action")
             self.assertEqual(persisted["observability"], {})
             for removed in ("audit_sinks", "otel", "privacy", "splunk"):
@@ -227,7 +227,7 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             with open(os.path.join(tmpdir, "config.yaml"), encoding="utf-8") as stream:
                 persisted = yaml.safe_load(stream)
 
-            self.assertEqual(persisted["config_version"], 8)
+            self.assertEqual(persisted["config_version"], 9)
             self.assertEqual(persisted["observability"], {})
             for removed in ("audit_sinks", "otel", "privacy", "splunk"):
                 self.assertNotIn(removed, persisted)
