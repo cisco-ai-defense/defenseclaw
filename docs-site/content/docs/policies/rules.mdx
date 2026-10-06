@@ -185,7 +185,7 @@ guardrail:
 | `disable` | Turns off rules, by rule ID. |
 | `severity_overrides` | Sets a rule's severity: `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`. |
 | `suppressions` | Drops [LLM judge](/docs/policies) findings. Each entry has an `id` that is unique in the pack and the config, a `finding_pattern` (matched against the whole finding ID), an optional `entity_pattern` (matched against the reported text; left out, it matches every value) and a required `reason`. |
-| `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one: `result_inspection`, `judge_result` and `min_entities_for_alert`. |
+| `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one: `result_inspection`, `judge_result` and `min_entities_for_alert`. Only the OpenClaw event path reads this list. The hook connectors (Claude Code, Codex, OpenCode and the others) inspect every tool result with the pack's rules and the judge, whatever the tool, and ignore it, so it cannot make them alert on one tool's result. |
 
 Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only, as the [suppression cookbook](/docs/policies/suppression-cookbook) explains.
 
