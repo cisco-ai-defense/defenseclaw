@@ -467,6 +467,14 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
         } elseif ($ReleaseBase -ne $OfficialReleaseBase) {
             Die "Releases from $ReleaseBase are verified by their signature: install cosign 2.0 or later"
         }
+        # Every release is signed by the same identity, so the signature alone
+        # would let a mirror serve another (older) release under this version.
+        $stamped = ""
+        $match = Select-String -LiteralPath "$tmp\install.ps1" -Pattern '^\$DcVersion = "(.*)"$' | Select-Object -First 1
+        if ($match) { $stamped = $match.Matches[0].Groups[1].Value }
+        if ($stamped.TrimStart("v") -ne $ReleaseVersion.TrimStart("v")) {
+            Die "The installer served for $ReleaseVersion is release $(if ($stamped) { $stamped } else { 'unknown' }); refusing a mismatched release"
+        }
         $shell = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh.exe" } else { "powershell.exe" }
         # Start the child on this console rather than through the pipeline, so its
         # output and prompts reach the user and only its exit code is returned.

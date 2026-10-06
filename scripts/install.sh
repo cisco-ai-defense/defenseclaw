@@ -349,6 +349,12 @@ run_release_installer() {
     elif [[ "${RELEASE_BASE}" != "${OFFICIAL_RELEASE_BASE}" ]]; then
         die "Releases from ${RELEASE_BASE} are verified by their signature: install cosign 2.0 or later"
     fi
+    # Every release is signed by the same identity, so the signature alone
+    # would let a mirror serve another (older) release under this version.
+    local stamped
+    stamped="$(sed -n 's/^readonly DC_VERSION="\(.*\)"$/\1/p' "${tmp}/install.sh" | head -1)"
+    [[ "${stamped#v}" == "${version#v}" ]] \
+        || die "The installer served for ${version} is release ${stamped:-unknown}; refusing a mismatched release"
     [[ -z "${SELF_TMP}" ]] || rm -rf "${SELF_TMP}"
     exec bash "${tmp}/install.sh" "$@"
 }

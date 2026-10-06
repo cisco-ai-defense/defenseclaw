@@ -273,6 +273,17 @@ def test_a_failed_fetch_leaves_no_temporary_directory(
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
+def test_an_installer_stamped_with_another_release_is_refused(
+    home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A mirror can serve a genuinely signed older release under the requested version.
+    monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
+    monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.0")))
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.2.0"]) == 1
+    assert execs == []
+
+
 def test_explicit_version_may_reinstall_or_go_back(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

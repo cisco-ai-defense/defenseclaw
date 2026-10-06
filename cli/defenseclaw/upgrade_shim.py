@@ -405,7 +405,28 @@ def _fetch_installer(repo: str, version: str, local_dir: str | None, workdir: st
         actual = hashlib.sha256(stream.read()).hexdigest()
     if actual != expected:
         raise ShimError(f"{name} for {version} does not match checksums.txt")
+    _check_installer_version(installer, version)
     return installer
+
+
+_STAMPED_VERSION = re.compile(r'^(?:(?:readonly )?DC_VERSION=|\$DcVersion = )"([^"]*)"\s*$', re.MULTILINE)
+
+
+def _check_installer_version(installer: str, version: str) -> None:
+    """Refuse an installer stamped with another release than *version*.
+
+    Every release is signed by the same identity, so a verified signature
+    alone would let a mirror (update.source) serve an older release under the
+    requested version. An unstamped copy (a local test build) is accepted.
+    """
+
+    with open(installer, encoding="utf-8", errors="replace") as stream:
+        match = _STAMPED_VERSION.search(stream.read())
+    stamped = match.group(1) if match else ""
+    if not stamped or stamped == "__DEFENSECLAW_VERSION__":
+        return
+    if stamped.lstrip("v") != version.lstrip("v"):
+        raise ShimError(f"the installer served for {version} is release {stamped}; refusing a mismatched release")
 
 
 def _cosign() -> str | None:
