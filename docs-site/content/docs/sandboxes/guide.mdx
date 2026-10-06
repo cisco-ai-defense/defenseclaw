@@ -389,7 +389,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Asks` | Where the rare asks go while the harness has your terminal: they are shown as they come, and you answer them in another terminal with `defenseclaw sandbox approvals --sandbox <name>` (see [answer the rare asks](#answer-the-rare-asks)). |
 | `Keys` | Shown for a harness whose Ctrl-C quits it, and so ends the session, rather than stopping a turn: in OpenCode, Esc interrupts a turn. |
 | `MCP` | Your MCP servers that came along. |
-| `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit (Kiro has no system settings tier) (hook silence is detected)`. It reads the same on every compute driver. The connector pages have the details. |
+| `Hooks` | Shown for user-tier harnesses: what of the harness's hooks the image keeps root-owned and what the agent can still change, for example `user tier: the hooks and the DefenseClaw agent that runs them are root-owned; Kiro's user and project settings, MCP servers and the TUI runtime it unpacks into the sandbox home are the agent's to edit (Kiro has no system settings tier) (DefenseClaw stops the sandbox when the harness works for 10m without its hooks)`; under the `open` pack it ends `DefenseClaw alerts when …` instead. It reads the same on every compute driver. The connector pages have the details. |
 | `⚠ …` | Anything worth knowing before you start: MCP servers left behind or blocked, secrets not passed in, or settings your organization's policy changed. |
 
 ### Harness arguments and headless runs
@@ -644,10 +644,26 @@ What happens next is the pack's `hooks.on_tamper` setting:
 | `open` | `alert` | The sandbox keeps running; review the activity and stop it if you didn't expect this. |
 | `balanced`, `strict` | `stop` | DefenseClaw stops the sandbox. |
 
-A harness that is busy (model calls, network traffic) while its hooks stay
-silent also raises a finding (`the harness is active but its hooks are
-silent`), and `defenseclaw sandbox list` shows `silent!` in its HOOKS
-column.
+A harness that works (model calls, its own processes and connections) for
+the pack's `hooks.silence_after`, 10 minutes in every built-in pack, without
+one hook request reaching DefenseClaw raises a HIGH `hook_silence` finding,
+and `defenseclaw sandbox list` shows `silent!` in its HOOKS column. A
+switched-off hook registration looks like that, and a user-tier harness's
+registration is the agent's to edit, so for those the pack's
+`hooks.on_silence` decides what follows:
+
+```text
+14:21:07 myapp-7f3a ⚠ the harness is active but its hooks are silent; stopping the sandbox (hooks.on_silence: stop)
+```
+
+| Pack | `hooks.on_silence` | Result for a user-tier harness |
+| --- | --- | --- |
+| `open` | `alert` | The sandbox keeps running. |
+| `balanced`, `strict` | `stop` | DefenseClaw stops the sandbox; its next session is watched again. |
+
+A managed-tier harness (Claude Code, Codex, GitHub Copilot CLI, Cursor
+Agent, OmniGent), whose hooks are root-owned, only alerts. The banner's
+`Hooks` line of a user-tier harness says what its silent hooks lead to.
 
 ### Nested repositories in a mounted project
 

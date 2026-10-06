@@ -27,6 +27,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -437,22 +438,33 @@ func (m *Manager) raiseTamper(b *box, a tamperAlarm) {
 		Event: a.event, Severity: "HIGH", Reason: string(audit.SandboxFindingHookTamper), Message: msg})
 
 	if a.stop {
-		m.tamperStops.Add(1)
-		go func() {
-			defer m.tamperStops.Done()
-			m.stopForTamper(a.name, a.bindingID)
-		}()
+		m.scheduleAlarmStop(a.name, a.bindingID, audit.SandboxFindingHookTamper)
 	}
 }
 
-// stopForTamper stops a sandbox whose hooks were tampered with, unless the
-// session that tampered is already over.
-func (m *Manager) stopForTamper(name, bindingID string) {
+// scheduleAlarmStop stops sandbox name in the background for a hook alarm
+// (kind hook_tamper or hook_silence), unless the session it was raised in
+// is over by then.
+func (m *Manager) scheduleAlarmStop(name, bindingID string, kind audit.SandboxFindingKind) {
+	m.tamperStops.Add(1)
+	go func() {
+		defer m.tamperStops.Done()
+		m.stopForAlarm(name, bindingID, kind)
+	}()
+}
+
+// stopForAlarm stops a sandbox whose hooks were tampered with or went
+// silent, unless the session that raised the alarm is already over.
+func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFindingKind) {
+	what := "hook tamper"
+	if kind == audit.SandboxFindingHookSilence {
+		what = "silent hooks"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultOpTimeout)
 	defer cancel()
 	b, unlock, err := m.lockBox(name)
 	if err != nil {
-		m.logf("hook tamper: stop %s: %v", name, err)
+		m.logf("%s: stop %s: %v", what, name, err)
 		return
 	}
 	defer unlock()
@@ -463,12 +475,12 @@ func (m *Manager) stopForTamper(name, bindingID string) {
 		return
 	}
 	if err := m.stop(ctx, b); err != nil {
-		m.logf("hook tamper: stop %s: %v", name, err)
+		m.logf("%s: stop %s: %v", what, name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
-			Reason: string(audit.SandboxFindingHookTamper), Message: "⚠ DefenseClaw could not stop the tampered sandbox: stop it yourself"})
+			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + ": stop it yourself"})
 		return
 	}
-	m.logf("hook tamper: stopped %s", name)
+	m.logf("%s: stopped %s", what, name)
 }
 
 // pruneToolCalls drops the tool-call ledgers of bindings no sandbox holds
@@ -502,32 +514,65 @@ func hookLabel(s string, limit int) string {
 	return out.String()
 }
 
+// hookSilenceInterval paces the silence check, well under the shortest
+// hooks.silence_after a pack may set (packs.MinSilenceAfter).
+const hookSilenceInterval = 15 * time.Second
+
+// silenceResponse is what DefenseClaw does about the silent hooks of a
+// sandbox whose harness is of tamper tier, under eff, and after how long
+// (the pack's hooks.silence_after). A user-tier harness, whose hook
+// registration the agent can edit, gets the pack's hooks.on_silence; an
+// unknown response fails toward stopping. A managed-tier one only alerts:
+// the agent cannot switch its root-owned registration off.
+func silenceResponse(tier string, eff *packs.Effective) (response string, after time.Duration) {
+	response, after = packs.OnSilenceStop, packs.DefaultSilenceAfter
+	if eff != nil {
+		response = eff.HookOnSilence
+		if eff.HookSilenceAfter > 0 {
+			after = eff.HookSilenceAfter
+		}
+	}
+	if tier != connector.SandboxTamperTierUser || response == packs.OnSilenceAlert {
+		return packs.OnSilenceAlert, after
+	}
+	return packs.OnSilenceStop, after
+}
+
+// silenceAlarm is one sandbox whose hooks went silent, captured under
+// Manager.mu.
+type silenceAlarm struct {
+	id              audit.SandboxIdentity
+	name, bindingID string
+	tier, response  string
+	since           time.Time
+	after           time.Duration
+	// stop is set when this alarm schedules the session's stop; stopping
+	// says one was already scheduled (a tamper's).
+	stop, stopping bool
+}
+
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
 // harness was active (OCSF process or network events of the harness's own
 // binaries, its connections to the egress proxy among them, native OTLP)
-// more than HookSilence after its last hook request, or after it became
-// ready when no hook ever arrived. A tampered or disabled hook
-// registration looks exactly like that; user-tier connectors, whose hook
-// config the agent can edit, rely on it.
+// for longer than the pack's hooks.silence_after since its last hook
+// request, or since it became ready when no hook ever arrived. A tampered or
+// disabled hook registration looks exactly like that. A user-tier harness
+// under hooks.on_silence: stop (balanced and strict) is stopped, as a hook
+// tamper is; every other one alerts (silenceResponse).
 func (m *Manager) checkHookSilence(ctx context.Context) {
-	threshold := m.opts.HookSilence
 	now := m.now()
-	type finding struct {
-		id    audit.SandboxIdentity
-		name  string
-		since time.Time
-	}
-	var out []finding
+	var out []silenceAlarm
 	m.mu.Lock()
 	for _, b := range m.boxes {
 		if b.deleted || b.creating || b.phase != audit.SandboxPhaseReady {
 			continue
 		}
+		response, after := silenceResponse(b.rec.TamperTier, b.eff)
 		ref := b.started
 		if b.hooks.lastHook.After(ref) {
 			ref = b.hooks.lastHook
 		}
-		if ref.IsZero() || !b.activeAt.After(ref.Add(threshold)) {
+		if ref.IsZero() || !b.activeAt.After(ref.Add(after)) {
 			continue
 		}
 		if b.silentSince.IsZero() {
@@ -537,19 +582,55 @@ func (m *Manager) checkHookSilence(ctx context.Context) {
 			continue
 		}
 		b.silenceSent = true
-		out = append(out, finding{id: b.identity(), name: b.rec.Name, since: ref})
+		a := silenceAlarm{id: b.identity(), name: b.rec.Name, bindingID: b.rec.BindingID, tier: b.rec.TamperTier,
+			response: response, since: ref, after: after}
+		if response == packs.OnSilenceStop {
+			a.stop, a.stopping = !b.tamperStop, b.tamperStop
+			b.tamperStop = true
+		}
+		out = append(out, a)
 	}
 	m.mu.Unlock()
-	for _, f := range out {
-		quiet := now.Sub(f.since).Round(time.Minute)
-		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
-			Sandbox: f.id, Kind: audit.SandboxFindingHookSilence, Severity: "HIGH",
-			Title:       "Sandboxed harness is active without DefenseClaw hook traffic",
-			Description: fmt.Sprintf("%s has been doing work for %s without a single hook request reaching DefenseClaw.", f.name, quiet),
-			Remediation: "Check the harness's hook configuration inside the sandbox; stop the sandbox if hooks were disabled.",
-			TargetRef:   f.name, Timestamp: now,
-		})
-		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: f.name, Severity: "HIGH",
-			Reason: string(audit.SandboxFindingHookSilence), Message: "⚠ the harness is active but its hooks are silent"})
+	for _, a := range out {
+		m.raiseSilence(ctx, now, a)
+	}
+}
+
+// raiseSilence reports silent hooks as a HIGH hook_silence finding and on
+// the activity feed, and stops the sandbox when the alarm says so.
+func (m *Manager) raiseSilence(ctx context.Context, now time.Time, a silenceAlarm) {
+	after := packs.ShortDuration(a.after)
+	var remediation, outcome string
+	switch {
+	case a.response == packs.OnSilenceStop:
+		remediation = "DefenseClaw is stopping the sandbox (hooks.on_silence: stop). Check the harness's hook configuration in the sandbox " +
+			"before you start it again: the agent can edit a user-tier harness's hook registration."
+		outcome = "; stopping the sandbox (hooks.on_silence: stop)"
+		if a.stopping {
+			outcome = "; the sandbox is already stopping"
+		}
+	case a.tier == connector.SandboxTamperTierUser:
+		remediation = "The sandbox keeps running (hooks.on_silence: alert). Check the harness's hook configuration in the sandbox, " +
+			"and stop the sandbox if its hooks were disabled."
+		outcome = "; the sandbox keeps running (hooks.on_silence: alert)"
+	default:
+		remediation = "The sandbox keeps running: the harness's hooks are root-owned (managed tier), so silence only alerts. " +
+			"Check what the harness is doing, and stop the sandbox if you did not expect this."
+		outcome = "; the sandbox keeps running"
+	}
+	quiet := now.Sub(a.since).Round(time.Minute)
+	if err := m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		Sandbox: a.id, Kind: audit.SandboxFindingHookSilence, Severity: "HIGH",
+		Title:       "Sandboxed harness is active without DefenseClaw hook traffic",
+		Description: fmt.Sprintf("%s has been doing work for %s without a single hook request reaching DefenseClaw.", a.name, quiet),
+		Evidence:    "on_silence=" + a.response + " silence_after=" + after + " tier=" + firstNonEmpty(a.tier, "unknown"),
+		Remediation: remediation, TargetRef: a.name, Timestamp: now,
+	}); err != nil {
+		m.logf("silent hooks: record the finding for %s: %v", a.name, err)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: a.name, Severity: "HIGH",
+		Reason: string(audit.SandboxFindingHookSilence), Message: "⚠ the harness is active but its hooks are silent" + outcome})
+	if a.stop {
+		m.scheduleAlarmStop(a.name, a.bindingID, audit.SandboxFindingHookSilence)
 	}
 }

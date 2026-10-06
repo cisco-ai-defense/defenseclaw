@@ -323,6 +323,13 @@ type HookCoverage struct {
 	// Silent is set while the harness is active without hook traffic.
 	Silent      bool      `json:"silent,omitempty"`
 	SilentSince time.Time `json:"silent_since,omitzero"`
+	// OnSilence is what DefenseClaw does once the harness has worked for
+	// SilenceAfter ("10m") without hook traffic: "stop" stops the sandbox
+	// (a user-tier harness under the pack's hooks.on_silence: stop), "alert"
+	// raises a finding and leaves it running. Empty when the sandbox's
+	// policy is not resolved.
+	OnSilence    string `json:"on_silence,omitempty"`
+	SilenceAfter string `json:"silence_after,omitempty"`
 	// HookFailed counts the authenticated hook posts DefenseClaw answered
 	// with an error status (a refused route, the rate limit, a malformed
 	// request). The hooks fail closed, so the harness did not do what each

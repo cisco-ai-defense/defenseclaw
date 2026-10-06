@@ -109,6 +109,11 @@ func TestResolveDefaults(t *testing.T) {
 	wantSetting(t, eff, "learn", "false", SourceDefault, "")
 	wantSetting(t, eff, "hooks.fail_mode", "closed", SourcePack, "pack open")
 	wantSetting(t, eff, "hooks.on_tamper", "alert", SourcePack, "pack open")
+	wantSetting(t, eff, "hooks.on_silence", "alert", SourcePack, "pack open")
+	wantSetting(t, eff, "hooks.silence_after", "10m", SourcePack, "pack open")
+	if eff.HookOnSilence != OnSilenceAlert || eff.HookSilenceAfter != DefaultSilenceAfter {
+		t.Fatalf("silence = %q after %s", eff.HookOnSilence, eff.HookSilenceAfter)
+	}
 	wantSetting(t, eff, "mcp.project_servers", "block", SourcePack, "pack open")
 
 	// The loader defaults (git_depth 200, on_exit ask) read as defaults.
@@ -838,6 +843,11 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 	alerting.Name, alerting.Hooks.OnTamper = "alerting", OnTamperAlert
 	stopping := *open
 	stopping.Name, stopping.Hooks.OnTamper = "stopping", OnTamperStop
+	// So is alerting on silent hooks, or waiting longer before acting on them.
+	silentAlerting := *balanced
+	silentAlerting.Name, silentAlerting.Hooks.OnSilence = "silentalerting", OnSilenceAlert
+	patient := *balanced
+	patient.Name, patient.Hooks.SilenceAfter = "patient", "20m"
 	// Reporting a large upload without cutting it is looser than blocking it.
 	blocking := *open
 	blocking.Name, blocking.Egress.BlockLargeUploads = "blocking", true
@@ -856,6 +866,10 @@ func TestLooserPackKeyBuiltins(t *testing.T) {
 		{&alerting, balanced, "hooks.on_tamper"},
 		{balanced, &alerting, ""},
 		{&stopping, open, ""},
+		{&silentAlerting, balanced, "hooks.on_silence"},
+		{balanced, &silentAlerting, ""},
+		{&patient, balanced, "hooks.silence_after"},
+		{balanced, &patient, ""},
 		{open, &blocking, "egress.block_large_uploads"},
 		{&blocking, open, ""},
 	} {

@@ -1188,6 +1188,20 @@ deleted.
   (create) or stopped again (start), and the message now says which
   (`…; DefenseClaw deleted it`, `…; DefenseClaw stopped it again (its work is
   kept)`). It ran only on the MicroVM driver before.
+- **Silent hooks stop a user-tier sandbox in balanced and strict.** New pack
+  keys `hooks.on_silence` (`stop` or `alert`) and `hooks.silence_after` (a
+  duration from `1m` to `24h`, `10m` in every built-in pack). When the
+  harness of a user-tier sandbox (OpenCode, Kiro CLI, Amp, Devin CLI,
+  Antigravity, Hermes, OpenHands), whose hook registration the agent can
+  edit, works that long without one hook request reaching DefenseClaw,
+  `stop` (the default in `balanced` and `strict`) stops the sandbox the way
+  a hook tamper does, and `alert` (the default in `open`) keeps it running.
+  Both raise the HIGH `hook_silence` finding, whose evidence names the
+  response, and a feed line that says what follows. A managed-tier harness
+  only alerts. The banner's `Hooks` line, `sandbox policy explain` and the
+  sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
+  with `pack` locked, a run cannot switch to a pack that alerts or waits
+  longer. The threshold was a fixed 10 minutes and silence only alerted.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -1576,7 +1576,19 @@ func hooksTierText(sb *sandboxapi.Sandbox) string {
 	if spec, ok := harness.Get(sb.Harness); ok && spec.TamperNote != "" {
 		note = spec.TamperNote
 	}
-	return sb.TamperTier + " tier: " + note + " (hook silence is detected)"
+	return sb.TamperTier + " tier: " + note + " (" + silenceText(sb.Hooks) + ")"
+}
+
+// silenceText says what silent hooks of the sandbox lead to (the pack's
+// hooks.on_silence and hooks.silence_after, as the daemon resolved them).
+func silenceText(h sandboxapi.HookCoverage) string {
+	switch {
+	case h.OnSilence == "stop" && h.SilenceAfter != "":
+		return "DefenseClaw stops the sandbox when the harness works for " + h.SilenceAfter + " without its hooks"
+	case h.OnSilence == "alert" && h.SilenceAfter != "":
+		return "DefenseClaw alerts when the harness works for " + h.SilenceAfter + " without its hooks"
+	}
+	return "hook silence is detected"
 }
 
 // bannerHostPorts are the host ports the sandbox may ask to reach, as the

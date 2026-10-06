@@ -101,7 +101,8 @@ type box struct {
 	// reach is whether the current session's hooks reach the ingress
 	// (reach.go); it starts over whenever the sandbox becomes ready.
 	reach hookReach
-	// tamperStop is set once a hook tamper scheduled this session's stop.
+	// tamperStop is set once a hook alarm (a tamper, or silent hooks under
+	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
 	// seenChunks are the pending draft chunks triage decided; it is pruned
@@ -284,6 +285,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
 		b.reach = hookReach{}
+		// The silence check starts over with the session: one that stopped
+		// a session for silent hooks stops the next one too while they stay
+		// silent.
+		b.silentSince, b.silenceSent = time.Time{}, false
 		b.closedPorts = nil
 		if previous != audit.SandboxPhaseReady {
 			b.rec.Sessions++
@@ -661,6 +666,9 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
 		}
 		v.Violations = wireViolations(b.violations)
+		var after time.Duration
+		v.Hooks.OnSilence, after = silenceResponse(r.TamperTier, e)
+		v.Hooks.SilenceAfter = packs.ShortDuration(after)
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
 		if running {
 			v.Warnings = append(v.Warnings, sessionDrift(r, e, v.SessionYolo, v.Yolo)...)

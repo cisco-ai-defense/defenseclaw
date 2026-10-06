@@ -978,6 +978,16 @@ func TestBanner(t *testing.T) {
 		}, nil,
 			[]string{"Hooks     user tier: the hooks and their config (/etc/hermes/config.yaml) are root-owned; the Hermes home (.env files, profiles, plugins) is the agent's to write, and the launcher checks it at every start (hook silence is detected)"},
 			nil},
+		// The line says what silent hooks lead to, as the daemon resolved
+		// the pack's hooks.on_silence and hooks.silence_after.
+		{"silent hooks stop", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+			sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = "stop", "10m"
+		}, nil, []string{"(DefenseClaw stops the sandbox when the harness works for 10m without its hooks)"}, []string{"hook silence is detected"}},
+		{"silent hooks alert", func(_ *testApp, sb *sandboxapi.Sandbox) {
+			sb.Harness, sb.HarnessName, sb.TamperTier = "kiro", "Kiro CLI", "user"
+			sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = "alert", "5m"
+		}, nil, []string{"(DefenseClaw alerts when the harness works for 5m without its hooks)"}, nil},
 		{"a managed tier", func(_ *testApp, sb *sandboxapi.Sandbox) { sb.TamperTier = "managed" }, nil, nil, []string{"Hooks "}},
 	} {
 		t.Run(c.name, func(t *testing.T) {

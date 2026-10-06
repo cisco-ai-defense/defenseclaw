@@ -856,7 +856,7 @@ func (e *harnessEnv) newManager() *Manager {
 		IngressPort: e.ingressPort, EgressPort: e.egressPort, APIPort: e.apiPort,
 		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch, Resolver: e.dns,
 		Guard: e.guard.run, GuardGitlinks: func(context.Context, string) ([]string, error) { return nil, nil },
-		DefenseClawVersion: "1.2.3", SettleDelay: -1, HookSilence: 10 * time.Minute,
+		DefenseClawVersion: "1.2.3", SettleDelay: -1,
 		Logf: func(format string, args ...any) { e.t.Logf("[manager] "+format, args...) },
 	})
 	if err != nil {

@@ -755,6 +755,58 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	}
 }
 
+// Under hooks.on_silence: stop (balanced, strict) a user-tier harness that
+// works for hooks.silence_after without one hook is stopped, as a tampered
+// one is, and its next session is watched again; under alert (open) it keeps
+// running, and a managed-tier harness only alerts whatever the pack says.
+func TestHookSilenceResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name, pack, tier, response, outcome string
+	}{
+		{"balanced user tier", "balanced", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)"},
+		{"open user tier", "open", "user", "alert", "; the sandbox keeps running (hooks.on_silence: alert)"},
+		{"strict managed tier", "strict", "managed", "alert", "; the sandbox keeps running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			now, advance := e.fakeClock(time.Now())
+			e.create(sandboxapi.CreateRequest{Name: "silentbox", Pack: tc.pack})
+			b := e.boxOf("silentbox")
+			e.m.mu.Lock()
+			b.rec.TamperTier = tc.tier
+			e.m.mu.Unlock()
+			if h := e.get("silentbox").Hooks; h.OnSilence != tc.response || h.SilenceAfter != "10m" {
+				t.Fatalf("hooks = %+v, want on_silence %s after 10m", h, tc.response)
+			}
+			silentFor := func(d time.Duration) []audit.SandboxFindingEvent {
+				advance(d)
+				e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+				e.m.checkHookSilence(t.Context())
+				return e.tel.findingsOf(audit.SandboxFindingHookSilence)
+			}
+			if f := silentFor(9 * time.Minute); len(f) != 0 {
+				t.Fatalf("findings before silence_after: %+v", f)
+			}
+			f := silentFor(2 * time.Minute)
+			feed := e.events("silentbox", sandboxapi.ActivityFinding, string(audit.SandboxFindingHookSilence))
+			if len(f) != 1 || f[0].Evidence != "on_silence="+tc.response+" silence_after=10m tier="+tc.tier ||
+				len(feed) != 1 || !strings.HasSuffix(feed[0].Message, tc.outcome) {
+				t.Fatalf("findings %+v, feed %+v", f, feed)
+			}
+			if got := stopped(t, e, "silentbox"); got != (tc.response == "stop") {
+				t.Fatalf("stopped = %v, want %v", got, tc.response == "stop")
+			}
+			if tc.response != "stop" {
+				return
+			}
+			e.startBox("silentbox", sandboxapi.StartRequest{})
+			if f := silentFor(11 * time.Minute); len(f) != 2 || !stopped(t, e, "silentbox") {
+				t.Fatalf("the next silent session: findings %+v, stopped %v", f, stopped(t, e, "silentbox"))
+			}
+		})
+	}
+}
+
 // Every hook post the ingress answered with an error counts (the hook failed
 // closed, so the harness's action was blocked); the feed reports the first at
 // once and then at most one summary per interval.

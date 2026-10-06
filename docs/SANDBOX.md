@@ -1847,11 +1847,20 @@ compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF process or
   network events of the harness's own binaries under its install root,
-  their connections to the egress proxy included, native OTLP) for
-  `HookSilence` without a single hook request. Commands the harness did not
+  their connections to the egress proxy included, native OTLP) for the
+  pack's `hooks.silence_after` (10 minutes in the built-in packs, 1 minute
+  to 24 hours) without a single hook request. Commands the harness did not
   start, such as the CLI's probe, a copy-mode upload or pull, or your own
   `sandbox exec`, do not count, and neither do the egress proxy's own
-  events, which cannot tell the harness's requests from theirs.
+  events, which cannot tell the harness's requests from theirs. For a
+  user-tier harness (its hook registration is in the image HOME, the
+  agent's to edit) the pack's `hooks.on_silence` picks the response: `stop`
+  (balanced, strict) stops the sandbox once per session through the tamper
+  stop path (`stopForAlarm`; the stop keeps no run log), `alert` (open)
+  reports and leaves it running. A managed-tier harness only alerts. The
+  finding's evidence names the response, the threshold and the tier, and
+  `hooks.on_silence` / `hooks.silence_after` in the sandbox's `hooks` view
+  feed the banner's `Hooks` line.
 - **Hook tamper** (`hook_tamper`, `internal/openshell/manager/hook_tamper.go`):
   a tool that ran without a verdict. Per binding, the manager records each
   pre-tool decision and pairs it with the call's post-tool event. A

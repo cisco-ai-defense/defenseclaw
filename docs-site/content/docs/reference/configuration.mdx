@@ -872,8 +872,10 @@ loader default, so an unset key follows the pack: `profile`, `yolo`,
 block, and allow lists add to the pack's lists. Some settings exist only in a
 pack, so a custom pack is the way to change them: the approvals mode, the
 review list, `mcp.blocked_tools`, `mcp.project_servers` (whether the MCP
-servers a repository defines may start), and `hooks.on_tamper` (whether a
-sandbox whose hooks were bypassed is stopped or only reported).
+servers a repository defines may start), `hooks.on_tamper` (whether a
+sandbox whose hooks were bypassed is stopped or only reported), and
+`hooks.on_silence` with `hooks.silence_after` (the same for a user-tier
+harness that works that long without its hooks).
 
 ```yaml
 openshell:

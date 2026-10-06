@@ -58,7 +58,6 @@ const (
 	// start, which closes in-flight connections ~10-12 s in (FINDINGS P1).
 	DefaultSettleDelay       = 15 * time.Second
 	DefaultReconcileInterval = 5 * time.Minute
-	DefaultHookSilence       = 10 * time.Minute
 	DefaultTriageInterval    = 30 * time.Second
 	defaultConnectRetry      = 30 * time.Second
 	// connectBackoff bounds how often API requests redial a gateway that
@@ -168,9 +167,6 @@ type Options struct {
 	// (DefaultSettleDelay); negative skips it.
 	SettleDelay       time.Duration
 	ReconcileInterval time.Duration
-	// HookSilence is how long a harness may be active without hook
-	// traffic before a hook_silence finding (DefaultHookSilence).
-	HookSilence time.Duration
 	// HookReachWindow is how long a session's harness may work before its
 	// first authenticated hook is overdue and the session is flagged as
 	// not reaching DefenseClaw (DefaultHookReachWindow; see reach.go).
@@ -307,9 +303,6 @@ func New(opts Options) (*Manager, error) {
 	}
 	if opts.ReconcileInterval <= 0 {
 		opts.ReconcileInterval = DefaultReconcileInterval
-	}
-	if opts.HookSilence <= 0 {
-		opts.HookSilence = DefaultHookSilence
 	}
 	if opts.HookReachWindow <= 0 {
 		opts.HookReachWindow = DefaultHookReachWindow
@@ -455,7 +448,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	startup := true
 	reconcile := time.NewTimer(0)
 	defer reconcile.Stop()
-	silence := time.NewTicker(minDuration(m.opts.HookSilence/4, time.Minute))
+	silence := time.NewTicker(hookSilenceInterval)
 	defer silence.Stop()
 	reach := time.NewTicker(hookReachInterval)
 	defer reach.Stop()
@@ -488,13 +481,6 @@ func (m *Manager) Run(ctx context.Context) error {
 			reconcile.Reset(m.opts.ReconcileInterval)
 		}
 	}
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a <= 0 || a > b {
-		return b
-	}
-	return a
 }
 
 // gateway returns the live connection, connecting when there is none.

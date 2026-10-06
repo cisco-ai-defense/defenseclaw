@@ -880,7 +880,9 @@ when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
 `tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
 plain reason, tamper counts, the verdicts per hook event under the
 harness's own event names in `events`, at most 48 names with the rest in
-`other_events`, and whether hooks are `silent` or `unreachable`),
+`other_events`, whether hooks are `silent` or `unreachable`, and
+`on_silence` with `silence_after`: `stop` or `alert`, what silent hooks
+lead to once the harness has worked that long without them),
 `endpoints` (the last result of each credentialed endpoint),
 `egress` totals, `pending_approvals`, the
 `workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
