@@ -842,6 +842,8 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.echo(f"  • {ux._style('profile:', fg='bright_black', bold=True)}    {profile_status_text(app.cfg, profile)}")
         for note in profile.get("warnings") or []:
             ux.warn(str(note), indent="    ")
+        if (profile.get("directory") or {}).get("message"):
+            ux.warn(str(profile["directory"]["message"]), indent="    ")
         if profile.get("profile") or profile.get("overrides"):
             ux.subhead(
                 "The table shows guardrail.*; the profile settings above decide for you. "
@@ -4600,6 +4602,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         ux.warn(f"user lookup failed: {result['lookup_error']}")
     for note in result.get("warnings") or []:
         ux.warn(str(note))
+    if (result.get("directory") or {}).get("message"):
+        ux.warn(str(result["directory"]["message"]))
     effective = result.get("effective") or {}
     if effective:
         scope = result.get("connector") or "global"

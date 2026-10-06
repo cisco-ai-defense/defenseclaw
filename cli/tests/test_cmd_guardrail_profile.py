@@ -176,8 +176,12 @@ def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
         "match": "user",
         "subject": {"user_name": "alice", "group_count": 1},
         "warnings": [note],
+        # GAP-0145: a directory that does not answer.
+        "directory": {"failing": 2, "message": "directory lookups are failing for 2 account(s) since 21:04:08Z"},
     }
-    assert note in _explain(monkeypatch, answer).output
+    explained = _explain(monkeypatch, answer).output
+    assert note in explained
+    assert "directory lookups are failing for 2 account(s)" in explained
 
     app = AppContext()
     app.cfg = default_config()
@@ -186,6 +190,7 @@ def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
     monkeypatch.setattr(gateway, "current_user_guardrail_profile", lambda cfg: {**answer, "user": "alice", "overrides": []})
     status = CliRunner().invoke(cmd_guardrail.guardrail, ["status"], obj=app, catch_exceptions=False)
     assert note in status.output
+    assert "directory lookups are failing for 2 account(s)" in status.output
 
     # `profile list` reads the config file and adds what the running gateway
     # warns about, such as a group the host no longer knows (GAP-0135).
@@ -202,8 +207,9 @@ def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
 
     result = cmd_doctor._DoctorResult(quiet=True)
     cmd_doctor._check_guardrail_profile(app.cfg, result)
-    assert [(c["status"], c["label"]) for c in result.checks if c["label"].startswith("Guardrail")] == [
+    assert [(c["status"], c["label"]) for c in result.checks] == [
         ("pass", "Guardrail profile"),
+        ("warn", "Directory lookups"),
         ("warn", "Guardrail assignments"),
     ]
 

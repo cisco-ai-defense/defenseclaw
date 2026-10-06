@@ -2225,6 +2225,18 @@ def _check_guardrail_profile(cfg, r: _DoctorResult) -> None:
         )
     else:
         _emit("pass", "Guardrail profile", profile_status_text(cfg, result), r=r, check_id="doctor.guardrail.profile")
+    # A directory that does not answer leaves only default_lookup_failed on
+    # each record otherwise (GAP-0145).
+    directory = (result.get("directory") or {}).get("message")
+    if directory:
+        _emit(
+            "warn",
+            "Directory lookups",
+            str(directory),
+            r=r,
+            check_id="doctor.guardrail.directory",
+            remediation="getent passwd $USER; on SSSD hosts also: sssctl domain-status",
+        )
     # What the decision alone does not show: a warning, never a failure.
     for note in result.get("warnings") or []:
         _emit(

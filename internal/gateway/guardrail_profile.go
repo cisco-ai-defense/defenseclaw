@@ -1034,6 +1034,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			}
 		}
 	}
+	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
+		out["directory"] = view
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}

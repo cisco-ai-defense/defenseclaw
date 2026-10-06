@@ -43,6 +43,11 @@ const IdentitySpoolDirName = "identity"
 // IdentitySpoolRecordVersion is the record schema version.
 const IdentitySpoolRecordVersion = 1
 
+// IdentitySpoolMaxAge is how long the gateway trusts a record (four times the
+// 15 minute identity cache lifetime) and how long the guardian keeps the
+// record of an account it no longer lists.
+const IdentitySpoolMaxAge = time.Hour
+
 // maxIdentitySpoolRecordBytes bounds one record.
 const maxIdentitySpoolRecordBytes = 256 << 10
 

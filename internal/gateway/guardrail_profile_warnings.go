@@ -212,3 +212,41 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	}
 	return view, warning
 }
+
+// Directory lookups that fail.
+//
+// A directory that does not answer (a domain controller down, SSSD offline)
+// leaves no trace on the tools an administrator uses: the accounts without
+// cached facts get the default profile, and the only sign was match
+// default_lookup_failed on each record. directoryHealthView reports the
+// accounts whose lookups failed in the last cache lifetime, with the reason
+// and the age of the facts still served, to explain, status and doctor
+// (GAP-0145).
+
+// directoryCacheHealth reads the health of the cache requests use. Tests
+// replace it.
+var directoryCacheHealth = func() identityCacheHealth { return peerDirectoryCache().health() }
+
+// directoryHealthView returns the "directory" object of the resolve answer
+// and its one-line message, or nil when no lookup failed recently.
+func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]any, message string) {
+	if h.Failing == 0 {
+		return nil, ""
+	}
+	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); accounts without cached facts "+
+		"get the default profile (default_lookup_failed)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+	if h.Stale > 0 {
+		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
+			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)
+	}
+	view = map[string]any{
+		"failing":            h.Failing,
+		"since":              h.Since.UTC().Format(time.RFC3339),
+		"last_error":         h.LastError,
+		"stale":              h.Stale,
+		"oldest_age_seconds": int(h.OldestAge.Seconds()),
+		"max_age_seconds":    int(identityDirectoryMaxAge.Seconds()),
+		"message":            message,
+	}
+	return view, message
+}

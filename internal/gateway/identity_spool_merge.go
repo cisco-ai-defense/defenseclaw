@@ -14,7 +14,9 @@ import (
 // identitySpoolMaxAge bounds how old a guardian identity record may be. The
 // guardian rewrites records every identity cache lifetime; a record several
 // lifetimes old belongs to a guardian that stopped, and its UPN may be stale.
-const identitySpoolMaxAge = 4 * identityDirectoryTTL
+// The guardian keeps the record of an account it did not list for as long
+// (enterprisehooks.IdentitySpoolMaxAge).
+const identitySpoolMaxAge = identityDirectoryMaxAge
 
 // identitySpoolDir is the guardian identity spool the gateway reads, or ""
 // when it runs without a guardian (any profile but standalone).

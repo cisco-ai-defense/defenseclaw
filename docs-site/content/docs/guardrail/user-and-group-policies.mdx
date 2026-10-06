@@ -219,9 +219,15 @@ What follows when the identity is missing:
   profile; its `cache:` line and a warning give the age of the facts requests
   still use. Restart the gateway to drop its cache at once. On Windows the
   groups are those of the sign-in token, so the user must also sign out and
-  back in. While the
-  directory does not answer, the gateway keeps using a user's last facts until
-  a lookup succeeds again.
+  back in. While the directory does not answer, the gateway keeps using a
+  user's last facts, for at most an hour (four times the cache lifetime). After
+  that the user has no facts and gets the default profile
+  (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
+  group does not keep its profile for the whole outage. `defenseclaw doctor`,
+  `guardrail status` and `guardrail profile explain` warn while lookups are
+  failing, with the number of accounts, the first failure and the reason; the
+  gateway log has one line when an account's lookups start to fail and one when
+  they work again.
 
 Because an unverified or failed lookup always lands on the default profile,
 **set a strict `default_profile`**. A lenient default means a lookup failure
