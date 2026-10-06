@@ -82,10 +82,8 @@ def _release_tuple(value: str) -> tuple[int, int, int]:
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
 @click.option("--gateway-binary", default=None, type=click.Path(dir_okay=False), help="Gateway used by --check.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-@click.option("--yes", "-y", is_flag=True, hidden=True, help="Accepted for installer compatibility.")
-def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, yes) -> None:
+def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json) -> None:
     """Bring config and data to this version's schema."""
-    del yes
     from defenseclaw import __version__
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 

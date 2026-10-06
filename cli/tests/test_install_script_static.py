@@ -125,8 +125,8 @@ def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     posix_refresh = posix.index("agent discover --refresh --no-emit-otel")
     windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
-    assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
-    assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+    assert posix.rindex("args=(migrate)", 0, posix_refresh) > 0
+    assert windows.rindex('@("migrate")', 0, windows_refresh) > 0
     # GAP-1294: the upgraded ACP guard is re-pinned in locks that pinned the
     # guard it replaced, so configured editor entries keep working.
     assert posix.index('acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")"') > posix_refresh

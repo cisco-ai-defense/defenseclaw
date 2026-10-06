@@ -1198,7 +1198,7 @@ function Install-New {
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
         if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
-        $migrateArgs = @("migrate", "--yes")
+        $migrateArgs = @("migrate")
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
         if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $migrateArgs) -ne 0) { return $false }
