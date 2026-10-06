@@ -453,7 +453,7 @@ func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
 // the gateway. The 8 -> 9 migration check used to refuse the config of a user
 // who had set the key it asked for (GAP-0173).
 func TestValidateCandidateResolvesDestinationSecretsFromTheDataDirDotEnv(t *testing.T) {
-	const name = "DEFENSECLAW_TEST_GAP0173_KEY"
+	const name = "GAP0173_TEST_GALILEO_API_KEY"
 	dir := t.TempDir()
 	raw := []byte("config_version: 9\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
 		"  - name: galileo\n    kind: otlp\n    preset: galileo\n    enabled: true\n    protocol: http/protobuf\n" +
