@@ -13,6 +13,7 @@
 package unixidentity
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -50,12 +51,21 @@ var directoryServices = map[string]directoryService{
 	"aad":        {directory: useridentity.DirectoryEntraID, source: "nss_aad"},
 }
 
-// maxDirectoryGroups bounds how many group ids are named per account.
-const maxDirectoryGroups = 256
+// maxDirectoryGroups bounds how many group ids are named per account. An
+// Active Directory token holds about a thousand groups at most; an account
+// past the bound has no facts (the lookup fails, and the default profile
+// applies as default_lookup_failed) instead of facts with some of its
+// groups missing, which would select a profile on part of its membership.
+const maxDirectoryGroups = 2048
 
 // DirectoryFactsForUID resolves the verified directory facts of uid. The
 // caller has verified the uid (peer credentials or a per-user credential);
 // everything here comes from the host's own account database.
+//
+// A lookup that does not finish fails as a whole: facts that lack the
+// groups, or take a directory account for a local one, would be cached as
+// resolved (the gateway keeps them for 15 minutes) and select the default
+// profile as though the account had no groups.
 func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity.DirectoryFacts, error) {
 	account, err := r.LookupUID(uid)
 	if err != nil {
@@ -74,7 +84,12 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				continue
 			}
 			if _, lookupErr := r.LookupUIDInService(service, uid); lookupErr != nil {
-				continue
+				if IsNotFound(lookupErr) {
+					continue
+				}
+				// A directory that did not answer is not one that does not
+				// own the account.
+				return useridentity.DirectoryFacts{}, lookupErr
 			}
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
@@ -90,11 +105,13 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 			break
 		}
 	}
+	groups, err := r.groupNames(account)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
+	}
+	facts.Groups = groups
 	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
 		applyRealm(&facts, account.Name, hostRealms(r.context()))
-	}
-	if groups, groupErr := r.groupNames(account); groupErr == nil {
-		facts.Groups = groups
 	}
 	return facts, nil
 }
@@ -107,19 +124,24 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 		return nil, err
 	}
 	if len(ids) > maxDirectoryGroups {
-		ids = ids[:maxDirectoryGroups]
+		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
 	}
 	keys := make([]string, 0, len(ids))
 	for _, id := range ids {
 		keys = append(keys, strconv.Itoa(id))
 	}
+	result, err := r.query("group", keys...)
+	if err != nil {
+		return nil, err
+	}
+	// Exit 2 means some id has no group, which stays a number.
+	if result.exitCode != getentExitOK && result.exitCode != getentExitNotFound {
+		return nil, fmt.Errorf("getent group exited %d", result.exitCode)
+	}
 	names := map[int]string{}
-	if result, queryErr := r.query("group", keys...); queryErr == nil &&
-		(result.exitCode == getentExitOK || result.exitCode == getentExitNotFound) {
-		for _, line := range nonEmptyLines(string(result.stdout)) {
-			if gid, name, ok := parseGroupName(line); ok {
-				names[gid] = name
-			}
+	for _, line := range nonEmptyLines(string(result.stdout)) {
+		if gid, name, ok := parseGroupName(line); ok {
+			names[gid] = name
 		}
 	}
 	out := make([]string, 0, len(ids))

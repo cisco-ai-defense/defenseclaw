@@ -47,6 +47,9 @@ func TestLinuxLocalAccountsAndDirectoryConfiguration(t *testing.T) {
 	}
 }
 
+// Tests never ask the host's realmd; the ones about realms set hostRealms.
+func init() { hostRealms = func(context.Context) []Realm { return nil } }
+
 // A per-user gateway resolves the directory type of an SSSD account from the
 // realm realmd reports, as the root guardian does: by the account's DNS
 // domain or a parent of it, or the only realm for a bare name. An SSSD
@@ -67,11 +70,12 @@ func TestDirectoryFactsForUIDTakesTheRealmFromRealmd(t *testing.T) {
 		70003: "carol",
 		70004: "dave@ldap.example.org",
 	}
-	f := &fakeRun{results: map[string]commandResult{}}
+	f := &fakeRun{results: map[string]commandResult{"group 70000": {stdout: []byte("users:*:70000:\n")}}}
 	for uid, name := range accounts {
 		line := commandResult{stdout: []byte(name + ":*:" + strconv.Itoa(uid) + ":70000::/home/" + name + ":/bin/bash\n")}
 		f.results["passwd "+strconv.Itoa(uid)] = line
 		f.results["-s sss passwd "+strconv.Itoa(uid)] = line
+		f.results["initgroups "+name] = commandResult{stdout: []byte(name + " 70000\n")}
 	}
 	type view struct {
 		directory                useridentity.Directory

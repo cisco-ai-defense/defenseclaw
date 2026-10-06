@@ -65,3 +65,31 @@ func TestResolveWindowsDirectoryFacts(t *testing.T) {
 		t.Fatalf("local facts = %+v", local)
 	}
 }
+
+// TestADUPNCacheWaitsAndRetriesFailures pins GAP-0129: a lookup answers within
+// the wait it is given, and a failed lookup (no domain controller) is retried
+// after minutes while the last good answer is kept, not forgotten for a day.
+func TestADUPNCacheWaitsAndRetriesFailures(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	answers := []string{"", "alice@corp.example.com", ""}
+	calls := 0
+	cache := newADUPNCache(func(string) string { calls++; return answers[calls-1] })
+	cache.now = func() time.Time { return now }
+	const name = `CORP\alice`
+
+	if got := cache.lookup(name, time.Second); got != "" || calls != 1 {
+		t.Fatalf("failed lookup = %q after %d calls; want empty after 1", got, calls)
+	}
+	now = now.Add(adUPNFailureTTL - time.Second)
+	if got := cache.lookup(name, time.Second); got != "" || calls != 1 {
+		t.Fatalf("lookup inside the failure lifetime = %q after %d calls; want the cached failure", got, calls)
+	}
+	now = now.Add(2 * time.Second)
+	if got := cache.lookup(name, time.Second); got != "alice@corp.example.com" || calls != 2 {
+		t.Fatalf("retried lookup = %q after %d calls; want the UPN after 2", got, calls)
+	}
+	now = now.Add(adUPNTTL)
+	if got := cache.lookup(name, time.Second); got != "alice@corp.example.com" || calls != 3 {
+		t.Fatalf("lookup after a failure = %q after %d calls; want the last good UPN kept", got, calls)
+	}
+}

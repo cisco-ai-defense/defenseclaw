@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -55,11 +56,11 @@ func TestHookModelLogsV8RouteRichUnredactedRequestAndResponseWithoutGatewayJSONL
 			ConfigDigest: "0000000000000000000000000000000000000000000000000000000000000000",
 		},
 	}
-	if _, err := buildHookModelRequestLogRecord(builder, envelope, llmEventMeta{}, prompt); err != nil {
+	if _, err := buildHookModelRequestLogRecord(t.Context(), builder, envelope, llmEventMeta{}, prompt); err != nil {
 		t.Fatalf("build model request: %v", err)
 	}
 	envelope.Action = "model.response"
-	if _, err := buildHookModelResponseLogRecord(builder, envelope, llmEventMeta{}, response, []string{"stop"}); err != nil {
+	if _, err := buildHookModelResponseLogRecord(t.Context(), builder, envelope, llmEventMeta{}, response, []string{"stop"}); err != nil {
 		t.Fatalf("build model response: %v", err)
 	}
 	api.emitLLMPromptEventV8(t.Context(), meta, prompt, nil)
@@ -98,6 +99,41 @@ func TestHookModelLogsV8RouteRichUnredactedRequestAndResponseWithoutGatewayJSONL
 	}
 	if !bytes.Contains(wire, []byte(prompt)) || !bytes.Contains(wire, []byte(response)) {
 		t.Fatal("default redaction_profile none did not preserve model log content")
+	}
+}
+
+// GAP-0070: a sandboxed session's model and agent lifecycle logs carry the
+// sandbox binding and the agent identity, so they join its hook decisions.
+func TestHookModelAndLifecycleLogsV8CarrySandboxAndAgentIdentity(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33", SandboxName: "dc-codex-app-0a1b",
+	})
+	meta := richHookModelV8Meta()
+	meta.AgentIdentityID = "agt-0123456789abcdef"
+	api.emitLLMPromptEventV8(ctx, meta, "sandboxed prompt", nil)
+	if got := api.emitHookLifecycleEvent(ctx, meta); got != hookLifecycleV8Persisted {
+		t.Fatalf("lifecycle emission = %d, want persisted", got)
+	}
+	eventuallyTrue(t, func() bool { return len(hookModelV8CapturedLogs(capture.logSnapshot())) >= 2 })
+	seen := map[string]bool{}
+	for _, record := range hookModelV8CapturedLogs(capture.logSnapshot()) {
+		var wire struct {
+			Body map[string]any `json:"body"`
+		}
+		name := logStringAttribute(record.GetAttributes(), "defenseclaw.event.name")
+		if err := json.Unmarshal([]byte(record.GetBody().GetStringValue()), &wire); err != nil {
+			t.Fatalf("%s body: %v", name, err)
+		}
+		if wire.Body["defenseclaw.sandbox.id"] != "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33" ||
+			wire.Body["defenseclaw.sandbox.name"] != "dc-codex-app-0a1b" ||
+			wire.Body["defenseclaw.agent.identity.id"] != "agt-0123456789abcdef" {
+			t.Errorf("%s body = %v, want the sandbox id, name and agent identity", name, wire.Body)
+		}
+		seen[name] = true
+	}
+	if !seen[observability.TelemetryEventModelRequest] || !seen[observability.TelemetryEventTurnEnd] {
+		t.Fatalf("captured log events = %v, want model.request and turn_end", seen)
 	}
 }
 
