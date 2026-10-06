@@ -98,7 +98,8 @@ func TestGatewayV8LoaderStrictParsesBeforeCanonicalActivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.ConfigVersion != 8 || loaded.ConfigFilePath != configPath {
+	// A config_version 8 file runs as its in-memory v9 migration.
+	if loaded.ConfigVersion != config.ConfigVersionV9 || loaded.ConfigFilePath != configPath {
 		t.Fatalf("loaded config version/source = %d/%q", loaded.ConfigVersion, loaded.ConfigFilePath)
 	}
 	if startup == nil || loaded.AuditDB != filepath.Join(directory, config.DefaultAuditDBName) {

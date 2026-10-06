@@ -153,7 +153,8 @@ func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T)
 	if err := mgr.Reload(context.Background(), "test"); err != nil {
 		t.Fatal(err)
 	}
-	if !applied || mgr.gen.Load() != 1 || mgr.Current().ConfigVersion != 8 {
+	// The config_version 8 file reloads as its in-memory v9 migration.
+	if !applied || mgr.gen.Load() != 1 || mgr.Current().ConfigVersion != config.ConfigVersionV9 {
 		t.Fatalf("applied/gen/version = %t/%d/%d", applied, mgr.gen.Load(), mgr.Current().ConfigVersion)
 	}
 	if got, want := version.Current().ContentHash, configContentHashForTest(nextRaw); got != want {

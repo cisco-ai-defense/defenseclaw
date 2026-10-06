@@ -1725,7 +1725,7 @@ func TestSidecarConfigManagerV8RestartRequiredChangeHelperFailureIsAtomic(t *tes
 func TestSidecarConfigManagerV8ArmsRestartModeWithoutImmediateRestart(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
 	initialRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nobservability: {}\n",
+		"config_version: 9\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: hot\nobservability: {}\n",
 		fixture.dataDir,
 	))
 	if err := os.WriteFile(fixture.configPath, initialRaw, 0o600); err != nil {
@@ -1757,7 +1757,7 @@ func TestSidecarConfigManagerV8ArmsRestartModeWithoutImmediateRestart(t *testing
 		fixture.sidecar.applyConfigReloadSnapshot,
 	)
 	nextRaw := []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
+		"config_version: 9\ndata_dir: %q\ngateway:\n  config_reload:\n    mode: restart\nobservability: {}\n",
 		fixture.dataDir,
 	))
 	if err := os.WriteFile(fixture.configPath, nextRaw, 0o600); err != nil {
