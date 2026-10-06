@@ -456,8 +456,13 @@ func mergeWindowsApplicationNames(groups ...[]string) []string {
 
 // platformIDEAppData returns the current user's %APPDATA% and
 // %LOCALAPPDATA% (Known Folders, which folder redirection may move out of
-// the profile).
-func platformIDEAppData() (string, string) {
+// the profile) when home is that user's profile. Any other home is read
+// through its own AppData, never this account's.
+func platformIDEAppData(home string) (string, string) {
+	profile, err := platformDiscoveryHomeDir()
+	if err != nil || !strings.EqualFold(profile, filepath.Clean(home)) {
+		return "", ""
+	}
 	resolve := windowsDiscoveryKnownFolderResolver(winpath.CurrentUserKnownFolderPathWithFlags)
 	return windowsKnownFolderValue(resolve, windows.FOLDERID_RoamingAppData),
 		windowsKnownFolderValue(resolve, windows.FOLDERID_LocalAppData)

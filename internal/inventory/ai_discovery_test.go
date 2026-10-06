@@ -1091,6 +1091,7 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 // record's IDE inventory is attributed the same way; a v1 record (a
 // guardian from before the IDE inventory) is still read.
 func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
+	withoutMachineIDEs(t)
 	tmp := t.TempDir()
 	home := filepath.Join(tmp, "alice")
 	mustWrite(t, filepath.Join(home, ".shadowai", "config.json"), "{}")
