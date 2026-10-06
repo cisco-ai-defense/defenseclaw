@@ -342,18 +342,26 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
             views = {name: _admission_view(cfg, name) for name in _ADMISSION_TYPES}
             return (
                 {name: data for name, (data, _) in views.items()},
-                ", ".join(f"{name}={source}" for name, (_, source) in views.items()),
+                ", ".join(f"{name}={_whole_source(sources)}" for name, (_, sources) in views.items()),
             )
-        data, source = _admission_view(cfg, parts[1])
+        data, sources = _admission_view(cfg, parts[1])
         found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
         if not found:
             return None
-        return value, source
+        return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
     return None
 
 
-def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
-    """The admission policy of one asset type as the gateway enforces it, and its source."""
+def _whole_source(sources: dict[str, str]) -> str:
+    """The source of a whole asset type: every field that config.yaml or the
+    scanner gate sets, else builtin."""
+    labels = list(dict.fromkeys(label for label in sources.values() if label != "builtin"))
+    return ", ".join(labels) or "builtin"
+
+
+def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]]:
+    """The admission policy of one asset type as the gateway enforces it, and
+    where each field comes from."""
     from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
 
     compiled = compile_admission(cfg, target_type)
@@ -374,7 +382,7 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
             for name, paths in compiled.first_party_allow.items()
         ],
     }
-    return data, compiled.source
+    return data, compiled.field_sources or {"actions": compiled.source}
 
 
 # ---------------------------------------------------------------------------
