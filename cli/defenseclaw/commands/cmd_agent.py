@@ -216,6 +216,15 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
     ),
 )
 @click.option(
+    "--sandbox",
+    "sandboxes",
+    multiple=True,
+    help=(
+        "Show only what AI discovery found inside this OpenShell sandbox "
+        "(repeatable). Rows found in a sandbox are tagged \"(sandbox NAME)\"."
+    ),
+)
+@click.option(
     "--show-gone",
     is_flag=True,
     help="Include 'gone' signals in the table (suppressed by default to cut noise).",
@@ -264,6 +273,7 @@ def usage(
     categories: tuple[str, ...],
     products: tuple[str, ...],
     components: tuple[str, ...],
+    sandboxes: tuple[str, ...],
     show_gone: bool,
     by_detector: bool,
     limit: int,
@@ -325,6 +335,7 @@ def usage(
             categories=categories,
             products=products,
             components=components,
+            sandboxes=sandboxes,
             show_gone=show_gone,
             by_detector=by_detector,
             limit=limit,
@@ -4041,6 +4052,7 @@ def _filter_ai_usage_signals(
     products: tuple[str, ...],
     show_gone: bool,
     components: tuple[str, ...] = (),
+    sandboxes: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Apply the operator-supplied filters to the raw signal list.
 
@@ -4064,14 +4076,20 @@ def _filter_ai_usage_signals(
       ``signal.product`` for legacy signatures that carry neither block). Lets the
       operator type ``--component openai`` and pick out every
       OpenAI-named SDK install across npm/pypi/go, or type a local model ID.
+    * ``sandboxes`` — exact, case-insensitive match against
+      ``signal.sandbox_name``: what AI discovery found inside those OpenShell
+      sandboxes, and nothing found on this machine itself.
     """
     state_set = {_canonical_ai_usage_state(s) for s in states} if states else set()
     category_set = {c.lower() for c in categories} if categories else set()
     product_needles = [p.lower() for p in products] if products else []
     component_needles = [c.lower() for c in components] if components else []
+    sandbox_set = {s.strip().lower() for s in sandboxes if s.strip()} if sandboxes else set()
 
     out: list[dict[str, Any]] = []
     for sig in signals or []:
+        if sandbox_set and str(sig.get("sandbox_name") or "").lower() not in sandbox_set:
+            continue
         state = _canonical_ai_usage_state(sig.get("state", ""))
         if state_set:
             if state not in state_set:
@@ -4472,6 +4490,25 @@ def _format_ai_usage_scan_diagnostics(summary: dict[str, Any]) -> str:
     return note + "."
 
 
+def _tag_sandbox_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag what AI discovery found inside an OpenShell sandbox with its name.
+
+    The product reads "Claude Code (sandbox myapp-7f3a)", so a component
+    found in a sandbox never folds into the same product on this machine
+    in the grouped view, and every view says where it was found. (Square
+    brackets would read as Rich markup in the table.)
+    """
+    out: list[dict[str, Any]] = []
+    for sig in signals:
+        name = str(sig.get("sandbox_name") or "").strip()
+        if name:
+            sig = dict(sig)
+            product = str(sig.get("product") or sig.get("name") or "").strip()
+            sig["product"] = f"{product} (sandbox {name})" if product else f"(sandbox {name})"
+        out.append(sig)
+    return out
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -4480,19 +4517,23 @@ def _render_ai_usage_table(
     categories: tuple[str, ...] = (),
     products: tuple[str, ...] = (),
     components: tuple[str, ...] = (),
+    sandboxes: tuple[str, ...] = (),
     show_gone: bool = False,
     by_detector: bool = False,
     limit: int = 0,
     wide: bool = False,
 ) -> str:
     raw_signals = payload.get("signals", []) or []
-    filtered = _filter_ai_usage_signals(
-        raw_signals,
-        states=states,
-        categories=categories,
-        products=products,
-        show_gone=show_gone,
-        components=components,
+    filtered = _tag_sandbox_signals(
+        _filter_ai_usage_signals(
+            raw_signals,
+            states=states,
+            categories=categories,
+            products=products,
+            show_gone=show_gone,
+            components=components,
+            sandboxes=sandboxes,
+        )
     )
     summary = payload.get("summary", {}) or {}
     enabled = payload.get("enabled", True)
