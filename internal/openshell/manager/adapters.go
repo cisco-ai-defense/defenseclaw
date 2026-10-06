@@ -268,7 +268,11 @@ type ProfileImporter interface {
 // --global`.
 type CLIProfileImporter struct {
 	Binary string
-	Runner openshell.Runner
+	// BinaryFunc, when set, names the CLI at each import instead of Binary:
+	// the daemon reads openshell.binary from its live configuration, which
+	// setup changes while the daemon runs.
+	BinaryFunc func() string
+	Runner     openshell.Runner
 	// TempDir holds the short-lived profile files (default os.TempDir()).
 	TempDir string
 }
@@ -309,6 +313,9 @@ func (c CLIProfileImporter) Import(ctx context.Context, gateway string, p profil
 		return fmt.Errorf("profile import: %w", err)
 	}
 	bin := c.Binary
+	if c.BinaryFunc != nil {
+		bin = c.BinaryFunc()
+	}
 	if bin == "" {
 		bin = openshell.DefaultBinary
 	}

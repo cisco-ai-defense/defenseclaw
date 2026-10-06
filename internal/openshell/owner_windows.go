@@ -25,3 +25,9 @@ import "io/fs"
 func ownedByCaller(fs.FileInfo) bool { return false }
 
 func ownedByCallerOrRoot(fs.FileInfo) bool { return false }
+
+// writableByCaller and ownerName serve the macOS Homebrew check, which
+// never runs on Windows.
+func writableByCaller(string) bool { return true }
+
+func ownerName(fs.FileInfo) string { return "" }
