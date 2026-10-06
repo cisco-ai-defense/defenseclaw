@@ -301,6 +301,7 @@ func publishGeneration(g *Generation) {
 	defer publishGenerationMu.Unlock()
 	g.N = generationSeq.Add(1)
 	liveGeneration.Store(g)
+	publishPackPostures()
 	liveReloadError.Store("")
 	applyGenerationProviders(g.Providers)
 }

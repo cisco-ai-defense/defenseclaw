@@ -127,7 +127,7 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 				scope, s.ref.Name, got, s.ref.Name)
 		}
 	}
-	rememberPackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
+	notePackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
 	if len(s.layers) == 0 {
 		return base, nil
 	}
