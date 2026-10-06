@@ -85,6 +85,8 @@ class DoctorPolicyStateTests(unittest.TestCase):
             with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": local}):
                 cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
             self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
+            if want == "fail" and not extra:
+                self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
 
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):

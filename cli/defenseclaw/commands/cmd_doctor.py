@@ -9040,14 +9040,12 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             "fail",
             label,
             f"the gateway applies {_short_policy_digest(digest)} but config.yaml and its policy assets compute to "
-            f"{_short_policy_digest(str(local.get('effective_digest')))}",
+            f"{_short_policy_digest(str(local.get('effective_digest')))}; "
+            "run `defenseclaw-gateway restart` to apply them",
             r=r,
             check_id="doctor.policy.stale",
             reason_code="policy-stale",
-            remediation=(
-                "Run `defenseclaw-gateway restart`, or check "
-                "`defenseclaw-gateway status` for a rejected reload"
-            ),
+            remediation="Check `defenseclaw-gateway status` for a rejected reload if a restart does not clear it",
         )
         return
     if config_generation > 0 and policy.get("config_generation_recorded") is False:

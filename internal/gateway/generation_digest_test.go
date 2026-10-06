@@ -101,3 +101,35 @@ func TestEffectivePolicyDigestCoversObservability(t *testing.T) {
 		t.Fatal("a store path under data_dir differs between users")
 	}
 }
+
+// The digest follows the enforced policy, not how config.yaml wrote it: an
+// emptied first_party_allow_list changes it (YAML omits an empty list), and a
+// value equal to its default digests like the unset key (GAP-0015, GAP-0032).
+func TestEffectivePolicyDigestMaterializesDefaults(t *testing.T) {
+	yes := true
+	build := func(edit func(*config.Config)) string {
+		t.Helper()
+		cfg := &config.Config{DataDir: "/home/alice/.defenseclaw"}
+		edit(cfg)
+		g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, raw: []byte("config_version: 9\n")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.Digest
+	}
+	base := build(func(*config.Config) {})
+	if got := build(func(c *config.Config) { c.Admission.Plugin.FirstPartyAllowList = []config.AdmissionFirstParty{} }); got == base {
+		t.Fatal("an emptied admission.plugin.first_party_allow_list left the digest unchanged")
+	}
+	if got := build(func(c *config.Config) { c.Admission.MCP.ScanOnInstall = &yes }); got != base {
+		t.Fatal("admission.mcp.scan_on_install: true (the default) changed the digest")
+	}
+	withCodex := func(enabled *bool) string {
+		return build(func(c *config.Config) {
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}}
+		})
+	}
+	if withCodex(&yes) != withCodex(nil) {
+		t.Fatal("guardrail.connectors.codex.enabled: true changed the digest")
+	}
+}
