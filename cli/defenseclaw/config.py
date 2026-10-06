@@ -32,6 +32,7 @@ import re
 import stat
 import subprocess
 import sys
+import urllib.parse
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -808,6 +809,12 @@ _RECOGNIZED_LLM_PROVIDERS = frozenset(
 
 _LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
 
+# Providers that speak the OpenAI chat-completions route (<base>/v1/chat/completions).
+# Keep in step with openAIStyleLLMProviders in internal/config/config.go.
+_OPENAI_STYLE_LLM_PROVIDERS = frozenset(
+    {"openai", "openai-compatible", "custom-openai", "vllm", "lm_studio", "lmstudio", "local"}
+)
+
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
@@ -1014,6 +1021,24 @@ class LLMConfig:
             return ""
         mode = (self.bedrock.auth_mode or "").strip().lower() or "api_key"
         return "" if mode == "api_key" else mode
+
+    def request_base_url(self) -> str:
+        """``base_url`` as LiteLLM and the Python scanners must send it.
+
+        The gateway's judge appends ``/v1/chat/completions`` to the host,
+        while LiteLLM appends only ``/chat/completions`` to what it is given,
+        so a bare host (``http://127.0.0.1:8000``) reached the two on
+        different paths. For an OpenAI-style provider a base URL with no path
+        gets ``/v1``; a URL with a path is used as written (GAP-0156). Mirrors
+        ``LLMConfig.RequestBaseURL`` in internal/config/config.go.
+        """
+        url = (self.base_url or "").strip()
+        if not url or self.provider_prefix() not in _OPENAI_STYLE_LLM_PROVIDERS:
+            return self.base_url
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme and parts.netloc and parts.path in ("", "/") and not parts.query and not parts.fragment:
+            return url.rstrip("/") + "/v1"
+        return self.base_url
 
     def is_local_provider(self) -> bool:
         """Return True when the resolved provider runs on-box and

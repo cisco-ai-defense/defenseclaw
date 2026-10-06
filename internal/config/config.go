@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -905,6 +906,35 @@ func (l LLMConfig) IsLocalProvider() bool {
 		}
 	}
 	return false
+}
+
+// openAIStyleLLMProviders speak the OpenAI chat-completions route
+// (<base>/v1/chat/completions). Keep in step with _OPENAI_STYLE_LLM_PROVIDERS
+// in cli/defenseclaw/config.py.
+var openAIStyleLLMProviders = map[string]struct{}{
+	"openai": {}, "openai-compatible": {}, "custom-openai": {}, "vllm": {},
+	"lm_studio": {}, "lmstudio": {}, "local": {},
+}
+
+// RequestBaseURL is BaseURL as LiteLLM and the Python scanners must send it.
+// The judge's client appends /v1/chat/completions to the host, while LiteLLM
+// appends only /chat/completions to what it is given, so a bare host reached
+// the two on different paths. For an OpenAI-style provider a base URL with no
+// path gets /v1; a URL with a path is used as written (GAP-0156). Mirrors
+// LLMConfig.request_base_url in cli/defenseclaw/config.py.
+func (l LLMConfig) RequestBaseURL() string {
+	raw := strings.TrimSpace(l.BaseURL)
+	if raw == "" {
+		return l.BaseURL
+	}
+	if _, ok := openAIStyleLLMProviders[l.ProviderPrefix()]; !ok {
+		return l.BaseURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return l.BaseURL
+	}
+	return strings.TrimRight(raw, "/") + "/v1"
 }
 
 // ForwardCustomHeadersEnabled reports whether the gateway forwards

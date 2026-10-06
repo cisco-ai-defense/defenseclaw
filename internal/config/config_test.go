@@ -1359,3 +1359,21 @@ func TestRecognizedLLMProvidersLockstep(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0156: the judge posts to <host>/v1/chat/completions and LiteLLM to
+// <base>/chat/completions, so an OpenAI-style bare host gets /v1 for LiteLLM.
+func TestLLMRequestBaseURL(t *testing.T) {
+	for _, tc := range []struct{ provider, base, want string }{
+		{"openai", "http://127.0.0.1:28555", "http://127.0.0.1:28555/v1"},
+		{"openai-compatible", "https://llm.example/", "https://llm.example/v1"},
+		{"openai", "https://llm.example/v1", "https://llm.example/v1"},
+		{"openai", "https://llm.example/api", "https://llm.example/api"},
+		{"anthropic", "https://llm.example", "https://llm.example"},
+		{"openai", "", ""},
+	} {
+		got := LLMConfig{Provider: tc.provider, BaseURL: tc.base}.RequestBaseURL()
+		if got != tc.want {
+			t.Errorf("%s %q: RequestBaseURL = %q, want %q", tc.provider, tc.base, got, tc.want)
+		}
+	}
+}

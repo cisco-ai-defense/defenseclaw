@@ -319,7 +319,7 @@ llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
   model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
-  base_url: ""                 # optional override; LiteLLM picks a default per provider. An OpenAI-compatible endpoint takes the /v1 form (https://host/v1); the judge and the scanners read it the same way
+  base_url: ""                 # optional override; LiteLLM picks a default per provider. For an OpenAI-style provider (openai, openai-compatible, vllm, lm_studio) a bare host such as https://host gets /v1 added, so the judge, doctor and the scanners all call https://host/v1/chat/completions; a URL with a path is used as written
   role: unified                # unified | agent | judge
   instance_name: ""            # binds to an llm_providers.custom entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence

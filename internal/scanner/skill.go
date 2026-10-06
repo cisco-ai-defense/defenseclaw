@@ -151,7 +151,7 @@ var openAICompatibleProviders = map[string]bool{
 // start, so an unusable judge is not requested.
 func (s *SkillScanner) judge() (skillJudge, bool) {
 	llm := s.LLM
-	j := skillJudge{model: liteLLMModel(llm), apiKey: llm.ResolvedAPIKey(), baseURL: strings.TrimSpace(llm.BaseURL)}
+	j := skillJudge{model: liteLLMModel(llm), apiKey: llm.ResolvedAPIKey(), baseURL: strings.TrimSpace(llm.RequestBaseURL())}
 	if j.model == "" {
 		return j, false
 	}
