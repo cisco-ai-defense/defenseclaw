@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -183,6 +184,62 @@ func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
 	if want := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "claudecode"}).ID; want != "" &&
 		body["defenseclaw.agent.identity.id"] != want {
 		t.Fatalf("agent.identity.id = %v, want the hook path's %q", body["defenseclaw.agent.identity.id"], want)
+	}
+}
+
+// Sandbox traffic is verified as the binding's host user, the gateway's own
+// account: its records carry that account's directory facts, which come
+// from the refreshed directory cache like host traffic's (GAP-0150). A
+// binding that names another account gets no subject.
+func TestSandboxHostUserIsVerifiedSubject(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	self, _ := localProcessUser()
+	if self == "" {
+		t.Skip("no process owner")
+	}
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) {
+		return useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			Groups: []string{"dc-ml-team@dclab.test"}, ResolvedAt: time.Now(),
+		}, strconv.Itoa(uid) == self
+	}
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+
+	f := newSandboxIngressFixture(t)
+	st := f.api.sandboxIngressState()
+	_, exact := f.api.sandboxIngressMux()
+	next := &recordingHandler{}
+	h := f.api.sandboxIngressAuthenticate(st, f.api.sandboxIngressAuthorize(st, exact, next))
+	other, _ := strconv.Atoi(self)
+	for _, uid := range []string{self, strconv.Itoa(other + 1)} {
+		_, token, err := f.store.Mint(sandboxauth.Spec{
+			SandboxName: "dc-host-" + uid, Connector: "claudecode", HookContractID: "claudecode-hooks-v1",
+			Routes: []sandboxauth.Route{sandboxauth.RouteHook}, Workdir: sandboxauth.Workdir{Mode: sandboxauth.WorkdirCopy},
+			HostUser: sandboxauth.HostUser{UID: uid},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	if len(next.reqs) != 2 {
+		t.Fatalf("reached mux %d times, want 2", len(next.reqs))
+	}
+	owner, stranger := next.reqs[0].Context(), next.reqs[1].Context()
+	subject, ok := verifiedSubjectFromContext(owner)
+	if !ok || subject.UserID != self || len(subject.Directory.Groups) != 1 {
+		t.Fatalf("host user subject = %+v, %v", subject, ok)
+	}
+	identity := resolveHookUserIdentity(owner, "claudecode", nil).Identity
+	if identity == nil || identity.Directory.Assurance != useridentity.AssuranceVerified || identity.Directory.Domain != "dclab.test" {
+		t.Fatalf("sandbox record identity = %+v, want the verified directory facts", identity)
+	}
+	if _, ok := verifiedSubjectFromContext(stranger); ok {
+		t.Fatal("a binding naming another account got a verified subject")
 	}
 }
 
