@@ -789,7 +789,7 @@ def _check_generated_hook_freshness(
                 f"{label} freshness",
                 "a generated script is not the one setup rendered (an edit, or a copy from another build)",
                 r=r,
-                remediation="run 'defenseclaw-gateway restart' to render the scripts again",
+                remediation="run 'defenseclaw doctor --fix' to render the scripts again",
             )
             return
         _emit("pass", f"{label} freshness", "generated scripts include latest diagnostics", r=r)

@@ -182,4 +182,4 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     with mock.patch.object(cmd_doctor, "_stale_generated_hook_reasons", return_value=[]):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
-    assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]
+    assert row["status"] == "warn" and "defenseclaw doctor --fix" in row["remediation"]

@@ -603,7 +603,39 @@ def _v8_defaults(app: AppContext) -> dict:
         props = node["properties"]
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
-    return _prune(_config_to_masked_dict(cfg), schema)  # type: ignore[return-value]
+    pruned = _prune(_config_to_masked_dict(cfg), schema)
+    _show_effective_scanner_settings(pruned, cfg)  # type: ignore[arg-type]
+    return pruned  # type: ignore[return-value]
+
+
+#: scanners.skill_scanner keys that config_version 9 no longer reads: they are
+#: migration input, so a v9 source does not list them as settings.
+_SKILL_SCANNER_V8_KEYS = ("binary", "use_virustotal", "use_aidefense", "virustotal_api_key", "virustotal_api_key_env")
+
+
+def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
+    """Fill the scanner keys a blank value stands for with what the gateway
+    runs with (the severity gate and the judge source), and leave out the
+    migration-only keys of a v9 source."""
+    from defenseclaw.enforce.admission import _DEFAULT_FAIL_ON_SEVERITY, _DEFAULT_REVIEW_QUEUE_MIN
+
+    scanners = masked.get("scanners")
+    if not isinstance(scanners, dict):
+        return
+    for name in ("skill_scanner", "mcp_scanner"):
+        block = scanners.get(name)
+        if not isinstance(block, dict):
+            continue
+        if not block.get("judge_source"):
+            llm = block.get("llm")
+            block["judge_source"] = "override" if isinstance(llm, dict) and any(llm.values()) else "inherit"
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        skill["fail_on_severity"] = skill.get("fail_on_severity") or _DEFAULT_FAIL_ON_SEVERITY
+        skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
+        if getattr(cfg, "_source_config_version", 0) >= config_module.CONFIG_VERSION_V9:
+            for key in _SKILL_SCANNER_V8_KEYS:
+                skill.pop(key, None)
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:

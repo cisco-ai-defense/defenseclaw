@@ -309,8 +309,8 @@ writer as `defenseclaw config set`: one file lock shared with the CLI and the
 gateway, the whole result checked before it is written, and a new entry in
 `config.generation.json` whose actor is `tui:<user>`. A value that fails the
 check is not written, and the editor shows `Config save failed: <reason>`.
-The dialog's button reads **Save and queue restart** every time; the restart
-banner appears only when a key you changed needs one.
+The dialog's button reads **Save**, and **Save and queue restart** only when a
+key you changed needs a restart; the restart banner appears for the same keys.
 
 What happens next depends on the keys you changed. The editor asks the writer
 which of them a running gateway can only apply after a restart (the
