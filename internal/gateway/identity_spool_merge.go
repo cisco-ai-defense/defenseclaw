@@ -43,8 +43,9 @@ func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.Identity
 
 // mergeSpoolFacts overlays the guardian's root-resolved facts on the facts
 // the gateway resolved itself for the same verified account. The spool wins
-// for what only root can read (UPN, principal, realm, directory type); the
-// gateway's own answer wins for groups, which it resolved just now.
+// for the UPN and principal, which only root can read, and for the realm and
+// directory type it resolved with them; the gateway's own answer wins for
+// groups, which it resolved just now.
 func mergeSpoolFacts(own, spool useridentity.DirectoryFacts) useridentity.DirectoryFacts {
 	merged := own
 	if spool.UPN != "" {

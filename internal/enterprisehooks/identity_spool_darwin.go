@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -31,7 +32,7 @@ import (
 
 const macOSIdentityToolTimeout = 10 * time.Second
 
-func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, _ []RealmEntry, now time.Time) (IdentitySpoolRecord, error) {
+func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	name := strings.TrimSpace(account.User)
 	if name == "" || strings.ContainsAny(name, "/\x00\n") || strings.HasPrefix(name, "-") {
 		return IdentitySpoolRecord{}, errors.New("account has no usable name")
@@ -67,4 +68,23 @@ func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) stri
 	return boundedOutput(out)
 }
 
-func readRealmList(context.Context) []RealmEntry { return nil }
+// trustedIdentityTool returns the first root-owned, non-writable candidate.
+func trustedIdentityTool(candidates ...string) string {
+	for _, candidate := range candidates {
+		info, err := os.Lstat(candidate)
+		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// boundedOutput trims command output to a sane size.
+func boundedOutput(data []byte) string {
+	const limit = 64 << 10
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	return strings.ToValidUTF8(string(data), "")
+}
