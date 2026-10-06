@@ -427,7 +427,6 @@ enum TUIWizards {
         baseArgs: ["setup", "rotate-token"], commandBuilder: tokenRotationCommands,
         fields: [
             WizardField(key: "connector", label: "Connector", kind: .choice(options: ["auto"] + connectors), defaultValue: "auto"),
-            WizardField(key: "restart", label: "Refresh hooks and restart", kind: .bool, defaultValue: "yes"),
         ]
     )
 
@@ -1135,7 +1134,6 @@ enum TUIWizards {
         var args = ["setup", "rotate-token", "--yes"]
         let connector = value(v, "connector", "auto")
         if connector != "auto" { args += ["--connector", connector] }
-        if !yes(v, "restart") { args.append("--no-restart") }
         return [args]
     }
 

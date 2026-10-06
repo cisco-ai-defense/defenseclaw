@@ -2135,7 +2135,6 @@ def _local_observability_wizard_fields() -> tuple[WizardFormField, ...]:
 def _token_rotation_wizard_fields() -> tuple[WizardFormField, ...]:
     return (
         WizardFormField("Connector", "choice", value="", default="", options=("", *CONNECTORS)),
-        WizardFormField("Refresh Hooks", "bool", value="yes", default="yes"),
     )
 
 
@@ -3618,13 +3617,7 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
             "auto",
             "Rotate the gateway token",
             summary="Make a new gateway token and update every protected agent's hooks; nothing changes if a step fails.",
-            fields=("Refresh Hooks",),
-        ),
-        WizardGoal(
-            "specific",
-            "Rotate the gateway token, refresh one agent",
-            summary="Same new token for every agent; only the chosen agent's hooks are rewritten now.",
-            fields=("Connector", "Refresh Hooks"),
+            fields=("Connector",),
         ),
     )
 
@@ -4735,8 +4728,6 @@ def _build_token_rotation_args(fields: Sequence[WizardFormField]) -> tuple[str, 
     args = ["setup", "rotate-token", "--yes"]
     if connector := wizard_field_value(fields, "Connector"):
         args.extend(("--connector", connector))
-    if wizard_bool_value(fields, "Refresh Hooks", "yes") == "no":
-        args.append("--no-restart")
     return tuple(args)
 
 
