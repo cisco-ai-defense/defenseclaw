@@ -724,9 +724,10 @@ func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
 // cooldown filters. The redacted reason alone did not say which rule fired
 // (GAP-1351), so the details also carry rule=<ids> and the generic payload
 // names the rules the way the agent message does ("rule ID: Title", titles
-// only from the compiled-in catalog or a loaded rule pack). A managed
-// deployment keeps the historical payload.
-func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
+// only from the compiled-in catalog or a loaded rule pack). The payload also
+// names the account, agent identity and profile of the request (GAP-0144). A
+// managed deployment keeps the historical payload.
+func (a *APIServer) dispatchHookBlockWebhook(ctx context.Context, connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
 	if a == nil || a.webhookSource == nil {
 		return
 	}
@@ -751,8 +752,9 @@ func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent,
 		if ids := webhookRuleIDs(ruleIDs); ids != "" {
 			event.Details = fmt.Sprintf("connector=%s event=%s rule=%s reason=%s", connectorName, hookEvent, ids, reason)
 		}
+		event.Structured = map[string]any{webhookAttributionKey: webhookAttributionFor(ctx)}
 		if rules := agentMatchedRules(reason); rules != "" {
-			event.Structured = map[string]any{webhookRuleKey: rules}
+			event.Structured[webhookRuleKey] = rules
 		}
 	}
 	webhooks.Dispatch(event)

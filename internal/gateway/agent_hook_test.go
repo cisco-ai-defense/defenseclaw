@@ -591,7 +591,7 @@ func TestAgentHookDispatch_BlockFiresOnBlock(t *testing.T) {
 		HookEventName: "preToolUse",
 		ToolName:      "Bash",
 	}
-	api.dispatchAgentHookNotification(req, "block", "block", "HIGH",
+	api.dispatchAgentHookNotification(context.Background(), req, "block", "block", "HIGH",
 		"matched policy: deny-rm-rf", false, hookEvaluationContext{})
 
 	got := rec.WaitFor(t, 1)
@@ -613,7 +613,7 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchAgentHookNotification(
+	api.dispatchAgentHookNotification(context.Background(),
 		agentHookRequest{ConnectorName: "openhands", HookEventName: "pre_tool_use", ToolName: "Read"},
 		"allow", "block", "MEDIUM", "observe-mode", true,
 		hookEvaluationContext{},
@@ -637,7 +637,7 @@ func TestAgentHookDispatch_ConfirmCarriesConnectorAndEvent(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchAgentHookNotification(
+	api.dispatchAgentHookNotification(context.Background(),
 		agentHookRequest{
 			ConnectorName: "cursor",
 			HookEventName: "beforeShellExecution",
@@ -680,7 +680,7 @@ func TestAgentHookDispatch_ConfirmDowngradedRewordsToast(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchAgentHookNotification(
+	api.dispatchAgentHookNotification(context.Background(),
 		agentHookRequest{
 			ConnectorName: "cursor",
 			HookEventName: "beforeReadFile",
@@ -727,7 +727,7 @@ func TestAgentHookDispatch_ObserveModeConfirmRoutesThroughWouldBlock(t *testing.
 	// action="allow", wouldBlock=false. Same shape regardless of
 	// whether the event is in caps.AskEvents because mode != action
 	// short-circuits before the AskEvents check.
-	api.dispatchAgentHookNotification(
+	api.dispatchAgentHookNotification(context.Background(),
 		agentHookRequest{
 			ConnectorName: "cursor",
 			HookEventName: "beforeShellExecution",
@@ -760,7 +760,7 @@ func TestAgentHookDispatch_RedactsReason(t *testing.T) {
 	api := &APIServer{}
 	api.SetNotifier(d)
 
-	api.dispatchAgentHookNotification(
+	api.dispatchAgentHookNotification(context.Background(),
 		agentHookRequest{ConnectorName: "copilot", HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH",
 		"prompt contained AKIAIOSFODNN7EXAMPLE", false,

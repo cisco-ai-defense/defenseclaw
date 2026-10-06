@@ -3142,7 +3142,8 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) {
+				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) ||
+					s.macOSTCCSkipped(path) {
 					return filepath.SkipDir
 				}
 				return nil
@@ -3193,7 +3194,7 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 		// collapse to a single per-project signal instead of N
 		// near-identical fingerprints.
 		var raw []AISignal
-		for dir, entries := range dirEntries {
+		for _, entries := range dirEntries {
 			versionsByEcosystem := map[string]map[string]string{}
 			for _, entry := range entries {
 				for eco, components := range entry.parsedComponents {
@@ -3207,7 +3208,6 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 					}
 				}
 			}
-			_ = dir // kept for future per-dir caching; intentionally unused
 			for _, entry := range entries {
 				raw = append(raw, s.matchManifestEntry(entry, versionsByEcosystem)...)
 			}

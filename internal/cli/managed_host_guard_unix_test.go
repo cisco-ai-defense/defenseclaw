@@ -322,6 +322,29 @@ func TestManagedStandaloneAdminEnvPointsAdministratorsAtTheDeployment(t *testing
 	}
 }
 
+// policy show and policy validate are administrator commands on a managed
+// host: as root they read the standalone deployment, as policy digest does.
+// They used to read /var/root/.defenseclaw/config.yaml, fail, and tell the
+// administrator to run the same command with sudo.
+func TestPolicyShowAndValidateReadTheManagedDeploymentAsAdministrator(t *testing.T) {
+	layout := withManagedStandaloneDeployment(t, 991)
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	for _, command := range []*cobra.Command{policyShowCmd, policyValidateCmd} {
+		clearManagedStandaloneAdminEnv(t)
+		withManagedHostCallerUID(t, 0)
+		if command.PersistentPreRunE == nil {
+			t.Fatalf("policy %s inherits the per-user pre-run", command.Name())
+		}
+		// The temporary layout holds no config.yaml, so the load itself fails;
+		// the pin it was aimed at is what this checks.
+		_ = command.PersistentPreRunE(command, nil)
+		if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath {
+			t.Errorf("policy %s read %q, want the managed config %q", command.Name(), got, layout.ConfigPath)
+		}
+	}
+}
+
 // The guardian manifest and authorization directory come from this OS's
 // layout for a standalone config; `enterprise hooks status` on macOS used
 // to default to the Linux manifest and a data-dir-derived authorization

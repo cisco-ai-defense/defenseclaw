@@ -655,7 +655,7 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 | `enterprise.trust.mode: ""` | Accepted (empty means not set) | Accepted |
 | `guardrail.rule_pack_dir: /nonexistent` in a `config_version: 8` file (`ensure` migrates it) | Exit `1`, refused | Exit `1639` |
 | `guardrail.rule_pack: x` with `guardrail.custom_packs.x.path: /nonexistent` in a `config_version: 9` file | Exit `1`, refused; record the code | Refused; record the exit code |
-| No `config_version` | Refused; the error names the file passed with `--config` and says to add `config_version: 8` (it does not suggest `defenseclaw migrate`, which the enterprise package does not ship) | Refused (`1639`) |
+| No `config_version` | Refused; the error names the file passed with `--config` and says to add `config_version: 9` (it does not suggest `defenseclaw migrate`, which the enterprise package does not ship) | Refused (`1639`) |
 | No `guardrail.connectors` | Installs; `status` warns `no_connectors_enabled` when there are eligible users; `security_complete: false` | Installs; `security_complete: false` |
 
 ### Linux install
@@ -1849,7 +1849,7 @@ has found a regression.
   `authenticode|hash_pinned`). Live: macOS, Windows.
 - **REG-1-1-03** **[U] Missing `config_version`.** Run ensure with a config that has no `config_version`.
   Expect: the error names the file you passed with `--config` (not the installed path) and
-  says to add `config_version: 8`; it does not tell you to run `defenseclaw migrate` (not
+  says to add `config_version: 9`; it does not tell you to run `defenseclaw migrate` (not
   shipped in the enterprise package). Live: RHEL, macOS.
 - **REG-1-1-04** **[U] Layout-fixed keys default.** Omit `data_dir` and `guardrail.rule_pack`. Expect:
   `data_dir` defaults to the layout's data directory (`/var/lib/defenseclaw`,

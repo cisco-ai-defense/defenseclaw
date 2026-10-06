@@ -958,6 +958,41 @@ def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_ca
     assert "nothing was changed" not in proc.stdout
 
 
+def test_an_upgrade_names_a_port_another_account_holds_before_building(tmp_path: Path) -> None:
+    # GAP-0130: the upgrade of a second account on a host failed only at the
+    # gateway restart, 2.5 minutes and 562 MB later, because the first
+    # account's gateway holds the API port.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index('if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \\')
+    block = text[start : text.index("\nfi\n", text.index("\n    fi\n", start)) + 4]
+    assert text.index(block) < text.index('info "Building the Python environment')
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    gateway = staging / "bin" / "defenseclaw-gateway"
+
+    def run(gateway_body: str, running: str) -> subprocess.CompletedProcess[str]:
+        gateway.write_text("#!/bin/sh\n" + gateway_body, encoding="utf-8")
+        gateway.chmod(0o755)
+        script = tmp_path / "preflight.sh"
+        script.write_text(
+            'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ndrop_new_uv() { :; }\n'
+            f'gateway_pid() {{ {running}; }}\nSTAGING="{staging}" PREV_VERSION=0.8.4\n' + block + 'echo "passed"\n',
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    held = '[ "$2" = --help ] && exit 0\necho "Error: 127.0.0.1:18970 is held by another account; use --api-port 19010" >&2\nexit 1\n'
+    proc = run(held, "echo 4242")
+    assert proc.returncode == 1 and "passed" not in proc.stdout, proc.stdout
+    assert "err: 127.0.0.1:18970 is held by another account; use --api-port 19010; nothing was changed" in proc.stdout
+    assert not staging.exists()
+    (staging / "bin").mkdir(parents=True)
+
+    # No running gateway is not restarted; a staged gateway without the check is not asked.
+    assert "passed" in run(held, "return 1").stdout
+    assert "passed" in run('echo "Error: unknown command" >&2\nexit 1\n', "echo 4242").stdout
+
+
 def test_a_full_disk_is_checked_before_the_lock() -> None:
     # GAP-1538 / GAP-1527: a full disk showed a raw "echo: write error" or
     # "Could not take the install lock", which reads like a concurrent install.
