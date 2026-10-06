@@ -149,32 +149,6 @@ func (c SkillScannerConfig) VirusTotalKeyEnvName() string {
 	return "VIRUSTOTAL_API_KEY"
 }
 
-// DerivedAdmissionActions is admission.skill.actions when that map is
-// unset: severities at or above the gate quarantine, the review band warns
-// and anything below is allowed. An explicit admission.skill.actions wins.
-func (c SkillScannerConfig) DerivedAdmissionActions() AdmissionActionMap {
-	gate := scannerSeverityRank[c.EffectiveFailOnSeverity()]
-	review := scannerSeverityRank[c.EffectiveReviewQueueMin()]
-	action := func(severity string) *AdmissionAction {
-		rank := scannerSeverityRank[severity]
-		switch {
-		case rank >= gate:
-			return &AdmissionAction{Shorthand: AdmissionActionQuarantine}
-		case rank >= review:
-			return &AdmissionAction{Shorthand: AdmissionActionWarn}
-		default:
-			return &AdmissionAction{Shorthand: AdmissionActionAllow}
-		}
-	}
-	return AdmissionActionMap{
-		Critical: action("CRITICAL"),
-		High:     action("HIGH"),
-		Medium:   action("MEDIUM"),
-		Low:      action("LOW"),
-		Info:     action("INFO"),
-	}
-}
-
 // EffectiveAnalyzers is the analyzer list the MCP scanner runs, or nil for
 // auto (YARA, plus the LLM when its model and key are ready). Names are
 // trimmed, lower-cased and de-duplicated. "auto" alone, "" and an empty list

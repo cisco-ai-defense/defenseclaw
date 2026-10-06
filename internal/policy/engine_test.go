@@ -119,11 +119,11 @@ func TestAdmissionRegoAndFallbackAgree(t *testing.T) {
 // TestCompileAdmissionLayers pins the resolution order: the type's own
 // value, then (skill) the scanner gate, then admission.defaults, then the
 // built-in default; and an empty first_party_allow_list clears the list.
+// The gate applies with its shown defaults (HIGH, review MEDIUM) when the
+// scanner keys are unset.
 func TestCompileAdmissionLayers(t *testing.T) {
 	block := &config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
 	cfg := config.DefaultConfig()
-	cfg.Scanners.SkillScanner.FailOnSeverity = "HIGH"
-	cfg.Scanners.SkillScanner.ReviewQueueMin = "MEDIUM"
 	cfg.Admission = config.AdmissionConfig{
 		Defaults: config.AdmissionAssetType{Actions: config.AdmissionActionMap{Low: block}},
 		Skill:    config.AdmissionAssetType{Actions: config.AdmissionActionMap{Critical: block}},

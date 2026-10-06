@@ -726,6 +726,10 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
         holder.first_party_allow_list.append(
             AdmissionFirstParty(name=name, source_path_contains=paths, reason=str(entry.get("reason", "") or "")),
         )
+    # The preset's actions are an explicit choice for skills too: without
+    # admission.skill.actions the scanner gate would decide skills instead.
+    for sev, action in adm.defaults.actions.items():
+        adm.skill.actions.setdefault(sev, action)
     return adm
 
 

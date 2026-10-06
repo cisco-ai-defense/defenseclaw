@@ -135,9 +135,18 @@ def _severity_rank(sev: str) -> int:
         return 0
 
 
+#: The skill-scanner gate defaults (Go config.DefaultSkillScannerFailOnSeverity
+#: and DefaultSkillScannerReviewQueueMin), which setup, the TUI and doctor show.
+_DEFAULT_FAIL_ON_SEVERITY = "HIGH"
+_DEFAULT_REVIEW_QUEUE_MIN = "MEDIUM"
+
+
 def _derived_scanner_gate(fail_on: str, review_min: str) -> dict[str, tuple[SeverityAction, bool]]:
     """scanners.skill_scanner.fail_on_severity/review_queue_min as an action
-    map: at or above the gate quarantine, [review, gate) warn, below allow."""
+    map: at or above the gate quarantine, [review, gate) warn, below allow.
+    Unset values take the defaults, as Go's Effective* do."""
+    fail_on = str(fail_on or "").strip() or _DEFAULT_FAIL_ON_SEVERITY
+    review_min = str(review_min or "").strip() or _DEFAULT_REVIEW_QUEUE_MIN
     gate = _severity_rank(fail_on)
     if not gate:
         return {}

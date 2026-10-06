@@ -868,7 +868,8 @@ class TestCompileAdmission(unittest.TestCase):
         self.assertIn("defenseclaw", compile_admission(None, "plugin").first_party_allow)
 
     def test_layers_type_then_scanner_gate_then_defaults(self):
-        gate = SimpleNamespace(fail_on_severity="HIGH", review_queue_min="MEDIUM")
+        # Unset gate keys apply their shown defaults (HIGH, review MEDIUM), as Go.
+        gate = SimpleNamespace(fail_on_severity="", review_queue_min="")
         cfg = SimpleNamespace(admission=AdmissionConfig(), scanners=SimpleNamespace(skill_scanner=gate))
         cfg.admission.defaults.actions["low"] = "block"
         cfg.admission.skill.actions["critical"] = "block"

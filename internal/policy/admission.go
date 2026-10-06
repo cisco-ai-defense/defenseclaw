@@ -76,11 +76,12 @@ func builtinAdmission(assetType string) CompiledAdmission {
 //
 //	admission.<type>  >  (skill only) the scanner gate  >  admission.defaults  >  built-in
 //
-// The scanner gate applies when scanners.skill_scanner.fail_on_severity is
-// set: severities at or above it quarantine, [review_queue_min, gate) warn
-// and lower ones allow (review_queue_min unset means every lower severity
-// warns). A nil first_party_allow_list inherits; an empty one clears the
-// list. A severity nothing covers fails closed in Rego and the fallback.
+// The scanner gate is scanners.skill_scanner.fail_on_severity and
+// review_queue_min with their effective defaults (HIGH and MEDIUM), the
+// values setup, the TUI and doctor show: severities at or above the gate
+// quarantine, [review_queue_min, gate) warn and lower ones allow. A nil
+// first_party_allow_list inherits; an empty one clears the list. A severity
+// nothing covers fails closed in Rego and the fallback.
 func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 	var adm config.AdmissionConfig
 	if cfg != nil {
@@ -99,7 +100,8 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 		}
 		var derived map[string]CompiledAction
 		if assetType == config.AdmissionTypeSkill && cfg != nil {
-			derived = derivedScannerGate(cfg.Scanners.SkillScanner.FailOnSeverity, cfg.Scanners.SkillScanner.ReviewQueueMin)
+			skill := cfg.Scanners.SkillScanner
+			derived = derivedScannerGate(skill.EffectiveFailOnSeverity(), skill.EffectiveReviewQueueMin())
 		}
 		out[assetType] = compileAssetType(assetType, own, adm.Defaults, derived)
 	}

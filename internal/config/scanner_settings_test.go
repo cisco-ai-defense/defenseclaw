@@ -9,20 +9,6 @@ import (
 	"testing"
 )
 
-// With admission.skill.actions unset, the action map is derived from the
-// scanner gate: HIGH+ quarantines, [MEDIUM, HIGH) warns, below is allowed.
-func TestSkillScannerDerivedAdmissionActionsFollowTheGate(t *testing.T) {
-	got := SkillScannerConfig{}.DerivedAdmissionActions()
-	want := map[string]string{"critical": "quarantine", "high": "quarantine", "medium": "warn", "low": "allow", "info": "allow"}
-	for sev, action := range map[string]*AdmissionAction{
-		"critical": got.Critical, "high": got.High, "medium": got.Medium, "low": got.Low, "info": got.Info,
-	} {
-		if action == nil || action.Shorthand != want[sev] {
-			t.Errorf("%s = %+v, want %s", sev, action, want[sev])
-		}
-	}
-}
-
 func TestScannersValidateCrossFieldRules(t *testing.T) {
 	cases := map[string]ScannersConfig{
 		"review above gate":      {SkillScanner: SkillScannerConfig{FailOnSeverity: "MEDIUM", ReviewQueueMin: "HIGH"}},
