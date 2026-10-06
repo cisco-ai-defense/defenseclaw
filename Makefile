@@ -506,29 +506,21 @@ endif
 # scanners/plugin_scanner/, etc.) because dist/index.js imports siblings
 # by relative path. Flattening the tree silently breaks plugin load.
 #
-# Best-effort: a fresh clone has no extensions/defenseclaw/dist/ until
-# `make plugin` runs. Forcing every gateway build to first run npm
+# Best-effort: a fresh clone has no extensions/defenseclaw/dist/index.js
+# until `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
 # who don't need the plugin at all. Instead we drop a placeholder file
 # so //go:embed has at least one entry (the tracked .placeholder is kept
 # even after a sync, so a build leaves the checkout clean), and the
-# OpenClaw connector finds no package.json at runtime and returns a clear error when
+# OpenClaw connector finds no plugin entry at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension: _checkout-write-preflight
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
-	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
-	  if [ ! -f "$$embed_dir/package.json" ]; then \
-	    mkdir -p "$$embed_dir"; \
-	    [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
-	      "OpenClaw extension bundle is not present in this source checkout." \
-	      > "$$embed_dir/.placeholder"; \
-	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
-	  else \
-	    echo "  • OpenClaw extension dist/ missing — keeping the previously synced tree under $$embed_dir/"; \
-	  fi; \
+	if [ ! -f "$$plugin_dist/index.js" ] && [ -f "$$embed_dir/dist/index.js" ]; then \
+	  echo "  • OpenClaw extension dist/ not built — keeping the previously synced tree under $$embed_dir/"; \
 	  exit 0; \
 	fi; \
 	mkdir -p "$$embed_dir"; \
@@ -536,6 +528,13 @@ sync-openclaw-extension: _checkout-write-preflight
 	  [ -e "$$entry" ] || continue; \
 	  [ "$${entry##*/}" = .placeholder ] || rm -rf "$$entry"; \
 	done; \
+	if [ ! -f "$$plugin_dist/index.js" ]; then \
+	  [ -f "$$embed_dir/.placeholder" ] || printf '%s\n' \
+	    "OpenClaw extension bundle is not present in this source checkout." \
+	    > "$$embed_dir/.placeholder"; \
+	  echo "  • OpenClaw extension dist/ not built — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
+	  exit 0; \
+	fi; \
 	mkdir -p "$$embed_dir/node_modules"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
