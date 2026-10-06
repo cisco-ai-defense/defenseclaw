@@ -1242,7 +1242,7 @@ func validateObservabilityV8ResolvedOTLPEndpoints(
 				return fmt.Errorf("%s: OTLP endpoints must not contain query or fragment data", endpointPath)
 			}
 			if (parsed.Scheme == "http") != observabilityV8TransportTLSInsecure(transport) {
-				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree", endpointPath)
+				return fmt.Errorf("%s: OTLP endpoint scheme and tls.insecure disagree (use https://, or set tls.insecure: true for an http:// endpoint)", endpointPath)
 			}
 			if (transport.Protocol == "grpc" || transport.Protocol == "grpc/protobuf") && parsed.EscapedPath() != "" && parsed.EscapedPath() != "/" {
 				return fmt.Errorf("%s: gRPC OTLP endpoints must not contain a path", endpointPath)
