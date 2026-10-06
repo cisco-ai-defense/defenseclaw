@@ -350,7 +350,13 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
     return None
 
 
-_ADMISSION_FIELDS = ("actions", "scan_on_install", "allow_list_bypass_scan", "scanner_overrides", "first_party_allow_list")
+_ADMISSION_FIELDS = (
+    "actions",
+    "scan_on_install",
+    "allow_list_bypass_scan",
+    "scanner_overrides",
+    "first_party_allow_list",
+)
 
 
 def _admission_layer_key(parts: list) -> bool:

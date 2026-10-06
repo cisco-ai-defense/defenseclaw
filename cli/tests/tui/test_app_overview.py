@@ -1134,10 +1134,11 @@ def test_overview_config_reads_per_type_admission_actions() -> None:
 
     cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
     cfg.admission = AdmissionConfig()
-    cfg.admission.mcp.actions = {"low": "block", "high": "not-an-action"}
+    # MEDIUM quarantine is the built-in mcp action, so it is not an override.
+    cfg.admission.mcp.actions = {"low": "block", "medium": "quarantine", "high": "not-an-action"}
     overview = _overview_config(cfg)
     assert ("mcp", "LOW", "install", "block") in overview.scanner_overrides
-    assert all(entry[1] != "HIGH" for entry in overview.scanner_overrides)
+    assert all(entry[1] not in ("HIGH", "MEDIUM") for entry in overview.scanner_overrides)
     assert "mcp" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
 
 

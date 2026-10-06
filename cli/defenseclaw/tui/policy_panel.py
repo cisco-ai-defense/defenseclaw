@@ -20,7 +20,7 @@ Each flow shows a consequence modal (red, with a second press, when
 protection gets weaker) and then runs the command directly:
 
 - ``m``: ``guardrail mode observe|action [--connector C]``
-- ``b`` / ``a`` on Posture: pick a tool-call level →
+- ``b`` / ``a`` on Posture: pick a block or alert level →
   ``guardrail block-at|alert-at LEVEL|inherit [--connector C]``
 - ``b`` / ``a`` on Policies: pick the policy's LLM-traffic level →
   ``policy edit guardrail --block-threshold N -p NAME`` (or ``--alert-threshold N``)
@@ -422,7 +422,7 @@ class PolicyPanelMixin:
         scope = model.selected_scope()
         pack = model.selected_protection()
         selectable = pack is not None and getattr(pack, "status", "") != "staged"
-        # b / a: a scope's tool-call levels on Posture, the highlighted policy's
+        # b / a: a scope's block and alert levels on Posture, the highlighted policy's
         # LLM-traffic levels on Policies.
         levels = (view == "posture" and scope is not None) or (
             view == "policies" and model.selected_policy() is not None
@@ -576,7 +576,7 @@ class PolicyPanelMixin:
         await self._run_policy_intent(mode_intent(new, model.command_connector(row)))
 
     async def _level_flow(self, kind: str, connector: str) -> None:
-        """``b`` / ``a`` on Posture: the scope's tool-call level → ``guardrail block-at|alert-at``."""
+        """``b`` / ``a`` on Posture: the scope's block or alert level → ``guardrail block-at|alert-at``."""
         model = self.policy_model
         row = model.scope_row(connector)
         what = "Block" if kind == "block" else "Alert"
@@ -590,7 +590,7 @@ class PolicyPanelMixin:
         previews = {choice.value: level_preview(model, kind, row, choice.value) for choice in choices}
         chosen = await self.push_screen_wait(  # type: ignore[attr-defined]
             LevelPickerScreen(
-                f"{what} at: tool calls for {_level_scope_words(model, row)}",
+                f"{what} at: prompts, completions and tool calls for {_level_scope_words(model, row)}",
                 choices,
                 subtitle="Prompts, completions, tool calls and proxy LLM traffic of this scope, in action mode.",
                 previews=previews,
@@ -819,7 +819,9 @@ def rule_pack_change_modal(model: PoliciesPanelModel, choice: RulePackChoice) ->
         if source != "pack" and now != theirs
     ]
     if held:
-        details.append("Tool calls still " + " and ".join(held) + ", as set with block-at / alert-at.")
+        details.append(
+            "Prompts, completions and tool calls still " + " and ".join(held) + ", as set with block-at / alert-at."
+        )
     details.append(f"Validation: {choice.validation.summary}")
     details.append(_run_line(use_pack_intent(choice.pack, connector)))
     consequence = ""

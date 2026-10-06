@@ -379,7 +379,9 @@ def _undo_failed_commit(target: str, candidate: bytes, previous: bytes, mode: in
         else:
             os.unlink(target)
     except OSError as exc:
-        _log.warning("config writer: config.yaml holds the new bytes after a failed write and could not be restored: %s", exc)
+        _log.warning(
+            "config writer: config.yaml holds the new bytes after a failed write and could not be restored: %s", exc
+        )
 
 
 def _refresh_derived_files(target: str, candidate: bytes) -> None:

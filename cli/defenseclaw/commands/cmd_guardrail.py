@@ -28,8 +28,8 @@ This command surfaces the common policy levers directly:
   defenseclaw guardrail enable         # turn on + connector setup
   defenseclaw guardrail disable        # turn off + connector teardown
   defenseclaw guardrail mode           # observe (log only) vs action (enforce)
-  defenseclaw guardrail block-at       # lowest severity a tool call is blocked at
-  defenseclaw guardrail alert-at       # lowest severity a tool call raises an alert at
+  defenseclaw guardrail block-at       # lowest severity prompts, completions and tool calls are blocked at
+  defenseclaw guardrail alert-at       # lowest severity they raise an alert at
   defenseclaw guardrail fail-mode      # open vs closed on hook failures
   defenseclaw guardrail hilt           # human-in-the-loop prompting
   defenseclaw guardrail block-message  # message shown when an action is blocked
@@ -370,8 +370,8 @@ def guardrail() -> None:
       status         enabled state + roster (mode/fail/rule-pack/hilt/judge)
       enable/disable flip enforcement on/off
       mode           observe (log only) vs action (enforce)
-      block-at       lowest severity a tool call is blocked at
-      alert-at       lowest severity a tool call raises an alert at
+      block-at       lowest severity prompts, completions and tool calls are blocked at
+      alert-at       lowest severity they raise an alert at
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
