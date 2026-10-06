@@ -131,6 +131,22 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 		t.Fatalf("sub-agent instance = %q", got)
 	}
 
+	// Codex names the sub-agent on every hook of it, not only on its start
+	// and stop, so a tool call of the sub-agent has the sub-agent's instance
+	// too (GAP-0137).
+	codexMain := agentHookRequest{
+		ConnectorName: "codex", SessionID: "sess-codex", HookEventName: "PreToolUse",
+		Payload: map[string]interface{}{},
+	}
+	codexSub := codexMain
+	codexSub.AgentID = "thread-sub"
+	codexSub.Payload = map[string]interface{}{"agent_id": "thread-sub"}
+	mainInstance := agentIdentityForGenericHook(alice, codexMain).AgentInstanceID
+	if got := agentIdentityForGenericHook(alice, codexSub).AgentInstanceID; got == mainInstance ||
+		got != agentidentity.SubagentInstanceID(mainInstance, "thread-sub") {
+		t.Fatalf("codex sub-agent tool call instance = %q, main %q", got, mainInstance)
+	}
+
 	rec := httptest.NewRecorder()
 	(&APIServer{}).handleAgentIdentities(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/identities?user=alice&connector=claudecode", nil))
 	var body struct {
