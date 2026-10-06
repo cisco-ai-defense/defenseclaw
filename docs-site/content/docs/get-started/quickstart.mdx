@@ -89,8 +89,10 @@ defenseclaw guardrail mode action --connector claudecode
 ```
 
 This switches only Claude Code to **action** mode, which enforces the rules.
-Any other agent stays in observe. The command restarts the running gateway so
-the change applies right away.
+Any other agent stays in observe. The mode is saved to `config.yaml`, and the
+running gateway applies it on its own. Here the command also restarts the
+gateway, because switching to action flips Claude Code's hook fail mode (below)
+and the generated hook scripts carry that mode.
 
 Action mode also changes what happens while the gateway is down. The report
 showed `fail mode=open` because an agent in observe mode always fails open. In
@@ -164,8 +166,9 @@ defenseclaw guardrail use-pack first-guardrail --connector claudecode
 
 </Tabs>
 
-The copy keeps every default rule. `use-pack` validates the pack, switches
-Claude Code to it and restarts the gateway.
+The copy keeps every default rule. `use-pack` validates the pack, pins its
+digest in `guardrail.custom_packs.first-guardrail`, and switches Claude Code to
+it. The running gateway loads the pack on its next reload; nothing restarts.
 
 </Step>
 
@@ -221,6 +224,7 @@ The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`):
 ```bash
 defenseclaw guardrail use-pack --clear --connector claudecode   # back to the default pack
 defenseclaw guardrail mode --clear --connector claudecode       # back to observe
+defenseclaw config unset guardrail.custom_packs.first-guardrail # drop the pinned digest
 ```
 
 Then delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`.

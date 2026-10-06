@@ -225,8 +225,10 @@ Codex. Project and workspace-local servers are the repository's, and
 `mcp.project_servers` decides whether those start. A server stays behind
 when:
 
-- DefenseClaw blocks it: a scan verdict the watcher acted on,
-  `defenseclaw mcp block`, or the MCP asset policy in `action` mode;
+- DefenseClaw blocks it: an `asset_policy.mcp.denied` rule (`defenseclaw mcp
+  block` writes one), a scan verdict the watcher acted on, or the MCP asset
+  policy in `action` mode. See
+  [Admission and the block/allow list](/docs/policies/admission);
 - it is disabled, runs on this machine (a `localhost` or private URL), or
   uses a transport the harness cannot run in a sandbox (Codex has no SSE);
 - for Codex with repository servers blocked, the repository defines a server

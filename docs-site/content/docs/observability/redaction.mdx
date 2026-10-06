@@ -166,8 +166,9 @@ defenseclaw setup redaction route move splunk-production critical-findings \
 defenseclaw setup redaction route remove splunk-production critical-findings --yes
 ```
 
-Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`.
-Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
+Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`
+(the default is no restart: a running gateway applies a verified change by
+itself, and `--restart` also restarts it). Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
 means “leave that field unchanged”; reset/inherit verbs remove the corresponding
 source override explicitly. JSON dry-runs report `applied: false`; confirmed
 writes emit their result only after verification and include `backup_path`,
@@ -389,18 +390,21 @@ profile or error path falls back from a configured redacting profile to raw outp
 Local mandatory records are minimal and content-safe by construction. Disabling
 normal log collection cannot disable this SQLite-only compliance floor.
 
-## V7 compatibility (upgrades only)
+## Importing an old install (upgrades only)
 
 <Accordions>
 
 <Accordion title="What happens to v7 redaction settings">
 
-The v7 `privacy` block's `disable_redaction` field and
-`DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
-They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
-materializes their effective behavior into the `none` built-in or a generated
-`v7-compatible` custom profile before retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
-with an actionable upgrade message.
+Only an install older than 0.8.5 has v7 redaction settings. When the 1.0
+installer imports one (see
+[Upgrading from 0.x to 1.0](/docs/get-started/upgrade#upgrading-from-0x-to-10)),
+its converter materializes the effective behavior of the old controls into the
+`none` built-in or a generated `v7-compatible` custom profile, and then retires
+the old inputs. Nothing in the running product reads them afterwards: a gateway
+rejects legacy observability and redaction blocks with an actionable upgrade
+message. This section stays for as long as the installer imports 0.x installs
+older than 0.8.5.
 
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
 does not alter the v8 destination route graph or a persistent-sink projection.
@@ -411,7 +415,10 @@ does not alter the v8 destination route graph or a persistent-sink projection.
 
 ## Write and activation safety
 
-The CLI is the preferred redaction editor. Each mutation runs the strict Python
+The CLI is the preferred redaction editor. It writes through the same config
+writer as `defenseclaw config set`: the shared `config.yaml.lock`, a refusal on
+a managed standalone device, and a new entry in
+`config.generation.json`. Each mutation runs the strict Python
 source validator and the canonical Go compiler before writing. For a changed,
 non-dry-run write, it compares the live file with the preview digest, installs a
 private backup, atomically replaces `config.yaml`, verifies the installed
@@ -428,16 +435,16 @@ target but drops the setup row details, which then read
 
 Comments and unrelated source formatting are retained outside the exact policy
 span being edited. `--restart` restarts the gateway after verification; without
-it, the gateway uses its configured hot-reload behavior.
+it, which is the default, a running gateway applies the change by itself.
 
-When `--no-restart` explicitly stages a change while the gateway is unavailable,
-the CLI still verifies the installed effective-plan digest but warns on stderr
+When the gateway is not running while you change policy, the CLI still verifies the installed effective-plan digest but warns on stderr
 that the canonical setup audit event could not be recorded. Start the gateway
 before the next policy change when canonical audit admission is required. JSON
 mutation output remains machine-readable on stdout.
 
 For manual changes outside the CLI-owned redaction surface, edit only
-`~/.defenseclaw/config.yaml` and stop before restart if validation fails:
+`~/.defenseclaw/config.yaml`, check it, and stop if validation fails. A running
+gateway applies a valid edit by itself:
 
 ```bash
 umask 077
@@ -447,7 +454,6 @@ cp "$HOME/.defenseclaw/config.yaml" \
 defenseclaw config validate && \
 defenseclaw config show --effective --section observability && \
 defenseclaw observability plan && \
-defenseclaw-gateway restart && \
 defenseclaw doctor
 ```
 

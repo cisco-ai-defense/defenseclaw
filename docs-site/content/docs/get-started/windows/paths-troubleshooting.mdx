@@ -38,7 +38,10 @@ set it.
 
 | Path | What it is | Can you edit it? |
 | --- | --- | --- |
-| `config.yaml` | Your DefenseClaw configuration. | Prefer setup and `config` commands. If you edit it, run `defenseclaw config validate` before restarting the gateway. |
+| `config.yaml` | Your DefenseClaw configuration. | Change it with `defenseclaw config set` or the setup commands. The running gateway applies a valid edit by itself and keeps the previous policy if an edit is invalid; run `defenseclaw config validate` first when you edit it by hand. |
+| `config.generation.json` | The generation, SHA-256, actor and time of each write to `config.yaml`. | **No.** DefenseClaw writes it. |
+| `custom-providers.json` | Custom LLM providers, derived from `llm_providers` in `config.yaml`. | **No.** It is rewritten for you and never read back; `defenseclaw doctor --fix` regenerates it if it drifts. |
+| `config.yaml.v8.bak`, `migration-v9.json` | Kept by the `config_version` 9 migration: your file as it was, and every value the migration moved. | Read them locally. `defenseclaw config migrate --ack` marks the record as read. |
 | `.env` | Protected tokens and API keys. | **No.** Never print it. Use `defenseclaw keys` and the setup commands. |
 | `audit.db` | The local audit database (SQLite). | No. Do not open it with a second writer or attach it to a support ticket. |
 | `gateway.log` | The gateway's output. | Read it locally; check excerpts for sensitive content before you share them. |
@@ -279,8 +282,10 @@ not remove, leftovers of connectors you no longer use.
   </Accordion>
   <Accordion title="A connector is disabled or status disagrees with configuration">
     Use `defenseclaw guardrail status` to compare the saved settings with what
-    the gateway is running. A change made with `--no-restart` applies after
-    `defenseclaw-gateway restart`. Enable or disable one connector at a time
+    the gateway is running. A setting that needs a restart (a port, a
+    connector's enablement or its hook fail mode) applies after
+    `defenseclaw-gateway restart`; `defenseclaw config set` names such a key when
+    you set it, and every other change applies without a restart. Enable or disable one connector at a time
     (see [disabling](/docs/guardrail/disabling)) so the others are not changed.
   </Accordion>
   <Accordion title="A disabled skill or plugin still behaves unexpectedly">
