@@ -759,7 +759,7 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		events = append(events, enforcementEvent)
 	}
 	profileTelemetry := guardrailProfileTelemetryFor(ctx)
-	return observability.SpanGuardrailApplyInput{
+	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
@@ -809,7 +809,9 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 		DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 		DefenseClawGuardrailReason:          facts.reason,
 		ConditionConnectorKnown:             connectorKnown, ConditionOperationTerminal: true,
-	}, true
+	}
+	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	return input, true
 }
 
 func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtime sidecarRuntimeEmitter) error {
@@ -838,7 +840,7 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			return observability.Record{}, buildErr
 		}
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
-		return builder.BuildLogGuardrailEvaluationCompleted(observability.LogGuardrailEvaluationCompletedInput{
+		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: facts.envelope(ctx, snapshot), Severity: observability.Present(facts.severity),
@@ -872,7 +874,9 @@ func (facts proxyGuardrailV8Facts) emitEvaluationLog(ctx context.Context, runtim
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 			DefenseClawGuardrailReason:          facts.reason,
 			ConditionSecuritySeverityAvailable:  true,
-		})
+		}
+		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
 }

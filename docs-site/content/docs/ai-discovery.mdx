@@ -641,14 +641,19 @@ The local observability stack ships the **AI Agent Usage & Detection** board
 - Prometheus: `defenseclaw_ai_discovery_signals_total` (labels `state`,
   `signal_category`, `ai_vendor`, `ai_product`, `detector`), the active-signal
   gauge and the IDE plugin gauge `defenseclaw_inventory_ide_plugins` (labels
-  `ide`, `ai`, `enabled`).
+  `ide`, `ai`, `enabled`). These short label names are the
+  `local-observability-v1` projection, which only the OTLP destination named
+  `local-observability` receives (`setup observability add local-otlp`). A
+  plain `otlp` destination exports the canonical names
+  `defenseclaw_ide_product`, `defenseclaw_ide_plugin_ai` and
+  `defenseclaw_ide_plugin_enabled`, which the board does not read.
 - Loki: the `ai.discovery.completed`, `ai_component.*` and `ide.plugin.*`
   records.
 - Tempo: the discovery scan traces.
 
 Its **IDE plugins** section shows the plugin count by IDE, AI against other
 plugins, disabled plugins and a per-user table. The `$user` box narrows the
-Loki panels to one `user.id`.
+Loki panels to one user by `user.id`, account name or principal.
 
 It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
 

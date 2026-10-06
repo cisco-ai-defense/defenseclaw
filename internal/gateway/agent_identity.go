@@ -285,6 +285,25 @@ func agentIdentityV8FromContext(ctx context.Context) observability.Optional[stri
 	return agentIdentityV8(id)
 }
 
+// inventoryAgentIdentityID is the agent identity of userID's install of
+// connectorName: the ID the hook path derives for that user's hooks, so an
+// inventory record joins the agent's decisions. "" when it cannot be derived.
+func inventoryAgentIdentityID(connectorName, userID string) string {
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	if ManagedEnterpriseActive() || connectorName == "" || userID == "" {
+		return ""
+	}
+	user := agentIdentityUser{ID: userID, Home: userScopedIdentityHome(userID)}
+	if self := gatewaySelfUser(); !gatewayRunsAsServiceAccount() && self.ID == userID {
+		user = self
+	}
+	machine, _ := agentidentity.HostMachineHash()
+	return agentidentity.AgentID(agentidentity.Inputs{
+		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID),
+		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
+	})
+}
+
 // agentIdentityIDForTraffic is the agent identity of a request outside the
 // hook path (the LLM proxy, guardrail evaluate): the identity on ctx, else
 // the one identity its session was seen under on the hook path. The session

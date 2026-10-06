@@ -269,8 +269,8 @@
       },
       {
         "name": "user",
-        "label": "User ID regex",
-        "description": "Regex over user.id (uid or SID). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
         "type": "textbox",
         "query": ".*",
         "current": {
@@ -1530,7 +1530,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -1902,7 +1902,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -1933,7 +1933,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],

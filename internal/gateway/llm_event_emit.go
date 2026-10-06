@@ -84,12 +84,15 @@ type llmEventMeta struct {
 	UserName          string
 	UserEmail         string
 	Identity          *llmEventIdentity
-	PolicyID          string
-	DestinationApp    string
-	ToolName          string
-	ToolID            string
-	ToolIDReported    bool
-	FinishReasons     []string
+	// Profile is the guardrail profile that decided the request; the hook
+	// model and tool spans carry it as correlation.guardrail.profile.
+	Profile        guardrailProfileTelemetry
+	PolicyID       string
+	DestinationApp string
+	ToolName       string
+	ToolID         string
+	ToolIDReported bool
+	FinishReasons  []string
 	// TraceEventID scopes the short OTel anchor used for one hook delivery.
 	// Session and agent identifiers remain stable across deliveries, but a
 	// backend must not be asked to append children to a trace it has already
@@ -601,6 +604,7 @@ func proxyLLMEventMeta(p *GuardrailProxy, r *http.Request, req *ChatRequest, pro
 		UserName:       user.Name,
 		UserEmail:      user.Email,
 		Identity:       user.Identity,
+		Profile:        guardrailProfileTelemetryFor(r.Context()),
 		PolicyID:       firstNonEmpty(env.PolicyID, p.defaultPolicyID),
 		DestinationApp: env.DestinationApp,
 	}
@@ -1067,6 +1071,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		UserEmail:           user.Email,
 		AgentIdentityID:     agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)),
 		Identity:            user.Identity,
+		Profile:             guardrailProfileTelemetryFor(ctx),
 	}
 }
 

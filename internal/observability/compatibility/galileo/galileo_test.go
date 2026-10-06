@@ -1588,12 +1588,16 @@ func TestProjectAllowedToolAndAgentSpansNameTheirUser(t *testing.T) {
 		"user.id": "S-1-5-21-1-2-3-1017", "defenseclaw.user.name": "dcw-std1",
 		"defenseclaw.user.principal": "alice@CORP.EXAMPLE.COM", "defenseclaw.user.domain": "CORP.EXAMPLE.COM",
 		"defenseclaw.agent.identity.id": "agt-0123456789abcdef",
+		// GAP-0062: the directory facts of correlation.identity too.
+		"defenseclaw.user.directory": "active_directory", "defenseclaw.user.identity.source": "windows_lsa",
+		"defenseclaw.user.principal.assurance": "verified",
 	}
 	tool := map[string]any{
 		"gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": "apply_patch",
 		"gen_ai.tool.call.arguments": map[string]any{"path": "index.html"}, "gen_ai.tool.call.result": "ok",
 		// The guardrail profile rides tool and model spans, not agent spans.
-		"defenseclaw.guardrail.profile.name": "contractors",
+		"defenseclaw.guardrail.profile.name": "contractors", "defenseclaw.guardrail.profile.match": "group",
+		"defenseclaw.guardrail.profile.digest": "sha256:" + strings.Repeat("c", 64),
 	}
 	agent := map[string]any{
 		"gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "copilot", "gen_ai.provider.name": "github",
@@ -1626,7 +1630,8 @@ func TestProjectAllowedToolAndAgentSpansNameTheirUser(t *testing.T) {
 				t.Fatalf("%s: metadata = %v, want %s=%v", test.family, metadata, key, value)
 			}
 		}
-		if test.family == "span.tool.execute" && metadata["defenseclaw.guardrail.profile.name"] != "contractors" {
+		if test.family == "span.tool.execute" && (metadata["defenseclaw.guardrail.profile.name"] != "contractors" ||
+			metadata["defenseclaw.guardrail.profile.match"] != "group" || !strings.HasPrefix(metadata["defenseclaw.guardrail.profile.digest"], "sha256:")) {
 			t.Fatalf("%s: metadata = %v, want the guardrail profile", test.family, metadata)
 		}
 		if metadata["deployment.environment.name"] == "" || metadata["defenseclaw.guardrail.action"] != "" {

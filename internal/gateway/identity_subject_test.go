@@ -6,14 +6,19 @@
 package gateway
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -107,6 +112,76 @@ func TestSecureClientIgnoresIdentityFacts(t *testing.T) {
 	(&llmEventIdentity{Directory: useridentity.DirectoryFacts{Principal: "a@B", Assurance: useridentity.AssuranceVerified}}).applyTo(&input)
 	if !reflect.DeepEqual(input, observability.LogCompatHookDecisionInput{}) {
 		t.Fatal("Secure Client record gained identity attributes")
+	}
+}
+
+// A verified subject with resolved directory facts emits one
+// identity.observed record carrying the group count (GAP-0060).
+func TestVerifiedSubjectEmitsIdentityObserved(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	capture := &endpointInventoryCapture{}
+	(&APIServer{observabilityV8: capture}).observeIdentity(context.Background(), VerifiedSubject{
+		UserID: "1291", IDKind: useridentity.KindPOSIXUID, UserName: "dcad-alice",
+		Directory: useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory,
+			Groups: []string{"dc-ml-team@dclab.test", "dc-devs@dclab.test"}, Source: useridentity.SourceSSSDInfoPipe,
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now(),
+		},
+	}, useridentity.SessionFacts{})
+	records := capture.snapshot()
+	if len(records) != 1 || string(records[0].EventName()) != observability.TelemetryEventIdentityObserved {
+		t.Fatalf("records = %d, want one identity.observed", len(records))
+	}
+	if got := fmt.Sprint(canonicalBody(t, records[0])[observability.TelemetryAttributeDefenseClawUserGroupCount]); got != "2" {
+		t.Fatalf("group_count = %s, want 2", got)
+	}
+}
+
+// Discovery records carry the scanned account's directory facts and the
+// agent identity the hook path derives for that account's connector install,
+// so inventory joins the agent's decisions (GAP-0016).
+func TestDiscoverySignalCarriesInventoryIdentity(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	self := strconv.Itoa(os.Getuid())
+	original := managedHookPeerDirectory
+	managedHookPeerDirectory = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) {
+		if strconv.Itoa(uid) != self {
+			return useridentity.DirectoryFacts{}, false
+		}
+		return useridentity.DirectoryFacts{
+			Domain: "dclab.test", Directory: useridentity.DirectoryActiveDirectory, ResolvedAt: time.Now(),
+		}, true
+	}
+	t.Cleanup(func() { managedHookPeerDirectory = original })
+	capture := &endpointInventoryCapture{}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{
+			ScanID: "scan-identity", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok",
+			TotalSignals: 1, ActiveSignals: 1, NewSignals: 1,
+		},
+		Signals: []inventory.AISignal{{
+			SignalID: "model-identity", SignatureID: "local-model", Category: inventory.SignalLocalModel,
+			Confidence: .9, State: inventory.AIStateNew, SupportedConnector: "claudecode", UserID: self,
+		}},
+	}
+	if err := (&aiDiscoveryV8Adapter{runtime: capture}).EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	for _, record := range capture.snapshot() {
+		if record.EventName() == "ai_component.discovered" {
+			body = canonicalBody(t, record)
+		}
+	}
+	if body == nil || body["defenseclaw.user.directory"] != "active_directory" ||
+		body["defenseclaw.user.domain"] != "dclab.test" || body["defenseclaw.user.principal.assurance"] != "verified" {
+		t.Fatalf("ai_component.discovered identity = %v", body)
+	}
+	if want := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "claudecode"}).ID; want != "" &&
+		body["defenseclaw.agent.identity.id"] != want {
+		t.Fatalf("agent.identity.id = %v, want the hook path's %q", body["defenseclaw.agent.identity.id"], want)
 	}
 }
 

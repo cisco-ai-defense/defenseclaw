@@ -424,6 +424,22 @@ func discoveryUserIDKind(userID string) string {
 	return useridentity.KindPOSIXUID
 }
 
+// inventoryIdentity is the directory attribution of the account an inventory
+// record names. The gateway resolved that account itself (the scan's process
+// owner or a profile directory's owner), never from anything a client sent,
+// so its directory facts are reported as verified.
+func inventoryIdentity(userID string) *llmEventIdentity {
+	if userID == "" || !identityFactsEnabled.Load() {
+		return nil
+	}
+	facts, _ := verifiedIdentityDirectory(userID, true)
+	if facts.Empty() {
+		return nil
+	}
+	facts.Assurance = useridentity.AssuranceVerified
+	return &llmEventIdentity{Directory: facts}
+}
+
 // daemonHomeForInventoryAttribution returns the profile the sidecar itself
 // runs under, but only when that profile belongs to a person.
 //
@@ -954,7 +970,7 @@ func emitEndpointInventoryComponent(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		return builder.BuildLogAIComponentObserved(observability.LogAIComponentObservedInput{
+		input := observability.LogAIComponentObservedInput{
 			Envelope:                                        endpointInventoryEmitEnvelope(ctx, snapshot, recordSource, action, phase),
 			Severity:                                        observability.Present(observability.SeverityInfo),
 			LogLevel:                                        observability.Present(observability.LogLevelInfo),
@@ -991,7 +1007,10 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryVersion:                aiDiscoveryV8OptionalText(component.agentVersion),
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
-		})
+			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID)),
+		}
+		inventoryIdentity(component.userID).applyTo(&input)
+		return builder.BuildLogAIComponentObserved(input)
 	})
 	return err
 }

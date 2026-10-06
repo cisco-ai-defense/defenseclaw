@@ -216,8 +216,13 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     \b
       # Tag this computer's telemetry (host.name comes from the OS)
       defenseclaw setup observability add otlp --non-interactive \\
-          --endpoint 127.0.0.1:4317 --protocol grpc \\
+          --endpoint 10.0.0.5:4317 --protocol grpc \\
           --allow-private-networks --plaintext --environment lab-win2
+    \b
+      # Feed the bundled Grafana boards on another computer (plain otlp
+      # exports canonical metric labels the boards do not read)
+      defenseclaw setup observability add local-otlp --non-interactive \\
+          --endpoint stack-host:4317
     """
     preset = resolve_preset(preset_id.lower())
     token_source = click.get_current_context().get_parameter_source("token_value")

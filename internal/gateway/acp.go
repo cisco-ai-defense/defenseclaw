@@ -285,11 +285,23 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	identity := AgentIdentityFromContext(ctx)
+	updated := false
 	if identity.UserID == "" && identity.UserName == "" && !gatewayRunsAsServiceAccount() {
 		if user := useridentity.Current(); !user.Empty() {
 			identity.UserID, identity.UserIDKind, identity.UserName = user.ID, user.IDKind, user.Name
-			ctx = ContextWithAgentIdentity(ctx, identity)
+			updated = true
 		}
+	}
+	// The agent an ACP client drives is the connector's install, so its
+	// records carry the agent identity the hook path derives for it.
+	if identity.IdentityID == "" {
+		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+			updated = true
+		}
+	}
+	if updated {
+		ctx = ContextWithAgentIdentity(ctx, identity)
 	}
 	return ctx
 }
@@ -418,6 +430,7 @@ func acpAgentInvokeInputV8(
 	input.UserID = hookV8OptionalIdentifier(caller.ID)
 	input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
 	input.DefenseClawUserName = hookV8OptionalIdentifier(caller.Name)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx)))
 	caller.Identity.applyTo(&input)
 	return input
 }

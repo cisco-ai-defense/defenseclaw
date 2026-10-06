@@ -115,9 +115,12 @@ func (a *APIServer) observeIdentity(ctx context.Context, subject VerifiedSubject
 	if emitter == nil {
 		return
 	}
+	// identity.observed belongs to the gateway activity producer's
+	// compliance.activity set; no producer is registered under "identity",
+	// so classifying under that key failed and nothing was ever emitted.
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
-		observability.ProducerKey("identity"),
+		observability.ProducerKey(gatewaylog.EventActivity),
 		observability.ClassificationContext{
 			Bucket:      observability.BucketComplianceActivity,
 			EventName:   observability.EventName(observability.TelemetryEventIdentityObserved),

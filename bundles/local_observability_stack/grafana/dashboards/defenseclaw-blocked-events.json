@@ -72,7 +72,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -131,7 +131,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -190,7 +190,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -249,7 +249,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event!~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event!~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -308,7 +308,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (agent_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_gen_ai_agent_id!=\"\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (agent_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_gen_ai_agent_id!=\"\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -367,7 +367,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "count(sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range]))) or vector(0)",
+          "expr": "count(sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -438,7 +438,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__interval])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__interval])) or vector(0)",
           "refId": "A",
           "legendFormat": "enforced"
         },
@@ -447,7 +447,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__interval])) or vector(0)",
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__interval])) or vector(0)",
           "refId": "B",
           "legendFormat": "would block"
         }
@@ -499,7 +499,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(15, sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range])))",
+          "expr": "topk(15, sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range])))",
           "refId": "A",
           "instant": true,
           "queryType": "instant",
@@ -556,7 +556,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "topk(50, sum by (connector, decision, hook_event, severity, target, primary_rule) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<primary_rule>[^\\\\\\\"]+)\\\\\\\".*\" | label_format hook_event=\"{{if .body_defenseclaw_hook_event}}{{.body_defenseclaw_hook_event}}{{else}}unreported{{end}}\", severity=\"{{if .body_defenseclaw_security_severity}}{{.body_defenseclaw_security_severity}}{{else}}unreported{{end}}\", target=\"{{if .body_defenseclaw_destination_app}}{{.body_defenseclaw_destination_app}}{{else}}unreported{{end}}\" [$__range])))",
+          "expr": "topk(50, sum by (connector, decision, hook_event, severity, target, primary_rule) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<primary_rule>[^\\\\\\\"]+)\\\\\\\".*\" | label_format hook_event=\"{{if .body_defenseclaw_hook_event}}{{.body_defenseclaw_hook_event}}{{else}}unreported{{end}}\", severity=\"{{if .body_defenseclaw_security_severity}}{{.body_defenseclaw_security_severity}}{{else}}unreported{{end}}\", target=\"{{if .body_defenseclaw_destination_app}}{{.body_defenseclaw_destination_app}}{{else}}unreported{{end}}\" [$__range])))",
           "refId": "A",
           "instant": true,
           "queryType": "instant"
@@ -669,7 +669,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}BLOCKED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent {{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}}\\nRules: {{.rule_ids}}\\nWhy: {{.body_defenseclaw_guardrail_reason}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}BLOCKED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent {{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}}\\nRules: {{.rule_ids}}\\nWhy: {{.body_defenseclaw_guardrail_reason}}\"",
           "refId": "A"
         }
       ],
@@ -715,7 +715,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | body_user_id=~\"$user\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"Rules: {{.rule_ids}}\\nMeaning: {{.body_defenseclaw_guardrail_reason}}\\nSeen on: {{.connector}} · {{.body_defenseclaw_hook_event}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"Rules: {{.rule_ids}}\\nMeaning: {{.body_defenseclaw_guardrail_reason}}\\nSeen on: {{.connector}} · {{.body_defenseclaw_hook_event}}\"",
           "refId": "A"
         }
       ],
@@ -992,8 +992,8 @@
       },
       {
         "name": "user",
-        "label": "User ID regex",
-        "description": "Regex over user.id (uid or SID). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
+        "label": "User regex",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
         "type": "textbox",
         "query": ".*",
         "current": {
