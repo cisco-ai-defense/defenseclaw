@@ -173,6 +173,10 @@ func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 
 func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	tmp := t.TempDir()
+	// Windows also scans machine-wide Visual Studio extensions; keep the
+	// scan off the runner's own installation.
+	t.Setenv("ProgramFiles", tmp)
+	t.Setenv("ProgramFiles(x86)", tmp)
 	home := filepath.Join(tmp, "home")
 	rawPath := filepath.Join(home, ".raw-ai", "config.json")
 	if err := os.MkdirAll(filepath.Dir(rawPath), 0o700); err != nil {
@@ -222,7 +226,9 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- svc.Run(ctx) }()
-	scanCtx, scanCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// A hang guard, not a latency budget: a full scan on a loaded Windows
+	// runner still reads the account's real AppData.
+	scanCtx, scanCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	report, err := svc.ScanNow(scanCtx)
 	scanCancel()
 	if err != nil {

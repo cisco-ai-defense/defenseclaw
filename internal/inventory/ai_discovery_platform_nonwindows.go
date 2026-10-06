@@ -75,7 +75,7 @@ func platformInstalledApplicationNames(home string) []string {
 
 // platformIDEAppData returns the current user's %APPDATA% and
 // %LOCALAPPDATA%; only Windows has them.
-func platformIDEAppData() (string, string) {
+func platformIDEAppData(string) (string, string) {
 	return "", ""
 }
 

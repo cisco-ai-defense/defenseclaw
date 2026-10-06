@@ -4561,9 +4561,12 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
     for name in sorted(gc.profiles):
         profile = gc.profiles[name]
         summary = ", ".join(
-            f"{key}={value}" for key, value in _profile_settings(profile).items() if key not in {"description", "connectors", "hilt"}
+            f"{key}={value}"
+            for key, value in _profile_settings(profile).items()
+            if key not in {"description", "connectors", "hilt"}
         )
-        ux.echo(f"  • {ux.accent(name)}  {profile.description or ''} {ux.dim('(' + (summary or 'inherits everything') + ')')}")
+        detail = ux.dim("(" + (summary or "inherits everything") + ")")
+        ux.echo(f"  • {ux.accent(name)}  {profile.description or ''} {detail}")
     click.echo()
     ux.echo(f"  • {ux._style('assignments (first match wins):', fg='bright_black', bold=True)}")
     if not gc.profile_assignments:

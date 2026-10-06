@@ -55,3 +55,4 @@ declare module 'node:crypto' {
 }
 
 declare const Buffer: { from(value: string): Uint8Array }
+declare const process: { env: Record<string, string | undefined> }
