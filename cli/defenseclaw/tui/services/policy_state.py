@@ -817,7 +817,7 @@ POLICY_KEYMAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("j/k or Up/Down", "Move in the view", POLICY_VIEWS),
     ("m", "Posture: switch the highlighted scope between observe and action", ("posture",)),
-    ("b / a", "Posture: the scope's tool-call block at / alert at level", ("posture",)),
+    ("b / a", "Posture: the scope's block at / alert at level (tool calls, prompts, LLM traffic)", ("posture",)),
     ("b / a", "Policies: the policy's block / alert level for LLM traffic (guardrail proxy)", ("policies",)),
     ("h", "Posture: human approval for the highlighted scope", ("posture",)),
     ("p", "Posture: switch the highlighted scope's rule pack", ("posture",)),

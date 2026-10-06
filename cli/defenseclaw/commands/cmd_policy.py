@@ -470,11 +470,11 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     before = _restart_only_config(app.cfg)
     path = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
-    # The policy's guardrail thresholds are not the tool-call block level
-    # (GAP-1228).
+    # One threshold model: the policy's guardrail levels (guardrail.block_at /
+    # alert_at) apply to hook tool calls and prompts as well as the proxy.
     click.echo(
-        "  Its guardrail thresholds govern LLM traffic through the proxy; tool-call "
-        "blocking is unchanged (see 'defenseclaw guardrail status' and 'guardrail block-at')."
+        "  Its guardrail levels apply to tool calls, prompts and LLM traffic on every connector "
+        "without its own level (see 'defenseclaw guardrail status' and 'guardrail block-at')."
     )
     # A stopped gateway gets one note after the success lines, covering both
     # the skipped audit event and the reload on start (GAP-1718).

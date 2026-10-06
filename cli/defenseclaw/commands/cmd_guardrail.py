@@ -4197,13 +4197,13 @@ _LEVEL_WORDS = {
     "block_at": {
         "noun": "block",
         "command": "block-at",
-        "does": "blocks tool calls at",
+        "does": "blocks tool calls, prompts and LLM traffic at",
         "done": "are blocked at",
     },
     "alert_at": {
         "noun": "alert",
         "command": "alert-at",
-        "does": "alerts on tool calls at",
+        "does": "alerts on tool calls, prompts and LLM traffic at",
         "done": "raise an alert at",
     },
 }
@@ -4341,7 +4341,7 @@ def _set_tool_call_level(app: AppContext, setting: str, level: str, connector: s
         message = f"{subject} follows {_LEVEL_SOURCE_WORDS[source]} {noun} level again: {label}."
     elif value:
         message = (
-            f"The global {noun} level is now {value}: tool calls {words['done']} {label} "
+            f"The global {noun} level is now {value}: tool calls, prompts and LLM traffic {words['done']} {label} "
             "unless a connector has its own."
         )
     else:
