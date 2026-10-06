@@ -776,6 +776,23 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
 	if errors.Is(applyErr, errGenerationUnchanged) {
+		// The rebuild succeeded and equals the live generation, so an earlier
+		// rejected edit is resolved (a pack restored after a digest
+		// mismatch): clear its last_reload_error and error state, otherwise
+		// they stay until an unrelated config write.
+		liveReloadError.Store("")
+		if m.health != nil {
+			state, msg := StateRunning, ""
+			if envOverlayErr != nil {
+				state, msg = StateError, envOverlayErr.Error()
+			}
+			m.health.SetConfig(state, msg, map[string]interface{}{
+				"path":       m.path,
+				"generation": m.gen.Load(),
+				"reason":     reason,
+				"changed":    []string{},
+			})
+		}
 		return nil
 	}
 	if applyErr != nil {
