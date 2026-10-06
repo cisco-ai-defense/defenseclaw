@@ -125,9 +125,18 @@ class PolicyEngine:
     def unblock(self, target_type: str, name: str, connector: str = "") -> None:
         """Remove an operator block, and the journal's scan-verdict install
         block, so a later restore no longer keeps the asset blocked."""
+        self._refuse_if_managed(target_type, name, asset_lists.OP_UNBLOCK)
         self._drop_operator_entries(target_type, name, connector, asset_lists.OP_UNBLOCK)
         if self.store:
             self.store.clear_action_field(target_type, name, "install", connector)
+
+    def _refuse_if_managed(self, target_type: str, name: str, op: str) -> None:
+        """A managed standalone device takes block/allow/unblock from the
+        admin config only, so an unblock is refused before it touches the
+        operator lists or the journal (whose runtime disables the gateway
+        still enforces)."""
+        if not self._legacy_rows():
+            asset_lists.refuse_if_managed(self.cfg, target_type=target_type, op=op, name=name)
 
     def _drop_operator_entries(self, target_type: str, name: str, connector: str, op: str) -> None:
         if self._legacy_rows():
@@ -150,6 +159,7 @@ class PolicyEngine:
 
     def unblock_tool_for_connector(self, tool_name: str, connector: str = "") -> None:
         """Remove the tool's block or allow at exactly this connector scope."""
+        self._refuse_if_managed("tool", tool_name, asset_lists.OP_CLEAR)
         if self._legacy_rows():
             if self.store:
                 target = f"@{connector}/{tool_name}" if connector else tool_name
@@ -266,6 +276,7 @@ class PolicyEngine:
     def remove_action_for_connector(self, target_type: str, name: str, connector: str = "") -> None:
         """Remove all enforcement state at exactly this scope: the operator
         block/allow entries and the journal row."""
+        self._refuse_if_managed(target_type, name, asset_lists.OP_CLEAR)
         self._drop_operator_entries(target_type, name, connector, asset_lists.OP_CLEAR)
         if self.store:
             self.store.remove_action(target_type, name, connector)

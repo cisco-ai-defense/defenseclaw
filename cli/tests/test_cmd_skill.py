@@ -3480,6 +3480,20 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 3, result.output)
         self.assertIn("This device is managed", result.output)
         self.assertEqual(self.app.cfg.asset_policy.skill.denied, [])
+
+    def test_unblock_is_refused_and_audited_on_a_managed_standalone_device(self):
+        # The journal's runtime disable is still enforced by the gateway, so a
+        # local unblock must not delete it; the refused attempt is audited.
+        self.app.store.set_action_field("skill", "sample", "runtime", "disable", "scan verdict", "")
+        self.app.cfg.deployment_mode = "managed_enterprise"
+        with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}), \
+                patch.object(self.app.logger, "log_action") as log_action:
+            result = self.runner.invoke(skill, ["unblock", "sample"], obj=self.app)
+        self.assertEqual(result.exit_code, 3, result.output)
+        self.assertTrue(self.app.store.has_action("skill", "sample", "runtime", "disable"))
+        log_action.assert_called_once_with(
+            "skill-unblock", "sample", "outcome=refused reason=managed_device type=skill",
+        )
     def test_bare_unblock_clears_global_allow_row(self):
         PolicyEngine(self.app.store, self.app.cfg).allow("skill", "sample", "manual")
 
