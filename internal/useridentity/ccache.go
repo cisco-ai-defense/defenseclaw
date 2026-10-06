@@ -30,6 +30,26 @@ import (
 
 var errCCacheFormat = errors.New("useridentity: unsupported credential cache format")
 
+// kcmStatusError is KCM's own refusal of an operation, such as no default
+// cache: an answer, unlike a transport failure.
+type kcmStatusError struct {
+	opcode uint16
+	status int32
+}
+
+func (e kcmStatusError) Error() string {
+	return fmt.Sprintf("useridentity: KCM operation %d failed with status %d", e.opcode, e.status)
+}
+
+// kcmReadSettled reports whether the outcome of a KCM read answers for the
+// session: a principal, KCM's refusal or a malformed reply. A transport
+// failure settles nothing; the common one is the deadline passing while a
+// socket-activated sssd-kcm starts after its idle exit.
+func kcmReadSettled(err error) bool {
+	var status kcmStatusError
+	return err == nil || errors.As(err, &status) || errors.Is(err, errCCacheFormat)
+}
+
 // maxCCacheComponents and maxCCacheString bound a principal so a corrupt or
 // hostile cache cannot make the hook allocate without limit.
 const (
@@ -143,7 +163,7 @@ func kcmCall(conn io.ReadWriter, opcode uint16, data []byte) ([]byte, error) {
 	}
 	size := binary.BigEndian.Uint32(header[:4])
 	if status := int32(binary.BigEndian.Uint32(header[4:])); status != 0 {
-		return nil, fmt.Errorf("useridentity: KCM operation %d failed with status %d", opcode, status)
+		return nil, kcmStatusError{opcode: opcode, status: status}
 	}
 	if size < 4 || size > kcmMaxReply {
 		return nil, errCCacheFormat
@@ -153,7 +173,7 @@ func kcmCall(conn io.ReadWriter, opcode uint16, data []byte) ([]byte, error) {
 		return nil, err
 	}
 	if status := int32(binary.BigEndian.Uint32(reply[:4])); status != 0 {
-		return nil, fmt.Errorf("useridentity: KCM operation %d failed with status %d", opcode, status)
+		return nil, kcmStatusError{opcode: opcode, status: status}
 	}
 	return reply[4:], nil
 }

@@ -19,7 +19,10 @@ import (
 
 const (
 	kcmDialTimeout = 200 * time.Millisecond
-	kcmCallTimeout = 300 * time.Millisecond
+	// kcmCallTimeout covers a socket-activated sssd-kcm starting after its
+	// idle exit, which took about 0.4 s on RHEL 9; a running KCM answers in
+	// milliseconds.
+	kcmCallTimeout = 2 * time.Second
 	krb5ConfPath   = "/etc/krb5.conf"
 	maxKrb5Conf    = 256 << 10
 )
@@ -40,7 +43,7 @@ func currentSessionFactsHeader(now time.Time) string {
 		}
 	}
 	facts := SessionFromSSHEnv(os.Getenv)
-	principal, ccType := readDefaultPrincipal(kind, residual)
+	principal, ccType, settled := readDefaultPrincipal(kind, residual)
 	if principal == "" && ((ccType != CCacheKeyring && ccType != CCacheAPI) || platformDefault) {
 		// No readable cache: report no type rather than the default name's.
 		ccType = ""
@@ -51,7 +54,13 @@ func currentSessionFactsHeader(now time.Time) string {
 	}
 	header := EncodeSessionFactsHeader(ClaimedSessionHeader{Session: facts})
 	if cachePath != "" {
-		_ = writeSessionFactsCache(cachePath, key, envKey, header, now)
+		written := now
+		if !settled {
+			// A KCM read that failed in transit is not the session's
+			// answer: it is reused for sessionFactsRetryAfter, not the TTL.
+			written = now.Add(sessionFactsRetryAfter - SessionFactsCacheTTL)
+		}
+		_ = writeSessionFactsCache(cachePath, key, envKey, header, written)
 	}
 	return header
 }
@@ -173,21 +182,23 @@ func ccacheModTime(kind, residual string) string {
 }
 
 // readDefaultPrincipal reads the default principal of the named cache. It
-// returns the cache type even when the principal cannot be read.
-func readDefaultPrincipal(kind, residual string) (principal, ccType string) {
+// returns the cache type even when the principal cannot be read; settled is
+// false when a KCM read failed in transit and may answer on a retry.
+func readDefaultPrincipal(kind, residual string) (principal, ccType string, settled bool) {
 	switch kind {
 	case CCacheFile:
-		return readFileCCachePrincipal(residual), CCacheFile
+		return readFileCCachePrincipal(residual), CCacheFile, true
 	case CCacheDir:
-		return readDirCCachePrincipal(residual), CCacheDir
+		return readDirCCachePrincipal(residual), CCacheDir, true
 	case CCacheKCM:
-		return readKCMPrincipal(residual), CCacheKCM
+		principal, settled = readKCMPrincipal(residual)
+		return principal, CCacheKCM, settled
 	case CCacheKeyring:
-		return "", CCacheKeyring
+		return "", CCacheKeyring, true
 	case CCacheAPI:
-		return "", CCacheAPI
+		return "", CCacheAPI, true
 	}
-	return "", ""
+	return "", "", true
 }
 
 func readFileCCachePrincipal(path string) string {
@@ -226,19 +237,26 @@ func readDirCCachePrincipal(residual string) string {
 	return readFileCCachePrincipal(filepath.Join(residual, name))
 }
 
-func readKCMPrincipal(cacheName string) string {
+// readKCMPrincipal asks the first KCM socket that accepts for the default
+// principal. No socket accepting settles the answer (no KCM on this host);
+// a dial or call that timed out or broke off does not (kcmReadSettled).
+func readKCMPrincipal(cacheName string) (principal string, settled bool) {
+	settled = true
 	for _, socket := range []string{DefaultKCMSocketPath, LegacyKCMSocketPath} {
 		conn, err := net.DialTimeout("unix", socket, kcmDialTimeout)
 		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				settled = false
+			}
 			continue
 		}
 		_ = conn.SetDeadline(time.Now().Add(kcmCallTimeout))
-		principal, err := KCMDefaultPrincipal(conn, cacheName)
+		principal, err = KCMDefaultPrincipal(conn, cacheName)
 		_ = conn.Close()
-		if err == nil {
-			return principal
+		if err != nil {
+			return "", kcmReadSettled(err)
 		}
-		return ""
+		return principal, true
 	}
-	return ""
+	return "", settled
 }

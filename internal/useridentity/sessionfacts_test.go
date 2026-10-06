@@ -80,6 +80,33 @@ func TestKCMDefaultPrincipal(t *testing.T) {
 	}
 }
 
+// GAP-0095: a KCM read that failed in transit (the deadline passing while
+// sssd-kcm starts) must not be cached as the session's answer; KCM's own
+// refusal is an answer.
+func TestKCMReadSettledOnlyByAnAnswer(t *testing.T) {
+	_, err := KCMDefaultPrincipal(timedOutConn{}, "")
+	if err == nil || kcmReadSettled(err) {
+		t.Fatalf("timed-out KCM read: err %v settled %v, want an unsettled error", err, kcmReadSettled(err))
+	}
+	var refusal bytes.Buffer
+	_ = binary.Write(&refusal, binary.BigEndian, uint32(4))
+	_ = binary.Write(&refusal, binary.BigEndian, uint32(0))
+	_ = binary.Write(&refusal, binary.BigEndian, int32(-1765328189)) // KRB5_FCC_NOFILE
+	if _, err := KCMDefaultPrincipal(&kcmReplay{in: &refusal}, ""); err == nil || !kcmReadSettled(err) {
+		t.Fatalf("KCM refusal: err %v, want a settled error", err)
+	}
+}
+
+type timedOutConn struct{}
+
+func (timedOutConn) Write(p []byte) (int, error) { return len(p), nil }
+func (timedOutConn) Read([]byte) (int, error)    { return 0, os.ErrDeadlineExceeded }
+
+type kcmReplay struct{ in *bytes.Buffer }
+
+func (k *kcmReplay) Write(p []byte) (int, error) { return len(p), nil }
+func (k *kcmReplay) Read(p []byte) (int, error)  { return k.in.Read(p) }
+
 func TestSessionFactsHeaderAllowlist(t *testing.T) {
 	header := EncodeSessionFactsHeader(ClaimedSessionHeader{Session: SessionFacts{
 		Kind: SessionSSH, TTY: "pts/3", LogindSession: "12", ClientAddr: "192.0.2.10",
