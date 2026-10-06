@@ -28,7 +28,10 @@
 set -eu
 
 dc_handoff() {
+    # DEFENSECLAW_REPO only changes where the release is downloaded from; the
+    # signature is always checked against the official release identity.
     local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 tag tmp expected major
+    local signer='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --yes|-y) yes="--yes" ;;
@@ -80,11 +83,15 @@ dc_handoff() {
         case "${major}" in
             ''|*[!0-9]*) major=0 ;;
         esac
+        if [ "${major}" -lt 2 ] && [ "${repo}" != "cisco-ai-defense/defenseclaw" ]; then
+            echo "  ✗ a release from ${repo} needs cosign 2.0 or later to check its signature; nothing was changed" >&2
+            return 1
+        fi
         if [ "${major}" -ge 2 ]; then
             curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
                 "https://github.com/${repo}/releases/download/${tag}/checksums.txt.bundle"
             if ! cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
-                --certificate-identity-regexp "^https://github\.com/$(printf '%s' "${repo}" | sed 's/[.]/\\./g')/\.github/workflows/release\.yaml@refs/heads/main$" \
+                --certificate-identity-regexp "${signer}" \
                 --certificate-oidc-issuer https://token.actions.githubusercontent.com \
                 "${tmp}/checksums.txt" >/dev/null 2>&1; then
                 echo "  ✗ the release signature on checksums.txt did not verify; nothing was changed" >&2

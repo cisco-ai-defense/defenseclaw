@@ -270,6 +270,33 @@ def test_handoff_plan_changes_nothing(tmp_path: Path) -> None:
     assert "ran" not in result.stdout
 
 
+def test_handoff_checks_a_fork_against_the_official_release_identity(tmp_path: Path) -> None:
+    # DEFENSECLAW_REPO moves the downloads, never the trust root.
+    release = _release(tmp_path, "#!/bin/bash\necho ran\n")
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\nout=''\nwhile [ $# -gt 1 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n"
+        'case "$1" in */latest) echo "location: https://github.com/fork/defenseclaw/releases/tag/1.0.1" ;;\n'
+        f'*) cp "{release}/${{1##*/}}" "$out" 2>/dev/null || : > "$out" ;; esac\n',
+        encoding="utf-8",
+    )
+    (fake / "cosign").write_text(
+        f'#!/bin/bash\n[ "$1" = version ] && {{ echo "GitVersion: v2.4.1"; exit 0; }}\necho "$*" > "{tmp_path}/cosign.args"\n',
+        encoding="utf-8",
+    )
+    for tool in ("curl", "cosign"):
+        (fake / tool).chmod(0o755)
+
+    result = _run(
+        [str(HANDOFF_SH), "--plan"], tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO="fork/defenseclaw",
+    )
+
+    assert result.returncode == 0, result.stderr
+    signer = r"^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
+    assert f"--certificate-identity-regexp {signer}" in (tmp_path / "cosign.args").read_text(encoding="utf-8")
+
+
 def test_downloads_under_a_staging_name_are_checked_by_their_release_name() -> None:
     # checksums.txt lists release asset names; a file saved under another name
     # must pass the asset name to verify, or the lookup finds nothing.
