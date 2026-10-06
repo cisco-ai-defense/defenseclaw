@@ -222,6 +222,7 @@ func (b *box) identity() audit.SandboxIdentity {
 	id := audit.SandboxIdentity{
 		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness, Runtime: audit.SandboxRuntimeOpenShell,
 		Profile: b.rec.Profile, Pack: b.rec.Pack, Phase: b.phase, WorkdirMode: b.rec.WorkdirMode,
+		BindingID: b.rec.BindingID,
 	}
 	// Telemetry names the driver as OpenShell does (audit.SandboxDriverVM is
 	// "vm"); one this build does not know is left out, not guessed.
@@ -285,6 +286,8 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.started = m.now()
 		b.reach = hookReach{}
 		b.closedPorts = nil
+		// The new session's hooks name its session.
+		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
 			b.rec.Sessions++
 		}
@@ -320,6 +323,10 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		if err := m.saveRecord(b); err != nil {
 			m.logf("save the record of %s: %v", rec.Name, err)
 		}
+	}
+	if phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError {
+		// The session is over: keep what it reached.
+		m.flushDestinations(rec.Name)
 	}
 	m.feed.Publish(sandboxapi.ActivityEvent{
 		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
@@ -548,8 +555,10 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 	for _, h := range openshellBlocked {
 		blocked[h] = struct{}{}
 	}
+	live := map[string]egress.DestinationStats{}
 	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
 		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
+			live[strings.ToLower(d.Host)] = d
 			if d.Contacted {
 				v.Egress.Destinations++
 			}
@@ -562,6 +571,7 @@ func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID 
 		}
 	}
 	v.Egress.Blocked = len(blocked)
+	v.Egress.ModelAPIs, v.Egress.ShadowAI = m.destinationSummary(v.Name, v.Harness, live)
 	if snap, err := m.ws.LoadSnapshot(m.opts.DataDir, v.Name); err == nil && snap != nil {
 		info := &sandboxapi.SnapshotInfo{Kind: string(snap.Kind), CreatedAt: snap.CreatedAt}
 		if snap.Git != nil {

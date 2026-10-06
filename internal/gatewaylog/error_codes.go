@@ -107,6 +107,9 @@ const (
 	//   - WATCH_FAILED: the WatchSandbox event stream failed or lost events.
 	//   - LISTENER_FAILED: the sandbox hook ingress or egress proxy could
 	//     not bind.
+	//   - EGRESS_AUTH_FAILED: the sandbox egress proxy refused requests that
+	//     presented an invalid proxy credential.
+	//   - TELEMETRY_FAILED: the sandbox telemetry recorder refused a record.
 	ErrCodeOpenShellUnavailable        ErrorCode = "OPENSHELL_UNAVAILABLE"
 	ErrCodeOpenShellVersionUnsupported ErrorCode = "OPENSHELL_VERSION_UNSUPPORTED"
 	ErrCodeOpenShellPackInvalid        ErrorCode = "OPENSHELL_PACK_INVALID"
@@ -116,6 +119,8 @@ const (
 	ErrCodeOpenShellImageBuildFailed   ErrorCode = "OPENSHELL_IMAGE_BUILD_FAILED"
 	ErrCodeOpenShellWatchFailed        ErrorCode = "OPENSHELL_WATCH_FAILED"
 	ErrCodeOpenShellListenerFailed     ErrorCode = "OPENSHELL_LISTENER_FAILED"
+	ErrCodeOpenShellEgressAuthFailed   ErrorCode = "OPENSHELL_EGRESS_AUTH_FAILED"
+	ErrCodeOpenShellTelemetryFailed    ErrorCode = "OPENSHELL_TELEMETRY_FAILED"
 )
 
 // Subsystem is the v7 standardized vocabulary for the `subsystem` field
@@ -201,6 +206,8 @@ func AllErrorCodes() []ErrorCode {
 		ErrCodeOpenShellImageBuildFailed,
 		ErrCodeOpenShellWatchFailed,
 		ErrCodeOpenShellListenerFailed,
+		ErrCodeOpenShellEgressAuthFailed,
+		ErrCodeOpenShellTelemetryFailed,
 	}
 }
 

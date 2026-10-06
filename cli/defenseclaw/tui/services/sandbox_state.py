@@ -388,6 +388,10 @@ class SandboxRow:
     created_at: datetime | None = None
     destinations: int = 0
     blocked: int = 0
+    # The AI destinations: the model provider and the harness's vendor, and
+    # shadow AI (other AI APIs, inference-shaped hosts).
+    model_apis: int = 0
+    shadow_ai: int = 0
     pending_approvals: int = 0
     tool_calls: int = 0
     tool_blocked: int = 0
@@ -551,6 +555,8 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         created_at=_time(item.get("created_at")),
         destinations=_int(egress.get("destinations")),
         blocked=_int(egress.get("blocked")),
+        model_apis=_int(egress.get("model_apis")),
+        shadow_ai=_int(egress.get("shadow_ai")),
         pending_approvals=_int(item.get("pending_approvals")),
         tool_calls=_int(hooks.get("tool_calls")),
         tool_blocked=_int(hooks.get("tool_blocked")),
@@ -1704,8 +1710,13 @@ class SandboxesPanelModel:
         note = f"+{more} more · Enter" if more else "Enter for details"
         return f"⚠ {row.name}: {alert}", note
 
-    def detail_pairs(self) -> tuple[str, tuple[tuple[str, str], ...]]:
-        """Title and label/value pairs for the detail modal."""
+    def detail_pairs(self, destinations: Any = None) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Title and label/value pairs for the detail modal.
+
+        ``destinations`` is the selected sandbox's ``GET .../destinations``
+        answer (the panel fetches it as the detail opens), or an error
+        string; ``None`` leaves the Destinations section out.
+        """
         if self.view == "activity":
             event = self.selected_event()
             if event is None:
@@ -1779,7 +1790,7 @@ class SandboxesPanelModel:
             ("Policy", row.policy_label),
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),
-            ("Sites", f"{row.destinations} contacted, {row.blocked} blocked"),
+            ("Sites", f"{row.destinations} contacted, {row.blocked} blocked{_ai_sites_text(row)}"),
             ("Tool calls", f"{row.tool_calls} ({row.tool_blocked} blocked" + (f", {row.tool_asked} asked)" if row.tool_asked else ")")),
         ]
         if row.hook_events_text:
@@ -1798,6 +1809,10 @@ class SandboxesPanelModel:
             pairs.append(("Undo", f"available (U); {kept}"))
         else:
             pairs.append(("Undo", "available (U)" if row.undo_available else "no snapshot"))
+        if isinstance(destinations, str):
+            pairs.append(("Destinations", destinations))
+        elif destinations is not None:
+            pairs.extend(destination_pairs(destinations, row.name))
         for alert in row.alerts:
             pairs.append(("Alert", alert))
         for violation in row.violations:
@@ -1827,6 +1842,56 @@ class SandboxesPanelModel:
         if self.asks:
             line += f" · {len(self.asks)} ask(s) waiting (7)"
         return line
+
+
+def _ai_sites_text(row: SandboxRow) -> str:
+    """The AI part of the Sites line: "" without AI destinations."""
+    if not row.model_apis and not row.shadow_ai:
+        return ""
+    text = f" · AI: {_plural(row.model_apis, 'model API', 'model APIs')}"
+    return text + (f", {row.shadow_ai} shadow AI" if row.shadow_ai else "")
+
+
+# How a destination kind reads (sandboxapi Destination* kinds).
+_DESTINATION_KINDS = {
+    "model_provider": "model provider",
+    "harness_vendor": "harness vendor",
+    "other_ai_api": "shadow AI",
+    "unknown_ai": "shadow AI?",
+}
+
+# The destination rows the detail lists; the CLI shows them all.
+DETAIL_DESTINATIONS = 12
+
+
+def destination_pairs(response: Any, name: str, limit: int = DETAIL_DESTINATIONS) -> tuple[tuple[str, str], ...]:
+    """The Destinations section of a sandbox's detail: one pair per host, shadow AI first, then the models."""
+    item = _dict(response)
+    rows = [_dict(r) for r in _list(item.get("destinations")) if _dict(r).get("host")]
+    models = [_dict(m) for m in _list(item.get("models"))]
+    if not rows and not models:
+        return (("Destinations", "none reached yet"),)
+    pairs: list[tuple[str, str]] = []
+    for row in rows[:limit]:
+        kind = _text(row.get("kind"))
+        what = _DESTINATION_KINDS.get(kind, kind.replace("_", " ") or "other")
+        provider = _text(row.get("provider")) or _text(row.get("category"))
+        if provider:
+            what += f" ({provider.replace('_', ' ')})"
+        requests = _int(row.get("connections")) + _int(row.get("tunnels"))
+        refused = _int(row.get("refused")) + _int(row.get("blocked"))
+        parts = [what, _plural(requests, "request", "requests") + (f", {refused} refused" if refused else "")]
+        binaries = [_text(b) for b in _list(row.get("binaries")) if _text(b)]
+        if binaries:
+            parts.append(binaries[-1])
+        pairs.append(("Destination", f"{_text(row.get('host'))} — " + " · ".join(parts)))
+    if len(rows) > limit:
+        pairs.append(("Destinations", f"+{len(rows) - limit} more: defenseclaw sandbox destinations {name}"))
+    for model in models[:4]:
+        calls = _int(model.get("calls"))
+        label = " ".join(part for part in (_text(model.get("provider")), _text(model.get("model"))) if part) or "-"
+        pairs.append(("Model calls", f"{label}: {calls}" + (f" ({_int(model.get('failed'))} failed)" if model.get("failed") else "")))
+    return tuple(pairs)
 
 
 def review_pairs(response: Any) -> tuple[tuple[str, str], ...]:

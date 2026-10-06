@@ -178,6 +178,10 @@ type Provider struct {
 	// MatchedDomain is the catalog domain that matched, which is what makes
 	// the classification auditable.
 	MatchedDomain string
+	// SupportedConnector is the DefenseClaw connector the signature is of
+	// (its supported_connector), "" for every other provider: a host of the
+	// harness's own vendor is no shadow AI in that harness's sandbox.
+	SupportedConnector string
 }
 
 // Weight prices reaching this provider.
@@ -229,11 +233,12 @@ func FromSignatures(signatures []inventory.AISignature) *Catalog {
 				continue
 			}
 			provider := Provider{
-				ID:            signature.ID,
-				DisplayName:   signature.Name,
-				Vendor:        signature.Vendor,
-				Category:      classify(signature.Vendor, domain),
-				MatchedDomain: domain,
+				ID:                 signature.ID,
+				DisplayName:        signature.Name,
+				Vendor:             signature.Vendor,
+				Category:           classify(signature.Vendor, domain),
+				MatchedDomain:      domain,
+				SupportedConnector: signature.SupportedConnector,
 			}
 			// First writer wins so a later signature cannot silently reclassify
 			// a domain an earlier one already owns.

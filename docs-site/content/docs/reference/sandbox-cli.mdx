@@ -949,6 +949,46 @@ defenseclaw sandbox activity --sandbox myapp-7f3a --output json
 | `--since` | number | `0` | Start after this event sequence number. |
 {/* AUTOGEN-END: sandbox-flags */}
 
+### `sandbox destinations`
+
+Lists every host the sandbox reached or tried to reach since it was
+created, through the DefenseClaw egress proxy or OpenShell's own network
+boundary, and says what each one is:
+
+- **model provider**: reached under one of the sandbox's provider rules
+  (its model endpoint, a `--credential` binding);
+- **harness vendor**: an AI API of the harness's own vendor (for example
+  `api.openai.com` in a Codex sandbox);
+- **shadow AI**: another AI provider DefenseClaw's provider catalog knows,
+  or **shadow AI?** for a host that only looks like an inference endpoint.
+  Each one raises a `shadow_ai` finding once per provider and session:
+  MEDIUM when the sandbox reached it, LOW when it was only refused;
+- otherwise the category the egress proxy allowed it under (for example
+  `package registry`), **blocked** when it was only ever refused, or
+  **other**.
+
+Each row shows the requests and refusals both boundaries counted, the bytes
+the proxy relayed, and the last binary OpenShell named making the
+connection. The binary is what the process in the sandbox claims to be.
+With the [process tree](/docs/sandboxes/policy-packs) on, `--output json`
+adds the process and its parents (`lineage`). A second table lists the
+models OpenShell's inference route reported calls to. The view survives
+daemon restarts and stops, keeps at most 512 hosts (the oldest that are not
+AI destinations make room), and is removed with the sandbox. The `Egress`
+line of `sandbox status NAME` sums it up.
+
+```bash
+defenseclaw sandbox destinations myapp-7f3a
+defenseclaw sandbox destinations myapp-7f3a --output json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags destinations */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
 ### `sandbox approvals`
 
 Lists the asks waiting for you. Asks are rare: a program in the sandbox tried

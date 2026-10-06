@@ -282,6 +282,15 @@ func (c *Client) RunLog(ctx context.Context, name string, lines int) (*RunLog, e
 	return &out, nil
 }
 
+// Destinations returns what the sandbox reached or tried to reach.
+func (c *Client) Destinations(ctx context.Context, name string) (*Destinations, error) {
+	var out Destinations
+	if err := c.do(ctx, http.MethodGet, sandboxPath(name, "destinations"), nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ParseRunLogLines reads the ?lines query of GET /sandboxes/{name}/logs
 // (0: the whole kept log).
 func ParseRunLogLines(v url.Values) (int, error) {

@@ -165,3 +165,19 @@ func TestFirstWriterWinsForADomain(t *testing.T) {
 		t.Fatalf("Lookup = %+v, want the first writer's frontier classification", provider)
 	}
 }
+
+// TestProviderNamesItsConnector pins that a connector's own signature says
+// which connector it is, which tells a sandbox harness's vendor from shadow
+// AI, and that the bundled catalog maps the harnesses' model APIs so.
+func TestProviderNamesItsConnector(t *testing.T) {
+	t.Parallel()
+	shared, err := Shared()
+	if err != nil {
+		t.Fatalf("Shared(): %v", err)
+	}
+	for host, connector := range map[string]string{"api.anthropic.com": "claudecode", "api.openai.com": "codex", "openrouter.ai": ""} {
+		if provider, ok := shared.Lookup(host); !ok || provider.SupportedConnector != connector {
+			t.Errorf("Lookup(%q) = %+v, %v; want supported connector %q", host, provider, ok, connector)
+		}
+	}
+}

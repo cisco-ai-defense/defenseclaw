@@ -258,7 +258,9 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	// block (egress.block_large_uploads), so no block is set counter-wide.
 	proxy, err := egress.New(egress.Options{
 		Auth: mgr.EgressAuthenticator(), Decider: decider, Sink: mgr.EgressSink(),
-		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),
+		// A host a sandbox reached in an earlier session is no first-seen
+		// destination after a restart either (its destinations are kept).
+		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes(), KnownHost: mgr.KnownDestination}),
 	})
 	if err != nil {
 		_ = api.SetSandboxIngress(SandboxIngressConfig{})
@@ -349,12 +351,14 @@ func (rt *sandboxRuntime) listenerLost(ctx context.Context, part string, cause e
 	fmt.Fprintf(os.Stderr, "[sandbox] %s: %v\n", gatewaylog.ErrCodeOpenShellListenerFailed, cause)
 	report(part, fmt.Errorf("%w (running sandboxes are stopped until DefenseClaw holds this port again)", cause))
 	if rt.tel != nil {
-		_ = rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+		if err := rt.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 			State:        audit.SandboxHealthFailed,
 			ErrorCode:    strings.ToLower(string(gatewaylog.ErrCodeOpenShellListenerFailed)),
 			ErrorSummary: "the sandbox " + part + " listener is not running: " + cause.Error(),
 			Timestamp:    time.Now(),
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "[sandbox] %s: record the lost %s listener: %v\n", gatewaylog.ErrCodeOpenShellTelemetryFailed, part, err)
+		}
 	}
 	if rt.fleet == nil {
 		<-ctx.Done()

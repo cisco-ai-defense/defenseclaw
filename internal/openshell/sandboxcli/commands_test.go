@@ -78,6 +78,36 @@ func TestListAndStatus(t *testing.T) {
 	}
 }
 
+// `sandbox destinations` lists a sandbox's hosts by kind, warns about shadow
+// AI, and the status Egress line sums the AI destinations up.
+func TestDestinations(t *testing.T) {
+	sb := sampleSandbox("box")
+	sb.Egress.ModelAPIs, sb.Egress.ShadowAI = 1, 1
+	ta := newTestApp(t, "", sb)
+	ta.ok(t, ta.Destinations(bg, "box", OutputText))
+	has(t, ta.output(), "has reached no destination yet")
+	seen := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	ta.daemon.destinations = map[string]*sandboxapi.Destinations{"box": {Name: "box", Destinations: []sandboxapi.DestinationRow{
+		{Host: "api.openai.com", Ports: []int{443}, Kind: sandboxapi.DestinationOtherAI, Provider: "Codex", Tunnels: 3, BytesUp: 2048,
+			Sources: []string{sandboxapi.SourceProxy}, Binaries: []string{"/usr/bin/curl"}, LastSeen: seen},
+		{Host: "api.anthropic.com", Kind: sandboxapi.DestinationModelProvider, Provider: "Claude Code", Connections: 5, ModelTurns: 2,
+			Sources: []string{sandboxapi.SourceOpenShell}, LastSeen: seen},
+		{Host: "host.openshell.internal", Ports: []int{8080, 11434}, Kind: sandboxapi.DestinationOther, Connections: 1, LastSeen: seen},
+		{Host: "pastebin.com", Kind: sandboxapi.DestinationBlocked, Category: "paste_site", Blocked: 4, LastSeen: seen},
+	}, Models: []sandboxapi.ModelUse{{Provider: "anthropic", Model: "claude-haiku", Calls: 2, Failed: 1, LastSeen: seen}}}}
+	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputText))
+	has(t, ta.output(), "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
+		"0 (4 refused)", "/usr/bin/curl", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)")
+	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputJSON))
+	var d sandboxapi.Destinations
+	if err := json.Unmarshal(ta.out.Bytes(), &d); err != nil || len(d.Destinations) != 4 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI {
+		t.Fatalf("destinations json = %s, %v", ta.out.String(), err)
+	}
+	ta.ok(t, ta.fresh().Status(bg, "box", OutputText))
+	has(t, ta.output(), "; AI: 1 model API, 1 shadow AI (`defenseclaw sandbox destinations box`)")
+	wantErr(t, ta.fresh().Destinations(bg, "missing", OutputText), "no sandbox missing")
+}
+
 // What the hooks did shows in the list's HOOKS column and in status: the
 // right plural, tamper, hooks that do not reach DefenseClaw and hook calls
 // that failed closed (manual R2-5, R2-30, L10).

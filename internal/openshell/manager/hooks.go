@@ -120,6 +120,9 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.mu.Unlock()
 		return
 	}
+	// The sandbox's records name the session its hooks last named
+	// (gen_ai.conversation.id).
+	m.tel.noteSession(d.SandboxName, d.SessionID)
 	b.hooks.countEvent(event)
 	if !toolEvent {
 		prompt := blocked && isPromptEvent(d.Event)

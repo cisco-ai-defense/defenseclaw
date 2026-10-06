@@ -127,6 +127,24 @@
     ]
   },
   {
+    "path": "sandbox destinations",
+    "use": "destinations \u003cname\u003e",
+    "short": "List the hosts a sandbox reached or tried to reach, its model APIs and any shadow AI",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
     "path": "sandbox disable",
     "use": "disable \u003charness\u003e",
     "short": "Stop the harness command from running sandboxed (removes the shell wrapper)",

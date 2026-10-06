@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"slices"
 	"sort"
@@ -610,6 +611,7 @@ func (s *egressSink) drainOverflow(ctx context.Context) {
 // reports the refusals and feed events each sandbox's pacing held back.
 func (s *egressSink) flush(ctx context.Context) {
 	now := s.m.now()
+	s.m.reportAuthFailures(ctx, now)
 	var folded []sinkItem
 	s.mu.Lock()
 	for k, r := range s.recent {
@@ -646,6 +648,13 @@ func (s *egressSink) flush(ctx context.Context) {
 	for _, h := range s.m.egressFeed.drain(now) {
 		s.m.publishHeldBack(h.key, h.n, "egress events were not shown one by one")
 	}
+	for _, h := range s.m.procGate.drain(now) {
+		name, what := h.key, "process"
+		if n, ok := strings.CutSuffix(h.key, "\x00ssh"); ok {
+			name, what = n, "SSH"
+		}
+		s.m.logf("sandbox %s: %d %s records were not recorded one by one (more than %d a second)", name, h.n, what, activityRate)
+	}
 }
 
 // publishHeldBack tells the feed how many of a sandbox's egress events its
@@ -666,6 +675,11 @@ func (m *Manager) publishEgress(ev sandboxapi.ActivityEvent) {
 }
 
 func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) {
+	if e.Kind == egress.EventAuthFailed {
+		// No principal: the credential is what failed.
+		m.authFailed(ctx, e)
+		return
+	}
 	m.mu.Lock()
 	b := m.boxes[e.SandboxName]
 	var ident audit.SandboxIdentity
@@ -700,6 +714,8 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
 			m.logf("egress telemetry: %v", err)
 		}
+		m.observeDestination(ctx, b, destinationSighting{host: e.Host, port: e.Port, at: e.Time, proxy: true, denied: blocked,
+			category: string(e.Category)})
 		if blocked || e.FirstSeen {
 			kind := sandboxapi.ActivityEgressAllowed
 			// The port tells an HTTPS request from a plain-HTTP one to
@@ -716,6 +732,8 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 				Reason: truncate(e.Reason, 300), Message: msg,
 			})
 		}
+	case egress.EventClosed, egress.EventFailed:
+		m.egressEnded(ctx, ident, e)
 	case egress.EventLargeUpload:
 		if e.Terminated {
 			m.largeUploadBlocked(ctx, ident, e)
@@ -736,7 +754,7 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 		if e.Threshold > 0 {
 			size = "more than " + egress.FormatThreshold(e.Threshold)
 		}
-		_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+		m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 			Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "MEDIUM",
 			Title: "Large upload to a first-seen destination",
 			Description: fmt.Sprintf("%s sent %s to %s, which it had not contacted before (%d bytes as it crossed the threshold).",
@@ -749,6 +767,86 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			Reason:  truncate(e.Reason, 300),
 			Message: fmt.Sprintf("⚠ large upload to first-seen %s (%s)", sandboxapi.HostPort(e.Host, e.Port), size)})
 	}
+}
+
+// egressEnded records the end of an allowed tunnel or forwarded request:
+// what it sent and received and how long it took (completed), or the
+// upstream failure the sandbox got a 502 or 504 for (failed; timed out on
+// a 504). The decision was recorded when it opened.
+func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, e egress.Event) {
+	ev := audit.SandboxEgressEvent{
+		Sandbox: ident, Source: audit.SandboxEgressSourceProxy, Host: e.Host, Port: e.Port, Scheme: egressScheme(e),
+		ResolvedIP: remoteIP(e.RemoteAddr), DecisionCode: "SANDBOX_EGRESS_ALLOWED", PolicyOutcome: policyOutcome(e),
+		Duration: e.Duration, Timestamp: e.Time,
+	}
+	if e.Kind == egress.EventClosed {
+		ev.End, ev.BytesUp, ev.BytesDown = audit.SandboxEgressCompleted, e.BytesUp, e.BytesDown
+		// Set when a recheck ended it (its credential was revoked).
+		ev.Reason = truncate(e.Reason, 512)
+	} else {
+		ev.End, ev.TimedOut = audit.SandboxEgressFailed, e.Status == http.StatusGatewayTimeout
+		ev.DecisionCode = "SANDBOX_EGRESS_UPSTREAM_FAILED"
+		ev.Reason = truncate(firstNonEmpty(e.Error, e.Reason), 512)
+	}
+	if err := m.tel.RecordSandboxEgress(ctx, ev); err != nil {
+		m.logf("egress telemetry: %v", err)
+	}
+	// The counter counted it: the destinations view keeps its totals.
+	m.touchDestinations(e.SandboxName)
+}
+
+// authFailures counts the egress proxy's refusals of invalid credentials
+// since the last report (authFailed).
+type authFailures struct {
+	mu                sync.Mutex
+	count             int
+	since, reportedAt time.Time
+	last              string
+}
+
+// authFailedEvery paces the reports of refused credentials.
+const authFailedEvery = time.Minute
+
+// authFailed counts a request the egress proxy refused for an invalid proxy
+// credential (malformed, unknown, revoked or wrong; a request without one
+// is the normal first leg of the handshake and no event). It names no
+// sandbox, so it is degraded health of the integration, reported at once and
+// then at most every authFailedEvery with the count: a sandbox that keeps
+// a stale or revoked credential (an environment from before a restart) or
+// another program on this machine trying the proxy would otherwise flood
+// the records.
+func (m *Manager) authFailed(ctx context.Context, e egress.Event) {
+	now := m.now()
+	a := &m.authFails
+	a.mu.Lock()
+	if a.count == 0 {
+		a.since = now
+	}
+	a.count++
+	a.last = truncate(sandboxapi.DisplayText(sandboxapi.HostPort(e.Host, e.Port)), 256)
+	a.mu.Unlock()
+	m.reportAuthFailures(ctx, now)
+}
+
+// reportAuthFailures records the refused credentials counted since the last
+// report once authFailedEvery has passed since it. The sink's flush calls it
+// too, so the end of a burst is reported.
+func (m *Manager) reportAuthFailures(ctx context.Context, now time.Time) {
+	a := &m.authFails
+	a.mu.Lock()
+	if a.count == 0 || (!a.reportedAt.IsZero() && now.Sub(a.reportedAt) < authFailedEvery) {
+		a.mu.Unlock()
+		return
+	}
+	n, since, last := a.count, a.since, a.last
+	a.count, a.reportedAt = 0, now
+	a.mu.Unlock()
+	msg := fmt.Sprintf("the sandbox egress proxy refused %d request(s) with an invalid proxy credential since %s (the last to %s): "+
+		"a sandbox may use a stale or revoked credential, or another program on this machine tries the proxy",
+		n, since.UTC().Format(time.RFC3339), firstNonEmpty(last, "-"))
+	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellEgressAuthFailed, msg)
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{State: audit.SandboxHealthDegraded,
+		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellEgressAuthFailed), ErrorSummary: truncate(msg, 512), Timestamp: now})
 }
 
 // largeUploadBlocked records and shows an upload the large-upload block cut
@@ -764,7 +862,7 @@ func (m *Manager) largeUploadBlocked(ctx context.Context, ident audit.SandboxIde
 		remediation = "Review what the agent tried to upload. Your organization does not allow unblocks; " +
 			"ask your administrator if the destination is expected."
 	}
-	_ = m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
+	m.tel.RecordSandboxFinding(ctx, audit.SandboxFindingEvent{
 		Sandbox: ident, Kind: audit.SandboxFindingLargeUpload, Severity: "HIGH",
 		Title: "Large upload to a first-seen destination blocked",
 		Description: fmt.Sprintf("%s tried to send more than %s to %s, which it had not contacted before; "+

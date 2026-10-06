@@ -80,6 +80,10 @@ type Status struct {
 	// group but the daemon started before that, so it cannot reach Docker
 	// until it restarts (Linux).
 	DockerGroupMissing bool `json:"docker_group_missing,omitempty"`
+	// TelemetryFailures counts the sandbox telemetry records the recorder
+	// refused since the daemon started; TelemetryError is the last refusal.
+	TelemetryFailures int64  `json:"telemetry_failures,omitempty"`
+	TelemetryError    string `json:"telemetry_error,omitempty"`
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -378,6 +382,112 @@ type EgressStats struct {
 	BlockedRequests int   `json:"blocked_requests"`
 	BytesUp         int64 `json:"bytes_up"`
 	BytesDown       int64 `json:"bytes_down"`
+	// ModelAPIs and ShadowAI count the AI destinations of the sandbox's
+	// destinations view (GET /sandboxes/{name}/destinations): its model
+	// provider and its harness's vendor, and the other AI APIs and
+	// inference-shaped hosts it reached or tried to reach.
+	ModelAPIs int `json:"model_apis,omitempty"`
+	ShadowAI  int `json:"shadow_ai,omitempty"`
+}
+
+// Destination kinds (DestinationRow.Kind), in the order they are told apart.
+// A row that is none of the AI kinds takes the egress category the proxy
+// gave it (a feed category such as package_registry), else blocked or other.
+const (
+	// DestinationModelProvider: reached under one of the sandbox's
+	// provider rules (its model endpoint, a --credential binding).
+	DestinationModelProvider = "model_provider"
+	// DestinationHarnessVendor: an AI API of the harness's own vendor.
+	DestinationHarnessVendor = "harness_vendor"
+	// DestinationOtherAI: another catalogued AI provider (shadow AI).
+	DestinationOtherAI = "other_ai_api"
+	// DestinationUnknownAI: a host shaped like an inference endpoint the
+	// catalog does not know (shadow AI).
+	DestinationUnknownAI = "unknown_ai"
+	// DestinationBlocked: only ever refused.
+	DestinationBlocked = "blocked"
+	// DestinationOther: anything else.
+	DestinationOther = "other"
+)
+
+// ShadowAIKind reports whether a destination kind is shadow AI.
+func ShadowAIKind(kind string) bool {
+	return kind == DestinationOtherAI || kind == DestinationUnknownAI
+}
+
+// MaxDestinations bounds the rows a sandbox's destinations view keeps.
+const MaxDestinations = 512
+
+// Destinations is GET /sandboxes/{name}/destinations: every destination the
+// sandbox reached or tried to reach, through DefenseClaw's egress proxy or
+// OpenShell's own network boundary, since it was created (it survives daemon
+// restarts and stops; a delete drops it), and the model calls OpenShell's
+// inference route reported.
+type Destinations struct {
+	Name         string           `json:"name"`
+	Harness      string           `json:"harness,omitempty"`
+	Destinations []DestinationRow `json:"destinations"`
+	Models       []ModelUse       `json:"models,omitempty"`
+	// Dropped counts the destinations left out over MaxDestinations.
+	Dropped int `json:"dropped,omitempty"`
+}
+
+// DestinationRow is one destination host of a sandbox.
+type DestinationRow struct {
+	Host  string `json:"host"`
+	Ports []int  `json:"ports,omitempty"`
+	// Kind is a Destination* kind or an egress category.
+	Kind string `json:"kind"`
+	// Provider and Vendor name the AI provider the catalog matched (or
+	// the OpenShell provider rule's), Category the egress proxy's category.
+	Provider string `json:"provider,omitempty"`
+	Vendor   string `json:"vendor,omitempty"`
+	Category string `json:"category,omitempty"`
+	// Rule is the OpenShell policy rule that last allowed it.
+	Rule string `json:"rule,omitempty"`
+	// Sources are the boundaries that saw it: dc-egress-proxy, openshell.
+	Sources []string `json:"sources"`
+	// Connections counts the connections and requests OpenShell allowed,
+	// Tunnels those the DefenseClaw proxy relayed; Refused and Blocked the
+	// refusals of each. ModelTurns counts the model calls among OpenShell's
+	// requests.
+	Connections int64 `json:"connections,omitempty"`
+	Tunnels     int64 `json:"tunnels,omitempty"`
+	Refused     int64 `json:"refused,omitempty"`
+	Blocked     int64 `json:"blocked,omitempty"`
+	ModelTurns  int64 `json:"model_turns,omitempty"`
+	// BytesUp and BytesDown are what the proxy relayed.
+	BytesUp   int64 `json:"bytes_up,omitempty"`
+	BytesDown int64 `json:"bytes_down,omitempty"`
+	// Binaries are the executables OpenShell named making the
+	// connections (the last few), PID the last one's process. Both are what
+	// the workload claims.
+	Binaries []string `json:"binaries,omitempty"`
+	PID      int      `json:"pid,omitempty"`
+	// Lineage is PID's process and its parents, from the opt-in process
+	// tree (observe.process_tree), when it knows the process.
+	Lineage   []DestinationProcess `json:"lineage,omitempty"`
+	FirstSeen time.Time            `json:"first_seen"`
+	LastSeen  time.Time            `json:"last_seen"`
+}
+
+// DestinationProcess is one process of a destination's lineage.
+type DestinationProcess struct {
+	PID   int       `json:"pid"`
+	PPID  int       `json:"ppid,omitempty"`
+	Exe   string    `json:"exe,omitempty"`
+	Comm  string    `json:"comm,omitempty"`
+	Start time.Time `json:"start,omitzero"`
+}
+
+// ModelUse is a provider and model OpenShell's inference route reported
+// model calls to.
+type ModelUse struct {
+	Provider string    `json:"provider,omitempty"`
+	Model    string    `json:"model,omitempty"`
+	Calls    int64     `json:"calls"`
+	Failed   int64     `json:"failed,omitempty"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 // WorkspaceSummary is the launch-banner view of a mounted project.
@@ -829,6 +939,10 @@ const ReasonNestedRepo = "nested_repo"
 // ports. Its Message is the plain line with the way on (the flag to run
 // with), and Host is host.openshell.internal.
 const ReasonHostPortClosed = "host_port_closed"
+
+// ReasonShadowAI is the Reason of the finding event of a shadow AI
+// destination (DestinationOtherAI, DestinationUnknownAI): Host names it.
+const ReasonShadowAI = "shadow_ai"
 
 // ReasonHookFinding is the Reason of the finding event of a hook verdict
 // that let a tool call run but flagged it (an alert); Severity is the

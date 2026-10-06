@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -199,6 +200,9 @@ type Options struct {
 	// gitsafe).
 	Guard         GuardFunc
 	GuardGitlinks func(ctx context.Context, root string) ([]string, error)
+	// Processes resolves a sandbox process to its lineage for the
+	// destinations view (the opt-in process index); nil leaves it out.
+	Processes ProcessLookup
 }
 
 // Manager implements the gateway's SandboxController.
@@ -208,7 +212,7 @@ type Manager struct {
 	// from before it are replays (see ocsfEvent).
 	startedAt time.Time
 	ws        Workspace
-	tel       audit.SandboxTelemetry
+	tel       *telemetryGuard
 	records   recordStore
 	now       func() time.Time
 	logf      func(string, ...any)
@@ -265,6 +269,21 @@ type Manager struct {
 	// profileMu serializes this daemon's provider profile imports, so
 	// concurrent creates do not race each other to import the same one.
 	profileMu sync.Mutex
+	// destMu guards dests, each sandbox's destinations (destinations.go).
+	// It is never taken with mu held, nor mu with it.
+	destMu sync.Mutex
+	dests  map[string]*destTable
+	// catalog classifies destinations (destinationCatalog); procs gives
+	// their lineage.
+	catalogOnce sync.Once
+	catalog     *catalog.Catalog
+	procs       ProcessLookup
+	// procGate paces each sandbox's process and SSH records.
+	procGate *rateGate
+	// authFails paces the proxy's refusals of invalid credentials into
+	// health records (authFailed).
+	authFails authFailures
+
 	// credentialGC keeps a delete from removing a --credential profile
 	// between a create's import of it and the provider that uses it:
 	// creates hold it shared from import to provider, the collection of
@@ -336,7 +355,7 @@ func New(opts Options) (*Manager, error) {
 	m := &Manager{
 		opts:       opts,
 		ws:         opts.Workspace,
-		tel:        opts.Telemetry,
+		tel:        newTelemetryGuard(opts.Telemetry, host, opts.Logf, opts.Now),
 		records:    newRecordStore(opts.DataDir),
 		now:        opts.Now,
 		logf:       opts.Logf,
@@ -350,9 +369,9 @@ func New(opts Options) (*Manager, error) {
 		boxes:      map[string]*box{},
 		approvals:  map[string]*approval{},
 		startedAt:  opts.Now(),
-	}
-	if m.tel == nil {
-		m.tel = nopTelemetry{}
+		dests:      map[string]*destTable{},
+		procs:      opts.Processes,
+		procGate:   newRateGate(activityBurst, activityRate),
 	}
 	m.sink = newEgressSink(m)
 	debounce := time.Duration(config.DefaultOpenShellApprovalDebounceMs) * time.Millisecond
@@ -461,10 +480,15 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer reach.Stop()
 	drafts := time.NewTicker(m.opts.TriageInterval)
 	defer drafts.Stop()
+	destinations := time.NewTicker(destinationFlushEvery)
+	defer destinations.Stop()
+	defer m.flushDestinations("")
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-destinations.C:
+			m.flushDestinations("")
 		case <-silence.C:
 			m.checkHookSilence(ctx)
 			m.pruneToolCalls()
@@ -639,7 +663,7 @@ func (m *Manager) goneLocked() {
 }
 
 func (m *Manager) health(ctx context.Context, state audit.SandboxHealthState, code gatewaylog.ErrorCode, summary string) {
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{
 		State: state, ErrorCode: errorToken(code), ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
 }
@@ -750,27 +774,6 @@ func (m *Manager) running() context.Context {
 	m.runMu.Lock()
 	defer m.runMu.Unlock()
 	return m.runCtx
-}
-
-type nopTelemetry struct{}
-
-func (nopTelemetry) RecordSandboxLifecycle(context.Context, audit.SandboxLifecycleEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxEgress(context.Context, audit.SandboxEgressEvent) error { return nil }
-func (nopTelemetry) RecordSandboxApproval(context.Context, audit.SandboxApprovalEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxPolicy(context.Context, audit.SandboxPolicyEvent) error { return nil }
-func (nopTelemetry) RecordSandboxHealth(context.Context, audit.SandboxHealthEvent) error { return nil }
-func (nopTelemetry) RecordSandboxFinding(context.Context, audit.SandboxFindingEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspaceEvent) error {
-	return nil
-}
-func (nopTelemetry) RecordSandboxActivity(context.Context, audit.SandboxActivityEvent) error {
-	return nil
 }
 
 // truncate cuts s to at most n bytes without splitting a UTF-8 sequence, so

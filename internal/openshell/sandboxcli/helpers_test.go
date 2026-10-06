@@ -105,6 +105,8 @@ type fakeDaemon struct {
 	// stop keeps the log of the run it finds.
 	runLogs     map[string]*sandboxapi.RunLog
 	stopRunLogs map[string]*sandboxapi.RunLog
+	// destinations are the sandboxes' destinations views.
+	destinations map[string]*sandboxapi.Destinations
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -367,6 +369,12 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			out := *kept
 			if n, _ := strconv.Atoi(r.URL.Query().Get("lines")); n > 0 {
 				out.Log = string(harness.LastLines([]byte(out.Log), n))
+			}
+			reply(out)
+		case r.Method == http.MethodGet && verb == "destinations":
+			out := sandboxapi.Destinations{Name: name, Destinations: []sandboxapi.DestinationRow{}}
+			if kept := d.destinations[name]; kept != nil {
+				out = *kept
 			}
 			reply(out)
 		case r.Method == http.MethodGet:
