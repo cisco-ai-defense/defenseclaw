@@ -606,7 +606,7 @@ func (a *App) preflight(ctx context.Context, api API) (*sandboxapi.Status, error
 		return nil, apiError(err)
 	}
 	if !st.Enabled {
-		return nil, fmt.Errorf("OpenShell sandboxes are off; run `%s setup` to turn them on", CommandName)
+		return nil, errors.New(sandboxapi.DisabledMessage)
 	}
 	if !st.Available {
 		reason := firstNonEmpty(st.Reason, "the daemon is not connected to an OpenShell gateway")
@@ -1203,20 +1203,26 @@ func (a *App) warnSecretEnv(env map[string]string) {
 	}
 }
 
-// warnUnkeptOptionValue warns when an option is recorded without its value
-// (launchOptionsSplit): a later `sandbox connect` then passes the harness the
-// option and no value, and the harness fails to start or starts without the
-// setting. The run itself is unaffected - it uses the arguments as given -
-// and an option written as --option=value is recorded whole. The word that
-// was left out may have been a prompt instead (an option keeps a prompt out
-// of the record on purpose), so the message names both readings.
+// warnUnkeptOptionValue warns when the record of a run stops at an option
+// followed by a word with a space (launchOptionsSplit): a later `sandbox
+// connect` passes the harness that option without the word, and none of the
+// options after it. The run itself is unaffected - it uses the arguments as
+// given - and an option written as --option=value is recorded whole. The
+// word may have been a prompt instead (a prompt is kept out of the record on
+// purpose), so the message names both readings. When it is the last word,
+// the common `-- --verbose "fix the tests"`, nothing else is lost and a
+// prompt after a switch is recorded right, so it is a one-line note.
 func (a *App) warnUnkeptOptionValue(spec *harness.Spec, args []string) {
-	_, unkept := launchOptionsSplit(spec, args)
-	for _, flag := range unkept {
-		a.warn(flag + " is followed by a word with a space, so the sandbox records the option without it: " +
-			"a later `" + CommandName + " connect` passes " + spec.DisplayName + " the option and no value, and it may fail to start " +
-			"or start without the setting. That is intended for a prompt; if the word is this option's value, " +
-			"write it attached (" + flag + `="…") to have it recorded`)
+	_, flag, later := launchOptionsSplit(spec, args)
+	switch {
+	case flag == "":
+	case len(later) == 0:
+		a.note("A later `" + CommandName + " connect` passes " + flag + " without the last word; if that word is its value, write " +
+			flag + `="…"`)
+	default:
+		a.warn(flag + " is followed by a word with a space, so the record of this run stops there: a later `" +
+			CommandName + " connect` passes " + flag + " without that word and leaves out " + strings.Join(later, " ") +
+			". Put a prompt last, or write " + flag + `="…" if the word is its value`)
 	}
 }
 

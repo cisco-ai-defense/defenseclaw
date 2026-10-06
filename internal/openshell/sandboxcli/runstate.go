@@ -318,26 +318,28 @@ func (a *App) handoverText(h *handover) string {
 // after a switch). A harness whose command line holds no prompt word
 // (keepsEveryArg) keeps every argument, in order.
 //
-// An option whose value holds a space is kept without it, and
-// launchOptionsSplit names those options: `sandbox run` warns the
-// operator, because a later session passes the harness the option and no
-// value.
+// An option followed by a word that holds a space is kept without it, and
+// the record stops there; launchOptionsSplit names that option and the
+// options after it: `sandbox run` tells the operator, because a later
+// session passes the harness the option without the word and none of the
+// options after it.
 func launchOptions(spec *harness.Spec, args []string) []string {
-	kept, _ := launchOptionsSplit(spec, args)
+	kept, _, _ := launchOptionsSplit(spec, args)
 	return kept
 }
 
-// launchOptionsSplit is launchOptions and, separately, the options whose
-// value the record leaves out. The word that was left out may have been a
-// prompt rather than the option's value - nothing available here tells the
-// two apart, and a prompt is not recorded on purpose - so the caller's
-// warning is worded for both readings.
-func launchOptionsSplit(spec *harness.Spec, args []string) (kept, unkeptValue []string) {
+// launchOptionsSplit is launchOptions and, separately, the option whose
+// next word the record leaves out ("" when none) and the names of the
+// options after it, which the record leaves out too. The word may have been
+// a prompt rather than the option's value - nothing available here tells
+// the two apart, and a prompt is not recorded on purpose - so the caller's
+// message is worded for both readings.
+func launchOptionsSplit(spec *harness.Spec, args []string) (kept []string, unkept string, later []string) {
 	if len(args) == 0 || printMode(spec, args) {
-		return nil, nil
+		return nil, "", nil
 	}
 	if keepsEveryArg(spec) {
-		return slices.Clone(args), nil
+		return slices.Clone(args), "", nil
 	}
 	var out []string
 	operand := false
@@ -359,13 +361,20 @@ func launchOptionsSplit(spec *harness.Spec, args []string) (kept, unkeptValue []
 			continue
 		}
 		if strings.ContainsAny(next, " \t\r\n") {
-			unkeptValue = append(unkeptValue, arg)
-			break
+			for _, w := range args[i+2:] {
+				if w == "--" {
+					break
+				}
+				if name, _, _ := strings.Cut(w, "="); strings.HasPrefix(name, "-") && name != "-" && !slices.Contains(later, name) {
+					later = append(later, name)
+				}
+			}
+			return out, arg, later
 		}
 		out = append(out, next)
 		i++
 	}
-	return out, unkeptValue
+	return out, "", nil
 }
 
 // keepsEveryArg reports whether every word of spec's interactive command

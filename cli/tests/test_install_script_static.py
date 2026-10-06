@@ -312,7 +312,7 @@ def test_sandbox_flag_is_a_deprecated_no_op() -> None:
     assert "install_openshell_sandbox" not in text
     assert "SANDBOX_INSTALLER_ASSET_START_VERSION" not in text
     notice = text.index('if [[ "${INSTALL_SANDBOX}" == true ]]; then')
-    assert "--sandbox is deprecated and ignored" in text[notice : notice + 600]
+    assert "--sandbox is deprecated and ignored, and removed in 1.1.0" in text[notice : notice + 600]
     assert "defenseclaw sandbox legacy-cleanup --dry-run" in text[notice : notice + 600]
     # OpenShell 0.1 sandboxes ship: the notice points at their setup.
     assert "run 'defenseclaw sandbox setup'" in text[notice : notice + 600]

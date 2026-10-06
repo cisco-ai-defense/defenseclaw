@@ -412,8 +412,23 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 	fmt.Fprintf(&b, "RUN set -eu; for d in %s; do chown root:root \"$d\"; chmod 0755 \"$d\"; done; "+
 		"install -d -o root -g root -m 0755 %s; chown -R %d:%d %s\n",
 		dirs, harness.WorkRoot, spec.UID, spec.GID, connector.SandboxHomeDir)
+	b.WriteString("RUN " + runAsUserStep(spec.UID, spec.GID, "/etc/passwd", "/etc/group") + "\n")
 	b.WriteString("USER sandbox\n")
 	return b.Bytes()
+}
+
+// runAsUserStep names the run-as uid and gid in the image: the workload
+// runs as the host uid, which the base image's sandbox user does not have,
+// so whoami and every tool that looks up the uid failed. Unless an entry
+// already has the uid (or the gid), the sandbox user (and group) takes it,
+// with HOME at the sandbox home; file owners are numbers and stay as they
+// are.
+func runAsUserStep(uid, gid int, passwd, group string) string {
+	return fmt.Sprintf(`set -eu; `+
+		`grep -q '^[^:]*:[^:]*:%[1]d:' %[3]s || sed -i -E 's#^sandbox:([^:]*):[0-9]+:[0-9]+:([^:]*):[^:]*:#sandbox:\1:%[1]d:%[2]d:\2:%[5]s:#' %[3]s; `+
+		`grep -q '^[^:]*:[^:]*:%[2]d:' %[4]s || sed -i -E 's#^sandbox:([^:]*):[0-9]+:#sandbox:\1:%[2]d:#' %[4]s; `+
+		`grep -q '^[^:]*:[^:]*:%[1]d:' %[3]s || { echo "the base image has no sandbox user in %[3]s to give the run-as uid %[1]d" >&2; exit 1; }`,
+		uid, gid, passwd, group, connector.SandboxHomeDir)
 }
 
 // hashInput is the canonical description of every build input.

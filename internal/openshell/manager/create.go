@@ -85,7 +85,7 @@ func (r *rollback) run(m *Manager, sandbox string) {
 func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sandboxapi.Sandbox, error) {
 	cfg := m.config()
 	if !cfg.OpenShell.Enabled {
-		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, "OpenShell sandboxes are disabled (openshell.enabled is false)")
+		return nil, sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
 	}
 	if err := m.listenersReady(); err != nil {
 		return nil, err

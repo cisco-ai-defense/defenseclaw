@@ -349,8 +349,10 @@ func (a *App) providerHint(spec *harness.Spec, choice string) string {
 		// A Claude subscription logs in on this machine: setup-token prints
 		// a token the sandbox then sees only as a placeholder. The command
 		// runs the Claude Code installed here, outside the sandbox wrapper.
+		// The login inside the sandbox is the callers' to name: setup and
+		// run add it after every harness's hint.
 		if _, err := a.LookPath(spec.Command); err != nil {
-			return "set ANTHROPIC_API_KEY, or use /login in the sandbox"
+			return "set ANTHROPIC_API_KEY"
 		}
 		return "set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN from " + a.claudeSetupToken(spec)
 	case harnessName == "opencode":
