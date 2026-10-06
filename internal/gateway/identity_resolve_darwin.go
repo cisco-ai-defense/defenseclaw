@@ -13,27 +13,30 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// resolvePeerDirectoryFacts returns a verified uid's directory facts: the
-// root enumerator's Open Directory record when the guardian wrote one (a
-// managed install), otherwise the account's groups from the system account
-// database, which on macOS answers through Open Directory. The fallback
-// keeps users and groups assignments working on a per-user install, and
-// matches what guardrail profile explain resolves there.
+// resolvePeerDirectoryFacts returns a verified uid's directory facts. The
+// groups always come from the system account database, which on macOS
+// answers through Open Directory (local groups and an AD binding's), so
+// users and groups assignments match on a per-user install and on a managed
+// Mac alike, and agree with what guardrail profile explain resolves. On a
+// managed install the root enumerator's record adds what only root can read
+// (the AD binding, the Platform SSO provider).
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
 	now := time.Now().UTC()
-	if record, ok := readIdentitySpoolFacts(key, now); ok {
-		facts := record.Facts
-		facts.Assurance = useridentity.AssuranceVerified
-		return facts, nil
+	account, lookupErr := osuser.LookupId(key)
+	var groups []string
+	if lookupErr == nil {
+		groups = localAccountGroups(account)
 	}
-	account, err := osuser.LookupId(key)
-	if err != nil {
-		return useridentity.DirectoryFacts{}, err
+	if record, ok := readIdentitySpoolFacts(key, now); ok {
+		return spoolFactsWithGroups(record.Facts, groups, now), nil
+	}
+	if lookupErr != nil {
+		return useridentity.DirectoryFacts{}, lookupErr
 	}
 	return useridentity.DirectoryFacts{
 		Directory:  useridentity.DirectoryLocal,
 		Source:     useridentity.SourceMacOSOpenDirectory,
-		Groups:     localAccountGroups(account),
+		Groups:     groups,
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
 	}, nil

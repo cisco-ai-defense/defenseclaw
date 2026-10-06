@@ -41,6 +41,15 @@ func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.Identity
 	return record, true
 }
 
+// spoolFactsWithGroups is the guardian's record for an account whose own
+// record names no groups (the macOS enumerator reads Open Directory and the
+// AD binding but not the group database): the groups come from the account
+// database the gateway answers from now, as the NSS facts do on Linux. The
+// record still wins for everything only root can read.
+func spoolFactsWithGroups(spool useridentity.DirectoryFacts, groups []string, now time.Time) useridentity.DirectoryFacts {
+	return mergeSpoolFacts(useridentity.DirectoryFacts{Groups: groups, ResolvedAt: now}, spool)
+}
+
 // mergeSpoolFacts overlays the guardian's root-resolved facts on the facts
 // the gateway resolved itself for the same verified account. The spool wins
 // for what only root can read (UPN, principal, realm, directory type); the
