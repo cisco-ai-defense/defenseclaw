@@ -273,6 +273,7 @@ class _DoctorResult:
         "run_id",
         "mode",
         "passive",
+        "list_processes",
         "quiet",
         "gateway_down",
     )
@@ -284,6 +285,7 @@ class _DoctorResult:
         run_id: str | None = None,
         passive: bool = False,
         quiet: bool = False,
+        list_processes: bool | None = None,
     ) -> None:
         self.passed = 0
         self.failed = 0
@@ -296,6 +298,10 @@ class _DoctorResult:
         self.run_id = run_id or str(uuid.uuid4())
         self.mode = mode
         self.passive = passive
+        # Listing this account's processes creates no telemetry, so a
+        # --fix --dry-run still does it; only --passive (and Setup's passive
+        # readiness check) skip it (GAP-0100).
+        self.list_processes = not passive if list_processes is None else list_processes
         self.quiet = quiet
         # "stopped" or "foreign" once the Sidecar API row explained that this
         # account's gateway is not serving the API port; later rows that would
@@ -7157,7 +7163,7 @@ def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> Wind
     is nothing to reload. --passive does not list processes and keeps the
     pending-reload state.
     """
-    if check.state != "pending-reload" or r.passive:
+    if check.state != "pending-reload" or not r.list_processes:
         return check
     running = _hermes_host_running()
     if running is None:
@@ -7525,7 +7531,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                             remediation=_opencode_runtime_remediation(status, runtime_detail),
                         )
             elif connector == "hermes":
-                if not r.passive and _hermes_host_running() is False:
+                if r.list_processes and _hermes_host_running() is False:
                     _emit(
                         "pass",
                         label,
@@ -7534,7 +7540,7 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         r=r,
                     )
                     return
-                if r.passive:
+                if not r.list_processes:
                     # --passive does not list processes, so an idle Hermes is
                     # unknown here, not a failure (the full doctor checks it).
                     _emit(
@@ -10436,7 +10442,7 @@ def doctor(
 
     cfg = app.cfg
     mode = "plan" if do_fix and dry_run else "repair" if do_fix else "check"
-    r = _DoctorResult(mode=mode, passive=passive or dry_run)
+    r = _DoctorResult(mode=mode, passive=passive or dry_run, list_processes=not passive)
     _json_mode = json_out
 
     if not json_out:
@@ -11609,6 +11615,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             ("change explicit plugin admission policy in config.yaml",),
             False,
             True,
+        ),
+        (
+            "doctor.connector.hook-scripts.restore-mode",
+            "hook script mode",
+            "safe",
+            _fix_hook_script_modes,
+            (),
+            ("restore the owner execute bit on the generated hook scripts setup sealed",),
+            False,
+            False,
         ),
         (
             "doctor.acp.guard.repin",
@@ -14962,6 +14978,41 @@ def _fix_plugin_registry_required(
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")
+
+
+def _fix_hook_script_modes(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Restore mode 0700 on generated hook scripts that lost it (GAP-0101).
+
+    A connector whose scripts no longer match the digests setup sealed is
+    left alone: the Hook runtime files row sends it to setup instead of
+    making an edited script runnable.
+    """
+    from defenseclaw.hook_integrity import hook_runtime_problems, non_executable_hook_scripts
+
+    targets = [
+        script
+        for connector in _doctor_active_connectors(cfg)
+        if not any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        for script in non_executable_hook_scripts(cfg, connector)
+    ]
+    if not targets:
+        return ("skip", "the generated hook scripts are executable")
+    names = ", ".join(str(script) for script in targets)
+    if plan_only:
+        return ("plan", f"restore mode 0700 on {names}")
+    if not assume_yes and not click.confirm(f"    Restore mode 0700 on {names}?", default=True):
+        return ("skip", "declined by user")
+    try:
+        for script in targets:
+            os.chmod(script, 0o700)
+    except OSError as exc:
+        return ("fail", f"could not restore the hook script mode: {exc}")
+    return ("pass", f"restored mode 0700 on {names}")
 
 
 def _fix_acp_guard_pins(

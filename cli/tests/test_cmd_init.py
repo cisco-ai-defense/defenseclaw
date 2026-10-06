@@ -4265,6 +4265,22 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertTrue(discover.call_args.kwargs["refresh"])
         self.assertEqual(selector.call_args.kwargs["default_selected"], ["claudecode", "opencode"])
 
+    def test_connector_selection_rescans_a_cache_that_found_no_hook_connector(self):
+        # GAP-0092: a cache written before the agents were on PATH kept init
+        # saying "No hook connectors were detected" on the next run.
+        from defenseclaw.commands import cmd_init
+
+        cached = self._disc(set())
+        cached.cache_hit = True
+        fresh = self._disc({"claudecode", "codex"})
+        with patch.object(cmd_init.agent_discovery, "discover_agents", side_effect=[cached, fresh]) as discover, \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch.object(cmd_init, "_with_config_state", side_effect=lambda found, _data_dir: found), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", return_value=["codex"]) as selector:
+            cmd_init._prompt_connector_selection(None, False)
+        self.assertTrue(discover.call_args.kwargs["refresh"])
+        self.assertEqual(set(selector.call_args.kwargs["default_selected"]), {"claudecode", "codex"})
+
     def _select_after_unchecking_hermes(self, confirm: bool):
         from defenseclaw.commands import cmd_init
 

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -51,23 +52,21 @@ def _hook_token_well_formed(path: Path) -> bool:
     return len(body) <= 4096 and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
-def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
-    """Return short descriptions of drifted hook files for *connector*."""
+def _locked_hook_scripts(cfg: Any, connector: str) -> tuple[list[Path], dict[str, str]]:
+    """The hook scripts setup sealed for *connector*, and their digests by file name."""
 
-    if os.name == "nt":
-        return []
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     lock_path = Path(data_dir, "hook_contract_lock.json")
     try:
         if not data_dir or lock_path.stat().st_size > _LOCK_LIMIT:
-            return []
+            return [], {}
         lock = json.loads(lock_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []  # the Hook contract row reports a missing or unreadable lock
+        return [], {}  # the Hook contract row reports a missing or unreadable lock
     connectors = lock.get("connectors") if isinstance(lock, dict) else None
     entry = connectors.get(connector) if isinstance(connectors, dict) else None
     if not isinstance(entry, dict):
-        return []
+        return [], {}
     locations = entry.get("locations")
     raw_paths = locations.get("hook_script_paths") if isinstance(locations, dict) else None
     scripts = [Path(str(p)) for p in raw_paths if str(p or "").strip()] if isinstance(raw_paths, list) else []
@@ -77,6 +76,40 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     for source in (entry.get("hook_script_digests"), lock.get("shared_hook_script_digests")):
         if isinstance(source, dict):
             digests.update({str(name): str(value) for name, value in source.items()})
+    return scripts, digests
+
+
+def non_executable_hook_scripts(cfg: Any, connector: str) -> list[Path]:
+    """Generated hook scripts of *connector* that lost their execute bit (GAP-0101).
+
+    Setup writes them 0o700. Without the owner execute bit the agent reports a
+    non-blocking hook error and runs every tool call unguarded. The sourced
+    helpers (``_hardening.sh``) are 0o600 by design and are not listed.
+    """
+
+    if os.name == "nt":
+        return []
+    found: list[Path] = []
+    for script in _locked_hook_scripts(cfg, connector)[0]:
+        if script.suffix != ".sh" or script.name.startswith("_"):
+            continue
+        try:
+            mode = script.stat().st_mode
+        except OSError:
+            continue
+        if stat.S_ISREG(mode) and not mode & stat.S_IXUSR:
+            found.append(script)
+    return found
+
+
+def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
+    """Return short descriptions of drifted hook files for *connector*."""
+
+    if os.name == "nt":
+        return []
+    scripts, digests = _locked_hook_scripts(cfg, connector)
+    if not scripts:
+        return []
 
     from defenseclaw.fail_mode import _sha256_regular_file
 
@@ -89,6 +122,12 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
                 "it does not match hook_contract_lock.json)"
             )
             break
+
+    for script in non_executable_hook_scripts(cfg, connector):
+        problems.append(
+            f"hook script {script} is not executable, so the agent cannot run it and its tool calls "
+            "run unguarded (`defenseclaw doctor --fix` restores mode 0700)"
+        )
 
     token_name = f".hook-{connector}.token"
     for script in scripts:

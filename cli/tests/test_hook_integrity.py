@@ -36,6 +36,7 @@ def _install(tmp_path):
     hooks.mkdir()
     script = hooks / "codex-hook.sh"
     script.write_text('#!/bin/bash\n[ -f "${HOOK_DIR}/.hook-codex.token" ] || exit 2\n')
+    script.chmod(0o700)
     (hooks / ".hook-codex.token").write_text("ab" * 32 + "\n")
     digest = "sha256:" + hashlib.sha256(script.read_bytes()).hexdigest()
     lock = {
@@ -74,6 +75,27 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
     assert "defenseclaw setup codex" in row["detail"]
+
+
+def test_non_executable_script_fails_doctor_and_fix_restores_it(tmp_path, monkeypatch):
+    # GAP-0101: a 0644 hook script made Claude Code run every tool call
+    # unguarded while doctor reported healthy and --fix had nothing to do.
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_TOKEN", raising=False)
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    cfg, script = _install(tmp_path)
+    script.chmod(0o644)
+
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", r)
+    row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
+    assert row["status"] == "fail" and "not executable" in row["detail"]
+
+    assert cmd_doctor._fix_hook_script_modes(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_hook_script_modes(cfg, assume_yes=True)[0] == "pass"
+    assert script.stat().st_mode & 0o777 == 0o700
+    assert hook_runtime_problems(cfg, "codex") == []
 
 
 def test_missing_scoped_token_is_reported_even_with_gateway_token_env(tmp_path, monkeypatch):

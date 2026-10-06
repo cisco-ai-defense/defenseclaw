@@ -91,6 +91,13 @@ def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
     # Setup readiness still reads it as pending reload.
     assert "running hermes" in row["detail"].casefold() and "live=false" in row["detail"]
     assert "without --passive" in row["remediation"]
+    # GAP-0100: --fix --dry-run is passive but still lists processes, so it
+    # reports an idle Hermes as the plain doctor does.
+    with mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]), \
+            mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
+        dry_run = _DoctorResult(mode="plan", passive=True, list_processes=True)
+        cmd_doctor._check_hook_health(cfg, "hermes", dry_run)
+    assert dry_run.checks[-1]["status"] == "pass"
 
 
 def test_codex_plugin_cache_missing_is_not_a_warning() -> None:
