@@ -2426,7 +2426,8 @@ targets:
         function script:Assert-DefenseClawInstalledConfig {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
-                [Parameter(Mandatory)][string]$GatewayServiceName
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [switch]$RecordLifecycle
             )
         }
         function script:Wait-DefenseClawEnterpriseReadiness {

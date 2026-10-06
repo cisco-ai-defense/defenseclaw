@@ -1505,6 +1505,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		dataDir        string
 		serviceAccount string
 		jsonOutput     bool
+		record         bool
 	)
 	cmd := &cobra.Command{
 		Use:          "validate-service-config",
@@ -1512,7 +1513,7 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount)
+			report, err := validateWindowsServiceConfig(configPath, dataDir, serviceAccount, record)
 			if jsonOutput {
 				if err != nil {
 					_ = newEnterpriseJSONEncoder(cmd.OutOrStdout()).Encode(map[string]any{
@@ -1535,15 +1536,22 @@ func newWindowsServiceConfigValidationCommand() *cobra.Command {
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "expected protected runtime directory")
 	cmd.Flags().StringVar(&serviceAccount, "service-account", "", "gateway NT SERVICE virtual account")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	cmd.Flags().BoolVar(&record, "record-lifecycle", false,
+		"migrate a config_version 8 config and record the installed config generation (install-like lifecycle only)")
 	_ = cmd.MarkFlagRequired("config")
 	_ = cmd.MarkFlagRequired("data-dir")
 	return cmd
 }
 
+// validateWindowsServiceConfig checks the installed config. Only the
+// install-like lifecycle passes record, inside its transaction: verify and
+// status run the same check read-only, so a hand edit is never recorded as
+// a lifecycle generation and a v8 file is not migrated without a snapshot.
 func validateWindowsServiceConfig(
 	configPath string,
 	expectedDataDir string,
 	serviceAccount string,
+	record bool,
 ) (windowsServiceConfigValidation, error) {
 	var report windowsServiceConfigValidation
 	configPath, err := filepath.Abs(strings.TrimSpace(configPath))
@@ -1611,10 +1619,13 @@ func validateWindowsServiceConfig(
 			)
 		}
 		report.Profile = managed.ProfileStandalone
-		// A config_version 8 administrator config becomes 9 here, and the
-		// installed config is recorded in config.generation.json.
-		if err := migrateManagedStandaloneConfig(context.Background(), configPath); err != nil {
-			return windowsServiceConfigValidation{}, err
+		// In the lifecycle transaction a config_version 8 administrator
+		// config becomes 9 here, and the installed config is recorded in
+		// config.generation.json.
+		if record {
+			if err := migrateManagedStandaloneConfig(context.Background(), configPath); err != nil {
+				return windowsServiceConfigValidation{}, err
+			}
 		}
 		// The gateway service compiles this file strictly at start; prove
 		// it can before the lifecycle starts it. Secure Client

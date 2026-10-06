@@ -5405,3 +5405,19 @@ def test_self_uninstall_finalizer_helper_keeps_its_call_on_one_line() -> None:
     call = next(line for line in helper.splitlines() if "Complete-DefenseClawSelfUninstallRetirement" in line)
     assert "-ReceiptPath `$ProtectedReceiptPath" in call
     assert "-WaitForCallerExit" in call
+
+
+def test_only_the_lifecycle_transaction_records_the_installed_config() -> None:
+    # validate-service-config migrates and records the config only when the
+    # install-like lifecycle asks, after its snapshot; verify is read-only.
+    module = read(MODULE)
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") : module.index(
+            "function Invoke-DefenseClawUninstallLifecycle"
+        )
+    ]
+    start = module.index("function Assert-DefenseClawEnterpriseDeployment {")
+    deployment = module[start : module.index("\nfunction ", start + 1)]
+    after_snapshot = install_like[install_like.index("$snapshot = New-DefenseClawTransaction `") :]
+    assert "-GatewayServiceName $GatewayServiceName -RecordLifecycle" in after_snapshot
+    assert "Assert-DefenseClawInstalledConfig" in deployment and "-RecordLifecycle" not in deployment

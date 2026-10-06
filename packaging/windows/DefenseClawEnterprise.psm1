@@ -16203,18 +16203,25 @@ function Resolve-DefenseClawManagedHooksLifecycleRecoveryBinding {
 function Assert-DefenseClawInstalledConfig {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        # Only the install-like lifecycle records (and migrates) the config,
+        # inside its transaction; verify validates read-only.
+        [switch]$RecordLifecycle
     )
+    $arguments = @(
+        'enterprise', 'windows', 'validate-service-config',
+        '--config', $Layout.ConfigPath,
+        '--data-dir', $Layout.RuntimeDirectory,
+        '--service-account', "NT SERVICE\$GatewayServiceName",
+        '--json'
+    )
+    if ($RecordLifecycle) {
+        $arguments += '--record-lifecycle'
+    }
     [void](Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
-            'enterprise', 'windows', 'validate-service-config',
-            '--config', $Layout.ConfigPath,
-            '--data-dir', $Layout.RuntimeDirectory,
-            '--service-account', "NT SERVICE\$GatewayServiceName",
-            '--json'
-        ))
+        -Arguments $arguments)
 }
 
 function Test-DefenseClawGatewayReady {
@@ -23005,7 +23012,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -Report $codexRemoval
         }
-        Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
+        Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName -RecordLifecycle
 
         $deploymentGenerationID = $lifecycleTransactionID
         $managedHooksActivationState = if ($Action -eq 'Install') {
