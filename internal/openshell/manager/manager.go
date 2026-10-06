@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Defaults.
@@ -385,7 +386,8 @@ func resolveHostUser(h *HostUser) (HostUser, error) {
 	}
 	out := HostUser{UID: uid, GID: gid}
 	if u, err := user.LookupId(strconv.Itoa(uid)); err == nil {
-		out.Name = u.Username
+		// The bare account: a binding refuses SSSD's alice@realm form.
+		out.Name = useridentity.BareAccountName(u.Username)
 	}
 	return out, nil
 }

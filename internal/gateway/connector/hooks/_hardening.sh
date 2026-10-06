@@ -1319,6 +1319,8 @@ defenseclaw_user_identity_args() {
   esac
 
   name="$(id -un 2>/dev/null)" || name=""
+  # SSSD fully qualified names (alice@realm) report the bare account.
+  name="${name%%@*}"
   case "$name" in
     '' | *[!A-Za-z0-9._-]*) return 0 ;;
   esac

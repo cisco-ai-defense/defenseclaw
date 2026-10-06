@@ -188,6 +188,10 @@ func newUntrustedLLMEventUser(userID, userName string) llmEventUser {
 func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userID = sanitizeLLMEventUser(userID)
 	userName = sanitizeLLMEventUser(userName)
+	if trustedID {
+		// An OS-derived name may be fully qualified (SSSD's alice@realm).
+		userName = useridentity.BareAccountName(userName)
+	}
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
 		trustedID = userID != ""
@@ -221,19 +225,7 @@ func localProcessUser() (string, string) {
 		return "", ""
 	}
 	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(bareAccountName(current.Username), current.Name, current.Uid))
-}
-
-// bareAccountName drops the domain or host prefix Windows puts on an account
-// name ("HOST\user" becomes "user"). The prefixed form fails the v8 identifier
-// pattern, so defenseclaw.user.name would be dropped, and the hook path
-// already reports the bare name (useridentity.accountNameForSID).
-func bareAccountName(name string) string {
-	name = strings.TrimSpace(name)
-	if idx := strings.LastIndexByte(name, '\\'); idx >= 0 && idx+1 < len(name) {
-		return name[idx+1:]
-	}
-	return name
+		sanitizeLLMEventUser(firstNonEmpty(useridentity.BareAccountName(current.Username), current.Name, current.Uid))
 }
 
 // userFieldsFromHookPayload pulls the user fields a connector may report in

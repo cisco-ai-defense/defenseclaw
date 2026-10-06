@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // TestOpenClawPromptBlockMarksTheTurn pins GAP-2231: the turn of an
@@ -106,22 +107,24 @@ func TestOpenClawAllowedTurnNamesTheLocalUser(t *testing.T) {
 	}
 }
 
-// TestBareAccountNameKeepsTheV8UserName pins GAP-2366: the Windows
-// HOST\user fallback name is reduced to the bare account name, which passes
-// the v8 identifier check, so defenseclaw.user.name is not dropped.
+// TestBareAccountNameKeepsTheV8UserName pins GAP-2366 and GAP-0064: the
+// Windows HOST\user name and the SSSD alice@realm name are reduced to the
+// bare account name, which passes the v8 identifier check, so
+// defenseclaw.user.name is not dropped.
 func TestBareAccountNameKeepsTheV8UserName(t *testing.T) {
 	for in, want := range map[string]string{
-		`runnervm\runneradmin`: "runneradmin",
-		`DOMAIN\dcw-std1`:      "dcw-std1",
-		"dcr-std1":             "dcr-std1",
-		`trailing\`:            `trailing\`,
+		`runnervm\runneradmin`:  "runneradmin",
+		`DOMAIN\dcw-std1`:       "dcw-std1",
+		"dcad-alice@dclab.test": "dcad-alice",
+		"dcr-std1":              "dcr-std1",
+		`trailing\`:             `trailing\`,
 	} {
-		if got := bareAccountName(in); got != want {
-			t.Fatalf("bareAccountName(%q) = %q, want %q", in, got, want)
+		if got := useridentity.BareAccountName(in); got != want {
+			t.Fatalf("BareAccountName(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if !hookModelV8Identifier(bareAccountName(`runnervm\runneradmin`)) {
-		t.Fatal("bare Windows account name fails the v8 identifier check")
+	if got := newTrustedLLMEventUser("1005", "dcad-alice@dclab.test").Name; !hookModelV8Identifier(got) {
+		t.Fatalf("trusted SSSD account name %q fails the v8 identifier check", got)
 	}
 }
 

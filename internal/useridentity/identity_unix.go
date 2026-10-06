@@ -25,19 +25,19 @@ func currentIdentity() Identity {
 		IDKind: KindPOSIXUID,
 	}
 	if resolved, err := user.LookupId(out.ID); err == nil && resolved != nil {
-		out.Name = strings.TrimSpace(resolved.Username)
+		out.Name = BareAccountName(resolved.Username)
 	}
 	if out.Name == "" {
 		// user.Current can describe the real uid in a setuid process. Use it
 		// only when its uid agrees with the effective uid reported above.
 		if current, err := user.Current(); err == nil && current != nil && current.Uid == out.ID {
-			out.Name = strings.TrimSpace(current.Username)
+			out.Name = BareAccountName(current.Username)
 		}
 	}
 	return out
 }
 
-// nameForID reads the passwd account name for a uid.
+// nameForID reads the bare passwd account name for a uid.
 func nameForID(id string) string {
 	if KindForID(id) != KindPOSIXUID {
 		return ""
@@ -46,7 +46,7 @@ func nameForID(id string) string {
 	if err != nil || resolved == nil {
 		return ""
 	}
-	return strings.TrimSpace(resolved.Username)
+	return BareAccountName(resolved.Username)
 }
 
 // homeForID reads the passwd home directory for a uid.
@@ -86,7 +86,7 @@ func identityForHome(home string) Identity {
 		IDKind: KindPOSIXUID,
 	}
 	if resolved, err := user.LookupId(out.ID); err == nil && resolved != nil {
-		out.Name = strings.TrimSpace(resolved.Username)
+		out.Name = BareAccountName(resolved.Username)
 	}
 	return out
 }
