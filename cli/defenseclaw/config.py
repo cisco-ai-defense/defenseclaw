@@ -1557,171 +1557,6 @@ class WatchConfig:
 
 
 @dataclass
-class SplunkConfig:
-    """Upgrade/credential-preview DTO for removed pre-v8 Splunk config.
-
-    Target commands must inspect canonical v8 destination status instead of
-    reading this projection. ``Config.save`` never writes it to an exact-v8
-    document.
-    """
-
-    hec_endpoint: str = "https://localhost:8088/services/collector/event"
-    hec_token: str = ""
-    hec_token_env: str = ""
-    index: str = "defenseclaw"
-    source: str = "defenseclaw"
-    sourcetype: str = "_json"
-    # (and parity with Go ): TLS verification is now ON by
-    # default. ``verify_tls`` is the LEGACY opt-in-to-security flag and
-    # is honoured when explicitly true (no-op against the new secure
-    # default); explicit false is silently IGNORED. Operators that
-    # genuinely need to bypass certificate validation (dev environments
-    # with self-signed HEC) must set ``insecure_skip_verify=True``.
-    verify_tls: bool = True
-    insecure_skip_verify: bool = False
-    enabled: bool = False
-    batch_size: int = 50
-    flush_interval_s: int = 5
-
-    def tls_verify_enabled(self) -> bool:
-        """Resolve effective TLS verification posture.
-
-        returns False only when ``insecure_skip_verify`` is
-        explicitly true. ``verify_tls=False`` no longer downgrades the
-        sink — operators must move the explicit opt-out to the new
-        ``insecure_skip_verify`` flag. Any other combination yields a
-        secure default of True so omitting the field never silently
-        leaks the HEC token to a MITM peer.
-
-        The flag is run through :func:`_coerce_bool` so a quoted
-        ``"false"`` persisted in ``config.yaml`` (a truthy non-empty
-        string under bare ``bool()``) cannot silently disable TLS
-        verification.
-        """
-        return not _coerce_bool(self.insecure_skip_verify)
-
-    def resolved_hec_token(self) -> str:
-        """Return HEC token from env var (if set) or direct value."""
-        if self.hec_token_env:
-            val = os.environ.get(self.hec_token_env, "")
-            if val:
-                return val
-        return self.hec_token
-
-
-@dataclass
-class OTelTLSConfig:
-    insecure: bool = False
-    ca_cert: str = ""
-
-
-@dataclass
-class OTelTracesConfig:
-    enabled: bool = True
-    sampler: str = "always_on"
-    sampler_arg: str = "1.0"
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelLogsConfig:
-    enabled: bool = True
-    emit_individual_findings: bool = False
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelMetricsConfig:
-    enabled: bool = True
-    export_interval_s: int = 60
-    temporality: str = "delta"
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelBatchConfig:
-    max_export_batch_size: int = 512
-    scheduled_delay_ms: int = 5000
-    max_queue_size: int = 2048
-
-
-@dataclass
-class OTelResourceConfig:
-    attributes: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class OTelSpanFilterOperationConfig:
-    name: str = ""
-    require_attributes: list[str] = field(default_factory=list)
-
-
-@dataclass
-class OTelSpanFilterConfig:
-    require_operation: str = ""
-    require_attributes: list[str] = field(default_factory=list)
-    operations: list[OTelSpanFilterOperationConfig] = field(default_factory=list)
-
-
-@dataclass
-class OTelDestinationConfig:
-    """Upgrade/credential-preview shape for a pre-v8 OTLP destination.
-
-    This is not the canonical v8 destination model. Target commands read the
-    validated observability graph through ``v8_status``/``v8_config``.
-    """
-
-    name: str = ""
-    preset: str = ""
-    enabled: bool = True
-    protocol: str = "grpc"
-    endpoint: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
-    tls: OTelTLSConfig = field(default_factory=OTelTLSConfig)
-    traces: OTelTracesConfig = field(default_factory=OTelTracesConfig)
-    logs: OTelLogsConfig = field(default_factory=OTelLogsConfig)
-    metrics: OTelMetricsConfig = field(default_factory=OTelMetricsConfig)
-    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
-    span_filter: OTelSpanFilterConfig = field(default_factory=OTelSpanFilterConfig)
-
-
-@dataclass
-class OTelTracePolicyConfig:
-    sampler: str = "always_on"
-    sampler_arg: str = "1.0"
-
-
-@dataclass
-class OTelLogPolicyConfig:
-    emit_individual_findings: bool = False
-
-
-@dataclass
-class OTelMetricPolicyConfig:
-    export_interval_s: int = 60
-    temporality: str = "delta"
-
-
-@dataclass
-class OTelConfig:
-    """Upgrade/credential-preview DTO for the removed top-level ``otel`` block."""
-
-    enabled: bool = False
-    traces: OTelTracePolicyConfig = field(default_factory=OTelTracePolicyConfig)
-    logs: OTelLogPolicyConfig = field(default_factory=OTelLogPolicyConfig)
-    metrics: OTelMetricPolicyConfig = field(default_factory=OTelMetricPolicyConfig)
-    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
-    resource: OTelResourceConfig = field(default_factory=OTelResourceConfig)
-    destinations: list[OTelDestinationConfig] = field(default_factory=list)
-
-
-@dataclass
 class GatewayWatcherSkillConfig:
     enabled: bool = True
     # Same default as the gateway's viper default (GAP-2357).
@@ -3257,8 +3092,6 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
-    splunk: SplunkConfig = field(default_factory=SplunkConfig)
-    otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     # config_version 9: admission replaces data.json and the *_actions keys.
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
@@ -4013,33 +3846,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
-    otel = d.get("otel") or {}
-    destinations = otel.get("destinations") or []
-    for destination in destinations:
-        if not isinstance(destination, dict):
-            continue
-        span_filter = destination.get("span_filter")
-        if not isinstance(span_filter, dict):
-            continue
-        if span_filter.get("operations"):
-            span_filter.pop("require_operation", None)
-            span_filter.pop("require_attributes", None)
-        else:
-            span_filter.pop("operations", None)
-            if not span_filter.get("require_operation"):
-                span_filter.pop("require_operation", None)
-            if not span_filter.get("require_attributes"):
-                span_filter.pop("require_attributes", None)
-        if not span_filter:
-            destination.pop("span_filter", None)
-    # Named destinations are the only transport/signal source of truth.
-    # Serialize only process-wide policy outside destinations.
-    traces = otel.get("traces") or {}
-    otel["traces"] = {key: value for key, value in traces.items() if key in {"sampler", "sampler_arg"}}
-    logs = otel.get("logs") or {}
-    otel["logs"] = {key: value for key, value in logs.items() if key == "emit_individual_findings"}
-    metrics = otel.get("metrics") or {}
-    otel["metrics"] = {key: value for key, value in metrics.items() if key in {"export_interval_s", "temporality"}}
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -4129,10 +3935,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 _strip_unset_levels(entry)
                 _serialize_v9_rules_scope(entry)
     _serialize_guardrail_profiles(cfg, guardrail)
-    # The compatibility dataclass can preview a retired ``splunk:`` source for
-    # upgrade/credential recovery, but exact-v8 serialization must never write
-    # it. Splunk forwarding is a canonical observability destination.
-    d.pop("splunk", None)
     # Mirror the Go `yaml:"cooldown_seconds,omitempty"` tag: when the
     # operator hasn't set a cooldown (tri-state None), drop the key so
     # the YAML stays minimal and the gateway falls back to
@@ -4459,9 +4261,8 @@ def _backup_unparseable_config(path: str) -> str:
 # dataclass introspection) because not every nested dataclass field
 # typed as ``dict[str, str]`` is dataclass-authoritative — some
 # carry user-supplied free-form keys we want to preserve. Any new
-# secret-bearing modeled dict added to ``OTelConfig`` (or
-# elsewhere) MUST be added here so a clear-on-save honours the
-# operator's intent.
+# secret-bearing modeled dict added to a config dataclass MUST be added
+# here so a clear-on-save honours the operator's intent.
 #
 # Format: dotted YAML path from the top-level config dict.
 _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
@@ -4534,9 +4335,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
-    {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
-)
+_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset({"audit_db", "privacy", "observability"})
 _V8_MISSING = object()
 
 # v4 LLM field -> the v5 slot that _migrate_llm_fields() copies it into.
@@ -5836,115 +5635,6 @@ def _merge_mcp_scanner_timeouts(raw: Any) -> MCPScannerTimeouts:
     )
 
 
-def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
-    if not isinstance(raw, dict) or not raw:
-        return OTelConfig()
-    traces_raw = _as_mapping(raw.get("traces"))
-    logs_raw = _as_mapping(raw.get("logs"))
-    metrics_raw = _as_mapping(raw.get("metrics"))
-    batch_raw = _as_mapping(raw.get("batch"))
-    resource_raw = _as_mapping(raw.get("resource"))
-    destinations: list[OTelDestinationConfig] = []
-    for item in raw.get("destinations") or []:
-        if not isinstance(item, dict):
-            continue
-        dest_traces = _as_mapping(item.get("traces"))
-        dest_logs = _as_mapping(item.get("logs"))
-        dest_metrics = _as_mapping(item.get("metrics"))
-        dest_batch = _as_mapping(item.get("batch"))
-        dest_tls = _as_mapping(item.get("tls"))
-        dest_span_filter = _as_mapping(item.get("span_filter"))
-        required_filter_attrs = dest_span_filter.get("require_attributes", [])
-        if not isinstance(required_filter_attrs, (list, tuple)):
-            required_filter_attrs = []
-        filter_operations: list[OTelSpanFilterOperationConfig] = []
-        for operation in dest_span_filter.get("operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_attrs = operation.get("require_attributes", [])
-            if not isinstance(operation_attrs, (list, tuple)):
-                operation_attrs = []
-            filter_operations.append(
-                OTelSpanFilterOperationConfig(
-                    name=str(operation.get("name", "") or ""),
-                    require_attributes=[str(value) for value in operation_attrs if str(value).strip()],
-                )
-            )
-        destinations.append(
-            OTelDestinationConfig(
-                name=str(item.get("name", "") or ""),
-                preset=str(item.get("preset", "") or ""),
-                enabled=_coerce_bool(item.get("enabled", True), default=True),
-                protocol=str(item.get("protocol", "grpc") or "grpc"),
-                endpoint=str(item.get("endpoint", "") or ""),
-                headers={str(k): str(v) for k, v in _as_mapping(item.get("headers")).items()},
-                tls=OTelTLSConfig(
-                    insecure=_coerce_bool(dest_tls.get("insecure", False)),
-                    ca_cert=str(dest_tls.get("ca_cert", "") or ""),
-                ),
-                traces=OTelTracesConfig(
-                    enabled=_coerce_bool(dest_traces.get("enabled", False)),
-                    endpoint=str(dest_traces.get("endpoint", "") or ""),
-                    protocol=str(dest_traces.get("protocol", "") or ""),
-                    url_path=str(dest_traces.get("url_path", "") or ""),
-                ),
-                logs=OTelLogsConfig(
-                    enabled=_coerce_bool(dest_logs.get("enabled", False)),
-                    endpoint=str(dest_logs.get("endpoint", "") or ""),
-                    protocol=str(dest_logs.get("protocol", "") or ""),
-                    url_path=str(dest_logs.get("url_path", "") or ""),
-                ),
-                metrics=OTelMetricsConfig(
-                    enabled=_coerce_bool(dest_metrics.get("enabled", False)),
-                    export_interval_s=_as_int(dest_metrics.get("export_interval_s", 60), 60),
-                    temporality=str(dest_metrics.get("temporality", "delta") or "delta"),
-                    endpoint=str(dest_metrics.get("endpoint", "") or ""),
-                    protocol=str(dest_metrics.get("protocol", "") or ""),
-                    url_path=str(dest_metrics.get("url_path", "") or ""),
-                ),
-                batch=OTelBatchConfig(
-                    max_export_batch_size=_as_int(dest_batch.get("max_export_batch_size", 512), 512),
-                    scheduled_delay_ms=_as_int(dest_batch.get("scheduled_delay_ms", 5000), 5000),
-                    max_queue_size=_as_int(dest_batch.get("max_queue_size", 2048), 2048),
-                ),
-                span_filter=OTelSpanFilterConfig(
-                    require_operation=str(dest_span_filter.get("require_operation", "") or ""),
-                    require_attributes=[str(value) for value in required_filter_attrs if str(value).strip()],
-                    operations=filter_operations,
-                ),
-            )
-        )
-    return OTelConfig(
-        enabled=_coerce_bool(raw.get("enabled", False)),
-        traces=OTelTracePolicyConfig(
-            sampler=traces_raw.get("sampler", "always_on"),
-            sampler_arg=traces_raw.get("sampler_arg", "1.0"),
-        ),
-        logs=OTelLogPolicyConfig(
-            emit_individual_findings=_coerce_bool(logs_raw.get("emit_individual_findings", False)),
-        ),
-        metrics=OTelMetricPolicyConfig(
-            export_interval_s=_as_int(metrics_raw.get("export_interval_s", 60), 60),
-            temporality=metrics_raw.get("temporality", "delta"),
-        ),
-        batch=OTelBatchConfig(
-            max_export_batch_size=_as_int(batch_raw.get("max_export_batch_size", 512), 512),
-            scheduled_delay_ms=_as_int(batch_raw.get("scheduled_delay_ms", 5000), 5000),
-            max_queue_size=_as_int(batch_raw.get("max_queue_size", 2048), 2048),
-        ),
-        resource=OTelResourceConfig(
-            attributes=_as_mapping(resource_raw.get("attributes")),
-        ),
-        destinations=destinations,
-    )
-
-
-def _as_mapping(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
-
-
 def _snapshot_authoritative_dicts(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for path in _AUTHORITATIVE_MODELED_DICT_PATHS:
@@ -6474,8 +6164,6 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
     if cfg.scanners.skill_scanner.virustotal_api_key:
         _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-    if not is_current_schema(cfg._source_config_version) and cfg.splunk.hec_token:
-        _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
 #: The Linux and macOS managed standalone layouts: config path -> the
@@ -6532,43 +6220,8 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
-    splunk_raw = raw.get("splunk", {}) or {}
     source_config_version = _exact_config_version(raw.get("config_version"))
     audit_db = _audit_database_path(raw, data_dir, source_config_version)
-
-    # Upgrade/credential-preview compatibility: mirror the first enabled v7
-    # Splunk sink into the legacy DTO in memory. Target v8 commands must never
-    # use this projection; they read the canonical destination graph instead.
-    # The explicit upgrade converter owns translation, and Config.save never
-    # writes this block into an exact-v8 document.
-    if not splunk_raw:
-        for sink in raw.get("audit_sinks") or []:
-            if not isinstance(sink, dict):
-                continue
-            if sink.get("kind") != "splunk_hec":
-                continue
-            if sink.get("enabled") is False:
-                continue
-            hec = sink.get("splunk_hec") or {}
-            if not isinstance(hec, dict) or not hec.get("endpoint"):
-                continue
-            splunk_raw = {
-                "enabled": True,
-                "hec_endpoint": hec.get("endpoint", ""),
-                "hec_token": hec.get("token", ""),
-                "hec_token_env": hec.get("token_env", ""),
-                "index": hec.get("index", "defenseclaw"),
-                "source": hec.get("source", "defenseclaw"),
-                "sourcetype": hec.get("sourcetype", "_json"),
-                # default verify_tls to True so promoting an
-                # audit_sinks declaration into the legacy SplunkConfig
-                # block never silently downgrades verification. The
-                # explicit opt-out lives on the new
-                # ``insecure_skip_verify`` field.
-                "verify_tls": _coerce_bool(hec.get("verify_tls", True), default=True),
-                "insecure_skip_verify": _coerce_bool(hec.get("insecure_skip_verify", False)),
-            }
-            break
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
@@ -6633,24 +6286,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             anchor_name=raw.get("firewall", {}).get("anchor_name", "com.defenseclaw"),
         ),
         guardrail=_merge_guardrail(raw.get("guardrail"), data_dir),
-        splunk=SplunkConfig(
-            hec_endpoint=splunk_raw.get("hec_endpoint", "https://localhost:8088/services/collector/event"),
-            hec_token=splunk_raw.get("hec_token", ""),
-            hec_token_env=splunk_raw.get("hec_token_env", ""),
-            index=splunk_raw.get("index", "defenseclaw"),
-            source=splunk_raw.get("source", "defenseclaw"),
-            sourcetype=splunk_raw.get("sourcetype", "_json"),
-            # default verify_tls to True so callers that load a
-            # legacy config without the new field still get certificate
-            # verification. The explicit dev-mode opt-out lives on
-            # ``insecure_skip_verify`` and is wired separately.
-            verify_tls=_coerce_bool(splunk_raw.get("verify_tls", True), default=True),
-            insecure_skip_verify=_coerce_bool(splunk_raw.get("insecure_skip_verify", False)),
-            enabled=splunk_raw.get("enabled", False),
-            batch_size=splunk_raw.get("batch_size", 50),
-            flush_interval_s=splunk_raw.get("flush_interval_s", 5),
-        ),
-        otel=_merge_otel(raw.get("otel")),
         gateway=GatewayConfig(
             host=gw_raw.get("host", "127.0.0.1"),
             port=gw_raw.get("port", 18789),
