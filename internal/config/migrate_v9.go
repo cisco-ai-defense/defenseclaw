@@ -219,6 +219,63 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	return result, err
 }
 
+// NeedsMigrationV9 reports whether raw is a config_version 8 document.
+func NeedsMigrationV9(raw []byte) bool {
+	var doc struct {
+		ConfigVersion int `yaml:"config_version"`
+	}
+	return yaml.Unmarshal(raw, &doc) == nil && doc.ConfigVersion == ObservabilityV8ConfigVersion
+}
+
+// MigrateV8InMemory is the gateway's read-only load of a config_version 8
+// file (spec 2.0): it returns the config_version 9 bytes the migration would
+// write, so the data.json admission and thresholds, the *_actions keys and,
+// on a per-user install, the operator rows of audit.db keep applying until
+// the file is migrated. Nothing is written. raw comes back unchanged for a
+// config_version 9 file and on a Secure Client host, whose path does not
+// change; on a migration error it comes back unchanged with the error, for
+// the caller to report.
+func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
+	if !NeedsMigrationV9(raw) {
+		return raw, nil
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return raw, nil
+	}
+	root := v8DocumentRoot(&doc)
+	if root == nil || root.Kind != yaml.MappingNode || v9SecureClientDocument(root) {
+		return raw, nil
+	}
+	dataDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "data_dir"))))
+	if dataDir == "" {
+		dataDir = DefaultDataPath()
+	}
+	policyDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "policy_dir"))))
+	if policyDir == "" {
+		policyDir = filepath.Join(dataDir, "policies")
+	}
+	managedHost := StandaloneManagedSource(raw)
+	in := MigrateV9Input{
+		ConfigPath: configFile, Source: raw, PolicyDir: policyDir,
+		DataJSONPath: filepath.Join(policyDir, "rego", "data.json"),
+		Managed:      managedHost, InMemory: true, RulePackDigest: rulePackDigest,
+	}
+	if !managedHost {
+		local := v8YAMLMapValue(v8YAMLMapValue(root, "observability"), "local")
+		auditDB := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(local, "path"))))
+		if auditDB == "" {
+			auditDB = filepath.Join(dataDir, "audit.db")
+		}
+		in.AuditDBPath = auditDB
+	}
+	result, err := MigrateV9(context.Background(), in)
+	if err != nil {
+		return raw, err
+	}
+	return result.Migrated, nil
+}
+
 // AcknowledgeMigrationV9 marks migration-v9.json next to configPath as read
 // (`defenseclaw config migrate --ack`), so doctor stops reporting it.
 func AcknowledgeMigrationV9(configPath string) error {

@@ -209,7 +209,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		}
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
 	}
-	candidateConfig, candidateErr := config.LoadRuntimeV8CandidateFromBytes(sourceName, raw)
+	candidateConfig, candidateErr := loadRuntimeConfigCandidate(sourceName, raw)
 	if candidateErr != nil || candidateConfig == nil {
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(
 			sidecarObservabilityV8BootstrapCompile, candidateErr,

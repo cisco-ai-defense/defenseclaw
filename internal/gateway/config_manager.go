@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -169,6 +170,19 @@ func (m *ConfigManager) getEnvConfigPath() string {
 	return ""
 }
 
+// loadRuntimeConfigCandidate decodes a config snapshot for activation. A
+// config_version 8 file is migrated in memory first (read-only), so it runs
+// as `defenseclaw migrate` would write it: its data.json admission and
+// thresholds and, on a per-user install, its audit.db block/allow entries
+// keep applying.
+func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
+	migrated, err := config.MigrateV8InMemory(source, raw, guardrail.RulePackDigest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[config] %s is config_version 8 and the in-memory config_version 9 migration failed (%v); it loads as config_version 8. Run `defenseclaw migrate`.\n", source, err)
+	}
+	return config.LoadRuntimeV8CandidateFromBytes(source, migrated)
+}
+
 func newConfigManagerWithSnapshot(
 	path string,
 	initial *config.Config,
@@ -185,7 +199,7 @@ func newConfigManagerWithSnapshot(
 		applySnapshot: apply,
 		logger:        logger,
 		health:        health,
-		loadSnapshot:  config.LoadRuntimeV8CandidateFromBytes,
+		loadSnapshot:  loadRuntimeConfigCandidate,
 		readSnapshot:  readConfigFileSnapshot,
 	}
 	if initial != nil {

@@ -268,3 +268,33 @@ func TestV9SecureClientDocumentKeepsRows(t *testing.T) {
 		}
 	}
 }
+
+// TestMigrateV8InMemory: the gateway runs an un-migrated v8 file as the
+// migration would write it, reading data.json and writing nothing.
+func TestMigrateV8InMemory(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	dataJSON := filepath.Join(dir, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {"MEDIUM": {"install": "block", "file": "none", "runtime": "block"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := MigrateV8InMemory(configPath, source, nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	if NeedsMigrationV9(migrated) || !strings.Contains(string(migrated), "medium: block") {
+		t.Fatalf("migrated = %s", migrated)
+	}
+	if _, err := os.Stat(dataJSON); err != nil {
+		t.Errorf("the in-memory migration touched data.json: %v", err)
+	}
+	if unchanged, err := MigrateV8InMemory(configPath, migrated, nil); err != nil || string(unchanged) != string(migrated) {
+		t.Errorf("a config_version 9 source changed: %v", err)
+	}
+}

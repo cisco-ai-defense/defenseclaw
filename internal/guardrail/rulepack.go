@@ -1345,6 +1345,17 @@ func safeJudgeName(name string) string {
 	return "component"
 }
 
+// RulePackDigest is the hex RulePackSummary digest of the pack in dir, the
+// value config.yaml pins a custom pack by (the v9 migration's
+// MigrateV9Input.RulePackDigest).
+func RulePackDigest(dir string) (string, error) {
+	pack, err := LoadRulePack(dir)
+	if err != nil {
+		return "", err
+	}
+	return pack.Summary().Digest, nil
+}
+
 // Summary returns deterministic counts and a SHA-256 fingerprint of the
 // complete loaded RulePack configuration. Rule counts cover loaded YAML
 // overrides, not compiled gateway fallback rules. Source paths are excluded.

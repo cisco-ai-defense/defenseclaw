@@ -116,15 +116,9 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		return config.MigrateV9Input{}, fmt.Errorf("read %s: %w", abs, err)
 	}
 	input := config.MigrateV9Input{
-		ConfigPath: abs,
-		Source:     raw,
-		RulePackDigest: func(dir string) (string, error) {
-			pack, err := guardrail.LoadRulePack(dir)
-			if err != nil {
-				return "", err
-			}
-			return pack.Summary().Digest, nil
-		},
+		ConfigPath:     abs,
+		Source:         raw,
+		RulePackDigest: guardrail.RulePackDigest,
 	}
 	policyDir, auditDB := "", ""
 	if cfg, loadErr := config.LoadRuntimeV8File(abs); loadErr == nil {
