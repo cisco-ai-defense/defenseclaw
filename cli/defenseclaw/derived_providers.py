@@ -126,6 +126,34 @@ def overlay_state(cfg, path: str | None = None) -> tuple[str, str]:
     return STATE_FRESH, path
 
 
+def configured_providers(cfg, path: str | None = None) -> list[dict[str, Any]]:
+    """The provider entries Python resolves against, in the overlay shape.
+
+    ``llm_providers`` rendered from config, whichever writer put it there; a
+    legacy operator overlay (no ``_derived_from``) only while config declares
+    no providers. A derived file is output and is never read back.
+    """
+    payload = render(cfg)
+    if payload["providers"] or payload["ollama_ports"]:
+        return payload["providers"]
+    current = _read(path or overlay_path(cfg))
+    if current is None or current.get(DERIVED_FROM_KEY):
+        return []
+    providers = current.get("providers")
+    return [p for p in providers if isinstance(p, dict)] if isinstance(providers, list) else []
+
+
+def refresh(cfg, path: str | None = None) -> bool:
+    """Re-render the overlay after a config write when it no longer matches
+    ``llm_providers`` (the writer's post-commit step). A hand-edited or
+    legacy overlay is left for doctor to report. Returns whether it wrote."""
+    state, path = overlay_state(cfg, path)
+    if state != STATE_STALE:
+        return False
+    write(cfg, path)
+    return True
+
+
 def write(cfg, path: str | None = None) -> str:
     """Render ``llm_providers`` to the overlay file (0600, atomic) and return
     its path. A legacy operator overlay is left alone while config has no

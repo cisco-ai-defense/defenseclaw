@@ -350,7 +350,30 @@ def _transact(
             else:
                 os.unlink(target)
             raise
+    _refresh_derived_files(target, candidate)
     return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+
+
+def _refresh_derived_files(target: str, candidate: bytes) -> None:
+    """Post-commit: re-render custom-providers.json from ``llm_providers``.
+
+    The commit already happened, so a failure here only leaves the derived
+    file stale, which doctor reports (and ``doctor --fix`` re-renders).
+    """
+    try:
+        from types import SimpleNamespace
+
+        from defenseclaw import derived_providers
+        from defenseclaw.config import _merge_llm_providers
+
+        document = yaml.safe_load(candidate.decode("utf-8")) or {}
+        if not isinstance(document, dict):
+            return
+        data_dir = os.path.expanduser(_data_dir_for(target, candidate))
+        shim = SimpleNamespace(data_dir=data_dir, llm_providers=_merge_llm_providers(document.get("llm_providers")))
+        derived_providers.refresh(shim)
+    except Exception as exc:  # noqa: BLE001 - the config commit stands
+        _log.warning("config writer: custom-providers.json was not re-rendered: %s", exc)
 
 
 def _resolve(path: str | os.PathLike[str] | None) -> str:

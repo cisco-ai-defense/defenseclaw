@@ -3692,7 +3692,9 @@ class Config:
         # play (the common case).
         if out.instance_name:
             try:
-                _apply_instance_overlay(out, self.data_dir)
+                from defenseclaw import derived_providers
+
+                _apply_instance_overlay(out, self.data_dir, derived_providers.configured_providers(self))
             except Exception:  # pragma: no cover - defensive
                 # Overlay merge must never take config loading offline.
                 _log.warning(
@@ -5259,17 +5261,11 @@ def _derive_instance_name_from_base_url(cfg: Config) -> None:
     block(s) so the overlay's value (with its TLS settings) is the
     only thing the gateway resolves at runtime.
     """
-    data_dir = getattr(cfg, "data_dir", "") or os.path.expanduser("~/.defenseclaw")
-    overlay_path = os.path.join(data_dir, "custom-providers.json")
+    from defenseclaw import derived_providers
+
     try:
-        with open(overlay_path, encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh)
-    except (FileNotFoundError, PermissionError, OSError):
-        return
-    if not isinstance(raw, dict):
-        return
-    providers = raw.get("providers") or []
-    if not isinstance(providers, list):
+        providers = derived_providers.configured_providers(cfg)
+    except Exception:  # noqa: BLE001 - loading must not fail on the overlay
         return
     by_url: dict[str, str] = {}
     for p in providers:
@@ -6467,11 +6463,12 @@ def _normalize_gateway_config_reload_mode(value: Any) -> str:
     return mode
 
 
-def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
-    """Fold a custom-providers.json instance entry into a resolved LLMConfig.
+def _apply_instance_overlay(out: LLMConfig, data_dir: str, providers: list[dict[str, Any]] | None = None) -> None:
+    """Fold a custom-provider instance entry into a resolved LLMConfig.
 
-    Reads the overlay at ``<data_dir>/custom-providers.json`` (the
-    same file ``defenseclaw setup provider`` writes) and merges the
+    ``providers`` are the entries config.yaml ``llm_providers`` declares
+    (``derived_providers.configured_providers``); without them the overlay
+    at ``<data_dir>/custom-providers.json`` is read. Merges the
     matching instance's defaults UNDER ``out``. Only blanks are
     filled; explicit role-level values always win. Silent no-op when
     the overlay file is missing, malformed, or has no matching
@@ -6494,21 +6491,24 @@ def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
     * ``tls``                — TLS sub-block (ca_cert_pem, insecure_skip_verify)
     * ``bedrock``/``vertex``/``azure`` — provider-typed sub-blocks
     """
-    if not out.instance_name or not data_dir:
+    if not out.instance_name:
         return
-    overlay_path = os.path.join(data_dir, "custom-providers.json")
-    try:
-        import json as _json
+    if providers is None:
+        # No config at hand: the overlay file at <data_dir>.
+        if not data_dir:
+            return
+        try:
+            import json as _json
 
-        with open(overlay_path, encoding="utf-8") as f:
-            data = _json.load(f)
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, dict):
-        return
-    providers = data.get("providers") or []
-    if not isinstance(providers, list):
-        return
+            with open(os.path.join(data_dir, "custom-providers.json"), encoding="utf-8") as f:
+                data = _json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        providers = data.get("providers") or []
+        if not isinstance(providers, list):
+            return
     target_name = out.instance_name.strip().lower()
     entry: dict[str, Any] | None = None
     for p in providers:

@@ -64,6 +64,17 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
     ) == ["guardrail.hook_fail_mode", "guardrail.connectors.codex.enabled"]
 
 
+def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    entry = {"name": "custom-gateway", "domains": ["llm.example.internal"], "env_keys": ["LLM_GATEWAY"]}
+    config_writer.apply([Change("llm_providers.custom", [entry])], "cli:test", "t", path=path)
+    overlay = json.loads((tmp_path / "custom-providers.json").read_text(encoding="utf-8"))
+    assert overlay["_derived_from"] and [p["name"] for p in overlay["providers"]] == ["custom-gateway"]
+
+
 def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, monkeypatch):
     path = _config(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")

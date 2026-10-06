@@ -9128,6 +9128,11 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
     from defenseclaw import derived_providers
 
     state, _ = derived_providers.overlay_state(cfg, path)
+    if state == derived_providers.STATE_STALE and not os.path.exists(path):
+        # Nothing reads a derived file back (Python and the gateway take
+        # llm_providers from config); the next config write renders it.
+        _emit("pass", label, "llm_providers apply from config.yaml (the overlay is rendered on the next write)", r=r)
+        return
     if state in (derived_providers.STATE_EDITED, derived_providers.STATE_STALE):
         why = (
             "was edited by hand; the gateway ignores those edits"
