@@ -84,7 +84,7 @@ record.
 | Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, or the only joined realm for a name without a DNS domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
 | UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool. Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
-| Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` and `API:` caches are reported by type only | Claimed |
+| Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
 
 The NSS and realmd lookups run on every Linux install, without privilege and
 without a call to the directory. The root guardian adds the InfoPipe facts on
@@ -119,7 +119,7 @@ the 15-minute cache.
 | AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
 | Device SSO provider (Entra or Okta) | `app-sso platform -s`: Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
 | The user's Platform SSO login | Not read | None |
-| Kerberos principal of the session | A `FILE:` cache named by `KRB5CCNAME` or `krb5.conf`. The default `API:` cache cannot be read | Claimed |
+| Kerberos principal of the session | The default principal of the default `API:` cache, from `/usr/bin/klist --json` at most once per 5 minutes, or of a `FILE:` cache named by `KRB5CCNAME` or `krb5.conf` | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |
 
 A per-user Mac install knows the account and its groups, not the directory it
