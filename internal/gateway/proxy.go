@@ -2138,9 +2138,15 @@ func extractSSEChunkText(data string, provider string) string {
 	return ""
 }
 
+// handleHealth answers the proxy liveness probe. Outside the Secure Client
+// integration it also names the live generation's effective policy digest.
 func (p *GuardrailProxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	if policy, ok := CurrentPolicyHealth(); ok {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy", "policy_digest": policy.EffectiveDigest})
+		return
+	}
 	_, _ = w.Write([]byte(`{"status":"healthy"}`))
 }
 
@@ -2175,13 +2181,12 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // providerRegistryMu guards providerDomains / ollamaPorts / providerRegistry.
-// The registry can be rebuilt at runtime via ReloadProviderRegistry() when
-// the operator overlay at ~/.defenseclaw/custom-providers.json changes.
+// The live configuration generation publishes the registry (embedded
+// providers.json, llm_providers from config.yaml and llm.base_url's host;
+// see buildGenerationProviders).
 var providerRegistryMu sync.RWMutex
 
-// providerDomains is built at init (and on reload) from the embedded
-// providers.json merged with the operator overlay. Each entry maps a
-// domain substring to the provider name.
+// providerDomains maps each provider domain to the provider name.
 var providerDomains []providerDomainEntry
 
 type providerDomainEntry struct {
@@ -2194,25 +2199,37 @@ type providerDomainEntry struct {
 // provider traffic so the SSRF allowlist does not reject them.
 var ollamaPorts []int
 
-// providerRegistry holds the merged provider list (built-ins + overlay)
-// as last loaded, for serving GET /v1/config/providers.
+// providerRegistry holds the merged provider list as last published, for
+// serving GET /v1/config/providers.
 var providerRegistry *configs.ProvidersConfig
 
 func init() {
-	if err := ReloadProviderRegistry(); err != nil {
+	cfg, err := configs.LoadProviders()
+	if err != nil {
 		panic("gateway: failed to load embedded providers.json: " + err.Error())
 	}
+	setProviderRegistry(cfg)
 }
 
-// ReloadProviderRegistry re-reads the embedded providers.json and merges
-// the operator overlay at ~/.defenseclaw/custom-providers.json. Safe to
-// call at runtime; concurrent readers of providerDomains / ollamaPorts
-// see a consistent snapshot.
+// ReloadProviderRegistry rebuilds the registry from the live generation's
+// configuration (re-reading any CA files llm_providers references). Before
+// the first generation it loads the embedded providers. Safe to call at
+// runtime; concurrent readers see a consistent snapshot.
 func ReloadProviderRegistry() error {
+	if g := currentGeneration(); g != nil && g.Config != nil {
+		applyGenerationProviders(buildGenerationProviders(g.Config))
+		return nil
+	}
 	cfg, err := configs.LoadProviders()
 	if err != nil {
 		return err
 	}
+	setProviderRegistry(cfg)
+	return nil
+}
+
+// setProviderRegistry publishes cfg as the provider registry.
+func setProviderRegistry(cfg *configs.ProvidersConfig) {
 	domains := make([]providerDomainEntry, 0, len(cfg.Providers)*2)
 	for _, p := range cfg.Providers {
 		for _, d := range p.Domains {
@@ -2224,7 +2241,6 @@ func ReloadProviderRegistry() error {
 	ollamaPorts = cfg.OllamaPorts
 	providerRegistry = cfg
 	providerRegistryMu.Unlock()
-	return nil
 }
 
 // SeedCustomProvidersFromLLMBaseURL writes a custom-providers.json overlay

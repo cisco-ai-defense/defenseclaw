@@ -113,9 +113,19 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	g.Thresholds = buildThresholdTable(cfg, in.profiles)
 	g.ConfigGen, g.ConfigGenRecorded = readConfigGeneration(cfg.ConfigFilePath, in.raw)
 
+	configComponent, err := configDigest(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("generation: %w", err)
+	}
+	g.Components["config"] = configComponent
 	if digest, err := config.GuardrailPolicyDigest(cfg); err == nil {
 		g.Components["guardrail_policy"] = digest
 	}
+	for key, digest := range assetDigestComponents(cfg) {
+		g.Components[key] = digest
+	}
+	g.Providers = buildGenerationProviders(cfg)
+	g.Components["providers"] = g.Providers.digest()
 	for key, pack := range g.RulePacks {
 		g.Components["rule_pack:"+key] = "sha256:" + pack.Summary().Digest
 	}
@@ -135,19 +145,21 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 }
 
 // effectivePolicyDigest is "sha256:" + the hex SHA-256 of the canonical JSON
-// {"v":1,"assets":{...},"profiles":{...}}. Map keys marshal sorted.
+// {"v":1,"config":...,"assets":{...},"profiles":{...}}. Map keys marshal
+// sorted.
 func effectivePolicyDigest(components, profiles map[string]string) string {
 	assets := make(map[string]string, len(components))
 	for key, value := range components {
-		if !strings.HasPrefix(key, "profile:") {
+		if key != "config" && !strings.HasPrefix(key, "profile:") {
 			assets[key] = value
 		}
 	}
 	raw, _ := json.Marshal(struct {
 		V        int               `json:"v"`
+		Config   string            `json:"config"`
 		Assets   map[string]string `json:"assets"`
 		Profiles map[string]string `json:"profiles"`
-	}{V: 1, Assets: assets, Profiles: profiles})
+	}{V: 1, Config: components["config"], Assets: assets, Profiles: profiles})
 	sum := sha256.Sum256(raw)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
@@ -256,6 +268,7 @@ func publishGeneration(g *Generation) {
 	g.N = generationSeq.Add(1)
 	liveGeneration.Store(g)
 	liveReloadError.Store("")
+	applyGenerationProviders(g.Providers)
 }
 
 // refreshConfigGeneration republishes the live generation with the current
