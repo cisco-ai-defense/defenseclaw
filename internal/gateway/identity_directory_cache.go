@@ -15,17 +15,20 @@ import (
 // Hook calls read only memory. A cached answer is served even when it is
 // older than identityDirectoryTTL, and one background refresh replaces it
 // (stale-while-revalidate). A key never seen before starts one shared
-// lookup (singleflight); the caller waits for it at most
-// identityDirectoryBudget, and only when asked to block, otherwise it gets no
-// facts this time and the next request finds them cached. A failed lookup is
-// retried no sooner than identityDirectoryRetry.
+// lookup (singleflight), and the request that started it waits for it at
+// most identityDirectoryBudget, so an account's first record after a
+// gateway start (an upgrade, a restart) carries its verified facts rather
+// than falling back to claimed ones. Other requests wait for an unresolved
+// key only when asked to block; otherwise they get no facts this time and a
+// later request finds them cached. A failed lookup is retried no sooner than
+// identityDirectoryRetry.
 //
-// Callers block only when a guardrail profile assignment selects by user or
+// Callers block when a guardrail profile assignment selects by user or
 // group, so the budget covers a cold SSSD or Active Directory lookup (often
-// one to two seconds) and the first request after a cold cache still gets
-// its group profile. A lookup slower than that selects the default profile
-// with match default_lookup_failed; the budget stays well inside the hook
-// request timeout.
+// one to two seconds) and every request still gets its group profile while
+// the first lookup is in flight or after it failed. A lookup slower than
+// that selects the default profile with match default_lookup_failed; the
+// budget stays well inside the hook request timeout.
 
 const (
 	identityDirectoryTTL    = 15 * time.Minute
@@ -63,8 +66,9 @@ func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] 
 	return &identityCache[T]{resolve: resolve, now: time.Now, entries: map[string]*identityCacheEntry[T]{}}
 }
 
-// get returns key's facts. ok is false when nothing is cached yet (and,
-// with block, the lookup did not finish within the budget).
+// get returns key's facts. ok is false when nothing is cached yet and the
+// lookup did not finish within the budget (or, after the first request for
+// key, the caller did not ask to block).
 func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	var zero T
 	if c == nil || key == "" || c.resolve == nil {
@@ -73,7 +77,8 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	c.mu.Lock()
 	now := c.now()
 	entry := c.entries[key]
-	if entry == nil {
+	first := entry == nil
+	if first {
 		if len(c.entries) >= identityDirectoryMax {
 			c.evictLocked()
 		}
@@ -91,7 +96,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	}
 	wait := entry.inflight
 	c.mu.Unlock()
-	if !block || wait == nil {
+	if !(block || first) || wait == nil {
 		return zero, false
 	}
 	timer := time.NewTimer(identityDirectoryBudget)
