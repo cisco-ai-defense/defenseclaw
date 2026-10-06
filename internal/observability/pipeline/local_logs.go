@@ -468,7 +468,16 @@ func (pipeline *LocalLogPipeline) process(
 		fmt.Fprintf(os.Stderr,
 			"[obs-pipeline] appender.AppendContext failed bucket=%s event=%s signal=%s connector=%s error=%s\n",
 			record.Bucket(), record.EventName(), record.Signal(), record.Connector(), ErrorLocalWrite)
-		return LocalLogOutcome{}, boundedPipelineError(ErrorLocalWrite, err)
+		writeErr := boundedPipelineError(ErrorLocalWrite, err)
+		if !exportOnWriteFailure || writeErr.contextCause != nil {
+			return LocalLogOutcome{}, writeErr
+		}
+		// GAP-1536: a local-store failure (disk full, read-only) should
+		// still return remote projections for this gateway's own record so
+		// the decision and the outage stay visible remotely. Imported
+		// records stay SQLite-first and skip this path.
+		pipeline.projectOptional(&outcome, record, optional, sinkPolicy, originDestination)
+		return outcome, writeErr
 	}
 	outcome.localPersisted = true
 	if localOnly {
