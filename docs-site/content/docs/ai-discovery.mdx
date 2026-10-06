@@ -401,8 +401,9 @@ ide-plugins` does the same from an elevated prompt.
   `ai_only`, a page at a time (`limit`, at most 1000, and `cursor` from the
   previous page's `next_cursor`). Paths appear only as hashes. `total` and
   `counts` (plugins, AI, disabled, users, installations and per-IDE) describe
-  the rows the filters select across all pages; `GET /api/v1/ai-usage`
-  carries the same counts for the whole machine.
+  the rows the filters select across all pages, and with `ai_only` the
+  `installations` list keeps only the installations that hold an AI plugin;
+  `GET /api/v1/ai-usage` carries the same counts for the whole machine.
 - AIBOM reports the list in its `ide_plugins` category.
 - The TUI shows it under Inventory → **IDE plugins**.
 - Each change is exported as an `ide.plugin.discovered`, `ide.plugin.changed`

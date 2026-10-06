@@ -168,16 +168,20 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	resp["scope"] = inv.Scope
 	resp["scan_id"] = ""
 	resp["scanned_at"] = inv.ScannedAt
-	installs := []inventory.IDEInstallation{}
-	for _, inst := range inv.Installations {
-		if useridentity.AccountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) {
-			installs = append(installs, inst)
-		}
-	}
 	plugins := []inventory.IDEPlugin{}
+	withPlugin := map[string]bool{}
 	for _, p := range inv.Plugins {
 		if useridentity.AccountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
 			plugins = append(plugins, p)
+			withPlugin[p.InstallID] = true
+		}
+	}
+	// ai_only keeps only the installations that hold a selected plugin
+	// (GAP-0104); the user and ide filters keep plugin-less installations.
+	installs := []inventory.IDEInstallation{}
+	for _, inst := range inv.Installations {
+		if useridentity.AccountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) && (!aiOnly || withPlugin[inst.InstallID]) {
+			installs = append(installs, inst)
 		}
 	}
 	total := len(plugins)
