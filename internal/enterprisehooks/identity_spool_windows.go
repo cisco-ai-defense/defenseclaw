@@ -66,7 +66,7 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, s
 		name := key + ".json"
 		keep[strings.ToLower(name)] = true
 		now := time.Now().UTC()
-		facts := useridentity.WindowsDirectoryFacts(key)
+		facts := useridentity.WindowsDirectoryFacts(key, 0)
 		groupSIDs := cache.Users[sid]
 		names := useridentity.WindowsGroupNames(groupSIDs, windowsIdentityGroupNameLimit, windowsIdentityGroupNameBudget)
 		groups := make([]string, 0, 2*len(groupSIDs))

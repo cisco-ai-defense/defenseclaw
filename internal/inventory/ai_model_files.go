@@ -293,7 +293,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				macOSHomeLibrary := runtime.GOOS == "darwin" && !root.specialized &&
 					isMacOSHomeLibrary(path, homes)
 				if path != root.path && (shouldSkipModelDirectoryForRoot(d.Name(), root) || macOSHomeLibrary ||
-					modelPathInSet(path, ownDataDirs)) {
+					modelPathInSet(path, ownDataDirs)) || s.macOSTCCSkipped(path) {
 					lastCompleted = path
 					return filepath.SkipDir
 				}
@@ -872,6 +872,9 @@ func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScan
 			return
 		}
 		path = filepath.Clean(path)
+		if s.macOSTCCSkipped(path) {
+			return
+		}
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
 			if !os.IsNotExist(err) && !s.discoveryAccessSkipped(err) {

@@ -156,7 +156,7 @@ func newHookCmd() *cobra.Command {
 // shell cannot read a credential cache; it caches the value in
 // ~/.defenseclaw/session-facts.json, which the hooks read without running
 // it for the next five minutes (30 seconds when a KCM read failed in
-// transit).
+// transit or the macOS klist timed out).
 func newHookSessionFactsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:    "session-facts",
