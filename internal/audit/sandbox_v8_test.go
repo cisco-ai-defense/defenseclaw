@@ -115,6 +115,8 @@ func recordSandboxEvent(ctx context.Context, recorder *SandboxRecorder, event an
 		return recorder.RecordSandboxFinding(ctx, event)
 	case SandboxWorkspaceEvent:
 		return recorder.RecordSandboxWorkspace(ctx, event)
+	case SandboxProcessEvent:
+		return recorder.RecordSandboxProcess(ctx, event)
 	}
 	panic(fmt.Sprintf("recordSandboxEvent: unsupported event %T", event))
 }

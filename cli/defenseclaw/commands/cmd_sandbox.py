@@ -264,6 +264,11 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             ),
             _Flag("no-mcp", "bool", "leave the harness's MCP servers behind"),
             _Flag(
+                "process-tree",
+                "bool",
+                "sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off",
+            ),
+            _Flag(
                 "detach",
                 "bool",
                 "run in the background (needs --prompt); follow with sandbox logs -f",
@@ -458,6 +463,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         "Find the AI components inside a running sandbox now (MCP servers, skills, CLIs, agents)",
         args=(_Arg("name"),),
         flags=(_OUTPUT, _JSON),
+    ),
+    _Cmd(
+        ("ps",),
+        "List the processes of a sandbox whose process tree is on",
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON, _Flag("tree", "bool", "show each process under its parent")),
     ),
     _Cmd(("policy",), "Show, explain and adjust the sandbox policy"),
     _Cmd(("policy", "show"), "Show the effective sandbox policy", flags=_policy_flags()),

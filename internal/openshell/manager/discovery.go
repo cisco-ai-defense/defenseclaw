@@ -24,6 +24,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -64,7 +65,7 @@ const (
 )
 
 // observeRun is the running observer of a ready sandbox: its discovery
-// cadence.
+// cadence and, with the process tree on, its process samples.
 type observeRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -108,6 +109,7 @@ func (m *Manager) syncObserve(b *box, phase audit.SandboxPhase) {
 	}
 	if stoppedWorkload(phase) {
 		m.dropDiscoveredProcesses(name)
+		m.endProcessTree(b)
 	}
 }
 
@@ -173,6 +175,9 @@ func (m *Manager) observeNow(b *box) {
 func (m *Manager) observeLoop(ctx context.Context, b *box, run *observeRun) {
 	next := time.NewTimer(observeFirstDelay)
 	defer next.Stop()
+	sample := time.NewTimer(processSampleInterval)
+	defer sample.Stop()
+	slow := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -183,8 +188,32 @@ func (m *Manager) observeLoop(ctx context.Context, b *box, run *observeRun) {
 		case <-next.C:
 			m.scheduledDiscovery(ctx, b)
 			next.Reset(m.discoveryInterval())
+		case <-sample.C:
+			// One exec a sample, and none while the tree is off. On the vm
+			// driver, where every exec crosses into a MicroVM, a slow sample
+			// sets the pace for the rest of the session.
+			took, sampled := m.sampleProcesses(ctx, b)
+			if sampled && !slow && took > processSampleSlow && m.driverName() == openshell.DriverVM {
+				slow = true
+				m.logf("sandbox %s: a process sample took %s on the vm driver; its processes are sampled every %s instead of %s",
+					b.name(m), took.Round(time.Millisecond), processSampleIntervalVM, processSampleInterval)
+			}
+			if slow {
+				sample.Reset(processSampleIntervalVM)
+			} else {
+				sample.Reset(processSampleInterval)
+			}
 		}
 	}
+}
+
+// driverName is the compute driver of the connected gateway, empty while
+// none answered.
+func (m *Manager) driverName() openshell.ComputeDriver {
+	if d := m.gwDriver.Load(); d != nil {
+		return d.Name
+	}
+	return ""
 }
 
 // name is the box's sandbox name.
@@ -313,6 +342,14 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 	report, err := inventory.ScanSandboxRoot(ctx, scan, opts, catalog)
 	if err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "scan sandbox %s: %v", rec.Name, err)
+	}
+	m.mu.Lock()
+	stillReady := b.phase == audit.SandboxPhaseReady && !b.deleted
+	m.mu.Unlock()
+	if !stillReady {
+		// The sandbox stopped while it was read: its processes ended with it
+		// (dropDiscoveredProcesses ran already).
+		report.Signals = slices.DeleteFunc(report.Signals, func(sig inventory.AISignal) bool { return sig.Detector == "process" })
 	}
 	record := inventory.SandboxScanRecord{SandboxID: id, SandboxName: rec.Name, UpdatedAt: m.now().UTC(), Report: report}
 	if err := inventory.WriteSandboxScanRecord(m.scanRecordPath(rec.Name), record); err != nil {

@@ -157,6 +157,15 @@ These are the settings each pack controls. The
   - Approvals are applied in batches when the sandbox's hooks are quiet,
     because every OpenShell policy change closes the sandbox's open
     connections. `openshell.approvals.debounce_ms` sets how quiet.
+- **Process tree** (`observe.process_tree`): sample the sandbox's processes
+  every 5 seconds while it runs (every 15 seconds on a Mac when sampling its
+  MicroVM is slow), with what OpenShell reports of processes starting and
+  exiting, for `defenseclaw sandbox ps`, the TUI's sandbox detail and the
+  `sandbox.process_tree` telemetry records. Off in every built-in pack;
+  `sandbox run --process-tree` turns it on for one sandbox. A process that
+  starts and ends between two samples, and that OpenShell does not report, is
+  not seen, and the agent chooses its processes' names and arguments, so the
+  tree is a view of what ran, not a control.
 - **Blocklist feeds** (`egress.feeds`): `builtin` is DefenseClaw's curated
   blocklist and the only feed.
 - **Block and allow lists** (`egress.block`, `egress.allow`): host patterns.
@@ -353,6 +362,7 @@ added. Copy the registry and source hosts you need from
 | `description` | No | Empty | At most 1024 characters. |
 | `network.mode` | Yes | | `open`, `allowlist`, or `deny`. |
 | `approvals.mode` | Yes | | `auto`, `triage`, or `manual`. |
+| `observe.process_tree` | No | `false` | `true` samples the sandbox's processes while it runs. |
 | `egress.feeds` | No | `[builtin]` | Only `builtin`; `[]` turns the feed off. At most 16. |
 | `egress.block` | No | `[]` | Host patterns. At most 1024. |
 | `egress.allow` | No | `[]` | Host patterns, but never one that covers a whole top-level domain such as `*.com` or `*.co.uk`, or an address range wider than `/8` (IPv4) or `/16` (IPv6). At most 1024. |
@@ -493,6 +503,7 @@ unset follows the pack. Some settings merge instead of replacing:
 | Approvals | The pack's mode, but never looser than the profile: `balanced` triages at least, and `strict` asks about every request. |
 | Skip-permissions | The pack's `harness.yolo`, then `openshell.yolo`, then the run. Keeping the harness prompts for a run always wins. |
 | Allowed harnesses | The pack's list and `openshell.admin.allowed_harnesses`. When both are set, only harnesses on both lists can run. |
+| Process tree | The pack's `observe.process_tree`, or on for a run with `--process-tree`. Nothing turns a pack's `true` off, so an organization that wants it sets it in its required pack. |
 | Workspace mode | The pack's mode, then `openshell.workdir.mode`, then copy mode for a run. |
 | Secret masks | The pack's masks plus `openshell.workdir.masks`. Masks can be added but not removed; only unmask entries reveal a masked file. |
 | Unmask | The pack's list plus `openshell.workdir.unmask` plus the run's entries. |

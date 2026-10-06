@@ -117,6 +117,7 @@ type Pack struct {
 	Description string          `yaml:"description" json:"description,omitempty"`
 	Network     NetworkPolicy   `yaml:"network"     json:"network"`
 	Approvals   ApprovalsPolicy `yaml:"approvals"   json:"approvals"`
+	Observe     ObservePolicy   `yaml:"observe"     json:"observe"`
 	Egress      EgressPolicy    `yaml:"egress"      json:"egress"`
 	Workspace   WorkspacePolicy `yaml:"workspace"   json:"workspace"`
 	Harness     HarnessPolicy   `yaml:"harness"     json:"harness"`
@@ -140,6 +141,15 @@ type NetworkPolicy struct {
 // ApprovalsPolicy selects how OpenShell draft proposals are handled.
 type ApprovalsPolicy struct {
 	Mode string `yaml:"mode" json:"mode"`
+}
+
+// ObservePolicy selects what DefenseClaw watches inside the sandbox beyond
+// what OpenShell reports.
+type ObservePolicy struct {
+	// ProcessTree samples the sandbox's processes every few seconds
+	// (`sandbox ps`, the sandbox.process_tree records). Off unless a pack
+	// or `sandbox run --process-tree` turns it on.
+	ProcessTree bool `yaml:"process_tree" json:"process_tree"`
 }
 
 // EgressPolicy configures the DefenseClaw egress proxy.
@@ -296,6 +306,7 @@ type packFile struct {
 	Description *string        `yaml:"description"`
 	Network     *networkFile   `yaml:"network"`
 	Approvals   *approvalsFile `yaml:"approvals"`
+	Observe     *observeFile   `yaml:"observe"`
 	Egress      *egressFile    `yaml:"egress"`
 	Workspace   *workspaceFile `yaml:"workspace"`
 	Harness     *harnessFile   `yaml:"harness"`
@@ -309,6 +320,10 @@ type networkFile struct {
 
 type approvalsFile struct {
 	Mode *string `yaml:"mode"`
+}
+
+type observeFile struct {
+	ProcessTree *bool `yaml:"process_tree"`
 }
 
 type egressFile struct {
@@ -390,6 +405,11 @@ func (f *packFile) normalize(source string) (*Pack, error) {
 		approvals = &approvalsFile{}
 	}
 	p.Approvals.Mode = v.enum("approvals.mode", approvals.Mode, ApprovalsAuto, ApprovalsTriage, ApprovalsManual)
+
+	// observe is optional: an absent key leaves the process tree off.
+	if f.Observe != nil && f.Observe.ProcessTree != nil {
+		p.Observe.ProcessTree = *f.Observe.ProcessTree
+	}
 
 	egress := f.Egress
 	if egress == nil {

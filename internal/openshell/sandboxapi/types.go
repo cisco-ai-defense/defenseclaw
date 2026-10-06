@@ -131,6 +131,9 @@ type CreateRequest struct {
 	Learn     bool     `json:"learn,omitempty"`
 	CPU       string   `json:"cpu,omitempty"`
 	Memory    string   `json:"memory,omitempty"`
+	// ProcessTree turns the process tree on for this sandbox (the pack's
+	// observe.process_tree turns it on for every one).
+	ProcessTree bool `json:"process_tree,omitempty"`
 	// NoSnapshot skips the pre-session snapshot of a mounted project, which
 	// also disables undo for this session.
 	NoSnapshot bool `json:"no_snapshot,omitempty"`
@@ -202,6 +205,9 @@ type Sandbox struct {
 	NetworkMode string `json:"network_mode,omitempty"`
 	Approvals   string `json:"approvals,omitempty"`
 	Yolo        bool   `json:"yolo"`
+	// ProcessTree reports that the sandbox's processes are sampled while it
+	// runs (GET /sandboxes/{name}/processes, `sandbox ps`).
+	ProcessTree bool `json:"process_tree,omitempty"`
 	// SessionYolo reports whether the session running now was launched in
 	// skip-permissions mode: Launch.Yolo as it was when the sandbox last
 	// became ready. Yolo and Launch.Yolo are what the next launch gets;

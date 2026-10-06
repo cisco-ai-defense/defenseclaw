@@ -313,6 +313,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 	f.StringArrayVar(&o.Credentials, "credential", nil, "NAME=host[:port]: give the sandbox a placeholder for $NAME that works only against that host (repeatable)")
 	f.BoolVar(&o.GitHubWrite, "github-write", false, "bind your GitHub token (GH_TOKEN or GITHUB_TOKEN) to api.github.com so gh can call the GitHub API (for example to open pull requests) with everything the token may do; git push over HTTPS is not covered")
 	f.BoolVar(&o.NoMCP, "no-mcp", false, "leave the harness's MCP servers behind")
+	f.BoolVar(&o.ProcessTree, "process-tree", false, "sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off")
 	f.BoolVarP(&o.Detach, "detach", "d", false, "run in the background (needs --prompt); follow with sandbox logs -f")
 	f.BoolVar(&o.Rm, "rm", false, "delete the sandbox when the session ends")
 	f.BoolVar(&o.Keep, "keep", false, "keep the sandbox of a headless run (--prompt), which is otherwise deleted at its end when nothing is left in it to bring back or undo")

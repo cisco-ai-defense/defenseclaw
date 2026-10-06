@@ -379,6 +379,8 @@ type collection struct {
 	Executables map[string]collectedEntry
 	Entries     []collectedEntry
 	Contents    map[string][]byte
+	// ProcessesCapped reports processes left out at the process bound.
+	ProcessesCapped bool
 	// Ended is set when the answer was complete.
 	Ended bool
 	// Problems say where the answer fell short (a bound, records refused).
@@ -445,7 +447,11 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 			c.Boot = time.Unix(secs, 0).UTC()
 		case "P":
 			f := strings.Split(rest, " ")
-			if len(f) != 5 || len(c.Processes) >= collectMaxProcesses {
+			if len(c.Processes) >= collectMaxProcesses {
+				c.ProcessesCapped = true
+				continue
+			}
+			if len(f) != 5 {
 				refuse()
 				continue
 			}
@@ -559,6 +565,7 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 			}
 			c.Contents[p] = content
 		case "Q":
+			c.ProcessesCapped = c.ProcessesCapped || rest == "processes"
 			c.Problems = appendOnce(c.Problems, "the collector stopped at its bound of "+collectText(rest, 64))
 		default:
 			refuse()
@@ -566,6 +573,9 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 	}
 	if entryCapped {
 		c.Problems = append(c.Problems, fmt.Sprintf("the sandbox listed more than %d entries", collectMaxEntries))
+	}
+	if c.ProcessesCapped {
+		c.Problems = appendOnce(c.Problems, fmt.Sprintf("the sandbox has more than %d processes", collectMaxProcesses))
 	}
 	if truncated {
 		c.Problems = append(c.Problems, fmt.Sprintf("the collector's answer was cut at %d bytes", collectStreamBytes))

@@ -53,6 +53,7 @@ type SandboxTelemetry interface {
 	RecordSandboxHealth(context.Context, SandboxHealthEvent) error
 	RecordSandboxFinding(context.Context, SandboxFindingEvent) error
 	RecordSandboxWorkspace(context.Context, SandboxWorkspaceEvent) error
+	RecordSandboxProcess(context.Context, SandboxProcessEvent) error
 }
 
 // SandboxPhase is the defenseclaw.sandbox.phase vocabulary: the OpenShell

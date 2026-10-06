@@ -1,0 +1,457 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package manager
+
+import (
+	"context"
+	"path"
+	"regexp"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
+)
+
+// The process tree (opt-in: the pack's observe.process_tree, or `sandbox run
+// --process-tree`). While a sandbox with it on is ready, the collector
+// samples its /proc every processSampleInterval (one exec; on the vm driver
+// every processSampleIntervalVM once a sample is slow): the pid, parent,
+// uid, start time, comm, executable, working folder and first arguments of
+// every process. OpenShell's PROC LAUNCH and TERMINATE records join the tree
+// as they arrive (they name a process and its binary, not its parent; the
+// next sample fills that in). The tree is bounded (procTreeMaxLive live
+// processes, the procTreeMaxExited most recently ended ones), every process
+// that joins it is recorded once as started and once as exited
+// (sandbox.process_tree, at most processRecordBurst at once and
+// processRecordRate a second per sandbox), and Lineage walks it for the
+// egress destinations. Its limits are those of sampling: a process that
+// starts and ends between two samples, and that OpenShell does not report,
+// is never seen; and every field is the agent's to choose (its arguments,
+// its comm, its executable path): display text, never a decision.
+
+const (
+	processSampleInterval   = 5 * time.Second
+	processSampleIntervalVM = 15 * time.Second
+	// processSampleSlow is the sample time past which the vm driver's
+	// sandboxes are sampled every processSampleIntervalVM.
+	processSampleSlow    = time.Second
+	processSampleTimeout = 10 * time.Second
+	procTreeMaxLive      = 4096
+	procTreeMaxExited    = 1024
+	processRecordBurst   = 200
+	processRecordRate    = 10
+	maxLineageDepth      = 32
+	maxCmdlineBytes      = 1024
+)
+
+// Process sources (sandboxapi.Process.Source).
+const (
+	processSourceSample = "sample"
+	processSourceOCSF   = "ocsf"
+)
+
+// procNode is one process of the tree. startTicks is its start in clock
+// ticks since boot, 0 while only OpenShell reported it.
+type procNode struct {
+	PID, PPID, UID int
+	startTicks     int64
+	Start          time.Time
+	Comm, Exe, Cwd string
+	Cmdline        string
+	Source         string
+	FirstSeen      time.Time
+	ExitedAt       time.Time
+	ExitCode       *int
+}
+
+// procTree is one sandbox's process tree.
+type procTree struct {
+	mu        sync.Mutex
+	live      map[int]*procNode
+	exited    []*procNode
+	sampledAt time.Time
+	truncated bool
+	// gate paces the tree's records; heldAt is when the log last said how
+	// many it held back.
+	gate   *rateGate
+	heldAt time.Time
+}
+
+func newProcTree() *procTree {
+	return &procTree{live: map[int]*procNode{}, gate: newRateGate(processRecordBurst, processRecordRate)}
+}
+
+// processTreeOn reports whether the box's policy has the process tree on.
+// Callers hold Manager.mu.
+func (b *box) processTreeOn() bool {
+	return b.eff != nil && b.eff.ProcessTree
+}
+
+// tree returns the box's process tree, making it on first use. Callers hold
+// Manager.mu.
+func (b *box) tree() *procTree {
+	if b.procs == nil {
+		b.procs = newProcTree()
+	}
+	return b.procs
+}
+
+// sampleProcesses takes one sample of a ready sandbox whose process tree is
+// on, and records the processes that started and exited since the last
+// one. It reports how long the exec took and whether it ran.
+func (m *Manager) sampleProcesses(ctx context.Context, b *box) (time.Duration, bool) {
+	m.mu.Lock()
+	on := b.processTreeOn() && b.phase == audit.SandboxPhaseReady && !b.deleted && !b.retained
+	name := b.rec.Name
+	m.mu.Unlock()
+	if !on {
+		return 0, false
+	}
+	gw, err := m.gateway(ctx)
+	if err != nil {
+		return 0, false
+	}
+	start := m.now()
+	execStart := time.Now()
+	res, err := gw.Client.Exec(ctx, name, collectArgv("ps", 1, []string{"O", "argv", "O", "cwd"}), openshell.ExecOptions{
+		Timeout: processSampleTimeout, Attempts: 1, MaxOutputBytes: collectStreamBytes,
+	})
+	took := time.Since(execStart)
+	if err != nil {
+		m.dropGateway(gw, err)
+		if ctx.Err() == nil {
+			m.logf("sandbox %s: process sample: %v", name, err)
+		}
+		return took, false
+	}
+	col, err := parseCollection(res.Stdout, res.Truncated, newCollectScope(), 1)
+	if err != nil {
+		m.logf("sandbox %s: process sample: %v", name, err)
+		return took, true
+	}
+	m.mu.Lock()
+	t := b.tree()
+	id := b.identity()
+	m.mu.Unlock()
+	started, exited := t.merge(col, start, m.now())
+	m.recordProcesses(ctx, b, id, t, started, exited)
+	return took, true
+}
+
+// merge folds one sample, taken from sampledAt on, into the tree and returns
+// the processes that started and exited. A pid the sample shows with
+// another start time is a new process; a live process the sample lacks has
+// exited, unless it joined the tree after the sample was taken.
+func (t *procTree) merge(c *collection, sampledAt, now time.Time) (started, exited []*procNode) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sampledAt = now
+	t.truncated = c.ProcessesCapped || len(c.Processes) > procTreeMaxLive
+	seen := map[int]bool{}
+	for _, p := range c.Processes {
+		if len(seen) >= procTreeMaxLive {
+			break
+		}
+		seen[p.PID] = true
+		node := t.live[p.PID]
+		if node != nil && node.startTicks != 0 && node.startTicks != p.StartTicks {
+			exited = append(exited, t.exitLocked(node, now, nil))
+			node = nil
+		}
+		fresh := node == nil
+		if fresh {
+			node = &procNode{PID: p.PID, FirstSeen: now, Source: processSourceSample}
+			t.live[p.PID] = node
+		}
+		node.PPID, node.UID, node.startTicks, node.Start = p.PPID, p.UID, p.StartTicks, c.started(p)
+		if p.Comm != "" {
+			node.Comm = p.Comm
+		}
+		if p.Exe != "" {
+			node.Exe = p.Exe
+		}
+		node.Cwd = p.Cwd
+		if len(p.Args) > 0 {
+			node.Cmdline = processCmdline(p.Args)
+		}
+		if fresh {
+			started = append(started, node)
+		}
+	}
+	for pid, node := range t.live {
+		if !seen[pid] && node.FirstSeen.Before(sampledAt) {
+			exited = append(exited, t.exitLocked(node, now, nil))
+		}
+	}
+	return started, exited
+}
+
+// exitLocked moves a live process to the exited ones, the least recently
+// ended dropped past procTreeMaxExited. Callers hold t.mu.
+func (t *procTree) exitLocked(node *procNode, at time.Time, code *int) *procNode {
+	delete(t.live, node.PID)
+	node.ExitedAt, node.ExitCode = at, code
+	t.exited = append(t.exited, node)
+	if over := len(t.exited) - procTreeMaxExited; over > 0 {
+		t.exited = slices.Delete(t.exited, 0, over)
+	}
+	return node
+}
+
+// observeOCSFProcess indexes an OpenShell PROC record of a sandbox whose
+// process tree is on: a launch joins the tree, a terminate ends the process
+// with its exit status.
+func (m *Manager) observeOCSFProcess(ctx context.Context, b *box, r ocsf.Record, at time.Time) {
+	// A record from before this daemon started is OpenShell replaying its
+	// stream: the process it names may be long gone.
+	if !r.HasPID || r.PID <= 0 || at.Before(m.startedAt) {
+		return
+	}
+	m.mu.Lock()
+	on := b.processTreeOn()
+	t := b.tree()
+	id := b.identity()
+	m.mu.Unlock()
+	if !on {
+		return
+	}
+	var started, exited []*procNode
+	t.mu.Lock()
+	node := t.live[r.PID]
+	switch strings.ToUpper(r.Activity) {
+	case "LAUNCH":
+		if node == nil && len(t.live) < procTreeMaxLive {
+			node = &procNode{PID: r.PID, FirstSeen: at, Source: processSourceOCSF}
+			binary := collectText(r.Binary, collectMaxPathBytes)
+			node.Comm, node.Exe = collectText(path.Base(binary), collectMaxCommBytes), binary
+			if r.CmdLine != "" {
+				node.Cmdline = processCmdline(strings.Fields(r.CmdLine))
+			}
+			t.live[r.PID] = node
+			started = append(started, node)
+		}
+	case "TERMINATE":
+		if node != nil {
+			exited = append(exited, t.exitLocked(node, at, r.ExitCode))
+		}
+	}
+	t.mu.Unlock()
+	m.recordProcesses(ctx, b, id, t, started, exited)
+}
+
+// endProcessTree ends every live process of a sandbox that stopped.
+func (m *Manager) endProcessTree(b *box) {
+	m.mu.Lock()
+	t := b.procs
+	id := b.identity()
+	m.mu.Unlock()
+	if t == nil {
+		return
+	}
+	now := m.now()
+	t.mu.Lock()
+	var exited []*procNode
+	for _, node := range t.live {
+		exited = append(exited, t.exitLocked(node, now, nil))
+	}
+	t.mu.Unlock()
+	if ctx := m.running(); ctx != nil {
+		m.recordProcesses(ctx, b, id, t, nil, exited)
+	}
+}
+
+// recordProcesses records the processes that started and exited, within the
+// tree's record rate; the log says once a minute how many it held back.
+func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxIdentity, t *procTree, started, exited []*procNode) {
+	emit := func(node *procNode, event string, at time.Time) {
+		t.mu.Lock()
+		lineage := t.lineageNamesLocked(node.PPID)
+		t.mu.Unlock()
+		if !t.gate.take(processGateKey, at) {
+			return
+		}
+		ev := audit.SandboxProcessEvent{
+			Sandbox: id, Event: event, Source: node.Source, PID: node.PID, ParentPID: node.PPID,
+			Executable: node.Exe, Name: node.Comm, CommandLine: node.Cmdline, WorkingDirectory: node.Cwd,
+			ExitCode: node.ExitCode, Lineage: lineage, Timestamp: at,
+		}
+		if err := m.tel.RecordSandboxProcess(ctx, ev); err != nil {
+			m.logf("sandbox %s: process telemetry: %v", id.Name, err)
+		}
+	}
+	for _, node := range started {
+		emit(node, audit.SandboxProcessStart, node.FirstSeen)
+	}
+	for _, node := range exited {
+		emit(node, audit.SandboxProcessExit, node.ExitedAt)
+	}
+	now := m.now()
+	t.mu.Lock()
+	report := now.Sub(t.heldAt) >= time.Minute
+	if report {
+		t.heldAt = now
+	}
+	t.mu.Unlock()
+	if !report {
+		return
+	}
+	for _, held := range t.gate.drain(now) {
+		m.logf("sandbox %s: %d process records were not sent: the sandbox starts processes faster than %d a second", id.Name, held.n, processRecordRate)
+	}
+}
+
+// processGateKey is the one key of a tree's record gate.
+const processGateKey = "processes"
+
+// lineageNamesLocked is the comm of each ancestor from pid up, at most
+// maxLineageDepth of them. Callers hold t.mu.
+func (t *procTree) lineageNamesLocked(pid int) []string {
+	var out []string
+	seen := map[int]bool{}
+	for pid > 0 && len(out) < maxLineageDepth && !seen[pid] {
+		seen[pid] = true
+		node := t.live[pid]
+		if node == nil {
+			break
+		}
+		out = append(out, node.Comm)
+		pid = node.PPID
+	}
+	return out
+}
+
+// Lineage returns the process pid of sandbox sandboxName and its ancestors,
+// nearest first, from the sandbox's process tree; nil while the tree is
+// off or does not hold the process. It implements ProcessLookup.
+func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
+	m.mu.Lock()
+	b := m.boxes[sandboxName]
+	var t *procTree
+	if b != nil {
+		t = b.procs
+	}
+	m.mu.Unlock()
+	if t == nil || pid <= 0 {
+		return nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []ProcessRef
+	seen := map[int]bool{}
+	for pid > 0 && len(out) < maxLineageDepth && !seen[pid] {
+		seen[pid] = true
+		node := t.live[pid]
+		if node == nil {
+			for i := len(t.exited) - 1; i >= 0; i-- {
+				if t.exited[i].PID == pid {
+					node = t.exited[i]
+					break
+				}
+			}
+		}
+		if node == nil {
+			break
+		}
+		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.Comm, Exe: node.Exe})
+		pid = node.PPID
+	}
+	return out
+}
+
+var _ ProcessLookup = (*Manager)(nil)
+
+// Processes returns a sandbox's process tree (GET
+// /sandboxes/{name}/processes): its live processes, and the ones that
+// ended most recently.
+func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.ProcessList, error) {
+	b, err := m.box(name)
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	out := &sandboxapi.ProcessList{Name: b.rec.Name, Enabled: b.processTreeOn(), Processes: []sandboxapi.Process{}}
+	t := b.procs
+	if out.Enabled {
+		out.IntervalSeconds = int(processSampleInterval / time.Second)
+	}
+	m.mu.Unlock()
+	if t == nil {
+		return out, nil
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out.SampledAt, out.Truncated = t.sampledAt, t.truncated
+	for _, node := range t.live {
+		out.Processes = append(out.Processes, node.view())
+	}
+	for i := len(t.exited) - 1; i >= 0 && len(out.Exited) < sandboxapi.MaxExitedProcesses; i-- {
+		out.Exited = append(out.Exited, t.exited[i].view())
+	}
+	slices.SortFunc(out.Processes, func(a, b sandboxapi.Process) int { return a.PID - b.PID })
+	return out, nil
+}
+
+func (n *procNode) view() sandboxapi.Process {
+	return sandboxapi.Process{
+		PID: n.PID, PPID: n.PPID, UID: n.UID, StartedAt: n.Start, ExitedAt: n.ExitedAt, ExitCode: n.ExitCode,
+		Comm: sandboxapi.DisplayText(n.Comm), Exe: sandboxapi.DisplayText(n.Exe), Cwd: sandboxapi.DisplayText(n.Cwd),
+		Cmdline: sandboxapi.DisplayText(n.Cmdline), Source: n.Source,
+	}
+}
+
+// secretArg is an argument that names a secret (--token=…, api_key=…), and
+// secretFlag a flag whose next argument is one (--password value).
+var (
+	secretArg  = regexp.MustCompile(`(?i)^(-{0,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*[=:])(.+)$`)
+	secretFlag = regexp.MustCompile(`(?i)^-{1,2}[a-z0-9_.-]*(?:token|secret|passw(?:or)?d|api[_-]?key|auth|credential|private[_-]?key)[a-z0-9_.-]*$`)
+	// longToken is a bare argument shaped like a key: 32 or more letters,
+	// digits and key punctuation with both letters and digits.
+	longToken = regexp.MustCompile(`^[A-Za-z0-9_\-+/=.]{32,}$`)
+)
+
+// processCmdline is a process's argument vector as the process tree keeps
+// and shows it: joined, the values of arguments that name secrets and
+// key-shaped arguments replaced by redaction placeholders, at most
+// maxCmdlineBytes. Telemetry destinations redact it again by their own
+// profile (it is content).
+func processCmdline(args []string) string {
+	out := make([]string, 0, len(args))
+	hideNext := false
+	for _, a := range args {
+		switch {
+		case hideNext:
+			a, hideNext = redaction.ForSinkEntity(a), false
+		case secretArg.MatchString(a):
+			m := secretArg.FindStringSubmatch(a)
+			a = m[1] + redaction.ForSinkEntity(m[2])
+		case secretFlag.MatchString(a):
+			hideNext = true
+		case longToken.MatchString(a) && strings.ContainsAny(a, "0123456789") && strings.IndexFunc(a, isLetter) >= 0 && !strings.Contains(a, "/"):
+			a = redaction.ForSinkEntity(a)
+		}
+		out = append(out, a)
+	}
+	return truncate(strings.Join(out, " "), maxCmdlineBytes)
+}
+
+func isLetter(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') }

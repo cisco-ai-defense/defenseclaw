@@ -98,6 +98,9 @@ type box struct {
 	// (discovery.go); discoverMu serializes its discoveries.
 	observe    *observeRun
 	discoverMu sync.Mutex
+	// procs is the sandbox's process tree (processes.go), made once its
+	// process tree is on.
+	procs *procTree
 
 	hooks       hookStats
 	activeAt    time.Time
@@ -593,7 +596,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		RunImage: r.RunImage, RunImageID: r.RunImageID,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Session: r.Sessions, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
-		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
+		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard), ProcessTree: b.processTreeOn(),
 		Launch:      sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
 		Credentials: slices.Clone(r.Credentials), HostPorts: slices.Clone(r.HostPorts),
 	}

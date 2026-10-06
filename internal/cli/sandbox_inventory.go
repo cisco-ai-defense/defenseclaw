@@ -51,6 +51,34 @@ usage --sandbox NAME") shows the result after its next scan.`,
 	return cmd
 }
 
+func newSandboxPsCmd() *cobra.Command {
+	var o sandboxcli.PsOptions
+	cmd := &cobra.Command{
+		Use:   "ps <name>",
+		Short: "List the processes of a sandbox whose process tree is on",
+		Long: `Lists the processes running in a sandbox whose process tree is on (a pack's
+observe.process_tree: true, or "sandbox run --process-tree"): pid, parent, uptime and
+command line, the values of arguments that name secrets replaced. --tree shows each
+process under its parent. The daemon samples the sandbox every 5 seconds while it runs
+(every 15 seconds on a Mac when sampling its MicroVM is slow) and adds what OpenShell
+reports of processes starting and exiting, so a process that starts and ends between
+two samples, unreported, is not seen. The agent chooses its processes' names and
+arguments.`,
+		Args: nameArg("sandbox"),
+		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Command, args []string) error {
+			out, err := parseOutput(cmd.Flag("output").Value.String())
+			if err != nil {
+				return err
+			}
+			o.Name, o.Output = args[0], out
+			return app.Ps(ctx, o)
+		}),
+	}
+	outputFlag(cmd)
+	cmd.Flags().BoolVar(&o.Tree, "tree", false, "show each process under its parent")
+	return cmd
+}
+
 func init() {
-	sandboxCmd.AddCommand(newSandboxDiscoverCmd())
+	sandboxCmd.AddCommand(newSandboxDiscoverCmd(), newSandboxPsCmd())
 }

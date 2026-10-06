@@ -685,6 +685,7 @@ A few rules the flags follow:
 | `--no-mcp` | switch |  | Leave the harness's MCP servers behind. |
 | `--no-snapshot` | switch |  | Skip the pre-session snapshot (and so undo). |
 | `--pack` | text |  | Sandbox policy pack (open, balanced, strict, or a custom pack). |
+| `--process-tree` | switch |  | Sample the sandbox's processes every 5 seconds (sandbox ps), even where the pack leaves it off. |
 | `--profile` | text |  | Network profile: open, balanced or strict. |
 | `-p`, `--prompt` | text |  | Run the harness headless with this prompt. |
 | `--refresh` | switch |  | When resuming a copy-mode sandbox, copy the folder again. |
@@ -1228,6 +1229,33 @@ defenseclaw sandbox discover myapp-7f3a --json
 | --- | --- | --- | --- |
 | `--json` | switch |  | Same as --output json. |
 | `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
+### `sandbox ps`
+
+Lists the processes of a running sandbox whose process tree is on (the pack's
+`observe.process_tree: true`, or `sandbox run --process-tree`): pid, parent,
+uptime and command line, with the values of arguments that name secrets
+replaced. `--tree` shows each process under its parent. The daemon samples
+the sandbox every 5 seconds while it runs (every 15 seconds on a Mac when
+sampling its MicroVM is slow) and adds what OpenShell reports of processes
+starting and exiting, so a process that starts and ends between two samples,
+and that OpenShell does not report, is not seen. The agent chooses its
+processes' names and arguments: they are shown, never acted on. The same tree
+is in the TUI's sandbox detail and in the `sandbox.process_tree` telemetry
+records.
+
+```bash
+defenseclaw sandbox ps myapp-7f3a --tree
+defenseclaw sandbox ps myapp-7f3a --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags ps */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+| `--tree` | switch |  | Show each process under its parent. |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ## Policy and packs

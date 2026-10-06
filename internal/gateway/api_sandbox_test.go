@@ -119,6 +119,10 @@ func (f *fakeSandboxController) Discover(_ context.Context, name string) (*sandb
 	return answer(f, "discover "+name, &sandboxapi.DiscoveryResult{Name: name, Result: "ok", Signals: []sandboxapi.DiscoverySignal{}})
 }
 
+func (f *fakeSandboxController) Processes(_ context.Context, name string) (*sandboxapi.ProcessList, error) {
+	return answer(f, "processes "+name, &sandboxapi.ProcessList{Name: name, Enabled: true, Processes: []sandboxapi.Process{}})
+}
+
 func (f *fakeSandboxController) Approvals(_ context.Context, sandbox string) ([]sandboxapi.Approval, error) {
 	return answer[[]sandboxapi.Approval](f, "approvals "+sandbox, nil)
 }
@@ -258,6 +262,7 @@ func TestSandboxAPIRoutes(t *testing.T) {
 		{"POST", sandboxapi.PathSandboxes + "/box/workspace", `{"operation":"pull","pull_mode":"branch"}`, 200, "workspace box pull"},
 		{"POST", sandboxapi.PathSandboxes + "/box/workspace", "", 400, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/discover", "", 200, "discover box"},
+		{"GET", sandboxapi.PathSandboxes + "/box/processes", "", 200, "processes box"},
 		{"POST", sandboxapi.PathSandboxes + "/box/discover", `{"surprise":1}`, 400, ""},
 		{"POST", sandboxapi.PathSandboxes + "/box/explode", "", 404, ""},
 		{"GET", sandboxapi.PathApprovals + "?sandbox=box", "", 200, "approvals box"},

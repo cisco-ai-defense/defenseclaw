@@ -53,6 +53,8 @@ type SandboxController interface {
 	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
 	// Discover runs the AI discovery of a ready sandbox now.
 	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
+	// Processes returns a sandbox's process tree (empty while it is off).
+	Processes(ctx context.Context, name string) (*sandboxapi.ProcessList, error)
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
@@ -122,6 +124,9 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 			return nil, err
 		}
 		return c.RunLog(ctx, r.PathValue("name"), lines)
+	}))
+	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/processes", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		return c.Processes(ctx, r.PathValue("name"))
 	}))
 	mux.HandleFunc("DELETE "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		var req sandboxapi.DeleteRequest

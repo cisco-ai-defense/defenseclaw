@@ -253,6 +253,25 @@ def test_a_run_image_is_in_the_details() -> None:
     assert "Run image" not in dict(_model().detail_pairs()[1])
 
 
+def test_the_process_tree_is_in_the_details() -> None:
+    model = SandboxesPanelModel()
+    model.set_snapshot(STATUS, [{**COPY, "process_tree": True}], [])
+    assert dict(model.detail_pairs()[1])["Processes"].startswith("none sampled yet")
+    model.set_processes("fix-tests", {"enabled": True, "processes": [
+        {"pid": 1, "ppid": 0, "comm": "init"},
+        {"pid": 42, "ppid": 1, "comm": "codex", "cmdline": "codex --yolo"},
+        {"pid": 43, "ppid": 42, "comm": "bash", "cmdline": "bash -c make test " + "x" * 200},
+        {"pid": 9, "ppid": 77, "comm": "orphan"},
+    ]})
+    lines = dict(model.detail_pairs()[1])["Processes"].split("\n")
+    assert lines[:3] == ["1 init", "  42 codex --yolo", lines[2]] and lines[2].startswith("    43 bash -c make test")
+    assert len(lines[2]) <= 72 and lines[3] == "9 orphan"
+    many = {"processes": [{"pid": i, "ppid": 1, "comm": f"p{i}"} for i in range(2, 40)]}
+    model.set_processes("fix-tests", many)
+    assert dict(model.detail_pairs()[1])["Processes"].endswith("more (defenseclaw sandbox ps --tree)")
+    assert "Processes" not in dict(_model().detail_pairs()[1])
+
+
 def test_hook_events_are_in_the_details() -> None:
     hooks = {
         "tool_calls": 12,

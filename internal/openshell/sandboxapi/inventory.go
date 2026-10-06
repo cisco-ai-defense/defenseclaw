@@ -53,6 +53,58 @@ type DiscoverySignal struct {
 	Confidence float64  `json:"confidence"`
 }
 
+// MaxExitedProcesses bounds the ended processes a ProcessList carries.
+const MaxExitedProcesses = 256
+
+// ProcessList is GET /sandboxes/{name}/processes: a sandbox's process tree,
+// while its process tree is on (observe.process_tree, `sandbox run
+// --process-tree`). Processes are the live ones by pid; Exited the ones that
+// ended most recently, newest first. Every text field is the sandbox's, made
+// safe to print: the agent chooses its processes' names, paths and
+// arguments.
+type ProcessList struct {
+	Name string `json:"name"`
+	// Enabled reports the sandbox's process tree on.
+	Enabled bool `json:"enabled"`
+	// SampledAt is the last sample of the sandbox's processes, and
+	// IntervalSeconds how often they are sampled.
+	SampledAt       time.Time `json:"sampled_at,omitzero"`
+	IntervalSeconds int       `json:"interval_seconds,omitempty"`
+	Processes       []Process `json:"processes"`
+	Exited          []Process `json:"exited,omitempty"`
+	// Truncated reports a sample that stopped at its bound.
+	Truncated bool `json:"truncated,omitempty"`
+}
+
+// Process is one process of a sandbox's process tree.
+type Process struct {
+	PID       int       `json:"pid"`
+	PPID      int       `json:"ppid"`
+	UID       int       `json:"uid"`
+	StartedAt time.Time `json:"started_at,omitzero"`
+	ExitedAt  time.Time `json:"exited_at,omitzero"`
+	// ExitCode is the exit status OpenShell reported, when it did.
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Comm     string `json:"comm"`
+	Exe      string `json:"exe,omitempty"`
+	Cwd      string `json:"cwd,omitempty"`
+	// Cmdline is the first arguments, joined, the values of arguments that
+	// name secrets replaced.
+	Cmdline string `json:"cmdline,omitempty"`
+	// Source is what saw it first: sample (DefenseClaw's sample of the
+	// sandbox's /proc) or ocsf (an OpenShell PROC record).
+	Source string `json:"source"`
+}
+
+// Processes returns a sandbox's process tree.
+func (c *Client) Processes(ctx context.Context, name string) (*ProcessList, error) {
+	var out ProcessList
+	if err := c.do(ctx, http.MethodGet, sandboxPath(name, "processes"), nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Discover runs the AI discovery of a ready sandbox now.
 func (c *Client) Discover(ctx context.Context, name string) (*DiscoveryResult, error) {
 	var out DiscoveryResult

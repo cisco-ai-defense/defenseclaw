@@ -81,6 +81,7 @@ classes:
       ActionSandboxPolicy: "sandbox-policy"
       ActionSandboxHealth: "sandbox-health"
       ActionSandboxFinding: "sandbox-finding"
+      ActionSandboxProcess: "sandbox-process"
       ActionSidecarStart: "sidecar-start"
       ActionSidecarStop: "sidecar-stop"
       ActionSidecarConnected: "sidecar-connected"

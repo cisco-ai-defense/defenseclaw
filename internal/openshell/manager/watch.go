@@ -344,6 +344,7 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if harnessActivity(harnessName, r.Binary) {
 			m.markActive(b, at)
 		}
+		m.observeOCSFProcess(ctx, b, r, at)
 	case ocsf.ClassFinding:
 		severity := ocsfSeverity(r.Severity)
 		ev := audit.SandboxFindingEvent{

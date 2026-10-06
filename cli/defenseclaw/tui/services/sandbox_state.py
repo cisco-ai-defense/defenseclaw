@@ -419,6 +419,8 @@ class SandboxRow:
     # The image the sandbox runs when it is not the harness image: on the
     # MicroVM (vm) driver, the image its per-run harness files are baked into.
     run_image: str = ""
+    # The sandbox's processes are sampled while it runs (observe.process_tree).
+    process_tree: bool = False
 
     @property
     def running(self) -> bool:
@@ -572,7 +574,51 @@ def decode_sandbox(raw: Any) -> SandboxRow | None:
         warnings=tuple(_text(w) for w in _list(item.get("warnings")) if w),
         violations=tuple(v for v in violations if v),
         run_image=_text(item.get("run_image")),
+        process_tree=bool(item.get("process_tree")),
     )
+
+
+# PROCESS_TREE_LINES bounds the process tree the sandbox detail shows.
+PROCESS_TREE_LINES = 12
+
+
+def process_tree_lines(payload: Any, *, limit: int = PROCESS_TREE_LINES, width: int = 72) -> tuple[str, ...]:
+    """The sandbox detail's process tree (``GET /sandboxes/{name}/processes``).
+
+    Each process sits under its parent; a process whose parent is not listed
+    starts a tree of its own. At most ``limit`` lines of ``width`` characters:
+    the agent chooses its processes' names and arguments.
+    """
+    procs = [p for p in (_dict(x) for x in _list(_dict(payload).get("processes"))) if _int(p.get("pid")) > 0]
+    by_pid = {_int(p.get("pid")): p for p in procs}
+    children: dict[int, list[dict[str, Any]]] = {}
+    roots: list[dict[str, Any]] = []
+    for proc in procs:
+        pid, ppid = _int(proc.get("pid")), _int(proc.get("ppid"))
+        if ppid in by_pid and ppid != pid:
+            children.setdefault(ppid, []).append(proc)
+        else:
+            roots.append(proc)
+    lines: list[str] = []
+    seen: set[int] = set()
+
+    def walk(proc: dict[str, Any], depth: int) -> None:
+        pid = _int(proc.get("pid"))
+        if pid in seen or depth > 32:
+            return
+        seen.add(pid)
+        command = _text(proc.get("cmdline")) or _text(proc.get("comm")) or "?"
+        line = f"{'  ' * depth}{pid} {command}"
+        lines.append(line if len(line) <= width else line[: width - 1] + "…")
+        for child in sorted(children.get(pid, []), key=lambda p: _int(p.get("pid"))):
+            walk(child, depth + 1)
+
+    for root in sorted(roots, key=lambda p: _int(p.get("pid"))):
+        walk(root, 0)
+    if len(lines) > limit:
+        more = len(lines) - limit
+        lines = lines[:limit] + [f"...and {more} more (defenseclaw sandbox ps --tree)"]
+    return tuple(lines)
 
 
 @dataclass(frozen=True)
@@ -997,6 +1043,13 @@ class SandboxesPanelModel:
     # another item the operator did not pick, so the next action key there
     # is refused once.
     _selection_lost: set[str] = field(default_factory=set)
+    # The process tree of each sandbox whose detail was opened last
+    # (set_processes), as the detail shows it.
+    processes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    def set_processes(self, name: str, payload: Any) -> None:
+        """Keep a sandbox's process tree for its detail."""
+        self.processes[name] = process_tree_lines(payload)
 
     # ---- snapshot ---------------------------------------------------------
 
@@ -1790,6 +1843,9 @@ class SandboxesPanelModel:
             pairs.append(("Asks waiting", str(row.pending_approvals)))
         if row.run_image:
             pairs.append(("Run image", row.run_image))
+        if row.process_tree:
+            tree = self.processes.get(row.name)
+            pairs.append(("Processes", "\n".join(tree) if tree else "none sampled yet (every 5 s while it runs)"))
         if row.copy_mode:
             pairs.append(("Pull", "P brings the work back: it shows the changes, then applies them or makes a branch"))
             pairs.append(("Undo", "reverts the last pull --apply (U)"))

@@ -513,6 +513,29 @@
     ]
   },
   {
+    "path": "sandbox ps",
+    "use": "ps \u003cname\u003e",
+    "short": "List the processes of a sandbox whose process tree is on",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      },
+      {
+        "name": "tree",
+        "type": "bool",
+        "default": "false"
+      }
+    ]
+  },
+  {
     "path": "sandbox pull",
     "use": "pull \u003cname\u003e",
     "short": "Bring a copy-mode sandbox's work back (3-way apply, a branch, or a patch)",
@@ -686,6 +709,11 @@
       {
         "name": "pack",
         "type": "string"
+      },
+      {
+        "name": "process-tree",
+        "type": "bool",
+        "default": "false"
       },
       {
         "name": "profile",
