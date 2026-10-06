@@ -242,7 +242,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     print what the gateway resolves them to. Exits 1 when the key has no value
     and no default, and 2 for an unknown section.
     """
-    parts = [part for part in key.strip().split(".") if part]
+    # destinations[1].enabled and destinations.1.enabled name the same item.
+    parts = [part for part in re.sub(r"\[(\d+)\]", r".\1", key.strip()).split(".") if part]
     if not parts:
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
     if effective:
@@ -253,6 +254,13 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             _echo_value(value, fmt)
             return
     view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    if parts[:2] == ["observability", "destinations"]:
+        # config set indexes the destinations as written in config.yaml; the
+        # resolved plan also lists the generated ones, such as local-sqlite
+        # at index 0 (GAP-0008).
+        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+        if _lookup(written, parts)[0]:
+            view = written
     found, value = _lookup(view, parts)
     if not found:
         sections = _v8_sections() or set(view)
