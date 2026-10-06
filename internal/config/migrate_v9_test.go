@@ -264,6 +264,26 @@ func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 	if codex == "strict" || g.CustomPacks[codex].Path != edited {
 		t.Errorf("codex rule_pack = %q (custom_packs %+v); want a custom pack for %s", codex, g.CustomPacks, edited)
 	}
+
+	// The edited copy keeps its folder's strict posture as a custom pack, so
+	// a data.json HIGH, looser than its MEDIUM, must not become block_at.
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + edited + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 3, "alert_threshold": 1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true,
+		RulePackDigest: func(string) (string, error) { return digest, nil },
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9 (custom strict copy): %v", err)
+	}
+	if strings.Contains(string(result.Migrated), "block_at") {
+		t.Errorf("a data.json level looser than the custom strict pack became block_at:\n%s", result.Migrated)
+	}
 }
 
 func TestV9SecureClientDocumentKeepsRows(t *testing.T) {

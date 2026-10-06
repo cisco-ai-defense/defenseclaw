@@ -346,6 +346,10 @@ type v9Migrator struct {
 	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
 	// replaces with the shipped module (nil data retires the file).
 	rego []v9RegoRefresh
+	// globalPackPosture is the posture the gateway gives the global v8
+	// rule_pack_dir ("" when none was set); the data.json thresholds are
+	// compared with it.
+	globalPackPosture string
 }
 
 type v9RegoRefresh struct {
@@ -958,9 +962,12 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 	if !data.present {
 		return
 	}
-	pack := "default"
-	if name := yamlScalarValue(v8YAMLMapValue(guardrail, "rule_pack")); name == "strict" || name == "permissive" {
-		pack = name
+	pack := m.globalPackPosture
+	if pack == "" {
+		pack = "default"
+		if name := yamlScalarValue(v8YAMLMapValue(guardrail, "rule_pack")); name == "strict" || name == "permissive" {
+			pack = name
+		}
 	}
 	packBlock, packAlert := v9PostureRanks(pack)
 	shippedBlock, shippedAlert := v9PostureRanks("default")
@@ -1128,6 +1135,11 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 		if err != nil {
 			return fmt.Errorf("config: %s.rule_pack_dir: %w", scope.path, err)
 		}
+		if scope.path == "guardrail" {
+			// A custom pack keeps the posture of its folder, which its new
+			// name (custom-strict, a stem) no longer shows.
+			m.globalPackPosture = v9DirPosture(expandPath(dir))
+		}
 		v9Set(scope.node, v9Scalar(name), "rule_pack")
 		m.moved("config", scope.path+".rule_pack_dir", scope.path+".rule_pack", name)
 		if len(protections) > 0 {
@@ -1140,6 +1152,28 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// v9DirPosture is the posture the gateway gives a rule-pack directory: the
+// manifest posture (defenseclaw-pack.json, guardrail.ReadPackPosture), else
+// the folder-name table (strict, permissive, else default).
+func v9DirPosture(dir string) string {
+	if raw, err := os.ReadFile(filepath.Join(dir, "defenseclaw-pack.json")); err == nil && len(raw) <= 1<<20 {
+		var manifest struct {
+			Posture string `json:"posture"`
+		}
+		if json.Unmarshal(raw, &manifest) == nil {
+			switch posture := strings.ToLower(strings.TrimSpace(manifest.Posture)); posture {
+			case "default", "strict", "permissive":
+				return posture
+			}
+		}
+	}
+	switch base := strings.ToLower(filepath.Base(filepath.Clean(dir))); base {
+	case "strict", "permissive":
+		return base
+	}
+	return "default"
 }
 
 // policyDir is the policy_dir the v9 preset names resolve under.
