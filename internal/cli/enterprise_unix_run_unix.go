@@ -89,19 +89,18 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		defer stop()
 	}
 	result := enterpriseunix.Run(ctx, env, enterpriseunix.Options{
-		Action:               action,
-		PayloadDir:           opts.payload,
-		FromPackage:          opts.fromPackage,
-		ConfigFile:           opts.config,
-		NoStart:              opts.noStart,
-		AdoptExisting:        opts.adoptExisting,
-		AllowDowngrade:       opts.allowDowngrade,
-		Purge:                opts.purge,
-		RemoveServiceAccount: opts.removeServiceAccount,
-		KeepState:            opts.keepState,
-		KeepServiceAccount:   opts.keepServiceAccount,
-		ProductVersion:       opts.productVersion,
-		Reason:               opts.reason,
+		Action:             action,
+		PayloadDir:         opts.payload,
+		FromPackage:        opts.fromPackage,
+		ConfigFile:         opts.config,
+		NoStart:            opts.noStart,
+		AdoptExisting:      opts.adoptExisting,
+		AllowDowngrade:     opts.allowDowngrade,
+		Purge:              opts.purge,
+		KeepState:          opts.keepState,
+		KeepServiceAccount: opts.keepServiceAccount,
+		ProductVersion:     opts.productVersion,
+		Reason:             opts.reason,
 	})
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
