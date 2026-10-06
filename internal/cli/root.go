@@ -440,6 +440,7 @@ func ExecuteContext(ctx context.Context) int {
 	}
 	addManagedWindowsSetupAnswer(rootCmd)
 	addManagedHostHelp(rootCmd)
+	dropEnterpriseIdentityViewsOnSecureClient(rootCmd)
 	installUsageArgChecks(rootCmd)
 	pendingUnknownSubcommand = nil
 	err := rootCmd.ExecuteContext(ctx)

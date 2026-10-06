@@ -1025,7 +1025,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	// Secure Client serves none of the identity routes (issue #1092).
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
 	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
@@ -1066,12 +1069,16 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
 	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
 	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
-	mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	}
 	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
-	mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	}
 	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
 	// discovery -- presence and behaviour -- reads as one surface.
 	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
