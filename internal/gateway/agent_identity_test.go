@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -34,6 +35,16 @@ func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
 	facts := resolveHookAgentIdentity(peer, agentHookRequest{ConnectorName: "codex"})
 	if facts.ID == "" || facts.UserName != "dcad-alice@dclab.test" {
 		t.Fatalf("agent identity = %q user %q, want the qualified account name", facts.ID, facts.UserName)
+	}
+
+	// GAP-0107: a per-user gateway names itself from the same account
+	// database, the bare Windows account rather than os/user's DOMAIN\user.
+	restoreName := userScopedIdentityName
+	userScopedIdentityName = func(string) string { return "dcw-std1" }
+	gatewaySelf.once = sync.Once{}
+	t.Cleanup(func() { userScopedIdentityName, gatewaySelf.once = restoreName, sync.Once{} })
+	if self := gatewaySelfUser(); self.Name != "dcw-std1" {
+		t.Fatalf("gateway self user = %q, want the account database name", self.Name)
 	}
 }
 
