@@ -1433,7 +1433,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._last_data_refresh_error = ""
         audit_db = _audit_db_from_config(config)
         self._read_repository = (
-            TUIReadRepository(audit_db) if audit_db else None
+            TUIReadRepository(audit_db, config=config) if audit_db else None
         )
         self._set_history_loading(self._read_repository is not None)
         self._slow_refresh_running = False
@@ -13760,7 +13760,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             old_repository.close()
         new_audit_db = _audit_db_from_config(new_cfg)
         self._read_repository = (
-            TUIReadRepository(new_audit_db)
+            TUIReadRepository(new_audit_db, config=new_cfg)
             if new_audit_db
             else None
         )
@@ -15416,7 +15416,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         store = getattr(self.alerts_model, "store", None) or getattr(self.audit_model, "store", None)
         if store is not None and hasattr(store, "get_enforcement_counts"):
             try:
-                current = store.get_enforcement_counts()  # type: ignore[attr-defined]
+                current = store.get_enforcement_counts(cfg=self.config)  # type: ignore[attr-defined]
             except Exception as count_exc:  # noqa: BLE001 - degraded counts must not break alerts.
                 self._write_activity(
                     f"[#FBBF24]enforcement counts unavailable:[/] {count_exc}"

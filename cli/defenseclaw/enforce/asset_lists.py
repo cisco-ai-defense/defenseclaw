@@ -307,6 +307,18 @@ def has_entry(cfg: Any, store: Any, target_type: str, name: str, connector: str,
     return False
 
 
+def install_counts(store: Any, cfg: Any) -> tuple[int, int, int, int]:
+    """(blocked skills, allowed skills, blocked MCPs, allowed MCPs) as the list
+    views show them: journal rows with the operator decisions of asset_policy
+    folded in, so a decision made in config.yaml is counted."""
+    counts: list[int] = []
+    for target_type in ("skill", "mcp"):
+        entries = merge_operator_entries(store.list_actions_by_type(target_type), cfg, target_type)
+        for install in ("block", "allow"):
+            counts.append(sum(1 for entry in entries if entry.actions.install == install))
+    return counts[0], counts[1], counts[2], counts[3]
+
+
 def merge_operator_entries(entries: list[Any], cfg: Any, target_type: str) -> list[Any]:
     """Journal rows with the operator decisions from asset_policy folded in.
 
