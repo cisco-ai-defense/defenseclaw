@@ -737,7 +737,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	//   trace context → requestID → correlation → requestLogger → rate → mux
 	// which we construct by wrapping inside-out.
 	withCorr := CorrelationMiddleware(SharedAgentRegistry())(logged)
-	withRequestID := p.requestIDMiddleware(withCorr)
+	withRequestID := p.requestIDMiddleware(dropProxyUserClaims(withCorr))
 	handler := inboundTraceContextMiddleware(withRequestID)
 	srv := &http.Server{Addr: addr, Handler: handler}
 
@@ -947,7 +947,8 @@ func setPassthroughUpstreamAuth(h http.Header, provider, upstreamAuth string) {
 // X-DC-Target-URL. Such a request has no body to inspect, so it is sent on
 // as is. An empty 200 made OpenClaw fail to parse the model list (GAP-2213).
 func (p *GuardrailProxy) handleReadOnlyPassthrough(w http.ResponseWriter, r *http.Request) {
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid API key")
 		return
 	}
@@ -1010,7 +1011,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
@@ -2649,7 +2651,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
@@ -4252,7 +4255,58 @@ func (p *GuardrailProxy) writeBlockedStreamAnthropic(w http.ResponseWriter, mode
 //   - For non-loopback (sandbox / bridge deployments), authentication is always
 //     required via X-DC-Auth or the master key.
 
-func (p *GuardrailProxy) authenticateRequest(w http.ResponseWriter, r *http.Request) bool {
+// authenticateRequest returns r with its verified subject bound when the
+// caller proved an owner credential (presentsOwnerCredential).
+func (p *GuardrailProxy) authenticateRequest(r *http.Request) (*http.Request, bool) {
+	if !p.credentialsAccepted(r) {
+		return r, false
+	}
+	if p.presentsOwnerCredential(r) {
+		// The correlation middleware took the user from the loopback
+		// X-DefenseClaw-User-* headers; the gateway's own account replaces
+		// that claim, as on the hook and ACP routes.
+		r = r.WithContext(attachProcessOwner(r.Context(), p.observabilityV8Emitter()))
+	}
+	return r, true
+}
+
+// dropProxyUserClaims removes the X-DefenseClaw-User-* pair before the
+// correlation middleware reads it. The hook helpers send that pair to the
+// hook routes; no proxy client does, so on the proxy it is only ever a
+// claim. Under the Secure Client integration the headers are left as they
+// are.
+func dropProxyUserClaims(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if identityFactsEnabled.Load() {
+			r.Header.Del(llmEventUserIDHeader)
+			r.Header.Del(llmEventUserNameHeader)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// presentsOwnerCredential reports whether r carries a credential only the
+// gateway's account can read: the gateway token or the master key derived
+// from its device key. Connectors also admit loopback callers without one
+// (legacy hook installs) or with a provider key, which prove nothing about
+// who sent the request.
+func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
+	if p.matchesRefreshedGatewayToken(r) {
+		return true
+	}
+	for _, presented := range []string{
+		strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer "),
+		connector.ExtractBearerKey(r.Header.Get("Authorization")),
+	} {
+		if presented != "" && ((p.gatewayToken != "" && constantTimeStringMatch(presented, p.gatewayToken)) ||
+			(p.masterKey != "" && constantTimeStringMatch(presented, p.masterKey))) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	// Test-only fast path: legacy proxy_test.go fixtures construct
 	// a GuardrailProxy directly without the NewGuardrailProxy boot
 	// path that synthesizes the gateway token. The bypass is set
@@ -4320,11 +4374,9 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 	// and client-controlled values out of metric cardinality. Target v8 startup
 	// guarantees this capability; a missing/detached runtime or failed canonical
 	// emission must never revive the legacy gateway log or Provider counter.
-	runtime := p.observabilityV8TraceRuntime()
-	emitter, _ := runtime.(sidecarRuntimeEmitter)
 	emitProtectedBoundaryAuthenticationFailureV8(
 		r.Context(),
-		emitter,
+		p.observabilityV8Emitter(),
 		observability.SourceGateway,
 		proxyAuthenticationLogV8Producer,
 		proxyAuthenticationMetricV8Producer,
