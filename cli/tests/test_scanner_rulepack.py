@@ -353,6 +353,16 @@ class TestMaybeWrap(unittest.TestCase):
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         self.assertIs(wrapped, inner)
 
+    def test_a_skill_scan_acts_on_the_default_pack_when_nothing_is_selected(self):
+        # The install watcher scans a skill with the default pack on a default
+        # install, so the skill scan does too; MCP and plugin scans do not (GAP-0164).
+        inner = _FakeScanner()
+        with patch("defenseclaw.policy_catalog.preset_pack_dir", return_value=self.pack_dir):
+            self.assertIs(rulepack.maybe_wrap(inner, self.app.cfg), inner)
+            wrapped = rulepack.maybe_wrap(inner, self.app.cfg, default_pack=True)
+        self.assertIsInstance(wrapped, rulepack.RulePackOverlayScanner)
+        self.assertIn("SEC-ANTHROPIC", {r.rule_id for r in wrapped.pack.rules})
+
     def test_wrap_appends_findings_and_preserves_existing(self):
         self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
         inner = _FakeScanner()
