@@ -361,13 +361,14 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
 MANAGED_EXIT_CODE = 3
 
 
-def _write_config_change(app: AppContext, change: object, expect_sha256: str | None, verb: str) -> None:
+def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> None:
     from defenseclaw import config_writer
 
     path = str(config_module.config_path())
+    key = ", ".join(getattr(change, "path", "") for change in changes)
     try:
         result = config_writer.apply(
-            [change],
+            changes,
             config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
             f"defenseclaw config {verb}",
             expect_sha256,
@@ -376,14 +377,13 @@ def _write_config_change(app: AppContext, change: object, expect_sha256: str | N
     except config_writer.ManagedConfigWriteError as exc:
         from defenseclaw.enforce.asset_lists import audit_managed_refusal
 
-        audit_managed_refusal("config-update", getattr(change, "path", "") or "config", f"verb={verb}")
+        audit_managed_refusal("config-update", key or "config", f"verb={verb}")
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(MANAGED_EXIT_CODE) from exc
     except config_writer.ConfigConflictError as exc:
         raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
     except (config_writer.ConfigWriteError, V8ConfigError, ValueError) as exc:
         raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
-    key = getattr(change, "path", "")
     if not result.changed:
         click.echo(f"{key} already has that value (generation {result.generation}).")
         return
@@ -428,22 +428,28 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         parsed = json.loads(value) if as_json else yaml.safe_load(value)
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
-    _write_config_change(app, Change(key, parsed), expect_sha256, "set")
+    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
 
 
 @config_cmd.command("unset")
-@click.argument("key")
+@click.argument("keys", nargs=-1, required=True)
 @click.option("--expect-sha256", default=None, help="Refuse the change unless config.yaml still has this sha256.")
 @pass_ctx
-def config_unset(app: AppContext, key: str, expect_sha256: str | None) -> None:
-    """Remove one configuration key (its default applies again)."""
+def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | None) -> None:
+    """Remove configuration keys (their defaults apply again).
+
+    Several KEYs are removed in one validated write, so a pair that depends on
+    each other, such as openshell.admin.required_pack and
+    openshell.admin.required_pack_digest, can go together.
+    """
     from defenseclaw.config_writer import Change, parse_path
 
     try:
-        parse_path(key)
+        for key in keys:
+            parse_path(key)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    _write_config_change(app, Change(key, unset=True), expect_sha256, "unset")
+    _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset")
 
 
 @config_cmd.command("migrate")
