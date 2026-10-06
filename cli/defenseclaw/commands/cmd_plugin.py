@@ -1946,6 +1946,24 @@ def _scan_installed_plugin_for_connector(
         connector=connector,
     )
 
+    if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
+        # The admission action for the findings' severity is allow; nothing
+        # is on an allow list, so this is installed like a clean plugin.
+        if app.logger and not defer_scan_log:
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
+        click.echo(
+            f"[install] {plugin_name!r} installed: the admission policy allows its findings "
+            f"({post_decision.reason}, connector={connector})"
+        )
+        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-allowed",
+                plugin_name,
+                f"reason=admission-action-allow connector={connector}",
+            )
+        return False
+
     if post_decision.verdict == "allowed":
         if app.logger and not defer_scan_log:
             saved_change_audit(app.logger).log_scan(result, connector=connector)

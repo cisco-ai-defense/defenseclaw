@@ -1622,6 +1622,36 @@ class TestSkillInstall(SkillCommandTestBase):
     @patch("defenseclaw.enforce.admission.evaluate_admission")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
     @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
+    def test_install_findings_the_admission_action_allows_are_not_an_allow_list_hit(
+        self, mock_install, mock_scan, mock_eval
+    ):
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        mock_install.side_effect = self._fake_clawhub_install
+        skill_dir = os.path.join(self.tmp_dir, "skills", "low-finding")
+        mock_scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(id="f1", severity="LOW", title="Minor", scanner="skill-scanner")],
+            duration=timedelta(seconds=0.5),
+        )
+        mock_eval.side_effect = [
+            AdmissionDecision("scan", "scan required"),
+            AdmissionDecision("allowed", "1 finding, max LOW", source="scan-allowed"),
+        ]
+
+        result = self.invoke(["install", "low-finding"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("allow-listed", result.output)
+        events = [e for e in self.app.store.list_events(20) if e.action == "install-allowed"]
+        self.assertEqual(len(events), 1)
+        self.assertIn("admission-action-allow", events[0].details)
+
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")
+    @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
     def test_install_connector_resolves_installed_skill_on_that_connector(
         self, mock_install, mock_scan, mock_eval,
     ):

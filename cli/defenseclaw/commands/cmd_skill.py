@@ -2537,7 +2537,10 @@ def _apply_scan_enforcement(
     )
 
     if decision.verdict == "allowed":
-        ux.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
+        if decision.source == "scan-allowed":
+            ux.echo(f"[scan] {skill_name!r}: the admission policy allows its findings ({decision.reason})")
+        else:
+            ux.echo(f"[scan] {skill_name!r} is allow-listed — skipping auto-enforcement")
         return
 
     sev = result.max_severity()
@@ -5417,6 +5420,21 @@ def _scan_installed_skill_for_connector(
         scan_result=result,
         connector=connector,
     )
+
+    if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
+        # The admission action for the findings' severity is allow; nothing
+        # is on an allow list.
+        click.echo(
+            f"[install] {skill_name!r} installed: the admission policy allows its findings "
+            f"({post_decision.reason}, connector={connector})"
+        )
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-allowed",
+                skill_name,
+                f"reason=admission-action-allow connector={connector}",
+            )
+        return
 
     if post_decision.verdict == "allowed":
         ux.echo(
