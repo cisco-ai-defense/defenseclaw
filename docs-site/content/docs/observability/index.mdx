@@ -267,11 +267,16 @@ permissions, edit only deliberate overrides, and validate before activation:
 defenseclaw config validate
 defenseclaw config show --effective --section observability
 defenseclaw observability plan
-defenseclaw-gateway restart
 defenseclaw doctor
 ```
 
-Stop if validation fails. A global or bucket redaction profile also changes local
+A running gateway applies a valid edit to buckets, redaction profiles and
+destinations by itself, with no restart, and keeps the previous policy if it
+rejects one; the **Policy** row of `defenseclaw doctor` shows which. The RELOAD
+column of `defenseclaw observability plan` says, per route, whether a change
+is `live_reloadable` or `restart_required`. Only a Prometheus destination (it
+owns a listener) and `observability.local.path` need `defenseclaw-gateway
+restart`. Stop if validation fails. A global or bucket redaction profile also changes local
 SQLite. To preserve full-fidelity local history while redacting a remote trust
 boundary, apply the profile only to that destination's `send` or matching route.
 
@@ -359,10 +364,10 @@ does not shrink automatically. Raw judge-body capture is
 controlled separately by `guardrail.retain_judge_bodies`. Redaction profiles
 do not apply to it: while it is `true` (the default), `judge_bodies.db` keeps
 the raw LLM-judge request and response text, which can quote secrets from
-prompts, for the same retention period. Set it to `false` and restart the
-gateway to stop that capture. The OPA
-`audit.retention_days` input is a distinct policy and does not configure this
-SQLite reaper.
+prompts, for the same retention period. Set it to `false` with
+`defenseclaw config set guardrail.retain_judge_bodies false` and restart the
+gateway to stop that capture; it is one of the
+[restart-required keys](/docs/reference/cli#restart-required-keys).
 
 The same window also bounds AI discovery scan history in
 `<data_dir>/inventory.db`. When continuous discovery is enabled, the gateway
