@@ -950,8 +950,13 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     if not errors:
         return
     error = errors[0]
-    path = _json_path(tuple(error.absolute_path))
     keyword = str(error.validator or "schema")
+    parts = tuple(error.absolute_path)
+    if keyword == "additionalProperties":
+        # Name the key the schema does not know, not just the object that
+        # holds it ("$.no.such", not "$").
+        parts += _first_unexpected_key(error)
+    path = _json_path(parts)
     action = {
         "additionalProperties": (
             "remove unsupported fields; see the configuration reference"
@@ -967,6 +972,24 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     raise V8ConfigError(
         source_name, path, keyword, _declared_action(keyword, error) or action, label="v9" if v9 else "v8"
     )
+
+
+_PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _first_unexpected_key(error: Any) -> tuple[str, ...]:
+    """The first key an additionalProperties error rejects, or () when it is not a plain name."""
+
+    schema = error.schema if isinstance(error.schema, Mapping) else {}
+    instance = error.instance if isinstance(error.instance, Mapping) else {}
+    known = schema.get("properties") or {}
+    patterns = [re.compile(pattern) for pattern in (schema.get("patternProperties") or {})]
+    extras = sorted(
+        str(key)
+        for key in instance
+        if key not in known and not any(pattern.search(str(key)) for pattern in patterns)
+    )
+    return (extras[0],) if extras and _PLAIN_KEY.match(extras[0]) else ()
 
 
 # An enum longer than this is left to the reference rather than listed.

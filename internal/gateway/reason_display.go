@@ -37,7 +37,7 @@ func trustedBuiltInMatchReason(reason string) bool {
 	if !ok || body == "" {
 		return false
 	}
-	labels := strings.Split(body, ", ")
+	labels := splitMatchLabels(body)
 	if len(labels) == 0 || len(labels) > 5 {
 		return false
 	}
@@ -47,6 +47,27 @@ func trustedBuiltInMatchReason(reason string) bool {
 		}
 	}
 	return true
+}
+
+// matchLabelStart opens every "<rule-id>:<title>" label of a matched reason.
+var matchLabelStart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
+
+// splitMatchLabels splits the body of a "matched: " reason into its labels.
+// Labels are joined with ", ", and a rule title may hold ", " too ("P0 marker,
+// off by default (high)"), so a piece that does not open with a rule ID and a
+// colon continues the label before it. A title that happens to look like a
+// label start splits early; its label then matches no known rule and the
+// message keeps the bare rule ID.
+func splitMatchLabels(body string) []string {
+	var labels []string
+	for _, piece := range strings.Split(body, ", ") {
+		if n := len(labels); n > 0 && !matchLabelStart.MatchString(piece) {
+			labels[n-1] += ", " + piece
+			continue
+		}
+		labels = append(labels, piece)
+	}
+	return labels
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
@@ -427,7 +448,7 @@ func agentMatchedRules(reason string) string {
 	for i, part := range strings.Split(reason, "; ") {
 		switch {
 		case i == 0 && strings.HasPrefix(part, builtInMatchReasonPrefix):
-			for _, label := range strings.Split(strings.TrimPrefix(part, builtInMatchReasonPrefix), ", ") {
+			for _, label := range splitMatchLabels(strings.TrimPrefix(part, builtInMatchReasonPrefix)) {
 				id, title, found := strings.Cut(label, ":")
 				if !found {
 					continue
