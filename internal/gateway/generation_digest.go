@@ -114,14 +114,19 @@ func dataDirOf(cfg *config.Config) string {
 	return strings.TrimRight(filepath.Clean(strings.TrimSpace(cfg.DataDir)), `/\`)
 }
 
-// rewriteDataDir replaces a leading data_dir with ${data_dir}.
+// rewriteDataDir replaces a leading data_dir with ${data_dir}. On Windows a
+// value written with forward slashes still matches the cleaned data_dir.
 func rewriteDataDir(value, dataDir string) string {
-	if dataDir == "" || dataDir == "." || !strings.HasPrefix(value, dataDir) {
+	if dataDir == "" || dataDir == "." {
 		return value
 	}
-	rest := value[len(dataDir):]
+	slashed, root := filepath.ToSlash(value), filepath.ToSlash(dataDir)
+	if !strings.HasPrefix(slashed, root) {
+		return value
+	}
+	rest := slashed[len(root):]
 	if rest == "" || rest[0] == '/' || rest[0] == '\\' {
-		return dataDirToken + filepath.ToSlash(rest)
+		return dataDirToken + rest
 	}
 	return value
 }
