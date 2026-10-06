@@ -4656,6 +4656,7 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - correlation.security
+  - correlation.policy.effective
   attributes:
   - ref: defenseclaw.asset.id
     requirement_level: recommended
@@ -10331,7 +10332,13 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - correlation.sandbox
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.sandbox.name
     requirement_level: required

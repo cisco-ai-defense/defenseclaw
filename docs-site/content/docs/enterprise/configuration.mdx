@@ -394,8 +394,8 @@ rules on Linux and macOS:
    `defenseclaw setup guardrail` from the
    [per-user workflow](/docs/policies/rulepack-validation) are not available.
 4. **Point the config at it.** Add the pack under `guardrail.custom_packs`
-   with its path and `sha256:` followed by the digest `rulepack validate`
-   prints, select it with `guardrail.rule_pack` (or
+   with its path and the `custom_packs pin` value `rulepack validate` prints
+   (`sha256:` and the digest of the pack's own files), select it with `guardrail.rule_pack` (or
    `guardrail.connectors.<name>.rule_pack` for one agent), and apply the
    config with `ensure --config` or through your MDM:
 
@@ -454,7 +454,7 @@ end. The gateway's other HTTPS clients take the proxy from `HTTPS_PROXY`,
 - The gateway reads `enterprise.network` only when it starts. A config
   reload that changes it is reported as restart-required, and the gateway
   keeps the previous proxy until it restarts. On Linux and macOS, a
-  lifecycle run that applies the changed config restarts the services.
+  lifecycle run that changes it restarts the gateway.
 - When `https_proxy` is empty, the AI Defense client and the telemetry
   exporters use the process environment's proxy variables (`HTTPS_PROXY`,
   `NO_PROXY`), if any.

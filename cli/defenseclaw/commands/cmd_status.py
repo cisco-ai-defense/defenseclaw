@@ -406,7 +406,7 @@ def status(app: AppContext, as_json: bool) -> None:
         # exit-0 (it is an informational command parsed by the TUI/scripts and
         # should not hard-fail on a transient DB read); the error is visible.
         try:
-            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS, cfg=app.cfg)
         except Exception as exc:  # noqa: BLE001 — surface the error, don't hide it
             counts = None
             db_error = str(exc)
@@ -759,7 +759,8 @@ def _print_agents(
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
         fail_mode = _effective_status_fail_mode(cfg, conn)
-        fail_mode_suffix = f" fail-mode={fail_mode['effective']} provenance={fail_mode['provenance']}"
+        fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
+        fail_mode_suffix = f" fail-mode={fail_mode['effective']}{fail_mode_note} provenance={fail_mode['provenance']}"
         friendly = _friendly_connector_name(conn)
         disclosure = _cursor_priority_conflict_disclosure(conn)
         disclosure_suffix = f" {disclosure}" if disclosure else ""
@@ -1662,7 +1663,7 @@ def _status_payload(app) -> dict:
 
     if app.store:
         try:
-            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS)
+            counts = app.store.get_counts(alert_count_seconds=_ALERT_COUNT_SECONDS, cfg=app.cfg)
         except Exception as exc:  # noqa: BLE001 — surface, don't hide (SU-05)
             payload["enforcement"] = None
             payload["activity"] = None

@@ -94,11 +94,12 @@ class TestPrintAgentsRoster(unittest.TestCase):
         report = {
             "effective": "open",
             "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         }
         with patch.object(cmd_status, "_effective_status_fail_mode", return_value=report):
             out = _render(_cfg(["codex"], modes={"codex": "action"}))
 
-        self.assertIn("fail-mode=open", out)
+        self.assertIn("fail-mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed", out)
         self.assertIn("provenance=process-env", out)
 
     def test_zero_connectors_shows_no_active(self):
@@ -767,7 +768,8 @@ class TestStatusDbErrorSurfacing(unittest.TestCase):
         self.assertIn("not counted", result.output)
         self.assertIn("defenseclaw alerts", result.output)
         self.assertEqual(
-            self.app.store.get_counts.call_args.kwargs, {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS}
+            self.app.store.get_counts.call_args.kwargs,
+            {"alert_count_seconds": cmd_status._ALERT_COUNT_SECONDS, "cfg": self.app.cfg},
         )
 
     def test_healthy_db_shows_counts(self):

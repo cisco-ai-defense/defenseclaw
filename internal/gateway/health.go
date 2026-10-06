@@ -877,8 +877,12 @@ func validObservabilityV8FailureCode(code string) bool {
 		string(delivery.HealthReasonPartial), string(delivery.HealthReasonDeliveryFailed),
 		string(delivery.HealthReasonOriginLoop),
 		"generation_mismatch", "pipeline_failed", "projection_failed",
-		"route_identity_mismatch", "unsupported_shape", "payload_failed",
+		"route_identity_mismatch", "payload_failed",
 		"queue_rejected", "panic_isolated", "compatibility_projection_failed":
+		// unsupported_shape is not listed: a record the destination's profile
+		// does not project (Galileo takes traces only) is dropped by design
+		// and counted by the consumer, so it is not a destination failure
+		// (GAP-0078).
 		return true
 	default:
 		return false

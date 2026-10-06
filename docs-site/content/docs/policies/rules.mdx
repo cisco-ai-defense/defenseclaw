@@ -189,7 +189,7 @@ guardrail:
 | `disable` | Turns off rules, by rule ID. |
 | `severity_overrides` | Sets a rule's severity: `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`. |
 | `suppressions` | Drops [LLM judge](/docs/policies) findings. Each entry has an `id` that is unique in the pack and the config, a `finding_pattern` (matched against the whole finding ID), an optional `entity_pattern` (matched against the reported text; left out, it matches every value) and a required `reason`. |
-| `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one: `result_inspection`, `judge_result` and `min_entities_for_alert`. |
+| `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one. `name` is the tool name the agent reports. With `result_inspection: true`, a result that matches at least `min_entities_for_alert` findings (default 1) raises a `tool-result-pii-alert` audit event on every connector; the row counts the findings and never carries the matched text. `judge_result` also sends the result to the LLM judge, for OpenClaw and ZeptoClaw tool results. |
 
 Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only, as the [suppression cookbook](/docs/policies/suppression-cookbook) explains.
 

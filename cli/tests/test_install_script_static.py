@@ -334,48 +334,14 @@ def test_both_installers_bootstrap_the_same_pinned_uv() -> None:
     assert re.search(r'\$UvZipSha256 = "[0-9a-f]{64}"', windows)
 
 
-def test_sandbox_flag_is_a_deprecated_no_op() -> None:
-    """--sandbox keeps parsing for old automation but installs nothing.
-
-    The legacy openshell-sandbox installer was removed; the flag must never
-    fetch or execute a sandbox installer again, nor pass the flag on to
-    another release's installer.
-    """
-    text = INSTALL_SH.read_text(encoding="utf-8")
-    assert "--sandbox) INSTALL_SANDBOX=true ;;" in text
-    assert "PASSTHROUGH+=(--sandbox)" not in text
-    assert "install-openshell-sandbox.sh" not in text
-    assert "install_openshell_sandbox" not in text
-    assert "SANDBOX_INSTALLER_ASSET_START_VERSION" not in text
-    notice = text.index('if [[ "${INSTALL_SANDBOX}" == true ]]; then')
-    assert "--sandbox is deprecated and ignored, and removed in 1.1.0" in text[notice : notice + 600]
-    assert "defenseclaw sandbox legacy-cleanup --dry-run" in text[notice : notice + 600]
-    # OpenShell 0.1 sandboxes ship: the notice points at their setup.
-    assert "run 'defenseclaw sandbox setup'" in text[notice : notice + 600]
-    assert "being rebuilt" not in text
-
-
-def test_legacy_sandbox_installer_asset_is_an_inert_stub(tmp_path: Path) -> None:
-    """Cached installers from earlier releases still download this asset."""
-    stub = ROOT / "scripts" / "install-openshell-sandbox.sh"
-    payload = stub.read_bytes()
-    assert payload.splitlines()[-1] == b"# DefenseClaw OpenShell sandbox installer complete v1"
-    text = payload.decode("utf-8")
-    for forbidden in ("curl", "wget", "sudo", "tar ", "install -m", "chmod", "ghcr.io"):
-        assert forbidden not in text, forbidden
-    completed = subprocess.run(
-        [BASH, stub.as_posix(), "--install-dir", (tmp_path / "bin").as_posix()],
-        text=True,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "legacy openshell-sandbox (0.0.x) installer has been removed" in completed.stderr
-    assert "defenseclaw sandbox legacy-cleanup" in completed.stderr
+def test_removed_sandbox_flag_is_a_usage_error(tmp_path: Path) -> None:
+    """--sandbox went with the legacy openshell-sandbox installer: it stops before anything is installed."""
+    completed = _run([_stamped(tmp_path).as_posix(), "--sandbox"], tmp_path)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "--sandbox was removed with the legacy openshell-sandbox installer" in completed.stderr
     assert "defenseclaw sandbox setup" in completed.stderr
-    assert "once available" not in completed.stderr
-    assert not (tmp_path / "bin").exists()
+    assert not (tmp_path / "home" / ".defenseclaw").exists()
+    assert not (ROOT / "scripts" / "install-openshell-sandbox.sh").exists()
 
 
 def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: Path) -> None:
@@ -990,6 +956,41 @@ def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_ca
     assert (data_dir / ".uv").is_dir()
     assert f"uv's download cache {data_dir}/.uv (" in proc.stdout and "MB) is kept" in proc.stdout
     assert "nothing was changed" not in proc.stdout
+
+
+def test_an_upgrade_names_a_port_another_account_holds_before_building(tmp_path: Path) -> None:
+    # GAP-0130: the upgrade of a second account on a host failed only at the
+    # gateway restart, 2.5 minutes and 562 MB later, because the first
+    # account's gateway holds the API port.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index('if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \\')
+    block = text[start : text.index("\nfi\n", text.index("\n    fi\n", start)) + 4]
+    assert text.index(block) < text.index('info "Building the Python environment')
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    gateway = staging / "bin" / "defenseclaw-gateway"
+
+    def run(gateway_body: str, running: str) -> subprocess.CompletedProcess[str]:
+        gateway.write_text("#!/bin/sh\n" + gateway_body, encoding="utf-8")
+        gateway.chmod(0o755)
+        script = tmp_path / "preflight.sh"
+        script.write_text(
+            'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ndrop_new_uv() { :; }\n'
+            f'gateway_pid() {{ {running}; }}\nSTAGING="{staging}" PREV_VERSION=0.8.4\n' + block + 'echo "passed"\n',
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    held = '[ "$2" = --help ] && exit 0\necho "Error: 127.0.0.1:18970 is held by another account; use --api-port 19010" >&2\nexit 1\n'
+    proc = run(held, "echo 4242")
+    assert proc.returncode == 1 and "passed" not in proc.stdout, proc.stdout
+    assert "err: 127.0.0.1:18970 is held by another account; use --api-port 19010; nothing was changed" in proc.stdout
+    assert not staging.exists()
+    (staging / "bin").mkdir(parents=True)
+
+    # No running gateway is not restarted; a staged gateway without the check is not asked.
+    assert "passed" in run(held, "return 1").stdout
+    assert "passed" in run('echo "Error: unknown command" >&2\nexit 1\n', "echo 4242").stdout
 
 
 def test_a_full_disk_is_checked_before_the_lock() -> None:

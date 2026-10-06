@@ -1923,6 +1923,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	nextGen.Config = appliedCfg
 	s.publishGeneration(nextGen)
+	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
 	if privateUpstreamsReload {
 		// Replace, rather than merge, so removing the last entry takes effect.
 		// Drop pooled transports as well: an already-idle connection otherwise
@@ -2285,6 +2286,37 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
+}
+
+// refreshHookGuardPolicies re-renders the hooks of every hook-only connector
+// whose effective hook fail mode the published config changed. The fail mode is
+// baked into the generated hook scripts and the agent's registration, and it
+// follows the guardrail mode (action uses the global fail mode, observe is
+// open), so a mode change through any writer must reach them without a
+// restart. It runs off the reload path: Setup rewrites agent config files.
+func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
+	if s == nil || oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || !newCfg.Guardrail.HookSelfHeal ||
+		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
+		return
+	}
+	s.hookGuardsMu.RLock()
+	guards := make([]*HookConfigGuard, 0, len(s.hookGuards))
+	for guard := range s.hookGuards {
+		guards = append(guards, guard)
+	}
+	s.hookGuardsMu.RUnlock()
+	for _, guard := range guards {
+		conn := guard.activeConnector()
+		if conn == nil || proxyShouldBindForConnector(conn, &newCfg.Guardrail) ||
+			oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) {
+			continue
+		}
+		go func() {
+			if err := guard.RefreshPolicy(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "[hook-guard] hook fail mode refresh for %s: %v\n", conn.Name(), err)
+			}
+		}()
+	}
 }
 
 func (s *Sidecar) unregisterHookConfigGuard(guard *HookConfigGuard) {
@@ -3236,6 +3268,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		return nil
 	})
 	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return livePolicyDigestV8(), livePolicyGenerationV8()
+	})
+	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
 		return livePolicyDigestV8(), livePolicyGenerationV8()
 	})
 	if conn != nil {

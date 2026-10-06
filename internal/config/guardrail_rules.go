@@ -17,6 +17,10 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
+	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -101,7 +105,10 @@ func (g *GuardrailConfig) EffectiveRulePackRef(connector string) RulePackRef {
 
 // ResolveRulePackDir returns the directory a reference loads from: a
 // built-in name is <policy_dir>/guardrail/<name>, a custom_packs name its
-// path, and a v8 rule_pack_dir itself. An unknown name resolves to "" (the
+// path, and a v8 rule_pack_dir itself. On the Linux and macOS standalone
+// layout a built-in name whose policy_dir folder does not exist is the
+// shipped vendor pack, as the implicit default pack is
+// (standaloneRulePackDefault). An unknown name resolves to "" (the
 // gateway's generation build rejects it before anything loads).
 func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 	if c == nil {
@@ -114,9 +121,28 @@ func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 		return strings.TrimSpace(custom.Path)
 	}
 	if IsBuiltinRulePack(ref.Name) && strings.TrimSpace(c.PolicyDir) != "" {
-		return filepath.Join(c.PolicyDir, "guardrail", ref.Name)
+		dir := filepath.Join(c.PolicyDir, "guardrail", ref.Name)
+		if vendor := c.vendorRulePackDir(ref.Name); vendor != "" {
+			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+				return vendor
+			}
+		}
+		return dir
 	}
 	return ""
+}
+
+// vendorRulePackDir is the shipped built-in pack name of the Linux or macOS
+// standalone layout this config is read from, "" elsewhere.
+func (c *Config) vendorRulePackDir(name string) string {
+	if !c.StandaloneEnterprise() {
+		return ""
+	}
+	layout, ok := standaloneUnixLayoutForConfig(c.ConfigFilePath)
+	if !ok {
+		return ""
+	}
+	return path.Join(layout.VendorPolicyDir, "guardrail", name)
 }
 
 // ReferencedRulePackDirs maps every rule-pack setting the gateway can load

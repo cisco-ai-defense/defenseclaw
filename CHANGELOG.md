@@ -1200,13 +1200,12 @@ deleted.
   `cli/defenseclaw/commands/cmd_setup_sandbox.py`,
   `scripts/bundle-sandbox-test.sh`, `scripts/test-e2e-sandbox*.sh`,
   `scripts/test-e2e-tool-block-sandbox.sh`, `scripts/test-proxy-sandbox.py`,
-  and `scripts/fix-sandbox-acls.sh`. `scripts/install-openshell-sandbox.sh`,
-  which older `install.sh` versions fetch as a release asset, is now a stub
-  that prints a deprecation notice and exits 0, so cached older installers do
-  not fail.
+  `scripts/fix-sandbox-acls.sh` and `scripts/install-openshell-sandbox.sh`.
 - `defenseclaw init --sandbox` is hidden and deprecated: it prints a notice and
-  continues a normal init. `install.sh --sandbox` prints a deprecation notice
-  and is otherwise a no-op.
+  continues a normal init.
+- **Breaking:** `install.sh --sandbox` is a usage error: the installer stops
+  before installing anything (exit 1) and points at `defenseclaw sandbox setup`
+  and `defenseclaw sandbox legacy-cleanup`.
 - **Breaking:** OpenClaw and ZeptoClaw subprocess policy is now `shims` on
   every platform. Earlier docs claimed Linux installed an enforced
   Landlock/seccomp OpenShell policy with shims as a supplement; that policy was

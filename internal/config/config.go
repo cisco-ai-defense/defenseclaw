@@ -1444,11 +1444,10 @@ func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
 type WatchConfig struct {
 	DebounceMs int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
 	AutoBlock  bool `mapstructure:"auto_block"             yaml:"auto_block"`
-	// AllowListBypassScan has no reader; it is v8 migration input for
-	// admission.<type>.allow_list_bypass_scan and rejected in config_version 9.
-	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
-	RescanEnabled       bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
-	RescanIntervalMin   int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
+	// watch.allow_list_bypass_scan is only v8 migration input (read from the
+	// YAML document) for admission.<type>.allow_list_bypass_scan.
+	RescanEnabled     bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
+	RescanIntervalMin int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
 	// RescanContentGated skips the scanner during a periodic re-scan when a
 	// target's content hash and scanner fingerprint are both unchanged since
 	// the stored baseline. This avoids re-running the (expensive) scanner and
@@ -4132,7 +4131,6 @@ func setDefaults(dataDir string, legacyObservability bool) {
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)
-	viper.SetDefault("watch.allow_list_bypass_scan", true)
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
 	viper.SetDefault("watch.rescan_content_gated", true)

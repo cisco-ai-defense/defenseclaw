@@ -320,9 +320,8 @@ scans every enrolled user's profile itself: the hook enumerator grants the
 service read access to each user's agent folders (`.claude`, `.codex`,
 `.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others) and to
 the IDE folders the [IDE plugin inventory](#ide-plugin-inventory) reads
-(`.vscode\extensions` and the forks', `%APPDATA%\Code\User\globalStorage`
-and `profiles`, `%APPDATA%\JetBrains`, `%LOCALAPPDATA%\Microsoft\VisualStudio`,
-Zed, Neovim, `vimfiles` and `.eclipse`), and nothing else in the profile. A folder on an enrolled connector's hook path
+([Whose plugins](#whose-plugins) lists them), and nothing else in the
+profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
 it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
@@ -442,11 +441,30 @@ owner's inventory.
 | --- | --- | --- |
 | Per-user (OSS) | The user's own gateway | That user's home only |
 | Standalone enterprise, Linux and macOS | The hook guardian, as each enrolled user | Each enrolled user's home. It does not follow links out of the home |
-| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each profile in the ProfileList; Visual Studio installs under Program Files are machine-wide |
+| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each enrolled profile; Visual Studio installs under Program Files are machine-wide |
 
-A managed Windows gateway does not read VS Code-family Remote-SSH servers,
-`%LOCALAPPDATA%\JetBrains` or Android Studio folders in a profile, because
-they are rare on a desktop and large.
+A managed Windows gateway reads the same IDE sources as a per-user scan, and
+the enabled state comes from the same places. The hook enumerator grants its
+service account read access to these folders in each enrolled profile (one
+with at least one enrolled agent) at every cycle, every 5 minutes, so a new
+IDE or plugin folder shows up after the next cycle and the next scan:
+
+| IDE | Read, with what it holds | Only the folder or file itself |
+| --- | --- | --- |
+| VS Code and forks | `.vscode\extensions` and the forks' `extensions`, `%APPDATA%\Code\User\globalStorage` and `profiles` (and the forks') | |
+| Remote-SSH servers | `.vscode-server\extensions` and the forks' | `.vscode-server` and `.vscode-server\cli\servers` (to list the server builds), each build's `server\package.json` (its version). The server's own data and binaries are not granted |
+| JetBrains | `%APPDATA%\JetBrains`, and `plugins` in each product folder under `%LOCALAPPDATA%\JetBrains` | `%LOCALAPPDATA%\JetBrains` (to list the products), `RemoteDev\dist` and each backend's `product-info.json`. The caches, indexes and logs beside them are not granted |
+| Android Studio | Each `%APPDATA%\Google\AndroidStudio<version>` folder, and `plugins` in each `%LOCALAPPDATA%\Google\AndroidStudio<version>` | `%APPDATA%\Google` and `%LOCALAPPDATA%\Google` (to list the versions). Other Google folders are not granted |
+| Visual Studio, Zed, Neovim, Vim | `%LOCALAPPDATA%\Microsoft\VisualStudio`, `%LOCALAPPDATA%\Zed\extensions\installed`, `%LOCALAPPDATA%\nvim` and `nvim-data`, `vimfiles` | |
+| Eclipse | `.eclipse` | `eclipse` (Oomph's installs) and each install's `bundles.info` |
+
+Nothing is granted through a link or junction inside a profile. The
+enumerator reads the default `%APPDATA%` and `%LOCALAPPDATA%` under each
+profile, so a profile whose AppData is redirected elsewhere is not read. The
+Secure Client profile keeps its historical editor-extension detector and
+has no IDE inventory, so it gets none of these grants. JetBrains Toolbox's
+own folder is not read on any platform: the IDEs it installs keep their
+plugins in the product folders above.
 
 ### What is collected, and what is not
 
@@ -806,7 +824,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
   </Step>
 </Steps>
 
-On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
+On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. Without Full Disk Access the scan does not open the folders that make macOS prompt the user (Desktop, Documents, Downloads, Movies, Music, Pictures, iCloud Drive, `~/Library/Containers`, `~/Library/Group Containers` and Contacts data); it skips them without counting an error. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; the gateway prunes scans older than `observability.local.retention_days` (seven days by default) and always keeps the latest scan. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
 

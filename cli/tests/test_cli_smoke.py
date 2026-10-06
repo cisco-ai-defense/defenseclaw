@@ -131,7 +131,7 @@ class CliSmokeTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["path"], expected)
             document = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-            self.assertEqual(document["config_version"], 8)
+            self.assertEqual(document["config_version"], 9)
             self.assertEqual(
                 document["ai_discovery"]["trusted_binary_prefixes"],
                 [expected],
@@ -593,7 +593,7 @@ class CliSmokeTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(config_exists)
-        self.assertIn("config_version: 8", config_text)
+        self.assertIn("config_version: 9", config_text)
         self.assertNotIn("emit_otel", config_text)
         self.assertTrue(audit_db_exists)
         self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)

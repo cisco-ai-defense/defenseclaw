@@ -53,7 +53,8 @@ var rulePackCmd = &cobra.Command{
 	Short: "Inspect a guardrail rule pack without starting the gateway",
 	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
 config. Administrators validate a custom pack with this command before
-pointing guardrail.rule_pack_dir at it.`,
+registering it as guardrail.custom_packs.<name> (its path and the digest this
+command prints) and selecting it with guardrail.rule_pack.`,
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
@@ -167,10 +168,11 @@ func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON 
 	if response.Valid && response.Summary != nil {
 		_, err := fmt.Fprintf(
 			w,
-			"valid rule pack: %d files, %d rules, digest %s\n",
+			"valid rule pack: %d files, %d rules, digest %s\ncustom_packs pin: sha256:%s\n",
 			response.Summary.RuleFileCount,
 			response.Summary.RuleCount,
 			response.Summary.Digest,
+			response.Summary.FilesDigest,
 		)
 		return err
 	}

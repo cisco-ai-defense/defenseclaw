@@ -235,17 +235,23 @@ def config_show(
 def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     """Print one configuration value (secrets masked).
 
-    KEY is a dotted path such as asset_policy.enabled or
-    asset_policy.mcp.registry_required. A key config.yaml leaves out prints
+    KEY is a dotted path with [i] list indexes, such as asset_policy.enabled or
+    asset_policy.skill.denied[0].name. A key config.yaml leaves out prints
     its default, with a note on stderr. With --effective, guardrail levels
-    (guardrail.block_at, guardrail.connectors.<c>.alert_at) and admission.<type>
-    print what the gateway resolves them to. Exits 1 when the key has no value
+    (guardrail.block_at, guardrail.connectors.<c>.alert_at) and admission[.<type>]
+    print what the gateway resolves them to; admission keys config.yaml leaves
+    out always print that resolved value. Exits 1 when the key has no value
     and no default, and 2 for an unknown section.
     """
-    parts = [part for part in key.strip().split(".") if part]
-    if not parts:
+    from defenseclaw.config_writer import parse_path
+
+    if not key.strip():
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
-    if effective:
+    try:
+        parts = list(parse_path(key.strip()))
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    if effective or (parts[0] == "admission" and not _written_in_source(app, parts)):
         resolved = _effective_value(app, parts)
         if resolved is not None:
             value, source = resolved
@@ -253,6 +259,13 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             _echo_value(value, fmt)
             return
     view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    if parts[:2] == ["observability", "destinations"]:
+        # config set indexes the destinations as written in config.yaml; the
+        # resolved plan also lists the generated ones, such as local-sqlite
+        # at index 0 (GAP-0008).
+        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+        if _lookup(written, parts)[0]:
+            view = written
     found, value = _lookup(view, parts)
     if not found:
         sections = _v8_sections() or set(view)
@@ -274,6 +287,13 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
     _echo_value(value, fmt)
+
+
+def _written_in_source(app: AppContext, parts: list) -> bool:
+    """Whether config.yaml itself sets the key (a v8 or later source only)."""
+    if not _looks_like_v8_config(str(config_module.config_path())):
+        return True
+    return _lookup(_show_data(app, source=True, effective=False, provenance=False, reveal=False), parts)[0]
 
 
 def _echo_value(value: object, fmt: str) -> None:
@@ -317,32 +337,44 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
-    if parts[0] == "admission" and len(parts) >= 2 and parts[1] in _ADMISSION_TYPES:
-        from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
-
-        compiled = compile_admission(cfg, parts[1])
-        data = {
-            "scan_on_install": compiled.scan_on_install,
-            "allow_list_bypass_scan": compiled.allow_list_bypass_scan,
-            "actions": {
-                sev.lower(): action_label(compiled.actions[sev])
-                for sev in ADMISSION_SEVERITY_ORDER
-                if sev in compiled.actions
-            },
-            "scanner_overrides": {
-                scanner: {sev.lower(): action_label(action) for sev, action in actions.items()}
-                for scanner, actions in compiled.scanner_overrides.items()
-            },
-            "first_party_allow_list": [
-                {"name": name, "source_path_contains": list(paths)}
-                for name, paths in compiled.first_party_allow.items()
-            ],
-        }
+    if parts[0] == "admission" and (len(parts) == 1 or parts[1] in _ADMISSION_TYPES):
+        if len(parts) == 1:
+            views = {name: _admission_view(cfg, name) for name in _ADMISSION_TYPES}
+            return (
+                {name: data for name, (data, _) in views.items()},
+                ", ".join(f"{name}={source}" for name, (_, source) in views.items()),
+            )
+        data, source = _admission_view(cfg, parts[1])
         found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
         if not found:
             return None
-        return value, compiled.source
+        return value, source
     return None
+
+
+def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
+    """The admission policy of one asset type as the gateway enforces it, and its source."""
+    from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
+
+    compiled = compile_admission(cfg, target_type)
+    data = {
+        "scan_on_install": compiled.scan_on_install,
+        "allow_list_bypass_scan": compiled.allow_list_bypass_scan,
+        "actions": {
+            sev.lower(): action_label(compiled.actions[sev])
+            for sev in ADMISSION_SEVERITY_ORDER
+            if sev in compiled.actions
+        },
+        "scanner_overrides": {
+            scanner: {sev.lower(): action_label(action) for sev, action in actions.items()}
+            for scanner, actions in compiled.scanner_overrides.items()
+        },
+        "first_party_allow_list": [
+            {"name": name, "source_path_contains": list(paths)}
+            for name, paths in compiled.first_party_allow.items()
+        ],
+    }
+    return data, compiled.source
 
 
 # ---------------------------------------------------------------------------
@@ -353,13 +385,15 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
 MANAGED_EXIT_CODE = 3
 
 
-def _write_config_change(app: AppContext, change: object, expect_sha256: str | None, verb: str) -> None:
+def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
+    """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
 
     path = str(config_module.config_path())
+    key = ", ".join(getattr(change, "path", "") for change in changes)
     try:
         result = config_writer.apply(
-            [change],
+            changes,
             config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
             f"defenseclaw config {verb}",
             expect_sha256,
@@ -368,17 +402,17 @@ def _write_config_change(app: AppContext, change: object, expect_sha256: str | N
     except config_writer.ManagedConfigWriteError as exc:
         from defenseclaw.enforce.asset_lists import audit_managed_refusal
 
-        audit_managed_refusal("config-update", getattr(change, "path", "") or "config", f"verb={verb}")
+        audit_managed_refusal("config-update", key or "config", f"verb={verb}")
         click.echo(f"error: {exc}", err=True)
         raise SystemExit(MANAGED_EXIT_CODE) from exc
     except config_writer.ConfigConflictError as exc:
         raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
     except (config_writer.ConfigWriteError, V8ConfigError, ValueError) as exc:
-        raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
-    key = getattr(change, "path", "")
+        raise click.ClickException(f"config.yaml was not changed: {config_writer.plain_error(exc)}") from exc
     if not result.changed:
-        click.echo(f"{key} already has that value (generation {result.generation}).")
-        return
+        if verb != "unset":
+            click.echo(f"{key} already has that value (generation {result.generation}).")
+        return False
     click.echo(f"{verb.capitalize()} {key} (config generation {result.generation}, sha256 {result.sha256[:12]}).")
     from defenseclaw.gateway import local_policy_digest
 
@@ -397,6 +431,7 @@ def _write_config_change(app: AppContext, change: object, expect_sha256: str | N
             )
         except Exception:  # noqa: BLE001 - the change is committed; audit is best effort
             pass
+    return True
 
 
 @config_cmd.command("set")
@@ -420,22 +455,38 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         parsed = json.loads(value) if as_json else yaml.safe_load(value)
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
-    _write_config_change(app, Change(key, parsed), expect_sha256, "set")
+    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
 
 
 @config_cmd.command("unset")
-@click.argument("key")
+@click.argument("keys", nargs=-1, required=True)
 @click.option("--expect-sha256", default=None, help="Refuse the change unless config.yaml still has this sha256.")
 @pass_ctx
-def config_unset(app: AppContext, key: str, expect_sha256: str | None) -> None:
-    """Remove one configuration key (its default applies again)."""
+def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | None) -> None:
+    """Remove configuration keys (their defaults apply again).
+
+    Several KEYs are removed in one validated write, so a pair that depends on
+    each other, such as openshell.admin.required_pack and
+    openshell.admin.required_pack_digest, can go together.
+    """
     from defenseclaw.config_writer import Change, parse_path
 
     try:
-        parse_path(key)
+        parsed = [(key, list(parse_path(key))) for key in keys]
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    _write_config_change(app, Change(key, unset=True), expect_sha256, "unset")
+    if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
+        return
+    # Nothing was removed: a key with a default is already unset, anything
+    # else is not a configuration key (a typo must not look like success).
+    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    for key, parts in parsed:
+        if not _lookup(view, parts)[0]:
+            raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
+    if len(keys) == 1:
+        click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")
+    else:
+        click.echo(f"{', '.join(keys)} are not set in config.yaml; their defaults already apply.")
 
 
 @config_cmd.command("migrate")
@@ -486,7 +537,9 @@ def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
     for part in parts:
         if isinstance(value, dict) and part in value:
             value = value[part]
-        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+        elif isinstance(value, list) and isinstance(part, int) and 0 <= part < len(value):
+            value = value[part]
+        elif isinstance(value, list) and isinstance(part, str) and part.isdigit() and int(part) < len(value):
             value = value[int(part)]
         else:
             return False, None

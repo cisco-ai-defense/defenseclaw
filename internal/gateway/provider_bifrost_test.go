@@ -131,6 +131,13 @@ func TestBifrostProvider_NewTenantAccount(t *testing.T) {
 		t.Errorf("key ID = %q, want %q", acc.keys[0].ID, keyID)
 	}
 
+	// An OpenAI-style base URL ending in /v1 reaches Bifrost without it, which
+	// appends /v1/chat/completions itself (GAP-0064).
+	withV1 := newTenantAccount(provKey, "k", keyID, "https://llm.example/v1", "", tlsOverrides{}, nil, nil, nil, nil)
+	if got := withV1.config.NetworkConfig.BaseURL; got != "https://llm.example" {
+		t.Errorf("network base URL = %q, want https://llm.example", got)
+	}
+
 	// Verify the account rejects requests for other providers — the
 	// previous global-account implementation served every configured
 	// provider from one instance, so a misrouted request could silently
@@ -333,7 +340,7 @@ func TestBifrostProvider_NewTenantAccountOllama(t *testing.T) {
 	}
 }
 
-func TestVLLMServerURL(t *testing.T) {
+func TestServerRootURL(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -346,8 +353,8 @@ func TestVLLMServerURL(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := vllmServerURL(tt.in); got != tt.want {
-				t.Errorf("vllmServerURL(%q) = %q, want %q", tt.in, got, tt.want)
+			if got := serverRootURL(tt.in); got != tt.want {
+				t.Errorf("serverRootURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

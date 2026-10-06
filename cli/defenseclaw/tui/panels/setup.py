@@ -7715,6 +7715,8 @@ def _effective_guardrail_value(
                 inspect_effective_policy=False,
             )
             detail = f"provenance: {report['provenance']}"
+            if report.get("note"):
+                detail += f"; {report['note']}"
             if report["drift"]:
                 detail += f"; status: {', '.join(report['drift'])}"
             return f"{report['effective']} ({detail})"

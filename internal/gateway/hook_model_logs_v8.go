@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -40,7 +41,7 @@ func emitHookModelRequestLogV8WithEmitter(
 		builder *observability.FamilyBuilder,
 		envelope observability.FamilyEnvelopeInput,
 	) (observability.Record, error) {
-		return buildHookModelRequestLogRecord(builder, envelope, meta, content)
+		return buildHookModelRequestLogRecord(ctx, builder, envelope, meta, content)
 	})
 }
 
@@ -73,11 +74,12 @@ func emitHookModelResponseLogV8WithEmitter(
 		builder *observability.FamilyBuilder,
 		envelope observability.FamilyEnvelopeInput,
 	) (observability.Record, error) {
-		return buildHookModelResponseLogRecord(builder, envelope, meta, content, finishReasons)
+		return buildHookModelResponseLogRecord(ctx, builder, envelope, meta, content, finishReasons)
 	})
 }
 
 func buildHookModelRequestLogRecord(
+	ctx context.Context,
 	builder *observability.FamilyBuilder,
 	envelope observability.FamilyEnvelopeInput,
 	meta llmEventMeta,
@@ -92,6 +94,7 @@ func buildHookModelRequestLogRecord(
 		DefenseClawTelemetryTokensReported: false, GenAIOperationName: observability.Present("chat"),
 	}
 	applyHookModelRequestLogIdentity(&input, meta)
+	input.DefenseClawSandboxID, input.DefenseClawSandboxName = hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 	if structured {
 		input.GenAIInputMessages = observability.Present(messages)
 	}
@@ -103,6 +106,7 @@ func buildHookModelRequestLogRecord(
 }
 
 func buildHookModelResponseLogRecord(
+	ctx context.Context,
 	builder *observability.FamilyBuilder,
 	envelope observability.FamilyEnvelopeInput,
 	meta llmEventMeta,
@@ -126,6 +130,7 @@ func buildHookModelResponseLogRecord(
 		DefenseClawTelemetryTokensReported: false, GenAIOperationName: observability.Present("chat"),
 	}
 	applyHookModelResponseLogIdentity(&input, meta)
+	input.DefenseClawSandboxID, input.DefenseClawSandboxName = hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 	if structured {
 		input.GenAIOutputMessages = observability.Present(messages)
 	}
@@ -285,6 +290,8 @@ func applyHookModelRequestLogIdentity(input *observability.LogModelRequestInput,
 	input.GenAIResponseID = hookModelV8OptionalID(meta.reportedResponseID())
 	input.DefenseClawModelRequestID = hookModelV8OptionalID(meta.PromptID)
 	input.DefenseClawModelResponseID = hookModelV8OptionalID(meta.ResponseID)
+	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
+	meta.Identity.applyTo(input)
 }
 
 func applyHookModelResponseLogIdentity(input *observability.LogModelResponseInput, meta llmEventMeta) {
@@ -329,4 +336,6 @@ func applyHookModelResponseLogIdentity(input *observability.LogModelResponseInpu
 	input.GenAIResponseID = request.GenAIResponseID
 	input.DefenseClawModelRequestID = request.DefenseClawModelRequestID
 	input.DefenseClawModelResponseID = request.DefenseClawModelResponseID
+	input.DefenseClawAgentIdentityID = request.DefenseClawAgentIdentityID
+	meta.Identity.applyTo(input)
 }

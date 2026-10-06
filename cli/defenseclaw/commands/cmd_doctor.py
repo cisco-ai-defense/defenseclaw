@@ -1347,7 +1347,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     _emit(
         "pass",
         "Config file",
-        f"{cfg_path}; canonical schema v8 valid",
+        f"{cfg_path}; canonical schema valid",
         r=r,
         check_id="doctor.config.canonical-v8",
     )
@@ -1489,7 +1489,7 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
             "run `defenseclaw config validate` before applying repairs"
         )
         return RepairDecision("blocked", reason, blockers=("canonical-v8 validation unavailable",))
-    return RepairDecision("noop", f"{config_path}; canonical schema v8 valid")
+    return RepairDecision("noop", f"{config_path}; canonical schema valid")
 
 
 def _fix_canonical_config_preflight(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -2523,6 +2523,24 @@ def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
     return "pass", f"{dist} {installed}"
 
 
+def _litellm_version_note() -> tuple[str, str]:
+    """``(status, note)`` for the installed LiteLLM, which both scanners call (GAP-0073)."""
+    import importlib.metadata as importlib_metadata
+    import re
+
+    from defenseclaw.scanner import settings as scanner_settings
+
+    dist, floor = scanner_settings.LITELLM_DIST, scanner_settings.LITELLM_MIN_VERSION
+    try:
+        installed = importlib_metadata.version(dist)
+    except importlib_metadata.PackageNotFoundError:
+        return "fail", f"{dist} is not installed; {_scanner_repair_hint()}"
+    if tuple(int(part) for part in re.findall(r"\d+", installed)[:3]) < floor:
+        needed = ".".join(str(part) for part in floor)
+        return "warn", f"{dist} {installed} (this release needs {needed} or newer); {_scanner_repair_hint()}"
+    return "pass", f"{dist} {installed}"
+
+
 def _check_scanners(cfg, r: _DoctorResult) -> None:
     from defenseclaw.scanner import settings as scanner_settings
 
@@ -2542,6 +2560,8 @@ def _check_scanners(cfg, r: _DoctorResult) -> None:
     # this environment, not a standalone mcp-scanner launcher.
     status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
     _emit(status, "Scanner: mcp-scanner", note, r=r)
+    status, note = _litellm_version_note()
+    _emit(status, "Scanner: litellm", note, r=r)
 
     issue = scanner_settings.recommended_settings_issue(cfg) if hasattr(cfg, "resolve_llm") else ""
     if issue:
@@ -9012,7 +9032,7 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
 
     data_dir = getattr(cfg, "data_dir", "") or ""
-    if getattr(cfg, "config_version", 0) >= CONFIG_VERSION_V9:
+    if getattr(cfg, "_source_config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
         stale = []
         # data-sandbox.json stays: `defenseclaw-gateway policy domains` and
@@ -12782,10 +12802,11 @@ def _check_connector_inventory(
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
             if mode in {"observe", "action"}:
+                fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
                 _emit(
                     "pass",
                     "Mode",
-                    f"{mode}; fail-mode={fail_mode['effective']}; provenance={fail_mode['provenance']}",
+                    f"{mode}; fail-mode={fail_mode['effective']}{fail_mode_note}; provenance={fail_mode['provenance']}",
                     r=r,
                 )
             else:

@@ -19,6 +19,7 @@ package audit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -91,6 +92,7 @@ func TestJudgeCompletionGeneratedMappingsPersistExactlyOnce(t *testing.T) {
 	}{
 		{name: "clean allow", action: "allow", severity: "NONE", outcome: observability.OutcomeAllowed, want: observability.SeverityInfo},
 		{name: "policy block", action: "block", severity: "HIGH", outcome: observability.OutcomeBlocked, want: observability.SeverityHigh},
+		{name: "policy alert", action: "alert", severity: "MEDIUM", outcome: observability.OutcomeAllowed, want: observability.SeverityMedium},
 		{name: "provider failure", action: "error", severity: "HIGH", failure: gatewaylog.JudgeFailureProvider,
 			error: "provider unavailable", outcome: observability.OutcomeFailed, want: observability.SeverityHigh},
 		{name: "empty response", action: "error", severity: "HIGH", failure: gatewaylog.JudgeFailureEmptyResponse,
@@ -179,6 +181,11 @@ func TestJudgeCompletionCollectionDropDoesNotResurrectLegacySignal(t *testing.T)
 }
 
 func TestEnforcementQuarantineGeneratedMappingPersistsExactlyOnce(t *testing.T) {
+	policyDigest := "sha256:" + strings.Repeat("a", 64)
+	SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return observability.Present(policyDigest), observability.Present(int64(7))
+	})
+	t.Cleanup(func() { SetPolicyStamp(nil) })
 	logger := newTestLogger(t)
 	runtime := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
 	logger.SetRuntimeV8Emitter(runtime)
@@ -251,10 +258,14 @@ func TestEnforcementQuarantineGeneratedMappingPersistsExactlyOnce(t *testing.T) 
 		"defenseclaw.asset.transition_initiator": "defenseclaw",
 		"defenseclaw.asset.file_action":          "quarantine",
 		"defenseclaw.enforcement.id":             "enforcement-77",
+		"defenseclaw.policy.effective_digest":    policyDigest,
 	} {
 		if assetBody[key] != want {
 			t.Errorf("asset body[%q] = %#v, want %#v", key, assetBody[key], want)
 		}
+	}
+	if got := fmt.Sprint(assetBody["defenseclaw.policy.generation"]); got != "7" {
+		t.Errorf("asset body policy generation = %q, want 7", got)
 	}
 	metrics := runtime.metricSnapshot()
 	if len(metrics) != 1 || metrics[0].EventName() != observability.EventName(observability.TelemetryInstrumentDefenseClawQuarantineActions) {

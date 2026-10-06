@@ -441,7 +441,11 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
 
     @patch(
         "defenseclaw.fail_mode.connector_fail_mode_report",
-        return_value={"effective": "open", "provenance": "process-env"},
+        return_value={
+            "effective": "open",
+            "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
+        },
     )
     def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
         cfg = self._cfg()
@@ -454,7 +458,8 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(len(mode_rows), 1)
         self.assertEqual(
             mode_rows[0]["detail"],
-            "action; fail-mode=open; provenance=process-env",
+            "action; fail-mode=open (observe mode keeps hooks fail-open; "
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
@@ -1631,6 +1636,7 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
             "suppression_count": 3,
             "sensitive_tool_count": 5,
             "digest": "a" * 64,
+            "files_digest": "b" * 64,
         }
         summary.update(overrides)
         return RulePackValidationResult(

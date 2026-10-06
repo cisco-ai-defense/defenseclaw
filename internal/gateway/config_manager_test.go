@@ -162,6 +162,41 @@ func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T)
 	}
 }
 
+// A destination key written to .env after the gateway started resolves when
+// the config that references it reloads (GAP-0017).
+func TestConfigManagerReloadReadsDotEnvKeysAddedSinceStart(t *testing.T) {
+	const keyName = "P0_RELOAD_DEST_KEY"
+	t.Setenv(keyName, "")
+	os.Unsetenv(keyName)
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	initialRaw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.RegisterDotEnvLoader(func(string) { os.Setenv(keyName, "from-dotenv") })
+	t.Cleanup(func() { config.RegisterDotEnvLoader(nil) })
+	mgr := newConfigManagerWithSnapshot(
+		path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			return nil
+		},
+	)
+	withDestination := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"    - name: remote\n      kind: otlp\n      endpoint: https://otel.example.test\n" +
+		"      headers:\n        Authorization: {env: " + keyName + "}\n")
+	if err := os.WriteFile(path, withDestination, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "test"); err != nil {
+		t.Fatalf("reload with a key that is only in .env: %v", err)
+	}
+}
+
 func TestConfigManagerV8ReloadRejectsInvalidSourceBeforeApply(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
@@ -1207,9 +1242,12 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	var diffs []ConfigDiff
-	unchanged := false
+	unchanged, rejected := false, false
 	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
 		diffs = append(diffs, diff)
+		if rejected {
+			return errors.New("custom pack digest mismatch")
+		}
 		if unchanged {
 			return errGenerationUnchanged
 		}
@@ -1232,5 +1270,44 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	unchanged = true
 	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || mgr.gen.Load() != gen {
 		t.Fatalf("unchanged asset rebuild = %v, generation %d -> %d", err, gen, mgr.gen.Load())
+	}
+	// A pack that fails its digest check rejects the rebuild and leaves a
+	// last_reload_error; restoring the pack rebuilds the same generation,
+	// which must clear that error (GAP-0027).
+	t.Cleanup(func() { liveReloadError.Store("") })
+	rejected = true
+	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
+		t.Fatal("rejected asset rebuild succeeded")
+	}
+	if msg, _ := liveReloadError.Load().(string); msg == "" {
+		t.Fatal("rejected asset rebuild left no last_reload_error")
+	}
+	rejected = false
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil {
+		t.Fatalf("restored asset rebuild: %v", err)
+	}
+	if msg, _ := liveReloadError.Load().(string); msg != "" {
+		t.Fatalf("last_reload_error = %q after the asset was restored, want it cleared", msg)
+	}
+}
+
+// A config_version 8 file whose in-memory migration fails is refused, not
+// run as raw v8 without its data.json admission and audit.db block/allow
+// policy (the reload keeps the previous generation).
+func TestLoadRuntimeConfigCandidateRefusesAFailedV8Migration(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	dataJSON := filepath.Join(dir, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {},}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if cfg, err := loadRuntimeConfigCandidate(source, raw); err == nil || cfg != nil {
+		t.Fatalf("loadRuntimeConfigCandidate = %v, %v; want the failed migration refused", cfg, err)
 	}
 }

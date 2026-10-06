@@ -174,7 +174,6 @@ OPENCLAW_MISSING=false
 OPENCLAW_INSTALLED=false
 OPENCLAW_NEXT=""
 QUICKSTART_RERUN=""
-INSTALL_SANDBOX=false
 PASSTHROUGH=()
 
 usage() {
@@ -196,7 +195,6 @@ Options:
   --no-openclaw            First install only: do not install OpenClaw
   --quickstart             Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   --quickstart-mode MODE   observe or action (implies --quickstart)
-  --sandbox                Deprecated no-op, removed in 1.1.0 (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
 
 Exit codes:
@@ -233,18 +231,12 @@ while [[ $# -gt 0 ]]; do
             QUICKSTART_MODE="$2"; shift
             case "${QUICKSTART_MODE}" in observe|action) ;; *) die "invalid --quickstart-mode: ${QUICKSTART_MODE}" ;; esac
             RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart-mode "${QUICKSTART_MODE}") ;;
-        --sandbox) INSTALL_SANDBOX=true ;;
+        --sandbox) die "--sandbox was removed with the legacy openshell-sandbox installer. Install without it; to run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' afterwards; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'." ;;
         --help|-h) usage; exit 0 ;;
         *) warn "Ignoring unknown option: $1" ;;
     esac
     shift
 done
-if [[ "${INSTALL_SANDBOX}" == true ]]; then
-    # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
-    # accepted until 1.1.0 so existing automation keeps working, and does
-    # nothing. It is not forwarded to another release's installer either.
-    warn "--sandbox is deprecated and ignored, and removed in 1.1.0: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
-fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
     CONNECTOR="${CONNECTOR:-none}"
@@ -658,6 +650,19 @@ for binary in ${MANAGED_BINARIES}; do
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The downloaded gateway does not report version ${VERSION}"
+
+# When another account's process holds this account's API port, the upgrade
+# only fails at the gateway restart, after the build, the migration and the
+# swap. The staged gateway (a release that has the check) names it first
+# (GAP-0130). A gateway that was not running is not restarted, so it is not checked.
+if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \
+    && "${STAGING}/bin/defenseclaw-gateway" check-api-port --help >/dev/null 2>&1; then
+    if ! port_problem="$("${STAGING}/bin/defenseclaw-gateway" check-api-port 2>&1)"; then
+        rm -rf "${STAGING}"
+        drop_new_uv
+        die "${port_problem#Error: }; nothing was changed"
+    fi
+fi
 
 info "Building the Python environment (a first install can take several minutes)"
 make_venv() {

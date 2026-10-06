@@ -80,6 +80,19 @@ func TestKCMDefaultPrincipal(t *testing.T) {
 	}
 }
 
+// macOS keeps the default ticket in an API: cache only its own klist reads.
+// Recorded from /usr/bin/klist --json on macOS 15.8; only the top-level
+// principal counts, never a ticket's.
+func TestParseKlistJSONPrincipal(t *testing.T) {
+	recorded := `{ "version" : 1, "cache" : "API:FF284205-CDB6-4352-B0DB-5E77C3A75D02", "principal" : "dcad-alice@DCLAB.TEST", "tickets" : [{"Issued" : "20261006200131","Expires" : "20261007060131","Principal" : "krbtgt/DCLAB.TEST@DCLAB.TEST"}]}`
+	if got := parseKlistJSONPrincipal([]byte(recorded)); got != "dcad-alice@DCLAB.TEST" {
+		t.Fatalf("klist principal = %q", got)
+	}
+	if got := parseKlistJSONPrincipal([]byte(`{"version":1,"tickets":[{"Principal":"krbtgt/DCLAB.TEST@DCLAB.TEST"}]}`)); got != "" {
+		t.Fatalf("a ticket's principal was taken as the default: %q", got)
+	}
+}
+
 // GAP-0095: a KCM read that failed in transit (the deadline passing while
 // sssd-kcm starts) must not be cached as the session's answer; KCM's own
 // refusal is an answer.

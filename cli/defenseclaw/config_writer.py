@@ -584,6 +584,52 @@ def validate_candidate(target: str, candidate: bytes) -> None:
             pass
 
 
+_REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
+_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
+_SCHEMA_WORDS = (
+    ("correct the field using the canonical v8 schema and reference", "check the value and its documented format"),
+    ("use the value type documented by the canonical v8 schema", "use the value type the reference documents"),
+)
+
+
+def plain_error(exc: BaseException) -> str:
+    """A refused change in plain words: the key and what to do about it.
+
+    The validators report a JSON path, a bracketed error code and pointers to
+    "the canonical v8 schema"; none of that helps someone who typed
+    ``config set``. The Go decision stands; this only says it plainly (the
+    same wording ``config validate`` uses for the schema errors).
+    """
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    cause = exc.__cause__ if isinstance(exc.__cause__, (ConfigInspectError, V8ConfigError)) else exc
+    if isinstance(cause, ConfigInspectError) and cause.field_path and cause.reason:
+        path, reason = cause.field_path, cause.reason
+    elif isinstance(cause, V8ConfigError):
+        path, reason = cause.path, f"[{cause.keyword}] {cause.corrective_action}"
+    else:
+        return str(exc)
+    for internal, plain in _SCHEMA_WORDS:
+        reason = reason.replace(internal, plain)
+    name = path.split(" (line", 1)[0].strip()
+    name = name[2:] if name.startswith("$.") else ("config.yaml" if name == "$" else name)
+    match = _REASON_CODE.match(reason.strip())
+    code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+    parts = [part.strip() for part in text.split("; ") if part.strip()]
+    if code == "config_semantic_invalid" and parts:
+        detail = _RULE_PACK_PREFIX.sub("", parts[0])
+        sentence = detail if detail.startswith(name) else f"{name}: {detail}"
+        actions = [part for part in parts[1:] if not part.startswith("expected ")]
+        return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+    if code == "pattern":
+        hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
+        return f"{name} is not in the expected format{hint}."
+    from defenseclaw.commands.cmd_config import _plain_v8_issue
+
+    return _plain_v8_issue(None, path, reason)
+
+
 def _data_dir_for(target: str, candidate: bytes) -> str:
     try:
         document = yaml.safe_load(candidate.decode("utf-8")) or {}
@@ -682,9 +728,9 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
     if not mutations:
         return current, []
     if not current.strip():
-        from defenseclaw.config import FRESH_CONFIG_VERSION
+        from defenseclaw.config import CURRENT_CONFIG_VERSION
 
-        current = f"config_version: {FRESH_CONFIG_VERSION}\n".encode()
+        current = f"config_version: {CURRENT_CONFIG_VERSION}\n".encode()
     prepared = prepare_v8_yaml_write(current, mutations, source_name=source_name, any_path=True)
     return prepared.candidate, changed
 

@@ -185,6 +185,10 @@ type SandboxLifecycleEvent struct {
 	// Severity overrides the phase default (error HIGH, unknown MEDIUM, else INFO).
 	Severity  string
 	Timestamp time.Time
+	// UserID and UserName are the host account the sandbox runs as, as on
+	// SandboxEgressEvent.
+	UserID   string
+	UserName string
 }
 
 // SandboxEgressSource identifies which boundary observed an egress decision.
@@ -615,6 +619,9 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: string(identity.Phase), DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				UserID:                             optionalNetworkIdentifier(input.UserID),
+				DefenseClawUserIDKind:              optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
+				DefenseClawUserName:                optionalNetworkIdentifier(input.UserName),
 				DefenseClawSandboxPhasePrevious:    optionalSandboxEnum(string(previous)),
 				DefenseClawSandboxLifecycleTrigger: optionalSandboxEnum(string(input.Trigger)),
 				DefenseClawSandboxExitCode:         exitCode,

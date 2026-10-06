@@ -1156,9 +1156,8 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 // processes. It ingests the guardian's per-user scans instead: each signal
 // belongs to the account the guardian's record names (not to anything the
 // scan reported), identical files of two users stay distinct, and the
-// gateway's own process detector is reported as covered, not failed. A v2
-// record's IDE inventory is attributed the same way; a v1 record (a
-// guardian from before the IDE inventory) is still read.
+// gateway's own process detector is reported as covered, not failed. A
+// record's IDE inventory is attributed the same way.
 func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	withoutMachineIDEs(t)
 	tmp := t.TempDir()
@@ -1186,11 +1185,11 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	}
 	spool := filepath.Join(tmp, "spool")
 	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
-		version, userReport := UserScanRecordVersion, report
+		userReport := report
 		if uid == 1002 {
-			version, userReport.IDEInventory = 1, nil
+			userReport.IDEInventory = nil
 		}
-		data, err := json.Marshal(UserScanRecord{Version: version, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2283,6 +2282,81 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 					sig.Fingerprint, collapsed.Fingerprint)
 			}
 			break
+		}
+	}
+}
+
+// Without Full Disk Access the scans never open a folder that makes macOS
+// prompt the user, so an employee is not asked about "defenseclaw-gateway"
+// (GAP-0128); with it, or elsewhere, they walk them like any other folder.
+func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	fullDiskAccess := false
+	macOSFullDiskAccess = func() bool { return fullDiskAccess }
+
+	home := t.TempDir()
+	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
+		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+	}
+	mustWrite(t, filepath.Join(home, "Documents", "models", "m.gguf"), "gguf")
+	mustWrite(t, filepath.Join(home, "work", "models", "m.gguf"), "gguf")
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	newService := func(roots ...string) *ContinuousDiscoveryService {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: roots, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		return svc
+	}
+	manifestProjects := func() int {
+		signals, _, err := newService(home).detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatalf("detectPackageManifests: %v", err)
+		}
+		count := 0
+		for _, sig := range signals {
+			if sig.Component != nil && sig.Component.Name == "ai" {
+				count++
+			}
+		}
+		return count
+	}
+	modelRoots := func() int {
+		count := 0
+		for _, root := range newService(filepath.Join(home, "Documents", "models"), filepath.Join(home, "work", "models")).modelFileScanRoots() {
+			if strings.HasPrefix(root.path, home+string(filepath.Separator)) && !strings.HasPrefix(root.path, filepath.Join(home, "data")) {
+				count++
+			}
+		}
+		return count
+	}
+	if projects, roots := manifestProjects(), modelRoots(); projects != 1 || roots != 1 {
+		t.Fatalf("without Full Disk Access: %d manifest projects and %d model roots, want only work/ (1 and 1)", projects, roots)
+	}
+	fullDiskAccess = true
+	if projects, roots := manifestProjects(), modelRoots(); projects != 4 || roots != 2 {
+		t.Fatalf("with Full Disk Access: %d manifest projects and %d model roots, want every folder (4 and 2)", projects, roots)
+	}
+	discoveryGOOS, fullDiskAccess = "linux", false
+	if projects := manifestProjects(); projects != 4 {
+		t.Fatalf("off macOS: %d manifest projects, want 4", projects)
+	}
+
+	for rel, want := range map[string]bool{
+		"Desktop": true, "documents/app": true, "Library/Containers": true,
+		"Library/Group Containers/group.example": true, "Library/Mobile Documents/com~apple~CloudDocs": true,
+		"Library/Application Support/AddressBook/Sources": true,
+		"Library": false, "Library/Application Support/Slack": false, "Library/Containers2": false,
+		"work/Documents": false, ".claude": false, "Desktops": false,
+	} {
+		if got := macOSTCCProtectedPath(filepath.Join(home, rel), []string{home}); got != want {
+			t.Errorf("macOSTCCProtectedPath(~/%s) = %v, want %v", rel, got, want)
 		}
 	}
 }

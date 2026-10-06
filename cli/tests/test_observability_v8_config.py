@@ -257,6 +257,30 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
     assert "run defenseclaw upgrade" in str(captured.value)
 
 
+@pytest.mark.parametrize(
+    ("removed", "path", "target"),
+    [
+        ("skill_actions: {high: {install: block}}", "$.skill_actions", "admission.skill.actions"),
+        ("guardrail: {rule_pack_dir: /x}", "$.guardrail.rule_pack_dir", "rule_pack or custom_packs"),
+        (
+            "guardrail: {connectors: {codex: {rule_pack_dir: /x}}}",
+            "$.guardrail.connectors.codex.rule_pack_dir",
+            "rule_pack or custom_packs",
+        ),
+    ],
+)
+def test_v9_names_the_replacement_of_a_removed_v8_key(removed: str, path: str, target: str) -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8(f"config_version: 9\n{removed}\n")
+
+    assert captured.value.path == path
+    assert captured.value.keyword == "legacy-key-forbidden"
+    message = str(captured.value)
+    assert f"use {target}" in message
+    assert "invalid v9 configuration" in message
+    assert "defenseclaw upgrade" not in message
+
+
 @pytest.mark.parametrize("version", [7, 10, "8", 8.0, True])
 def test_exact_v8_rejects_other_version_values(version: object) -> None:
     with pytest.raises(V8ConfigError) as captured:

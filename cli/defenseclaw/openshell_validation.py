@@ -297,7 +297,11 @@ def openshell_error(document: Mapping[str, Any]) -> tuple[str, str] | None:
         if not _PACK_DIGEST.fullmatch(digest):
             return "openshell.admin.required_pack_digest", "use sha256:<64 lowercase hex digits>"
         if not str(admin.get("required_pack") or "").strip():
-            return "openshell.admin.required_pack_digest", "set openshell.admin.required_pack to the pinned pack"
+            return (
+                "openshell.admin.required_pack_digest",
+                "the digest pins openshell.admin.required_pack: keep the pack, or remove both together with "
+                "defenseclaw config unset openshell.admin.required_pack openshell.admin.required_pack_digest",
+            )
 
     if section.get("enabled") is True:
         return _listeners_error(document, ingress, egress_port)

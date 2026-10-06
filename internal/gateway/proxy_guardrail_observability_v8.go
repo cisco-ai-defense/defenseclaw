@@ -569,7 +569,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 				TimeUnixNano: timestamp, DefenseClawEvaluationID: evaluationID,
 				DefenseClawGuardrailDecision: decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
-				DefenseClawGuardrailEnforced: enforced,
+				DefenseClawGuardrailEnforced:     enforced,
+				DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 			},
 		)
 		if err == nil {
@@ -581,7 +582,8 @@ func (facts proxyGuardrailV8Facts) overlay() proxyGuardrailV8Overlay {
 				TimeUnixNano: timestamp, DefenseClawEvaluationID: evaluationID,
 				DefenseClawGuardrailDecision: decision, DefenseClawGuardrailEffectiveAction: effective,
 				DefenseClawSecuritySeverity: severity, DefenseClawGuardrailWouldBlock: wouldBlock,
-				DefenseClawGuardrailEnforced: enforced,
+				DefenseClawGuardrailEnforced:     enforced,
+				DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 			},
 		)
 		if err == nil {
@@ -738,6 +740,8 @@ func (facts proxyGuardrailV8Facts) traceInput(ctx context.Context) (observabilit
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 			DefenseClawGuardrailWouldBlock:      observability.Present(facts.wouldBlock),
 			DefenseClawGuardrailEnforced:        observability.Present(facts.enforced),
+			DefenseClawPolicyEffectiveDigest:    livePolicyDigestV8(),
+			DefenseClawPolicyGeneration:         livePolicyGenerationV8(),
 		},
 	)
 	if err != nil {
