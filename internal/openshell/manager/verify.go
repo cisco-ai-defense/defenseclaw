@@ -43,10 +43,11 @@ import (
 // it delivered, root-owned and out of the workload's reach. On the MicroVM
 // driver none of that is the container runtime's doing: the identity is the
 // gateway's configuration ([openshell.drivers.vm] sandbox_uid and
-// sandbox_gid) and the image is unpacked into a disk of the driver's own.
-// So one exec checks it after every create and start (on every driver that
-// does not skip it, openshell.Driver.SkipWorkloadCheck), and a sandbox that
-// is not as prepared is deleted (create) or stopped (start). The check
+// sandbox_gid) and the image is unpacked into a disk of the driver's own;
+// on docker it is the container runtime's and the policy's
+// process.run_as_user. So one exec checks it after every create and start,
+// on every driver, and a sandbox that is not as prepared is deleted
+// (create) or stopped (start). The check
 // reads CapEff in its own exec: that holds for the harness too while the
 // harness also starts through the supervisor's exec path.
 //
@@ -309,7 +310,8 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 		return out
 	}
 	if got.UID != want.UID || got.GID != want.GID {
-		msg := fmt.Sprintf("the workload runs as uid %d:%d, not %d:%d, the identity its image was built for", got.UID, got.GID, want.UID, want.GID)
+		msg := fmt.Sprintf("the workload runs as uid %d:%d, not %d:%d, the identity its image was built for and its policy's process.run_as_user names",
+			got.UID, got.GID, want.UID, want.GID)
 		if d.GatewayIdentity {
 			msg = fmt.Sprintf("the OpenShell %[1]s driver runs sandboxes as uid %[2]d:%[3]d, but DefenseClaw's images are built for %[4]d:%[5]d; "+
 				"set sandbox_uid = %[4]d and sandbox_gid = %[5]d under [openshell.drivers.%[1]s] in the gateway's gateway.toml "+
@@ -357,8 +359,9 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // verifyWorkload runs the workload check in sandbox name and returns what
 // it found. A sandbox that does not run as want expects, or that cannot be
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
-// it, so one not as prepared never keeps running.
-func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord) (workloadFacts, error) {
+// it, so one not as prepared never keeps running, and outcome (what the
+// caller does with it, "it was deleted") ends the refusal's message.
+func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, outcome string) (workloadFacts, error) {
 	res, err := gw.Client.Exec(ctx, name, verifyArgv(want), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
@@ -384,7 +387,7 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	detail := strings.Join(problems, "; ")
 	m.logf("%s: sandbox %s does not run as DefenseClaw prepared it: %s", gatewaylog.ErrCodeOpenShellPolicyRejected, name, detail)
 	return facts, &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
-		Message: "sandbox " + name + " does not run as DefenseClaw prepared it", Detail: truncate(detail, 2048)}
+		Message: "sandbox " + name + " does not run as DefenseClaw prepared it; " + outcome, Detail: truncate(detail, 2048)}
 }
 
 // verifyStarted runs the workload check of a sandbox a start just made
@@ -400,7 +403,7 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 	} else {
 		want.UID, want.GID = m.runAs()
 	}
-	facts, err := m.verifyWorkload(ctx, gw, rec.Name, want)
+	facts, err := m.verifyWorkload(ctx, gw, rec.Name, want, "DefenseClaw stopped it again (its work is kept)")
 	if err != nil {
 		m.stopUnverified(ctx, gw, b)
 		return err

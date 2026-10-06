@@ -193,10 +193,12 @@ not the driver's name or `runtime.GOOS`.
   an admin `max_resources` it also counts the processors and reads the
   memory the MicroVM got, since the running gateway can take other values
   than its files say (launchd's environment, a change since its restart). A
-  mismatch rolls the create back or stops the started sandbox. It runs on
-  the vm driver, where the workload's identity is the gateway's
-  configuration. On docker it is off (`SkipWorkloadCheck` in the driver
-  table) until a Linux live run has passed it.
+  mismatch rolls the create back or stops the started sandbox, and the
+  refusal says which (`policy_rejected`, "... DefenseClaw deleted it" or
+  "... DefenseClaw stopped it again"). It runs on every driver: on vm the
+  workload's identity is the gateway's configuration, on docker it is the
+  policy's `process.run_as_user`, and the run files docker bind-mounts must
+  be on a read-only mount.
 - **Resources.** vm has no per-sandbox limits: every MicroVM gets the
   gateway-wide `vcpus`, `mem_mib` and `overlay_disk_mib`. `--cpu` and
   `--memory` are warned about and dropped, the record keeps the gateway-wide

@@ -1177,6 +1177,18 @@ deleted.
   administrator's switch; the TUI and app feeds name the threshold. Both
   drivers.
 
+### OpenShell sandbox hardening
+
+- **The check after ready runs on the docker driver too.** After every
+  create and start, one exec checks that the workload runs as the uid its
+  image was built for with no capabilities, that DefenseClaw's hooks,
+  launcher and managed settings are the root-owned files it delivered, and,
+  on docker, that the per-run settings files are on read-only mounts. A
+  sandbox that fails it is refused with `policy_rejected` and is deleted
+  (create) or stopped again (start), and the message now says which
+  (`…; DefenseClaw deleted it`, `…; DefenseClaw stopped it again (its work is
+  kept)`). It ran only on the MicroVM driver before.
+
 ### Legacy OpenShell standalone sandbox removed
 
 - **Breaking:** removes the legacy standalone sandbox integration for the

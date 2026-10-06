@@ -791,7 +791,20 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	must(t, err)
 	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1", Driver: driver}
 	e.m = e.newManager()
+	// Its sandboxes answer the workload check, which runs on every driver,
+	// as their records expect.
+	e.fake.HandleExec(e.workloadChecks(nil, nil))
 	return e
+}
+
+// handleExec answers every exec but the workload check with other.
+func (e *harnessEnv) handleExec(other openshelltest.ExecHandler) {
+	e.fake.HandleExec(e.workloadChecks(nil, other))
+}
+
+// execCalls are the commands the gateway ran, the workload checks left out.
+func (e *harnessEnv) execCalls() []openshelltest.ExecCall {
+	return slices.DeleteFunc(e.fake.ExecCalls(), isWorkloadCheck)
 }
 
 // orDefault returns v, or def when v is its zero value.

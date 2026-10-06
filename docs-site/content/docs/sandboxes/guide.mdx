@@ -93,10 +93,11 @@ What is different on a Mac:
 | `localhost` | Resolves through the `/etc/hosts` Docker writes. | A MicroVM's `/etc/hosts` is empty (OpenShell 0.1.1), so the images DefenseClaw builds for MicroVMs answer `localhost` themselves (with a pinned `nss-myhostname`), for every program that uses the system resolver: Node, Python, glibc programs and Go programs built with cgo, such as Antigravity CLI. A program that resolves names on its own (a Go binary built without cgo, a static musl binary) still cannot resolve `localhost` in a MicroVM; each image is checked for this when it is built, a harness that fails this way is refused on a Mac, and `sandbox image build` says why. The images answer `localhost` and the sandbox's hostname with loopback addresses; the MicroVM's DNS relay answers every other name with a synthetic `198.18.x.x` address, `_gateway` and names that do not exist too, and the egress proxy refuses a connection to such an address as an invalid destination unless it names a real one. |
 
 The hooks, policy packs, egress proxy, asks, credential placeholders,
-telemetry and tamper detection work as on Linux. After each create and
-start, DefenseClaw also checks inside the sandbox that it runs as your uid
-with no capabilities and that its hooks and managed settings are the files
-DefenseClaw prepared, and stops a sandbox that is not as prepared. The images
+telemetry and tamper detection work as on Linux, and so does the check after
+each create and start: DefenseClaw checks inside the sandbox that it runs as
+your uid with no capabilities and that its hooks and managed settings are the
+files DefenseClaw prepared, and deletes (create) or stops (start) a sandbox
+that is not as prepared. The images
 a MicroVM starts are named under `defenseclaw.invalid/`, a host name that
 never resolves, so a driver that does not find an image in Docker cannot
 fetch a stand-in for it from a registry. The changed files are scanned for
@@ -1592,6 +1593,7 @@ which runs NVIDIA's installer and sets up the service.
 | ``the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)`` | Start the daemon. With the daemon down, sandbox hooks block every tool call. |
 | ``sandboxes are unavailable: … (see `defenseclaw sandbox doctor`)`` | Run the doctor; `--fix` often starts or restarts the OpenShell gateway. |
 | `DefenseClaw hooks are not reaching the daemon; every tool call is being blocked` | Run the doctor and look at **Sandbox hooks** and **DefenseClaw daemon**, fix the cause, then start the session again. |
+| ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start) | The check after ready found the sandbox other than DefenseClaw prepared it, on any compute driver, and the reason follows the message: the workload runs as another uid or holds capabilities, a hook, launcher or managed-settings file is missing, changed, not root-owned or writable, or (Linux) a per-run settings file is not on a read-only mount. Nothing of the sandbox kept running. Rebuild the harness image (`defenseclaw sandbox image build <harness> --force`) and run again; on a Mac, a uid mismatch is fixed by `defenseclaw sandbox doctor --fix`. If it repeats, keep the reason for a bug report. |
 | `refusing to share /home/alice with a sandbox: it is your home directory` | Run from a project folder inside your home, not from home itself. DefenseClaw also refuses system folders, shared roots such as `/tmp`, credential folders such as `~/.ssh`, and agent homes such as `~/.claude` and `~/.codex`, whose settings and hooks run on your machine. |
 | `undo cannot look inside tools in …: the session took read permission away` | Make the folder readable (`chmod u+rwx tools`), review what is in it, and run undo again. |
 | `… cannot be mounted live: …; run with --copy to work on a copy` | Add `--copy`. |

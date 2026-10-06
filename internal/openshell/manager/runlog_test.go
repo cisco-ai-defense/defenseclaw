@@ -43,7 +43,7 @@ import (
 // what the manager keeps is what the scripts found.
 func runDirSandbox(t *testing.T, e *harnessEnv, runs string) {
 	t.Helper()
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		return runOnHost(ctx, call, runs)
 	})
 }
@@ -183,7 +183,7 @@ func TestStopWithoutALiveRun(t *testing.T) {
 	e := liveEnv(t, "quietbox", nil)
 	runDirSandbox(t, e, t.TempDir())
 	e.stopBox("quietbox")
-	if calls := e.fake.ExecCalls(); len(calls) != 1 {
+	if calls := e.execCalls(); len(calls) != 1 {
 		t.Fatalf("exec calls = %d, want only the harness's end", len(calls))
 	}
 	if _, err := e.m.RunLog(t.Context(), "quietbox", 0); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
@@ -212,7 +212,7 @@ func TestStopSaysWhenARunsLogWasNotKept(t *testing.T) {
 	e.m.mu.Unlock()
 	must(t, e.m.saveRunLog("lostbox", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
 		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
-	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if slices.Contains(call.Command, "defenseclaw-run-log") {
 			return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 		}
@@ -246,7 +246,7 @@ func TestStopKeepsTheRunLogWhenTheHarnessEndFails(t *testing.T) {
 			e := liveEnv(t, "slowbox", nil)
 			going := detachedRunDir(t, "working\n", "")
 			liveRunner(t, going)
-			e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+			e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 				if !slices.Contains(call.Command, "defenseclaw-end-harness") {
 					return runOnHost(ctx, call, going)
 				}
@@ -369,7 +369,7 @@ func TestATamperStopDoesNotReadTheRunLog(t *testing.T) {
 	must(t, e.m.saveRunLog("tamperlog", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
 		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
 	var reads atomic.Int32
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if slices.Contains(call.Command, "defenseclaw-run-log") {
 			reads.Add(1)
 			<-ctx.Done()
@@ -403,7 +403,7 @@ func TestStopIsPublishedBeforeTheRunLogIsRead(t *testing.T) {
 	liveRunner(t, going)
 	b := e.boxOf("orderbox")
 	var atRead audit.SandboxPhase
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if slices.Contains(call.Command, "defenseclaw-run-log") {
 			e.m.mu.Lock()
 			atRead = b.phase

@@ -298,9 +298,10 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	}
 }
 
-// A create on the MicroVM driver checks the workload once, after ready,
-// against the root-owned files its image carries, and records the
-// hostname it found. The docker driver does not check yet.
+// A create checks the workload once, after ready, on every driver: on the
+// MicroVM driver against the root-owned files its image carries, on docker
+// against those and the run files bind-mounted read-only, and records the
+// hostname it found.
 func TestCreateChecksTheWorkload(t *testing.T) {
 	e := newVMEnv(t, nil)
 	useOpenCode(t, e)
@@ -327,19 +328,33 @@ func TestCreateChecksTheWorkload(t *testing.T) {
 
 	d := newEnv(t, nil)
 	d.create(sandboxapi.CreateRequest{Name: "dkcheck"})
-	if calls := d.workloadCheckCalls("dkcheck"); len(calls) != 0 {
-		t.Fatalf("docker ran the workload check: %+v", calls)
+	dcalls := d.workloadCheckCalls("dkcheck")
+	rec = d.boxOf("dkcheck").rec
+	if len(dcalls) != 1 || rec.Verify == nil || !slices.Equal(dcalls[0].Command, verifyArgv(*rec.Verify)) || rec.Hostname != "dkcheck" {
+		t.Fatalf("docker workload checks = %+v, record verify = %+v, hostname %q", dcalls, rec.Verify, rec.Hostname)
 	}
-	if rec := d.boxOf("dkcheck").rec; rec.Verify == nil || len(rec.Verify.Files) == 0 || rec.Hostname != "" {
-		t.Fatalf("docker record verify = %+v, hostname %q", rec.Verify, rec.Hostname)
+	if !slices.ContainsFunc(rec.Verify.Files, func(f verifyFile) bool { return f.ReadOnlyMount }) {
+		t.Fatalf("docker checks no read-only run file: %+v", rec.Verify.Files)
 	}
+	// A run file the container sees on a writable mount is refused.
+	rw := newEnv(t, nil)
+	rw.fake.HandleExec(rw.workloadChecks(func(_ string, a *workloadAnswer) {
+		for i := range a.files {
+			if a.files[i].mount != "" {
+				a.files[i].mount = "rw,relatime"
+			}
+		}
+	}, nil))
+	_, err := rw.tryCreate(sandboxapi.CreateRequest{Name: "dkrw"})
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected); !strings.Contains(apiErr.Detail, "is not on a read-only mount") {
+		t.Fatalf("refusal = %+v", apiErr)
+	}
+	assertNothingLeft(t, rw)
 }
 
 // A sandbox that does not run as prepared is rolled back like one OpenShell
 // rejected, on either driver: nothing is left behind.
 func TestCreateRollsBackASandboxNotAsPrepared(t *testing.T) {
-	checked, _ := openshell.LookupDriver("docker")
-	checked.SkipWorkloadCheck = false
 	for _, tc := range []struct {
 		name   string
 		docker bool
@@ -357,12 +372,14 @@ func TestCreateRollsBackASandboxNotAsPrepared(t *testing.T) {
 		{"no answer", false, nil, &types.StatusError{Code: types.ErrorInternal, Message: "exec relay closed"}, sandboxapi.CodeUpstream, "exec relay closed"},
 		{"a changed hook on docker", true, func(a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("0", 64) }, nil,
 			sandboxapi.CodePolicyRejected, "is not the file DefenseClaw delivered"},
+		{"another identity on docker", true, func(a *workloadAnswer) { a.uid, a.gid = 0, 0 }, nil,
+			sandboxapi.CodePolicyRejected, "runs as uid 0:0, not 501:20, the identity its image was built for and its policy's process.run_as_user names"},
+		{"capabilities on docker", true, func(a *workloadAnswer) { a.capEff = "00000000a80425fb" }, nil, sandboxapi.CodePolicyRejected, "holds capabilities"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newVMEnv(t, nil)
 			if tc.docker {
 				e = newEnv(t, nil)
-				e.gw.Driver = checked
 			}
 			e.m.host = HostUser{UID: 501, GID: 20, Name: "dev"}
 			e.images.rec.UID, e.images.rec.GID = 501, 20
@@ -376,8 +393,12 @@ func TestCreateRollsBackASandboxNotAsPrepared(t *testing.T) {
 				e.fake.FailNext(openshelltest.MethodExec, tc.fail)
 			}
 			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "badbox", Harness: "opencode", Copy: true})
-			if apiErr := wantCode(t, err, tc.code); !strings.Contains(apiErr.Error(), tc.want) {
+			apiErr := wantCode(t, err, tc.code)
+			if !strings.Contains(apiErr.Error(), tc.want) {
 				t.Fatalf("refusal = %v, want %q", apiErr, tc.want)
+			}
+			if tc.code == sandboxapi.CodePolicyRejected && !strings.HasSuffix(apiErr.Message, "does not run as DefenseClaw prepared it; DefenseClaw deleted it") {
+				t.Fatalf("refusal message = %q, want it to say the sandbox was deleted", apiErr.Message)
 			}
 			if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 1 {
 				t.Fatalf("create calls = %d", n)
@@ -436,6 +457,34 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	}
 	if phases := e.tel.phases("restart"); phases[len(phases)-1] != audit.SandboxPhaseStopped {
 		t.Fatalf("lifecycle = %v", phases)
+	}
+}
+
+// On docker too a start that finds the sandbox not as prepared (here the
+// run files it rewrote are on a writable mount) stops it again and says so.
+func TestStartOnDockerStopsASandboxNotAsPrepared(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "dkstart"})
+	e.stopBox("dkstart")
+	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) {
+		for i := range a.files {
+			if a.files[i].mount != "" {
+				a.files[i].mount = "rw,relatime"
+			}
+		}
+	}, nil))
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	_, err := e.m.Start(t.Context(), "dkstart", sandboxapi.StartRequest{})
+	if apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected); !strings.HasSuffix(apiErr.Message, "DefenseClaw stopped it again (its work is kept)") ||
+		!strings.Contains(apiErr.Detail, "is not on a read-only mount") {
+		t.Fatalf("refusal = %+v", apiErr)
+	}
+	if got, _ := e.client.GetSandbox(t.Context(), "dkstart"); got.Status.Phase != openshell.PhaseStopped ||
+		e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 {
+		t.Fatalf("after the failed check: phase %s, stops %d", got.Status.Phase, e.fake.Calls(openshelltest.MethodStopSandbox)-stops)
+	}
+	if calls := e.workloadCheckCalls("dkstart"); len(calls) != 2 {
+		t.Fatalf("workload checks = %d, want one at create and one at start", len(calls))
 	}
 }
 

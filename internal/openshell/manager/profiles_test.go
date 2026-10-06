@@ -281,6 +281,16 @@ func TestTwoDaemonsShareAGateway(t *testing.T) {
 	fake := openshelltest.New()
 	a := newDaemonEnv(t, daemonOptions{fake: fake, owner: "aaaaaaaaaaaaaaaa", ingressPort: 18971, egressPort: 18972, apiPort: 18970}, nil)
 	b := newDaemonEnv(t, daemonOptions{fake: fake, owner: "bbbbbbbbbbbbbbbb", ingressPort: 28971, egressPort: 28972, apiPort: 28970}, nil)
+	// Each daemon answers the workload checks of its own sandboxes.
+	fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		owner := a
+		b.m.mu.Lock()
+		if b.m.boxes[call.Sandbox] != nil {
+			owner = b
+		}
+		b.m.mu.Unlock()
+		return owner.workloadChecks(nil, nil)(ctx, call)
+	})
 	// b's image is another harness build: the shared LLM profile must end up with both images' binaries.
 	const otherClaude = "/opt/defenseclaw-harness/claudecode-2/bin/claude"
 	b.images.rec.NetworkBinaries = []image.Binary{{Name: "claude", Realpath: otherClaude}}
