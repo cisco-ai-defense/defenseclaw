@@ -92,6 +92,61 @@ def _write_pack(root: str) -> str:
     return pack
 
 
+class TestRulesLayers(unittest.TestCase):
+    """``guardrail.rules`` reaches the scan as the gateway composes it (GAP-0065)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rp-layers-")
+        self.pack_dir = _write_pack(self.tmp)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _rules(self, *layers):
+        return {r.rule_id: r for r in rulepack.load_rule_pack(self.pack_dir, layers).rules}
+
+    def test_enable_disable_and_severity_overrides(self):
+        rules = self._rules(
+            rulepack.RulesLayer(enable=("SEC-DISABLED",), severity_overrides=(("SEC-ANTHROPIC", "HIGH"),))
+        )
+        self.assertEqual(rules["SEC-ANTHROPIC"].severity, "HIGH")
+        self.assertIn("SEC-DISABLED", rules)
+        # A later layer (a connector's) wins over an earlier one.
+        rules = self._rules(rulepack.RulesLayer(enable=("SEC-DISABLED",)), rulepack.RulesLayer(disable=("SEC-DISABLED",)))
+        self.assertNotIn("SEC-DISABLED", rules)
+
+    def test_protection_replaces_a_rule_of_the_same_id(self):
+        root = os.path.join(self.tmp, "use-cases")
+        os.makedirs(os.path.join(root, "swap", "rules"))
+        with open(os.path.join(root, "swap", "rules", "secrets.yaml"), "w") as fh:
+            fh.write(
+                "version: 1\ncategory: secret\nrules:\n"
+                "  - id: SEC-ANTHROPIC\n    tool_call_only: true\n    pattern: 'x'\n    title: t\n"
+                "    severity: HIGH\n    confidence: 0.9\n    tags: []\n"
+            )
+        with patch("defenseclaw.policy_catalog.protection_packs_dir", return_value=root):
+            rules = self._rules(rulepack.RulesLayer(protections=("swap",)))
+        self.assertNotIn("SEC-ANTHROPIC", rules)
+
+    def test_maybe_wrap_applies_the_scope_rules_even_without_a_pack_dir(self):
+        from types import SimpleNamespace
+
+        guardrail = SimpleNamespace(
+            rules=SimpleNamespace(disable=["SEC-ANTHROPIC"], enable=[], protections=[], severity_overrides={}),
+            effective_rule_pack_dir=lambda connector="": "",
+            _connector_override=lambda connector: None,
+        )
+        cfg = SimpleNamespace(guardrail=guardrail)
+        with patch("defenseclaw.policy_catalog.preset_pack_dir", return_value=self.pack_dir):
+            wrapped = rulepack.maybe_wrap(object(), cfg, "codex")
+        self.assertIsInstance(wrapped, rulepack.RulePackOverlayScanner)
+        self.assertNotIn("SEC-ANTHROPIC", {r.rule_id for r in wrapped.pack.rules})
+        guardrail.rules = None
+        self.assertIsNot(type(rulepack.maybe_wrap(object(), cfg, "codex")), rulepack.RulePackOverlayScanner)
+
+
 class TestLoadRulePack(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="rp-test-")
@@ -426,7 +481,7 @@ class TestMaybeWrap(unittest.TestCase):
 
         self.assertIsInstance(codex, rulepack.RulePackOverlayScanner)
         self.assertIsInstance(cursor, rulepack.RulePackOverlayScanner)
-        load.assert_called_once_with(self.pack_dir)
+        load.assert_called_once_with(self.pack_dir, ())
 
 
 class TestTextFromMcpServer(unittest.TestCase):

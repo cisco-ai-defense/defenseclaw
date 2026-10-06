@@ -24,6 +24,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -628,6 +629,39 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
         app.cfg.save.assert_called_once()
+
+    def test_enable_one_connector_verifies_its_agent_first_and_waits_for_the_gateway(self):
+        """Windows refuses a connector it holds no verified agent executable for, and
+        disable dropped that proof (GAP-0069): enable records it before saving, and
+        reports success only once the restarted gateway admitted the connector."""
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        with (
+            patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections") as record,
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+        ):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(list(record.call_args.args[1]), ["codex"])
+        self.assertTrue(restart.call_args.kwargs["wait_for_connector_ready"])
+
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException("cannot verify the agent executable"),
+            ),
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+        ):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("cannot verify the agent executable", result.output)
+        app.cfg.save.assert_not_called()
+        restart.assert_not_called()
 
     def test_disable_already_disabled_is_noop(self):
         runner = CliRunner()
