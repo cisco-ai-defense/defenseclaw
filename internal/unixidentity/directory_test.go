@@ -72,20 +72,31 @@ func TestDirectoryFactsFailAsAWholeNotInPart(t *testing.T) {
 		t.Errorf("getent group exit 1: facts = %+v, want an error", facts)
 	}
 
-	// 400 groups are all named (with the primary group); more than the
-	// bound fail.
+	// 400 groups are all named (with the primary group), in several getent
+	// calls: one call for all of them outlasted a cold SSSD (GAP-0138). More
+	// than the bound fail, and so does one batch that did not finish.
 	for _, tc := range []struct {
-		count int
-		fails bool
-	}{{400, false}, {maxDirectoryGroups - 1, false}, {maxDirectoryGroups, true}} {
-		var ids, lines []string
+		count   int
+		fails   bool
+		timeout int // index of the batch whose getent times out, -1 for none
+	}{{400, false, -1}, {maxDirectoryGroups - 1, false, -1}, {maxDirectoryGroups, true, -1}, {400, true, 3}} {
+		// The primary group leads the ids, and the batches are cut from them.
+		ids := []string{"1001"}
+		lines := []string{"alice@corp.example.com:*:1001:"}
 		for i := range tc.count {
 			ids = append(ids, fmt.Sprint(7000+i))
 			lines = append(lines, fmt.Sprintf("g%d@corp.example.com:*:%d:", i, 7000+i))
 		}
 		f := fake()
-		f.results[initgroups] = commandResult{stdout: []byte("alice@corp.example.com 1001 " + strings.Join(ids, " ") + "\n")}
-		f.results["group 1001 "+strings.Join(ids, " ")] = commandResult{stdout: []byte(strings.Join(lines, "\n") + "\n")}
+		f.results[initgroups] = commandResult{stdout: []byte("alice@corp.example.com " + strings.Join(ids, " ") + "\n")}
+		for start := 0; start < len(ids); start += groupQueryBatch {
+			end := min(start+groupQueryBatch, len(ids))
+			key := "group " + strings.Join(ids[start:end], " ")
+			f.results[key] = commandResult{stdout: []byte(strings.Join(lines[start:end], "\n") + "\n")}
+			if start/groupQueryBatch == tc.timeout {
+				f.errs[key] = errors.New("getent timed out")
+			}
+		}
 		facts, err := newFakeNSS(f).DirectoryFactsForUID(1001, time.Now())
 		if (err != nil) != tc.fails || (err == nil && len(facts.Groups) != tc.count+1) {
 			t.Errorf("%d groups: %d named, err %v", tc.count, len(facts.Groups), err)

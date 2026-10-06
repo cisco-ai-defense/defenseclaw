@@ -186,6 +186,12 @@ func (s *ContinuousDiscoveryService) sweepHistoryIfDue(ctx context.Context) bool
 	} else if agents > 0 {
 		fmt.Fprintf(os.Stderr, "[ai-discovery] inventory history: pruned %d agent identities not seen for %d days\n", agents, days)
 	}
+	// So are the session ids the ledger remembers it counted.
+	if _, err := s.invStore.PruneAgentIdentitySessions(ctx, cutoff); err != nil {
+		if ctx.Err() == nil && w.allowDiagnostic("prune-agent-sessions", now) {
+			fmt.Fprintf(os.Stderr, "[ai-discovery] agent identity session prune failed: %v\n", err)
+		}
+	}
 	pruned, err := s.invStore.PruneScanHistory(ctx, cutoff, inventoryHistorySweepBudget)
 	if err != nil {
 		if ctx.Err() == nil && w.allowDiagnostic("prune", now) {

@@ -69,8 +69,8 @@ func TestProxyConnectTLSEndToEnd(t *testing.T) {
 		!allowed.FirstSeen || allowed.Status != http.StatusOK || allowed.Source != SourceDefault || allowed.TunnelID == "" {
 		t.Errorf("allowed event = %+v", allowed)
 	}
-	if n := len(h.proxy.Tunnels()); n != 1 {
-		t.Errorf("Tunnels() = %d open, want 1 while the client keeps the connection", n)
+	if n := h.proxy.activeTunnels(); n != 1 {
+		t.Errorf("%d tunnels tracked, want 1 while the client keeps the connection", n)
 	}
 	if open, moved := h.proxy.BindingActivity("binding-one"); open != 1 || moved < 5000 {
 		t.Errorf("BindingActivity = %d open, %d bytes moved; want the tunnel and its upload", open, moved)
@@ -84,12 +84,18 @@ func TestProxyConnectTLSEndToEnd(t *testing.T) {
 	if closed.TunnelID != allowed.TunnelID || closed.BytesUp < 5000 || closed.BytesDown == 0 || closed.Duration <= 0 || closed.Terminated {
 		t.Errorf("closed event = %+v", closed)
 	}
+	// The handler closes the flow of the tunnel and untracks it just after
+	// it reports it closed.
+	eventually(t, "the tunnel to wind down", func() bool {
+		s := h.proxy.Counter().DestinationsFor("binding-one")
+		return h.proxy.activeTunnels() == 0 && (len(s) != 1 || s[0].Active == 0)
+	})
 	stats := h.proxy.Counter().DestinationsFor("binding-one")
 	if len(stats) != 1 || stats[0].BytesUp != closed.BytesUp || stats[0].BytesDown != closed.BytesDown || stats[0].Tunnels != 1 || stats[0].Active != 0 {
 		t.Errorf("destination stats = %+v, closed event %+v", stats, closed)
 	}
-	if open, _ := h.proxy.BindingActivity("binding-one"); open != 0 || len(h.proxy.Tunnels()) != 0 {
-		t.Errorf("after close: BindingActivity = %d open, Tunnels() = %+v", open, h.proxy.Tunnels())
+	if open, _ := h.proxy.BindingActivity("binding-one"); open != 0 || h.proxy.activeTunnels() != 0 {
+		t.Errorf("after close: BindingActivity = %d open, %d tracked", open, h.proxy.activeTunnels())
 	}
 }
 
@@ -677,7 +683,7 @@ func TestProxyIdleTimeouts(t *testing.T) {
 		if closed := h.sink.wait(t, EventClosed, 1)[0]; !closed.Terminated || closed.BytesDown != int64(len("partial")) || closed.Status != http.StatusOK {
 			t.Errorf("closed event = %+v", closed)
 		}
-		eventually(t, "the request to be untracked", func() bool { return len(h.proxy.Tunnels()) == 0 })
+		eventually(t, "the request to be untracked", func() bool { return h.proxy.activeTunnels() == 0 })
 	})
 	t.Run("slow forwarded response", func(t *testing.T) {
 		h := newHarness(t, idle)
@@ -885,7 +891,7 @@ func TestProxyLargeUploadBlockAtFlaggedAddress(t *testing.T) {
 	if got := received(); got > 1024 {
 		t.Errorf("the sink received %d bytes across two names past the 1024-byte block", got)
 	}
-	eventually(t, "every tunnel to close", func() bool { return len(h.proxy.Tunnels()) == 0 })
+	eventually(t, "every tunnel to close", func() bool { return h.proxy.activeTunnels() == 0 })
 
 	for _, host := range []string{"known.example", "fresh.example"} {
 		resp, b := h.refused(h.cred, host+":443")
@@ -1005,7 +1011,7 @@ func TestProxyAbsoluteFormCountsRequestHeads(t *testing.T) {
 				for _, s := range h.proxy.Counter().DestinationsFor("binding-one") {
 					up += s.BytesUp
 				}
-				return len(h.proxy.Tunnels()) == 0
+				return h.proxy.activeTunnels() == 0
 			})
 			if got := received(); up != got || up == 0 || (block && got > 4096) {
 				t.Errorf("counted %d bytes up; the upstream received %d (block %v at 4096)", up, got, block)
@@ -1067,8 +1073,8 @@ func TestProxyWebSocketUpgrade(t *testing.T) {
 	if _, err := io.ReadFull(br, got); err != nil || string(got) != "frame-data" {
 		t.Fatalf("echo = %q, %v", got, err)
 	}
-	if n := len(h.proxy.Tunnels()); n != 1 {
-		t.Errorf("Tunnels() = %d during the upgrade", n)
+	if n := h.proxy.activeTunnels(); n != 1 {
+		t.Errorf("%d tunnels tracked during the upgrade", n)
 	}
 	_ = conn.Close()
 	closed := h.sink.wait(t, EventClosed, 1)[0]
@@ -1272,7 +1278,11 @@ func TestProxyConcurrentTunnels(t *testing.T) {
 	for err := range errs {
 		t.Error(err)
 	}
-	eventually(t, "all tunnels to close", func() bool { return len(h.sink.ofKind(EventClosed)) == 32 })
+	// A handler closes the flow of its tunnel just after it reports it closed.
+	eventually(t, "all tunnels to close", func() bool {
+		s := h.proxy.Counter().DestinationsFor("binding-one")
+		return len(h.sink.ofKind(EventClosed)) == 32 && (len(s) != 1 || s[0].Active == 0)
+	})
 	if s := h.proxy.Counter().DestinationsFor("binding-one"); len(s) != 1 || s[0].Tunnels != 32 || s[0].Active != 0 {
 		t.Errorf("stats = %+v", s)
 	}

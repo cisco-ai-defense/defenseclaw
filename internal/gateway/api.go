@@ -252,6 +252,8 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookChildThreads                  map[string]hookChildThread
+	hookChildThreadOrder              []string
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState

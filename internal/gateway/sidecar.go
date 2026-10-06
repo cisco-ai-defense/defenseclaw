@@ -1882,6 +1882,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		previousProfiles := api.guardrailProfileSet()
 		api.setGuardrailProfiles(profileCandidate)
 		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+		if profileCandidate != nil {
+			go profileCandidate.logUnknownGroups()
+		}
 	}
 	if s.router != nil {
 		if nextRulePack != nil {
@@ -6834,6 +6837,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
+	if set := api.guardrailProfileSet(); set != nil {
+		go set.logUnknownGroups()
+	}
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
