@@ -417,6 +417,8 @@ func SetCommandName(name string) {
 
 func init() {
 	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
+	// A config reload reads credentials added to .env since the gateway started.
+	config.RegisterDotEnvLoader(loadDotEnvIntoOS)
 }
 
 // Execute runs the root command and returns the exit code. The actual
