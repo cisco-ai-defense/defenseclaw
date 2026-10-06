@@ -9035,6 +9035,20 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         )
         return
     local = _local_policy_digest(cfg)
+    pending = [str(key) for key in policy.get("pending_restart") or []]
+    if local is not None and local.get("effective_digest") != digest and pending:
+        # The gateway announced these keys apply only after a restart, so the
+        # difference is the pending change, not a stale gateway.
+        _emit(
+            "warn",
+            label,
+            f"{applied}; restart the gateway to apply {', '.join(pending)}: `defenseclaw-gateway restart`",
+            r=r,
+            check_id="doctor.policy.restart-pending",
+            reason_code="policy-restart-pending",
+            remediation="Run `defenseclaw-gateway restart`",
+        )
+        return
     if local is not None and local.get("effective_digest") != digest:
         _emit(
             "fail",

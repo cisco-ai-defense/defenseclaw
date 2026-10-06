@@ -88,6 +88,16 @@ class DoctorPolicyStateTests(unittest.TestCase):
             if want == "fail" and not extra:
                 self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
 
+        # A digest the gateway holds back for a restart-only key is a pending
+        # restart (warn), not a stale gateway (fail) (GAP-0072).
+        policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                  "config_generation_recorded": True, "pending_restart": ["guardrail.connectors"]}
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": "sha256:" + "b" * 64}):
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+        self.assertEqual(result.checks[0]["status"], "warn")
+        self.assertIn("guardrail.connectors", result.checks[0]["detail"])
+
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
     def test_only_data_json_is_retired(self):

@@ -743,6 +743,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			}
 		}
 	}
+	setPendingRestart(pendingRestart)
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
