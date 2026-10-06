@@ -153,8 +153,17 @@ The machine ID comes from `/etc/machine-id`, the Windows `MachineGuid` or the
 macOS `IOPlatformUUID`. A config root the agent claims, such as a
 `CLAUDE_CONFIG_DIR` override, is recorded as a hint and never changes the ID.
 Two users who reuse the same session ID get different session IDs, and a
-chat that resumes after a gateway restart keeps its `ais-` ID. The Secure
-Client profile keeps its existing agent IDs and gets no new attributes.
+chat that resumes after a gateway restart keeps its `ais-` ID and is not
+counted again in the Sessions column of `defenseclaw agent identities`, however
+many chats were open at the restart. The Secure Client profile keeps its
+existing agent IDs and gets no new attributes.
+
+Claude Code and Codex name a sub-agent on every hook it makes, so each of those
+hooks carries the sub-agent's `ais-` at depth one with the main agent as its
+parent, also when the gateway restarted after the sub-agent started. Codex 0.160
+runs a spawned agent as a session of its own and sends no `SubagentStart`; the
+gateway links that session to the agent that created it, so it is a sub-agent
+at depth one with the parent session named, under the `ais-` of its own session.
 
 List the identities the gateway has seen:
 
