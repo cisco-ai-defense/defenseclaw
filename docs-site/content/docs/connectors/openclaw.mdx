@@ -143,8 +143,10 @@ defenseclaw setup openclaw \
 ```
 
 Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with a reviewed
-first-party allow-list for additional containment.
+that have already crossed the block threshold. The policy also writes the
+matching [admission](/docs/policies/admission) settings, including
+`allow_list_bypass_scan: false`, so first-party skills and plugins are scanned
+too.
 
 </Tab>
 

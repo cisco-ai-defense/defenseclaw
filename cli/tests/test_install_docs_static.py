@@ -756,12 +756,15 @@ def test_current_observability_guidance_explains_v8_redaction_workflow() -> None
         "defenseclaw config validate",
         "defenseclaw config show --effective --section observability",
         "defenseclaw observability plan",
-        "defenseclaw-gateway restart",
     )
     for rel in OBSERVABILITY_V8_WORKFLOW_GUIDES:
         text = (ROOT / rel).read_text(encoding="utf-8")
         for expected in required_workflow:
             assert expected in text, f"{rel} is missing v8 redaction guidance: {expected}"
+        if not rel.endswith(".mdx"):
+            # The generator and the alert rules still name the restart; the docs pages
+            # say that a running gateway applies a verified policy itself (config_version 9).
+            assert "defenseclaw-gateway restart" in text, f"{rel} is missing the restart command"
 
     for rel in OBSERVABILITY_V8_CONNECTOR_GUIDES:
         text = (ROOT / rel).read_text(encoding="utf-8")

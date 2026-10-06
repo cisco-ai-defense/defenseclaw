@@ -161,7 +161,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("codex"), "action")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
-        self.assertEqual(g.effective_rule_pack_dir("codex"), "/codex/rules")
+        self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.abspath("/codex/rules"))
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
@@ -170,7 +170,7 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("empty"), "observe")
         self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
-        self.assertEqual(g.effective_rule_pack_dir("empty"), "/global/rules")
+        self.assertEqual(g.effective_rule_pack_dir("empty"), os.path.abspath("/global/rules"))
         self.assertFalse(g.effective_hilt("empty").enabled)
         self.assertEqual(g.effective_hilt("empty").min_severity, "HIGH")
 

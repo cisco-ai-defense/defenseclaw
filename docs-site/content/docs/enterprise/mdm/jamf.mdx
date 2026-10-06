@@ -115,7 +115,7 @@ umask 022
 mkdir -p "$stage"
 tmp=$(mktemp "$stage/.config.yaml.XXXXXX")
 cat >"$tmp" <<'DEFENSECLAW_CONFIG'
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies

@@ -1,0 +1,332 @@
+---
+title: "Configuration: one source of truth"
+description: Where every DefenseClaw setting lives. config.yaml holds what an administrator decided; hook files and provider files are derived from it; locks and ledgers are evidence; approvals, discovery and quarantine are runtime state. Includes the single config writer, policy generations, and the rules for managed hosts.
+keywords:
+  - DefenseClaw config.yaml source of truth
+  - DefenseClaw config writer
+  - DefenseClaw effective policy digest
+  - DefenseClaw policy generation
+  - DefenseClaw managed device
+  - DefenseClaw derived files
+---
+
+DefenseClaw keeps every decision an administrator makes in one place:
+`~/.defenseclaw/config.yaml`, plus the few policy assets that file names by
+digest (a custom rule pack, a scanner policy file, extra YARA rules, an
+AI-discovery signature pack). Nothing else stores a decision. The gateway, the
+hooks, the TUI, the CLI and the enterprise lifecycle all read that one file,
+and every change goes through one writer.
+
+This page explains the model. For the key-by-key schema, see the
+[configuration reference](/docs/reference/configuration).
+
+## Four kinds of state
+
+Every file DefenseClaw keeps is one of four kinds. The kind tells you whether
+you may edit it, what happens if you do, and how to fix it.
+
+| Kind | What it is | Examples | If it is wrong |
+| --- | --- | --- | --- |
+| **Intent** | What an administrator decided. The only input to policy. | `config.yaml`, and the assets it pins by digest | Change it with `defenseclaw config set`, `setup`, the TUI, or by hand on a per-user install |
+| **Derived** | Rendered from intent. Regenerated whenever its inputs change, and never read back as input. | Hook scripts, `custom-providers.json`, enterprise machine policy, composed rule packs | Do not edit it. Doctor reports the drift, and `doctor --fix`, `setup` or `ensure` regenerates it |
+| **Evidence** | A record of what was applied or decided, so that tools can verify it later. | `config.generation.json`, `hook_contract_lock.json`, `migration-v9.json`, deployment records, ledgers | Not policy. Editing it makes verification fail |
+| **Runtime state** | What DefenseClaw observed or did while running. | Approvals, discovery inventory, quarantine, the enforcement journal | Reported by `status` and `doctor`. Never treated as policy |
+
+The split removes a class of bugs where two files disagreed. A block list in
+a database, a thresholds file next to the rules, or a hook script with a
+baked-in setting could each override what `config.yaml` said. In
+`config_version: 9` they cannot: if a value changes what DefenseClaw decides,
+it is in `config.yaml`.
+
+## How a change becomes enforcement
+
+<Flow
+  direction="TB"
+  caption="A change is validated and recorded by the config writer, written to config.yaml, and picked up by the running gateway as a new policy generation. Derived files are rendered from config.yaml; they are never read back."
+>
+  <Node id="admin" kind="operator">{`Change intent\nCLI · TUI · admin push`}</Node>
+  <Node id="writer" kind="generic">{`Config writer\nlock · validate · record`}</Node>
+  <Node id="cfg" kind="policy" emphasis>{`config.yaml\nthe one source of truth`}</Node>
+  <Node id="gen" kind="gateway">{`New policy generation\ncompose · compile · digest`}</Node>
+  <Node id="enf" kind="decision">{`Hooks, proxy, watcher\nread one generation`}</Node>
+  <Node id="derived" kind="datastore">{`Derived files\nhook scripts · providers`}</Node>
+  <Node id="evidence" kind="datastore">{`Evidence\ngeneration record`}</Node>
+  <Edge from="admin" to="writer" label="asks" />
+  <Edge from="writer" to="cfg" label="writes" />
+  <Edge from="writer" to="evidence" label="records" />
+  <Edge from="cfg" to="gen" label="reloads" />
+  <Edge from="cfg" to="derived" label="renders" />
+  <Edge from="gen" to="enf" label="serves" />
+</Flow>
+
+Three parts of that path matter day to day.
+
+1. **One writer.** `defenseclaw config set`, every `defenseclaw setup`
+   command, the TUI, `defenseclaw skill block` and the other block commands,
+   and the gateway's own API all change `config.yaml` through the same
+   writer. It takes the lock `config.yaml.lock` (the Go gateway and the Python
+   CLI share it), validates the new file against the schema before it writes
+   anything, replaces the file atomically, and records the write in
+   `config.generation.json`. A change that fails validation leaves
+   `config.yaml` untouched.
+2. **One generation.** The gateway watches `config.yaml` and the assets it
+   names. On a change it builds a complete new *policy generation* off the
+   hot path: it composes the rule packs, compiles `admission:`, resolves the
+   thresholds for every connector and profile, and prepares the policy
+   engine. Then it swaps the generation in atomically. Every hook decision,
+   proxy decision and install-watcher decision reads one generation, so a
+   request never sees half of a change.
+3. **A bad change is not applied.** If the new generation does not build (a
+   custom rule pack whose digest changed, for example), the gateway keeps
+   enforcing the previous generation and reports the error as
+   `last_reload_error`. Doctor shows it as a failed **Policy** check.
+
+Most keys apply with no restart. A short list of process-level keys still
+needs `defenseclaw-gateway restart`: `data_dir`, the gateway listener and
+token settings, the guardrail listener, `deployment_mode`,
+`enterprise.profile`, `enterprise.network`, the resource-identity keys
+(`environment`, `tenant_id`, `workspace_id`, `discovery_source`), and the hook
+settings that setup bakes into the hook scripts. When your change touches one,
+`config set` says so:
+
+```text
+Set gateway.port (config generation 9, sha256 b0683fad4394).
+Effective policy digest: sha256:c770dec74b1d9a5631df0a0f97d907259a661f6baded49b362722e043e12b76e
+Restart the gateway to apply gateway.port: defenseclaw-gateway restart
+```
+
+## What lives in config.yaml
+
+`config.yaml` is administrator intent. These sections decide behaviour:
+
+| Section | Decides |
+| --- | --- |
+| `guardrail` | Mode, thresholds (`block_at`, `alert_at`), rule pack and `guardrail.rules`, per-connector and per-profile overrides, hook fail mode |
+| `admission` | What happens to a skill, MCP server or plugin by scan severity |
+| `asset_policy` | The block and allow lists, and registry and runtime-detection rules |
+| `scanners`, `llm`, `llm_providers` | Scanner policy and gate, the judge model, custom LLM providers |
+| `update` | Update check, channel and download source |
+| `observability`, `webhooks`, `notifications` | Where telemetry and alerts go, and redaction |
+| `enterprise`, `managed`, `deployment_mode` | The managed-device profile |
+
+Read a value, and where it comes from, with `config get --effective`:
+
+```bash
+defenseclaw config set guardrail.block_at HIGH
+defenseclaw config get guardrail.block_at --effective
+```
+
+```text
+HIGH
+(source: config:guardrail.block_at)
+```
+
+When you do not set a threshold, the same command prints the rule pack's
+default and names the pack as the source. The same is true for the
+[admission](/docs/policies/admission) actions, which derive from the scanner
+gate until you set them.
+
+Some settings point at a file of their own: a custom rule pack, a scanner
+policy, extra YARA rules. Those assets are *pinned*. The config entry carries
+the file's `sha256` digest, so a changed file never takes effect silently:
+
+```yaml
+guardrail:
+  rule_pack: acme-hardened
+  custom_packs:
+    acme-hardened:
+      path: /etc/acme/defenseclaw/packs/acme-hardened
+      digest: sha256:<64 hex digits from the digest line of validate-pack>
+```
+
+`defenseclaw guardrail validate-pack PATH` prints the `digest:` line to paste
+after `sha256:`. If the digest does not match, the change does not build into a
+generation, and the previous policy keeps running. See
+[Rules](/docs/policies/rules).
+
+On a per-user install you may also edit `config.yaml` by hand. The running
+gateway validates the file, applies it, and records the edit in
+`config.generation.json` with the actor `hand-edit:<os-user>`. A hand edit
+that fails validation is not applied. On a managed host, a hand edit is
+reverted (see [Managed hosts](#managed-hosts)).
+
+## What is derived
+
+Derived files are rendered from `config.yaml`. DefenseClaw never reads a
+derived file back as input, so editing one changes nothing except that
+doctor reports the drift.
+
+| Derived file | Rendered from | Drift shows as | Regenerate with |
+| --- | --- | --- | --- |
+| Hook scripts, `~/.defenseclaw/hooks/<connector>-hook.sh`, and the Windows `.hookcfg` | `guardrail.hook_fail_mode`, the connector set and the gateway address. Each script carries a `# defenseclaw-derived:` header | Doctor warns `stale generated script` for the connector | `defenseclaw-gateway restart`, or `defenseclaw setup <connector>` |
+| `~/.defenseclaw/custom-providers.json` | `llm_providers` | Doctor fails `Custom-provider overlay` when the file was edited by hand or no longer matches | `defenseclaw doctor --fix` |
+| Enterprise machine policy (for example the Codex requirements file and the Claude Code managed settings) | The administrator config, inside `ensure` | `enterprise policy show` and `status` report drift | `ensure` or `repair` |
+| Composed rule packs, compiled `admission:`, the threshold table | `guardrail.rules`, `rule_pack`, `admission`, `block_at`, `alert_at` | Not on disk. They live in the generation and are rebuilt on every reload | Nothing to do |
+
+Older releases wrote composed protection packs to
+`~/.defenseclaw/policies/guardrail/protected-<scope>/`, and policy YAML to
+`policies/rego/data.json`. Neither exists in `config_version: 9`. The
+migration converts them into `guardrail.rules` and `admission:`; a leftover
+`data.json` is ignored, and doctor reports it as **Retired policy data**.
+[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) lists
+everything that moved.
+
+## What is evidence
+
+Evidence records what was applied. Tools compare the live state with it.
+Evidence is not policy; changing it does not change what DefenseClaw decides,
+but it does make a verification step fail.
+
+| Evidence | Records | Checked by |
+| --- | --- | --- |
+| `config.generation.json`, next to `config.yaml` | The config generation counter, the sha256 of the file the writer last wrote, the actor, the reason and the time | Doctor warns when the file on disk is not the one recorded (a hand edit) |
+| `hook_contract_lock.json` | The hook contract each connector's setup rendered | Doctor and setup |
+| `migration-v9.json`, `config.yaml.v8.bak`, `data.json.migrated-v9` | Every value the v9 migration moved, every conflict, and the pre-migration files | Doctor shows **Config migration** until you run `defenseclaw config migrate --ack` |
+| `committed-config.yaml`, `rejected-config.yaml`, `deployment.json`, `policy-state.json` and the guardian ledgers (managed hosts) | The config the lifecycle last applied, a rejected in-place edit, the deployment, the policy digest the lifecycle last applied, and the protected targets | `status` and `verify` (see [Lifecycle](/docs/enterprise/lifecycle)) |
+| The audit log | A `config.change.applied` event for every write, a `config.reload.rejected` event when a generation fails to build, and every decision, each stamped with the policy generation and digest | The [observability](/docs/observability) sinks |
+
+## What is runtime state
+
+Runtime state is what the product saw or did. `status` and `doctor` report it,
+and it is never policy: removing a quarantine record does not change a block
+list, and a block list does not rewrite a quarantine record.
+
+- Approvals granted at a prompt ([HITL](/docs/hitl)).
+- The AI-discovery inventory ([AI discovery](/docs/ai-discovery)).
+- Quarantine records and the quarantined files.
+- The enforcement journal in `audit.db`: the quarantine and runtime-disable
+  rows the install watcher writes, and its automatic blocks. Only
+  `asset_policy` blocks and allows an asset by name; the journal records what
+  happened to it.
+- The hook guardian's target list, `targets.yaml`, on managed hosts.
+
+## The effective policy digest
+
+Every policy generation has an *effective policy digest*:
+`sha256:` plus the hash of the canonical form of the migrated config, with
+secret values removed, paths under `data_dir` rewritten to a token, defaults
+filled in, and the digests of every pinned asset and composed rule pack.
+Managed hosts of one OS that run the same release and received the same admin
+config report the same digest, which is what makes a fleet comparable. Do not
+compare across operating systems: the config names different paths on each.
+
+The digest and the generation appear in these places:
+
+| Where | What you see |
+| --- | --- |
+| `defenseclaw status` and the TUI header | The generation, and the first 12 hex digits of the digest |
+| `defenseclaw doctor` | The **Policy** row: `generation N, digest sha256:abcd... (applied by the gateway)` |
+| Gateway `/health` and `/status` | A `policy` object with `effective_digest`, `generation`, `config_generation`, `config_generation_recorded`, `built_at`, `last_reload_error` and per-component digests |
+| Every decision event | `defenseclaw.policy.effective_digest` and `defenseclaw.policy.generation` |
+| Enterprise `status` | The `policy` object: the digest the committed config computes to, the config generation, and whether the gateway reports the same digest |
+
+The **Policy** row fails when the gateway applies a different digest than
+`config.yaml` and its assets compute to (a stale gateway), or when the last
+reload was rejected. It warns when `config.yaml` was edited outside the
+writer. The fix for a stale gateway is `defenseclaw-gateway restart`.
+
+The *config generation* counts writes of the file. The *generation* counts
+applied policy builds, so it also advances when a pinned asset changes. Two
+hosts can differ in either counter and still have the same digest.
+
+## Managed hosts
+
+A managed host is a device on the standalone enterprise profile
+(`deployment_mode: managed_enterprise`) that an administrator controls
+through an MDM or a package. The Secure Client profile is out of scope for
+all of this: nothing described here changes its behaviour.
+
+On a managed host, the administrator config is the only intent, and
+`ensure` is the only writer.
+
+<Flow
+  direction="TB"
+  caption="On a managed standalone host only the lifecycle (ensure) writes config.yaml. A local writer is refused with exit code 3, so it cannot change policy."
+>
+  <Zone id="z0" label="Z0 · Admin and MDM (admin)" tone="trusted">
+    <Node id="push" kind="operator">{`Admin config\nMDM or package`}</Node>
+  </Zone>
+  <Zone id="z1" label="Z1 · Lifecycle (root)" tone="privileged">
+    <Node id="ensure" kind="generic">{`ensure\napplies the config`}</Node>
+  </Zone>
+  <Zone id="z3" label="Z3 · Admin-owned files" tone="protected">
+    <Node id="cfg" kind="policy">{`config.yaml\nowned by an admin`}</Node>
+  </Zone>
+  <Zone id="z4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="local" kind="agent">{`Local writers\nconfig set · setup · block`}</Node>
+  </Zone>
+  <Edge from="push" to="ensure" label="pushes" />
+  <Edge from="ensure" to="cfg" label="writes" />
+  <Edge from="local" to="cfg" label="refused, exit 3" variant="dashed" />
+</Flow>
+
+### Local writers refuse
+
+Every local command that would change policy refuses on a managed standalone
+host and changes nothing. The command exits with code `3`:
+
+```text
+error: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device
+```
+
+That covers `defenseclaw config set` and `unset`, `defenseclaw policy
+activate`, the `setup` commands that save configuration, the TUI Setup panel
+(read-only on a managed host), and the gateway's `/enforce/block` and `/enforce/allow` routes, which
+answer `403` with `managed_device`. `skill block`, `mcp block`, `plugin
+block` and `tool block` refuse the same way and point you at `asset_policy`:
+
+```text
+This device is managed: add it to asset_policy in the admin config (MDM or management plane)
+```
+
+Reading is unaffected: `config get`, `config show`, `status`, `doctor` and
+`enterprise policy show` all work. Runtime actions are not config writes, so
+this gate does not apply to them: quarantine, restore, disable and enable act
+on runtime state. What a standard user may do beyond that is set by the
+enterprise profile; see [Enterprise concepts](/docs/enterprise/concepts).
+
+A hand edit of `config.yaml` does not survive. On Linux and macOS the
+lifecycle compares the file with the last config it applied, puts the applied
+config back, and keeps the edit as `rejected-config.yaml`; `status` warns and
+`verify` fails with `config_rejected` until a corrected config is pushed. The block and allow
+entries a user may have left in `audit.db` before the device was enrolled are
+ignored, and `ensure` reports how many.
+
+### Environment variables and `.env`
+
+The environment is a second place where settings could hide, so a managed
+host narrows it. Every variable DefenseClaw reads has a managed-host policy in
+the [environment variable reference](/docs/reference/env-vars):
+
+| Policy | On a managed host | Examples |
+| --- | --- | --- |
+| `allow` | The value is used | Runtime paths, credentials, values the hook scripts set for themselves |
+| `ignore` | The value is ignored, in the process environment and in `.env` | Security opt-outs, debug switches, test fixtures, `DEFENSECLAW_REPO`, and `DEFENSECLAW_DEPLOYMENT_MODE` and `DEFENSECLAW_ENTERPRISE_PROFILE` |
+| `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |
+
+A forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`
+cannot turn a managed host into an unmanaged one. Doctor
+lists every ignored value it finds, by name only, under its active security
+overrides.
+
+### Updates
+
+`update.source` changes only where release files are downloaded from. The
+signature check always uses the release identity compiled into DefenseClaw,
+so a mirror must serve the same signed `checksums.txt` bundle. Managed hosts
+do not self-update: `defenseclaw upgrade` and `defenseclaw rollback` refuse
+there, and the lifecycle applies updates. See
+[Lifecycle](/docs/enterprise/lifecycle) and the
+[upgrade guide](/docs/get-started/upgrade).
+
+## Where do I change it?
+
+| I want to | Change | Command |
+| --- | --- | --- |
+| Block at a different severity | `guardrail.block_at` | `defenseclaw guardrail block-at HIGH`, or `defenseclaw config set guardrail.block_at HIGH` |
+| Turn a rule off or change its severity | `guardrail.rules` | [Rules](/docs/policies/rules) |
+| Block or allow a skill, MCP server, plugin or tool | `asset_policy` | `defenseclaw skill block NAME`, `defenseclaw mcp block NAME`, ... |
+| Quarantine what a scan finds | `admission` | [Admission](/docs/policies/admission) |
+| Point at a custom LLM endpoint | `llm_providers.custom` | `defenseclaw setup provider add` |
+| See what the gateway enforces now | none | `defenseclaw config get KEY --effective`, `defenseclaw doctor` |
+| Move a v8 config to v9 | all of the above | `defenseclaw config migrate --dry-run` |

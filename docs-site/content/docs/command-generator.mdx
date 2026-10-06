@@ -39,8 +39,8 @@ They own `observability.destinations[].routes[].selector.buckets` and
 `observability.redaction_profiles`. For an independent check, run
 `defenseclaw config validate`,
 `defenseclaw config show --effective --section observability`, and
-`defenseclaw observability plan`, then apply the reviewed policy with
-`defenseclaw-gateway restart`.
+`defenseclaw observability plan`. A running gateway applies a valid policy by
+itself; `defenseclaw doctor` shows whether it did.
 </Callout>
 
 ## Conventions the generator follows

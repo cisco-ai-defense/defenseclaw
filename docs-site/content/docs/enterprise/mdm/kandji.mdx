@@ -122,7 +122,7 @@ umask 022
 mkdir -p "$layout"
 tmp=$(mktemp "$layout/.config.yaml.XXXXXX")
 cat >"$tmp" <<'DEFENSECLAW_CONFIG'
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -169,7 +169,7 @@ DC_ACTION=ensure
 
 dc_inline_config() {
     cat <<'DEFENSECLAW_CONFIG'
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies

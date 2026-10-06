@@ -83,13 +83,20 @@ Three safe options:
 
 - **Remove the test rule.** `defenseclaw guardrail use-pack --clear --connector claudecode`
   puts Claude Code back on the global pack. Then delete
-  `~/.defenseclaw/policies/guardrail/first-guardrail`.
+  `~/.defenseclaw/policies/guardrail/first-guardrail` and drop its pinned digest
+  with `defenseclaw config unset guardrail.custom_packs.first-guardrail`.
 - **Customize a copied rule pack.** Change or remove rules in a copied pack, as
   the quickstart did, and select it with `use-pack`. Editing a bundled pack in
   place makes upgrades harder to review.
 - **Switch the agent to observe.** `defenseclaw guardrail mode observe --connector claudecode`
   logs findings without blocking. Use observe for the first week of every new
   agent.
+
+Skills, MCP servers, plugins and tools also have name-based block and allow
+lists, such as `defenseclaw skill block <name>` and
+`defenseclaw tool allow <name> --connector claudecode`. They are separate from
+the rule pack, and an allowed tool skips the rule checks, so allow only what you
+have reviewed. See [Admission and the block/allow list](/docs/policies/admission).
 
 ## Next
 

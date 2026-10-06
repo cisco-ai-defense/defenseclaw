@@ -278,11 +278,12 @@ defenseclaw guardrail block-at inherit --connector codex  # back to the global l
 
 Levels are `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. The commands write
 `guardrail.block_at` and `guardrail.alert_at`, or the same keys under
-`guardrail.connectors.<name>`, and restart a running gateway so hook decisions
-pick up the change (`--no-restart` to skip). A connector's own value wins over
-the global one, and the global one wins over the pack's level. The alert level
-never ends up above the block level, so anything that blocks also alerts, and
-`CRITICAL` always blocks. The same settings in `config.yaml`:
+`guardrail.connectors.<name>`, and the running gateway applies the change
+without a restart. The most specific value wins: a profile connector, then a
+profile, then the connector's own value, then the global one, and last the
+pack's level. The alert level never ends up above the block level, so anything
+that blocks also alerts, and `CRITICAL` always blocks. The same settings in
+`config.yaml`:
 
 ```yaml
 guardrail:
@@ -293,16 +294,15 @@ guardrail:
       alert_at: MEDIUM
 ```
 
-The levels apply to tool-call decisions in action mode only: hook tool calls (including
-bounded chains, CodeGuard on file writes and sandbox shell commands) and the
-guardrail proxy's checks of tool calls in LLM responses. Prompts, completions,
-tool responses and message content keep the pack's levels. Human approval only
-ever applies below the block level: anything at or above it blocks without
-asking. The pack decides everything else, such as which rules run, and the
-named policy's thresholds for LLM traffic through the guardrail proxy don't
-change. Hook decisions read the configuration the gateway started with, so
-after editing these keys in `config.yaml` by hand, run
-`defenseclaw-gateway restart`.
+The levels apply in action mode to every guardrail surface: hook tool calls
+(including bounded chains, CodeGuard on file writes and sandbox shell
+commands), hook prompts, and the guardrail proxy's prompts, completions and
+tool calls. Human approval only ever applies below the block level: anything at
+or above it blocks without asking. The pack decides everything else, such as
+which rules run. The gateway picks up an edit to these keys, from a command or
+by hand in `config.yaml`, on its next reload; no restart is needed. See
+[Thresholds](/docs/policies/thresholds) for the scopes, precedence and the
+commands that read the effective value.
 
 ### Low-noise rollout
 
@@ -367,19 +367,19 @@ fail closed to abstention in its ActionFacts helper.
 “Selectable” means the pack can be turned on for the global rule pack or one
 connector with `defenseclaw guardrail protection enable NAME [--connector X]`,
 layered into a custom pack in Policy Creator, or copied into an
-operator-owned policy directory. `guardrail protection enable` composes
-`~/.defenseclaw/policies/guardrail/protected-<scope>/<profile>/` from the scope's
-current pack plus every pack that is on (the same merge Policy Creator uses),
-validates it with the gateway's validator, and switches the scope to it;
-`guardrail protection disable NAME` takes it out again and `guardrail
-protection list` shows which scope has which pack on. The staged SSH contract
-is refused. None of this adds another value to `defenseclaw setup guardrail
+operator-owned policy directory. `guardrail protection enable` adds the pack's
+name to `guardrail.rules.protections` for the scope (global, one connector, or a
+profile with `--profile`). The gateway layers the pack's rules on the scope's
+rule pack in memory, replacing base rules with the same ID, and writes no
+directory to disk. `guardrail protection disable NAME` takes it out again and
+`guardrail protection list` shows which scope has which pack on. The staged SSH
+contract is refused. None of this adds another value to `defenseclaw setup guardrail
 --rule-pack`, which accepts only `default`, `permissive`, and `strict`. For a
 Policy Creator export, validate the pack, review the declared trust boundary,
 then switch to it with `defenseclaw guardrail use-pack`. Either way, assigning
 a production-protection pack asserts that the selected connector context is
-actually protected. See [Opt-in protection packs](/docs/reference/cli#opt-in-protection-packs)
-and [Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs).
+actually protected. See [Opt-in protection packs](/docs/reference/cli#opt-in-protection-packs),
+[Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs), and [Rules and custom packs](/docs/policies/rules) for the `guardrail.rules` scopes.
 
 ## Other deterministic detection lanes
 

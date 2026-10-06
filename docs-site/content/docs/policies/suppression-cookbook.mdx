@@ -20,9 +20,11 @@ They live in a rule pack's `suppressions.yaml` and work at three points:
 <Callout type="warn" title="Suppressions never silence rule findings">
 All three layers act on the LLM judge only. A regex or CEL rule finding, such as
 `SEC-AWS-KEY` or `CMD-PIPE-CURL`, is never suppressed, and the request sent to
-the model is never redacted. To lower the noise from a rule, disable or narrow
-the rule in your own pack, or change the level it blocks or alerts at with
-`defenseclaw guardrail block-at` and `alert-at`.
+the model is never redacted. To lower the noise from a rule, turn it off or
+lower its severity with `defenseclaw guardrail rule disable` or `rule severity`
+([Rules and custom packs](/docs/policies/rules)), narrow it in your own pack,
+or change the level it blocks or alerts at with `defenseclaw guardrail block-at`
+and `alert-at` ([Thresholds](/docs/policies/thresholds)).
 </Callout>
 
 <Callout title="Don't blanket-match">
@@ -91,6 +93,38 @@ The default pack also ships `SUPP-USERNAME-METADATA`, `SUPP-IP-PRIVATE` and
 `SUPP-PHONE-PLATFORM-ID`. The entries shipped with the strict pack are in
 [the recipe catalog](/docs/policies/recipes); filter it by
 **finding suppression**.
+
+## Finding suppressions in config.yaml
+
+You do not have to copy a pack to add a finding suppression. `guardrail.rules.suppressions`
+in `config.yaml` holds entries with the same `finding_pattern` and
+`entity_pattern` as the pack's `finding_suppressions`, plus a required
+`reason`. The gateway adds them to the pack in memory, and the running gateway
+applies the change without a restart:
+
+```yaml title="~/.defenseclaw/config.yaml"
+guardrail:
+  rules:
+    suppressions:
+      - id: ACME-SUPP-BUILD-EMAIL
+        finding_pattern: JUDGE-PII-EMAIL
+        entity_pattern: '@build[.]acme[.]example$'
+        reason: Build bot addresses are not personal data
+```
+
+```bash
+defenseclaw guardrail suppress add ACME-SUPP-BUILD-EMAIL \
+  --finding JUDGE-PII-EMAIL --entity '@build[.]acme[.]example$' \
+  --reason "Build bot addresses are not personal data"
+defenseclaw guardrail suppress remove ACME-SUPP-BUILD-EMAIL
+```
+
+The `id` must not already exist in the pack or in another layer (the writer
+refuses a duplicate), and `entity_pattern` may be left out to match every value.
+The entry supports no `condition`; use a pack-level suppression for
+`is_epoch` or `is_platform_id`. Add `--connector X` or `--profile P` to scope an
+entry to one connector or one guardrail profile.
+[Rules and custom packs](/docs/policies/rules#scopes-and-layering) explains the layering.
 
 ## Tool suppressions
 
