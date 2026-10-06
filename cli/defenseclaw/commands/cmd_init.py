@@ -45,7 +45,6 @@ from defenseclaw.paths import (
 from defenseclaw.process_liveness import _process_image_path_windows, _process_parent_id_windows
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 
-_stdout_is_tty = terminal_checkbox.stdout_is_tty
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
 _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
@@ -3406,56 +3405,6 @@ def _install_guardrail(cfg, logger, skip: bool) -> None:
 
     click.echo("  Guardrail:     built into Go binary (no external dependencies)")
     logger.log_action("install-dep", "guardrail", "builtin")
-
-
-def _ensure_uv() -> None:
-    if shutil.which("uv"):
-        return
-
-    click.echo("  uv: not found, installing...", nl=False)
-    try:
-        subprocess.run(
-            ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-            capture_output=True,
-            check=True,
-        )
-        _add_uv_to_path()
-        click.echo(" done")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        click.echo(" failed")
-        click.echo("    install uv manually: curl -LsSf https://astral.sh/uv/install.sh | sh")
-        click.echo("    then re-run: defenseclaw init")
-
-
-def _add_uv_to_path() -> None:
-    home = os.path.expanduser("~")
-    for extra in [f"{home}/.local/bin", f"{home}/.cargo/bin"]:
-        if extra not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = extra + ":" + os.environ.get("PATH", "")
-
-
-def _install_with_uv(pkg: str) -> bool:
-    uv = shutil.which("uv")
-    if not uv:
-        return False
-    try:
-        result = subprocess.run(
-            [uv, "tool", "install", "--python", "3.13", pkg],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 or "already installed" in result.stderr:
-            return True
-        return False
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def _install_codeguard_skill(cfg, logger) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = cfg
-    _ = logger
-    click.echo("  CodeGuard:     skipped (explicit opt-in required)")
 
 
 def _onboard_notifications(

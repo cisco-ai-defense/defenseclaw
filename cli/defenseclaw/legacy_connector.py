@@ -291,11 +291,6 @@ def migrated_copy(raw: Any, config_path: str = "") -> tuple[Any, list[str]]:
     return out, migrate_raw_config(out, config_path)
 
 
-def cascade_user_hooks_path(home: str) -> str:
-    """Legacy per-user Cascade hooks file (cleanup only)."""
-    return os.path.join(home, ".codeium", "windsurf", "hooks.json")
-
-
 def desktop_legacy_rule_paths(home: str, workspace: str | None) -> list[str]:
     """Pre-rename rule locations Devin Desktop still loads (read-only)."""
     out: list[str] = []
@@ -316,17 +311,6 @@ def desktop_legacy_skill_paths(home: str, workspace: str | None) -> list[str]:
     if ws:
         out.append(os.path.join(ws, ".windsurf", "skills"))
     return out
-
-
-def owned_hook_scripts(data_dir: str) -> list[str]:
-    """Hook scripts an older release installed for the retired ID."""
-    if not (data_dir or "").strip():
-        return []
-    hooks = os.path.join(data_dir, "hooks")
-    return [
-        os.path.join(hooks, f"{RETIRED_DESKTOP_ID}-hook.sh"),
-        os.path.join(hooks, f"{RETIRED_DESKTOP_ID}-hook.ps1"),
-    ]
 
 
 def backup_dir(data_dir: str) -> str:

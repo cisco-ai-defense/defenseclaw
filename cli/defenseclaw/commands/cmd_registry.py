@@ -37,7 +37,6 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import asdict
 from typing import Any
 
 import click
@@ -2095,15 +2094,3 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
 # ---------------------------------------------------------------------------
 # Helpers exposed for tests
 # ---------------------------------------------------------------------------
-
-def _config_dump_for_test(cfg: Config) -> dict[str, Any]:
-    """Test helper — return the config slice the registry CLI mutates."""
-    return {
-        "registries": [_source_to_dict(s) for s in cfg.registries.sources],
-        "asset_policy.skill.registry": [
-            asdict(r) for r in cfg.asset_policy.skill.registry
-        ],
-        "asset_policy.mcp.registry": [
-            asdict(r) for r in cfg.asset_policy.mcp.registry
-        ],
-    }

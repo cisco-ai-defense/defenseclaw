@@ -314,7 +314,6 @@ enum TUIWizards {
             WizardField(key: "service-name", label: "Service name", kind: .text(placeholder: "defenseclaw"), defaultValue: "defenseclaw", visibleWhen: (key: "action", equals: ["up"])),
             WizardField(key: "no-wait", label: "Do not wait for readiness", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["up"])),
             WizardField(key: "no-config", label: "Do not update config", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["up"])),
-            WizardField(key: "audit-sink", label: "Configure audit sink", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["up"])),
             // --follow streams forever and would hang the wizard's apply
             // loop; the GUI always fetches a bounded snapshot.
             WizardField(key: "service", label: "Log service", kind: .text(placeholder: "optional service"), visibleWhen: (key: "action", equals: ["logs"])),
@@ -1014,7 +1013,6 @@ enum TUIWizards {
             append(v, "service-name", flag: "--service-name", to: &args, unless: "defenseclaw")
             flag(v, "no-wait", "--no-wait", to: &args)
             flag(v, "no-config", "--no-config", to: &args)
-            if !yes(v, "audit-sink") { args.append("--no-audit-sink") }
         } else if action == "logs" {
             append(v, "service", flag: "--service", to: &args)
             flag(v, "follow", "--follow", to: &args)

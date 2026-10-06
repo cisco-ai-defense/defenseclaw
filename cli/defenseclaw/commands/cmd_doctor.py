@@ -4839,21 +4839,6 @@ def _managed_gateway_listener_evidence(
     return _lsof_gateway_listener_evidence(port, host=host)
 
 
-def _managed_gateway_listener_pid(
-    port: int,
-    *,
-    host: str = "",
-    platform_name: str | None = None,
-) -> int:
-    """Return a listener PID through the native platform evidence path."""
-    listener = _managed_gateway_listener_evidence(
-        port,
-        host=host,
-        platform_name=platform_name,
-    )
-    return listener.pid if listener.status == "ok" else 0
-
-
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     """Report home ownership only from the same strong trust chain as auth."""
     code, _ = _http_probe(
@@ -5851,28 +5836,6 @@ def _opencode_managed_plugin_drift(cfg, path: str) -> str:
     return ""
 
 
-def _split_configured_hook_command(command: str, *, platform_name: str | None = None) -> list[str]:
-    """Split the narrow command shape DefenseClaw writes into hooks.json."""
-    is_windows = (platform_name or os.name) == "nt"
-    try:
-        parts = shlex.split(command, posix=not is_windows)
-    except ValueError:
-        return []
-    if is_windows:
-        if parts and parts[0] == "&":
-            parts = parts[1:]
-        normalized = []
-        for part in parts:
-            if len(part) >= 2 and part[0] == part[-1] and part[0] in {"'", '"'}:
-                quote = part[0]
-                part = part[1:-1]
-                if quote == "'":
-                    part = part.replace("''", "'")
-            normalized.append(part)
-        parts = normalized
-    return parts
-
-
 def _powershell_literal(value: str) -> str:
     """Return one inert single-quoted PowerShell string literal."""
     return "'" + value.replace("'", "''") + "'"
@@ -5895,7 +5858,6 @@ def _connector_health_row(document: str, connector: str) -> dict[str, object] | 
 
 def _cursor_health_row(document: str) -> dict[str, object] | None:
     return _connector_health_row(document, "cursor")
-
 
 
 def _opencode_runtime_remediation(status: str, runtime_detail: str) -> str:
@@ -9942,7 +9904,6 @@ def _check_connector_export_custody(report, r: _DoctorResult, *, configured: set
         )
 
 
-
 def _short_age(seconds: float) -> str:
     """Compact age for a doctor row: 'under a minute', '12 min', '23 h' or '3 d'."""
     if seconds < 60:
@@ -13739,21 +13700,6 @@ def _verified_listener_gateway_evidence(
     )
 
 
-def _verified_listener_gateway_pid(
-    cfg,
-    *,
-    evidence: GatewayEvidence | None = None,
-    platform_name: str | None = None,
-) -> int:
-    """Backward-compatible PID view over structured endpoint evidence."""
-    listener = _verified_listener_gateway_evidence(
-        cfg,
-        evidence=evidence,
-        platform_name=platform_name,
-    )
-    return listener.pid if listener.status == "ok" else 0
-
-
 def _remove_stale_pid_if_unchanged(
     pid_file: str,
     inspected_fingerprint: tuple[int, int, int, int, bytes],
@@ -14790,12 +14736,6 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
     if repair_reasons:
         return ("repairable", "; ".join(repair_reasons))
     return ("healthy", "gateway health matches the current configuration")
-
-
-def _gateway_service_health_repair_reason(cfg, health: dict) -> str:
-    """Compatibility view returning only deterministic repairable drift."""
-    kind, detail = _gateway_service_health_assessment(cfg, health)
-    return detail if kind == "repairable" else ""
 
 
 def _gateway_restart_cooldown_remaining(
