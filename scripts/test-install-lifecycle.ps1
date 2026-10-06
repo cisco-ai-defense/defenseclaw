@@ -595,6 +595,10 @@ function Test-FailureDrill {
     if (-not (Initialize-Gateway)) { return }
     $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
     $goodGateway = Get-Sha256 $gateway
+    # init writes the schema the config was created with. Bring it to this release first: the installer asks the
+    # staged gateway to migrate a pending config, and the drill gateway cannot answer that, so the install would
+    # stop before the swap this lane exists to test.
+    Check ((Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("migrate") -Quiet) -eq 0) "defenseclaw migrate failed"
     $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
     $source = Join-Path $Lane "DrillGateway.cs"
     [IO.File]::WriteAllText($source, @"
