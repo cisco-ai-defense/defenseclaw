@@ -1332,7 +1332,7 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     _emit(
         "pass",
         "Config file",
-        f"{cfg_path}; canonical schema v8 valid",
+        f"{cfg_path}; canonical schema valid",
         r=r,
         check_id="doctor.config.canonical-v8",
     )
@@ -1474,7 +1474,7 @@ def _plan_canonical_config_preflight(cfg) -> RepairDecision:
             "run `defenseclaw config validate` before applying repairs"
         )
         return RepairDecision("blocked", reason, blockers=("canonical-v8 validation unavailable",))
-    return RepairDecision("noop", f"{config_path}; canonical schema v8 valid")
+    return RepairDecision("noop", f"{config_path}; canonical schema valid")
 
 
 def _fix_canonical_config_preflight(cfg, *, assume_yes: bool) -> tuple[str, str]:

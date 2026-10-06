@@ -301,12 +301,12 @@ def yaml_error_mark(exc: BaseException) -> Any:
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
-    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str) -> None:
+    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str, *, label: str = "v8") -> None:
         self.source_name = source_name
         self.path = path or "$"
         self.keyword = keyword
         self.corrective_action = corrective_action
-        super().__init__(f"{source_name}: invalid v8 configuration at {self.path} ({keyword}); {corrective_action}")
+        super().__init__(f"{source_name}: invalid {label} configuration at {self.path} ({keyword}); {corrective_action}")
 
 
 @dataclass(frozen=True)
@@ -864,7 +864,68 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
         raise RuntimeError("Python v8 default policy drifted from the canonical schema")
 
 
+# v8 keys that config_version 9 replaced, as Go's rejectV9RemovedKeys names them:
+# (path of the removed key, what to use instead).
+_V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("skill_actions",), "admission.skill.actions"),
+    (("mcp_actions",), "admission.mcp.actions"),
+    (("plugin_actions",), "admission.plugin.actions"),
+    (("update_check",), "update.check"),
+    (("watch", "allow_list_bypass_scan"), "admission.<type>.allow_list_bypass_scan"),
+    (("scanners", "skill_scanner", "binary"), "the managed scanner install"),
+    (("scanners", "skill_scanner", "use_virustotal"), "scanners.skill_scanner.analyzers.virustotal.enabled"),
+    (("scanners", "skill_scanner", "use_aidefense"), "scanners.skill_scanner.analyzers.aidefense.enabled"),
+    (("scanners", "skill_scanner", "virustotal_api_key"), "a key stored with defenseclaw keys set"),
+    (("scanners", "skill_scanner", "virustotal_api_key_env"), "scanners.skill_scanner.analyzers.virustotal.api_key_env"),
+    (("scanners", "mcp_scanner", "binary"), "the managed scanner install"),
+)
+
+
+def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
+    """Name the replacement for a v8 key a config_version 9 source still carries."""
+
+    def lookup(parts: tuple[str, ...]) -> bool:
+        node: Any = document
+        for part in parts:
+            if not isinstance(node, dict) or part not in node:
+                return False
+            node = node[part]
+        return True
+
+    def refuse(parts: tuple[str, ...], target: str) -> None:
+        raise V8ConfigError(
+            source_name,
+            _json_path(parts),
+            "legacy-key-forbidden",
+            f"a v8 configuration key is not accepted in config_version 9; use {target}",
+            label="v9",
+        )
+
+    for parts, target in _V9_REMOVED_KEYS:
+        if lookup(parts):
+            refuse(parts, target)
+    guardrail = document.get("guardrail")
+    if not isinstance(guardrail, dict):
+        return
+
+    def children(scope_path: tuple[str, ...], scope: Any, key: str) -> list[tuple[tuple[str, ...], Any]]:
+        table = scope.get(key) if isinstance(scope, dict) else None
+        return [((*scope_path, key, name), body) for name, body in table.items()] if isinstance(table, dict) else []
+
+    scopes: list[tuple[tuple[str, ...], Any]] = [(("guardrail",), guardrail)]
+    scopes += children(("guardrail",), guardrail, "connectors")
+    for profile_path, profile in children(("guardrail",), guardrail, "profiles"):
+        scopes.append((profile_path, profile))
+        scopes += children(profile_path, profile, "connectors")
+    for scope_path, scope in scopes:
+        if isinstance(scope, dict) and "rule_pack_dir" in scope:
+            refuse((*scope_path, "rule_pack_dir"), "rule_pack or custom_packs")
+
+
 def _validate_schema(document: dict[str, Any], source_name: str) -> None:
+    v9 = document.get("config_version") == 9
+    if v9:
+        _reject_v9_removed_keys(document, source_name)
     errors = sorted(
         _schema_validator().iter_errors(document),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
@@ -875,14 +936,20 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     path = _json_path(tuple(error.absolute_path))
     keyword = str(error.validator or "schema")
     action = {
-        "additionalProperties": "remove unsupported or legacy fields and run defenseclaw upgrade",
+        "additionalProperties": (
+            "remove unsupported fields; see the configuration reference"
+            if v9
+            else "remove unsupported or legacy fields and run defenseclaw upgrade"
+        ),
         "required": "add the required field shown by the v8 reference",
         "const": "use the exact v8 value from the canonical reference",
         "enum": "choose a value from the canonical v8 vocabulary",
         "oneOf": "use exactly one supported v8 source shape",
         "type": "use the value type documented by the canonical v8 schema",
     }.get(keyword, "correct the field using the canonical v8 schema and reference")
-    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+    raise V8ConfigError(
+        source_name, path, keyword, _declared_action(keyword, error) or action, label="v9" if v9 else "v8"
+    )
 
 
 # An enum longer than this is left to the reference rather than listed.
