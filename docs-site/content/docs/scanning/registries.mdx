@@ -290,7 +290,7 @@ defenseclaw registry reject  corp-skills evil-skill --type skill
 
 ## Sync schedules
 
-Today, syncing is **on demand**: scheduled sync is not available yet, and `add` / `edit` refuse `--auto-sync` and `--sync-interval-hours`. Run `registry sync --all` on a schedule (cron, a systemd timer or a CI schedule) until scheduled sync ships in a future release.
+Today, syncing is **on demand**: scheduled sync is not available yet. Run `registry sync --all` on a schedule (cron, a systemd timer or a CI schedule) until scheduled sync ships in a future release.
 
 DefenseClaw configuration is per user, so schedule the sync as the user who
 runs DefenseClaw, for example in that user's crontab (`crontab -e`):
