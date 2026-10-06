@@ -111,7 +111,7 @@ the global value when the connector is the only one.
     },
     "--rule-pack-dir": {
       type: "path",
-      description: "Custom rule-pack directory for this connector, instead of --rule-pack. Pass an empty string to clear the override.",
+      description: "Path of a built-in pack folder for this connector, instead of --rule-pack. Pass an empty string to clear the override. A custom directory is refused; use defenseclaw guardrail use-pack DIR --connector NAME, which pins it by digest.",
     },
     "--enable-judge / --no-enable-judge": {
       type: "flag",

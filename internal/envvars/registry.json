@@ -943,7 +943,7 @@
     {
       "name": "DEFENSECLAW_CUSTOM_PROVIDERS_PATH",
       "category": "runtime_path",
-      "purpose": "Path to a custom providers YAML file consulted before the embedded catalog.",
+      "purpose": "Path of the derived custom-providers.json overlay, for test and container installs; DefenseClaw writes that file from llm_providers in config.yaml, so change llm_providers, not the file. Defaults to custom-providers.json in the data directory.",
       "default": "unset",
       "accepted_values": [
         "any-absolute-path",
@@ -2853,7 +2853,7 @@
     {
       "name": "DEFENSECLAW_JUDGE_TRACE",
       "category": "debug",
-      "purpose": "LLM judge logs every prompt + response. May contain agent traffic and secrets.",
+      "purpose": "Secure Client integration only: log every LLM judge prompt + response; on every other install use guardrail.judge.trace in config.yaml, which this variable does not affect. May contain agent traffic and secrets.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -3307,7 +3307,7 @@
     {
       "name": "DEFENSECLAW_NO_UPDATE_CHECK",
       "category": "debug",
-      "purpose": "Turns off the once-a-day 'new release available' notice in the CLI and TUI.",
+      "purpose": "Turns off the once-a-day 'new release available' notice in the CLI and TUI; the config.yaml equivalent is update.check: false.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -4002,10 +4002,11 @@
     {
       "name": "DEFENSECLAW_REPO",
       "category": "upgrade_internal",
-      "purpose": "GitHub owner/name whose releases `defenseclaw upgrade` and the installers use (for testing on a fork). Deprecated alias of update.source in config.yaml: it only changes where release bytes are fetched; signatures are always verified against the compiled release identity.",
+      "purpose": "Deprecated alias of update.source in config.yaml: the GitHub owner/name (or https mirror base URL) whose releases `defenseclaw upgrade` and the installers use, for testing on a fork. It only changes where release bytes are fetched; signatures are always verified against the compiled release identity.",
       "default": "cisco-ai-defense/defenseclaw",
       "accepted_values": [
-        "owner/name"
+        "owner/name",
+        "https mirror base URL"
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,

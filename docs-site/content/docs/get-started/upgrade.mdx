@@ -5,6 +5,8 @@ keywords:
   - defenseclaw upgrade
   - defenseclaw rollback
   - defenseclaw migrate
+  - DefenseClaw update.source
+  - DefenseClaw config_version 9 migration
   - DefenseClaw 1.0 upgrade
   - renamed and removed connectors
 ---
@@ -30,7 +32,9 @@ The installer:
 2. Builds the new version next to the running one and checks that it starts,
    and that your configuration can be migrated, before changing anything.
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`,
-   swaps in the new version, and runs `defenseclaw migrate`.
+   swaps in the new version, and runs `defenseclaw migrate`. From 1.0.x that
+   moves `config.yaml` to `config_version: 9` and keeps the old file (see
+   [Config migration](#config-migration)).
 4. Starts the gateway and waits for it to report healthy.
 
 If any step fails, the installer puts the previous version back, restarts it,
@@ -59,10 +63,58 @@ again. It repairs any install and keeps your data:
 When a newer release exists, interactive CLI commands and the TUI show one
 line: `DefenseClaw X.Y.Z is available (you have A.B.C) — run 'defenseclaw
 upgrade'`. The check runs at most once a day and never in scripts, JSON output,
-or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update.check:
-false` in `config.yaml`; on Windows the `DisableSelfUpdate` enterprise policy
+or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or by setting
+`update.check` to `false`; on Windows the `DisableSelfUpdate` enterprise policy
 also turns it off. Nothing is ever installed without you running
 `defenseclaw upgrade`.
+
+```bash
+defenseclaw config set update.check false
+```
+
+## Update settings
+
+The `update` block of `config.yaml` has three keys. They replace the
+`update_check` key and the `DEFENSECLAW_REPO` variable of DefenseClaw 1.0.x.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `update.check` | `true` | Show the update notice above. |
+| `update.channel` | `stable` | The release channel. `stable` is the only one. |
+| `update.source` | empty | Where release files are downloaded from: empty for the official GitHub releases, or an `https://` base URL for a mirror. |
+
+### Install from a mirror
+
+Set `update.source` to the mirror's base URL, and `defenseclaw upgrade` reads
+the latest release and downloads the installer, `checksums.txt` and its
+signature bundle from there:
+
+```bash
+defenseclaw config set update.source https://mirror.example.com/defenseclaw
+```
+
+The mirror has to serve the paths GitHub serves: `releases/latest` (a
+redirect to the newest tag) and `releases/download/<tag>/` with the installer,
+the release files, `checksums.txt` and `checksums.txt.bundle`.
+
+`update.source` changes only where the bytes come from. Which signature to
+trust is not a setting: the certificate identity that signed the official
+releases is compiled into DefenseClaw, and neither `update.source` nor the
+deprecated `DEFENSECLAW_REPO` variable can change it. A mirror therefore has to
+serve the official, signed `checksums.txt` and `checksums.txt.bundle`; a copy
+re-signed by anyone else fails verification. For that reason a mirror needs
+`cosign` 2.0 or later on the machine. Without it, `defenseclaw upgrade` stops
+before it runs anything and says `releases from <url> are verified by their
+signature: install cosign 2.0 or later, or clear update.source (and
+DEFENSECLAW_REPO) to use the official releases`. The official source works
+without `cosign` but is then checked against `checksums.txt` only. The upgrade also refuses an
+installer that is stamped with another release than the one you asked for.
+
+`DEFENSECLAW_REPO` is the deprecated alias of `update.source`: a GitHub
+`owner/name` or a mirror URL. When both are set, `update.source` wins. A first
+install has no `config.yaml` yet, so it is the only way to name a mirror there
+(see [Install](/docs/get-started/install#install)). A managed device does not
+self-update; the lifecycle applies updates ([Lifecycle](/docs/enterprise/lifecycle)).
 
 ## Upgrading from 0.x to 1.0
 
@@ -118,6 +170,16 @@ One previous install is kept, and rolling back needs no network. Reinstalling
 the same version does not replace the rollback copy. Running it again rolls
 forward (its header then reads `Rolling forward to DefenseClaw <version>`).
 
+Rolling back from a release that uses `config_version: 9` to 1.0.x restores the
+version 8 `config.yaml` that was saved when the upgrade started, together with
+`data.json` and the operator block and allow entries in `audit.db`, because
+those are part of the saved data. Policy edits you made after the upgrade stay
+in `~/.defenseclaw/previous` and return when you roll forward. A 1.0.x release
+that you install yourself, without `defenseclaw rollback`, refuses a version 9
+file ("Configuration was written by a newer DefenseClaw (config_version 9)");
+[Going back to 1.0.x](/docs/reference/migrate-v9#going-back-to-10x) lists the
+manual steps.
+
 The rollback starts the restored gateway when it was running and waits for it.
 A 0.8.x gateway on a large audit database can take a few minutes to start, so
 the rollback waits up to 3 minutes for it. If the gateway does not come up,
@@ -141,7 +203,8 @@ install the interrupted run was replacing, then continues.
 ## Migrations
 
 `defenseclaw migrate` brings configuration and data to the current schema. The
-installer runs it after every swap; running it again is safe.
+installer runs it after every swap; running it again is safe. Add `--check` to
+list the pending steps by name without changing anything.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -149,11 +212,30 @@ installer runs it after every swap; running it again is safe.
 | `1` | A step failed; the installer restores the previous install |
 | `2` | The configuration was written by a newer DefenseClaw than this one |
 
+### Config migration
+
+The step from `config_version: 8` to `9` moves the decisions that 1.0.x kept
+outside `config.yaml` into it: admission and thresholds from
+`policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the scanner
+switches, `update_check`, and the operator block and allow entries from
+`audit.db`. It keeps `config.yaml.v8.bak`, renames the retired `data.json` to
+`data.json.migrated-v9`, and writes `migration-v9.json` with every value it
+moved and every conflict it settled. The upgrade summary prints one line, and
+`defenseclaw doctor` shows a **Config migration** row until you acknowledge the
+record with `defenseclaw config migrate --ack`. You can preview the result
+first with `defenseclaw config migrate --dry-run`. Until the file is migrated,
+the gateway reads a version 8 file as if it were migrated, in memory only.
+
+[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) shows the before
+and after files for every key, explains the conflicts, and covers going back to
+1.0.x. On a managed standalone host the lifecycle migrates the administrator
+config for you; see [Lifecycle](/docs/enterprise/lifecycle).
+
 ## Troubleshooting
 
 | Message | What to do |
 | --- | --- |
-| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. Run `defenseclaw rollback`, or install the newer release again. |
+| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. For example, 1.0.x refuses a `config_version: 9` file. Run `defenseclaw rollback`, or install the newer release again. |
 | `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
 | `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
 | `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |

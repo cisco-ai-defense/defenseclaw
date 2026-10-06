@@ -1,0 +1,220 @@
+---
+title: "Thresholds: block_at and alert_at"
+description: The single threshold model for DefenseClaw guardrails. Where block_at and alert_at can be set, which one wins, what the rule pack supplies when you set nothing, and how to read, change and hot-apply them.
+keywords:
+  - guardrail block_at
+  - guardrail alert_at
+  - DefenseClaw thresholds
+  - rule pack posture
+  - cisco_trust_level
+  - defenseclaw guardrail block-at
+  - config get effective
+  - guardrail profiles
+---
+
+Two settings decide how severe a finding must be before the guardrail acts:
+
+- `block_at` is the lowest severity that is **blocked**.
+- `alert_at` is the lowest severity that raises an **alert**.
+
+Both take `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. They are the only threshold source: one pair of settings, resolved the same way on every guardrail surface. There is no separate tool-call level, no per-direction level and no threshold hidden in a policy file. `config.yaml` holds the values, and the rule pack supplies a default for anything you leave unset.
+
+## What the two levels do
+
+With `block_at: HIGH` and `alert_at: MEDIUM`:
+
+| Finding severity | Action mode | Observe mode |
+| --- | --- | --- |
+| `CRITICAL`, `HIGH` | Blocked | Alert |
+| `MEDIUM` | Alert | Alert |
+| `LOW` | Allowed | Allowed |
+
+- **Anything that blocks also alerts.** An `alert_at` that sits above `block_at` on the severity scale (for example `block_at: LOW` with `alert_at: MEDIUM`) alerts from the block level instead. `defenseclaw config get guardrail.alert_at --effective` labels that case `(clamped to block_at)`.
+- **Observe mode never blocks.** Findings at or above the alert level are logged as alerts and nothing is stopped. The levels take effect when the connector runs in action mode.
+- **Human approval sits below the block level.** When [HITL](/docs/hitl) is on, a finding at or above `guardrail.hilt.min_severity` but below `block_at` becomes a `confirm` on a connector event that can ask. Findings at or above `block_at` block without asking.
+
+## Where the levels apply
+
+The resolved levels decide every guardrail verdict that carries a severity:
+
+| Surface | Covered |
+| --- | --- |
+| Hook tool calls | Yes, for every hook connector (bounded chains, CodeGuard file writes and sandbox shell commands included) |
+| Hook prompts | Yes |
+| Guardrail proxy prompts | Yes |
+| Guardrail proxy completions | Yes |
+| Guardrail proxy tool calls in model responses | Yes |
+| Tool responses and message content | Yes |
+
+A preset (`defenseclaw policy activate`), `defenseclaw guardrail block-at` and a hand edit of `config.yaml` all change the same two keys.
+
+<Callout type="info" title="Upgrading from config_version 8">
+Before `config_version: 9`, `block_at` and `alert_at` applied only to hook tool calls, and prompts, completions and proxy traffic took their levels from the `block_threshold` and `alert_threshold` in the policy data file (`data.json`). The v9 migration reads those two thresholds once, at the upgrade from 8, and writes them as `guardrail.block_at` and `guardrail.alert_at`. It leaves a level unset when it equals the rule pack's default, and it prints a note that the keys now apply everywhere. Nothing reads `data.json` after that. See the [v8 to v9 migration guide](/docs/reference/migrate-v9).
+</Callout>
+
+## Scopes and precedence
+
+A level can be set at four scopes. The most specific scope that sets a value wins, and an unset scope falls through to the next one.
+
+<Flow
+  direction="TB"
+  caption="How the block level (and, the same way, the alert level) is resolved for one request. Paths are under guardrail. The first scope that sets a value wins. Profile scopes apply only to a request whose verified user, group, connector or agent a guardrail profile assignment selected. block_at and alert_at resolve independently, so a scope can set one and leave the other to fall through."
+>
+  <Node id="pc" kind="policy">{`Profile connector\nprofiles.P.connectors.C`}</Node>
+  <Node id="p" kind="policy">{`Profile\nprofiles.P.block_at`}</Node>
+  <Node id="c" kind="policy">{`Connector\nconnectors.C.block_at`}</Node>
+  <Node id="g" kind="policy">{`Global\nguardrail.block_at`}</Node>
+  <Node id="pack" kind="datastore">{`Rule pack default\npack manifest or name`}</Node>
+  <Edge from="pc" to="p" label="if unset" />
+  <Edge from="p" to="c" label="if unset" />
+  <Edge from="c" to="g" label="if unset" />
+  <Edge from="g" to="pack" label="if unset" />
+</Flow>
+
+From most to least specific:
+
+1. **Profile connector:** `guardrail.profiles.<profile>.connectors.<connector>.block_at`
+2. **Profile:** `guardrail.profiles.<profile>.block_at`
+3. **Connector:** `guardrail.connectors.<connector>.block_at`
+4. **Global:** `guardrail.block_at`
+5. **Rule-pack default:** the `posture` of the pack that scope uses (below)
+
+Application protection overlays (`application_protection.connectors.<connector>.guardrail`) can override some other guardrail fields, such as the mode, HITL and the rule pack, for connectors you have not set up by hand. They cannot carry `block_at` or `alert_at`: a config that sets either under `application_protection` is refused. For the thresholds that tier is therefore always empty, and the order reads profile connector > profile > guardrail.connectors > application protection (empty) > global > rule-pack default.
+
+Note that a profile's own level outranks `guardrail.connectors.<connector>`: a subject a profile selects gets the profile's `block_at` even on a connector that has its own, unless the profile sets that connector too. Profiles are how you give different people different levels; see [User- and group-based policies](/docs/guardrail/user-and-group-policies) for how assignments pick a profile.
+
+All four scopes in one file:
+
+```yaml title="~/.defenseclaw/config.yaml"
+guardrail:
+  block_at: HIGH            # global: HIGH and CRITICAL block everywhere
+  alert_at: MEDIUM
+  connectors:
+    codex:
+      block_at: CRITICAL    # connector: Codex blocks only CRITICAL
+  profiles:
+    contractors:
+      block_at: MEDIUM      # profile: contractors block MEDIUM and above
+      alert_at: LOW
+      connectors:
+        codex:
+          block_at: HIGH    # profile connector: except on Codex
+```
+
+## Rule-pack default (posture)
+
+A scope with no level of its own takes the default of the rule pack it enforces. The default comes from the pack's **posture**:
+
+| Posture | `block_at` | `alert_at` |
+| --- | --- | --- |
+| `default` | `CRITICAL` | `MEDIUM` |
+| `strict` | `MEDIUM` | `LOW` |
+| `permissive` | `CRITICAL` | `HIGH` |
+
+The posture of a pack is, in order:
+
+1. the `posture` field of `defenseclaw-pack.json` at the pack's root (`default`, `strict` or `permissive`), if the file exists;
+2. the pack's own name, for the built-in packs;
+3. otherwise the folder name when it is `strict` or `permissive`, and `default` for every other folder.
+
+The three built-in packs need no manifest. **A custom pack is `default` unless it says otherwise**, even when you copied it from `strict`. To keep strict levels for a copy, add a manifest to the pack directory:
+
+```json title="~/.defenseclaw/policies/guardrail/acme-strict/defenseclaw-pack.json"
+{"posture": "strict"}
+```
+
+The manifest is not part of the pack digest, and `defenseclaw guardrail validate-pack` accepts a pack with or without it. See [Rules and custom packs](/docs/policies/rules) for pinning a pack.
+
+Because a profile or connector can select a different `rule_pack`, the default can differ per scope. Setting `block_at` explicitly at a scope removes that dependency.
+
+## Cisco AI Defense trust level
+
+`guardrail.cisco_trust_level` decides how much a Cisco AI Defense verdict counts when you run the remote scanner (`scanner_mode: remote` or `both`):
+
+| Value | Effect |
+| --- | --- |
+| `full` (default) | The verdict counts like a local finding and can reach `block_at`. |
+| `advisory` | A Cisco verdict that alone would reach the block level raises an alert instead, unless a local finding also reaches the alert level. |
+| `none` | Cisco AI Defense severities are ignored when computing the verdict. |
+
+It is a single global setting; connectors and profiles do not override it. Change it with `defenseclaw policy edit guardrail --cisco-trust-level advisory` or `defenseclaw config set guardrail.cisco_trust_level advisory`. The `permissive` preset sets `advisory`.
+
+## Read the effective value
+
+`config get --effective` prints the value the gateway enforces and where it comes from. The source line goes to stderr, so a script that captures the output gets only the value.
+
+```text title="Terminal output"
+$ defenseclaw config get guardrail.block_at --effective            # block_at: HIGH
+(source: config:guardrail.block_at)
+HIGH
+$ defenseclaw config get guardrail.connectors.codex.block_at --effective   # codex sets its own
+(source: config:guardrail.connectors.codex.block_at)
+HIGH
+$ defenseclaw config get guardrail.alert_at --effective            # alert_at not set anywhere
+(source: pack-default:default)
+MEDIUM
+```
+
+The source is `config:guardrail.<key>` for the global scope, `config:guardrail.connectors.<connector>.<key>` for a connector, or `pack-default:<posture>` when nothing is set and the rule pack decides. `--effective` reads the global and connector scopes. For a profile scope, ask which profile a request resolves to and what it applies:
+
+```bash
+defenseclaw guardrail profile explain --connector codex
+```
+
+```text title="Terminal output (abridged)"
+Guardrail profile resolution
+profile: contractors
+match:   connector
+applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
+```
+
+`alert_at=pack` means the profile sets no alert level, so the rule pack's default applies. Add `--user alice` to resolve a specific user. Two more views:
+
+```bash
+defenseclaw guardrail status
+defenseclaw-gateway policy show
+```
+
+`guardrail status` prints the result per connector in its **Block/alert** column (`MEDIUM+/LOW+`: blocks MEDIUM and above, alerts LOW and above). `defenseclaw-gateway policy show` prints what the running binary compiles from `config.yaml`, under `guardrail`. It is the one to use on a managed host, where the `defenseclaw` Python CLI is not installed.
+
+## Set the levels
+
+| To | Run |
+| --- | --- |
+| Set the global block level | `defenseclaw guardrail block-at HIGH` |
+| Set the global alert level | `defenseclaw guardrail alert-at MEDIUM` |
+| Set one connector's levels | `defenseclaw guardrail block-at CRITICAL --connector codex` |
+| Clear a level so it inherits | `defenseclaw guardrail block-at inherit --connector codex` |
+| Set a profile's level | `defenseclaw config set guardrail.profiles.contractors.block_at MEDIUM` |
+| Set a profile connector's level | `defenseclaw config set guardrail.profiles.contractors.connectors.codex.block_at HIGH` |
+| Remove any key | `defenseclaw config unset guardrail.profiles.contractors.block_at` |
+| Take a preset's levels | `defenseclaw policy activate strict` |
+| Set levels and trust level together | `defenseclaw policy edit guardrail --block-threshold HIGH --alert-threshold MEDIUM` |
+
+`block-at` and `alert-at` take `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` (any case) or `inherit`, and have no `--profile` option; use `config set` for profile scopes. Every change goes through the one config writer, which validates the result before writing it, so a bad level is refused and `config.yaml` stays as it was.
+
+`policy activate` writes `guardrail.block_at` and `guardrail.alert_at` from the preset, but only when the preset's level differs from the default of the globally selected rule pack. Activating `default` on the default pack writes neither key. `strict` writes `block_at: MEDIUM` and `alert_at: LOW`. `permissive` writes `alert_at: HIGH` and `cisco_trust_level: advisory`. See [Defaults](/docs/policies/defaults) for the full preset table.
+
+<Callout type="warn" title="Managed devices refuse local changes">
+On a device managed by MDM or a management plane, the config writer refuses. `defenseclaw config set` exits with status 3 and the message `This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device`, and the commands built on the writer refuse too. Set the levels in the admin config instead.
+</Callout>
+
+## Hot reload
+
+A change to a threshold, a rule pack, `guardrail.rules`, a profile, the mode, HITL or the trust level is applied by the running gateway without a restart. The gateway builds a new policy generation in the background and swaps it in atomically. `defenseclaw guardrail block-at HIGH` ends with `The running gateway applies it now.`, and the next decision uses the new level.
+
+If a change is invalid, the previous generation keeps running. The rejected change shows up as `policy.last_reload_error` in the gateway `/health` output and as a failing **Policy** row in `defenseclaw doctor`, which also lists the generation and the digest still being enforced.
+
+A restart is still needed for the process-level guardrail keys: `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies`, `guardrail.hook_fail_mode`, the hook self-heal settings, and a connector's own `enabled` and `hook_fail_mode` (they are baked into the installed hooks). The writer prints `Restart the gateway to apply <key>: defenseclaw-gateway restart` when you change one. The rest of such a change still applies at once; the gateway logs which keys wait for the restart. With `gateway.config_reload.mode: restart` the gateway restarts itself when a change needs it, instead of waiting for you.
+
+<Callout type="info" title="Secure Client">
+When Cisco Secure Client integration is active, the gateway keeps the rule pack's posture levels for content decisions. `guardrail.block_at` and `alert_at` do not change them.
+</Callout>
+
+## See also
+
+- [Rules and custom packs](/docs/policies/rules): `guardrail.rule_pack`, `custom_packs` and `guardrail.rules`
+- [Defaults](/docs/policies/defaults): what each shipped preset and pack sets
+- [HITL](/docs/hitl): the confirm band below the block level
+- [User- and group-based policies](/docs/guardrail/user-and-group-policies): assign profiles by user, group, connector or agent
+- [Reference: Configuration](/docs/reference/configuration): every key

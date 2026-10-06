@@ -158,13 +158,14 @@ pkg does not satisfy Gatekeeper on Macs that require notarization.
 ### 2. Stage the config
 
 This example protects Codex and Claude Code in observe mode. The lifecycle
-requires `config_version: 8`, `deployment_mode: managed_enterprise`,
+requires `config_version: 9` (a version 8 file is migrated by `ensure`),
+`deployment_mode: managed_enterprise`,
 `enterprise.profile: standalone` and
 `data_dir: /opt/cisco/defenseclaw/runtime`. If you set `gateway.api_bind` or
 `gateway.api_port`, they must be `127.0.0.1` and `18970`.
 
 ```yaml title="config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -332,6 +333,7 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
 | `coverage_complete` | `true`: the gateway, guardian and enumerator are ready |
 | `security_complete` | `true`: coverage is complete, the sensor helper is ready, and there are no errors |
+| `policy` | `applied` is `true`: the running gateway reports the digest of the config on disk. `effective_digest` and `config_generation` identify that config; compare them across hosts ([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)) |
 | `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
 | `errors` | Empty |
 
@@ -409,7 +411,9 @@ that profile.
   rollback marker `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` exists;
   the lifecycle refuses an older tarball unless you pass `--allow-downgrade`.
   See [Upgrade](/docs/enterprise/lifecycle#upgrade) and
-  [Roll back](/docs/enterprise/lifecycle#roll-back).
+  [Roll back](/docs/enterprise/lifecycle#roll-back). The first `ensure` of a
+  new release migrates a `config_version: 8` config to 9 and keeps
+  `config.yaml.v8.bak` and `migration-v9.json` next to it.
 - **Change the config.** Replace `/opt/cisco/defenseclaw/etc/config.yaml`.
   The apply daemon runs `ensure`, which validates the new file and applies
   it, or rolls back. See

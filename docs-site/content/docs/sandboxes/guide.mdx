@@ -1164,8 +1164,9 @@ call. The banner's `MCP` line lists them.
 
 A server stays behind, with a warning that says why, when:
 
-- DefenseClaw blocks it (a scan verdict, `defenseclaw mcp block`, or the MCP
-  asset policy);
+- DefenseClaw blocks it (an `asset_policy.mcp.denied` rule, which
+  `defenseclaw mcp block` writes; a scan verdict the watcher acted on; or the
+  MCP asset policy in `action` mode);
 - it is disabled, runs on this machine (a `localhost` or private URL), or
   uses a transport the harness cannot run in a sandbox (Codex has no SSE).
 

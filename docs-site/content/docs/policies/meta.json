@@ -2,6 +2,9 @@
   "title": "Policies",
   "pages": [
     "defaults",
+    "thresholds",
+    "rules",
+    "admission",
     "deterministic-detection",
     "cel",
     "rulepack-validation",

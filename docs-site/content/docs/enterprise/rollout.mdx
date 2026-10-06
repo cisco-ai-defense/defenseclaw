@@ -45,6 +45,33 @@ that runs with unrestricted `sudo` or administrator rights can remove it. Keep
 agents running as standard users.
 </Callout>
 
+### Where releases come from
+
+One workflow publishes every release: the Release workflow of the DefenseClaw
+repository, run on `main`. It signs `checksums.txt` with cosign (a keyless
+signature, stored as `checksums.txt.bundle`) under the identity
+`https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main`
+and the issuer `https://token.actions.githubusercontent.com`. The installers
+(`install.sh`, `install.ps1`) and `defenseclaw upgrade` compile that identity
+in. No config key or environment variable changes it, so the trust root is
+the same whether you fetch from GitHub or from your own mirror.
+
+- **`update.source`** in the config (`https://` only) and the deprecated
+  `DEFENSECLAW_REPO` (a GitHub `owner/name`, or an `https://` base URL) change
+  only where release bytes are fetched. A mirror must serve the same signed
+  `checksums.txt` and `checksums.txt.bundle` and the same files; copy them
+  unchanged, and do not re-sign them. The tools refuse a mirror without
+  cosign 2.0 or later, and `defenseclaw upgrade` refuses an installer that is
+  stamped with another release than the one requested.
+- **The checksum-only fallback** (a warning that cosign is missing, then a
+  check against `checksums.txt` alone) exists only for the official source,
+  that is when `update.source` is empty and `DEFENSECLAW_REPO` is unset.
+- **Managed hosts do not update themselves.** `defenseclaw upgrade` and
+  `defenseclaw rollback` refuse, the update notice is off, and
+  `DEFENSECLAW_REPO` is ignored there. Your MDM delivers each release, pinned
+  by its SHA-256 from a `checksums.txt` that you verified with cosign once;
+  see [Hash-pinned trust](/docs/enterprise/mdm#what-you-deliver).
+
 ## Step 1: Choose the agents
 
 List every agent you want to protect under `guardrail.connectors` in the
@@ -205,6 +232,12 @@ Watch these on every ring:
 - **Health fields.** `coverage_complete` and `security_complete` in the
   lifecycle result ([Health fields](/docs/enterprise/operations#health-fields)).
 - **Enrollment counts** in `status`, against the users you expect.
+- **The effective policy digest.** `policy.effective_digest` should be the
+  same on every host of one OS in the ring that received the same config, and
+  `policy.applied` should be `true` (Linux and macOS; see
+  [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
+  A host with another digest has not applied the change, or runs another
+  config.
 
 Two Windows cases keep `security_complete` at `false` on a healthy install:
 
@@ -227,6 +260,15 @@ same rings work for upgrades: run `ensure` with the new release on the pilot
 ring first. On Linux and macOS the package manager, or `ensure` with a newer
 payload, upgrades in place. On Windows, `ensure` with the new Setup program
 upgrades and refuses to install an older version over a newer one.
+
+An upgrade keeps the administrator config. A `config_version: 8` config from
+the previous release is migrated to version 9 by the first `ensure` of the new
+release, which keeps `config.yaml.v8.bak` and `migration-v9.json`
+([What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config)).
+Check the record in the pilot ring before you widen it. Each release is also
+upgraded from the previous release's packages by an automated gate before it
+is published (Debian, RHEL 9, macOS and Windows); that gate runs one test
+config, not yours, so it does not replace the pilot ring.
 
 [Lifecycle](/docs/enterprise/lifecycle) covers
 [upgrade](/docs/enterprise/lifecycle#upgrade),

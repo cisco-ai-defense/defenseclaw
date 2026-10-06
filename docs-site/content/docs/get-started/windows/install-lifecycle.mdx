@@ -158,7 +158,8 @@ defenseclaw upgrade
 The installer continues in a new PowerShell window so the running command can
 release its files. It stops the gateway, keeps the current install in
 `%USERPROFILE%\.defenseclaw\previous`, swaps in the new version, migrates your
-configuration, and restarts the gateway. If any step fails it restores the
+configuration (a version 8 `config.yaml` becomes version 9, and the old file stays as
+`config.yaml.v8.bak`), and restarts the gateway. If any step fails it restores the
 previous install. Close the TUI and other DefenseClaw commands first; the
 installer waits up to a minute for them and changes nothing if they stay open.
 
