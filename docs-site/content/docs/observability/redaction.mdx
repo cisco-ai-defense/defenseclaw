@@ -399,8 +399,9 @@ The v7 `privacy` block's `disable_redaction` field and
 `DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
 They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
 materializes their effective behavior into the `none` built-in or a generated
-`v7-compatible` custom profile before retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
-with an actionable upgrade message.
+`v7-compatible` custom profile before retiring those inputs. The gateway reads neither control, so a `privacy`
+block left in `config.yaml` is rejected as an unknown key, and legacy observability blocks are rejected with an
+actionable upgrade message.
 
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
 does not alter the v8 destination route graph or a persistent-sink projection.
