@@ -333,6 +333,19 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 	return nil
 }
 
+// checkRuleAssets builds the rule packs the config selects, with its
+// guardrail.rules layers, the way the gateway does when it starts. A layer
+// the gateway would refuse (a duplicate suppression id, an unknown rule id,
+// a missing protection pack) is refused here, with its reason, before
+// anything changes, instead of keeping the gateway from starting. The check
+// is registered by the gateway package; a build without it skips this.
+func (e *Env) checkRuleAssets(v *validatedConfig) error {
+	if err := config.CheckCandidateAssets(v.Loaded); err != nil {
+		return fmt.Errorf("config does not build: %w", err)
+	}
+	return nil
+}
+
 // checkRulePacksReadable refuses an administrator rule pack the gateway's
 // service account cannot read. The lifecycle runs as root, which reads any
 // mode, so a pack written under umask 077 passed every other check and
