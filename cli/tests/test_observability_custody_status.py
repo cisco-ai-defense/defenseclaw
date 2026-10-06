@@ -352,7 +352,7 @@ def test_doctor_managed_exporter_drift_alone_warns_with_next_step() -> None:
 
     codex = {item["label"]: item for item in result.checks}["Connector OTLP: codex"]
     assert codex["status"] == "warn"
-    assert "run 'defenseclaw setup codex' to re-apply" in codex["detail"]
+    assert codex["remediation"] == "run 'defenseclaw setup codex' to re-apply"
 
 
 def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(capsys) -> None:

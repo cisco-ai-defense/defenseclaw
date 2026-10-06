@@ -588,7 +588,8 @@ def profile_status_text(cfg, result: dict) -> str:
 
     *result* comes from ``current_user_guardrail_profile``. Status, guardrail
     status and doctor show it, because the per-connector settings they list
-    are ``guardrail.*``, which a matching profile replaces (GAP-0056).
+    are ``guardrail.*``, which a matching profile replaces (GAP-0056). A
+    connector or agent another assignment picks is named too (GAP-0075).
     """
     from defenseclaw import policy_catalog
 
@@ -598,14 +599,26 @@ def profile_status_text(cfg, result: dict) -> str:
         return f"unknown for {user}: the gateway did not answer ({count} profile(s) configured)"
     name = str(result.get("profile") or "")
     if not name:
-        return f"none for {user} (guardrail.* applies)"
-    effective = result.get("effective") or {}
-    pack_dir = str(effective.get("rule_pack_dir") or "")
-    pack = policy_catalog.pack_name_for_path(cfg, pack_dir)[0] if pack_dir.strip() else "default"
-    reason = str(result.get("match") or "")
-    if result.get("matched_group"):
-        reason += f" {result['matched_group']}"
-    return f"{name} for {user} (by {reason}): mode {effective.get('mode') or 'observe'}, rule pack {pack}"
+        text = f"none for {user} (guardrail.* applies)"
+    else:
+        effective = result.get("effective") or {}
+        pack_dir = str(effective.get("rule_pack_dir") or "")
+        pack = policy_catalog.pack_name_for_path(cfg, pack_dir)[0] if pack_dir.strip() else "default"
+        reason = str(result.get("match") or "")
+        if result.get("matched_group"):
+            reason += f" {result['matched_group']}"
+        text = f"{name} for {user} (by {reason}): mode {effective.get('mode') or 'observe'}, rule pack {pack}"
+    scoped = []
+    for item in result.get("overrides") or []:
+        subject = " ".join(
+            part
+            for part in (_connector_label(item.get("connector") or ""), item.get("agent") and f"agent {item['agent']}")
+            if part
+        )
+        scoped.append(f"{item.get('profile')} for {subject} (by {item.get('match')})")
+    if scoped:
+        text += "; except " + ", ".join(scoped)
+    return text
 
 
 @guardrail.command("status")
@@ -822,10 +835,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.warn("connector limitation: " + limit_row, indent="  ")
     if profile is not None:
         ux.echo(f"  • {ux._style('profile:', fg='bright_black', bold=True)}    {profile_status_text(app.cfg, profile)}")
-        if profile.get("profile"):
+        if profile.get("profile") or profile.get("overrides"):
             ux.subhead(
-                "The table shows guardrail.*; this profile's settings decide for you. "
-                "Details: defenseclaw guardrail profile explain",
+                "The table shows guardrail.*; the profile settings above decide for you. "
+                "Details: defenseclaw guardrail profile explain [--connector NAME] [--agent ID]",
                 indent="    ",
             )
     ux.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
