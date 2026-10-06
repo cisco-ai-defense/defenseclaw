@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -395,12 +396,47 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/tool-response", auditAction, req.Tool, auditDetails))
+	if !managedAIDOnly {
+		a.alertSensitiveToolResult(r, req.Tool, verdict)
+	}
 
 	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
+}
+
+// alertSensitiveToolResult raises tool-result-pii-alert when the rule pack the
+// request's connector enforces lists the tool in sensitive_tools with
+// result_inspection and the tool's output matched at least
+// min_entities_for_alert findings. The event router does the same for
+// OpenClaw tool_result frames; this is the hook connectors' path, so
+// guardrail.rules.sensitive_tools is live on every connector. Findings are
+// only counted: the row never carries the matched text.
+func (a *APIServer) alertSensitiveToolResult(r *http.Request, tool string, verdict *ToolInspectVerdict) {
+	g := a.generation()
+	if g == nil || verdict == nil || a.logger == nil {
+		return
+	}
+	pack := g.RulePacks["conn:"+profileRequestConnector(r.Context())]
+	if pack == nil {
+		pack = g.RulePacks["global"]
+	}
+	entry := pack.LookupSensitiveTool(tool)
+	if entry == nil || !entry.ResultInspection {
+		return
+	}
+	minEntities := entry.MinEntitiesAlert
+	if minEntities <= 0 {
+		minEntities = 1
+	}
+	if len(verdict.Findings) < minEntities {
+		return
+	}
+	details := fmt.Sprintf("tool=%s severity=%s entities=%d", tool, verdict.Severity, len(verdict.Findings))
+	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(
+		r, "/api/v1/inspect/tool-response", string(audit.ActionToolResultPIIAlert), tool, details))
 }
 
 // buildVerdict converts rule findings into a ToolInspectVerdict.
