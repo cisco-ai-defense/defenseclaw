@@ -146,7 +146,7 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
         with Vertical(id="config-diff-dialog"):
             yield Static("Review Config Changes", id="config-diff-title")
             # Render EVERY change inside a bounded scroll region: an operator
-            # confirming "Save and queue restart" must be able to inspect
+            # confirming "Save" must be able to inspect
             # changes 9..N, which the old 8-entry truncation hid.
             with VerticalScroll(id="config-diff-scroll"):
                 yield Static(
@@ -157,7 +157,7 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
             with Horizontal(id="config-diff-buttons"):
                 yield Button("Cancel", id="config-diff-cancel", variant="default")
                 yield Button(
-                    "Save and queue restart",
+                    "Save",
                     id="config-diff-save",
                     variant="success",
                     disabled=not self.model.has_changes,
