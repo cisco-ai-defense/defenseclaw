@@ -830,7 +830,7 @@ def rule_pack_change_modal(model: PoliciesPanelModel, choice: RulePackChoice) ->
     where = connector or "every connector"
     return _modal(
         f"Use the {choice.name} rule pack for {where}?",
-        "A running gateway restarts to load the new pack.",
+        "A running gateway loads the new pack on its next reload.",
         details,
         consequence,
         _confirm("use", "u", f"Use {choice.name}", weaker),
@@ -850,12 +850,14 @@ def mode_change_modal(model: PoliciesPanelModel, row: Any, new: str) -> Conseque
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets the global mode.")
     elif connector:
-        details.append("Only this connector changes; the others keep their mode. A running gateway restarts.")
+        details.append(
+            "Only this connector changes; the others keep their mode. A running gateway applies it on its next reload."
+        )
     else:
         own = model.own_setting("mode")
         if own:
             details.append("Connectors with their own mode keep it: " + ", ".join(own) + ".")
-        details.append("A running gateway restarts to apply it.")
+        details.append("A running gateway applies it on its next reload.")
     details.append(_run_line(intent))
     consequence = ""
     if weaker:
@@ -974,13 +976,15 @@ def level_change_modal(model: PoliciesPanelModel, row: Any, kind: str, choice: s
     if connector and not model.multi_connector:
         details.append("This install has one connector, so this sets the global level.")
     elif connector:
-        details.append("Only this connector changes; a running gateway restarts to apply it.")
+        details.append("Only this connector changes; a running gateway applies it on its next reload.")
     elif model.multi_connector:
-        details.append("Every connector without its own level follows it; a running gateway restarts to apply it.")
+        details.append(
+            "Every connector without its own level follows it; a running gateway applies it on its next reload."
+        )
         if change.keep_own:
             details.append("Keep their own level: " + ", ".join(change.keep_own) + ".")
     else:
-        details.append("A running gateway restarts to apply it.")
+        details.append("A running gateway applies it on its next reload.")
     if after.alert_clamped:
         details.append(f"Alerts start at {after.alert_at}: anything that blocks also alerts.")
     details.append(_run_line(intent))
