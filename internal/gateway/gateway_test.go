@@ -111,7 +111,7 @@ func bindTestConfigRuntime(t *testing.T, api *APIServer) {
 	if err != nil {
 		t.Fatalf("marshal API config: %v", err)
 	}
-	if err := config.WriteFileAtomic(path, data, 0o600); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write API config: %v", err)
 	}
 
