@@ -444,7 +444,7 @@ func validateJudgeCompletionInput(input JudgeCompletionInput) error {
 	}
 	action, _, ok := judgeCompletionOutcome(input.Action)
 	if !ok {
-		return fmt.Errorf("audit: judge action must be allow, block, or error")
+		return fmt.Errorf("audit: judge action must be allow, warn, alert, block, or error")
 	}
 	if input.LatencyMS < 0 || input.InputBytes < 0 {
 		return fmt.Errorf("audit: judge measurements must not be negative")
@@ -497,10 +497,13 @@ func validateEnforcementQuarantineInput(event Event, input EnforcementQuarantine
 	return nil
 }
 
+// judgeCompletionOutcome maps a judge verdict action to its recorded action and
+// outcome. A warn or alert verdict is a finding the call went ahead with, so
+// the completion is allowed; the finding itself is recorded separately.
 func judgeCompletionOutcome(action string) (string, observability.Outcome, bool) {
-	switch strings.ToLower(strings.TrimSpace(action)) {
-	case "allow":
-		return "allow", observability.OutcomeAllowed, true
+	switch normalized := strings.ToLower(strings.TrimSpace(action)); normalized {
+	case "allow", "warn", "alert":
+		return normalized, observability.OutcomeAllowed, true
 	case "block":
 		return "block", observability.OutcomeBlocked, true
 	case "error":
