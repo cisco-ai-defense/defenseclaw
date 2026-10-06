@@ -121,7 +121,9 @@ observability: {}
 		"guardrail.block_at":                                      "HIGH",
 		"scanners.skill_scanner.analyzers.virustotal.enabled":     true,
 		"scanners.skill_scanner.analyzers.virustotal.api_key_env": "VT_KEY",
-		"asset_policy.skill.denied":                               []any{map[string]any{"name": "bad-skill", "reason": "operator", "source_path_contains": []any{"/s/bad"}}},
+		"asset_policy.skill.denied":                               []any{map[string]any{"name": "bad-skill", "reason": "operator"}},
+		"asset_policy.plugin.allowed":                             []any{map[string]any{"name": "ok", "reason": "operator", "source_path_contains": []any{"/p/ok"}}},
+		"asset_policy.mcp":                                        nil,
 		"asset_policy.tool.denied":                                []any{map[string]any{"name": "rm", "connector": "codex"}},
 	} {
 		if got, _ := json.Marshal(get(path)); string(got) != mustJSON(t, want) {
@@ -146,8 +148,8 @@ observability: {}
 	if len(result.Record.Conflicts) != 1 || result.Record.Conflicts[0].To != "admission.skill.actions.high" {
 		t.Errorf("conflicts = %+v", result.Record.Conflicts)
 	}
-	if result.Record.ActionsRowsMoved != 2 {
-		t.Errorf("actions rows moved = %d, want 2", result.Record.ActionsRowsMoved)
+	if result.Record.ActionsRowsMoved != 3 {
+		t.Errorf("actions rows moved = %d, want 3", result.Record.ActionsRowsMoved)
 	}
 	if backup, _ := os.ReadFile(configPath + ConfigV8BackupSuffix); string(backup) != source {
 		t.Error("config.yaml.v8.bak does not hold the v8 bytes")

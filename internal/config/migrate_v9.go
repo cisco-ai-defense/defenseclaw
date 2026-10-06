@@ -1200,7 +1200,11 @@ func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list stri
 	if row.reason != "" {
 		item.Content = append(item.Content, v9Scalar("reason"), v9Scalar(row.reason))
 	}
-	if row.sourcePath != "" && row.targetType != AdmissionTypeTool {
+	// v8 pinned allows to their source_path (admission.rego
+	// _allow_entry_path_matches) but matched blocks by name and type only,
+	// and the CLI recorded the resolved copy's path on a global block. A
+	// pinned deny would stop matching other copies and name-only checks.
+	if list == "allowed" && row.sourcePath != "" && row.targetType != AdmissionTypeTool {
 		paths := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
 		paths.Content = append(paths.Content, v9Scalar(row.sourcePath))
 		item.Content = append(item.Content, v9Scalar("source_path_contains"), paths)
