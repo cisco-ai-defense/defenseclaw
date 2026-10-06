@@ -1103,41 +1103,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ):
             self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
-    def test_sandbox_flag_is_a_deprecated_no_op(self):
-        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
-            result = self._invoke([
-                "--non-interactive",
-                "--yes",
-                "--connector",
-                "openclaw",
-                "--profile",
-                "observe",
-                "--scanner-mode",
-                "local",
-                "--skip-install",
-                "--sandbox",
-                "--no-start-gateway",
-                "--no-verify",
-                "--json-summary",
-            ])
-        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-
-        summary = json.loads(result.output)
-        sandbox_steps = [s for s in summary["setup"] if s["name"] == "Sandbox"]
-        self.assertEqual(len(sandbox_steps), 1, summary["setup"])
-        self.assertEqual(sandbox_steps[0]["status"], "warn")
-        self.assertIn("deprecated and ignored", sandbox_steps[0]["detail"])
-        self.assertIn("defenseclaw sandbox legacy-cleanup", sandbox_steps[0]["detail"])
-        # OpenShell 0.1 sandboxes ship: the notice points at their setup.
-        self.assertIn("run 'defenseclaw sandbox setup'", sandbox_steps[0]["detail"])
-        self.assertNotIn("being rebuilt", sandbox_steps[0]["detail"])
-        self.assertEqual(sandbox_steps[0]["next_command"], "defenseclaw sandbox legacy-cleanup --dry-run")
-
-    def test_sandbox_flag_is_hidden_from_help(self):
-        result = self._invoke(["--help"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertNotIn("--sandbox", result.output)
-
     def test_with_judge_defaults_hook_coverage_to_all(self):
         result = self._invoke([
             "--non-interactive",
