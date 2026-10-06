@@ -2869,8 +2869,9 @@ class AIDiscoveryConfig:
     # person rather than an account on one endpoint, and it leaves the endpoint
     # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
     include_user_email: bool = False
-    # Opt-in like include_user_email: the directory principal (UPN or Kerberos
-    # principal) identifies a person. Mirrors IncludeUserPrincipal.
+    # Opt-in like include_user_email: the directory principal (UPN) and the
+    # session's Kerberos principal identify a person. When on they ride every
+    # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
     include_user_principal: bool = False
     # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
     ide_inventory: str = "all"
@@ -6131,7 +6132,11 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
     if not isinstance(raw, dict):
         return AIDiscoveryConfig(enabled=False)
     return AIDiscoveryConfig(
-        enabled=bool(raw.get("enabled", True)),
+        # Go defaults ai_discovery.enabled to false (viper), so a block that
+        # omits the key is disabled there too. Defaulting to true here made the
+        # CLI report discovery as on while the gateway kept it off, and a later
+        # save never wrote the flag because it already matched the loaded value.
+        enabled=_coerce_bool(raw.get("enabled", False)),
         mode=str(raw.get("mode", "enhanced") or "enhanced"),
         scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),

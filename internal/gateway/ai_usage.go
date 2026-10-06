@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
 )
 
 // confidencePolicyMaxRequestBytes caps the body of
@@ -84,6 +85,36 @@ const (
 // name or id), IDE product or family, and ai_only, a page at a time
 // (cursor is the opaque next_cursor of the previous page). Paths appear
 // only as hashes.
+// ideFamilyNamesProduct lists the IDE families whose name is also a product
+// token: a filter on one of these names that product, not its forks (--ide
+// vscode is VS Code, not Cursor).
+var ideFamilyNamesProduct = map[string]bool{
+	ideplugins.FamilyVSCode:  true,
+	ideplugins.FamilyVim:     true,
+	ideplugins.FamilyZed:     true,
+	ideplugins.FamilyEclipse: true,
+}
+
+// ideFilterMatches reports whether an IDE filter (a product token or a
+// family such as jetbrains) selects a row.
+func ideFilterMatches(ide, family, product string) bool {
+	if ide == "" || ide == product {
+		return true
+	}
+	return ide == family && !ideFamilyNamesProduct[family]
+}
+
+// accountFilterMatches reports whether a user filter selects a row: the
+// account id, the account name (DOMAIN\name on Windows) or the name without
+// its domain.
+func accountFilterMatches(user, id, name string) bool {
+	if user == "" || user == id || strings.EqualFold(user, name) {
+		return true
+	}
+	i := strings.LastIndex(name, `\`)
+	return i >= 0 && strings.EqualFold(user, name[i+1:])
+}
+
 func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -146,21 +177,15 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	resp["scope"] = inv.Scope
 	resp["scan_id"] = ""
 	resp["scanned_at"] = inv.ScannedAt
-	matchUser := func(id, name string) bool {
-		return user == "" || strings.EqualFold(user, name) || user == id
-	}
-	matchIDE := func(family, product string) bool {
-		return ide == "" || ide == product || ide == family
-	}
 	installs := []inventory.IDEInstallation{}
 	for _, inst := range inv.Installations {
-		if matchUser(inst.UserID, inst.UserName) && matchIDE(inst.Family, inst.Product) {
+		if accountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) {
 			installs = append(installs, inst)
 		}
 	}
 	plugins := []inventory.IDEPlugin{}
 	for _, p := range inv.Plugins {
-		if matchUser(p.UserID, p.UserName) && matchIDE(p.Family, p.Product) && (!aiOnly || p.IsAI) {
+		if accountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
 			plugins = append(plugins, p)
 		}
 	}

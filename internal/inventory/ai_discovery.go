@@ -2770,7 +2770,6 @@ func (s *ContinuousDiscoveryService) detectApplications() []AISignal {
 var legacyExcludedExtensionIDs = map[string]bool{
 	"anthropic.claude-code": true,
 	"openai.chatgpt":        true,
-	"codeium.codeium":       true,
 }
 
 // detectEditorExtensionsLegacy is the historical detector the Secure Client

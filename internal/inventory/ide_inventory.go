@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // IDE inventory: every IDE installation in each scanned home and every
@@ -181,6 +182,13 @@ func newIDEAIIndex(catalog []AISignature) ideAIIndex {
 		put(ideplugins.FamilyJetBrains, sig.JetBrainsPluginIDs, sig)
 		put(ideplugins.FamilyZed, sig.ZedExtensionIDs, sig)
 		put(ideplugins.FamilyVim, sig.VimPlugins, sig)
+		// The Devin vendor's plugins keep their pre-rename ids, which the
+		// catalog does not spell; legacyconnector owns them.
+		if sig.ID == legacyconnector.Replacement {
+			put(ideplugins.FamilyVSCode, legacyconnector.VSCodeExtensionIDs, sig)
+			put(ideplugins.FamilyJetBrains, legacyconnector.JetBrainsPluginIDs, sig)
+			put(ideplugins.FamilyVim, legacyconnector.VimPlugins, sig)
+		}
 	}
 	return idx
 }
@@ -267,11 +275,9 @@ var currentIDEOwner = func() ideOwner {
 	if err != nil {
 		return ideOwner{}
 	}
-	name := u.Username
-	if i := strings.LastIndex(name, `\`); i >= 0 {
-		name = name[i+1:]
-	}
-	return ideOwner{id: u.Uid, name: name}
+	// The full account name (DOMAIN\name on Windows), as agent identities and
+	// hook records spell it.
+	return ideOwner{id: u.Uid, name: u.Username}
 }
 
 func programFilesDirs() []string {

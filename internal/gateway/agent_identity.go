@@ -224,9 +224,12 @@ func claimedInstallHint(payload map[string]interface{}) string {
 	}
 	hint := firstString(payload, "config_dir", "configDir", "claude_config_dir", "codex_home")
 	if hint == "" {
-		transcript := strings.ReplaceAll(firstString(payload, "transcript_path", "transcriptPath"), `\`, "/")
+		// Find the marker on a slash-normalized copy but cut the original, so a
+		// Windows hint keeps its backslashes like the install root beside it.
+		transcript := firstString(payload, "transcript_path", "transcriptPath")
+		normalized := strings.ReplaceAll(transcript, `\`, "/")
 		for _, marker := range []string{"/projects/", "/sessions/"} {
-			if i := strings.Index(transcript, marker); i > 0 {
+			if i := strings.Index(normalized, marker); i > 0 {
 				hint = transcript[:i]
 				break
 			}

@@ -608,3 +608,18 @@ func containsExactPath(paths []string, want string) bool {
 	}
 	return false
 }
+
+// A managed enterprise service's home is its service profile, so the watcher
+// must not watch connector (or OpenClaw default) folders there (GAP-0026).
+func TestWatcherUsesConnectorDirsSkipsManagedServiceHome(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "claudecode"
+	if !watcherUsesConnectorDirs(cfg) {
+		t.Fatal("a configured per-user gateway must watch its connector folders")
+	}
+	cfg.DeploymentMode = "managed_enterprise"
+	if watcherUsesConnectorDirs(cfg) {
+		t.Fatal("a managed enterprise service must not watch its own profile's connector folders")
+	}
+}

@@ -245,6 +245,34 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unversioned default"):
             prepare_fresh_v8_config(cfg)
 
+    def test_ai_discovery_block_without_enabled_loads_disabled_and_enable_persists(self):
+        # Go defaults ai_discovery.enabled to false; a block holding only a
+        # privacy toggle must load as disabled so enabling it writes the flag.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(
+                    {
+                        "config_version": 8,
+                        "observability": {},
+                        "gateway": {"token_env": "DEFENSECLAW_GATEWAY_TOKEN"},
+                        "ai_discovery": {"include_user_principal": True},
+                    },
+                    stream,
+                    sort_keys=False,
+                )
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = load()
+                self.assertFalse(cfg.ai_discovery.enabled)
+                cfg.ai_discovery.enabled = True
+                cfg.save()
+
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+
+            self.assertIs(persisted["ai_discovery"]["enabled"], True)
+            self.assertIs(persisted["ai_discovery"]["include_user_principal"], True)
+
     def test_loaded_v8_can_enable_ai_discovery_without_restoring_v7_routing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = os.path.join(tmpdir, "config.yaml")
