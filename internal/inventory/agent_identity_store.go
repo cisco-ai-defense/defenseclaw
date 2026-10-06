@@ -9,6 +9,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentitiesDDL is the agent_identities table of inventory.db v4. The
@@ -44,7 +46,9 @@ type AgentIdentityRecord struct {
 // AgentIdentityFilter narrows ListAgentIdentities. Empty fields match
 // everything.
 type AgentIdentityFilter struct {
-	// User matches the user id exactly or the user name case-insensitively.
+	// User matches the user id exactly or the user name case-insensitively,
+	// also in its qualified forms: user@realm and DOMAIN\user select the
+	// bare account name the rows carry (GAP-0075).
 	User      string
 	Connector string
 	// Limit caps the rows returned; 0 or less means 1000.
@@ -129,8 +133,8 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities WHERE 1=1`
 	var args []any
 	if user := strings.TrimSpace(filter.User); user != "" {
-		query += ` AND (user_id = ? OR lower(COALESCE(user_name, '')) = lower(?))`
-		args = append(args, user, user)
+		query += ` AND (user_id = ? OR lower(COALESCE(user_name, '')) IN (lower(?), lower(?)))`
+		args = append(args, user, user, useridentity.BareAccountName(user))
 	}
 	if connector := strings.TrimSpace(filter.Connector); connector != "" {
 		query += ` AND connector = ?`

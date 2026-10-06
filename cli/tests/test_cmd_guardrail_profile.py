@@ -71,13 +71,16 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     )
     assert json.loads(as_json.output)["profile"] == "strict"
 
-    # With no option, explain and guardrail status ask about the account
-    # running the command, and status names its profile (GAP-0056).
+    # Without --user, explain (also with --connector, GAP-0085) and guardrail
+    # status ask about the account running the command, and status names its
+    # profile (GAP-0056).
     monkeypatch.setattr("getpass.getuser", lambda: "alice")
     app.cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
-    mine = runner.invoke(cmd_guardrail.guardrail, ["profile", "explain"], obj=app, catch_exceptions=False)
+    mine = runner.invoke(
+        cmd_guardrail.guardrail, ["profile", "explain", "--connector", "codex"], obj=app, catch_exceptions=False
+    )
     assert mine.exit_code == 0, mine.output
-    assert asked["user"] == "alice"
+    assert asked == {"user": "alice", "connector": "codex", "agent": ""}
     status = runner.invoke(cmd_guardrail.guardrail, ["status"], obj=app, catch_exceptions=False)
     assert "strict for alice (by group CORP\\Contractors): mode action" in status.output
 

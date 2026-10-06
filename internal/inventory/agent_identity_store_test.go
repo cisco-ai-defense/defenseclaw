@@ -50,6 +50,11 @@ func TestAgentIdentitiesUpsertMergesBatchesAndFilters(t *testing.T) {
 		!got.FirstSeen.Equal(t0.Add(-time.Minute)) || !got.LastSeen.Equal(t0.Add(time.Hour)) {
 		t.Fatalf("merged row = %+v", got)
 	}
+	for _, qualified := range []string{"alice@DCLAB.TEST", `DCLAB\alice`} {
+		if rows, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{User: qualified}); err != nil || len(rows) != 1 || rows[0].UserID != "1001" {
+			t.Fatalf("qualified user filter %q rows = %+v, err %v", qualified, rows, err)
+		}
+	}
 	if rows, err = st.ListAgentIdentities(ctx, AgentIdentityFilter{Connector: "codex"}); err != nil || len(rows) != 1 || rows[0].UserID != "1002" {
 		t.Fatalf("connector filter rows = %+v, err %v", rows, err)
 	}

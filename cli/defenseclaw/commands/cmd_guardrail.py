@@ -4475,18 +4475,19 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
 
     Asks the running gateway (loopback, gateway token), which resolves the
     user through the operating system the way it does for live requests.
-    With no option it explains the account running the command.
+    Without --user it explains the account running the command, also for
+    --connector and --agent, as live requests always carry a user (GAP-0085).
     """
     import getpass
 
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    if not (user or connector or agent):
+    if not user:
         try:
             user = getpass.getuser()
         except Exception:  # noqa: BLE001 - fall through to the error below.
             user = ""
-        if not user:
+        if not (user or connector or agent):
             ux.err("Name at least one of --user, --connector or --agent.")
             raise SystemExit(2)
     try:
