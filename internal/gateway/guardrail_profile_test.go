@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	osuser "os/user"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -297,5 +299,25 @@ rules:
 	}
 	if ids := findingIDs(ScanAllRulesForConnector("codex", "profile_marker_token", "exec")); containsRuleID(ids, "PROFILE-MARKER") {
 		t.Fatalf("profile rule pack leaked into the base rule set: %v", ids)
+	}
+}
+
+// GAP-0094: a local account's groups count once each. macOS listed every
+// gid and then its name, so explain and identity.observed doubled the count.
+func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows lists each group as its SID and name")
+	}
+	account, err := osuser.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	gids, err := account.GroupIds()
+	if err != nil || len(gids) == 0 {
+		t.Skip("no groups for the current account")
+	}
+	groups := localAccountGroups(account)
+	if len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
+		t.Fatalf("localAccountGroups = %v (count %d), want one entry per gid %v", groups, identityGroupCount(groups), gids)
 	}
 }

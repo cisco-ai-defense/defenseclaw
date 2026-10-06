@@ -4514,7 +4514,7 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     subject = result.get("subject") or {}
     if subject:
         who = subject.get("upn") or subject.get("principal") or subject.get("user_name") or user
-        click.echo(f"  user:    {who} ({len(subject.get('groups') or [])} group(s))")
+        click.echo(f"  user:    {who} ({int(subject.get('group_count') or 0)} group(s))")
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
     if result.get("match"):
