@@ -38,6 +38,14 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // before it is renamed into place, so the gateway never reads a partial or
 // unreadable record. An account whose lookups fail keeps no record; the
 // gateway then reports only what it resolves itself.
+//
+// The record of an account missing from accounts is removed only once it is
+// older than IdentitySpoolMaxAge, when the gateway ignores it anyway. A pass
+// that could not decide an account (the enumerator drops AD accounts whose
+// home owner does not resolve while the domain controller is unreachable)
+// would otherwise delete the UPN and directory facts of every such account,
+// and the gateway would report them without those until the next pass
+// (GAP-0145).
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
@@ -75,9 +83,13 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		return nil
 	}
 	for _, entry := range entries {
-		if !keep[entry.Name()] {
-			_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
+		if keep[entry.Name()] {
+			continue
 		}
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
 	return nil
 }

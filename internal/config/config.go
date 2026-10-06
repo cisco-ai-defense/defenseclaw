@@ -3071,8 +3071,8 @@ func checkRuntimeConfigVersion(version int) error {
 		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
 			version, ObservabilityV8ConfigVersion)
 	case version > MaxSupportedConfigVersion:
-		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); "+
-			"upgrade DefenseClaw or restore ~/.defenseclaw/previous", version)
+		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); %s",
+			version, newerConfigAction)
 	}
 	return nil
 }

@@ -132,6 +132,25 @@ LEGACY_CONFIG_BOUNDARY_COMMANDS = {
 ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "tui"}
 
 
+def _cli_audit_db(cfg) -> str:
+    """The audit database this CLI opens: ``cfg.audit_db``, except in the
+    managed configuration folder.
+
+    The enterprise lifecycle owns that folder (root, 0755, read by every
+    enrolled user's hooks). A CLI pointed at it with ``DEFENSECLAW_HOME`` would
+    create an ``audit.db`` there, and the store drops the folder's world bits
+    when it creates one, so it gets an in-memory store instead (GAP-0062).
+    """
+
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    descriptor = managed_descriptor()
+    audit_db = cfg.audit_db
+    if descriptor and os.path.dirname(os.path.abspath(audit_db)) == os.path.dirname(descriptor):
+        return ":memory:"
+    return audit_db
+
+
 def _is_help_invocation(ctx: click.Context) -> bool:
     # Allow `defenseclaw --help` and `<cmd> --help` to work even before init.
     if getattr(ctx, "resilient_parsing", False):
@@ -399,7 +418,7 @@ def cli(ctx: click.Context) -> None:
         return
 
     try:
-        app.store = Store(app.cfg.audit_db)
+        app.store = Store(_cli_audit_db(app.cfg))
         app.store.init()
     except Exception as exc:
         ux.echo(f"Failed to open audit store: {exc}", err=True)

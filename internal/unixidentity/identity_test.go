@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -92,6 +93,7 @@ func TestParseLoginDefsUIDRange(t *testing.T) {
 }
 
 type fakeRun struct {
+	mu      sync.Mutex
 	calls   [][]string
 	results map[string]commandResult
 	errs    map[string]error
@@ -99,7 +101,9 @@ type fakeRun struct {
 
 func (f *fakeRun) run(_ context.Context, path string, args []string) (commandResult, error) {
 	key := strings.Join(args, " ")
+	f.mu.Lock()
 	f.calls = append(f.calls, append([]string{path}, args...))
+	f.mu.Unlock()
 	if err := f.errs[key]; err != nil {
 		return commandResult{}, err
 	}

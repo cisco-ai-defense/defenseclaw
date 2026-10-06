@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"sort"
@@ -64,6 +65,46 @@ func checkCandidateAssets(cfg *config.Config) error {
 				continue
 			}
 			if _, err := loadScopedRulePack(cache, c.cfg, scope, c.label); err != nil {
+				return err
+			}
+		}
+	}
+	return checkCandidateWebhooks(cfg)
+}
+
+// checkCandidateWebhooks refuses an enabled webhook whose URL the dispatcher
+// would drop when it builds its endpoints (a malformed URL, a scheme other
+// than http or https, a loopback, private or link-local address). Without it
+// a bad webhook is accepted and then silently never delivers. Host names are
+// not resolved here; the dispatcher still checks what they resolve to.
+func checkCandidateWebhooks(cfg *config.Config) error {
+	check := func(path string, hooks []config.WebhookConfig) error {
+		for i, hook := range hooks {
+			if !hook.Enabled || hook.URL == "" {
+				continue
+			}
+			if err := validateWebhookURLWith(hook.URL, nil); err != nil {
+				label := fmt.Sprintf("webhook %d", i)
+				if hook.Name != "" {
+					label = fmt.Sprintf("webhook %q", hook.Name)
+				}
+				return &config.V8SemanticError{
+					Path:     fmt.Sprintf("$.%s[%d].url", path, i),
+					Summary:  fmt.Sprintf("%s: %s", label, scrubWebhookErr(err, hook.URL)),
+					Expected: "an http or https URL the gateway can deliver to (not loopback, private or link-local)",
+					Action:   "fix the url, or remove the webhook",
+				}
+			}
+		}
+		return nil
+	}
+	if err := check("webhooks", cfg.Webhooks); err != nil {
+		return err
+	}
+	names := cfg.Observability.ConnectorNames()
+	for _, name := range names {
+		if override := cfg.Observability.Connectors[name].Webhooks; override != nil {
+			if err := check(fmt.Sprintf("observability.connectors[%q].webhooks", name), *override); err != nil {
 				return err
 			}
 		}

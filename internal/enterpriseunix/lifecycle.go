@@ -739,12 +739,16 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err := env.checkRulePacksReadable(v9, account); err != nil {
 			return nil, &codedError{code: codeConfig, err: err}
 		}
-		if fromInstalled && config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
+		if fromInstalled && record != nil && record.ProductVersion == p.version &&
+			config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
 			// Configuration management put back the v8 file this host
 			// already migrated. Rewriting it again would fight that tool on
 			// every run, so its bytes stay, as for any in-place edit (the
 			// gateway migrates a v8 file in memory), and only the v9 checks
-			// apply.
+			// apply. This is only for a run that keeps the version: after a
+			// rollback the earlier release put the v8 file back and recorded
+			// its own version, so the upgrade migrates it again and replaces
+			// the stale migration record (GAP-0113).
 			v9.Raw, v9.SHA = validated.Raw, validated.SHA
 		} else {
 			v9.Migration = &configMigration{
@@ -755,6 +759,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 			fromInstalled = false
 		}
 		validated = v9
+	}
+	if err := env.checkCandidateAssets(validated); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
 	p.config = validated

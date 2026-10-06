@@ -1840,14 +1840,17 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	// The candidate generation compiles everything a request reads: the
 	// composed rule packs, profiles, the prepared OPA queries and the
-	// resolved thresholds. A Rego module that worked in the previous
-	// generation and no longer loads rejects the reload.
+	// resolved thresholds. A Rego module that does not load rejects the
+	// reload and keeps the previous generation, so last_reload_error names it
+	// until it is fixed. A generation that already runs without Rego because
+	// its modules did not load (the boot fallback) keeps the lenient build,
+	// so a config change is not held back by a module it never used.
 	nextGen, err := buildGeneration(ctx, generationInputs{
 		cfg:       cloneConfig(&next),
 		raw:       source.raw,
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
-		strictOPA: previousGen != nil && previousGen.OPA != nil,
+		strictOPA: previousGen != nil && previousGen.opaError == "",
 	})
 	if err != nil {
 		recordGenerationBuildError(err)
@@ -1952,6 +1955,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		previousProfiles := api.guardrailProfileSet()
 		api.setGuardrailProfiles(profileCandidate)
 		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+		if profileCandidate != nil {
+			go profileCandidate.logUnknownGroups()
+		}
 	}
 	if s.router != nil {
 		if rulePackChanged {
@@ -6929,6 +6935,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
+	if set := api.guardrailProfileSet(); set != nil {
+		go set.logUnknownGroups()
+	}
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward

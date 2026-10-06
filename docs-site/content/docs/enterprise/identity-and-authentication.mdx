@@ -87,7 +87,7 @@ the standalone enterprise profile with its root guardian or SYSTEM enumerator.
 | LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name, the groups from `initgroups` and, for an SSSD account, the directory type of the realmd realm that serves its domain (verified), also per-user. Enterprise adds the UPN from SSSD InfoPipe (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
 | Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
 | Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified, enterprise). The user's Platform SSO login is not read |
-| Okta | Appears as the AD or LDAP account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified, enterprise). As AD or LDAP when synced |
+| Okta | Through the Okta LDAP Interface and SSSD: the uid, name and Okta groups (verified), also per-user; standalone enterprise adds directory `ldap`, and the UPN when SSSD maps the Okta login to it. Tested live on RHEL 9. Or the AD account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified, enterprise; not tested live). As AD or LDAP when synced |
 
 What differs between platforms and installs, as exercised on real hosts:
 
@@ -100,8 +100,9 @@ What differs between platforms and installs, as exercised on real hosts:
   and source through NSS, and the directory type from realmd, which any
   account may ask. Only enterprise adds the UPN from InfoPipe, so on a
   per-user install an SSSD account's principal is `account@REALM`. An SSSD
-  domain that no joined realm covers, such as plain LDAP, has no
-  `defenseclaw.user.directory` on either install.
+  domain that no joined realm covers, such as plain LDAP or the Okta LDAP
+  Interface, has no `defenseclaw.user.directory` on a per-user install;
+  standalone enterprise reads its type, `ldap`, from InfoPipe.
 - **Windows per-user and managed.** A per-user install resolves the account,
   the AD UPN and the Entra UPN and tenant itself, but has **no group list**:
   `groups` assignments cannot match there. The managed host's SYSTEM
@@ -114,10 +115,15 @@ What differs between platforms and installs, as exercised on real hosts:
   reads with macOS's own `/usr/bin/klist --json` at most once per 5 minutes,
   or from a `FILE:` cache that `KRB5CCNAME` or `krb5.conf` names.
 - **Okta is never an Okta lookup.** On Linux and Windows an Okta user is
-  whatever AD or LDAP account Okta syncs to. The `okta` directory value comes
-  only from a Mac's Platform SSO or Okta Device Access provider.
-- **Entra and Okta readers were tested against recorded OS output**, not a live
-  tenant. See the limits in
+  whatever AD or LDAP account the OS gets from Okta: an AD account Okta syncs
+  to, or an LDAP account SSSD reads from the Okta LDAP Interface. The `okta`
+  directory value comes only from a Mac's Platform SSO or Okta Device Access
+  provider.
+- **Okta through the Okta LDAP Interface and SSSD was tested live** on RHEL 9
+  with an Okta org; see
+  [Use Okta users on Linux through the Okta LDAP Interface](#use-okta-users-on-linux-through-the-okta-ldap-interface).
+  The Entra, Okta Device Access and Platform SSO readers were tested against
+  recorded OS output, not a live tenant. See the limits in
   [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources#limits-stated-plainly).
 
 ## Agent identity
@@ -206,8 +212,8 @@ loads SSSD's `localauth` plugin; without it a GSSAPI sign-in maps the ticket to
 
 ### Turn on InfoPipe
 
-DefenseClaw reads the UPN and mail through SSSD's InfoPipe D-Bus service, from
-the root hook guardian (standalone enterprise). Enable the attributes in
+DefenseClaw reads the UPN through SSSD's InfoPipe D-Bus service, from the
+root hook guardian (standalone enterprise). Enable the attribute in
 `/etc/sssd/sssd.conf`:
 
 ```ini
@@ -215,11 +221,11 @@ the root hook guardian (standalone enterprise). Enable the attributes in
 services = nss, pam, ifp
 
 [ifp]
-user_attributes = +userPrincipalName, +mail
+user_attributes = +userPrincipalName
 ```
 
 If InfoPipe returns no `userPrincipalName`, also add
-`ldap_user_extra_attrs = mail, userPrincipalName` to the `[domain/...]`
+`ldap_user_extra_attrs = userPrincipalName` to the `[domain/...]`
 section. `realm join` sets `use_fully_qualified_names = True`, which the
 examples in these docs assume.
 
@@ -235,7 +241,7 @@ sudo systemctl restart sssd
 getent passwd alice@corp.example.com
 id alice@corp.example.com
 realm list
-dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice@corp.example.com array:string:userPrincipalName,mail
+dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice@corp.example.com array:string:userPrincipalName
 ```
 
 `getent` and `id` must show the user and the groups. `realm list` must show
@@ -316,6 +322,143 @@ Use the group name exactly as `id -Gn` prints it. A Windows group is
 `CORP\Contractors`, the bare name or its SID. The full guide, with precedence,
 worked scenarios, the audit record and delivery to managed hosts, is
 [User- and group-based policies](/docs/guardrail/user-and-group-policies).
+
+### Use Okta users on Linux through the Okta LDAP Interface
+
+DefenseClaw never calls Okta. On Linux, Okta users become OS accounts through
+the Okta LDAP Interface, which SSSD reads like any plain LDAP directory, and
+DefenseClaw sees them as it sees any other SSSD account. This guide was run
+live on RHEL 9.8 against an Okta org: Okta users signed in over SSH with their
+Okta passwords, ran Claude Code, and their Okta groups chose guardrail
+profiles, on per-user installs and on the standalone enterprise profile.
+
+<Steps>
+
+<Step>
+
+### Prepare Okta
+
+- Turn on the LDAP Interface in the Okta Admin Console. It serves
+  `ldaps://<org>.ldap.okta.com:636`, with users under
+  `ou=users,dc=<org>,dc=okta,dc=com` and Okta groups under
+  `ou=groups,dc=<org>,dc=okta,dc=com`.
+- Okta profiles carry no POSIX data. Add the user attributes `uidNumber`,
+  `gidNumber`, `homeDirectory`, `loginShell` and a unique `unixUsername`, and
+  the group attribute `gidNumber`, and fill them in. The LDAP Interface
+  exposes them under the same names. A group without a `gidNumber` (such as
+  `Everyone`) is skipped by SSSD.
+- Create a bind user for SSSD and give it a custom admin role that can read
+  users and groups. Without a role the bind user sees only itself.
+- An LDAP bind cannot answer an MFA prompt, so the LDAP Interface's sign-on
+  policy must let the bind user and the Linux users sign in with a password.
+
+</Step>
+
+<Step>
+
+### Point SSSD at Okta
+
+**SSSD 2.9, the version in RHEL 9, cannot bind to Okta.** It always sends the
+password-policy request control, Okta answers with an empty control, and SSSD
+2.9 treats that as a failed bind: no Okta user resolves, `getent passwd` finds
+nothing and `sssctl domain-status` says `Offline`. Use SSSD 2.10 or later (RHEL
+10), which has `ldap_use_ppolicy`, or an SSSD 2.9 build with that upstream
+change (SSSD commit 1980e2c4) backported. Okta also refuses anonymous reads,
+including the root DSE, so SSSD must read it after the bind.
+
+```ini title="/etc/sssd/sssd.conf (root, mode 0600)"
+[sssd]
+services = nss, pam, ifp
+domains = okta
+
+[domain/okta]
+id_provider = ldap
+auth_provider = ldap
+chpass_provider = none
+access_provider = simple
+simple_allow_groups = linux-users
+ldap_uri = ldaps://<org>.ldap.okta.com:636
+ldap_search_base = dc=<org>,dc=okta,dc=com
+ldap_user_search_base = ou=users,dc=<org>,dc=okta,dc=com
+ldap_group_search_base = ou=groups,dc=<org>,dc=okta,dc=com
+ldap_default_bind_dn = uid=<bind user login>,dc=<org>,dc=okta,dc=com
+ldap_default_authtok = <bind user password>
+ldap_read_rootdse = authenticated
+ldap_use_ppolicy = false
+ldap_schema = rfc2307bis
+ldap_id_mapping = false
+ldap_user_object_class = inetOrgPerson
+ldap_user_name = unixUsername
+ldap_group_object_class = groupOfUniqueNames
+ldap_group_member = uniqueMember
+entry_cache_timeout = 600
+```
+
+Then `sudo authselect select sssd with-mkhomedir`, restart SSSD, and check
+`getent passwd alice`, `id alice` and an SSH sign-in with the Okta password
+(sshd must allow password or keyboard-interactive sign-in for these users).
+The names are bare (`alice`, `ml-team`) unless you set
+`use_fully_qualified_names`.
+
+</Step>
+
+<Step>
+
+### Read what DefenseClaw records
+
+Install DefenseClaw for the user (or deploy the enterprise package), run an
+agent for one prompt, and read the record with the audit export from the AD
+guide. With the configuration above:
+
+| Field | Per-user install | Standalone enterprise |
+| --- | --- | --- |
+| `user.id`, `defenseclaw.user.name` | The uid and the `unixUsername` | The same |
+| Groups (`explain` subject, `defenseclaw.user.group_count`) | The user's Okta groups that have a `gidNumber` | The same |
+| `defenseclaw.user.identity.source`, `defenseclaw.user.principal.assurance` | `sssd`, `verified` | The same; `sssd_infopipe` once the UPN is mapped (below) |
+| `defenseclaw.user.directory` | Absent: InfoPipe answers root only | `ldap`, from the InfoPipe domain provider |
+| `defenseclaw.user.domain` | Absent, because the names are not fully qualified | The same |
+| UPN and `defenseclaw.user.principal` | Absent | Absent, unless SSSD maps the Okta login to the UPN (below) |
+| `defenseclaw.session.kind`, `client.address` | `ssh` and the client address, verified through logind | The same |
+
+Assign profiles by the Okta group name exactly as `id -Gn` prints it:
+
+```yaml
+guardrail:
+  profiles:
+    ml-team: {mode: action, block_at: HIGH}
+  profile_assignments:
+    - {profile: ml-team, match: {groups: ["ml-team"]}}
+  default_profile: strict
+```
+
+</Step>
+
+</Steps>
+
+What to expect in operation:
+
+- **Group changes.** A change in Okta reaches the host when SSSD's entry
+  expires (`entry_cache_timeout`), then the gateway's 15-minute cache. In the
+  test, an Okta group add and remove changed the profile of live requests 11
+  minutes later, with no new sign-in: DefenseClaw follows the directory, while
+  `id -Gn` in an open shell keeps the groups of the sign-in. `profile explain`
+  asks the operating system directly, so it shows the change first; see the
+  cache layers in [Troubleshooting](#troubleshooting).
+- **Okta unreachable.** With a warm SSSD cache, SSSD goes offline and serves
+  the cached entries, so profiles do not change. With no cached entry the
+  lookup fails and requests get the default profile with
+  `default_lookup_failed`: set a strict `default_profile`. When Okta answered
+  again, SSSD came back online within seconds and the group profile applied
+  again without a gateway restart.
+- **The Okta login as the UPN** (standalone enterprise). The Okta LDAP
+  Interface has no `userPrincipalName`; its `uid` is the Okta login. Add
+  `ldap_user_principal = uid` to the `[domain/okta]` section and
+  `user_attributes = +userPrincipalName` to `[ifp]`, then restart SSSD: the
+  guardian then records the Okta login (`alice@example.com`) as the UPN, with
+  source `sssd_infopipe`, within its 15-minute refresh. A per-user install
+  never has it.
+- **Not tested live.** Okta Device Access and macOS Platform SSO with Okta
+  Verify.
 
 ### Check what DefenseClaw knows about a user
 
@@ -399,14 +542,16 @@ none of these facts.
 | No UPN, the principal reads `account@REALM` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
 | No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
-| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. |
+| `doctor` or `guardrail status` warns "directory lookups are failing" | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
+| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim: it is the cache's default principal, and its tickets are not checked, so an expired TGT still reports it (`klist` shows the end time). With KCM the caches belong to the uid, not to one login: `kdestroy` removes the session's own cache, and another cache of the same uid (another login) becomes the default, so the record keeps naming a principal; `kdestroy -A` empties the uid's collection. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
-| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice@corp.example.com --json` and compare `subject.groups` with your spelling. Use the SID to avoid name ambiguity. On Windows, a user added to the group must sign out and back in first. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
-| A user's new group has no effect | The gateway caches directory facts for 15 minutes. Wait, or restart the gateway to drop the cache. |
+| A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice@corp.example.com --json` and compare `subject.groups` with your spelling. If the group was renamed or deleted in the directory, `explain`, `profile list`, `status` and `doctor` warn `group "..." is not known to this host`, and so does the gateway log at start and reload. Use the SID to avoid name ambiguity. On Windows, a user added to the group must sign out and back in first. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
+| A user's new group has no effect, or `explain` shows it and the audit rows do not yet | Three layers sit between the directory and a decision. SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps the user's directory facts for 15 minutes from the user's first request. And the first request after those 15 minutes still uses the old facts while one background lookup replaces them. `guardrail profile explain` asks the operating system directly, so it shows the profile requests get after the next refresh; its `cache:` line gives the age of the facts requests use now, with a warning when they give another profile. Restart the gateway to drop its cache and use the new group at once. |
 | A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
 | `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |
+| `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` means the gateway is not running. |
 
 ## IDE plugin inventory
 
