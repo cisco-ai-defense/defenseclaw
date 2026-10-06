@@ -46,15 +46,16 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	discovery, releaseDiscovery := a.leaseAIDiscovery()
 	defer releaseDiscovery()
 	if discovery == nil {
-		a.writeJSON(w, http.StatusOK, map[string]any{
+		body := map[string]any{
 			"enabled":                        false,
 			"lookup_model_provenance_online": false,
 			"summary": map[string]any{
 				"result": "disabled",
 			},
-			"signals":     []any{},
-			"ide_plugins": (*inventory.IDEInventory)(nil).Counts(),
-		})
+			"signals": []any{},
+		}
+		a.addAIUsageIDEPluginCounts(body, nil)
+		a.writeJSON(w, http.StatusOK, body)
 		return
 	}
 	report := discovery.Snapshot()
@@ -67,13 +68,23 @@ func (a *APIServer) handleAIUsage(w http.ResponseWriter, r *http.Request) {
 	// safe and never touches the persistent state file.
 	inventory.EnrichSignalsWithComponentConfidence(report.Signals, discovery.ConfidenceParams())
 	report = a.sanitizeAIUsageReportForResponse(report)
-	a.writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"enabled":                        true,
 		"lookup_model_provenance_online": discovery.LookupModelProvenanceOnline(),
 		"summary":                        report.Summary,
 		"signals":                        report.Signals,
-		"ide_plugins":                    discovery.IDEInventory().Counts(),
-	})
+	}
+	a.addAIUsageIDEPluginCounts(body, discovery.IDEInventory())
+	a.writeJSON(w, http.StatusOK, body)
+}
+
+// addAIUsageIDEPluginCounts adds the machine-wide IDE plugin counts to the
+// GET /api/v1/ai-usage body. Secure Client keeps the body without them
+// (issue #1092).
+func (a *APIServer) addAIUsageIDEPluginCounts(body map[string]any, inv *inventory.IDEInventory) {
+	if !a.managedAIDOnly() {
+		body["ide_plugins"] = inv.Counts()
+	}
 }
 
 const (

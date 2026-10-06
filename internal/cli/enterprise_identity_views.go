@@ -69,6 +69,31 @@ var enterpriseIdentityViews = []enterpriseIdentityView{
 	},
 }
 
+// enterpriseIdentityViewAnnotation marks the identity view commands.
+const enterpriseIdentityViewAnnotation = "defenseclaw.identity-view"
+
+// dropEnterpriseIdentityViewsOnSecureClient removes the identity views from
+// the `enterprise <platform>` groups on a Secure Client computer, whose
+// gateway serves none of their routes: its CLI keeps the groups it had
+// before them (issue #1092).
+func dropEnterpriseIdentityViewsOnSecureClient(root *cobra.Command) {
+	if !secureClientHost() {
+		return
+	}
+	for _, enterprise := range root.Commands() {
+		if enterprise.Name() != "enterprise" {
+			continue
+		}
+		for _, group := range enterprise.Commands() {
+			for _, cmd := range group.Commands() {
+				if cmd.Annotations[enterpriseIdentityViewAnnotation] != "" {
+					group.RemoveCommand(cmd)
+				}
+			}
+		}
+	}
+}
+
 // newEnterpriseIdentityViewCommands returns the identity views of
 // `enterprise <platform>`.
 func newEnterpriseIdentityViewCommands(platform string) []*cobra.Command {
@@ -92,6 +117,7 @@ it changes nothing. Run it as root on Linux and macOS, or from an elevated
 Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
+		Annotations:  map[string]string{enterpriseIdentityViewAnnotation: view.use},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if goos := enterprisePlatformGOOS(platform); runtime.GOOS != goos {
 				return invalidLifecycleArguments(fmt.Errorf("`enterprise %s %s` reads %s hosts; this host is %s", platform, view.use, goos, runtime.GOOS))
