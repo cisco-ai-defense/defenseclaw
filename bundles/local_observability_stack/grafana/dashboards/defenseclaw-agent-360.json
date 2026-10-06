@@ -982,10 +982,8 @@
         "displayMode": "gradient",
         "orientation": "horizontal",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+          "calcs": [],
+          "values": true
         },
         "showUnfilled": true
       }
