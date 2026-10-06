@@ -565,7 +565,9 @@ def _render_connector_blocks(rows: list[dict[str, tuple[str, str]]]) -> None:
             )
 
 
-def _echo_status_json(gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str]) -> None:
+def _echo_status_json(
+    gc, rows: list[dict[str, tuple[str, str]]], warnings: list[str], profile: dict | None = None
+) -> None:
     """Machine-readable ``guardrail status``: the same fields as the table."""
     import json  # noqa: PLC0415
 
@@ -576,7 +578,34 @@ def _echo_status_json(gc, rows: list[dict[str, tuple[str, str]]], warnings: list
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
         connectors.append(item)
     payload = {"enabled": bool(gc.enabled), "port": gc.port, "connectors": connectors, "warnings": warnings}
+    if profile is not None:
+        payload["profile"] = profile
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def profile_status_text(cfg, result: dict) -> str:
+    """One line naming the guardrail profile that decides for this account.
+
+    *result* comes from ``current_user_guardrail_profile``. Status, guardrail
+    status and doctor show it, because the per-connector settings they list
+    are ``guardrail.*``, which a matching profile replaces (GAP-0056).
+    """
+    from defenseclaw import policy_catalog
+
+    user = str(result.get("user") or "this account")
+    if result.get("error"):
+        count = len(getattr(cfg.guardrail, "profiles", {}) or {})
+        return f"unknown for {user}: the gateway did not answer ({count} profile(s) configured)"
+    name = str(result.get("profile") or "")
+    if not name:
+        return f"none for {user} (guardrail.* applies)"
+    effective = result.get("effective") or {}
+    pack_dir = str(effective.get("rule_pack_dir") or "")
+    pack = policy_catalog.pack_name_for_path(cfg, pack_dir)[0] if pack_dir.strip() else "default"
+    reason = str(result.get("match") or "")
+    if result.get("matched_group"):
+        reason += f" {result['matched_group']}"
+    return f"{name} for {user} (by {reason}): mode {effective.get('mode') or 'observe'}, rule pack {pack}"
 
 
 @guardrail.command("status")
@@ -780,14 +809,25 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 "judge": (judge_raw, _style_judge_value(judge_raw)),
             }
         )
+    from defenseclaw.gateway import current_user_guardrail_profile
+
+    profile = current_user_guardrail_profile(app.cfg)
     if as_json:
-        _echo_status_json(gc, rows, runtime_drift_rows + runtime_limit_rows)
+        _echo_status_json(gc, rows, runtime_drift_rows + runtime_limit_rows, profile)
         return
     _render_connector_table(rows)
     for drift_row in runtime_drift_rows:
         ux.warn("runtime fail-mode drift: " + drift_row, indent="  ")
     for limit_row in runtime_limit_rows:
         ux.warn("connector limitation: " + limit_row, indent="  ")
+    if profile is not None:
+        ux.echo(f"  • {ux._style('profile:', fg='bright_black', bold=True)}    {profile_status_text(app.cfg, profile)}")
+        if profile.get("profile"):
+            ux.subhead(
+                "The table shows guardrail.*; this profile's settings decide for you. "
+                "Details: defenseclaw guardrail profile explain",
+                indent="    ",
+            )
     ux.echo(f"  • {ux.dim('fail = invalid, unauthorized, incomplete, or unreachable gateway responses')}")
     if any_disabled:
         ux.echo(f"  • {ux.dim('fail - = disabled connector (no hooks, so no fail mode)')}")
@@ -4412,7 +4452,7 @@ def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
 
 
 @profile_group.command("explain")
-@click.option("--user", "user", default="", help="Account name, uid or SID to resolve.")
+@click.option("--user", "user", default="", help="Account name, uid or SID to resolve (default: you).")
 @click.option("--connector", "connector", default="", help="Connector the request would come from.")
 @click.option("--agent", "agent", default="", help="Agent identity (agt-...) the request would carry.")
 @click.option("--json", "json_out", is_flag=True, help="Print the resolution as JSON.")
@@ -4422,12 +4462,20 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
 
     Asks the running gateway (loopback, gateway token), which resolves the
     user through the operating system the way it does for live requests.
+    With no option it explains the account running the command.
     """
+    import getpass
+
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
     if not (user or connector or agent):
-        ux.err("Name at least one of --user, --connector or --agent.")
-        raise SystemExit(2)
+        try:
+            user = getpass.getuser()
+        except Exception:  # noqa: BLE001 - fall through to the error below.
+            user = ""
+        if not user:
+            ux.err("Name at least one of --user, --connector or --agent.")
+            raise SystemExit(2)
     try:
         client = OrchestratorClient(
             host=gateway_api_client_host(app.cfg),
@@ -4449,6 +4497,10 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     ux.section("Guardrail profile resolution", indent="  ")
     if not result.get("profiles_configured"):
         click.echo(f"  {ux.dim('No guardrail profiles are configured; guardrail.* applies.')}")
+    subject = result.get("subject") or {}
+    if subject:
+        who = subject.get("upn") or subject.get("principal") or subject.get("user_name") or user
+        click.echo(f"  user:    {who} ({len(subject.get('groups') or [])} group(s))")
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
     if result.get("match"):

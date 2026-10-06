@@ -341,6 +341,19 @@ _IDE_PLUGIN_ENABLED_LABELS = {
 }
 
 
+# IDE cell suffix for a plugin of a remote install (the TUI mirrors it).
+_IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
+
+
+def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
+    """IDE cell: the product, plus where it runs for a remote install."""
+    product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    kind = str(item.get("remote_kind") or "")
+    if kind:
+        return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
+    return f"{product} (remote)" if item.get("scope") == "remote" else product
+
+
 def ide_plugin_enabled_label(value: object) -> str:
     """Short Enabled cell for an IDE plugin row (shared with the TUI)."""
     text = str(value or "unknown")
@@ -359,7 +372,7 @@ def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
             plugin = f"{plugin} ({name})" if plugin else name
         rows.append([
             str(item.get("user") or item.get("user_id") or "-"),
-            str(item.get("ide_product") or item.get("ide_family") or "-"),
+            ide_plugin_ide_label(item),
             plugin or "-",
             str(item.get("version") or "-"),
             ide_plugin_enabled_label(item.get("enabled")),

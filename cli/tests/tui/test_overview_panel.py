@@ -1295,6 +1295,12 @@ def test_multi_connector_overview_has_no_false_drift_and_counts_modes() -> None:
     assert model.guardrail_mode_label("claudecode") == "action"
     assert model.guardrail_detail().startswith("observe, 1 action")
 
+    # A profile that decides for this account replaces guardrail.* (GAP-0050).
+    model.set_guardrail_profile(
+        {"user": "alice", "profile": "mlteam", "effective": {"mode": "action", "rule_pack_dir": "/p/idr-marker"}}
+    )
+    assert model.guardrail_detail().startswith("action, profile mlteam, idr-marker pack")
+
 
 def test_overview_and_audit_say_loading_until_the_first_read() -> None:
     """GAP-1240: a slow first read is "loading", not "no audit events yet"."""
