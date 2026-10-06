@@ -92,3 +92,24 @@ func packRule(rp *guardrail.RulePack, id string) *guardrail.RuleDefYAML {
 	}
 	return nil
 }
+
+// The watcher follows every single-file asset the effective digest covers.
+func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.AIDiscovery.SignaturePacks = []string{"/p/sig.json"}
+	cfg.AIDiscovery.ConfidencePolicyPath = "/p/confidence.yaml"
+	cfg.Scanners.SkillScanner.PolicyFile.Path = "/p/policy.yaml"
+	cfg.Scanners.MCPScanner.YARA.ExtraRules = []config.AssetFileRef{{Path: "/p/extra.yar"}}
+	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{Name: "acme", TLS: &config.LLMCustomProviderTLS{CACertFile: "/p/ca.pem"}}}
+	got := strings.Join(generationAssetFiles(cfg), ",")
+	want := strings.Join([]string{
+		filepath.Clean("/p/ca.pem"), filepath.Clean("/p/confidence.yaml"), filepath.Clean("/p/extra.yar"),
+		filepath.Clean("/p/policy.yaml"), filepath.Clean("/p/sig.json"),
+	}, ",")
+	if got != want {
+		t.Fatalf("asset files = %s, want %s", got, want)
+	}
+	if _, ok := assetDigestComponents(cfg)["provider_ca:acme"]; !ok {
+		t.Fatal("the provider CA file is not in the effective digest")
+	}
+}

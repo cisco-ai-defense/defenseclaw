@@ -162,6 +162,11 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 		sort.Strings(digests)
 		out["yara_rules:mcp"] = sha256Digest([]byte(strings.Join(digests, "\n")))
 	}
+	for _, provider := range cfg.LLMProviders.Custom {
+		if provider.TLS != nil && strings.TrimSpace(provider.TLS.CACertFile) != "" {
+			out["provider_ca:"+provider.Name] = fileDigest(strings.TrimSpace(provider.TLS.CACertFile))
+		}
+	}
 	if digest := builtinPolicyDigest(); digest != "" {
 		out["builtin"] = digest
 	}

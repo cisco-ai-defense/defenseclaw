@@ -1056,6 +1056,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 		return nil
 	}
+	s.configMgr.assetFiles = func() []string {
+		if g := s.Generation(); g != nil {
+			return g.assetFiles
+		}
+		return nil
+	}
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	s.configMgr.bindObservabilityV8(metricRuntime)
 	// managed_enterprise: wire the AVC-authored env_config.json so the

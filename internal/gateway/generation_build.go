@@ -141,7 +141,41 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	}
 	g.Digest = effectivePolicyDigest(g.Components, profileDigests)
 	g.assetDirs = generationAssetDirs(cfg, g)
+	g.assetFiles = generationAssetFiles(cfg)
 	return g, nil
+}
+
+// generationAssetFiles lists the single-file assets the effective digest
+// covers (assetDigestComponents), so an edit to one rebuilds the generation.
+func generationAssetFiles(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		if path = strings.TrimSpace(path); path != "" {
+			seen[filepath.Clean(path)] = struct{}{}
+		}
+	}
+	for _, path := range cfg.AIDiscovery.SignaturePacks {
+		add(path)
+	}
+	add(cfg.AIDiscovery.ConfidencePolicyPath)
+	add(cfg.Scanners.SkillScanner.PolicyFile.Path)
+	for _, ref := range cfg.Scanners.MCPScanner.YARA.ExtraRules {
+		add(ref.Path)
+	}
+	for _, provider := range cfg.LLMProviders.Custom {
+		if provider.TLS != nil {
+			add(provider.TLS.CACertFile)
+		}
+	}
+	files := make([]string, 0, len(seen))
+	for path := range seen {
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files
 }
 
 // effectivePolicyDigest is "sha256:" + the hex SHA-256 of the canonical JSON

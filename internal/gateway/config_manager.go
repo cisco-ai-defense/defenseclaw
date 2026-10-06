@@ -103,6 +103,9 @@ type ConfigManager struct {
 	// references (generation.assetDirs); the watcher follows them so an
 	// edited rule pack or Rego module rebuilds the generation.
 	assetDirs func() []string
+	// assetFiles lists its single-file assets (generation.assetFiles); the
+	// watcher follows their directories and matches these exact paths.
+	assetFiles func() []string
 
 	// envConfigPath is the AVC-authored env_config.json (see
 	// config.ResolveDefaultEnvConfigPath). When set, Reload overlays
@@ -282,16 +285,33 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	// watchedAssets is the asset directory set currently registered with
 	// fsw; syncAssetWatches reconciles it after every reload.
 	watchedAssets := map[string]struct{}{}
+	// assetDirSet holds the directories whose policy files are assets and
+	// assetFileSet the single asset files, whose directories are watched too.
+	assetDirSet, assetFileSet := map[string]struct{}{}, map[string]struct{}{}
 	syncAssetWatches := func() {
-		if m.assetDirs == nil {
+		if m.assetDirs == nil && m.assetFiles == nil {
 			return
 		}
 		want := map[string]struct{}{}
-		for _, assetDir := range m.assetDirs() {
-			if assetDir = filepath.Clean(assetDir); assetDir != dir {
-				want[assetDir] = struct{}{}
+		dirs, files := map[string]struct{}{}, map[string]struct{}{}
+		if m.assetDirs != nil {
+			for _, assetDir := range m.assetDirs() {
+				if assetDir = filepath.Clean(assetDir); assetDir != dir {
+					want[assetDir] = struct{}{}
+					dirs[assetDir] = struct{}{}
+				}
 			}
 		}
+		if m.assetFiles != nil {
+			for _, assetFile := range m.assetFiles() {
+				assetFile = filepath.Clean(assetFile)
+				files[assetFile] = struct{}{}
+				if parent := filepath.Dir(assetFile); parent != dir {
+					want[parent] = struct{}{}
+				}
+			}
+		}
+		assetDirSet, assetFileSet = dirs, files
 		for assetDir := range watchedAssets {
 			if _, keep := want[assetDir]; !keep {
 				_ = fsw.Remove(assetDir)
@@ -309,8 +329,11 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	}
 	isAsset := func(path string) bool {
 		cleaned := filepath.Clean(path)
-		if _, ok := watchedAssets[filepath.Dir(cleaned)]; !ok {
-			if _, ok := watchedAssets[cleaned]; !ok {
+		if _, ok := assetFileSet[cleaned]; ok {
+			return true
+		}
+		if _, ok := assetDirSet[filepath.Dir(cleaned)]; !ok {
+			if _, ok := assetDirSet[cleaned]; !ok {
 				return false
 			}
 		}

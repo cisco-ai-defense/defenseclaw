@@ -70,6 +70,10 @@ type Generation struct {
 	// assetDirs are the directories the config watcher follows for this
 	// generation (rule packs and Rego modules).
 	assetDirs []string
+	// assetFiles are the single-file assets it follows: signature packs, the
+	// discovery confidence policy, the skill-scanner policy file, the MCP
+	// scanner's extra YARA rules and the custom providers' CA files.
+	assetFiles []string
 }
 
 // ResolvedThresholds is the block and alert severity for one (profile,
