@@ -1163,6 +1163,13 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 			m.record.Removed = append(m.record.Removed, scope.path+".rule_pack_dir")
 			continue
 		}
+		if name := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, "rule_pack"))); name != "" {
+			// At one scope rule_pack wins over rule_pack_dir (the loader's
+			// rulePackRefOf), so the directory never applied.
+			m.record.Removed = append(m.record.Removed, scope.path+".rule_pack_dir")
+			m.note("%s.rule_pack_dir (%s) was dropped: %s.rule_pack (%s) already selects the pack", scope.path, dir, scope.path, name)
+			continue
+		}
 		name, protections, err := m.rulePackFor(guardrail, dir)
 		if err != nil {
 			return fmt.Errorf("config: %s.rule_pack_dir: %w", scope.path, err)

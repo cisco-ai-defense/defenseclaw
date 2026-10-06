@@ -284,6 +284,21 @@ func TestMigrateV9KeepsThePackPosture(t *testing.T) {
 	if strings.Contains(string(result.Migrated), "block_at") {
 		t.Errorf("a data.json level looser than the custom strict pack became block_at:\n%s", result.Migrated)
 	}
+
+	// rule_pack wins over rule_pack_dir at one scope, so the directory is
+	// dropped instead of replacing the selected pack.
+	source = "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack: strict\n  rule_pack_dir: " +
+		filepath.Join(dir, "policies", "guardrail", "default") + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err = MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9 (rule_pack and rule_pack_dir): %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "rule_pack: default") {
+		t.Errorf("rule_pack_dir replaced the selected rule_pack:\n%s", got)
+	}
 }
 
 func TestV9SecureClientDocumentKeepsRows(t *testing.T) {
