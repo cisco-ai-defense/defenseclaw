@@ -375,13 +375,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// digest) callers can override this via SetDefaultPolicyID.
 	router.SetDefaultPolicyID(cfg.Guardrail.Mode)
 
-	// Seed custom-providers overlay from llm.base_url so a custom LLM
-	// gateway domain is recognized by isKnownProviderDomain(). Must run
-	// before providerRegistrySnapshot() calls below.
-	if err := SeedCustomProvidersFromLLMBaseURL(cfg.LLM.BaseURL); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
-	}
-
 	// Wire LLM judge when enabled. The judge handles tool-call injection
 	// detection AND tool-result PII inspection (via inspectToolResult),
 	// so it must be initialized whenever judge is enabled — not only when
@@ -1879,11 +1872,6 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	var nextJudge *LLMJudge
 	if judgeChanged {
-		if strings.TrimSpace(next.LLM.BaseURL) != "" {
-			if err := SeedCustomProvidersFromLLMBaseURL(next.LLM.BaseURL); err != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
-			}
-		}
 		nextJudge, err = buildSharedJudge(&next, rulePackCandidate.active, nextGen.Providers)
 		if err != nil {
 			return err
