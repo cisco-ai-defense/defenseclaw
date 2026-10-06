@@ -306,6 +306,18 @@ func TestMigrateV8InMemory(t *testing.T) {
 	if unchanged, err := MigrateV8InMemory(configPath, migrated, nil); err != nil || string(unchanged) != string(migrated) {
 		t.Errorf("a config_version 9 source changed: %v", err)
 	}
+
+	// An inline VirusTotal key keeps working: the v9 document names its
+	// variable, and the in-memory load sets it for this process.
+	t.Setenv("VIRUSTOTAL_API_KEY", "")
+	inline := []byte("config_version: 8\ndata_dir: " + dir + "\nscanners:\n  skill_scanner:\n    use_virustotal: true\n" +
+		"    virustotal_api_key: vt-test-value\nobservability: {}\n")
+	if _, err := MigrateV8InMemory(configPath, inline, nil); err != nil {
+		t.Fatalf("MigrateV8InMemory(inline key): %v", err)
+	}
+	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-test-value" {
+		t.Errorf("VIRUSTOTAL_API_KEY = %q after the in-memory load", got)
+	}
 }
 
 // TestMigrateV9InlineKeyWithTildeDataDir: data_dir "~/..." is valid v8, so

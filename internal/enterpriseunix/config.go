@@ -87,6 +87,11 @@ type validatedConfig struct {
 type configMigration struct {
 	Source []byte
 	Record config.MigrationRecord
+	// EnvKey and EnvValue are the inline scanner key the migration moved
+	// out of the config; the apply adds it to the service .env (secret:
+	// never printed).
+	EnvKey   string `json:"-"`
+	EnvValue string `json:"-"`
 }
 
 // migrateConfigV9 takes a config_version 8 administrator config to 9 in

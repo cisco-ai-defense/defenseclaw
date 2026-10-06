@@ -120,14 +120,16 @@ guardrail:
 
 // ensure keeps working on a host whose config an earlier build wrote: the
 // config_version 8 file is installed as its v9 migration, with the v8 bytes,
-// migration-v9.json and a lifecycle config generation next to it.
+// migration-v9.json and a lifecycle config generation next to it, and an
+// inline VirusTotal key moves to the service .env.
 func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			requireNoHostInstall(t, h.env.Layout)
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			previous := previousDefaultConfig(h.env.Layout)
+			previous := append(previousDefaultConfig(h.env.Layout),
+				"scanners:\n  skill_scanner:\n    use_virustotal: true\n    virustotal_api_key: vt-test-value\n"...)
 			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), previous, 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -152,6 +154,9 @@ func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 			}
 			if _, err := os.Stat(h.env.P(config.MigrationRecordPath(h.env.Layout.ConfigPath))); err != nil {
 				t.Fatalf("migration-v9.json: %v", err)
+			}
+			if env := h.read(serviceDotEnvPath(h.env)); !strings.Contains(env, "VIRUSTOTAL_API_KEY=vt-test-value") {
+				t.Fatal("the inline VirusTotal key is not in the service .env")
 			}
 			state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
 			if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != record.ConfigSHA256 {

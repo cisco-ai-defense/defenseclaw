@@ -103,6 +103,13 @@ type MigrateV9Result struct {
 	Record MigrationRecord
 	// Written lists the files written (empty for DryRun and InMemory).
 	Written []string
+	// EnvKey and EnvValue are the inline scanner key the migration moves out
+	// of config.yaml (scanners.skill_scanner.virustotal_api_key). A
+	// committing run writes it to <data_dir>/.env; a DryRun or InMemory
+	// caller that installs Migrated must place it itself. EnvValue is a
+	// secret: never print or record it.
+	EnvKey   string `json:"-"`
+	EnvValue string `json:"-"`
 }
 
 // MigrationRecord is migration-v9.json: every value moved and every
@@ -202,7 +209,7 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 		return nil, err
 	}
 	m.record.ResultSHA256 = cfgtxn.SHA256Hex(migrated)
-	result := &MigrateV9Result{Migrated: migrated, Record: m.record}
+	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
 		return result, nil
@@ -272,6 +279,13 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	result, err := MigrateV9(context.Background(), in)
 	if err != nil {
 		return raw, err
+	}
+	// The v8 file still holds the inline key; the v9 document names its
+	// variable instead, so the variable carries the key for this process
+	// (the scanners inherit it) until the file is migrated. A value already
+	// in the environment or .env wins, as it does for any api_key_env.
+	if result.EnvKey != "" && os.Getenv(result.EnvKey) == "" {
+		_ = os.Setenv(result.EnvKey, result.EnvValue)
 	}
 	return result.Migrated, nil
 }
@@ -474,10 +488,20 @@ func appendDotEnvKey(path, key, value string) error {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	updated, changed := DotEnvWithKey(existing, key, value)
+	if !changed {
+		return nil
+	}
+	return cfgtxn.WriteFileDurable(path, updated, 0o600)
+}
+
+// DotEnvWithKey returns the .env bytes existing with key=value appended, and
+// false when key is already defined there (existing is then unchanged).
+func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
 	for _, line := range strings.Split(string(existing), "\n") {
 		name, _, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export ")), "=")
 		if ok && strings.TrimSpace(name) == key {
-			return nil
+			return existing, false
 		}
 	}
 	var out bytes.Buffer
@@ -486,7 +510,7 @@ func appendDotEnvKey(path, key, value string) error {
 		out.WriteByte('\n')
 	}
 	fmt.Fprintf(&out, "%s=%s\n", key, value)
-	return cfgtxn.WriteFileDurable(path, out.Bytes(), 0o600)
+	return out.Bytes(), true
 }
 
 // ---------------------------------------------------------------------------

@@ -732,7 +732,10 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err := env.checkRulePacksReadable(v9, account); err != nil {
 			return nil, &codedError{code: codeConfig, err: err}
 		}
-		v9.Migration = &configMigration{Source: append([]byte(nil), raw...), Record: migrated.Record}
+		v9.Migration = &configMigration{
+			Source: append([]byte(nil), raw...), Record: migrated.Record,
+			EnvKey: migrated.EnvKey, EnvValue: migrated.EnvValue,
+		}
 		validated = v9
 		// The migrated bytes replace the installed v8 file.
 		fromInstalled = false
@@ -962,6 +965,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	snapPaths = append(snapPaths, configwrite.GenerationPath(env.Layout.ConfigPath))
 	if p.config.Migration != nil {
 		snapPaths = append(snapPaths, env.Layout.ConfigPath+config.ConfigV8BackupSuffix, config.MigrationRecordPath(env.Layout.ConfigPath))
+		if p.config.Migration.EnvKey != "" {
+			snapPaths = append(snapPaths, serviceDotEnvPath(env))
+		}
 	}
 	dirPaths := []string{}
 	for _, dir := range p.dirs {
@@ -1296,6 +1302,11 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		if err := env.writeFileAtomic(env.P(config.MigrationRecordPath(env.Layout.ConfigPath)), append(record, '\n'), 0o640, serviceGroup); err != nil {
 			return nil, err
 		}
+		if migration.EnvKey != "" {
+			if err := writeMigratedDotEnvKey(env, migration, account); err != nil {
+				return nil, err
+			}
+		}
 		l.noteChange("migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s)",
 			env.Layout.ConfigPath, len(migration.Record.Moved), len(migration.Record.Conflicts), env.Layout.ConfigPath, config.ConfigV8BackupSuffix)
 		if migration.Record.ActionsRowsIgnored > 0 {
@@ -1304,6 +1315,27 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 		}
 	}
 	return changed, nil
+}
+
+// serviceDotEnvPath is the gateway service's .env, which it loads at start.
+func serviceDotEnvPath(env *Env) string {
+	return filepath.Join(env.Layout.DataDir, ".env")
+}
+
+// writeMigratedDotEnvKey adds the scanner key a v8 config held inline to the
+// service .env (unless the variable is already defined there), so the
+// analyzer the migrated config enables keeps its credential.
+func writeMigratedDotEnvKey(env *Env, migration *configMigration, account Account) error {
+	path := env.P(serviceDotEnvPath(env))
+	existing, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	updated, changed := config.DotEnvWithKey(existing, migration.EnvKey, migration.EnvValue)
+	if !changed {
+		return nil
+	}
+	return env.writeFileAtomic(path, updated, 0o600, fileOwner{UID: account.UID, GID: account.GID})
 }
 
 // applyFiles writes every binary and file whose bytes differ, fixes the
