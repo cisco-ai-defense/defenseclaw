@@ -258,9 +258,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	// block (egress.block_large_uploads), so no block is set counter-wide.
 	proxy, err := egress.New(egress.Options{
 		Auth: mgr.EgressAuthenticator(), Decider: decider, Sink: mgr.EgressSink(),
-		// A host a sandbox reached in an earlier session is no first-seen
-		// destination after a restart either (its destinations are kept).
-		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes(), KnownHost: mgr.KnownDestination}),
+		Counter: egress.NewCounter(egress.CounterOptions{LargeUploadBytes: mgr.LargeUploadBytes()}),
 	})
 	if err != nil {
 		_ = api.SetSandboxIngress(SandboxIngressConfig{})

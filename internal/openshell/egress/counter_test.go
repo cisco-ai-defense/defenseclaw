@@ -61,7 +61,7 @@ func TestCounterAccumulates(t *testing.T) {
 		t.Errorf("per-flow counts = %d/%d, %d", f1.up.Load(), f1.down.Load(), f2.up.Load())
 	}
 	if got := c.DestinationsFor(testPrincipal.BindingID); len(got) != 1 || got[0].BytesUp != 110 || got[0].BytesDown != 1000 ||
-		got[0].Tunnels != 2 || got[0].Active != 1 || !got[0].Novel || got[0].LargeUpload {
+		got[0].Tunnels != 2 || got[0].Active != 1 || got[0].LargeUpload {
 		t.Errorf("DestinationsFor = %+v", got)
 	}
 	c.recordBlocked(testPrincipal, "webhook.site")
@@ -94,28 +94,6 @@ func TestCounterLargeUploadSignal(t *testing.T) {
 	other, _ := c.open(Principal{BindingID: "b-2"}, "drop.example", netip.Addr{})
 	other.addDown(1 << 20)
 	verdict(t, "another binding", other.addUp(99, false), false, false)
-}
-
-func TestCounterKnownHost(t *testing.T) {
-	var calls atomic.Int32
-	c := NewCounter(CounterOptions{
-		LargeUploadBytes: 10,
-		KnownHost: func(p Principal, host string) bool {
-			calls.Add(1)
-			return host == "github.com"
-		},
-	})
-	f, _ := c.open(testPrincipal, "github.com", netip.Addr{})
-	verdict(t, "known host", f.addUp(1000, false), false, false)
-	c.open(testPrincipal, "github.com", netip.Addr{})
-	g, _ := c.open(testPrincipal, "new.example", netip.Addr{})
-	verdict(t, "first-seen host", g.addUp(11, false), true, false)
-	if calls.Load() != 2 {
-		t.Errorf("KnownHost called %d times, want once per destination", calls.Load())
-	}
-	if s := c.DestinationsFor("b-1"); s[0].Novel || !s[1].Novel {
-		t.Errorf("novelty = %+v", s)
-	}
 }
 
 func TestCounterBlockLargeUploads(t *testing.T) {
@@ -301,28 +279,24 @@ func TestCounterPendingFlow(t *testing.T) {
 	verdict(t, "upload on a pending flow", u.addUp(101, false), true, true)
 }
 
-// Refusals are not contact: they must not call KnownHost, use up the first
-// contact or count as tunnels, and their count carries over once the
-// destination is contacted.
+// Refusals are not contact: they must not use up the first contact or
+// count as tunnels, and their count carries over once the destination is
+// contacted.
 func TestCounterRefusalIsNotContact(t *testing.T) {
-	var calls atomic.Int32
-	c := NewCounter(CounterOptions{KnownHost: func(Principal, string) bool {
-		calls.Add(1)
-		return false
-	}})
+	c := NewCounter(CounterOptions{})
 	c.recordBlocked(testPrincipal, "example.com")
 	c.recordBlocked(testPrincipal, "example.com")
 	s := c.DestinationsFor("b-1")
-	if len(s) != 1 || s[0].Blocked != 2 || s[0].Tunnels != 0 || s[0].Novel || s[0].FirstSeen.IsZero() || calls.Load() != 0 {
-		t.Fatalf("refusal-only stats = %+v, KnownHost ran %d times", s, calls.Load())
+	if len(s) != 1 || s[0].Blocked != 2 || s[0].Tunnels != 0 || s[0].Contacted || s[0].FirstSeen.IsZero() {
+		t.Fatalf("refusal-only stats = %+v", s)
 	}
 	f, first := c.open(testPrincipal, "example.com", netip.Addr{})
 	defer f.close()
-	if !first || calls.Load() != 1 {
-		t.Errorf("first contact %v, KnownHost ran %d times; want the refusals to leave it to the contact", first, calls.Load())
+	if !first {
+		t.Error("the refusals used up the first contact")
 	}
 	c.recordBlocked(testPrincipal, "example.com")
-	if s = c.DestinationsFor("b-1"); len(s) != 1 || s[0].Blocked != 3 || s[0].Tunnels != 1 || !s[0].Novel {
+	if s = c.DestinationsFor("b-1"); len(s) != 1 || s[0].Blocked != 3 || s[0].Tunnels != 1 || !s[0].Contacted {
 		t.Errorf("stats after contact = %+v", s)
 	}
 	c.recordBlocked(testPrincipal, "webhook.site")
@@ -377,13 +351,10 @@ func TestRegistrableDomain(t *testing.T) {
 // Uploads to first-seen hosts are totalled per registrable domain and per
 // address as well as per host, so rotating subdomains, pointing many names
 // at one server, or a provider's free subdomains does not reset the
-// threshold. Known hosts and exempt (unblocked or operator-allowed) flows
-// count only toward their own host.
+// threshold. Exempt (unblocked or operator-allowed) flows count only toward
+// their own host.
 func TestCounterAggregatesUploads(t *testing.T) {
-	c := NewCounter(CounterOptions{
-		LargeUploadBytes: 1000,
-		KnownHost:        func(_ Principal, host string) bool { return host == "known.attacker.example" },
-	})
+	c := NewCounter(CounterOptions{LargeUploadBytes: 1000})
 	send := func(host, remote string, n int64, exempt bool) uploadVerdict {
 		addr, _ := netip.ParseAddr(remote)
 		f, _ := c.open(testPrincipal, host, addr)
@@ -391,7 +362,6 @@ func TestCounterAggregatesUploads(t *testing.T) {
 		return f.addUp(n, exempt)
 	}
 	// Subdomain rotation: each host stays far below the threshold.
-	verdict(t, "a known host", send("known.attacker.example", "198.51.100.1", 5000, false), false, false)
 	verdict(t, "chunk 0", send("c0.attacker.example", "198.51.100.10", 400, false), false, false)
 	verdict(t, "chunk 1", send("c1.attacker.example", "198.51.100.11", 400, false), false, false)
 	verdict(t, "an exempt flow", send("c9.attacker.example", "198.51.100.12", 1000, true), false, false)
@@ -447,12 +417,11 @@ func TestCounterBlocksAggregates(t *testing.T) {
 
 // uploadRefused tells an open flow whose first upload chunk the block would
 // cut: its destination, domain or address total already crossed. Exempt
-// flows, known hosts and the alert-only mode are never refused.
+// flows and the alert-only mode are never refused.
 func TestCounterUploadRefused(t *testing.T) {
 	addr := netip.MustParseAddr("198.51.100.7")
-	known := func(_ Principal, host string) bool { return host == "known.example" }
 	for _, block := range []bool{true, false} {
-		c := NewCounter(CounterOptions{LargeUploadBytes: 1000, BlockLargeUploads: block, KnownHost: known})
+		c := NewCounter(CounterOptions{LargeUploadBytes: 1000, BlockLargeUploads: block})
 		f, _ := c.open(testPrincipal, "big.example", addr)
 		if scope, refused := f.uploadRefused(false); refused {
 			t.Fatalf("a fresh flow is refused (%q)", scope)
@@ -475,7 +444,6 @@ func TestCounterUploadRefused(t *testing.T) {
 			{host: "other.example", addr: addr, scope: "destinations at 198.51.100.7", refused: true},
 			{host: "cdn.big.example", scope: "destinations under big.example", refused: true},
 			{host: "other.example", addr: addr, exempt: true},
-			{host: "known.example", addr: addr},
 			{host: "elsewhere.example", addr: netip.MustParseAddr("198.51.100.8")},
 		} {
 			f, _ := c.open(testPrincipal, tt.host, tt.addr)

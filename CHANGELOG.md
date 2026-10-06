@@ -94,8 +94,6 @@ stopped`. Nothing is changed; use the install command above.
   telemetry records are no longer silently dropped: they are logged, counted
   on `sandbox status` and reported as degraded health
   (`openshell_telemetry_failed`).
-- After a daemon restart, a host a sandbox reached in an earlier session is
-  no longer first-seen for the large-upload check.
 - Removed the `binary_drift` and `tamper_attempt` sandbox finding kinds,
   which nothing produced.
 

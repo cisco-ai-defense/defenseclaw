@@ -36,9 +36,10 @@ const defaultMaxDestinations = 8192
 
 // CounterOptions configures a Counter.
 type CounterOptions struct {
-	// LargeUploadBytes is the volume sent to a first-seen destination that
-	// raises the large-upload signal. Zero uses DefaultLargeUploadBytes; a
-	// negative value disables the signal.
+	// LargeUploadBytes is the volume sent to a first-seen destination (one
+	// the binding first contacted since the counter started: the counts live
+	// in the daemon) that raises the large-upload signal. Zero uses
+	// DefaultLargeUploadBytes; a negative value disables the signal.
 	//
 	// A binding's uploads to first-seen hosts are also totalled per
 	// registrable domain (the name under its ICANN public suffix, so every
@@ -57,12 +58,6 @@ type CounterOptions struct {
 	// It applies to every principal; Principal.BlockLargeUploads turns it
 	// on for one.
 	BlockLargeUploads bool
-	// KnownHost reports destinations that are not first-seen for a
-	// principal, for example hosts contacted in earlier sessions or trusted
-	// by the operator. It is called once per binding and destination, at
-	// the first contact; refused attempts are not contact. Nil treats every
-	// destination as first-seen at its first contact.
-	KnownHost func(p Principal, host string) bool
 	// MaxDestinations caps tracked (binding, destination) pairs. Over the
 	// cap, idle contacted destinations are evicted, those with the least
 	// upload counted toward the large-upload signal first, then the least
@@ -79,16 +74,14 @@ type CounterOptions struct {
 type Counter struct {
 	threshold int64
 	block     bool
-	known     func(Principal, string) bool
 	max       int
 	now       func() time.Time
 
 	mu    sync.Mutex
 	dests map[destKey]*destination
 	// refused holds destinations that were only ever refused. Refusals pass
-	// no rate limit, so they are kept apart: they never call KnownHost,
-	// never use up a destination's first contact, and can only evict each
-	// other.
+	// no rate limit, so they are kept apart: they never use up a
+	// destination's first contact, and can only evict each other.
 	refused map[destKey]*refusal
 	// aggs total a binding's uploads to first-seen hosts per registrable
 	// domain and per address.
@@ -162,7 +155,6 @@ func registrableDomain(host string) string {
 type destination struct {
 	key       destKey
 	firstSeen time.Time
-	novel     bool
 	// threshold is the large-upload threshold of the principal at first
 	// contact; eviction ranks the destination by it. Uploads are checked
 	// against the threshold of the flow's own principal.
@@ -208,10 +200,6 @@ type DestinationStats struct {
 	// refusal or its first contact, whichever came first.
 	FirstSeen time.Time
 	LastSeen  time.Time
-	// Novel reports that the destination was not a known host at first
-	// contact, so uploads to it count toward the large-upload signal. It is
-	// false for destinations that were only ever refused.
-	Novel bool
 	// LargeUpload reports that the large-upload signal fired.
 	LargeUpload bool
 }
@@ -221,7 +209,6 @@ func NewCounter(opts CounterOptions) *Counter {
 	c := &Counter{
 		threshold: opts.LargeUploadBytes,
 		block:     opts.BlockLargeUploads,
-		known:     opts.KnownHost,
 		max:       opts.MaxDestinations,
 		now:       opts.Now,
 		dests:     map[destKey]*destination{},
@@ -266,17 +253,6 @@ func (c *Counter) contact(p Principal, host string) (*destination, bool) {
 	key := destKey{binding: p.BindingID, host: host}
 	now := c.now()
 	c.mu.Lock()
-	if d := c.dests[key]; d != nil {
-		c.mu.Unlock()
-		d.lastSeen.Store(now.UnixNano())
-		return d, false
-	}
-	c.mu.Unlock()
-
-	// KnownHost is caller code; never run it under the lock.
-	novel := c.known == nil || !c.known(p, host)
-
-	c.mu.Lock()
 	defer c.mu.Unlock()
 	if d := c.dests[key]; d != nil {
 		d.lastSeen.Store(now.UnixNano())
@@ -285,7 +261,7 @@ func (c *Counter) contact(p Principal, host string) (*destination, bool) {
 	if len(c.dests) >= c.max {
 		c.evictLocked()
 	}
-	d := &destination{key: key, firstSeen: now, novel: novel, threshold: c.thresholdFor(p)}
+	d := &destination{key: key, firstSeen: now, threshold: c.thresholdFor(p)}
 	if r := c.refused[key]; r != nil {
 		d.firstSeen = r.firstSeen
 		d.blocked.Store(r.count)
@@ -298,7 +274,7 @@ func (c *Counter) contact(p Principal, host string) (*destination, bool) {
 
 // armedUp is the upload counted toward the large-upload signal.
 func (c *Counter) armedUp(d *destination) int64 {
-	if d.threshold <= 0 || !d.novel {
+	if d.threshold <= 0 {
 		return 0
 	}
 	return d.up.Load()
@@ -334,7 +310,7 @@ func (c *Counter) evictLocked() {
 
 // recordBlocked counts a refused attempt. A refusal is not contact: a
 // destination that was never contacted gets a refusal-only record, which
-// costs no KnownHost call and no eviction sort.
+// costs no eviction sort.
 func (c *Counter) recordBlocked(p Principal, host string) {
 	key := destKey{binding: p.BindingID, host: host}
 	now := c.now()
@@ -373,11 +349,11 @@ func (c *Counter) evictRefusedLocked() {
 
 // uploadBlocked reports that the large-upload block already applies to
 // p's traffic to host: its own total, or its registrable domain's, crossed
-// the threshold. A host with no record yet is not refused here (whether it
-// is first-seen is only known at contact), and neither is one whose address
-// total crossed (the address is only known once dialed): a CONNECT tunnel
-// is refused once its flow opens (flow.uploadRefused), and a forwarded
-// request's first upload chunk is cut.
+// the threshold. A host with no record yet is not refused here, and
+// neither is one whose address total crossed (the address is only known
+// once dialed): a CONNECT tunnel is refused once its flow opens
+// (flow.uploadRefused), and a forwarded request's first upload chunk is
+// cut.
 func (c *Counter) uploadBlocked(p Principal, host string) bool {
 	if !c.blocksFor(p) || c.thresholdFor(p) <= 0 {
 		return false
@@ -385,11 +361,11 @@ func (c *Counter) uploadBlocked(p Principal, host string) bool {
 	c.mu.Lock()
 	d := c.dests[destKey{binding: p.BindingID, host: host}]
 	var site *aggregate
-	if d != nil && d.novel {
+	if d != nil {
 		site = c.aggs[siteKey(p, host)]
 	}
 	c.mu.Unlock()
-	return d != nil && d.novel && (d.flagged.Load() || (site != nil && site.flagged.Load()))
+	return d != nil && (d.flagged.Load() || (site != nil && site.flagged.Load()))
 }
 
 // siteKey is the registrable-domain aggregate of p's uploads to host.
@@ -476,7 +452,7 @@ type flow struct {
 	opening sync.Once
 	dest    atomic.Pointer[destination]
 	// aggs are the totals the flow's uploads count toward besides its
-	// destination's; set when it opens, for first-seen destinations only.
+	// destination's; set when it opens, when its principal has a threshold.
 	aggs   []*aggregate
 	first  atomic.Bool
 	closed atomic.Bool
@@ -497,7 +473,7 @@ func (f *flow) openAt(remote netip.Addr) bool {
 		}
 		c := f.counter
 		d, created := c.contact(f.principal, f.host)
-		if c.thresholdFor(f.principal) > 0 && d.novel {
+		if c.thresholdFor(f.principal) > 0 {
 			f.aggs = c.aggregatesFor(f.principal, f.host, remote)
 		}
 		d.tunnels.Add(1)
@@ -516,7 +492,7 @@ func (f *flow) openAt(remote netip.Addr) bool {
 // host and its domain (uploadBlocked); only an open flow knows its address.
 func (f *flow) uploadRefused(exempt bool) (scope string, refused bool) {
 	c, d := f.counter, f.dest.Load()
-	if d == nil || exempt || !c.blocksFor(f.principal) || c.thresholdFor(f.principal) <= 0 || !d.novel {
+	if d == nil || exempt || !c.blocksFor(f.principal) || c.thresholdFor(f.principal) <= 0 {
 		return "", false
 	}
 	if d.flagged.Load() {
@@ -558,7 +534,7 @@ func (f *flow) addUp(n int64, exempt bool) uploadVerdict {
 	}
 	now := c.now().UnixNano()
 	threshold := c.thresholdFor(f.principal)
-	armed := threshold > 0 && d.novel
+	armed := threshold > 0
 	aggs := f.aggs
 	if exempt {
 		aggs = nil
@@ -640,7 +616,6 @@ func (d *destination) stats() DestinationStats {
 		Contacted:   true,
 		FirstSeen:   d.firstSeen,
 		LastSeen:    time.Unix(0, d.lastSeen.Load()),
-		Novel:       d.novel,
 		LargeUpload: d.flagged.Load(),
 	}
 }

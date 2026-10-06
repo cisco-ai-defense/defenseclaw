@@ -2766,10 +2766,11 @@ NET, HTTP and API records per host, classify each host (model provider by
 its provider rule, the harness's vendor, shadow AI by the AI provider
 catalog in `internal/sensor/catalog` or an inference-shaped name, else the
 proxy's category, blocked or other), keep at most 512 hosts in
-`<data_dir>/sandboxes/<name>/destinations.json` across restarts, and seed
-the proxy counter's first-seen check with the hosts reached in earlier
-sessions (`egress.CounterOptions.KnownHost`). A delete removes them and
-the counter's rows for the binding (`Counter.Forget`).
+`<data_dir>/sandboxes/<name>/destinations.json` across restarts. The proxy
+counter's first-seen check does not read them: the counter starts over with
+the daemon, so every host is first-seen again after a restart (a host
+reached before is no exemption). A delete removes them and the counter's
+rows for the binding (`Counter.Forget`).
 
 The watcher side exists. `internal/openshell/stream` follows one sandbox
 through the raw `WatchSandbox` RPC on its own connection (the SDK's watch

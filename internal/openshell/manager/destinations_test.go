@@ -17,14 +17,19 @@
 package manager
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
@@ -125,17 +130,10 @@ func TestDestinationsAreClassified(t *testing.T) {
 	}
 }
 
-// The destinations are kept across daemon restarts; a host reached in an
-// earlier session is no first-seen destination for the proxy counter; a
-// delete removes them.
+// The destinations are kept across daemon restarts; a delete removes them.
 func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	e := liveEnv(t, "keepbox", nil)
 	e.ocsf("keepbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(9) -> files.example.org:443/tcp [policy:allow_files engine:opa]", time.Now())
-	b := e.binding("keepbox")
-	p := egress.Principal{BindingID: b.ID, SandboxName: "keepbox"}
-	if e.m.KnownDestination(p, "files.example.org") {
-		t.Fatal("a host first reached in this session is known")
-	}
 	e.stopBox("keepbox")
 	path := filepath.Join(e.dataDir, "sandboxes", "keepbox", destinationsFile)
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
@@ -146,16 +144,72 @@ func TestDestinationsAreKeptAndForgotten(t *testing.T) {
 	if rows := destinationKinds(t, e, "keepbox"); rows["files.example.org"].Connections != 1 {
 		t.Fatalf("after a restart = %+v", rows)
 	}
-	if !e.m.KnownDestination(p, "FILES.example.org.") || e.m.KnownDestination(p, "other.example") ||
-		e.m.KnownDestination(egress.Principal{BindingID: "sb_other", SandboxName: "keepbox"}, "files.example.org") {
-		t.Fatal("KnownDestination does not follow the kept destinations")
-	}
 	e.deleteBox("keepbox", sandboxapi.DeleteRequest{})
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("destinations after delete: %v", err)
 	}
 	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
 		t.Fatalf("sandbox dir after delete: %v", err)
+	}
+}
+
+// The egress proxy's counts are a destination's: the counter's rows merge
+// into the view and are kept across daemon restarts, and a delete forgets
+// what the counter counted for the binding. The counter starts over with
+// the daemon, so a host the sandbox reached before a restart is first-seen
+// again: the large-upload block cuts an upload to it again.
+func TestDestinationsCountTheProxysTraffic(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) {
+		c.OpenShell.Egress.LargeUploadMB = 1
+		c.OpenShell.Egress.BlockLargeUploads = true
+	})
+	e.run()
+	proxy := startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.live(sandboxapi.CreateRequest{Name: "upbox"})
+	upload := func(proxy *liveProxy) {
+		t.Helper()
+		conn, br := proxy.open(t, "upbox", "example.org:80")
+		const size = 2 << 20
+		_, err := fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: example.org\r\nContent-Length: %d\r\n\r\n", size)
+		must(t, err)
+		chunk := bytes.Repeat([]byte("u"), 32<<10)
+		for sent := 0; sent < size; sent += len(chunk) {
+			if _, err := conn.Write(chunk); err != nil {
+				break // the proxy cut the tunnel
+			}
+		}
+		_, _ = io.Copy(io.Discard, br)
+	}
+	cuts := func() int { return len(e.tel.findingsOf(audit.SandboxFindingLargeUpload)) }
+	upload(proxy)
+	eventually(t, "the cut", func() bool { return cuts() == 1 })
+	var row sandboxapi.DestinationRow
+	eventually(t, "the counter's counts in the view", func() bool {
+		row = destinationKinds(t, e, "upbox")["example.org"]
+		return row.Tunnels == 1 && row.BytesUp > 0
+	})
+	if !slices.Contains(row.Sources, sandboxapi.SourceProxy) || row.BytesUp > 1<<20 {
+		t.Fatalf("row = %+v", row)
+	}
+
+	e.stopBox("upbox")
+	e.restartDaemon()
+	proxy = startLiveProxyWith(t, e, func(o *egress.Options) { o.Sink = e.m.EgressSink() })
+	e.startBox("upbox", sandboxapi.StartRequest{})
+	if kept := destinationKinds(t, e, "upbox")["example.org"]; kept.Tunnels != row.Tunnels || kept.BytesUp != row.BytesUp {
+		t.Fatalf("kept %+v, want the counts of %+v", kept, row)
+	}
+	upload(proxy)
+	eventually(t, "the cut in the new session", func() bool { return cuts() == 2 })
+	eventually(t, "both runs' counts", func() bool { return destinationKinds(t, e, "upbox")["example.org"].Tunnels == 2 })
+
+	binding := e.binding("upbox").ID
+	e.deleteBox("upbox", sandboxapi.DeleteRequest{})
+	e.m.mu.Lock()
+	counter := e.m.proxy.Counter()
+	e.m.mu.Unlock()
+	if left := counter.DestinationsFor(binding); len(left) != 0 {
+		t.Fatalf("the counter kept %+v for the deleted sandbox", left)
 	}
 }
 

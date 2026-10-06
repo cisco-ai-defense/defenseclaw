@@ -126,17 +126,18 @@ type destTable struct {
 // holds what earlier daemon runs (and counters reset since) counted, live
 // the counter's last snapshot in this run.
 type destRow struct {
-	Host           string    `json:"host"`
-	Ports          []int     `json:"ports,omitempty"`
-	FirstSeen      time.Time `json:"first_seen"`
-	LastSeen       time.Time `json:"last_seen"`
-	ContactSession int       `json:"contact_session,omitempty"`
-	Sources        []string  `json:"sources,omitempty"`
-	Connections    int64     `json:"connections,omitempty"`
-	Refused        int64     `json:"refused,omitempty"`
-	ModelTurns     int64     `json:"model_turns,omitempty"`
-	Rule           string    `json:"rule,omitempty"`
-	ProviderRule   bool      `json:"provider_rule,omitempty"`
+	Host      string    `json:"host"`
+	Ports     []int     `json:"ports,omitempty"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	// Reached marks a host either boundary let the sandbox reach.
+	Reached      bool     `json:"reached,omitempty"`
+	Sources      []string `json:"sources,omitempty"`
+	Connections  int64    `json:"connections,omitempty"`
+	Refused      int64    `json:"refused,omitempty"`
+	ModelTurns   int64    `json:"model_turns,omitempty"`
+	Rule         string   `json:"rule,omitempty"`
+	ProviderRule bool     `json:"provider_rule,omitempty"`
 	// Category is the egress category of the proxy's last allowed request
 	// (a feed's, such as package_registry), Refusal that of its last
 	// refusal (not_allowlisted, paste_site, ...).
@@ -168,7 +169,7 @@ func (r *destRow) total() counts { return r.Proxy.add(r.live) }
 
 // contacted reports a host either boundary let the sandbox reach.
 func (r *destRow) contacted() bool {
-	return r.ContactSession > 0 || r.Connections > 0 || r.total().Tunnels > 0
+	return r.Reached || r.Connections > 0 || r.total().Tunnels > 0
 }
 
 // destinationSighting is one boundary's observation of a destination.
@@ -266,7 +267,7 @@ func (r *destRow) lookup(c *catalog.Catalog) {
 }
 
 // note folds a sighting into the row.
-func (r *destRow) note(s destinationSighting, session int) {
+func (r *destRow) note(s destinationSighting) {
 	if s.at.After(r.LastSeen) {
 		r.LastSeen = s.at
 	}
@@ -285,8 +286,8 @@ func (r *destRow) note(s destinationSighting, session int) {
 		r.Ports = append(r.Ports, s.port)
 		slices.Sort(r.Ports)
 	}
-	if !s.denied && r.ContactSession == 0 {
-		r.ContactSession = session
+	if !s.denied {
+		r.Reached = true
 	}
 	switch {
 	case s.proxy && s.denied:
@@ -375,7 +376,7 @@ func (m *Manager) observeDestination(ctx context.Context, b *box, s destinationS
 		m.destMu.Unlock()
 		return
 	}
-	r.note(s, info.session)
+	r.note(s)
 	t.dirty = true
 	kind, provider, _ := r.classify(info.harness)
 	level := shadowRefused
@@ -604,32 +605,6 @@ func (m *Manager) destinationSummary(name, harnessName string, live map[string]e
 		}
 	}
 	return modelAPIs, shadow
-}
-
-// KnownDestination implements egress.CounterOptions.KnownHost: a host the
-// sandbox of p reached in an earlier session is no first-seen destination.
-// The counter starts over with the daemon, and the destinations table, kept
-// across restarts, remembers what it counted before; a host first reached
-// in the session running now stays first-seen, as the counter had it.
-func (m *Manager) KnownDestination(p egress.Principal, host string) bool {
-	m.mu.Lock()
-	b := m.boxes[p.SandboxName]
-	session, ok := 0, b != nil && !b.deleted && b.rec.BindingID == p.BindingID
-	if ok {
-		session = b.rec.Sessions
-	}
-	m.mu.Unlock()
-	if !ok {
-		return false
-	}
-	m.destMu.Lock()
-	defer m.destMu.Unlock()
-	t := m.dests[p.SandboxName]
-	if t == nil {
-		return false
-	}
-	r := t.rows[strings.TrimSuffix(strings.ToLower(host), ".")]
-	return r != nil && r.contacted() && r.ContactSession > 0 && r.ContactSession < session
 }
 
 // destinationsPath is where a sandbox's destinations table is kept.
