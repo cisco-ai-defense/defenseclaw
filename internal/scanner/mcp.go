@@ -125,14 +125,11 @@ func validateMCPScanTargetURL(target string) error {
 // the exact contract the plugin scanner already parses, so there is a
 // single SDK code path with no drift-prone second JSON schema.
 //
-// The legacy “InspectLLMConfig“/“CiscoAIDefenseConfig“ fields are kept
-// only to preserve the existing constructor signatures; LLM and Cisco
-// AI Defense credentials are resolved by the Python CLI from its own
-// config, so they are no longer injected into the subprocess env.
+// LLM and Cisco AI Defense credentials are resolved by the Python CLI
+// from its own config, so they are not injected into the subprocess env.
 type MCPScanner struct {
 	Config         config.MCPScannerConfig
 	LLM            config.LLMConfig
-	InspectLLM     config.InspectLLMConfig // Deprecated: populated only for back-compat; do not read.
 	CiscoAIDefense config.CiscoAIDefenseConfig
 }
 
@@ -150,20 +147,6 @@ func mcpScannerBinary(binary string) string {
 		return "defenseclaw"
 	}
 	return binary
-}
-
-// NewMCPScanner is the back-compat constructor. Translates the legacy
-// “InspectLLMConfig“ shape into the unified “LLMConfig“ internally
-// so everything downstream only deals with one structure. Prefer
-// “NewMCPScannerFromLLM“ in new code.
-func NewMCPScanner(cfg config.MCPScannerConfig, llm config.InspectLLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
-	cfg.Binary = mcpScannerBinary(cfg.Binary)
-	return &MCPScanner{
-		Config:         cfg,
-		LLM:            inspectToLLM(llm),
-		InspectLLM:     llm,
-		CiscoAIDefense: aid,
-	}
 }
 
 // NewMCPScannerFromLLM constructs a scanner directly from the unified

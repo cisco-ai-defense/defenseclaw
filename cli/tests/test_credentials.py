@@ -489,7 +489,8 @@ class RequirementPredicateTests(unittest.TestCase):
         cfg = _make_cfg(
             "/tmp/dc-test",
             scanners=ScannersConfig(
-                skill_scanner=SkillScannerConfig(use_llm=True),
+                # use_llm is on by default; the judge needs a key once a model resolves.
+                skill_scanner=SkillScannerConfig(use_llm=True, llm=LLMConfig(model="anthropic/claude-sonnet-5-5")),
             ),
         )
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)

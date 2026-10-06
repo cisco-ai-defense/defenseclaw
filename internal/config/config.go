@@ -1551,12 +1551,15 @@ type SkillScannerConfig struct {
 	Timeouts  SkillScannerTimeouts  `mapstructure:"timeouts"  yaml:"timeouts,omitempty"`
 }
 
-// ResolvedVirusTotalKey returns the VirusTotal key from the env var (if set) or the direct value.
+// ResolvedVirusTotalKey returns the VirusTotal key from its env var (the
+// keys store first, then the process), or the v8 inline value.
 func (c *SkillScannerConfig) ResolvedVirusTotalKey() string {
-	if c.VirusTotalKeyEnv != "" {
-		if v := os.Getenv(c.VirusTotalKeyEnv); v != "" {
-			return v
-		}
+	name := c.VirusTotalKeyEnvName()
+	if v, ok := GetKey(name); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
+	}
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
 	}
 	return c.VirusTotalKey
 }
@@ -1581,10 +1584,10 @@ type MCPScannerConfig struct {
 	Timeouts    MCPScannerTimeouts         `mapstructure:"timeouts"     yaml:"timeouts,omitempty"`
 }
 
-// AnalyzersArg renders Analyzers as the scanner's comma-separated
-// --analyzers value ("" lets the scanner choose).
+// AnalyzersArg renders EffectiveAnalyzers as the scanner's comma-separated
+// --analyzers value ("" is auto).
 func (c MCPScannerConfig) AnalyzersArg() string {
-	return strings.Join(c.Analyzers, ",")
+	return strings.Join(c.EffectiveAnalyzers(), ",")
 }
 
 type ScannersConfig struct {
@@ -3219,6 +3222,12 @@ func loadConfigSourceChecked(
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
 	}
+	if err := cfg.Scanners.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "scanners_invalid")
+		}
+		return nil, err
+	}
 	if err := cfg.Routing.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "routing_invalid")
@@ -4152,14 +4161,14 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("cisco_ai_defense.enabled_rules", []string{})
 
 	viper.SetDefault("scanners.skill_scanner.binary", "skill-scanner")
-	viper.SetDefault("scanners.skill_scanner.use_llm", false)
+	viper.SetDefault("scanners.skill_scanner.use_llm", true)
 	viper.SetDefault("scanners.skill_scanner.use_behavioral", false)
 	viper.SetDefault("scanners.skill_scanner.enable_meta", false)
 	viper.SetDefault("scanners.skill_scanner.use_trigger", false)
 	viper.SetDefault("scanners.skill_scanner.use_virustotal", false)
 	viper.SetDefault("scanners.skill_scanner.use_aidefense", false)
 	viper.SetDefault("scanners.skill_scanner.llm_consensus_runs", 0)
-	viper.SetDefault("scanners.skill_scanner.policy", "permissive")
+	viper.SetDefault("scanners.skill_scanner.policy", DefaultSkillScannerPolicy)
 	viper.SetDefault("scanners.skill_scanner.lenient", true)
 	viper.SetDefault("scanners.skill_scanner.virustotal_api_key", "")
 	viper.SetDefault("scanners.skill_scanner.virustotal_api_key_env", "VIRUSTOTAL_API_KEY")

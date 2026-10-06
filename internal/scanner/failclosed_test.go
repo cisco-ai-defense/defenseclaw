@@ -38,11 +38,11 @@ func TestScanners_FailClosedOnNonZeroExitWithParseableStdout(t *testing.T) {
 	}{
 		{
 			name:    "skill",
-			scanner: NewSkillScanner(config.SkillScannerConfig{Binary: bin}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{}),
+			scanner: NewSkillScannerFromLLM(config.SkillScannerConfig{Binary: bin}, config.LLMConfig{}, config.CiscoAIDefenseConfig{}),
 		},
 		{
 			name:    "mcp",
-			scanner: NewMCPScanner(config.MCPScannerConfig{Binary: bin}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{}),
+			scanner: NewMCPScannerFromLLM(config.MCPScannerConfig{Binary: bin}, config.LLMConfig{}, config.CiscoAIDefenseConfig{}),
 		},
 		{
 			name:    "plugin",

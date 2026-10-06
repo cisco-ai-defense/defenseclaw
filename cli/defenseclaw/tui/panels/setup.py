@@ -80,6 +80,12 @@ from defenseclaw.tui.services.cli_choices import (
     LLM_PROVIDERS as _CHOICE_LLM_PROVIDERS,
 )
 from defenseclaw.tui.services.cli_choices import (
+    SCANNER_LLM_PROVIDERS as _SCANNER_LLM_PROVIDERS,
+)
+from defenseclaw.tui.services.cli_choices import (
+    SKILL_SCANNER_POLICIES as _SKILL_SCANNER_POLICIES,
+)
+from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
 from defenseclaw.tui.services.sandbox_state import DEFAULT_SANDBOX_HARNESSES, SANDBOX_HARNESS_SPECS, compute_driver
@@ -2945,7 +2951,7 @@ def _build_redaction_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
 # generated hints only repeated the label or flag ("Select scan policy.",
 # "Sets --llm-model.", GAP-2522).
 _SCANNER_LLM_HINTS: dict[str, str] = {
-    "--llm-provider": "anthropic or openai; saved in the shared llm: block every scanner uses.",
+    "--llm-provider": "The judge's provider, saved in the shared llm: block every scanner uses.",
     "--llm-model": "Model id for the LLM review, e.g. claude-haiku-4-5; saved in the shared llm: block.",
 }
 _SKILL_SCANNER_HINTS: dict[str, str] = {
@@ -2955,13 +2961,16 @@ _SKILL_SCANNER_HINTS: dict[str, str] = {
     "--llm-consensus-runs": "LLM reviews per skill; only findings most runs agree on are kept. 0 = one review.",
     "--enable-meta": "A second LLM pass over all findings that drops false positives and ranks the rest.",
     "--use-trigger": "Flag skill descriptions so broad that they would trigger on almost any request.",
-    "--use-virustotal": "Look up the skill's files on VirusTotal; needs VIRUSTOTAL_API_KEY.",
-    "--use-aidefense": "Send skill content to Cisco AI Defense for analysis; needs an AI Defense API key.",
+    "--use-virustotal": "Optional: look up the skill's files on VirusTotal; needs VIRUSTOTAL_API_KEY.",
+    "--use-aidefense": "Optional: send skill content to Cisco AI Defense; needs an AI Defense API key.",
+    "--use-osv": "Optional: check the skill's declared dependencies against OSV.dev (needs network).",
+    "--llm-base-url": "Endpoint of an openai-compatible or vllm judge, e.g. http://127.0.0.1:8000/v1.",
     "--policy": (
-        "strict: fewest exceptions, for untrusted skills; balanced: between the two; "
-        "permissive: fewest false positives, for trusted skills (the default); "
-        "none: the scanner's built-in policy."
+        "quiet (recommended, with the LLM judge): fewest false positives; low-noise and balanced "
+        "report more for review; strict: fewest exceptions; permissive: trusted skills."
     ),
+    "--fail-on-severity": "Findings at or above this severity block the skill (recommended: HIGH).",
+    "--review-queue-min": "Findings from this severity up to the block level are flagged for review (MEDIUM).",
     "--lenient": "yes (the default): scan skills with malformed front matter or missing fields; no: fail them.",
 }
 _MCP_SCANNER_HINTS: dict[str, str] = {
@@ -3036,24 +3045,23 @@ def wizard_form_defs(
         # install, and Run kept the real values (GAP-2536). A field left at
         # its current value emits no flag; a change always emits one.
         policy, lenient = _skill_scanner_policy_values(cfg)
-        policies = ("strict", "balanced", "permissive", "none")
+        policies = _SKILL_SCANNER_POLICIES
+        gate = (_cfg_str(cfg, "scanners.skill_scanner.fail_on_severity") or "HIGH").upper()
+        review = (_cfg_str(cfg, "scanners.skill_scanner.review_queue_min") or "MEDIUM").upper()
+        severities = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
         skill_fields = (
-            _cfg_bool_field("Behavioral Analyzer", "--use-behavioral", cfg, "scanners.skill_scanner.use_behavioral"),
-            _cfg_bool_field("LLM Analyzer", "--use-llm", cfg, "scanners.skill_scanner.use_llm"),
+            _cfg_bool_field("LLM Judge", "--use-llm", cfg, "scanners.skill_scanner.use_llm"),
             WizardFormField(
                 "LLM Provider",
                 "choice",
                 "--llm-provider",
                 value="anthropic",
                 default="anthropic",
-                options=_WIZARD_LLM_PROVIDERS,
+                options=_SCANNER_LLM_PROVIDERS,
             ),
             WizardFormField("LLM Model", "string", "--llm-model"),
+            WizardFormField("LLM Base URL", "string", "--llm-base-url"),
             WizardFormField("LLM Consensus Runs", "int", "--llm-consensus-runs", value="0", default="0"),
-            _cfg_bool_field("Meta Analyzer", "--enable-meta", cfg, "scanners.skill_scanner.enable_meta"),
-            _cfg_bool_field("Trigger Analyzer", "--use-trigger", cfg, "scanners.skill_scanner.use_trigger"),
-            _cfg_bool_field("VirusTotal Scanner", "--use-virustotal", cfg, "scanners.skill_scanner.use_virustotal"),
-            _cfg_bool_field("AI Defense Analyzer", "--use-aidefense", cfg, "scanners.skill_scanner.use_aidefense"),
             WizardFormField(
                 "Scan Policy",
                 "choice",
@@ -3062,6 +3070,22 @@ def wizard_form_defs(
                 default=policy,
                 options=policies if policy in policies else (policy, *policies),
             ),
+            WizardFormField(
+                "Block At", "choice", "--fail-on-severity", value=gate, default=gate, options=severities
+            ),
+            WizardFormField(
+                "Review From", "choice", "--review-queue-min", value=review, default=review, options=severities
+            ),
+            _cfg_bool_field("Behavioral Analyzer", "--use-behavioral", cfg, "scanners.skill_scanner.use_behavioral"),
+            _cfg_bool_field("Meta Analyzer", "--enable-meta", cfg, "scanners.skill_scanner.enable_meta"),
+            _cfg_bool_field("Trigger Analyzer", "--use-trigger", cfg, "scanners.skill_scanner.use_trigger"),
+            _cfg_bool_field(
+                "VirusTotal Scanner", "--use-virustotal", cfg, "scanners.skill_scanner.analyzers.virustotal.enabled"
+            ),
+            _cfg_bool_field(
+                "AI Defense Analyzer", "--use-aidefense", cfg, "scanners.skill_scanner.analyzers.aidefense.enabled"
+            ),
+            _cfg_bool_field("OSV Dependency Checks", "--use-osv", cfg, "scanners.skill_scanner.analyzers.osv.enabled"),
             WizardFormField("Lenient Mode", "bool", "--lenient", "--no-lenient", value=lenient, default=lenient),
             WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         )
@@ -3076,7 +3100,7 @@ def wizard_form_defs(
                 "--llm-provider",
                 value="anthropic",
                 default="anthropic",
-                options=_WIZARD_LLM_PROVIDERS,
+                options=_SCANNER_LLM_PROVIDERS,
             ),
             WizardFormField("LLM Model", "string", "--llm-model"),
             WizardFormField(
@@ -3252,12 +3276,12 @@ def _cfg_bool_field(label: str, flag: str, cfg: object | Mapping[str, Any] | Non
 def _skill_scanner_policy_values(cfg: object | Mapping[str, Any] | None) -> tuple[str, str]:
     """The effective skill-scanner policy and lenient mode as form values.
 
-    The defaults match ``SkillScannerConfig`` (permissive, lenient on);
-    an empty policy is what ``--policy none`` saves.
+    The defaults match ``SkillScannerConfig`` (quiet, lenient on); an empty
+    policy is the recommended quiet preset.
     """
 
-    policy = get_config_value(cfg, "scanners.skill_scanner.policy", "permissive")
-    policy = str(policy).strip() or "none"
+    policy = get_config_value(cfg, "scanners.skill_scanner.policy", "quiet")
+    policy = str(policy).strip() or "quiet"
     lenient = get_config_value(cfg, "scanners.skill_scanner.lenient", True)
     if not isinstance(lenient, bool):
         lenient = str(lenient).strip().lower() in {"1", "true", "yes", "on"}
@@ -8120,17 +8144,40 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
 def _scanners_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
     fields = [
         _header(".. Skill Scanner .."),
-        _field(cfg, "Binary", "scanners.skill_scanner.binary", hint="Path/name of skill-scanner executable."),
         _field(
             cfg,
             "Policy",
             "scanners.skill_scanner.policy",
             "choice",
-            ("strict", "balanced", "permissive", "none"),
-            "Skill scanner policy.",
+            _SKILL_SCANNER_POLICIES,
+            "Skill scanner policy (recommended: quiet with the LLM judge).",
+        ),
+        _field(
+            cfg,
+            "Block At",
+            "scanners.skill_scanner.fail_on_severity",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"),
+            "Findings at or above this severity block (empty: HIGH).",
+        ),
+        _field(
+            cfg,
+            "Review From",
+            "scanners.skill_scanner.review_queue_min",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"),
+            "Findings from here up to Block At go to review (empty: MEDIUM).",
         ),
         _field(cfg, "Lenient", "scanners.skill_scanner.lenient", "bool", hint="Tolerate malformed skills (off: fail them)."),
-        _field(cfg, "Use LLM", "scanners.skill_scanner.use_llm", "bool", hint="Enable LLM-assisted classification."),
+        _field(cfg, "Use LLM", "scanners.skill_scanner.use_llm", "bool", hint="Run the LLM judge (recommended)."),
+        _field(
+            cfg,
+            "Judge Source",
+            "scanners.skill_scanner.judge_source",
+            "choice",
+            ("", "inherit", "override"),
+            "inherit: the top-level llm block; override: the LLM override below.",
+        ),
         _field(
             cfg, "LLM Consensus Runs", "scanners.skill_scanner.llm_consensus_runs", "int", hint="Number of LLM votes."
         ),
@@ -8139,27 +8186,36 @@ def _scanners_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         _field(
             cfg, "Use Trigger", "scanners.skill_scanner.use_trigger", "bool", hint="Enable trigger-word heuristics."
         ),
-        _field(cfg, "Use VirusTotal", "scanners.skill_scanner.use_virustotal", "bool", hint="Submit artifact hashes."),
+        _field(
+            cfg,
+            "Use VirusTotal",
+            "scanners.skill_scanner.analyzers.virustotal.enabled",
+            "bool",
+            hint="Optional: look up artifact hashes.",
+        ),
         _field(
             cfg,
             "VirusTotal Key Env",
-            "scanners.skill_scanner.virustotal_api_key_env",
-            hint="Env var NAME for VirusTotal key.",
+            "scanners.skill_scanner.analyzers.virustotal.api_key_env",
+            hint="Env var NAME for VirusTotal key (empty: VIRUSTOTAL_API_KEY).",
         ),
         _field(
             cfg,
-            "VirusTotal API Key (redacted)",
-            "scanners.skill_scanner.virustotal_api_key",
-            "password",
-            hint="Inline VirusTotal key.",
+            "Use AI Defense",
+            "scanners.skill_scanner.analyzers.aidefense.enabled",
+            "bool",
+            hint="Optional: chain a Cisco AI Defense scan.",
         ),
         _field(
-            cfg, "Use AI Defense", "scanners.skill_scanner.use_aidefense", "bool", hint="Chain Cisco AI Defense scan."
+            cfg,
+            "Use OSV",
+            "scanners.skill_scanner.analyzers.osv.enabled",
+            "bool",
+            hint="Optional: check dependencies on OSV.dev.",
         ),
         *_llm_override_fields(cfg, "Skill Scanner", "scanners.skill_scanner.llm"),
         _header(".. MCP Scanner .."),
-        _field(cfg, "Binary", "scanners.mcp_scanner.binary", hint="Path/name of mcp-scanner executable."),
-        _field(cfg, "Analyzers", "scanners.mcp_scanner.analyzers", hint="CSV of analyzer IDs."),
+        _field(cfg, "Analyzers", "scanners.mcp_scanner.analyzers", hint="CSV of analyzer IDs; auto: YARA plus a ready LLM."),
         _field(cfg, "Scan Prompts", "scanners.mcp_scanner.scan_prompts", "bool", hint="Scan MCP prompt templates."),
         _field(
             cfg, "Scan Resources", "scanners.mcp_scanner.scan_resources", "bool", hint="Scan MCP resource contents."

@@ -124,10 +124,14 @@ class AutoAnalyzerSelectionTests(unittest.TestCase):
         s = _wrapper("yara,llm", model=False)
         self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
 
-    def test_empty_defers_to_sdk_all(self):
-        """Empty keeps the legacy 'let the SDK run everything' meaning."""
+    def test_empty_is_auto(self):
         s = _wrapper("", model=True)
-        self.assertIsNone(s._parse_analyzers(_FakeAnalyzerEnum))
+        self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
+
+    def test_auto_inside_a_list_keeps_yara(self):
+        """M29: the v8 wizard saved "auto,llm", which ran the LLM alone."""
+        s = _wrapper("auto,llm", model=True)
+        self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
 
 
 class LLMBackendErrorClassifierTests(unittest.TestCase):

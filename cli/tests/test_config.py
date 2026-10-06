@@ -720,14 +720,15 @@ class TestDefaultConfig(unittest.TestCase):
     def test_default_skill_scanner_config(self):
         cfg = default_config()
         sc = cfg.scanners.skill_scanner
-        self.assertFalse(sc.use_llm)
+        # The recommended default: the quiet policy with the LLM judge.
+        self.assertTrue(sc.use_llm)
+        self.assertEqual(sc.policy, "quiet")
         self.assertFalse(sc.use_behavioral)
         self.assertFalse(sc.enable_meta)
         self.assertFalse(sc.use_trigger)
         self.assertFalse(sc.use_virustotal)
         self.assertFalse(sc.use_aidefense)
         self.assertEqual(sc.llm_consensus_runs, 0)
-        self.assertEqual(sc.policy, "permissive")
         self.assertTrue(sc.lenient)
 
     def test_default_mcp_scanner_config(self):

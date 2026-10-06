@@ -61,6 +61,7 @@ from defenseclaw.registries.ssrf import (
     pinned_getaddrinfo,
     resolve_and_pin,
 )
+from defenseclaw.scanner import settings
 from defenseclaw.scanner._llm_env import (
     inject_llm_env,
     litellm_model,
@@ -1197,16 +1198,20 @@ class MCPScannerWrapper:
         self._llm_skipped = ""
         start = time.monotonic()
 
-        if is_local:
-            all_findings = self._scan_local(scanner, server_entry, analyzers)
-        elif pinned_target is not None:
-            # Pin the SDK's DNS resolution to the IP we vetted above so a
-            # rebind cannot redirect the connect to an internal address.
-            host, port, ip = pinned_target
-            with pinned_getaddrinfo(host, port, ip):
+        # Settings come from config (sdk_config above); inherited
+        # MCP_SCANNER_* / SKILL_SCANNER_* / VIRUSTOTAL_* / AI_DEFENSE_*
+        # shell variables never reach the SDK or a scanned stdio server.
+        with settings.scanner_env({}):
+            if is_local:
+                all_findings = self._scan_local(scanner, server_entry, analyzers)
+            elif pinned_target is not None:
+                # Pin the SDK's DNS resolution to the IP we vetted above so a
+                # rebind cannot redirect the connect to an internal address.
+                host, port, ip = pinned_target
+                with pinned_getaddrinfo(host, port, ip):
+                    all_findings = self._scan_remote(scanner, target, analyzers)
+            else:
                 all_findings = self._scan_remote(scanner, target, analyzers)
-        else:
-            all_findings = self._scan_remote(scanner, target, analyzers)
 
         elapsed = time.monotonic() - start
         result = self._convert(all_findings, target, elapsed)
@@ -1217,38 +1222,22 @@ class MCPScannerWrapper:
     def _parse_analyzers(self, analyzer_enum_cls: type) -> list | None:
         """Resolve configured analyzer names into SDK enum values.
 
-        Selection is *readiness-driven* via the ``"auto"`` sentinel. ``auto``
-        means "run YARA always, and add the LLM analyzer only when a
-        model and its required authentication are available for this scanner".
-        Local providers need no key, and Bedrock may use its AWS credential
-        chain. This lets the unified LLM lane be default-on without making a
-        missing optional credential fail the entire scan. With
-        ``MCPScannerConfig.analyzers`` and the Go parity default set to auto, every
-        scan picks YARA+LLM when the LLM lane is usable and YARA-only otherwise.
-
-        An explicit comma-separated list (``yara`` / ``yara,llm,api`` / …)
-        is honoured verbatim as a local-only escape hatch — ``yara`` keeps
-        a scan YARA-only even when a model is configured. An empty value
-        preserves the legacy "let the SDK run every analyzer" meaning
-        (``None``) so deliberately blanking the field is not silently
-        narrowed.
+        ``auto`` (also ``""`` and an empty list) is readiness-driven: YARA
+        always, plus the LLM analyzer when a model and its authentication are
+        available, so a missing optional credential never fails the scan.
+        An explicit list is honoured as given; ``auto`` inside a list stands
+        for YARA (:func:`settings.normalize_mcp_analyzers`), so the
+        ``auto,llm`` the v8 setup wizard wrote no longer drops YARA.
         """
         cfg = self.config
-        raw = (cfg.analyzers or "").strip()
-        if not raw:
-            return None
-
         analyzer_map = {e.value: e for e in analyzer_enum_cls}
-
-        if raw.lower() == "auto":
+        names = settings.normalize_mcp_analyzers(cfg.analyzers)
+        if not names:
             return self._auto_analyzers(analyzer_map)
 
         valid_names = sorted(analyzer_map.keys())
         analyzers = []
-        for name in raw.split(","):
-            name = name.strip().lower()
-            if not name:
-                continue
+        for name in names:
             if name in analyzer_map:
                 analyzers.append(analyzer_map[name])
             else:
@@ -1258,11 +1247,10 @@ class MCPScannerWrapper:
                 )
         if not analyzers:
             print(
-                f"warning: no valid analyzers after parsing "
-                f"{cfg.analyzers!r}, falling back to all analyzers",
+                f"warning: no valid analyzers in {cfg.analyzers!r}; using the auto set",
                 file=sys.stderr,
             )
-            return None
+            return self._auto_analyzers(analyzer_map)
         return analyzers
 
     def _auto_analyzers(self, analyzer_map: dict) -> list | None:

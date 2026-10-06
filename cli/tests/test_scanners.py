@@ -185,8 +185,8 @@ class TestMCPScannerWrapper(unittest.TestCase):
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper._convert")
     @patch("defenseclaw.scanner.mcp.asyncio.run")
-    def test_all_invalid_analyzers_falls_back_to_none(self, mock_asyncio_run, mock_convert):
-        """When every analyzer name is invalid, fall back to all analyzers (None)."""
+    def test_all_invalid_analyzers_fall_back_to_auto(self, mock_asyncio_run, mock_convert):
+        """When every analyzer name is invalid, fall back to the auto set."""
         from datetime import datetime, timezone
         from io import StringIO
 
@@ -214,7 +214,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
                 scanner.scan("http://localhost:3000")
 
         output = captured.getvalue()
-        self.assertIn("falling back to all analyzers", output)
+        self.assertIn("using the auto set", output)
 
         call_args = mock_asyncio_run.call_args
         coro = call_args[0][0]
@@ -341,41 +341,6 @@ class TestSkillScannerWrapper(unittest.TestCase):
         from defenseclaw.scanner.skill import SkillScannerWrapper
         s = SkillScannerWrapper(SkillScannerConfig())
         self.assertEqual(s.name(), "skill-scanner")
-
-    def test_inject_env_sets_vars(self):
-        from defenseclaw.config import InspectLLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-
-        llm = InspectLLMConfig(api_key="test-key-value", model="gpt-4")
-        s = SkillScannerWrapper(SkillScannerConfig(), llm)
-
-        env_backup = {}
-        for k in ["SKILL_SCANNER_LLM_API_KEY", "SKILL_SCANNER_LLM_MODEL"]:
-            if k in os.environ:
-                env_backup[k] = os.environ.pop(k)
-
-        try:
-            s._inject_env()
-            self.assertEqual(os.environ.get("SKILL_SCANNER_LLM_API_KEY"), "test-key-value")
-            self.assertEqual(os.environ.get("SKILL_SCANNER_LLM_MODEL"), "gpt-4")
-        finally:
-            for k in ["SKILL_SCANNER_LLM_API_KEY", "SKILL_SCANNER_LLM_MODEL"]:
-                os.environ.pop(k, None)
-            os.environ.update(env_backup)
-
-    def test_inject_env_does_not_override_existing(self):
-        from defenseclaw.config import InspectLLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-
-        llm = InspectLLMConfig(api_key="new-key")
-        s = SkillScannerWrapper(SkillScannerConfig(), llm)
-
-        os.environ["SKILL_SCANNER_LLM_API_KEY"] = "original-key"
-        try:
-            s._inject_env()
-            self.assertEqual(os.environ["SKILL_SCANNER_LLM_API_KEY"], "original-key")
-        finally:
-            del os.environ["SKILL_SCANNER_LLM_API_KEY"]
 
     def test_convert_empty_result(self):
         from defenseclaw.config import SkillScannerConfig
@@ -852,6 +817,20 @@ class TestMCPScannerCommonConfigs(unittest.TestCase):
         self.assertEqual(captured["llm_base_url"], "https://my-azure.openai.azure.com")
 
 
+class TestSkillScannerEnvFromConfig(unittest.TestCase):
+    def test_scanner_env_config_wins_and_drops_shell_values(self):
+        """M31: a shell SKILL_SCANNER_LLM_MODEL never changes a scan."""
+        from defenseclaw.scanner.settings import scanner_env
+
+        shell = {"SKILL_SCANNER_LLM_MODEL": "other", "ENABLE_LLM_ANALYZER": "1", "VIRUSTOTAL_API_KEY": "shell"}
+        with patch.dict(os.environ, shell):
+            with scanner_env({"SKILL_SCANNER_LLM_MODEL": "anthropic/claude-sonnet-5-5"}):
+                self.assertEqual(os.environ["SKILL_SCANNER_LLM_MODEL"], "anthropic/claude-sonnet-5-5")
+                self.assertNotIn("ENABLE_LLM_ANALYZER", os.environ)
+                self.assertNotIn("VIRUSTOTAL_API_KEY", os.environ)
+            self.assertEqual(os.environ["SKILL_SCANNER_LLM_MODEL"], "other")
+
+
 class TestSkillScannerCommonConfigs(unittest.TestCase):
     """Tests for SkillScannerWrapper using shared InspectLLM and CiscoAIDefense configs."""
 
@@ -863,55 +842,6 @@ class TestSkillScannerCommonConfigs(unittest.TestCase):
         self.assertEqual(s.inspect_llm.provider, "")
         self.assertEqual(s.cisco_ai_defense.api_key, "")
 
-    def test_inject_env_uses_inspect_llm(self):
-        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-
-        llm = InspectLLMConfig(api_key="shared-llm-key", model="gpt-4o")
-        aid = CiscoAIDefenseConfig(api_key="shared-aid-key", api_key_env="")
-        s = SkillScannerWrapper(SkillScannerConfig(), llm, aid)
-
-        for k in ["SKILL_SCANNER_LLM_API_KEY", "SKILL_SCANNER_LLM_MODEL", "AI_DEFENSE_API_KEY"]:
-            os.environ.pop(k, None)
-
-        try:
-            s._inject_env()
-            self.assertEqual(os.environ.get("SKILL_SCANNER_LLM_API_KEY"), "shared-llm-key")
-            self.assertEqual(os.environ.get("SKILL_SCANNER_LLM_MODEL"), "gpt-4o")
-            self.assertEqual(os.environ.get("AI_DEFENSE_API_KEY"), "shared-aid-key")
-        finally:
-            for k in ["SKILL_SCANNER_LLM_API_KEY", "SKILL_SCANNER_LLM_MODEL", "AI_DEFENSE_API_KEY"]:
-                os.environ.pop(k, None)
-
-    def test_inject_env_cisco_resolved_from_env_var(self):
-        from defenseclaw.config import CiscoAIDefenseConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-
-        aid = CiscoAIDefenseConfig(api_key="direct", api_key_env="TEST_CISCO_RESOLVE_XYZ")
-        os.environ["TEST_CISCO_RESOLVE_XYZ"] = "env-resolved"
-        os.environ.pop("AI_DEFENSE_API_KEY", None)
-
-        try:
-            s = SkillScannerWrapper(SkillScannerConfig(), cisco_ai_defense=aid)
-            s._inject_env()
-            self.assertEqual(os.environ.get("AI_DEFENSE_API_KEY"), "env-resolved")
-        finally:
-            os.environ.pop("TEST_CISCO_RESOLVE_XYZ", None)
-            os.environ.pop("AI_DEFENSE_API_KEY", None)
-
-    def test_inject_env_virustotal_still_from_scanner_config(self):
-        from defenseclaw.config import SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-
-        cfg = SkillScannerConfig(virustotal_api_key="vt-key-abc")
-        s = SkillScannerWrapper(cfg)
-
-        os.environ.pop("VIRUSTOTAL_API_KEY", None)
-        try:
-            s._inject_env()
-            self.assertEqual(os.environ.get("VIRUSTOTAL_API_KEY"), "vt-key-abc")
-        finally:
-            os.environ.pop("VIRUSTOTAL_API_KEY", None)
 
 
 if __name__ == "__main__":

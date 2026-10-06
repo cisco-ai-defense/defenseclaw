@@ -1754,7 +1754,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("skill-scanner:", result.output)
-        self.assertIn("policy=permissive", result.output)
+        self.assertIn("policy=quiet", result.output)
         self.assertIn("lenient=True", result.output)
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
@@ -1812,9 +1812,9 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
         self.assertNotIn("scanners", raw)
 
         effective = load().scanners
-        self.assertEqual(effective.skill_scanner.policy, "permissive")
+        self.assertEqual(effective.skill_scanner.policy, "quiet")
         self.assertTrue(effective.skill_scanner.lenient)
-        self.assertFalse(effective.skill_scanner.use_llm)
+        self.assertTrue(effective.skill_scanner.use_llm)
         self.assertEqual(effective.mcp_scanner.analyzers, "auto")
         self.assertFalse(effective.mcp_scanner.scan_prompts)
 

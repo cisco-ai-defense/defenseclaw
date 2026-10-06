@@ -38,7 +38,9 @@ func TestMCPScanner_BuildArgs_Default(t *testing.T) {
 
 func TestMCPScanner_BuildArgs_AllKnobs(t *testing.T) {
 	cfg := config.MCPScannerConfig{
-		Analyzers:        []string{"yara", "llm"},
+		// "auto" inside a list stands for YARA (the v8 wizard wrote
+		// "auto,llm", which used to drop YARA).
+		Analyzers:        []string{"auto", "llm"},
 		ScanPrompts:      true,
 		ScanResources:    true,
 		ScanInstructions: true,

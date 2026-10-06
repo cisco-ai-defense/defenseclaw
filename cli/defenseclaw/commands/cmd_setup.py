@@ -126,6 +126,7 @@ from defenseclaw.platform_support import (
     local_shell_stacks_supported,
 )
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
+from defenseclaw.scanner import settings as scanner_settings
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
 _checkbox_key_name = terminal_checkbox.checkbox_key_name
@@ -699,6 +700,11 @@ _WIZARD_LLM_PROVIDERS = [
     "lm_studio",
 ]
 
+# The scanner wizards' --llm-provider choices: every wizard provider (the
+# judge routes by its LiteLLM model prefix) plus an OpenAI-shaped endpoint.
+_SCANNER_LLM_PROVIDERS = (*_WIZARD_LLM_PROVIDERS, "openai-compatible")
+_SCANNER_SEVERITIES = ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
 
 # --------------------------------------------------------------------------
 # `defenseclaw setup migrate-llm`
@@ -1233,19 +1239,33 @@ def setup_llm(
 @click.option("--use-trigger/--no-use-trigger", default=None, help="Enable (or disable) the trigger analyzer")
 @click.option("--use-virustotal/--no-use-virustotal", default=None, help="Enable (or disable) the VirusTotal scanner")
 @click.option("--use-aidefense/--no-use-aidefense", default=None, help="Enable (or disable) the AI Defense analyzer")
+@click.option("--use-osv/--no-use-osv", default=None, help="Enable (or disable) OSV dependency checks")
 @click.option(
     "--llm-provider",
     default=None,
-    type=click.Choice(["anthropic", "openai"]),
-    help="LLM provider (anthropic or openai)",
+    type=click.Choice(list(_SCANNER_LLM_PROVIDERS)),
+    help="Judge LLM provider (any `setup llm` provider, or openai-compatible with --llm-base-url)",
 )
 @click.option("--llm-model", default=None, help="LLM model name")
+@click.option("--llm-base-url", default=None, help="Base URL for openai-compatible and vllm judges")
 @click.option("--llm-consensus-runs", type=int, default=None, help="LLM consensus runs (0=disabled)")
 @click.option(
     "--policy",
     default=None,
-    type=click.Choice(["strict", "balanced", "permissive", "none"], case_sensitive=False),
-    help="Scan policy preset (strict, balanced, permissive, none)",
+    type=click.Choice(list(scanner_settings.POLICY_PRESETS), case_sensitive=False),
+    help="Scan policy preset (recommended: quiet)",
+)
+@click.option(
+    "--fail-on-severity",
+    default=None,
+    type=click.Choice(_SCANNER_SEVERITIES, case_sensitive=False),
+    help="Findings at or above this severity block (recommended: HIGH)",
+)
+@click.option(
+    "--review-queue-min",
+    default=None,
+    type=click.Choice(_SCANNER_SEVERITIES, case_sensitive=False),
+    help="Findings from this severity up to the gate go to review (recommended: MEDIUM)",
 )
 @click.option("--lenient/--no-lenient", default=None, help="Tolerate malformed skills (or fail them)")
 @click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
@@ -1259,18 +1279,23 @@ def setup_skill_scanner(
     use_trigger,
     use_virustotal,
     use_aidefense,
+    use_osv,
     llm_provider,
     llm_model,
+    llm_base_url,
     llm_consensus_runs,
     policy,
+    fail_on_severity,
+    review_queue_min,
     lenient,
     verify,
     non_interactive,
 ) -> None:
     """Configure skill-scanner analyzers, API keys, and policy.
 
-    Interactively configure how skill-scanner runs. Enables LLM analysis,
-    behavioral dataflow analysis, meta-analyzer filtering, and more.
+    The recommended setup is the default: the quiet policy with the LLM
+    judge, block at HIGH and review MEDIUM and above. The judge uses the
+    top-level ``llm:`` block. VirusTotal, AI Defense and OSV are optional.
 
     LLM settings land in the unified top-level ``llm:`` block (see
     ``Config.resolve_llm`` for the merge semantics) so skill, MCP,
@@ -1293,23 +1318,31 @@ def setup_skill_scanner(
         if use_trigger is not None:
             sc.use_trigger = use_trigger
         if use_virustotal is not None:
-            sc.use_virustotal = use_virustotal
-            if use_virustotal and not sc.virustotal_api_key_env:
-                sc.virustotal_api_key_env = "VIRUSTOTAL_API_KEY"
+            _set_skill_virustotal(sc, use_virustotal)
         if use_aidefense is not None:
-            sc.use_aidefense = use_aidefense
-        if llm_provider is not None:
-            llm.provider = llm_provider
-        if llm_model is not None:
-            llm.model = llm_model
+            _set_skill_aidefense(sc, use_aidefense)
+        if use_osv is not None:
+            sc.analyzers.osv.enabled = use_osv
+        _apply_scanner_llm_flags(llm, llm_provider, llm_model, llm_base_url)
         if llm_consensus_runs is not None:
             sc.llm_consensus_runs = llm_consensus_runs
         if policy is not None:
-            sc.policy = "" if policy.lower() == "none" else policy.lower()
+            sc.policy = policy.lower()
+        if fail_on_severity is not None:
+            sc.fail_on_severity = fail_on_severity.upper()
+        if review_queue_min is not None:
+            sc.review_queue_min = review_queue_min.upper()
         if lenient is not None:
             sc.lenient = lenient
     else:
         _interactive_setup(sc, llm, aid, app.cfg)
+
+    gate = scanner_settings.effective_fail_on_severity(sc)
+    review = scanner_settings.effective_review_queue_min(sc)
+    if _SCANNER_SEVERITIES.index(review) > _SCANNER_SEVERITIES.index(gate):
+        raise click.UsageError(
+            f"--review-queue-min {review} is above --fail-on-severity {gate}; pick a review level at or below the gate"
+        )
 
     # In non-interactive mode, a successful write to cfg.llm should
     # still scrub the legacy inspect_llm block so the YAML converges on
@@ -1319,6 +1352,12 @@ def setup_skill_scanner(
 
     app.cfg.save()
     _print_summary(sc, llm, aid)
+    issue = scanner_settings.recommended_settings_issue(app.cfg)
+    if issue:
+        click.echo(f"  {ux.dim('Recommended:')} {issue}")
+    if (llm.provider_prefix() or "") == "vllm":
+        click.echo(f"  {ux.dim('vLLM:')} serve the judge model with")
+        click.echo(f"    {scanner_settings.VLLM_SERVE_HINT}")
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _check_virustotal, _DoctorResult
@@ -1336,8 +1375,7 @@ def setup_skill_scanner(
         parts = [f"use_llm={sc.use_llm}", f"use_behavioral={sc.use_behavioral}", f"enable_meta={sc.enable_meta}"]
         if llm.provider:
             parts.append(f"llm_provider={llm.provider}")
-        if sc.policy:
-            parts.append(f"policy={sc.policy}")
+        parts.append(f"policy={scanner_settings.effective_policy(sc)}")
         # The scanner config is local; a stopped gateway skips only the
         # audit event, with one note, instead of failing a saved change (GAP-1970).
         _log_setup_action(app, ACTION_SETUP_SKILL_SCANNER, " ".join(parts), allow_offline=True)
@@ -1356,12 +1394,9 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     click.echo(f"  {ux.dim('Binary:')} {sc.binary}")
     click.echo()
 
-    sc.use_behavioral = click.confirm("  Enable behavioral analyzer (dataflow analysis)?", default=sc.use_behavioral)
-    sc.use_llm = click.confirm("  Enable LLM analyzer (semantic analysis)?", default=sc.use_llm)
-
+    sc.use_llm = click.confirm("  Use the LLM judge (recommended)?", default=sc.use_llm)
     if sc.use_llm:
         _configure_llm(cfg, data_dir)
-        sc.enable_meta = click.confirm("  Enable meta-analyzer (false positive filtering)?", default=sc.enable_meta)
         sc.llm_consensus_runs = click.prompt(
             "  LLM consensus runs (0 = disabled)",
             type=int,
@@ -1373,32 +1408,34 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     # remove the key they should edit ~/.defenseclaw/.env directly or
     # run `defenseclaw setup migrate-llm --clear`.
 
-    sc.use_trigger = click.confirm("  Enable trigger analyzer (vague description checks)?", default=sc.use_trigger)
-    sc.use_virustotal = click.confirm("  Enable VirusTotal binary scanner?", default=sc.use_virustotal)
-    if sc.use_virustotal:
-        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", sc.virustotal_api_key, data_dir)
-        sc.virustotal_api_key = ""
-        sc.virustotal_api_key_env = "VIRUSTOTAL_API_KEY"
-    else:
-        sc.virustotal_api_key = ""
-        sc.virustotal_api_key_env = ""
-
-    sc.use_aidefense = click.confirm("  Enable Cisco AI Defense analyzer?", default=sc.use_aidefense)
-    if sc.use_aidefense:
-        _configure_cisco_ai_defense(aid, data_dir)
-    else:
-        aid.api_key = ""
-        aid.api_key_env = ""
-
     click.echo()
-    valid_policies = ["strict", "balanced", "permissive", "none"]
-    val = click.prompt(
-        "  Scan policy preset",
-        type=click.Choice(valid_policies),
-        default=sc.policy if sc.policy in valid_policies else "none",
+    current = scanner_settings.effective_policy(sc)
+    presets = list(scanner_settings.POLICY_PRESETS)
+    sc.policy = click.prompt(
+        "  Scan policy preset (quiet is recommended)",
+        type=click.Choice(presets),
+        default=current if current in presets else scanner_settings.DEFAULT_POLICY,
         show_default=True,
     )
-    sc.policy = "" if val == "none" else val
+    sc.use_behavioral = click.confirm("  Enable behavioral analyzer (dataflow analysis)?", default=sc.use_behavioral)
+    sc.use_trigger = click.confirm("  Enable trigger analyzer (vague description checks)?", default=sc.use_trigger)
+
+    click.echo()
+    click.echo(f"  {ux.dim('Optional analyzers (off by default; each sends data to a remote service):')}")
+    _set_skill_virustotal(
+        sc, click.confirm("  Enable VirusTotal binary scanner?", default=scanner_settings.virustotal_enabled(sc))
+    )
+    if sc.analyzers.virustotal.enabled:
+        _prompt_and_save_secret("VIRUSTOTAL_API_KEY", sc.virustotal_api_key, data_dir)
+        sc.virustotal_api_key = ""
+    _set_skill_aidefense(
+        sc, click.confirm("  Enable Cisco AI Defense analyzer?", default=scanner_settings.aidefense_enabled(sc))
+    )
+    if sc.analyzers.aidefense.enabled:
+        _configure_cisco_ai_defense(aid, data_dir)
+    sc.analyzers.osv.enabled = click.confirm(
+        "  Enable OSV dependency checks?", default=scanner_settings.osv_enabled(sc)
+    )
 
     sc.lenient = click.confirm("  Lenient mode (tolerate malformed skills)?", default=sc.lenient)
 
@@ -2686,20 +2723,58 @@ def _print_summary(sc, llm, aid) -> None:
             rows.append(("llm", "base_url", llm.base_url))
     if sc.use_trigger:
         rows.append(("scanners.skill_scanner", "use_trigger", "true"))
-    if sc.use_virustotal:
-        rows.append(("scanners.skill_scanner", "use_virustotal", "true"))
-        vt_key = sc.resolved_virustotal_api_key()
-        if vt_key:
-            rows.append(("scanners.skill_scanner", "virustotal_api_key_env", sc.virustotal_api_key_env or "(in .env)"))
-    if sc.use_aidefense:
-        rows.append(("scanners.skill_scanner", "use_aidefense", "true"))
+    if scanner_settings.virustotal_enabled(sc):
+        rows.append(("scanners.skill_scanner", "analyzers.virustotal", "on"))
+    if scanner_settings.aidefense_enabled(sc):
+        rows.append(("scanners.skill_scanner", "analyzers.aidefense", "on"))
         rows.append(("cisco_ai_defense", "endpoint", aid.endpoint))
-    if sc.policy:
-        rows.append(("scanners.skill_scanner", "policy", sc.policy))
+    if scanner_settings.osv_enabled(sc):
+        rows.append(("scanners.skill_scanner", "analyzers.osv", "on"))
+    rows.append(("scanners.skill_scanner", "policy", scanner_settings.effective_policy(sc)))
+    rows.append(("scanners.skill_scanner", "fail_on_severity", scanner_settings.effective_fail_on_severity(sc)))
+    rows.append(("scanners.skill_scanner", "review_queue_min", scanner_settings.effective_review_queue_min(sc)))
     if sc.lenient:
         rows.append(("scanners.skill_scanner", "lenient", "true"))
 
     _echo_summary_rows(rows)
+
+
+def _apply_scanner_llm_flags(llm, provider: str | None, model: str | None, base_url: str | None) -> None:
+    """Write the scanner wizards' judge flags to the shared ``llm:`` block.
+
+    ``openai-compatible`` is an OpenAI-shaped endpoint (a gateway or a
+    proxy) and needs ``--llm-base-url``; ``vllm`` defaults to the local
+    server's URL.
+    """
+    if provider == "openai-compatible":
+        if not (base_url or llm.base_url):
+            raise click.UsageError("--llm-provider openai-compatible needs --llm-base-url")
+        llm.provider = "openai"
+    elif provider is not None:
+        llm.provider = provider
+        if provider == "vllm" and not (base_url or llm.base_url):
+            base_url = _LOCAL_LLM_DEFAULT_BASE_URL["vllm"]
+    if model is not None:
+        llm.model = model
+    if base_url is not None:
+        llm.base_url = base_url
+
+
+def _set_skill_virustotal(sc, enabled: bool) -> None:
+    """analyzers.virustotal; the v8 use_virustotal/key fields are cleared."""
+    sc.analyzers.virustotal.enabled = enabled
+    if enabled and not sc.analyzers.virustotal.api_key_env:
+        sc.analyzers.virustotal.api_key_env = sc.virustotal_api_key_env or "VIRUSTOTAL_API_KEY"
+    if not enabled:
+        sc.analyzers.virustotal.api_key_env = ""
+    sc.use_virustotal = False
+    sc.virustotal_api_key_env = ""
+
+
+def _set_skill_aidefense(sc, enabled: bool) -> None:
+    """analyzers.aidefense; the v8 use_aidefense field is cleared."""
+    sc.analyzers.aidefense.enabled = enabled
+    sc.use_aidefense = False
 
 
 # ---------------------------------------------------------------------------
@@ -2708,12 +2783,16 @@ def _print_summary(sc, llm, aid) -> None:
 
 
 @setup.command("mcp-scanner")
-@click.option("--analyzers", default=None, help="Comma-separated analyzer list (yara,api,llm,behavioral,readiness)")
+@click.option(
+    "--analyzers",
+    default=None,
+    help="Comma-separated analyzer list (yara,api,llm,behavioral,readiness); auto picks YARA plus a ready LLM",
+)
 @click.option(
     "--llm-provider",
     default=None,
-    type=click.Choice(["anthropic", "openai"]),
-    help="LLM provider (anthropic or openai)",
+    type=click.Choice(list(_SCANNER_LLM_PROVIDERS)),
+    help="Judge LLM provider (any `setup llm` provider, or openai-compatible)",
 )
 @click.option("--llm-model", default=None, help="LLM model for semantic analysis")
 @click.option("--api-endpoint", default=None, help="Cisco AI Defense API URL for the api analyzer")
@@ -2761,11 +2840,10 @@ def setup_mcp_scanner(
 
     if non_interactive:
         if analyzers is not None:
-            mc.analyzers = analyzers
-        if llm_provider is not None:
-            llm.provider = llm_provider
-        if llm_model is not None:
-            llm.model = llm_model
+            mc.analyzers = ",".join(scanner_settings.normalize_mcp_analyzers(analyzers)) or "auto"
+        # The judge's base URL is set with `setup skill-scanner --llm-base-url`
+        # or `setup llm`; both scanners share the top-level llm: block.
+        _apply_scanner_llm_flags(llm, llm_provider, llm_model, None)
         # The TUI's "Use a remote scan API" goal sends these; without them
         # the command failed with "No such option: --api-endpoint" (GAP-2529).
         if api_endpoint is not None:
@@ -2803,7 +2881,7 @@ def setup_mcp_scanner(
             click.echo()
 
     if app.logger:
-        parts = [f"analyzers={mc.analyzers or 'default'}"]
+        parts = [f"analyzers={mc.analyzers or 'auto'}"]
         if llm.provider:
             parts.append(f"llm_provider={llm.provider}")
         if llm.model:
@@ -2858,23 +2936,29 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
-    mc.analyzers = click.prompt(
-        "  Analyzers (comma-separated, e.g. yara,behavioral,readiness)",
-        default=mc.analyzers or "yara",
+    raw = click.prompt(
+        "  Analyzers (comma-separated, e.g. yara,llm,behavioral; auto = YARA plus a ready LLM)",
+        default=",".join(scanner_settings.normalize_mcp_analyzers(mc.analyzers)) or "auto",
     )
+    # "auto" inside a list stands for YARA: appending llm to "auto" used to
+    # save "auto,llm", which ran the LLM alone and dropped YARA.
+    names = scanner_settings.normalize_mcp_analyzers(raw)
 
     use_llm = click.confirm("  Enable LLM analyzer?", default=bool(llm.model))
     if use_llm:
         _configure_llm(cfg, cfg.data_dir)
-        if "llm" not in mc.analyzers:
-            mc.analyzers = f"{mc.analyzers},llm" if mc.analyzers else "llm"
+        if names and "llm" not in names:
+            names.append("llm")
 
     click.echo()
     use_api = click.confirm("  Enable API analyzer (Cisco AI Defense)?", default=False)
     if use_api:
         _configure_cisco_ai_defense(aid, cfg.data_dir)
-        if "api" not in mc.analyzers:
-            mc.analyzers = f"{mc.analyzers},api" if mc.analyzers else "api"
+        if not names:
+            names = ["yara", "llm"] if use_llm else ["yara"]
+        if "api" not in names:
+            names.append("api")
+    mc.analyzers = ",".join(names) or "auto"
 
     click.echo()
     mc.scan_prompts = click.confirm("  Scan MCP prompts?", default=mc.scan_prompts)
@@ -2888,7 +2972,7 @@ def _print_mcp_summary(mc, llm, aid) -> None:
     click.echo()
 
     rows: list[tuple[str, str, str]] = [
-        ("scanners.mcp_scanner", "analyzers", mc.analyzers or "(all)"),
+        ("scanners.mcp_scanner", "analyzers", mc.analyzers or "auto"),
     ]
     if llm.provider:
         rows.append(("llm", "provider", llm.provider))

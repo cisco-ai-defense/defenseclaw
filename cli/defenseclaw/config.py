@@ -1246,14 +1246,16 @@ class MCPScannerTimeouts:
 @dataclass
 class SkillScannerConfig:
     binary: str = "skill-scanner"
-    use_llm: bool = False
+    # The recommended default: the quiet policy with the LLM judge (it runs
+    # when the top-level llm: block resolves a model; see scanner/settings.py).
+    use_llm: bool = True
     use_behavioral: bool = False
     enable_meta: bool = False
     use_trigger: bool = False
     use_virustotal: bool = False
     use_aidefense: bool = False
     llm_consensus_runs: int = 0
-    policy: str = "permissive"
+    policy: str = "quiet"
     lenient: bool = True
     # LLM overrides the top-level ``llm:`` block for the skill scanner.
     # Unset fields inherit from ``Config.llm`` via
@@ -6685,14 +6687,14 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(
                 binary=ss_raw.get("binary", "skill-scanner"),
-                use_llm=ss_raw.get("use_llm", False),
+                use_llm=ss_raw.get("use_llm", True),
                 use_behavioral=ss_raw.get("use_behavioral", False),
                 enable_meta=ss_raw.get("enable_meta", False),
                 use_trigger=ss_raw.get("use_trigger", False),
                 use_virustotal=ss_raw.get("use_virustotal", False),
                 use_aidefense=ss_raw.get("use_aidefense", False),
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
-                policy=ss_raw.get("policy", "permissive"),
+                policy=ss_raw.get("policy", "quiet"),
                 lenient=ss_raw.get("lenient", True),
                 llm=_merge_llm(ss_raw.get("llm")),
                 virustotal_api_key=ss_raw.get("virustotal_api_key", ""),

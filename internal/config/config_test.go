@@ -1581,8 +1581,8 @@ func TestSkillScannerConfigNoLLMFields(t *testing.T) {
 	if sc.Binary != "skill-scanner" {
 		t.Errorf("expected 'skill-scanner', got %q", sc.Binary)
 	}
-	if sc.Policy != "permissive" {
-		t.Errorf("expected default policy 'permissive', got %q", sc.Policy)
+	if sc.Policy != "quiet" || !sc.UseLLM {
+		t.Errorf("expected the recommended default (policy quiet, judge on), got policy %q use_llm %v", sc.Policy, sc.UseLLM)
 	}
 	if !sc.Lenient {
 		t.Error("expected default lenient=true")
@@ -1597,8 +1597,8 @@ func TestMCPScannerConfigNoLLMFields(t *testing.T) {
 	if mc.Binary != "mcp-scanner" {
 		t.Errorf("expected 'mcp-scanner', got %q", mc.Binary)
 	}
-	if mc.AnalyzersArg() != "auto" {
-		t.Errorf("expected default analyzers 'auto', got %q", mc.Analyzers)
+	if mc.AnalyzersArg() != "" {
+		t.Errorf("expected the auto analyzer set (no --analyzers), got %q", mc.Analyzers)
 	}
 	if mc.ScanPrompts {
 		t.Error("expected default scan_prompts=false")

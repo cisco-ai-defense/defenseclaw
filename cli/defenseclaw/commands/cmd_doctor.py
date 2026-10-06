@@ -2469,85 +2469,123 @@ def _scanner_repair_hint() -> str:
     )
 
 
+def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
+    """``(status, note)`` for the installed scanner distribution's version."""
+    import importlib.metadata as importlib_metadata
+
+    try:
+        installed = importlib_metadata.version(dist)
+    except importlib_metadata.PackageNotFoundError:
+        return "fail", f"{dist} is not installed; {_scanner_repair_hint()}"
+    if installed != expected:
+        return "warn", f"{dist} {installed} (this release pins {expected}); {_scanner_repair_hint()}"
+    return "pass", f"{dist} {installed}"
+
+
 def _check_scanners(cfg, r: _DoctorResult) -> None:
-    bins = [
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
-    ]
-    for name, binary in bins:
-        path = resolve_scanner_binary(binary)
-        if not path:
-            _emit(
-                "fail",
-                f"Scanner: {name}",
-                f"'{binary}' not found in the managed environment or on PATH",
-                r=r,
-            )
-            continue
-        if name != "skill-scanner":
-            _emit("pass", f"Scanner: {name}", path, r=r)
-            continue
-        probe_path = path
-        if os.name != "nt" and str(binary or "").strip() == "skill-scanner":
-            installed_launcher = os.path.abspath(os.path.expanduser("~/.local/bin/skill-scanner"))
-            if os.path.lexists(installed_launcher):
-                # Scanner resolution intentionally prefers the managed venv so
-                # internal calls cannot be shadowed by PATH. Doctor additionally
-                # exercises the documented POSIX launcher when it exists; that
-                # is where legacy pip-generated shebangs became stale.
-                probe_path = installed_launcher
-        try:
-            probe = subprocess.run(
-                [probe_path, "--version"],
-                capture_output=True,
-                text=True,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                env=trusted_system_subprocess_env(),
-                # The first run after an install compiles the scanner's
-                # modules and took longer than 10 s on a test host.
-                timeout=30.0,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            # Slow is not broken: a first start after an install or upgrade
-            # (files scanned on first use, modules cached) or a busy machine
-            # can exceed the budget. A scanner that cannot start fails below.
+    from defenseclaw.scanner import settings as scanner_settings
+
+    if sys.version_info < (3, 11):
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        for name in ("skill-scanner", "mcp-scanner"):
             _emit(
                 "warn",
                 f"Scanner: {name}",
-                f"{probe_path} did not answer --version within 30 s; the first start after an install or "
-                f"upgrade, or a busy machine, can take longer, so run `defenseclaw doctor` again, and if it "
-                f"keeps timing out, {_scanner_repair_hint()}",
+                f"skill and MCP scanning need Python 3.11+; this runtime is Python {version}",
                 r=r,
             )
-            continue
-        except OSError as exc:
-            _emit(
-                "fail",
-                f"Scanner: {name}",
-                f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
-                r=r,
-            )
-            continue
-        output = " ".join(
-            line.strip()
-            for line in ((probe.stdout or "") + "\n" + (probe.stderr or "")).splitlines()
-            if line.strip()
-        )[:300]
-        if probe.returncode != 0:
-            detail = f"{probe_path} failed --version (exit {probe.returncode})"
-            if output:
-                detail += f": {output}"
-            detail += "; " + _scanner_repair_hint()
-            _emit("fail", f"Scanner: {name}", detail, r=r)
-            continue
+        return
+
+    _check_skill_scanner_launcher(cfg, r, scanner_settings)
+    # The gateway scans MCP servers with `defenseclaw mcp scan`, the SDK in
+    # this environment, not a standalone mcp-scanner launcher.
+    status, note = _scanner_version_note(scanner_settings.MCP_SCANNER_DIST, scanner_settings.MCP_SCANNER_VERSION)
+    _emit(status, "Scanner: mcp-scanner", note, r=r)
+
+    issue = scanner_settings.recommended_settings_issue(cfg) if hasattr(cfg, "resolve_llm") else ""
+    if issue:
+        _emit("warn", "Scanner settings", issue, r=r)
+    elif hasattr(cfg, "resolve_llm"):
+        _emit("pass", "Scanner settings", "recommended: quiet policy with the LLM judge", r=r)
+
+
+def _check_skill_scanner_launcher(cfg, r: _DoctorResult, scanner_settings) -> None:
+    """The gateway runs the skill-scanner launcher; probe it and its version."""
+    name = "skill-scanner"
+    binary = getattr(cfg.scanners.skill_scanner, "binary", "") or "skill-scanner"
+    path = resolve_scanner_binary(binary)
+    if not path:
         _emit(
-            "pass",
+            "fail",
             f"Scanner: {name}",
-            f"{probe_path} ({output or 'launcher executed successfully'})",
+            f"'{binary}' not found in the managed environment or on PATH",
             r=r,
         )
+        return
+    probe_path = path
+    if os.name != "nt" and str(binary or "").strip() == "skill-scanner":
+        installed_launcher = os.path.abspath(os.path.expanduser("~/.local/bin/skill-scanner"))
+        if os.path.lexists(installed_launcher):
+            # Scanner resolution intentionally prefers the managed venv so
+            # internal calls cannot be shadowed by PATH. Doctor additionally
+            # exercises the documented POSIX launcher when it exists; that
+            # is where legacy pip-generated shebangs became stale.
+            probe_path = installed_launcher
+    try:
+        probe = subprocess.run(
+            [probe_path, "--version"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
+            # The first run after an install compiles the scanner's
+            # modules and took longer than 10 s on a test host.
+            timeout=30.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Slow is not broken: a first start after an install or upgrade
+        # (files scanned on first use, modules cached) or a busy machine
+        # can exceed the budget. A scanner that cannot start fails below.
+        _emit(
+            "warn",
+            f"Scanner: {name}",
+            f"{probe_path} did not answer --version within 30 s; the first start after an install or "
+            f"upgrade, or a busy machine, can take longer, so run `defenseclaw doctor` again, and if it "
+            f"keeps timing out, {_scanner_repair_hint()}",
+            r=r,
+        )
+        return
+    except OSError as exc:
+        _emit(
+            "fail",
+            f"Scanner: {name}",
+            f"{probe_path} could not start: {exc}; {_scanner_repair_hint()}",
+            r=r,
+        )
+        return
+    output = " ".join(
+        line.strip()
+        for line in ((probe.stdout or "") + "\n" + (probe.stderr or "")).splitlines()
+        if line.strip()
+    )[:300]
+    if probe.returncode != 0:
+        detail = f"{probe_path} failed --version (exit {probe.returncode})"
+        if output:
+            detail += f": {output}"
+        detail += "; " + _scanner_repair_hint()
+        _emit("fail", f"Scanner: {name}", detail, r=r)
+        return
+    status, note = _scanner_version_note(
+        scanner_settings.SKILL_SCANNER_DIST, scanner_settings.SKILL_SCANNER_VERSION
+    )
+    _emit(
+        status,
+        f"Scanner: {name}",
+        f"{probe_path} ({output or 'launcher executed successfully'}); {note}",
+        r=r,
+    )
 
 
 def _gateway_fleet_expected_enabled(cfg) -> bool:
@@ -10116,13 +10154,15 @@ def _check_webhooks(cfg, r: _DoctorResult) -> None:
 
 
 def _check_virustotal(cfg, r: _DoctorResult) -> None:
+    from defenseclaw.scanner import settings as scanner_settings
+
     sc = cfg.scanners.skill_scanner
-    if not sc.use_virustotal:
+    if not scanner_settings.virustotal_enabled(sc):
         _emit("skip", "VirusTotal API", "not enabled", r=r)
         return
     vt_key = sc.resolved_virustotal_api_key()
     if not vt_key:
-        env_name = sc.virustotal_api_key_env or "VIRUSTOTAL_API_KEY"
+        env_name = scanner_settings.virustotal_key_env(sc)
         _emit(
             "warn",
             "VirusTotal API",
