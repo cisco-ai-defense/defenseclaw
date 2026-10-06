@@ -94,10 +94,10 @@ var identityFactsEnabled atomic.Bool
 
 func setIdentityFactsEnabled(v bool) { identityFactsEnabled.Store(v) }
 
-// identityLookupBlocking makes a cold directory lookup wait (up to its
-// budget) instead of answering from the cache only. It is on when a
-// guardrail profile assignment selects by group or user, the only consumer
-// that needs the facts on the first request.
+// identityLookupBlocking makes every request for an account whose directory
+// lookup has not resolved yet wait for it (up to its budget), not only the
+// request that started it. It is on when a guardrail profile assignment
+// selects by group or user, which needs the facts on every request.
 var identityLookupBlocking atomic.Bool
 
 func setIdentityLookupBlocking(v bool) { identityLookupBlocking.Store(v) }

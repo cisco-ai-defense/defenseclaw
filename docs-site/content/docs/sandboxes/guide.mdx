@@ -202,8 +202,10 @@ What setup does, in order:
    Linux. This edits `gateway.toml` with a timestamped backup and restarts
    the gateway. It lets whoever can call your local gateway (only you, over
    mTLS) ask for host mounts; agents cannot reach the gateway, and
-   DefenseClaw mounts only the folder you launch from. Say no, or pass
-   `--no-mounts`, and every run works on a copy instead.
+   DefenseClaw mounts only the folder you launch from and the read-only
+   settings Claude Code and Codex sandboxes need. Say no, or pass
+   `--no-mounts`, and no Claude Code or Codex sandbox can start, a `--copy`
+   run included; other harnesses run on a copy.
 
    On a Mac, setup asks instead whether to run sandboxes in OpenShell
    MicroVMs (the default answer is yes, which `--yes` and
@@ -268,7 +270,7 @@ What setup does, in order:
 | --- | --- |
 | `--harness NAME` | A harness to set up; repeat it for more. It is added to `openshell.harnesses`, which keeps the harnesses set up before. Default: the harnesses in `openshell.harnesses`, else Claude Code and Codex. |
 | `--install-openshell` | Install OpenShell without asking. |
-| `--no-mounts` | Leave bind mounts off (Linux); every run works on a copy. A Mac always works on a copy. |
+| `--no-mounts` | Leave bind mounts off (Linux): no Claude Code or Codex sandbox can start, and other harnesses run on a copy. A Mac always works on a copy. |
 | `--wrappers` / `--no-wrappers` | Install the shell wrappers without asking, or never offer them. |
 | `--upstream-telemetry` | Keep OpenShell's anonymous usage telemetry on. On macOS setup leaves it on either way. |
 | `--skip-images` | Don't build images now; the first run builds its image. |

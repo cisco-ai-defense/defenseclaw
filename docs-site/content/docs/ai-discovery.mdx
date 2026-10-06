@@ -306,8 +306,9 @@ enabled:
 - `mode`, `include_shell_history`, `include_package_manifests` and
   `store_raw_local_paths` apply as usual.
 - Administrators read the per-user records on the host with
-  `defenseclaw-gateway enterprise linux discovery` or
-  `enterprise macos discovery` (root, read-only; `--user`, `--json`).
+  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
+  or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos
+  discovery` (root, read-only; `--user`, `--json`).
   On Windows, `defenseclaw.exe enterprise windows discovery` (elevated,
   read-only) shows the gateway's scan the same way.
 - Skills and MCP servers found this way are inventoried only: the managed
@@ -388,8 +389,9 @@ defenseclaw aibom scan --only ide_plugins
 ```
 
 A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
-or macOS host, `defenseclaw-gateway enterprise linux ide-plugins` (or
-`enterprise macos ide-plugins`) prints the managed gateway's inventory as
+or macOS host, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux
+ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
+enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the same `--user`, `--ide`, `--ai-only` and `--cursor` filters.
 On a managed Windows computer, `defenseclaw.exe enterprise windows
 ide-plugins` does the same from an elevated prompt.
@@ -397,8 +399,11 @@ ide-plugins` does the same from an elevated prompt.
 - `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's plugins,
   filtered by `user` (account name or ID), `ide` (product or family) and
   `ai_only`, a page at a time (`limit`, at most 1000, and `cursor` from the
-  previous page's `next_cursor`). Paths appear only as hashes.
-  `GET /api/v1/ai-usage` adds the plugin counts.
+  previous page's `next_cursor`). Paths appear only as hashes. `total` and
+  `counts` (plugins, AI, disabled, users, installations and per-IDE) describe
+  the rows the filters select across all pages, and with `ai_only` the
+  `installations` list keeps only the installations that hold an AI plugin;
+  `GET /api/v1/ai-usage` carries the same counts for the whole machine.
 - AIBOM reports the list in its `ide_plugins` category.
 - The TUI shows it under Inventory → **IDE plugins**.
 - Each change is exported as an `ide.plugin.discovered`, `ide.plugin.changed`

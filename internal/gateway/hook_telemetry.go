@@ -85,13 +85,6 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 // per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
 // escapes cannot forge fake audit rows or corrupt the operator's
 // terminal.
-//
-// Optional action override: when env.AuditActionOverride is set
-// (today: ActionConnectorHookSynthetic for synthetic
-// codex-notify-derived events), the override is used as the audit
-// row's action column instead of the canonical
-// ActionConnectorHook. Sinks that want to keep "1 row per
-// codex.notify in" should filter on action=connector-hook only.
 func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) error {
 	if a.logger == nil {
 		return fmt.Errorf("gateway: audit logger is unavailable")
@@ -106,9 +99,6 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
 	}
 	auditAction := string(audit.ActionConnectorHook)
-	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
-		auditAction = env.AuditActionOverride
-	}
 	jsonDetails, structured := renderHookAuditEnvelopePayload(env)
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
@@ -341,9 +331,8 @@ func (a *APIServer) effectiveRulePackDir(ctx context.Context, connector string) 
 }
 
 // stampHookEnvelopeIdentity fills the multi-connector identity fields on
-// a HookAuditEnvelope before it is logged. Shared by the live hook path
-// (finalizeAgentHook) and the synthetic codex-notify path so the two
-// cannot drift. connectorName is threaded explicitly from the request
+// a HookAuditEnvelope before finalizeAgentHook logs it. connectorName is
+// threaded explicitly from the request
 // entry point; StepIdx comes from the per-turn populator; Enforced
 // reflects an actual block; RulePackDir from the effective resolver.
 func (a *APIServer) stampHookEnvelopeIdentity(ctx context.Context, connectorName string, env *HookAuditEnvelope, req agentHookRequest, resp agentHookResponse) {

@@ -125,6 +125,15 @@ async def test_panel_renders_primary_content_at_80x24(tmp_path, name: str, key: 
             bar = app.query_one("#inventory-controls")
             button = app.query_one(f"#inventory-tab-{subtab}").region
             assert button.width > 0 and bar.region.contains_region(button), f"{subtab}: its button is off the bar"
+        if subtab == "ide_plugins":
+            # The card shows two of its lines here; PgDn reads the rest (GAP-0090).
+            await pilot.press("enter")
+            await pilot.pause()
+            detail = app.query_one("#detail-panel")
+            assert detail.max_scroll_y > 0 and "PgUp/PgDn scroll detail" in app.hint_text
+            await pilot.press("pagedown")
+            await pilot.pause()
+            assert detail.scroll_y > 0 and app.inventory_model.detail_open
         if table.row_count > 0:
             assert table.display, f"{name}: table has rows but is hidden"
             assert table.region.height > 0, f"{name}: table has no height"

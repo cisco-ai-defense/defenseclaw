@@ -2782,6 +2782,7 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 				// config, never a folder inside data_dir.
 				candidate.PolicyDir = layout.VendorPolicyDir
 			}
+			standalonePolicyDirDefault(candidate, dataDir, runtime.GOOS)
 		}
 	}
 	if !has("scanners", "codeguard") {

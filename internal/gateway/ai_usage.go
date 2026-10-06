@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/ideplugins"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // confidencePolicyMaxRequestBytes caps the body of
@@ -80,11 +81,6 @@ const (
 	idePluginsMaxLimit     = 1000
 )
 
-// handleAIUsageIDEPlugins serves GET /api/v1/ai-usage/ide-plugins: the
-// last full scan's IDE extensions and plugins, filtered by user (account
-// name or id), IDE product or family, and ai_only, a page at a time
-// (cursor is the opaque next_cursor of the previous page). Paths appear
-// only as hashes.
 // ideFamilyNamesProduct lists the IDE families whose name is also a product
 // token: a filter on one of these names that product, not its forks (--ide
 // vscode is VS Code, not Cursor).
@@ -104,17 +100,12 @@ func ideFilterMatches(ide, family, product string) bool {
 	return ide == family && !ideFamilyNamesProduct[family]
 }
 
-// accountFilterMatches reports whether a user filter selects a row: the
-// account id, the account name (DOMAIN\name on Windows) or the name without
-// its domain.
-func accountFilterMatches(user, id, name string) bool {
-	if user == "" || user == id || strings.EqualFold(user, name) {
-		return true
-	}
-	i := strings.LastIndex(name, `\`)
-	return i >= 0 && strings.EqualFold(user, name[i+1:])
-}
-
+// handleAIUsageIDEPlugins serves GET /api/v1/ai-usage/ide-plugins: the
+// last full scan's IDE extensions and plugins, filtered by user (account
+// name or id), IDE product or family, and ai_only, a page at a time
+// (cursor is the opaque next_cursor of the previous page). counts
+// summarizes the filtered rows across all pages; GET /api/v1/ai-usage
+// carries the whole-machine counts. Paths appear only as hashes.
 func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -166,7 +157,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		"scope":         scope,
 		"total":         0,
 		"next_cursor":   "",
-		"counts":        inv.Counts(),
+		"counts":        (*inventory.IDEInventory)(nil).Counts(),
 		"installations": []inventory.IDEInstallation{},
 		"plugins":       []inventory.IDEPlugin{},
 	}
@@ -177,16 +168,20 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	resp["scope"] = inv.Scope
 	resp["scan_id"] = ""
 	resp["scanned_at"] = inv.ScannedAt
-	installs := []inventory.IDEInstallation{}
-	for _, inst := range inv.Installations {
-		if accountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) {
-			installs = append(installs, inst)
+	plugins := []inventory.IDEPlugin{}
+	withPlugin := map[string]bool{}
+	for _, p := range inv.Plugins {
+		if useridentity.AccountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
+			plugins = append(plugins, p)
+			withPlugin[p.InstallID] = true
 		}
 	}
-	plugins := []inventory.IDEPlugin{}
-	for _, p := range inv.Plugins {
-		if accountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
-			plugins = append(plugins, p)
+	// ai_only keeps only the installations that hold a selected plugin
+	// (GAP-0104); the user and ide filters keep plugin-less installations.
+	installs := []inventory.IDEInstallation{}
+	for _, inst := range inv.Installations {
+		if useridentity.AccountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) && (!aiOnly || withPlugin[inst.InstallID]) {
+			installs = append(installs, inst)
 		}
 	}
 	total := len(plugins)
@@ -198,6 +193,7 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 		resp["next_cursor"] = strconv.Itoa(end)
 	}
 	resp["total"] = total
+	resp["counts"] = (&inventory.IDEInventory{Installations: installs, Plugins: plugins}).Counts()
 	resp["installations"] = installs
 	resp["plugins"] = plugins[offset:end]
 	if snap := discovery.Snapshot(); snap.Summary.ScanID != "" {

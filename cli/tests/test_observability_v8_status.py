@@ -1157,6 +1157,42 @@ def test_doctor_galileo_canary_names_gateway_delivery_failure() -> None:
     assert "connects directly" in check["remediation"]
 
 
+
+def test_doctor_dry_run_galileo_canary_skip_names_dry_run() -> None:
+    # GAP-0102: --fix --dry-run is passive; the skip row must name --dry-run,
+    # not a passive mode the user never chose.
+    from defenseclaw.commands.cmd_doctor import (
+        _check_galileo_trace_canaries,
+        _DoctorResult,
+    )
+
+    enabled = V8DestinationStatus(
+        name="galileo",
+        kind="otlp",
+        enabled=True,
+        generated=False,
+        capabilities=("traces",),
+        selected_signals=("traces",),
+        policy_form="capability_default",
+        endpoint="https://api.galileo.ai/otel/traces",
+        route_count=1,
+        buckets=("agent.lifecycle",),
+        redaction_profiles=("none",),
+        preset="galileo",
+    )
+    result = _DoctorResult(mode="plan", passive=True)
+    _check_galileo_trace_canaries(
+        SimpleNamespace(destinations=(enabled,)),
+        result,
+        config_path="/data/config.yaml",
+        data_dir="/data",
+    )
+
+    check = result.checks[0]
+    assert check["status"] == "skip"
+    assert check["detail"].startswith("--dry-run ")
+    assert "passive" not in check["detail"]
+
 def test_doctor_caps_automatic_galileo_canaries_and_warns_for_remaining_routes() -> None:
     from defenseclaw.commands.cmd_doctor import (
         _check_galileo_trace_canaries,

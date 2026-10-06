@@ -358,6 +358,9 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		pack    string
 		profile string
 		want    string
+		// policyCleared: policy_dir names no Rego bundle, so the gateway
+		// uses its built-in policy.
+		policyCleared bool
 	}{
 		{name: "standalone implicit follows policy_dir", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
 		{name: "standalone explicit pack is kept", goos: "linux", policy: "/opt/defenseclaw/share/policies", pack: "/etc/defenseclaw/policies/guardrail/custom", want: "/etc/defenseclaw/policies/guardrail/custom"},
@@ -365,7 +368,7 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 		{name: "secure client is unchanged", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileSecureClient, want: dataDirPack},
 		// Nothing stages a pack under a Windows data_dir, so the
 		// implicit default selects the embedded packs.
-		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: ""},
+		{name: "windows standalone implicit uses the embedded packs", goos: "windows", policy: "/var/lib/defenseclaw/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: "", policyCleared: true},
 		{name: "windows standalone implicit follows an administrator policy_dir", goos: "windows", policy: "/opt/defenseclaw/share/policies", pack: dataDirPack, profile: managed.ProfileStandalone, want: filepath.Join("/opt/defenseclaw/share/policies", "guardrail", "default")},
 	}
 	for _, tc := range cases {
@@ -378,6 +381,9 @@ func TestStandaloneLayoutImplicitRulePackExists(t *testing.T) {
 			}
 			if cfg.Guardrail.RulePackDir != tc.want {
 				t.Fatalf("rule_pack_dir = %q, want %q", cfg.Guardrail.RulePackDir, tc.want)
+			}
+			if (cfg.PolicyDir == "") != tc.policyCleared {
+				t.Fatalf("policy_dir = %q, want cleared=%t", cfg.PolicyDir, tc.policyCleared)
 			}
 		})
 	}

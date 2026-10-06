@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFlushInterval is how often observed agent identities are
@@ -49,7 +50,9 @@ var sharedAgentIdentities = &agentIdentityRecorder{
 }
 
 // observe records one hook of an agent identity. newSession is true when the
-// hook started a session the registry had not seen.
+// hook started a session the registry had not seen; the registry is in
+// memory, so the batch keeps the first session it counted for the upsert to
+// recognize a session resumed after a restart.
 func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID string, newSession bool) {
 	if r == nil || facts.ID == "" {
 		return
@@ -72,11 +75,15 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserName != "" {
 		rec.UserName = facts.UserName
 	}
-	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
-		rec.LastSessionID = sessionID
-	}
-	if newSession {
+	sessionID = strings.TrimSpace(sessionID)
+	if newSession && sessionID != "" && sessionID != rec.LastSessionID {
+		if rec.SessionsSeen == 0 {
+			rec.FirstSessionID = sessionID
+		}
 		rec.SessionsSeen++
+	}
+	if sessionID != "" {
+		rec.LastSessionID = sessionID
 	}
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {
 		r.hints[facts.ID] = facts.InstallHint
@@ -115,6 +122,9 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
 		}
 		if old.FirstSeen.Before(cur.FirstSeen) {
 			cur.FirstSeen = old.FirstSeen
+		}
+		if old.SessionsSeen > 0 {
+			cur.FirstSessionID = old.FirstSessionID
 		}
 		cur.SessionsSeen += old.SessionsSeen
 		if cur.UserName == "" {
@@ -285,7 +295,7 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 }
 
 // mergeAgentIdentityRows overlays the buffered rows on the stored ones, the
-// way the next flush will write them.
+// way the next flush will write them, and names each row's account.
 func mergeAgentIdentityRows(
 	stored []inventory.AgentIdentityRecord,
 	pending map[string]inventory.AgentIdentityRecord,
@@ -310,6 +320,12 @@ func mergeAgentIdentityRows(
 			order = append(order, id)
 			continue
 		}
+		// The way the upsert counts: a buffered session that resumes the
+		// stored last session is not a new one.
+		rec.SessionsSeen += buffered.SessionsSeen
+		if buffered.SessionsSeen > 0 && buffered.FirstSessionID != "" && buffered.FirstSessionID == rec.LastSessionID {
+			rec.SessionsSeen--
+		}
 		if buffered.LastSeen.After(rec.LastSeen) {
 			rec.LastSeen = buffered.LastSeen
 			if buffered.LastSessionID != "" {
@@ -322,11 +338,24 @@ func mergeAgentIdentityRows(
 		if buffered.UserName != "" {
 			rec.UserName = buffered.UserName
 		}
-		rec.SessionsSeen += buffered.SessionsSeen
 	}
+	// Each account is named as the host names its uid or SID now, the way a
+	// new hook call would record it, so a row an older build stored with
+	// another spelling (a bare SSSD name, DOMAIN\user) reads like the rest
+	// (GAP-0103). A row whose account no longer resolves keeps its name.
+	names := map[string]string{}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
-		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *byID[id], InstallHint: hints[id]})
+		rec := byID[id]
+		name, ok := names[rec.UserID]
+		if !ok {
+			name = sanitizeLLMEventUser(userScopedIdentityName(rec.UserID))
+			names[rec.UserID] = name
+		}
+		if name != "" {
+			rec.UserName = name
+		}
+		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *rec, InstallHint: hints[id]})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if !rows[i].LastSeen.Equal(rows[j].LastSeen) {
@@ -338,7 +367,7 @@ func mergeAgentIdentityRows(
 }
 
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if user := filter.User; user != "" && rec.UserID != user && !strings.EqualFold(rec.UserName, user) {
+	if user := filter.User; user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

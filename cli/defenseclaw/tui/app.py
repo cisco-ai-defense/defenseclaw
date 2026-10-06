@@ -4979,6 +4979,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("h/l", "Switch sub-tab (Tab moves to the next panel)"),
                 ("j/k or Up/Down", "Navigate items"),
                 ("Enter / Esc", "Open / close the detail pane"),
+                ("PgUp / PgDn", "Scroll the open detail"),
                 ("1 / 2-4", "Skills and Plugins sub-tabs: show all / filter (elsewhere digits switch panel)"),
                 ("o", "Toggle a faster scan of skills and plugins only"),
                 ("r", "Scan inventory"),
@@ -10862,6 +10863,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self._setup_view()
         if active_panel == "registries" and self.registries_model.detail_open:
             return "detail"
+        if active_panel == "inventory" and self.inventory_model.detail_open:
+            return "detail"
         return ""
 
     def _active_filter_label(self) -> str:
@@ -11887,6 +11890,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if key == "m" and len(self._active_connector_names()) > 1:
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
+            if self.inventory_model.detail_open and key in {"pagedown", "page_down", "pageup", "page_up"}:
+                # At 80x24 the card shows two of an IDE plugin's eleven lines
+                # and no key reached the rest (GAP-0090).
+                return self._scroll_detail_panel(key)
             action = self._handle_inventory_key(key)
             return self._apply_inventory_action(action)
 

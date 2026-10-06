@@ -51,14 +51,20 @@ type DoctorOptions struct {
 }
 
 func (a *App) defaultDoctor() *openshell.Doctor {
-	d := &openshell.Doctor{}
+	d := &openshell.Doctor{GatewayApplied: func(res *openshell.GatewayApplyResult) {
+		// A fix's gateway edit is DefenseClaw's, as setup's is: teardown
+		// restores the file only while it holds what DefenseClaw last wrote.
+		if err := a.recordGatewayApply(res); err != nil {
+			a.warnErr("could not record the gateway change for teardown: " + err.Error())
+		}
+	}}
 	if a.Cfg != nil {
 		o := a.Cfg.OpenShell
 		d.CLI = o.EffectiveBinary()
 		d.Discover = openshell.DiscoverOptions{Gateway: o.Gateway.Name}
 		want := o.UpstreamTelemetry
 		d.WantTelemetry = &want
-		d.BindMountsOptional = o.Workdir.Mode == config.OpenShellWorkdirCopy
+		d.BindMountsOptional = o.Workdir.Mode == config.OpenShellWorkdirCopy && len(mountedSettingsHarnesses(o.Harnesses)) == 0
 		// Every MicroVM gets the gateway-wide resources, which an
 		// organization's maximum must allow. The resolver refuses a
 		// malformed one on its own.
@@ -448,6 +454,11 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 				}
 			}
 		}
+		for _, out := range outcomes {
+			if out.ID == openshell.CheckIDBindMounts && out.Applied {
+				a.dropCopyMode(o.Output != OutputJSON)
+			}
+		}
 		if len(outcomes) > 0 {
 			rep = a.runDoctor(ctx)
 		}
@@ -469,6 +480,23 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("sandbox doctor found problems")}}
 	}
 	return nil
+}
+
+// dropCopyMode removes the openshell.workdir.mode copy that a setup
+// without bind mounts recorded, once a fix allows them, as setup does when
+// they are allowed there: the pack decides again.
+func (a *App) dropCopyMode(say bool) {
+	if a.Cfg == nil || a.Cfg.OpenShell.Workdir.Mode != config.OpenShellWorkdirCopy {
+		return
+	}
+	if err := a.patchConfig(map[string]any{"openshell.workdir.mode": ""}); err != nil {
+		a.warnErr("bind mounts are on, but openshell.workdir.mode stays copy, so runs still work on a copy: " + err.Error())
+		return
+	}
+	a.Cfg.OpenShell.Workdir.Mode = ""
+	if say {
+		a.ok("openshell.workdir.mode copy removed from " + a.tildePath(a.ConfigPath) + " now that bind mounts are on")
+	}
 }
 
 func (a *App) printDoctor(rep *openshell.DoctorReport) {

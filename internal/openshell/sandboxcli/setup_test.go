@@ -719,10 +719,15 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, SkipImages: true, Harnesses: []string{"codex"}}))
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}))
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
 	}
+	// It ends on the fix, not on a run that cannot start, and says nothing
+	// of a download for the image that is current (GAP-0091).
+	has(t, ta.output(), "not ready for sandboxes yet: no Claude Code or Codex sandbox can start without bind mounts; "+
+		"enable them with `defenseclaw sandbox doctor --fix`, then `cd <project> && defenseclaw sandbox run codex`")
+	lacks(t, ta.output(), "Done →", "Building the Codex image")
 	c := loadConfig(t, ta)
 	if c.OpenShell.Workdir.Mode != "copy" || !slices.Equal(c.OpenShell.Harnesses, []string{"codex"}) {
 		t.Fatalf("config = %+v", c.OpenShell)
@@ -1183,7 +1188,7 @@ func TestSetupHarnessLines(t *testing.T) {
 	has(t, ta.output(),
 		"  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):\n"+
 			"    Claude Code (claude)  model credential ANTHROPIC_API_KEY ✓\n"+
-			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY or log in with `codex login --with-api-key`, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
+			"    Codex (codex)         model credential none found: before the first run, set OPENAI_API_KEY, or set AWS_BEARER_TOKEN_BEDROCK for Amazon Bedrock; or log in inside the sandbox\n"+
 			"  Other harnesses: amp (not verified yet), antigravity, copilot, cursor-agent (not verified yet), devin (not verified yet), hermes, kiro, omnigent, opencode, openhands\n",
 		"Build the Claude Code image now? (the first build downloads about 3 GB; otherwise the first `defenseclaw sandbox run claude` builds it) [Y/n]",
 		"Build the Codex image now?",
@@ -1427,6 +1432,37 @@ func TestDoctorFixNamesChecksAsItAsked(t *testing.T) {
 	has(t, ta.output(), `Fix "Gateway": start the gateway? [Y/n]`, `✓ fixed "mTLS files"`,
 		`✗ could not fix "Gateway": brew services start nvidia/openshell/openshell: exit status 1`)
 	lacks(t, ta.output(), "gateway-version:", "fixed mtls-permissions")
+}
+
+// TestDoctorFixRecordsItsGatewayEdit: the bind-mount fix's gateway.toml
+// edit goes in setup's receipt, so teardown restores the file from setup's
+// first backup instead of leaving it as someone else's change, and the copy
+// mode setup recorded without bind mounts goes (GAP-0089).
+func TestDoctorFixRecordsItsGatewayEdit(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "  workdir:\n    mode: copy\n")
+	ta.Cfg.OpenShell.Workdir.Mode = config.OpenShellWorkdirCopy
+	toml := filepath.Join(t.TempDir(), "gateway.toml")
+	writeFile(t, toml, "setup's edit\n")
+	ta.ok(t, ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml, Backup: toml + ".first.bak"}}}))
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		return hostReport(func(r *openshell.DoctorReport) {
+			r.Get(openshell.CheckIDBindMounts).Fix = &openshell.Fix{Summary: "let sandboxes mount the project folder", Automatic: true,
+				Apply: func(context.Context) error {
+					writeFile(t, toml, "doctor's edit\n")
+					d.GatewayApplied(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: toml, Backup: toml + ".second.bak"}}, Restarted: true})
+					return nil
+				}}
+		})(ctx, d)
+	}
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	sum, err := fileSHA256(toml)
+	if r, rerr := ta.loadReceipt(); err != nil || rerr != nil || len(r.GatewayFiles) != 1 || r.GatewayFiles[0].Backup != toml+".first.bak" || r.GatewayFiles[0].SHA256 != sum {
+		t.Fatalf("receipt = %+v, %v, %v", r, rerr, err)
+	}
+	if mode := loadConfig(t, ta).OpenShell.Workdir.Mode; mode != "" {
+		t.Fatalf("openshell.workdir.mode = %q after the bind-mount fix", mode)
+	}
 }
 
 // TestDoctorVerdict pins the doctor's last line: not "ready" while

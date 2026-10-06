@@ -214,16 +214,16 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
 		return enterpriseGatewayAIUsage{Enabled: true, Summary: inventory.AIDiscoverySummary{ScannedAt: scanned, Result: "ok"}, Signals: []inventory.AISignal{
 			{Name: "Amp", Category: "supported_connector", SupportedConnector: "amp", Detector: "config", UserName: "dcw-std2", UserID: "S-1-5-21-2", LastSeen: scanned},
-			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Cursor", Category: "mcp_server", SupportedConnector: "cursor", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"dccert-mcp", "mcp.json"}, Evidence: []inventory.AIEvidence{
 					{Type: "mcp", Basename: "mcp.json"}, {Type: "mcp_server", Basename: "dccert-mcp"}}},
 			// GAP-2337: a config file that declares no server is no MCP server.
-			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Antigravity", Category: "mcp_server", SupportedConnector: "antigravity", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"mcp_config.json"}, Evidence: []inventory.AIEvidence{{Type: "mcp", Basename: "mcp_config.json"}}},
-			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "Hermes Agent", Category: "skill", SupportedConnector: "hermes", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"skills"}, Evidence: []inventory.AIEvidence{{Type: "skill", Basename: "skills"}},
 				Partial: true, CoverageReason: "read_error"},
-			{Name: "dccert-skill", Category: "skill", UserName: "dcw-std1", UserID: "S-1-5-21-1", LastSeen: scanned,
+			{Name: "dccert-skill", Category: "skill", UserName: `DCLAB\dcw-std1`, UserID: "S-1-5-21-1", LastSeen: scanned,
 				Basenames: []string{"skills", "ewr6-hello2"}, Evidence: []inventory.AIEvidence{
 					{Type: "skill", Basename: "skills"}, {Type: "skill_entry", Basename: "ewr6-hello2"}}},
 			{Name: "Ollama", Category: "local_ai_app", LastSeen: scanned},
@@ -292,7 +292,9 @@ func TestWindowsEnterpriseDiscoveryGroupsTheGatewayReportByAccount(t *testing.T)
 		t.Fatalf("--json --user <sid> = %s (%v)", asJSON.String(), err)
 	}
 
-	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), `no AI Discovery signal for account "nobody"`) {
+	// GAP-0079: the bare name selects the DOMAIN\name rows above; an
+	// unknown account says what the scan did find.
+	if err := writeWindowsEnterpriseDiscovery(&bytes.Buffer{}, "nobody", false); err == nil || !strings.Contains(err.Error(), "found signals for 2 other account(s)") {
 		t.Fatalf("an unknown account = %v", err)
 	}
 

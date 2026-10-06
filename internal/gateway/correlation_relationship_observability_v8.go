@@ -34,10 +34,32 @@ func (a *APIServer) emitCorrelationRelationshipsV8(
 	if a == nil {
 		return nil
 	}
+	if ctx != nil && len(relationships) > 0 {
+		ctx = a.contextWithSessionAgentV8(ctx, connector)
+	}
 	return emitCorrelationRelationshipsV8WithEmitter(
 		ctx, a.observabilityV8RuntimeEmitter(), source, connector,
 		semantic, logical, instance, relationships,
 	)
+}
+
+// contextWithSessionAgentV8 names the session's agent for an occurrence that
+// reported its session but no agent: Codex's native OTLP logs carry only
+// conversation.id. It takes the agent the canonical import of the same event
+// is stamped with (enrichInboundWithHookLifecycleV8): the live hook snapshot,
+// else the conversation's root agent. Without it, those occurrences'
+// relationship rows did not join the session agent (GAP-0087).
+func (a *APIServer) contextWithSessionAgentV8(ctx context.Context, connector string) context.Context {
+	envelope := audit.EnvelopeFromContext(ctx)
+	if envelope.AgentID != "" || envelope.SessionID == "" {
+		return ctx
+	}
+	if meta, found := a.hookLifecycleSnapshot(connector, envelope.SessionID, ""); found && meta.AgentID != "" {
+		envelope.AgentID = meta.AgentID
+	} else {
+		envelope.AgentID = stableLLMEventID("agent", connector, envelope.SessionID, "root")
+	}
+	return audit.ContextWithEnvelope(ctx, envelope)
 }
 
 func emitCorrelationRelationshipsV8WithEmitter(

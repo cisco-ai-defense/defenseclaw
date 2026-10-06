@@ -6,7 +6,6 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -654,57 +653,6 @@ func TestCopilotHookRejectsMissingOrInvalidTrustedEvent(t *testing.T) {
 				t.Fatalf("status=%d, want 400; body=%s", recorder.Code, recorder.Body.String())
 			}
 		})
-	}
-}
-
-// TestHandleAgentHook_FullChain_SyntheticPath drives the
-// codex-notify synthetic hook path top-to-bottom and asserts that:
-//
-//   - the synthesised Stop event reaches the safeEvaluateSyntheticHook
-//     pipeline,
-//   - the response shape is the codex-specific one (codex_output),
-//   - no panic propagates if the evaluator throws — same fail-open
-//     posture as the regular path.
-func TestHandleAgentHook_FullChain_SyntheticPath(t *testing.T) {
-	health := NewSidecarHealth()
-	api := &APIServer{health: health}
-	ctx := context.Background()
-
-	req := agentHookRequest{
-		ConnectorName: "codex",
-		HookEventName: "Stop",
-		SessionID:     "session-synth",
-		AgentID:       "codex-test",
-		AgentName:     "codex test",
-		AgentType:     "codex-cli",
-	}
-	body, _ := json.Marshal(map[string]interface{}{
-		"hook_event_name": "Stop",
-		"session_id":      "session-synth",
-	})
-
-	resp := api.handleAgentHookSynthetic(ctx, "codex", req, body)
-	if resp.Action == "" {
-		t.Errorf("synthetic handler returned empty Action (resp=%+v)", resp)
-	}
-	if resp.Mode == "" {
-		t.Errorf("synthetic handler returned empty Mode (resp=%+v)", resp)
-	}
-
-	// The renderAgentHookResponse projection still uses
-	// codex_output for the codex connector even on the synthetic
-	// path — clients that consume the wire shape via /api/v1/codex/notify
-	// expect this contract.
-	wire := renderAgentHookResponse("codex", resp)
-	if _, ok := wire["codex_output"]; !ok && resp.HookOutput != nil {
-		t.Errorf("synthetic codex response missing codex_output: %+v", wire)
-	}
-	connectorHealth := connByName(health.Snapshot().Connectors)["codex"]
-	if connectorHealth.Requests != 1 {
-		t.Errorf("synthetic connector health requests=%d, want 1", connectorHealth.Requests)
-	}
-	if connectorHealth.LastActivityAt == nil {
-		t.Error("synthetic connector health last_activity_at is nil after accepted hook")
 	}
 }
 

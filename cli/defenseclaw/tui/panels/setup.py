@@ -5461,7 +5461,9 @@ def sandbox_wizard_fields(
                 value="yes",
                 default="yes",
                 hint="Allow sandboxes to mount the folder you launch from (enables bind mounts on your local "
-                "OpenShell gateway; DefenseClaw only ever mounts the launch folder). No: every run works on a copy. "
+                "OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code "
+                "and Codex sandboxes need). No: no Claude Code or Codex sandbox can start, and other harnesses "
+                "run on a copy. "
                 "Turning bind mounts on " + restart_note,
                 visible_when=is_setup,
             ),

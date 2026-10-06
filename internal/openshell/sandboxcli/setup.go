@@ -292,7 +292,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		changes = microVMChanges(rep, state, a.Geteuid())
 		copyOnly = true
 	} else if !o.NoMounts && !state.BindMounts.Enabled() {
-		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder)", true, assume)
+		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; "+
+			"DefenseClaw mounts only the launch folder and the read-only settings "+strings.Join(mountedSettingsHarnesses(harness.Names()), " and ")+
+			" sandboxes need)", true, assume)
 		if err != nil {
 			return err
 		}
@@ -460,6 +462,8 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	if unwritten {
 		once = "once `" + CommandName + " setup` writes the change above and you restart the gateway"
 	}
+	// Without bind mounts no harness whose settings are mounted can start.
+	noMounts := !microVM && copyOnly && !state.BindMounts.Enabled() && !changes.EnableBindMounts
 	switch {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
@@ -468,8 +472,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			"it runs sandboxes in MicroVMs " + once)
 	case microVM:
 		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs " + once)
+	case noMounts:
+		a.warn("without bind mounts no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
+			" sandbox can start, a `--copy` run included: DefenseClaw mounts their per-run settings read-only. " +
+			"Other harnesses run on a copy; `" + CommandName + " doctor --fix` enables bind mounts")
 	case copyOnly:
-		a.note("without bind mounts every run works on a copy (`--copy`)")
+		a.note("without project mounts every run works on a copy (`--copy`)")
 	}
 
 	// 4. Harnesses and credentials. --harness adds to openshell.harnesses.
@@ -537,9 +545,18 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			skipped = append(skipped, "shell wrappers (not asked with --non-interactive; add one with `"+CommandName+" enable "+HarnessArg(wrappable[0])+"`)")
 		}
 	}
+	// The closing command names a harness that can start: without bind
+	// mounts one whose settings are not mounted, if any is set up.
 	cmd := "claude"
 	if len(specs) > 0 {
 		cmd = HarnessArg(specs[0])
+	}
+	startable := !noMounts
+	for _, s := range specs {
+		if noMounts && !mountsSettings(s) {
+			cmd, startable = HarnessArg(s), true
+			break
+		}
 	}
 
 	// 7. Images, then the ingress provider profile (imported once here:
@@ -616,6 +633,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		// (consentGatewayRestart): the sandboxes are the user's to stop.
 		a.warn("restart the OpenShell gateway yourself, the way you started it, so it runs on the change above (DefenseClaw cannot restart it); " +
 			a.manualRestartStops(ctx, rep.Driver == openshell.DriverVM, nil))
+	}
+	if !startable {
+		a.warn("not ready for sandboxes yet: no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
+			" sandbox can start without bind mounts; enable them with `" + CommandName + " doctor --fix`, then `cd <project> && " +
+			CommandName + " run " + cmd + "`")
+		return nil
 	}
 	a.ok("Done →  cd <project> && " + CommandName + " run " + cmd)
 	return nil
