@@ -346,6 +346,19 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     assert report["provenance"] == "process-env"
     assert report["configured"] == "closed"
     assert report["drift"] == ["process-env-open"]
+    assert report["note"] == ""
+
+    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    observe = ConnectorFailModeState(
+        connector="claudecode",
+        desired="open",
+        configured="closed",
+        runtime="open",
+        sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
+        drift=(),
+    ).to_report()
+    assert observe["effective"] == "open" and observe["drift"] == []
+    assert observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
 
 
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(

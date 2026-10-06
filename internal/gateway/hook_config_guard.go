@@ -635,6 +635,9 @@ func (g *HookConfigGuard) repairCurrent(
 	if dataDir != "" && !sameHookGuardDataDir(opts.DataDir, dataDir) {
 		return errors.New("hook registration guard owns a different data home")
 	}
+	// installedFailMode is the hook fail mode the connector's hooks were last
+	// rendered with; the resolver below replaces it with the current one.
+	installedFailMode := strings.ToLower(strings.TrimSpace(opts.HookFailMode))
 	var releasePolicy func()
 	if policyResolver != nil {
 		policy, release, ok := policyResolver(conn.Name())
@@ -725,7 +728,11 @@ func (g *HookConfigGuard) repairCurrent(
 		return err
 	}
 	g.clearPolicyFailure()
-	if present && evidenceCurrent {
+	// The registration can be intact while the rendered hooks bake a stale
+	// hook fail mode: a guardrail mode change (action implies the global fail
+	// mode, observe implies open) never touches the hook entries themselves.
+	failModeDrift := policyResolver != nil && installedFailMode != "" && installedFailMode != opts.HookFailMode
+	if present && evidenceCurrent && !failModeDrift {
 		return nil
 	}
 	requested := append([]string(nil), changed...)
@@ -738,7 +745,14 @@ func (g *HookConfigGuard) repairCurrent(
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
-	err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	if present && evidenceCurrent {
+		err = g.refreshFailModeLocked(baseCtx, conn, opts, releasePolicy)
+	} else {
+		err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
+	}
+	if err == nil && policyResolver != nil {
+		g.adoptRenderedPolicy(opts)
+	}
 	outcome := hookGuardRepairOutcome{
 		connector: conn.Name(),
 		err:       err,
@@ -751,6 +765,83 @@ func (g *HookConfigGuard) repairCurrent(
 		observe(outcome)
 	}
 	return err
+}
+
+// RefreshPolicy re-renders the connector's hooks when the effective hook fail
+// mode now differs from the one they were rendered with. The sidecar calls it
+// after a reload publishes a policy that changes the fail mode (for example
+// guardrail.mode action), so the generated hook scripts follow config instead
+// of waiting for a gateway restart. A guard whose hooks are intact and
+// current does nothing.
+func (g *HookConfigGuard) RefreshPolicy(ctx context.Context) error {
+	return g.repairCurrent(ctx, "", "", []string{"effective hook policy changed"})
+}
+
+// activeConnector is the connector this guard currently owns, or nil.
+func (g *HookConfigGuard) activeConnector() connector.Connector {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.conn
+}
+
+// adoptRenderedPolicy records the policy the hooks were just rendered with,
+// so the next check compares against it. Caller holds repairMu.
+func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
+	g.mu.Lock()
+	g.opts.HookFailMode = opts.HookFailMode
+	g.opts.GuardrailMode = opts.GuardrailMode
+	g.opts.HILTEnabled = opts.HILTEnabled
+	g.mu.Unlock()
+}
+
+// refreshFailModeLocked re-runs Setup for a connector whose registration is
+// intact but was rendered with another hook fail mode. It is a policy
+// refresh, not a repair: no tamper audit row and no heal notification.
+// Caller holds repairMu.
+func (g *HookConfigGuard) refreshFailModeLocked(
+	baseCtx context.Context,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	releasePolicy func(),
+) error {
+	connName := conn.Name()
+	g.mu.Lock()
+	g.suppressUntil = time.Now().Add(hookGuardHealSuppressWindow)
+	g.mu.Unlock()
+
+	hctx, cancel := context.WithTimeout(context.WithoutCancel(baseCtx), hookGuardSetupTimeout)
+	defer cancel()
+	setupErr := connector.SetupRecordingCreatedDirs(hctx, conn, opts)
+	g.mu.Lock()
+	g.resyncTargetsLocked(conn, opts)
+	g.mu.Unlock()
+	if releasePolicy != nil {
+		releasePolicy()
+	}
+	err := setupErr
+	if err == nil {
+		present, presentErr := connector.OwnedHooksPresent(conn, opts)
+		if presentErr != nil {
+			err = presentErr
+		} else if !present {
+			err = errors.New("effective hook contract is inactive after the re-render")
+		}
+	}
+	if err == nil && connector.RequiresHookRuntimeRegistrationEvidence(conn) {
+		err = publishFreshHookRegistrationEvidence(opts, conn)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-render %s hooks for hook fail mode %s failed: %v\n", connName, opts.HookFailMode, err)
+		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
+			fmt.Sprintf("failed to re-render %s hooks for hook fail mode %s", connName, opts.HookFailMode), err)
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[hook-guard] re-rendered %s hooks for hook fail mode %s\n", connName, opts.HookFailMode)
+	emitLifecycle(baseCtx, "hook_guard", "refreshed", map[string]string{"connector": connName})
+	return nil
 }
 
 // rearmAfterBusyRepair queues another repair when Setup failed only because

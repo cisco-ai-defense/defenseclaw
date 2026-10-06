@@ -12841,10 +12841,11 @@ def _check_connector_inventory(
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
             if mode in {"observe", "action"}:
+                fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
                 _emit(
                     "pass",
                     "Mode",
-                    f"{mode}; fail-mode={fail_mode['effective']}; provenance={fail_mode['provenance']}",
+                    f"{mode}; fail-mode={fail_mode['effective']}{fail_mode_note}; provenance={fail_mode['provenance']}",
                     r=r,
                 )
             else:

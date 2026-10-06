@@ -13,25 +13,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// resolvePeerDirectoryFacts returns a verified uid's directory facts. The
-// groups always come from the system account database, which on macOS
-// answers through Open Directory (local groups and an AD binding's), so
-// users and groups assignments match on a per-user install and on a managed
-// Mac alike, and agree with what guardrail profile explain resolves. On a
-// managed install the root enumerator's record adds what only root can read
-// (the AD binding, the Platform SSO provider).
+// resolvePeerDirectoryFacts returns a verified uid's directory facts: the
+// account's own facts from the system account database, which on macOS
+// answers through Open Directory (directory local, groups), with the root
+// enumerator's record laid over them when the guardian wrote one (a managed
+// install: the dscl directory, Kerberos principal and domain of a bound Mac,
+// the Platform SSO tenant). The record carries no groups, so the gateway's
+// own answer stays under it, as on Linux; returning the record alone made
+// every group assignment miss on a managed Mac. Guardrail profile explain
+// resolves through the same function.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
 	now := time.Now().UTC()
-	account, lookupErr := osuser.LookupId(key)
-	var groups []string
-	if lookupErr == nil {
-		groups = localAccountGroups(account)
-	}
-	if record, ok := readIdentitySpoolFacts(key, now); ok {
-		return spoolFactsWithGroups(record.Facts, groups, now), nil
-	}
-	if lookupErr != nil {
-		return useridentity.DirectoryFacts{}, lookupErr
+	account, err := osuser.LookupId(key)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, err
 	}
 	// Groups that could not be listed fail the lookup: facts cached as
 	// resolved without them would select the default profile as "default"
@@ -40,11 +35,15 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
-	return useridentity.DirectoryFacts{
+	own := useridentity.DirectoryFacts{
 		Directory:  useridentity.DirectoryLocal,
 		Source:     useridentity.SourceMacOSOpenDirectory,
 		Groups:     groups,
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
-	}, nil
+	}
+	if record, ok := readIdentitySpoolFacts(key, now); ok {
+		return mergeSpoolFacts(own, record.Facts), nil
+	}
+	return own, nil
 }
