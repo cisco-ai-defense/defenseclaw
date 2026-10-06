@@ -153,6 +153,12 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	if lineage := e.m.Lineage("treebox", 42); len(lineage) != 2 || lineage[0].Comm != "claude" || lineage[1].PID != 1 {
 		t.Fatalf("lineage = %+v", lineage)
 	}
+	// The list says how often the sandbox is sampled now (the vm driver's
+	// slower pace once a sample is slow).
+	e.m.setSampleInterval(b, processSampleIntervalVM)
+	if list, _ := e.m.Processes(context.Background(), "treebox"); list.IntervalSeconds != 15 {
+		t.Fatalf("interval = %d", list.IntervalSeconds)
+	}
 	// 42 ended between the samples.
 	sample.Store(psAnswer("P 1 0 0 10 S", "Pc 1 init"))
 	time.Sleep(time.Millisecond)

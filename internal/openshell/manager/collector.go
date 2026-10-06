@@ -577,6 +577,17 @@ func parseCollection(out []byte, truncated bool, scope *collectScope, maxFileByt
 	if c.ProcessesCapped {
 		c.Problems = appendOnce(c.Problems, fmt.Sprintf("the sandbox has more than %d processes", collectMaxProcesses))
 	}
+	// A file whose content was asked for and that is over the bound is
+	// listed but not read: what it configures is unknown.
+	oversize := 0
+	for _, e := range c.Entries {
+		if _, read := c.Contents[e.Path]; !read && e.Type == 'f' && e.Size > maxFileBytes && scope.contentAllowed(e.Path) {
+			oversize++
+		}
+	}
+	if oversize > 0 {
+		c.Problems = append(c.Problems, fmt.Sprintf("%d file(s) over %d bytes were not read", oversize, maxFileBytes))
+	}
 	if truncated {
 		c.Problems = append(c.Problems, fmt.Sprintf("the collector's answer was cut at %d bytes", collectStreamBytes))
 	} else if !c.Ended {

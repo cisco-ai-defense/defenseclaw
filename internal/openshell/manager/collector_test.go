@@ -139,6 +139,12 @@ func TestParseCollectionBoundsContent(t *testing.T) {
 	if !strings.Contains(strings.Join(c.Problems, ";"), "over 1024 bytes") {
 		t.Fatalf("problems = %v, want the oversize file named", c.Problems)
 	}
+	// A file listed over the bound, whose content the collector left out,
+	// makes the answer partial too.
+	c, err = parseCollection(answerOf("E f 4096 1 /sandbox/.dccert/mcp.json", collectEnd), false, testScope(), 1024)
+	if err != nil || !strings.Contains(strings.Join(c.Problems, ";"), "1 file(s) over 1024 bytes were not read") {
+		t.Fatalf("problems = %v, %v", c.Problems, err)
+	}
 	// A content line cut off by the stream's end is refused, and the cut
 	// answer is reported.
 	c, err = parseCollection([]byte(collectSchema+"\nF /sandbox/.dccert/mcp.json\n"+b64("abc")[:2]), true, testScope(), 1024)

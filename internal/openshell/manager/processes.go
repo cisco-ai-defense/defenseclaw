@@ -95,6 +95,8 @@ type procTree struct {
 	// many it held back.
 	gate   *rateGate
 	heldAt time.Time
+	// interval is how often the sandbox is sampled now (0 until a sample).
+	interval time.Duration
 }
 
 func newProcTree() *procTree {
@@ -114,6 +116,19 @@ func (b *box) tree() *procTree {
 		b.procs = newProcTree()
 	}
 	return b.procs
+}
+
+// setSampleInterval records how often the observer samples the sandbox now,
+// for the process list.
+func (m *Manager) setSampleInterval(b *box, d time.Duration) {
+	m.mu.Lock()
+	t := b.procs
+	m.mu.Unlock()
+	if t != nil {
+		t.mu.Lock()
+		t.interval = d
+		t.mu.Unlock()
+	}
 }
 
 // sampleProcesses takes one sample of a ready sandbox whose process tree is
@@ -401,6 +416,9 @@ func (m *Manager) Processes(_ context.Context, name string) (*sandboxapi.Process
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out.SampledAt, out.Truncated = t.sampledAt, t.truncated
+	if t.interval > 0 {
+		out.IntervalSeconds = int(t.interval / time.Second)
+	}
 	for _, node := range t.live {
 		out.Processes = append(out.Processes, node.view())
 	}

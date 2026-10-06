@@ -198,11 +198,14 @@ func (m *Manager) observeLoop(ctx context.Context, b *box, run *observeRun) {
 				m.logf("sandbox %s: a process sample took %s on the vm driver; its processes are sampled every %s instead of %s",
 					b.name(m), took.Round(time.Millisecond), processSampleIntervalVM, processSampleInterval)
 			}
+			interval := processSampleInterval
 			if slow {
-				sample.Reset(processSampleIntervalVM)
-			} else {
-				sample.Reset(processSampleInterval)
+				interval = processSampleIntervalVM
 			}
+			if sampled {
+				m.setSampleInterval(b, interval)
+			}
+			sample.Reset(interval)
 		}
 	}
 }
