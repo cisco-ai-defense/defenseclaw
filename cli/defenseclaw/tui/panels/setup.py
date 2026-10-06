@@ -6660,10 +6660,9 @@ def _guardrail_wizard_fields_for(
     mode = mode.strip().lower() or "observe"
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
-    rule_pack_dir = (
-        _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir")
-        if connector_policy and connector
-        else str(get_config_value(cfg, "guardrail.rule_pack_dir", "") or "")
+    # The pack the scope enforces: config_version 9 rule_pack, else the v8 dir.
+    rule_pack_dir = _effective_guardrail_value(
+        cfg, connector if connector_policy else "", "effective_rule_pack_dir", "guardrail.rule_pack_dir"
     )
     rule_pack_options: tuple[str, ...] = ("default", "strict", "permissive")
     pack_name = os.path.basename(rule_pack_dir.rstrip("/\\")).strip() if rule_pack_dir else ""

@@ -6132,12 +6132,24 @@ def _apply_rule_pack_selection(gc, pack_dir: str, *, connector: str | None) -> b
     was per-connector.
     """
     if connector and getattr(gc, "connectors", None) and connector in gc.connectors:
-        gc.connectors[connector].rule_pack_dir = pack_dir
+        _set_scope_rule_pack_dir(gc.connectors[connector], pack_dir)
         return True
-    gc.rule_pack_dir = pack_dir
+    _set_scope_rule_pack_dir(gc, pack_dir)
     for block in (getattr(gc, "connectors", None) or {}).values():
-        block.rule_pack_dir = ""
+        _set_scope_rule_pack_dir(block, "")
     return False
+
+
+def _set_scope_rule_pack_dir(block, pack_dir: str) -> None:
+    """Select *pack_dir* at one guardrail scope ("" clears the scope's pack).
+
+    The config_version 9 key is ``rule_pack``; the save maps a non-empty v8
+    ``rule_pack_dir`` onto it, so the scope's ``rule_pack`` is cleared here or
+    an existing selection would survive a clear.
+    """
+    block.rule_pack_dir = pack_dir
+    if hasattr(block, "rule_pack"):
+        block.rule_pack = ""
 
 
 def _apply_guardrail_extra_options(
@@ -7226,7 +7238,7 @@ def setup_guardrail(
             ("guardrail.port", str(gc.port)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", gc.detection_strategy),
-            ("guardrail.rule_pack_dir", gc.rule_pack_dir),
+            ("guardrail.rule_pack_dir", gc.effective_rule_pack_dir()),
         ]
         if gc.api_base:
             rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
@@ -9850,10 +9862,10 @@ def _apply_hook_connector_setup(
         # "(cleared)" when --rule-pack-dir "" reset the override.
         pack_label = rule_pack if rule_pack is not None else (pack_dir or "(cleared — inherits global)")
         if write_mode == "add" and connector in gc.connectors:
-            gc.connectors[connector].rule_pack_dir = pack_dir
+            _set_scope_rule_pack_dir(gc.connectors[connector], pack_dir)
             ux.echo(f"  ✓ {connector} rule pack: {pack_label} (per-connector override)")
         else:
-            gc.rule_pack_dir = pack_dir
+            _set_scope_rule_pack_dir(gc, pack_dir)
             ux.echo(f"  ✓ rule pack: {pack_label} (global)")
     gc.enabled = True
     # SU-01/G1: write the guardrail mode PER-CONNECTOR when this connector owns

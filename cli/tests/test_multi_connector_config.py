@@ -179,6 +179,31 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("nope"), "observe")
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
 
+    def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
+        from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("strict", "permissive"):
+                os.makedirs(os.path.join(tmp, "guardrail", name))
+            cfg = Config(
+                policy_dir=tmp,
+                guardrail=GuardrailConfig(
+                    rule_pack="strict",
+                    connectors={
+                        "codex": PerConnectorGuardrailConfig(rule_pack="permissive"),
+                        "claudecode": PerConnectorGuardrailConfig(),
+                    },
+                ),
+            )
+            g = cfg.guardrail
+            self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "permissive"))
+            self.assertEqual(g.effective_rule_pack_dir("claudecode"), os.path.join(tmp, "guardrail", "strict"))
+            # A global selection clears every connector's pack, v9 key included.
+            _apply_rule_pack_selection(g, os.path.join(tmp, "guardrail", "strict"), connector=None)
+            self.assertEqual(g.connectors["codex"].rule_pack, "")
+            self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "strict"))
+
     def test_safe_fallbacks_when_unset(self):
         g = GuardrailConfig(mode="", hook_fail_mode="", rule_pack_dir="")
         self.assertEqual(g.effective_mode(""), "observe")

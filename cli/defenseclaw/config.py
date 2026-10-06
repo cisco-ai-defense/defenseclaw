@@ -2691,12 +2691,36 @@ class GuardrailConfig:
             return pc.block_message
         return self.block_message
 
-    def effective_rule_pack_dir(self, connector: str = "") -> str:
-        """Per-connector rule-pack dir when set, else the global one."""
+    def effective_rule_pack(self, connector: str = "") -> str:
+        """The config_version 9 ``rule_pack`` a connector uses: its own, else the global one ("" = default)."""
         pc = self._connector_override(connector)
-        if pc is not None and pc.rule_pack_dir.strip():
-            return pc.rule_pack_dir
-        return self.rule_pack_dir
+        if pc is not None and pc.rule_pack.strip():
+            return pc.rule_pack.strip()
+        return self.rule_pack.strip()
+
+    def effective_rule_pack_dir(self, connector: str = "") -> str:
+        """Directory of the rule pack a connector enforces, "" for the built-in default.
+
+        A connector scope that selects a pack wins over the global one. At each
+        scope ``rule_pack`` (a preset under ``policy_dir`` or a
+        ``guardrail.custom_packs`` key) wins over the v8 ``rule_pack_dir``, as
+        in the gateway; the resolution is ``policy_catalog.configured_pack_dir``.
+        """
+        from types import SimpleNamespace
+
+        from defenseclaw import policy_catalog
+
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is None or getattr(cfg, "guardrail", None) is not self:
+            # A guardrail block built on its own: presets resolve to the bundled copy.
+            cfg = SimpleNamespace(guardrail=self, policy_dir="", data_dir="")
+        pc = self._connector_override(connector)
+        if pc is not None:
+            selected = policy_catalog.configured_pack_dir(cfg, pc)
+            if selected:
+                return selected
+        return policy_catalog.configured_pack_dir(cfg, self)
 
     def effective_block_at(self, connector: str = "") -> str:
         """Tool-call block level: connector value > global value > "".
@@ -3378,6 +3402,16 @@ class Config:
             return str(Path(raw).expanduser().resolve(strict=False))
         except OSError:
             return os.path.abspath(raw)
+
+    def __post_init__(self) -> None:
+        # GuardrailConfig.effective_rule_pack_dir resolves a rule_pack preset
+        # under this config's policy_dir.
+        import weakref
+
+        try:
+            object.__setattr__(self.guardrail, "_owner", weakref.ref(self))
+        except (AttributeError, TypeError):  # a test double without attributes
+            pass
 
     def active_connector(self) -> str:
         """Return the canonical connector name for this config.

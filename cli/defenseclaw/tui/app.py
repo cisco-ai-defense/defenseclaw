@@ -16157,6 +16157,12 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     effective_guardrail_enabled = bool(getattr(guardrail, "enabled", False))
     effective_guardrail_mode = str(getattr(guardrail, "mode", "") or "observe")
     effective_rule_pack_dir = str(getattr(guardrail, "rule_pack_dir", "") or "")
+    if hasattr(guardrail, "effective_rule_pack_dir"):
+        try:
+            # The global pack: config_version 9 rule_pack, else the v8 dir.
+            effective_rule_pack_dir = str(guardrail.effective_rule_pack_dir() or "")
+        except Exception:  # noqa: BLE001 - retain the raw v8 value.
+            pass
     effective_hilt = hilt
     if len(actives) == 1 and guardrail is not None:
         connector = actives[0]

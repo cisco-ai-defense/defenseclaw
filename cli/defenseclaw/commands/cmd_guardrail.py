@@ -601,8 +601,11 @@ def profile_status_text(cfg, result: dict) -> str:
     if not name:
         return f"none for {user} (guardrail.* applies)"
     effective = result.get("effective") or {}
+    # config_version 9 names the pack (rule_pack); a v8 gateway sends its dir.
+    pack = str(effective.get("rule_pack") or "").strip()
     pack_dir = str(effective.get("rule_pack_dir") or "")
-    pack = policy_catalog.pack_name_for_path(cfg, pack_dir)[0] if pack_dir.strip() else "default"
+    if not pack:
+        pack = policy_catalog.pack_name_for_path(cfg, pack_dir)[0] if pack_dir.strip() else "default"
     reason = str(result.get("match") or "")
     if result.get("matched_group"):
         reason += f" {result['matched_group']}"
@@ -2875,7 +2878,7 @@ def list_packs_cmd(app: AppContext, json_out: bool) -> None:
             click.echo(f"      - {ux.accent(pack.name)}: {pack.path}{ux.dim(used)}")
         click.echo()
 
-    global_dir = (getattr(gc, "rule_pack_dir", "") or "").strip()
+    global_dir = str((gc.effective_rule_pack_dir() if hasattr(gc, "effective_rule_pack_dir") else "") or "").strip()
     ux.echo(
         f"  • {ux._style('global rule-pack dir:', fg='bright_black', bold=True)} "
         + (ux.accent(global_dir) if global_dir else ux.dim("(built-in default)"))
@@ -4462,7 +4465,7 @@ def profile_group() -> None:
 
 def _profile_settings(profile) -> dict:
     out: dict = {}
-    for key in ("description", "mode", "block_at", "alert_at", "rule_pack_dir", "block_message"):
+    for key in ("description", "mode", "block_at", "alert_at", "rule_pack", "rule_pack_dir", "block_message"):
         value = getattr(profile, key, "")
         if value:
             out[key] = value
@@ -4476,6 +4479,7 @@ def _profile_settings(profile) -> dict:
                     ("mode", pc.mode),
                     ("block_at", pc.block_at),
                     ("alert_at", pc.alert_at),
+                    ("rule_pack", getattr(pc, "rule_pack", "")),
                     ("rule_pack_dir", pc.rule_pack_dir),
                     ("block_message", pc.block_message),
                 )

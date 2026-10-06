@@ -265,9 +265,9 @@ def _rule_pack_dirs() -> list[Path]:
         from defenseclaw import config as config_module  # noqa: PLC0415
 
         cfg = config_module.load()
-        gc = cfg.guardrail
-        if str(getattr(gc, "rule_pack_dir", "") or "").strip():
-            dirs.append(Path(gc.rule_pack_dir).expanduser())
+        configured = cfg.guardrail.effective_rule_pack_dir()
+        if configured:
+            dirs.append(Path(configured))
         policy_dir = str(getattr(cfg, "policy_dir", "") or "").strip()
         if policy_dir:
             seeded = Path(policy_dir).expanduser() / "guardrail"
