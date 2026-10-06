@@ -6,6 +6,7 @@
     "sandbox-cli",
     "source-of-truth",
     "configuration",
+    "migrate-v9",
     "env-vars",
     "keys",
     "fail-modes",
