@@ -5207,8 +5207,6 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     if not raw:
         return GuardrailConfig()
     hilt_raw = raw.get("hilt")
-    if hilt_raw is None:
-        hilt_raw = raw.get("hitl")
     private_upstreams_raw = raw.get("allow_private_upstreams", [])
     private_upstreams = (
         [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
@@ -5270,8 +5268,6 @@ def _merge_guardrail_connectors(
     for name, entry in raw.items():
         entry = entry if isinstance(entry, dict) else {}
         hilt_entry = entry.get("hilt")
-        if hilt_entry is None:
-            hilt_entry = entry.get("hitl")
         # ``enabled`` is parsed only when present so an absent key stays
         # ``None`` ("inherit default") rather than collapsing to a concrete
         # bool. A non-bool value is ignored (treated as unset) to match Go's
@@ -6221,7 +6217,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
     source_config_version = _exact_config_version(raw.get("config_version"))
-    audit_db = _audit_database_path(raw, data_dir, source_config_version)
+    audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
@@ -6356,23 +6352,18 @@ def _exact_config_version(value: Any) -> int:
     return 0
 
 
-def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
+def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
     """Resolve Python readers/writers to the same local store as config v8."""
 
-    if is_current_schema(source_version):
-        observability = raw.get("observability")
-        local = observability.get("local") if isinstance(observability, dict) else None
-        configured = local.get("path") if isinstance(local, dict) else None
-        path = configured.strip() if isinstance(configured, str) else ""
-        if not path:
-            path = os.path.join(data_dir, AUDIT_DB_NAME)
-        elif not os.path.isabs(path):
-            path = os.path.join(data_dir, path)
-        return os.path.normpath(os.path.expanduser(path))
-    configured = raw.get("audit_db")
-    if isinstance(configured, str) and configured.strip():
-        return configured
-    return os.path.join(data_dir, AUDIT_DB_NAME)
+    observability = raw.get("observability")
+    local = observability.get("local") if isinstance(observability, dict) else None
+    configured = local.get("path") if isinstance(local, dict) else None
+    path = configured.strip() if isinstance(configured, str) else ""
+    if not path:
+        path = os.path.join(data_dir, AUDIT_DB_NAME)
+    elif not os.path.isabs(path):
+        path = os.path.join(data_dir, path)
+    return os.path.normpath(os.path.expanduser(path))
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
@@ -6494,8 +6485,6 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
     if not isinstance(raw, dict):
         return PerConnectorGuardrailConfig()
     hilt_entry = raw.get("hilt")
-    if hilt_entry is None:
-        hilt_entry = raw.get("hitl")
     enabled_raw = raw.get("enabled")
     return PerConnectorGuardrailConfig(
         mode=str(raw.get("mode", "") or ""),

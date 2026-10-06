@@ -1705,14 +1705,14 @@ class TestGuardrailHostField(unittest.TestCase):
         )
         self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
 
-    def test_merge_guardrail_hilt_defaults_and_alias(self):
+    def test_merge_guardrail_hilt_defaults_and_values(self):
         default_gc = _merge_guardrail({}, "/tmp")
         self.assertFalse(default_gc.hilt.enabled)
         self.assertEqual(default_gc.hilt.min_severity, "HIGH")
 
-        aliased = _merge_guardrail({"hitl": {"enabled": True, "min_severity": "medium"}}, "/tmp")
-        self.assertTrue(aliased.hilt.enabled)
-        self.assertEqual(aliased.hilt.min_severity, "MEDIUM")
+        configured = _merge_guardrail({"hilt": {"enabled": True, "min_severity": "medium"}}, "/tmp")
+        self.assertTrue(configured.hilt.enabled)
+        self.assertEqual(configured.hilt.min_severity, "MEDIUM")
 
 
 class TestOpenShellModeField(unittest.TestCase):
