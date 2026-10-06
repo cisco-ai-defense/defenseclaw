@@ -28,6 +28,7 @@ Mirrors internal/config/asset_policy_lists.go and internal/gateway/enforce_confi
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any
 
 import click
@@ -230,10 +231,12 @@ def write_operator_decision(
     refuse_if_managed(cfg, target_type=target_type, op=op, name=name)
     if target_type not in TARGET_TYPES:
         raise ValueError(f"target type must be one of {', '.join(TARGET_TYPES)}")
-    path = str(config_path_for_data_dir(cfg.data_dir))
-    with config_writer.hold_lock(path):
+    data_dir = getattr(cfg, "data_dir", "")
+    path = str(config_path_for_data_dir(data_dir)) if data_dir else ""
+    with config_writer.hold_lock(path) if path else contextlib.nullcontext():
         holder = getattr(cfg.asset_policy, target_type)
-        _reload_lists_from_disk(cfg, holder, target_type, path)
+        if path:
+            _reload_lists_from_disk(cfg, holder, target_type, path)
         denied = [r for r in holder.denied if not _same_asset(r, name, connector)]
         allowed = [r for r in holder.allowed if not _same_asset(r, name, connector)]
         if target_type == "tool":
