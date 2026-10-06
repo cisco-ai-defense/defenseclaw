@@ -417,6 +417,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 			m.moved("config", "update_check", "update.check", check)
 		}
 	}
+	m.migrateTelemetryAliases(root)
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
@@ -436,6 +437,47 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: encode the migrated config: %w", err)
 	}
 	return out.Bytes(), false, nil
+}
+
+// migrateTelemetryAliases retires the telemetry attribute alias switch. Since
+// config_version 9 telemetry carries only canonical attribute names, so
+// observability.trace_policy.compatibility_aliases is dropped (recorded in
+// Removed) and a configured resource attribute deployment.environment becomes
+// deployment.environment.name. A host that exports to a backend is told its
+// queries and dashboards must use the canonical names. Keep this until the
+// config_version 8 migration is dropped (1.1.0).
+func (m *v9Migrator) migrateTelemetryAliases(root *yaml.Node) {
+	observability := v8YAMLMapValue(root, "observability")
+	if observability == nil || observability.Kind != yaml.MappingNode {
+		return
+	}
+	if policy := v8YAMLMapValue(observability, "trace_policy"); policy != nil {
+		if v9Pop(policy, "compatibility_aliases") != nil {
+			m.record.Removed = append(m.record.Removed, "observability.trace_policy.compatibility_aliases")
+		}
+		if policy.Kind == yaml.MappingNode && len(policy.Content) == 0 {
+			v9Pop(observability, "trace_policy")
+		}
+	}
+	const from, to = "deployment.environment", "deployment.environment.name"
+	attributes := v8YAMLMapValue(v8YAMLMapValue(observability, "resource"), "attributes")
+	if node := v9Pop(attributes, from); node != nil {
+		prefix := "observability.resource.attributes."
+		if v8YAMLMapValue(attributes, to) == nil {
+			v9Set(attributes, node, to)
+			m.moved("config", prefix+from, prefix+to, node.Value)
+		} else if v8YAMLMapValue(attributes, to).Value != node.Value {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: prefix + to, Kept: to, Lost: from,
+				Reason: "both spellings were set to different values; the canonical name wins",
+			})
+		}
+	}
+	if len(v9SeqItems(v8YAMLMapValue(observability, "destinations"))) > 0 {
+		m.note("telemetry no longer carries the alias attributes deployment.environment, deployment.mode and " +
+			"defenseclaw.device.id; queries, dashboards and alerts on an exported backend must use " +
+			"deployment.environment.name, defenseclaw.deployment.mode and defenseclaw.device.public_key_fingerprint")
+	}
 }
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
