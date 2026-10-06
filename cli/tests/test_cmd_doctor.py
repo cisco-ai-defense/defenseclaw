@@ -90,6 +90,7 @@ class DoctorPolicyStateTests(unittest.TestCase):
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
     def test_only_data_json_is_retired(self):
         from defenseclaw.commands import cmd_doctor
+        from defenseclaw.config import Config
 
         with tempfile.TemporaryDirectory() as policy_dir:
             os.makedirs(os.path.join(policy_dir, "rego"))
@@ -97,7 +98,8 @@ class DoctorRetiredPolicyDataTests(unittest.TestCase):
                 with open(os.path.join(policy_dir, "rego", name), "w", encoding="utf-8") as f:
                     f.write("{}")
             result = _DoctorResult()
-            cfg = SimpleNamespace(config_version=9, policy_dir=policy_dir, data_dir="")
+            cfg = Config(policy_dir=policy_dir, data_dir="")
+            cfg._source_config_version = 9
             cmd_doctor._check_policy_evidence_files(cfg, result)
         detail = result.checks[0]["detail"]
         self.assertIn("data.json", detail)

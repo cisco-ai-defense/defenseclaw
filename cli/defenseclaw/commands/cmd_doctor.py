@@ -9027,7 +9027,7 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
 
     data_dir = getattr(cfg, "data_dir", "") or ""
-    if getattr(cfg, "config_version", 0) >= CONFIG_VERSION_V9:
+    if getattr(cfg, "_source_config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
         stale = []
         # data-sandbox.json stays: `defenseclaw-gateway policy domains` and
