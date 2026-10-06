@@ -3629,6 +3629,21 @@ func TestAPIPolicyEvaluateFallback(t *testing.T) {
 	if resp.Data.Verdict != "rejected" {
 		t.Errorf("high-severity verdict = %q, want rejected", resp.Data.Verdict)
 	}
+
+	// The per-scanner overrides apply on this path too (scanner_name).
+	block := config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
+	api.scannerCfg.Admission.Plugin.ScannerOverrides = map[string]config.AdmissionActionMap{"plugin-scanner": {Low: &block}}
+	body = []byte(`{"domain":"admission","input":{"target_type":"plugin","target_name":"low-plugin","path":"/tmp/low-plugin",
+		"scan_result":{"max_severity":"LOW","total_findings":1,"scanner_name":"plugin-scanner"}}}`)
+	req = httptest.NewRequest(http.MethodPost, "/policy/evaluate", bytes.NewReader(body))
+	w = httptest.NewRecorder()
+	api.handlePolicyEvaluate(w, req)
+	if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+		t.Fatalf("decode override response: %v", err)
+	}
+	if resp.Data.Verdict != "rejected" {
+		t.Errorf("plugin-scanner LOW override verdict = %q, want rejected", resp.Data.Verdict)
+	}
 }
 
 func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {

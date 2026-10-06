@@ -2037,6 +2037,8 @@ type policyEvaluateInput struct {
 type policyEvaluateScanResult struct {
 	MaxSeverity   string `json:"max_severity"`
 	TotalFindings int    `json:"total_findings"`
+	// ScannerName keys admission.<type>.scanner_overrides.
+	ScannerName string `json:"scanner_name,omitempty"`
 	// DeepSec hardening (S2.scanners): expose the scanner failure
 	// signal so callers driving this debug endpoint can reproduce
 	// the post-scan admission decision a non-zero scanner exit
@@ -2462,6 +2464,7 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		input.ScanResult = &policy.ScanResultInput{
 			MaxSeverity:   req.Input.ScanResult.MaxSeverity,
 			TotalFindings: req.Input.ScanResult.TotalFindings,
+			ScannerName:   req.Input.ScanResult.ScannerName,
 			ExitCode:      req.Input.ScanResult.ExitCode,
 			ScanError:     req.Input.ScanResult.ScanError,
 		}

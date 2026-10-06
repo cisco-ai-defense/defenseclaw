@@ -625,6 +625,7 @@ export class PolicyEnforcer {
         scan_result: {
           max_severity: maxSeverity(scanResult.findings.map((f) => f.severity)),
           total_findings: scanResult.findings.length,
+          scanner_name: scanResult.scanner,
           findings: scanResult.findings.map((f) => ({
             severity: f.severity,
             title: f.title,
