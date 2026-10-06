@@ -73,6 +73,27 @@ class CliSmokeTests(unittest.TestCase):
             if group == "mcp":
                 self.assertIn("in the configured connector(s)' MCP config.", " ".join(commands.split()))
 
+    def test_help_never_shows_internal_ledger_ids(self):
+        # Ledger ids belong in code comments and commit messages; click
+        # prints command docstrings and option help to users.
+        import re
+
+        import click
+        from defenseclaw.main import cli
+
+        leaks = []
+
+        def walk(command, ctx):
+            if re.search(r"GAP-\d", command.get_help(ctx)):
+                leaks.append(ctx.command_path)
+            if isinstance(command, click.Group):
+                for name in command.list_commands(ctx):
+                    sub = command.get_command(ctx, name)
+                    walk(sub, click.Context(sub, info_name=name, parent=ctx))
+
+        walk(cli, click.Context(cli, info_name="defenseclaw"))
+        self.assertEqual(leaks, [])
+
     def test_init_help_works(self):
         from defenseclaw.main import cli
 
