@@ -28,8 +28,8 @@ This command surfaces the common policy levers directly:
   defenseclaw guardrail enable         # turn on + connector setup
   defenseclaw guardrail disable        # turn off + connector teardown
   defenseclaw guardrail mode           # observe (log only) vs action (enforce)
-  defenseclaw guardrail block-at       # lowest severity a tool call is blocked at
-  defenseclaw guardrail alert-at       # lowest severity a tool call raises an alert at
+  defenseclaw guardrail block-at       # lowest severity the guardrail blocks at
+  defenseclaw guardrail alert-at       # lowest severity the guardrail raises an alert at
   defenseclaw guardrail fail-mode      # open vs closed on hook failures
   defenseclaw guardrail hilt           # human-in-the-loop prompting
   defenseclaw guardrail block-message  # message shown when an action is blocked
@@ -358,8 +358,8 @@ def guardrail() -> None:
       status         enabled state + roster (mode/fail/rule-pack/hilt/judge)
       enable/disable flip enforcement on/off
       mode           observe (log only) vs action (enforce)
-      block-at       lowest severity a tool call is blocked at
-      alert-at       lowest severity a tool call raises an alert at
+      block-at       lowest severity prompts, completions and tool calls are blocked at
+      alert-at       lowest severity prompts, completions and tool calls raise an alert at
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
@@ -3157,6 +3157,8 @@ def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
 # restart the gateway.
 
 _RULE_PACK_NAME = re.compile(r"[^a-z0-9_-]+")
+#: A rule id as the shipped packs spell it: ``SEC-AWS-KEY``, ``exec.remote_ip_download_execute_same_artifact``.
+_RULE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def _cli_actor() -> str:
@@ -3219,13 +3221,16 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
         )
     except config_writer.ManagedConfigWriteError:
+        from defenseclaw.enforce.asset_lists import audit_managed_refusal
+
+        audit_managed_refusal("guardrail-config", getattr(changes[0], "path", "") or "guardrail", f"command={reason}")
         fail(
             3,
             "This device is managed: change the guardrail in the admin config (MDM or management plane). "
             "Nothing was changed.",
         )
     except config_writer.ConfigWriteError as exc:
-        fail(1, f"Failed to save config: {exc}")
+        fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
     return None
 
 
@@ -3307,7 +3312,8 @@ def use_pack_cmd(
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
 
-    PACK is a built-in preset (default, strict, permissive), the name of a
+    PACK is a built-in preset (default, strict, permissive), a key of
+    ``guardrail.custom_packs`` (a pack you already registered), the name of a
     pack under ``<policy_dir>/guardrail/``, or a directory path (``./NAME``
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
@@ -3417,9 +3423,23 @@ def use_pack_cmd(
 
     # Resolve PACK -> (name, directory, kind).
     raw = (pack or "").strip()
+    registered = (getattr(gc, "custom_packs", None) or {}).get(raw)
     if raw in policy_catalog.RULE_PACK_PRESETS:
         path = policy_catalog.preset_pack_dir(app.cfg, raw)
         pack_name, kind = raw, "preset"
+    elif registered is not None:
+        # A pack already registered under guardrail.custom_packs: select it by
+        # name, keeping its pinned digest (an edited pack is refused below).
+        path = policy_catalog.normalize_pack_path(str(getattr(registered, "path", "") or ""))
+        pack_name, kind = raw, "registered"
+        if not os.path.isdir(path):
+            _finish(
+                ok=False,
+                exit_code=1,
+                pack_name=raw,
+                path=path,
+                message=f"Rule pack {raw!r} is registered at {path}, which isn't a directory. Nothing was changed.",
+            )
     else:
         candidate = policy_catalog.normalize_pack_path(raw)
         # A bare name is the installed pack of that name even when the current
@@ -3488,11 +3508,25 @@ def use_pack_cmd(
                 )
             # The pin covers the pack's own files, not the embedded defaults.
             digest = str((result.summary or {}).get("files_digest", "") or "")
+            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
+            if kind == "registered" and digest.lower() != pinned:
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=(
+                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
+                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
+                        f"sha256:{digest}. Nothing was changed."
+                    ),
+                )
 
     _preflight_config_write(app)
     changes: list = []
     name = pack_name
-    if kind != "preset":
+    if kind == "custom":
         name = _RULE_PACK_NAME.sub("-", pack_name.lower()).strip("-_")[:64] or "custom"
         if name in policy_catalog.RULE_PACK_PRESETS:
             name = f"custom-{name}"
@@ -3737,8 +3771,9 @@ def rule_group() -> None:
       disable   guardrail.rules.disable += ID
       severity  guardrail.rules.severity_overrides[ID] = SEVERITY
 
-    An ID the scope's rule pack doesn't have is refused by the gateway when
-    it reloads (the previous configuration keeps running).
+    IDs are case-sensitive, as the pack spells them. An ID the scope's rule
+    pack doesn't have is refused by the gateway when it reloads (the previous
+    configuration keeps running).
     """
 
 
@@ -3758,9 +3793,9 @@ def _change_rule_lists(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
-    rule_id = rule_id.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", rule_id):
-        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, _ and -). Nothing was changed.")
+    rule_id = rule_id.strip()
+    if not _RULE_ID.fullmatch(rule_id):
+        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
     connector_key = None
     if connector:
@@ -3840,16 +3875,18 @@ def rule_severity_cmd(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
-    rule_id = rule_id.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", rule_id):
-        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, _ and -). Nothing was changed.")
+    rule_id = rule_id.strip()
+    if not _RULE_ID.fullmatch(rule_id):
+        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
     connector_key = normalize_connector(connector) if connector else None
     if connector and not profile_name:
         connector_key, problem = _resolve_scope_connector(app, connector)
         if problem:
             _fail(1, problem)
-    key = f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides.{rule_id}"
+    # A dotted ID (exec.remote_ip_...) is one key, not a path of keys.
+    overrides = config_writer.parse_path(f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides")
+    key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     change = config_writer.Change(key, unset=True) if level == "DEFAULT" else config_writer.Change(key, level)
     _preflight_config_write(app)

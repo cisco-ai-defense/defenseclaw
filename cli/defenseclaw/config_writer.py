@@ -74,6 +74,10 @@ ACTOR_PREFIX_API = "api:"
 ACTOR_PREFIX_SANDBOX = "sandbox:"
 ACTOR_PREFIX_HAND_EDIT = "hand-edit:"
 
+#: The runtime descriptor the enterprise lifecycle writes next to the managed
+#: config.yaml. The folder that holds it is the lifecycle's, not the writer's.
+MANAGED_RUNTIME_DESCRIPTOR = "managed-runtime.json"
+
 #: Shown when a local writer is refused on a managed (standalone) device.
 MANAGED_REFUSAL = (
     "This device is managed: change config.yaml in the admin config "
@@ -305,7 +309,11 @@ def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT
         finally:
             held[target] -= 1
         return
-    file_permissions.make_private_directory(os.path.dirname(target) or ".")
+    directory = os.path.dirname(target) or "."
+    # The managed config folder is root-owned 0755 on purpose (every user's
+    # hook reads it); a refused or lifecycle write must not tighten it.
+    if not os.path.isfile(os.path.join(directory, MANAGED_RUNTIME_DESCRIPTOR)):
+        file_permissions.make_private_directory(directory)
     stack = ExitStack()
     try:
         stack.enter_context(locked_file_update(target, timeout_seconds=timeout_s))
@@ -506,12 +514,26 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     return profile == "standalone"
 
 
+def machine_managed_standalone() -> bool:
+    """Whether this computer is a managed standalone host: the enterprise
+    lifecycle published its runtime descriptor (Linux, macOS) or the Windows
+    marker with the standalone profile. Any account's CLI sees it, so a
+    standard user's per-user config cannot opt out of the managed gate.
+    Secure Client hosts publish neither, so their path is unchanged."""
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
+
+
 def standalone_managed(current: bytes) -> bool:
-    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
-    managed deployment on the standalone profile. Secure Client hosts are
-    not standalone, so their path is unchanged."""
+    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
+    describe a managed deployment on the standalone profile. Secure Client
+    hosts are not standalone, so their path is unchanged."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
+    if machine_managed_standalone():
+        return True
     try:
         document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
     except (UnicodeDecodeError, yaml.YAMLError):
@@ -582,6 +604,52 @@ def validate_candidate(target: str, candidate: bytes) -> None:
             os.unlink(staged)
         except OSError:
             pass
+
+
+_REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
+_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
+_SCHEMA_WORDS = (
+    ("correct the field using the canonical v8 schema and reference", "check the value and its documented format"),
+    ("use the value type documented by the canonical v8 schema", "use the value type the reference documents"),
+)
+
+
+def plain_error(exc: BaseException) -> str:
+    """A refused change in plain words: the key and what to do about it.
+
+    The validators report a JSON path, a bracketed error code and pointers to
+    "the canonical v8 schema"; none of that helps someone who typed
+    ``config set``. The Go decision stands; this only says it plainly (the
+    same wording ``config validate`` uses for the schema errors).
+    """
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    cause = exc.__cause__ if isinstance(exc.__cause__, (ConfigInspectError, V8ConfigError)) else exc
+    if isinstance(cause, ConfigInspectError) and cause.field_path and cause.reason:
+        path, reason = cause.field_path, cause.reason
+    elif isinstance(cause, V8ConfigError):
+        path, reason = cause.path, f"[{cause.keyword}] {cause.corrective_action}"
+    else:
+        return str(exc)
+    for internal, plain in _SCHEMA_WORDS:
+        reason = reason.replace(internal, plain)
+    name = path.split(" (line", 1)[0].strip()
+    name = name[2:] if name.startswith("$.") else ("config.yaml" if name == "$" else name)
+    match = _REASON_CODE.match(reason.strip())
+    code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+    parts = [part.strip() for part in text.split("; ") if part.strip()]
+    if code == "config_semantic_invalid" and parts:
+        detail = _RULE_PACK_PREFIX.sub("", parts[0])
+        sentence = detail if detail.startswith(name) else f"{name}: {detail}"
+        actions = [part for part in parts[1:] if not part.startswith("expected ")]
+        return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+    if code == "pattern":
+        hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
+        return f"{name} is not in the expected format{hint}."
+    from defenseclaw.commands.cmd_config import _plain_v8_issue
+
+    return _plain_v8_issue(None, path, reason)
 
 
 def _data_dir_for(target: str, candidate: bytes) -> str:

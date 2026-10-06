@@ -53,7 +53,7 @@ in the config, including which agents to protect, is in
 
    That SHA-256 is the pin for hash-pinned trust, the default. See
    `signing/README.md` for signature-based trust instead.
-2. **Write the administrator config.** It needs `config_version: 8`,
+2. **Write the administrator config.** It needs `config_version: 9` (a version 8 file is migrated),
    `deployment_mode: managed_enterprise` and `enterprise.profile:
    standalone`, and it chooses the agents to protect. Start from the
    per-OS minimal config in
