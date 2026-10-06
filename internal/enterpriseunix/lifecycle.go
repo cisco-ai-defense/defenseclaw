@@ -1307,7 +1307,7 @@ func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Acc
 				return nil, err
 			}
 		}
-		l.noteChange("migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s)",
+		l.noteChange("migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s, the --config a rollback to a config_version 8 release needs)",
 			env.Layout.ConfigPath, len(migration.Record.Moved), len(migration.Record.Conflicts), env.Layout.ConfigPath, config.ConfigV8BackupSuffix)
 		if migration.Record.ActionsRowsIgnored > 0 {
 			l.result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
