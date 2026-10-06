@@ -32,7 +32,6 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,8 +40,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
-	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -410,16 +409,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// optional side effect controlled by retain_judge_bodies.
 	//
 	// Retention defaults to on (see viper.SetDefault); operators who opt out via
-	// config or DEFENSECLAW_PERSIST_JUDGE=0 get no judge_responses body row but
+	// guardrail.retain_judge_bodies: false get no judge_responses body row but
 	// retain the canonical completion. The raw body is only touched inside this
 	// process; route-specific central projection owns export redaction, and the
 	// InsertJudgeResponse body stays on disk under the data-directory ACLs.
 	queueDepth := cfg.Guardrail.JudgePersistQueueDepth
-	if v := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE")); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-			queueDepth = parsed
-		}
-	}
 	legacyJudgeBodies := false
 	if store != nil {
 		var legacyErr error

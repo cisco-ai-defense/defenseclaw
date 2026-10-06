@@ -1767,8 +1767,7 @@ type GuardrailConfig struct {
 	// OTLP) is redacted by emitJudge before it leaves the process.
 	//
 	// Operators who prefer not to store judge bodies can opt out via
-	// `guardrail.retain_judge_bodies: false` in config.yaml or the
-	// DEFENSECLAW_PERSIST_JUDGE=0 environment override. Redaction is
+	// `guardrail.retain_judge_bodies: false` in config.yaml. Redaction is
 	// the safety mechanism for downstream sinks; retention is a
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
@@ -1785,9 +1784,6 @@ type GuardrailConfig struct {
 	//     while bounding worst-case memory to ~64 MiB (each row
 	//     is capped at MaxJudgeRawBytes = 64 KiB).
 	//   - Setting this to 0 falls back to the default at boot.
-	//   - DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE env var overrides
-	//     the config value at sidecar boot for emergency tuning
-	//     without a config push.
 	//
 	// Drops show up as defenseclaw.judge.persist.drops with
 	// reason="queue_full"; a sustained non-zero rate is the cue
@@ -4350,7 +4346,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	// in ~/.defenseclaw/audit.db, which is already covered by the
 	// same filesystem ACLs as the rest of the data directory. Operators
 	// with strict storage or privacy constraints can still opt out with
-	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
+	// `guardrail.retain_judge_bodies: false`.
 	viper.SetDefault("guardrail.retain_judge_bodies", true)
 	// Buffered async persistence queue: 1024 entries is the sweet
 	// spot between memory ceiling and BUSY absorption under burst
