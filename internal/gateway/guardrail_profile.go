@@ -740,7 +740,9 @@ func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 		return nil
 	}
 	base := a.scannerCfg
-	if g := a.generation(); g != nil && g.Config != nil {
+	// Secure Client keeps deciding with the start-time configuration
+	// (issue #1092).
+	if g := a.generation(); g != nil && g.Config != nil && !base.SecureClientIntegration() {
 		base = g.Config
 	}
 	return a.decisionConfigFrom(ctx, base)

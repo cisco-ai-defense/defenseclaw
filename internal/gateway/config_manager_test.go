@@ -1341,3 +1341,57 @@ func TestLoadRuntimeConfigCandidateRefusesAFailedV8Migration(t *testing.T) {
 		t.Fatalf("loadRuntimeConfigCandidate = %v, %v; want the failed migration refused", cfg, err)
 	}
 }
+
+// A Secure Client gateway reads .env only at start (GAP-0137, issue #1092).
+func TestConfigManagerSecureClientReloadReadsNoDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loads := 0
+	config.RegisterDotEnvLoader(func(string) { loads++ })
+	t.Cleanup(func() { config.RegisterDotEnvLoader(nil) })
+	initial := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dir}
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			return nil
+		})
+	_ = mgr.Reload(context.Background(), "test")
+	if loads != 0 {
+		t.Fatalf("a Secure Client reload loaded .env %d time(s)", loads)
+	}
+}
+
+// Secure Client keeps its reload classification (GAP-0141, GAP-0147, issue
+// #1092): hook_fail_mode reloads hot; the levels, llm, watch, ai_discovery
+// and the v8 action keys need a restart; and the watcher follows no policy
+// assets.
+func TestDiffConfigsSecureClientKeepsItsReloadClassification(t *testing.T) {
+	base := &config.Config{DeploymentMode: "managed_enterprise"}
+	edit := func(change func(*config.Config)) ConfigDiff {
+		next := cloneConfig(base)
+		change(next)
+		return diffConfigs(base, next)
+	}
+	if diff := edit(func(c *config.Config) { c.Guardrail.HookFailMode = "open" }); len(diff.RestartRequired) != 0 {
+		t.Fatalf("hook_fail_mode needs a restart: %v", diff.RestartRequired)
+	}
+	for want, change := range map[string]func(*config.Config){
+		"guardrail":     func(c *config.Config) { c.Guardrail.BlockAt = "HIGH" },
+		"llm":           func(c *config.Config) { c.LLM.Model = "openai/gpt-4o" },
+		"watch":         func(c *config.Config) { c.Watch.DebounceMs = 900 },
+		"ai_discovery":  func(c *config.Config) { c.AIDiscovery.Enabled = true },
+		"skill_actions": func(c *config.Config) { c.SkillActions.High.Install = "block" },
+	} {
+		if diff := edit(change); !slices.Contains(diff.RestartRequired, want) {
+			t.Fatalf("%s edit restart set = %v, want %s", want, diff.RestartRequired, want)
+		}
+	}
+	sidecar := &Sidecar{cfg: base, configMgr: &ConfigManager{}}
+	sidecar.watchGenerationAssets()
+	if sidecar.configMgr.assetDirs != nil || sidecar.configMgr.assetFiles != nil {
+		t.Fatal("the Secure Client watcher follows policy assets")
+	}
+}
