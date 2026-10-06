@@ -3102,7 +3102,8 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
-				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) {
+				if path != root && (shouldSkipDiscoveryDir(d.Name()) || modelPathInSet(path, ownDataDirs)) ||
+					s.macOSTCCSkipped(path) {
 					return filepath.SkipDir
 				}
 				return nil
