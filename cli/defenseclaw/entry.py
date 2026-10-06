@@ -68,12 +68,23 @@ def use_bundled_litellm_cost_map(environ=None) -> None:
     env.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 
+def ignore_stray_deployment_pins() -> None:
+    """Drop a deployment mode exported in a user's shell (see
+    ``config.ignore_unmanaged_deployment_pins``). A CLI that cannot import its
+    config module must still upgrade and roll back, so a failure here is
+    ignored."""
+    try:
+        from defenseclaw.config import ignore_unmanaged_deployment_pins
+
+        ignore_unmanaged_deployment_pins()
+    except Exception:  # noqa: BLE001 - never block upgrade or rollback
+        pass
+
+
 def main() -> None:
     exempt_instance_metadata_from_proxy()
     use_bundled_litellm_cost_map()
-    from defenseclaw.config import ignore_unmanaged_deployment_pins
-
-    ignore_unmanaged_deployment_pins()
+    ignore_stray_deployment_pins()
     argv = sys.argv[1:]
     if argv and argv[0] in ("upgrade", "rollback"):
         from defenseclaw.upgrade_shim import run
