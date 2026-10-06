@@ -417,6 +417,11 @@ func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
 	if got, want := canonical[0].SessionID, "thread-123"; got != want {
 		t.Fatalf("SessionID = %q, want %q", got, want)
 	}
+	// GAP-0031: the notify row carries the session's root agent, the ID
+	// the correlation ledger mints for the thread's hook rows.
+	if got, want := canonical[0].AgentID, stableLLMEventID("agent", "codex", "thread-123", "root"); got != want {
+		t.Fatalf("AgentID = %q, want the session root agent %q", got, want)
+	}
 	if !strings.Contains(canonical[0].Details, "thread_id=") {
 		t.Fatalf("Details missing thread_id summary: %q", canonical[0].Details)
 	}
