@@ -132,7 +132,7 @@ if [ "$platform" = linux ]; then
     config_dir=/etc/defenseclaw
     data_dir=/var/lib/defenseclaw
     lifecycle_dir=/var/lib/defenseclaw-enterprise
-    purged_dirs=(/etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian /var/lib/defenseclaw-enterprise /var/log/defenseclaw /opt/defenseclaw)
+    purged_dirs=(/etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian /var/lib/defenseclaw-enterprise /var/log/defenseclaw /opt/defenseclaw /usr/share/doc/defenseclaw-enterprise)
     policy_dirs=(/etc/claude-code /etc/codex)
     services=(defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket defenseclaw-gateway.service
         defenseclaw-hook-guardian.service defenseclaw-hook-enumerator.service defenseclaw-sensor-helper.service)
