@@ -175,8 +175,7 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 		managedHookPeerDirectory, profileExplainAccount, profileExplainDirectoryFacts = prevDirectory, prevAccount, prevFacts
 		setIdentityFactsEnabled(false)
 	})
-	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
-	ctx := api.attachVerifiedSubject(context.Background(), "94401103", "dcad-alice@dclab.test", subjectSourcePeerCredentials)
+	ctx := attachVerifiedSubject(context.Background(), nil, "94401103", "dcad-alice@dclab.test", subjectSourcePeerCredentials)
 	live, ok := profileSubjectSource(ctx)
 	explained, err := lookupDirectoryProfileSubject("dcad-alice")
 	if !ok || err != nil || !reflect.DeepEqual(live, explained) {
