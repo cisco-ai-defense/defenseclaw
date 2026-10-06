@@ -62,8 +62,6 @@ from defenseclaw.file_permissions import (
     set_file_mode,
 )
 
-_OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
 
@@ -142,7 +140,6 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(out)
 
 
-
 # ---------------------------------------------------------------------------
 # MigrationContext
 # ---------------------------------------------------------------------------
@@ -197,7 +194,6 @@ class _PreparedObservabilityV8Migration:
     environment: dict[str, str] = field(repr=False)
     environment_file_present: bool
     environment_file_sha256: str = field(repr=False)
-
 
 
 def _prepare_observability_v8_migration(
@@ -363,7 +359,6 @@ def _read_stable_observability_v8_upgrade_file(
                 pass
 
 
-
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
     """Convert, target-validate, and activate config v8 (the 0.8.5 hard cut).
 
@@ -454,7 +449,6 @@ def _preflight_observability_v8(
     )
 
 
-
 def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
     """Create one descriptor-pinned private bundle recovery directory."""
 
@@ -504,7 +498,6 @@ def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
             os.close(root_descriptor)
         if data_descriptor >= 0:
             os.close(data_descriptor)
-
 
 
 def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
@@ -565,13 +558,6 @@ def _observability_v8_upgrade_environment_snapshot(
         if _ENVIRONMENT_NAME.fullmatch(name) is not None
     )
     return snapshot, present, digest
-
-
-def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
-    """Read the exact active dotenv without the legacy parser's silent loss."""
-
-    snapshot, _present, _sha256 = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
-    return snapshot
 
 
 def _read_observability_v8_upgrade_dotenv_snapshot(
@@ -3386,8 +3372,6 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         _migrate_observability_v8,
     ),
 ]
-
-
 
 
 # ---------------------------------------------------------------------------

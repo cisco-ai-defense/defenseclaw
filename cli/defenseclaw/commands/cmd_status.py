@@ -830,20 +830,6 @@ def _print_agents(
                 _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
 
 
-def _canonical_data_dir(value) -> str | None:
-    """Return the platform-canonical absolute form of a configured data dir."""
-    try:
-        raw = os.fspath(value)
-    except TypeError:
-        return None
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
-    except (OSError, ValueError):
-        return None
-
-
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     """Fetch health only from the verified managed sidecar listener.
 

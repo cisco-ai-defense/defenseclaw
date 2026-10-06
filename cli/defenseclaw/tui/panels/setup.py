@@ -7828,16 +7828,6 @@ def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connecto
     return "false"
 
 
-def _judge_hook_connectors_wizard_value(cfg: object | Mapping[str, Any] | None) -> str:
-    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
-    if not isinstance(gate, (list, tuple)):
-        return ""
-    tokens = [str(entry or "").strip() for entry in gate if str(entry or "").strip()]
-    if tokens == ["*"]:
-        return "all"
-    return ",".join(tokens)
-
-
 def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
     """Build per-connector guardrail override groups for the config editor (B4).
 
@@ -9074,34 +9064,6 @@ def _connector_setup_alias(wire: str) -> str:
 
 def _connector_hook_label(name: str) -> str:
     return friendly_connector_name(name) if name else "Connector"
-
-
-def _bifrost_providers() -> tuple[str, ...]:
-    return (
-        "openai",
-        "azure",
-        "anthropic",
-        "bedrock",
-        "cohere",
-        "vertex",
-        "mistral",
-        "ollama",
-        "groq",
-        "sgl",
-        "parasail",
-        "perplexity",
-        "cerebras",
-        "gemini",
-        "openrouter",
-        "elevenlabs",
-        "huggingface",
-        "nebius",
-        "xai",
-        "replicate",
-        "vllm",
-        "runway",
-        "fireworks",
-    )
 
 
 def _mapping_or_attr(obj: object, name: str, default: Any = "") -> Any:
