@@ -2286,6 +2286,81 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
+// Without Full Disk Access the scans never open a folder that makes macOS
+// prompt the user, so an employee is not asked about "defenseclaw-gateway"
+// (GAP-0128); with it, or elsewhere, they walk them like any other folder.
+func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	fullDiskAccess := false
+	macOSFullDiskAccess = func() bool { return fullDiskAccess }
+
+	home := t.TempDir()
+	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
+		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+	}
+	mustWrite(t, filepath.Join(home, "Documents", "models", "m.gguf"), "gguf")
+	mustWrite(t, filepath.Join(home, "work", "models", "m.gguf"), "gguf")
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	newService := func(roots ...string) *ContinuousDiscoveryService {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: roots, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		return svc
+	}
+	manifestProjects := func() int {
+		signals, _, err := newService(home).detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatalf("detectPackageManifests: %v", err)
+		}
+		count := 0
+		for _, sig := range signals {
+			if sig.Component != nil && sig.Component.Name == "ai" {
+				count++
+			}
+		}
+		return count
+	}
+	modelRoots := func() int {
+		count := 0
+		for _, root := range newService(filepath.Join(home, "Documents", "models"), filepath.Join(home, "work", "models")).modelFileScanRoots() {
+			if strings.HasPrefix(root.path, home+string(filepath.Separator)) && !strings.HasPrefix(root.path, filepath.Join(home, "data")) {
+				count++
+			}
+		}
+		return count
+	}
+	if projects, roots := manifestProjects(), modelRoots(); projects != 1 || roots != 1 {
+		t.Fatalf("without Full Disk Access: %d manifest projects and %d model roots, want only work/ (1 and 1)", projects, roots)
+	}
+	fullDiskAccess = true
+	if projects, roots := manifestProjects(), modelRoots(); projects != 4 || roots != 2 {
+		t.Fatalf("with Full Disk Access: %d manifest projects and %d model roots, want every folder (4 and 2)", projects, roots)
+	}
+	discoveryGOOS, fullDiskAccess = "linux", false
+	if projects := manifestProjects(); projects != 4 {
+		t.Fatalf("off macOS: %d manifest projects, want 4", projects)
+	}
+
+	for rel, want := range map[string]bool{
+		"Desktop": true, "documents/app": true, "Library/Containers": true,
+		"Library/Group Containers/group.example": true, "Library/Mobile Documents/com~apple~CloudDocs": true,
+		"Library/Application Support/AddressBook/Sources": true,
+		"Library": false, "Library/Application Support/Slack": false, "Library/Containers2": false,
+		"work/Documents": false, ".claude": false, "Desktops": false,
+	} {
+		if got := macOSTCCProtectedPath(filepath.Join(home, rel), []string{home}); got != want {
+			t.Errorf("macOSTCCProtectedPath(~/%s) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
 // TestRunScan_SingleFlight (H-1) verifies that concurrent scans serialize on
 // the per-service mutex instead of racing on the state store / detector
 // fanout. It uses the single-flight boundary directly so the assertion does

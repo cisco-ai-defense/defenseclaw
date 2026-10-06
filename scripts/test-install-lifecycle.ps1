@@ -353,9 +353,6 @@ print(json.dumps(client.scan_skill(target=sys.argv[1], name='lifecycle')))
     # The source copy is not stamped: with -Local it installs the version of the wheel there.
     $unstamped = Join-Path $PSScriptRoot "install.ps1"
     Write-Log "re-run the same version (repair) as & ([scriptblock]::Create(...)) of the source copy"
-    # init writes the schema the config was created with; bring it to this release first, as an upgrade would,
-    # so the repair is compared with a config that has nothing left to migrate.
-    Check ((Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("migrate") -Quiet) -eq 0) "defenseclaw migrate failed"
     $before = Get-Sha256 (Join-Path $DcHome "config.yaml")
     $command = "& ([scriptblock]::Create([IO.File]::ReadAllText('$unstamped'))) -Local '$Assets' -Yes -NoPersistPath; 'session-alive'"
     $output = Get-ExeOutput $PowerShell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $command)
@@ -595,10 +592,6 @@ function Test-FailureDrill {
     if (-not (Initialize-Gateway)) { return }
     $gateway = Join-Path $Bin "defenseclaw-gateway.exe"
     $goodGateway = Get-Sha256 $gateway
-    # init writes the schema the config was created with. Bring it to this release first: the installer asks the
-    # staged gateway to migrate a pending config, and the drill gateway cannot answer that, so the install would
-    # stop before the swap this lane exists to test.
-    Check ((Invoke-Exe (Join-Path $Bin "defenseclaw.cmd") @("migrate") -Quiet) -eq 0) "defenseclaw migrate failed"
     $config = Get-Sha256 (Join-Path $DcHome "config.yaml")
     $source = Join-Path $Lane "DrillGateway.cs"
     [IO.File]::WriteAllText($source, @"

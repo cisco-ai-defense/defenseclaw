@@ -79,9 +79,10 @@ has a **Connector** and a **User regex** (`$user`) box.
 
 Things to know when you read it:
 
-- **Directory shows `unreported` for a per-user Linux SSSD account.** A
-  per-user install has no `realm list` facts, so SSSD does not say which
-  directory serves the account. The domain and the assurance still show.
+- **Directory shows `unreported` for a Linux SSSD account** whose domain is
+  not a joined realm, such as a plain LDAP domain: SSSD does not say which
+  directory serves it, and realmd does not know it. The domain and the
+  assurance still show.
 - **Principals are blank unless you opt in.** The Agents per user table fills
   the principal only when `ai_discovery.include_user_principal` is on.
 - **SSH vs local sessions** counts only sessions whose kind has the same

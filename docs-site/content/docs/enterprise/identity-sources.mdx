@@ -81,16 +81,16 @@ record.
 | Account name and the backend that owns it | NSS through `getent passwd`; each service on the `passwd` line of `nsswitch.conf` is asked for the uid in turn (`sss`, `winbind`, `ldap`, `himmelblau`, `aad`), and an account no directory service knows is `local` | Verified |
 | Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports | Verified |
 | Groups | `initgroups` plus a group lookup through NSS | Verified |
-| UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool; the directory type from `realm list` (`active_directory` for an Active Directory realm, `ldap` for an IPA realm). Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
+| Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, or the only joined realm for a name without a DNS domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
+| UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool. Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
 | Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
 
-The NSS lookups run on every Linux install. The root guardian adds the
-InfoPipe and `realm list` facts on the standalone enterprise profile only. An
-SSSD account on a per-user install therefore has its domain and groups but no
-`defenseclaw.user.directory`, because SSSD serves AD, IPA and plain LDAP
-domains alike and only `realm list` tells which one. A plain LDAP domain
-that SSSD serves without realmd has no directory type on any install.
+The NSS and realmd lookups run on every Linux install, without privilege and
+without a call to the directory. The root guardian adds the InfoPipe facts on
+the standalone enterprise profile only. SSSD serves AD, IPA and plain LDAP
+domains alike, so the directory type comes from realmd, and a plain LDAP
+domain that SSSD serves without realmd has no directory type on any install.
 
 ### Windows
 
@@ -98,7 +98,7 @@ that SSSD serves without realmd has no directory type on any install.
 | --- | --- | --- |
 | Which user made the request | The kernel-verified SID of the caller on a managed host, or the account of the per-user credential on a per-user install | Verified |
 | Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
-| AD UPN | `TranslateNameW`, resolved in the background and cached for 24 hours | Verified |
+| AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. An answer is cached for 24 hours and a failed lookup (no domain controller reachable) for 2 minutes; an account still without its UPN is looked up again after 2 minutes | Verified |
 | Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
 | Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local, AD and Entra group SIDs and names. Standalone enterprise only; a per-user install has no group list | Verified |
 | Remote desktop and logon type | `LsaGetLogonSessionData` for the hook's own logon session | Claimed |
@@ -132,7 +132,8 @@ standalone enterprise profile.
 | --- | --- | --- |
 | Account, name, uid or SID | Gateway | Gateway |
 | Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
-| Linux UPN, mail, directory type | Not available | Root guardian |
+| Linux directory type and realm | Gateway, through realmd | Gateway, through realmd |
+| Linux UPN and mail | Not available | Root guardian |
 | Windows groups | Not available | SYSTEM enumerator |
 | Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
 | macOS directory, domain and SSO provider | Not available | Root enumerator |
@@ -173,7 +174,7 @@ machine.
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.
-- **Some facts need the enterprise profile.** The UPN and directory type on
+- **Some facts need the enterprise profile.** The UPN and mail on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install
   does not have.

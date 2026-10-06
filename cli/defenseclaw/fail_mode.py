@@ -114,12 +114,30 @@ class ConnectorFailModeState:
             source = candidate
         return source
 
+    @property
+    def note(self) -> str:
+        """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
+
+        A connector in observe mode without a value of its own stays fail-open
+        whatever the global value says (GuardrailConfig.effective_hook_fail_mode),
+        so ``closed`` in config.yaml next to ``open`` in the hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129).
+        """
+
+        if self.configured == self.desired or self.effective != self.desired:
+            return ""
+        return (
+            f"observe mode keeps hooks fail-{self.desired}; "
+            f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+        )
+
     def to_report(self) -> dict[str, Any]:
         """Return the canonical JSON-friendly reporting projection."""
 
         return {
             "effective": self.effective,
             "provenance": self.provenance,
+            "note": self.note,
             "configured": self.configured,
             "desired": self.desired,
             "runtime": self.runtime,
@@ -239,6 +257,7 @@ def connector_fail_mode_report(
         return {
             "effective": "open",
             "provenance": f"{name}-upstream-fail-open",
+            "note": "",
             "configured": configured,
             "desired": "open",
             "runtime": "open",
@@ -258,6 +277,7 @@ def connector_fail_mode_report(
     return {
         "effective": configured,
         "provenance": "config",
+        "note": "",
         "configured": configured,
         "desired": configured,
         "runtime": None,

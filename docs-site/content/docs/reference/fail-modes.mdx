@@ -45,6 +45,10 @@ Each connector's effective fail mode resolves in this order:
    fail mode.
 3. Otherwise, the global `guardrail.hook_fail_mode`.
 
+When rule 2 keeps a connector open although the global value is `closed`,
+`defenseclaw status` and the `Mode` row of `defenseclaw doctor` say so next to
+`fail-mode=open`, so it does not read as drift.
+
 Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
 their generated hooks stay open even when the effective mode is `closed`. See
 [Connector response shapes](#connector-response-shapes).

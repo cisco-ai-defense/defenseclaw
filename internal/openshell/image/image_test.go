@@ -271,8 +271,29 @@ func TestRunAsUserStepNamesTheUID(t *testing.T) {
 	}
 	gotP, _ := os.ReadFile(passwd)
 	gotG, _ := os.ReadFile(group)
-	if !strings.Contains(string(gotP), "\nsandbox:x:1005:1005:Sandbox:/sandbox:/bin/bash\n") || !strings.Contains(string(gotG), "\nsandbox:x:1005:\n") {
+	if !strings.Contains(string(gotP), "\nsandbox:x:1005:1005:Sandbox:/sandbox:/bin/bash\n") || !strings.HasPrefix(string(gotG), "sandbox:x:1005:\n") {
 		t.Fatalf("passwd = %q, group = %q", gotP, gotG)
+	}
+
+	// GAP-0113: a Mac's primary gid 20 is dialout in the base image, and
+	// id printed gid=20(dialout). The sandbox group takes the gid and comes
+	// first, so the name is sandbox; a second run changes nothing.
+	for p, data := range map[string]string{
+		passwd: "root:x:0:0:root:/root:/bin/bash\nsandbox:x:998:998:Sandbox:/home/sandbox:/bin/bash\n",
+		group:  "root:x:0:\ndialout:x:20:\nsandbox:x:998:\n",
+	} {
+		if err := os.WriteFile(p, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if out, err := exec.Command("sh", "-c", runAsUserStep(503, 20, passwd, group)).CombinedOutput(); err != nil {
+			t.Fatalf("step: %v %s", err, out)
+		}
+	}
+	gotG, _ = os.ReadFile(group)
+	if string(gotG) != "sandbox:x:20:\nroot:x:0:\ndialout:x:20:\n" {
+		t.Fatalf("group = %q", gotG)
 	}
 }
 
