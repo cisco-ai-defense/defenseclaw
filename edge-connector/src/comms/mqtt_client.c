@@ -64,6 +64,39 @@ typedef struct {
 
 static mqtt_context_t mqtt_ctx;
 
+/*
+ * Pending request tracking table — ring-buffer of {request_id, tool_hash} pairs.
+ * When a verdict request is sent, the tool hash is stored here so that
+ * the HMAC verifier can look it up when the response arrives.
+ */
+#define MQTT_PENDING_RING_SIZE  16
+
+typedef struct {
+    uint16_t request_id;
+    uint8_t  tool_hash[32];
+    bool     occupied;
+} mqtt_pending_entry_t;
+
+static mqtt_pending_entry_t pending_ring[MQTT_PENDING_RING_SIZE];
+static uint8_t pending_ring_next = 0;
+
+void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash) {
+    mqtt_pending_entry_t *slot = &pending_ring[pending_ring_next];
+    slot->request_id = request_id;
+    memcpy(slot->tool_hash, tool_hash, 32);
+    slot->occupied = true;
+    pending_ring_next = (pending_ring_next + 1) % MQTT_PENDING_RING_SIZE;
+}
+
+static const uint8_t *dclaw_mqtt_pending_lookup(uint16_t request_id) {
+    for (int i = 0; i < MQTT_PENDING_RING_SIZE; i++) {
+        if (pending_ring[i].occupied && pending_ring[i].request_id == request_id) {
+            return pending_ring[i].tool_hash;
+        }
+    }
+    return NULL;
+}
+
 extern dclaw_state_t *dclaw_get_state(void);
 extern const char *dclaw_config_get_broker(uint8_t index);
 extern int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size);
@@ -443,11 +476,21 @@ static void mqtt_route_publish(const char *topic, const uint8_t *payload,
     /* Check for verdict/resp suffix */
     const char *suffix = strstr(topic, "verdict/resp");
     if (suffix) {
-        /* TODO: In full implementation, look up pending_tool_hash by request_id
-         * from the payload. For now pass a zeroed hash. */
-        uint8_t zero_hash[32];
-        memset(zero_hash, 0, sizeof(zero_hash));
-        dclaw_verdict_handle_response(payload, payload_len, zero_hash);
+        /*
+         * Extract request_id from the response payload (first 2 bytes, big-endian)
+         * to look up the original tool hash for HMAC verification.
+         */
+        if (payload_len >= 2) {
+            uint16_t request_id = (uint16_t)((payload[0] << 8) | payload[1]);
+            const uint8_t *tool_hash = dclaw_mqtt_pending_lookup(request_id);
+            if (tool_hash) {
+                dclaw_verdict_handle_response(payload, payload_len, tool_hash);
+            } else {
+                /* Unknown request_id — no matching pending request, drop the response */
+                fprintf(stderr, "[DCLAW-MQTT] Verdict response for unknown request_id %u\n",
+                        request_id);
+            }
+        }
         return;
     }
 
@@ -596,8 +639,11 @@ int dclaw_mqtt_connect(void) {
     }
 
     if (is_tls) {
-        fprintf(stderr, "[DCLAW-MQTT] WARNING: mqtts:// requested but mbedTLS not available. "
-                "Falling back to plain TCP (INSECURE).\n");
+        fprintf(stderr, "[DCLAW-MQTT] ERROR: mqtts:// requested but mbedTLS not available. "
+                "Refusing to connect over plain TCP. Build with DCLAW_HAS_MBEDTLS=1 "
+                "or use mqtt:// for development only.\n");
+        mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
+        return -1;
     }
 
     /* Step 1: TCP connect */

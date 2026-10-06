@@ -105,6 +105,14 @@ static bool verify_ed25519(const uint8_t *message, size_t msg_len,
  */
 static uint8_t ota_ca_key[ED25519_PUBKEY_LEN];
 static bool    ota_ca_key_loaded = false;
+static bool    ota_ca_key_provisioned = false;  /* true only when a real (non-zero) key is loaded */
+
+/* Reset key state — allows tests to force re-reading from env */
+void dclaw_ota_reset_key_state(void) {
+    ota_ca_key_loaded = false;
+    ota_ca_key_provisioned = false;
+    memset(ota_ca_key, 0, sizeof(ota_ca_key));
+}
 
 static int hex_char_to_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -116,6 +124,7 @@ static int hex_char_to_nibble(char c) {
 static const uint8_t *get_ota_ca_key(void) {
     if (ota_ca_key_loaded) return ota_ca_key;
     ota_ca_key_loaded = true;
+    ota_ca_key_provisioned = false;
 
     const char *env = getenv("DCLAW_OTA_KEY");
     if (env != NULL && strlen(env) == 64) {
@@ -130,16 +139,48 @@ static const uint8_t *get_ota_ca_key(void) {
             }
             ota_ca_key[i] = (uint8_t)((hi << 4) | lo);
         }
-        if (valid) return ota_ca_key;
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY has invalid hex — falling back to zero key\n");
+        if (valid) {
+            /* Check that the key is not all zeros */
+            bool all_zero = true;
+            for (int i = 0; i < ED25519_PUBKEY_LEN; i++) {
+                if (ota_ca_key[i] != 0) { all_zero = false; break; }
+            }
+            if (!all_zero) {
+                ota_ca_key_provisioned = true;
+                return ota_ca_key;
+            }
+            fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY is all zeros — "
+                    "OTA updates will be REJECTED until a real key is provisioned.\n");
+            return ota_ca_key;
+        }
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY has invalid hex — "
+                "OTA updates will be REJECTED until a valid key is provisioned.\n");
     } else if (env != NULL) {
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY must be 64 hex chars (32 bytes) — falling back to zero key\n");
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY must be 64 hex chars (32 bytes) — "
+                "OTA updates will be REJECTED until a valid key is provisioned.\n");
     } else {
-        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY not set — using zero key. OTA integrity verification is INSECURE.\n");
+        fprintf(stderr, "[DCLAW] WARNING: DCLAW_OTA_KEY not set — "
+                "OTA updates will be REJECTED until a key is provisioned.\n");
     }
 
     memset(ota_ca_key, 0, sizeof(ota_ca_key));
     return ota_ca_key;
+}
+
+/*
+ * Verify signature only when a real (non-zero) OTA key has been provisioned.
+ * When no key is provisioned, ALL signatures are rejected to prevent attackers
+ * from forging updates against a known-zero key.
+ */
+static bool verify_signature(const uint8_t *message, size_t msg_len,
+                             const uint8_t *signature) {
+    const uint8_t *key = get_ota_ca_key();
+    if (!ota_ca_key_provisioned) {
+        fprintf(stderr, "[DCLAW] REJECT: OTA signature verification failed — "
+                "no key provisioned. Set DCLAW_OTA_KEY to accept updates.\n");
+        return false;
+    }
+    return verify_ed25519(message, msg_len, signature, key);
 }
 
 /* === Policy OTA (REQ-33 through REQ-36) === */
@@ -151,8 +192,9 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
     if (blob_len < sizeof(dclaw_policy_header_t)) return -1;
     if (blob_len > HAL_FLASH_POLICY_A_SIZE) return -1;
 
-    /* REQ-33: Verify Ed25519 signature (or HMAC-SHA256 when mbedTLS unavailable) */
-    if (!verify_ed25519(blob, blob_len, signature, get_ota_ca_key())) {
+    /* REQ-33: Verify Ed25519 signature (or HMAC-SHA256 when mbedTLS unavailable).
+     * Rejects ALL updates when no OTA key is provisioned. */
+    if (!verify_signature(blob, blob_len, signature)) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, 0, 0);
         return -1;
     }
@@ -286,8 +328,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
     const uint8_t *signature = msg + 44;
 
     /* REQ-30: Verify Ed25519 signature over first 44 bytes
-     * (or HMAC-SHA256 when mbedTLS unavailable) */
-    if (!verify_ed25519(msg, 44, signature, get_ota_ca_key())) {
+     * (or HMAC-SHA256 when mbedTLS unavailable).
+     * Rejects ALL emergency messages when no OTA key is provisioned. */
+    if (!verify_signature(msg, 44, signature)) {
         return -1;
     }
 

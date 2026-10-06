@@ -309,17 +309,30 @@ class MCPProxy:
         method = msg.get("method", "")
         req_id = msg.get("id")
 
-        # Notifications (no id) — forward silently
+        # tools/call — ALWAYS intercept, regardless of whether an id is present.
+        # A tools/call without an id is invalid JSON-RPC (cannot correlate a
+        # response) so we reject it rather than forwarding unexamined.
+        if method == "tools/call":
+            if req_id is None:
+                logger.warning(
+                    "Rejecting tools/call with no JSON-RPC id (tool=%s)",
+                    msg.get("params", {}).get("name", ""),
+                )
+                return _make_error(
+                    None,
+                    code=-32600,
+                    message="Invalid Request: tools/call requires an id",
+                )
+            return await self._handle_tool_call(msg)
+
+        # Notifications (no id) — fire-and-forget to upstream (don't wait
+        # for a response that will never arrive).
         if req_id is None:
             try:
-                await self._upstream.send(msg)
+                await self._send_notification(msg)
             except Exception:
                 pass  # best-effort for notifications
             return None
-
-        # tools/call — intercept and evaluate
-        if method == "tools/call":
-            return await self._handle_tool_call(msg)
 
         # Everything else — passthrough
         if method in self._PASSTHROUGH_METHODS or method.startswith("notifications/"):
@@ -362,6 +375,28 @@ class MCPProxy:
 
         # Forward to real server
         return await self._forward(msg)
+
+    async def _send_notification(self, msg: Dict) -> None:
+        """Fire-and-forget: send a notification to the upstream without
+        waiting for a response (notifications never receive one)."""
+        assert self._upstream is not None
+        if isinstance(self._upstream, _StdioUpstream):
+            proc = self._upstream._proc
+            if proc and proc.stdin:
+                proc.stdin.write(_encode(msg))
+                await proc.stdin.drain()
+        elif isinstance(self._upstream, _HttpUpstream):
+            session = self._upstream._session
+            if session:
+                async with session.post(
+                    self._upstream._url,
+                    json=msg,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    pass  # discard response if server sends one
+        else:
+            # Fallback: best-effort via send() but don't block callers
+            await self._upstream.send(msg)
 
     async def _forward(self, msg: Dict) -> Dict:
         """Forward a message to the upstream and return its response."""
@@ -429,6 +464,21 @@ async def _run_http(proxy: MCPProxy, port: int) -> None:
             "HTTP transport requires aiohttp: pip install aiohttp"
         )
 
+    # Optional bearer-token auth: when DCLAW_MCP_PROXY_TOKEN is set,
+    # every request (except /health) must carry a matching
+    # Authorization: Bearer <token> header.
+    proxy_token = os.environ.get("DCLAW_MCP_PROXY_TOKEN", "")
+
+    @web.middleware
+    async def _auth_middleware(request: web.Request, handler):
+        if proxy_token and request.path != "/health":
+            auth = request.headers.get("Authorization", "")
+            if not auth.startswith("Bearer ") or auth[7:] != proxy_token:
+                return web.json_response(
+                    {"error": "unauthorized"}, status=401,
+                )
+        return await handler(request)
+
     async def handle_mcp(request: web.Request) -> web.Response:
         try:
             msg = await request.json()
@@ -445,15 +495,16 @@ async def _run_http(proxy: MCPProxy, port: int) -> None:
     async def handle_health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "defenseclaw-mcp-proxy"})
 
-    app = web.Application()
+    app = web.Application(middlewares=[_auth_middleware])
     app.router.add_post("/mcp", handle_mcp)
     app.router.add_get("/health", handle_health)
 
+    bind_addr = os.environ.get("DCLAW_MCP_PROXY_BIND", "127.0.0.1")
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, bind_addr, port)
     await site.start()
-    logger.info("MCP proxy ready (HTTP transport, port %d)", port)
+    logger.info("MCP proxy ready (HTTP transport, %s:%d)", bind_addr, port)
 
     # Block until cancelled
     stop_event = asyncio.Event()

@@ -6827,7 +6827,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// so Prometheus scrapes reflect live fleet state.
 	fleetMgr := fleetmanager.New(nil)
 	fleetCache := fleetverdict.NewCache(4096, func(h [32]byte) (fleetverdict.Action, uint8) {
-		return fleetverdict.ActionAllow, 0
+		// Default-deny: unknown tool hashes must not be auto-allowed
+		// when no cloud inspection pipeline is configured.
+		return fleetverdict.ActionBlock, 3 // severity=3 (high)
 	})
 	fleet.WireMetrics(fleetMgr, fleetCache)
 

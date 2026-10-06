@@ -11,6 +11,32 @@ static uint16_t ring_head = 0; /* next write position in flash ring */
  * When DCLAW_HAS_MBEDTLS=1: HMAC-SHA256 via mbedtls_md, truncated to 4 bytes.
  * Otherwise: built-in HMAC-SHA256 (no external library), truncated to 4 bytes.
  */
+/*
+ * Build the HMAC input covering ALL decision fields of the audit entry,
+ * excluding the hmac tag itself and padding.
+ *
+ * Layout of dclaw_audit_entry_t (24 bytes):
+ *   [0..7]   timestamp       (8 bytes)
+ *   [8..9]   target_hash     (2 bytes)
+ *   [10..11] session_id      (2 bytes)
+ *   [12..15] hmac            (4 bytes) -- EXCLUDED from HMAC input
+ *   [16]     action          (1 byte)
+ *   [17]     reason          (1 byte)
+ *   [18..23] _pad            (6 bytes) -- EXCLUDED (padding only)
+ *
+ * HMAC message = timestamp(8) || target_hash(2) || session_id(2) || action(1) || reason(1)
+ *              = 14 bytes
+ */
+#define AUDIT_HMAC_MSG_LEN 14
+
+static void build_hmac_message(const dclaw_audit_entry_t *entry, uint8_t *msg) {
+    /* Copy fields before the hmac tag: timestamp + target_hash + session_id = 12 bytes */
+    memcpy(msg, entry, 12);
+    /* Copy fields after the hmac tag: action + reason = 2 bytes */
+    msg[12] = entry->action;
+    msg[13] = entry->reason;
+}
+
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
 
 /* mbedTLS path — real HMAC-SHA256 via mbedtls_md */
@@ -21,11 +47,11 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
                          uint8_t *out_hmac) {
     /*
      * Real HMAC-SHA256 truncated to 4 bytes.
-     * Key: prev_hmac (chained), Message: entry fields (first 12 bytes).
+     * Key: prev_hmac (chained), Message: all decision fields (14 bytes).
      */
     uint8_t hmac_full[32];
-    uint8_t entry_data[12];
-    memcpy(entry_data, entry, 12);
+    uint8_t entry_data[AUDIT_HMAC_MSG_LEN];
+    build_hmac_message(entry, entry_data);
 
     mbedtls_md_context_t ctx;
     const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
@@ -33,7 +59,7 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
     mbedtls_md_init(&ctx);
     mbedtls_md_setup(&ctx, md_info, 1 /* HMAC */);
     mbedtls_md_hmac_starts(&ctx, prev_hmac, 4);
-    mbedtls_md_hmac_update(&ctx, entry_data, 12);
+    mbedtls_md_hmac_update(&ctx, entry_data, AUDIT_HMAC_MSG_LEN);
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
 
@@ -49,14 +75,14 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
                          uint8_t *out_hmac) {
     /*
      * Real HMAC-SHA256 truncated to 4 bytes.
-     * Key: prev_hmac (chained, 4 bytes), Message: entry fields (first 12 bytes).
+     * Key: prev_hmac (chained, 4 bytes), Message: all decision fields (14 bytes).
      * Matches the mbedTLS path semantics exactly.
      */
     uint8_t hmac_full[32];
-    uint8_t entry_data[12];
-    memcpy(entry_data, entry, 12);
+    uint8_t entry_data[AUDIT_HMAC_MSG_LEN];
+    build_hmac_message(entry, entry_data);
 
-    dclaw_hmac_sha256(prev_hmac, 4, entry_data, 12, hmac_full);
+    dclaw_hmac_sha256(prev_hmac, 4, entry_data, AUDIT_HMAC_MSG_LEN, hmac_full);
 
     /* Truncate to 4 bytes */
     memcpy(out_hmac, hmac_full, 4);

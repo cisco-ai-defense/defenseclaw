@@ -27,10 +27,23 @@ static void make_policy_blob(uint8_t *blob, size_t *len, uint16_t version,
 }
 
 /*
- * Helper: build a valid signature for the given blob.
+ * Test OTA key — a known non-zero key used for test signing.
+ * Set as DCLAW_OTA_KEY env var in hex before tests run.
+ */
+static const uint8_t TEST_OTA_KEY[32] = {
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+};
+
+static const char *TEST_OTA_KEY_HEX =
+    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+
+/*
+ * Helper: build a valid signature for the given blob using the test OTA key.
  * When mbedTLS is available, this would need real Ed25519 signing (not testable here).
  * Without mbedTLS, the built-in path uses HMAC-SHA256(ota_key, blob).
- * Since DCLAW_OTA_KEY is not set, the key is all zeros.
  */
 static void make_valid_signature_for(const uint8_t *blob, size_t blob_len, uint8_t *sig) {
     memset(sig, 0, 64);
@@ -39,10 +52,8 @@ static void make_valid_signature_for(const uint8_t *blob, size_t blob_len, uint8
      * This branch is not exercised when mbedTLS is not found. */
     (void)blob; (void)blob_len;
 #else
-    /* Built-in path: HMAC-SHA256(zero_key, blob), first 32 bytes in sig */
-    uint8_t zero_key[32];
-    memset(zero_key, 0, sizeof(zero_key));
-    dclaw_hmac_sha256(zero_key, 32, blob, blob_len, sig);
+    /* Built-in path: HMAC-SHA256(test_key, blob), first 32 bytes in sig */
+    dclaw_hmac_sha256(TEST_OTA_KEY, 32, blob, blob_len, sig);
 #endif
 }
 
@@ -228,9 +239,41 @@ static void test_emergency_no_gap(void) {
     printf("  PASS: no gap when cloud is exactly 1 ahead\n");
 }
 
-int main(void) {
-    /* Ensure the OTA key defaults to zero key for test reproducibility */
+/* Force the OTA key loader to re-read from env on next call */
+extern void dclaw_ota_reset_key_state(void);
+
+static void test_unprovisioned_key_rejects_valid_signature(void) {
+    /* Unset the OTA key — should reject even a correctly signed blob */
     unsetenv("DCLAW_OTA_KEY");
+    dclaw_ota_reset_key_state();
+
+    dclaw_state_t *s = dclaw_get_state();
+    uint16_t saved_version = s->device.policy_version;
+
+    uint8_t blob[64];
+    size_t len;
+    make_policy_blob(blob, &len, saved_version + 1, 5);
+
+    /* Sign with zero key (what the old code would have accepted) */
+    uint8_t sig[64];
+    memset(sig, 0, 64);
+    uint8_t zero_key[32];
+    memset(zero_key, 0, sizeof(zero_key));
+    dclaw_hmac_sha256(zero_key, 32, blob, len, sig);
+
+    int rc = dclaw_apply_policy(blob, (uint32_t)len, sig);
+    assert(rc == -1); /* Must reject — no key provisioned */
+    assert(s->device.policy_version == saved_version); /* Version unchanged */
+    printf("  PASS: unprovisioned key rejects zero-key-signed update\n");
+
+    /* Restore the test key for subsequent tests */
+    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
+    dclaw_ota_reset_key_state();
+}
+
+int main(void) {
+    /* Set a real (non-zero) test OTA key for signature verification */
+    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
 
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -242,6 +285,7 @@ int main(void) {
     test_policy_invalid_signature_rejected();
     test_policy_rollback_version_rejected();
     test_policy_canary_rollback();
+    test_unprovisioned_key_rejects_valid_signature();
     printf(" -- Emergency Broadcast --\n");
     test_emergency_valid_applies();
     test_emergency_invalid_sig_rejected();
@@ -249,7 +293,7 @@ int main(void) {
     test_emergency_jump_attack_rejected();
     test_emergency_gap_detection();
     test_emergency_no_gap();
-    printf("  ALL PASSED (10 tests)\n");
+    printf("  ALL PASSED (11 tests)\n");
 
     dclaw_shutdown();
     return 0;

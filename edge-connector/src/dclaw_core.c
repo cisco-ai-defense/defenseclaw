@@ -4,6 +4,14 @@
 #include "content_scanner.h"
 #include <string.h>
 
+#if DCLAW_MQTT_ENABLED
+extern int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
+                                           uint16_t request_id);
+extern int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash);
+extern void dclaw_mqtt_pending_store(uint16_t request_id, const uint8_t *tool_hash);
+extern bool dclaw_mqtt_is_connected(void);
+#endif
+
 static dclaw_state_t g_state;
 static dclaw_retroactive_block_fn g_retroactive_cb = NULL;
 
@@ -201,22 +209,66 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     }
 
     /* Step 8: No local decision — need cloud escalation */
+#if DCLAW_MQTT_ENABLED
+    {
+        uint16_t request_id = g_state.next_request_id++;
+        /* Store the tool hash so the HMAC verifier can look it up on response */
+        dclaw_mqtt_pending_store(request_id, req->tool_hash);
+        dclaw_verdict_register_pending(request_id, req->tool_hash);
+
+        /* Attempt to send the verdict request to the cloud */
+        int send_rc = -1;
+        if (dclaw_mqtt_is_connected()) {
+            send_rc = dclaw_mqtt_send_verdict_request(req, request_id);
+        }
+
 #if DCLAW_SPECULATIVE_EXECUTION
-    if (!is_sync_block_required(req->cap_flags)) {
-        /* Speculative: return PENDING, agent can proceed */
+        if (!is_sync_block_required(req->cap_flags)) {
+            /* Speculative mode: allow the agent to proceed, cloud will respond async.
+             * If send failed, still return ALLOW — the request is logged for audit. */
+            dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
+                              target_hash, req->session_id);
+            g_state.eval_escalated_count++;
+            return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK,
+                                DCLAW_VERDICT_PENDING);
+        }
+#endif
+
+        /* Sync block mode: must wait for cloud verdict.
+         * If the send failed, we have no verdict to wait for — block on timeout. */
+        if (send_rc != 0) {
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT,
+                              target_hash, req->session_id);
+            g_state.eval_denied_count++;
+            return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT,
+                                DCLAW_VERDICT_SYNC);
+        }
+
+        /* Send succeeded — return PENDING so the caller knows to wait for the
+         * async response (which will arrive via MQTT and be handled by
+         * dclaw_verdict_handle_response). */
         dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
                           target_hash, req->session_id);
         g_state.eval_escalated_count++;
-        return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK, DCLAW_VERDICT_PENDING);
+        return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_BLOCK,
+                            DCLAW_VERDICT_PENDING);
+    }
+#else
+    /* MQTT not enabled — no cloud path available */
+#if DCLAW_SPECULATIVE_EXECUTION
+    if (!is_sync_block_required(req->cap_flags)) {
+        dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
+                          target_hash, req->session_id);
+        g_state.eval_escalated_count++;
+        return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK,
+                            DCLAW_VERDICT_PENDING);
     }
 #endif
-
-    /* Sync block: would wait for cloud here (MQTT publish + wait).
-     * For Phase 1 without cloud connected, default to BLOCK on timeout. */
     dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT,
                       target_hash, req->session_id);
     g_state.eval_denied_count++;
     return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT, DCLAW_VERDICT_SYNC);
+#endif /* DCLAW_MQTT_ENABLED */
 }
 
 dclaw_action_t dclaw_check_destination(const char *host, uint16_t port) {

@@ -20,6 +20,21 @@ extern int dclaw_ipc_parse_request(const char *json, size_t json_len,
 extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
                               dclaw_severity_t severity);
 extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
+extern void dclaw_ota_reset_key_state(void);
+
+/*
+ * Test OTA key — a known non-zero key used for test signing.
+ * Must match the key set via DCLAW_OTA_KEY env var.
+ */
+static const uint8_t TEST_OTA_KEY[32] = {
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20,
+};
+
+static const char *TEST_OTA_KEY_HEX =
+    "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
 
 static uint64_t clock_ns(void) {
     struct timespec ts;
@@ -139,7 +154,7 @@ static void test_ac07(void) {
     blob[2] = 0; blob[3] = 56;
     blob[4] = 0; blob[5] = 3; /* baseline=3 */
 
-    /* Compute valid signature for the blob */
+    /* Compute valid signature for the blob using the test OTA key */
     uint8_t sig[64] = {0};
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
     (void)sig; /* mbedTLS path needs real Ed25519 — not testable here */
@@ -147,8 +162,7 @@ static void test_ac07(void) {
     return;
 #else
     {
-        uint8_t zero_key[32] = {0};
-        dclaw_hmac_sha256(zero_key, 32, blob, 64, sig);
+        dclaw_hmac_sha256(TEST_OTA_KEY, 32, blob, 64, sig);
     }
 #endif
 
@@ -346,8 +360,8 @@ static void test_ac17_backward_compat(void) {
 }
 
 int main(void) {
-    /* Ensure the OTA key defaults to zero key for test reproducibility */
-    unsetenv("DCLAW_OTA_KEY");
+    /* Set a real (non-zero) test OTA key for signature verification */
+    setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
 
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};

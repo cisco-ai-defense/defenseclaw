@@ -3553,6 +3553,15 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Fleet API routes carry their own DCLAW_FLEET_API_TOKEN auth
+		// (see fleet.API.authMiddleware). Exempt them from the gateway's
+		// main token check so edge-connector tokens issued by
+		// `defenseclaw setup edge-connector` are not required to pass
+		// both layers.
+		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == connector.UserScopedListenerProofPath && a.userScopedCredentialsRequired() {
 			// A standalone in-agent plugin on loopback TCP makes the
 			// listener prove it is the gateway before it sends its per-user

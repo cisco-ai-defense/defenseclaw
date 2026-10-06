@@ -253,6 +253,30 @@ class _FFIBackend:
 
 
 # ---------------------------------------------------------------------------
+# Response helpers
+# ---------------------------------------------------------------------------
+_ACTION_STRING_MAP = {
+    "allow": ACTION_ALLOW,
+    "block": ACTION_BLOCK,
+    "warn": ACTION_WARN,
+}
+
+
+def _parse_action(raw: Any) -> int:
+    """Convert a daemon action value to an int.
+
+    The daemon may return the action as a numeric code (0, 1, 2) or as a
+    lowercase string ("allow", "block", "warn").  Accept both to avoid
+    breakage when the IPC schema evolves.
+    """
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        return _ACTION_STRING_MAP.get(raw.lower(), ACTION_BLOCK)
+    return ACTION_BLOCK
+
+
+# ---------------------------------------------------------------------------
 # Backend: Unix socket (JSON-RPC)
 # ---------------------------------------------------------------------------
 class _SocketBackend:
@@ -266,12 +290,18 @@ class _SocketBackend:
                  destination: str, session_id: int,
                  content: Optional[str], direction: int) -> Verdict:
         self._id += 1
+        # Compute a deterministic SHA-256 tool hash (64 hex chars) so the
+        # daemon's ipc_json.c handler can look up the tool in its verdict
+        # cache.  Callers that already carry a hash can extend this later;
+        # for now we derive one from the canonical tool name.
+        tool_hash = hashlib.sha256(tool_name.encode()).hexdigest()
         payload: Dict[str, Any] = {
             "jsonrpc": "2.0",
             "id": self._id,
             "method": "evaluate",
             "params": {
                 "tool_name": tool_name,
+                "tool_hash": tool_hash,
                 "capabilities": cap_flags,
                 "destination": destination,
                 "session_id": session_id,
@@ -300,7 +330,7 @@ class _SocketBackend:
             return Verdict.error(resp["error"].get("message", "RPC_ERROR"))
         r = resp.get("result", {})
         return Verdict.from_raw(
-            r.get("action", ACTION_BLOCK),
+            _parse_action(r.get("action", ACTION_BLOCK)),
             r.get("reason", 0),
             r.get("severity", 0),
             r.get("from_cache", False),
