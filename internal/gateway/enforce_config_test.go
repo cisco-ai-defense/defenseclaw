@@ -67,9 +67,11 @@ func enforceRequest(t *testing.T, handler http.HandlerFunc, method, body string)
 // and DELETE removes only the deny.
 func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 	api, recorded := enforceTestAPI(t, "asset_policy:\n  skill:\n    allowed:\n      - {name: s1, reason: vetted}\n      - {name: other}\n")
+	api.SetGenerationSource(func() *Generation { return &Generation{Digest: "sha256:applied"} })
 
 	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodPost, `{"target_type":"skill","target_name":"s1","reason":"bad"}`)
-	if code != http.StatusOK || out["status"] != "blocked" || out["generation"] != float64(7) {
+	if code != http.StatusOK || out["status"] != "blocked" || out["generation"] != float64(7) ||
+		out["effective_policy_digest"] != "sha256:applied" {
 		t.Fatalf("block = %d %v", code, out)
 	}
 	want := []configwrite.Change{

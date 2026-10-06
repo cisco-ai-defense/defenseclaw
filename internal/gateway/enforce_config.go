@@ -167,6 +167,17 @@ func toolRuleMap(rule config.AssetPolicyToolRule) map[string]any {
 	return out
 }
 
+// enforceWriteResponse is the /enforce write reply: the status, the
+// config_generation the writer recorded and, once the gateway has applied
+// it, the live generation's effective_policy_digest.
+func (a *APIServer) enforceWriteResponse(status string, generation uint64) map[string]any {
+	out := map[string]any{"status": status, "generation": generation}
+	if g := a.generation(); g != nil && g.Digest != "" {
+		out["effective_policy_digest"] = g.Digest
+	}
+	return out
+}
+
 // applyAssetListEdit writes edit to config.yaml through the single writer,
 // reading the lists from the file it changes (compare-and-swap on its
 // sha256, retried when another writer got there first), then applies the

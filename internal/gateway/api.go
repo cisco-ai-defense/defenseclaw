@@ -2117,7 +2117,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(action), req.TargetName, details)
 	}
-	a.writeJSON(w, http.StatusOK, map[string]any{"status": status, "generation": result.Generation})
+	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse(status, result.Generation))
 }
 
 func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
@@ -2214,7 +2214,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 		return
 	}
-	a.writeJSON(w, http.StatusOK, map[string]any{"status": "allowed", "generation": generation})
+	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", generation))
 }
 
 // decodeEnforcementRequest reads and validates an /enforce/* body.
