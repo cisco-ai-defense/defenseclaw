@@ -586,8 +586,14 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 		{"allow_list_bypass_scan", data.Config.AllowListBypassScan},
 	} {
 		key, value := item.key, item.value
-		// Rego compared these with == true, so an absent value was false.
+		// v8 Rego skipped the install scan only when scan_on_install was
+		// == false, so an absent value scanned; it bypassed the scan for
+		// allow-listed assets only when allow_list_bypass_scan was == true,
+		// so an absent value did not bypass.
 		enforced := value != nil && *value
+		if key == "scan_on_install" {
+			enforced = value == nil || *value
+		}
 		if !enforced {
 			v9Set(root, v9Scalar(false), "admission", "defaults", key)
 			m.moved("data.json", "data.json:config."+key, "admission.defaults."+key, false)

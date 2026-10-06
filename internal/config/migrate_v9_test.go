@@ -56,7 +56,8 @@ observability: {}
 	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	data := `{"config": {"scan_on_install": true, "allow_list_bypass_scan": false, "policy_name": "x"},
+	// scan_on_install is absent: v8 scanned.
+	data := `{"config": {"allow_list_bypass_scan": false, "policy_name": "x"},
 	  "actions": {"HIGH": {"install": "none", "file": "none", "runtime": "allow"}},
 	  "guardrail": {"block_threshold": 3, "alert_threshold": 1}}`
 	if err := os.WriteFile(dataJSON, []byte(data), 0o600); err != nil {
@@ -119,6 +120,7 @@ observability: {}
 		"admission.skill.actions.critical":                        "quarantine",
 		"guardrail.rule_pack":                                     "strict",
 		"guardrail.block_at":                                      "HIGH",
+		"admission.defaults.scan_on_install":                      nil,
 		"scanners.skill_scanner.analyzers.virustotal.enabled":     true,
 		"scanners.skill_scanner.analyzers.virustotal.api_key_env": "VT_KEY",
 		"asset_policy.skill.denied":                               []any{map[string]any{"name": "bad-skill", "reason": "operator"}},
