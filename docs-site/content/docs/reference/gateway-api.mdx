@@ -37,16 +37,13 @@ described under [Sandbox listeners](#sandbox-listeners).
 | Knob | Config default | Effective value |
 | --- | --- | --- |
 | `gateway.api_port` | `18970` | Sidecar API port |
-| `gateway.api_bind` | empty | `127.0.0.1` when empty, except on an uncleaned legacy sandbox host (below) |
+| `gateway.api_bind` | empty | `127.0.0.1` when empty |
 
-The API binds to loopback by default. The one exception is a host that still
-carries the removed legacy standalone sandbox: while the config still says
-`openshell.mode: standalone`, an empty `gateway.api_bind` inherits
-`guardrail.host` when that value is non-empty and is not the literal
-`localhost` (for example `10.200.0.1`), so `upgrade` health checks keep
-reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/sandboxes/guide)
-resets that config and returns the API to loopback. An explicit
-`gateway.api_bind` always takes precedence. A non-loopback value expands access
+The API binds to loopback unless `gateway.api_bind` names another address.
+(A 0.8.x host that ran the retired standalone sandbox kept it on
+`guardrail.host`, `10.200.0.1`; the upgrade to 1.0 resets that, see
+[Remove a retired standalone sandbox](/docs/sandboxes/guide#remove-a-retired-standalone-sandbox).)
+A non-loopback value expands access
 to the authenticated management surface; protect that listener with host
 firewalling and a deployment-specific network design.
 `gateway.host` and `gateway.port` describe the upstream agent gateway, while
@@ -195,12 +192,8 @@ for the OpenShell sandbox runtime:
   hooks fail closed;
 - `stopped` while the API listener restarts.
 
-On a host that still carries the removed legacy standalone sandbox (see
-[Bind address](#bind-address)), `/health` includes a `sandbox` subsystem with
-state `degraded` and a `last_error` of "legacy standalone install detected",
-directing the operator to run `defenseclaw sandbox legacy-cleanup`. On a host
-with neither, where `openshell.enabled` is `false` and no legacy install is
-left, the `sandbox` subsystem is absent from `/health`.
+Where `openshell.enabled` is `false`, the `sandbox` subsystem is absent from
+`/health`.
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 

@@ -271,6 +271,7 @@ record:
 The legacy standalone sandbox's events were retired with it: the
 `init-sandbox` audit action and the `defenseclaw.openshell.exit` metric
 (`metric.defenseclaw.openshell.exit` family, with its
-`defenseclaw.metric.command` attribute) are no longer emitted. See
-[SANDBOX.md](SANDBOX.md#hosts-that-still-have-the-legacy-install) for how to
-remove a legacy install.
+`defenseclaw.metric.command` attribute) are no longer emitted, and the gateway
+no longer reports a degraded `sandbox` health subsystem for a host that still
+has the legacy config (the upgrade to 1.0 resets that config). See
+[SANDBOX.md](SANDBOX.md#hosts-that-still-have-the-legacy-install).

@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -408,6 +409,137 @@ func TestMigrateV8InMemory(t *testing.T) {
 	}
 	if got := os.Getenv("VIRUSTOTAL_API_KEY"); got != "vt-test-value" {
 		t.Errorf("VIRUSTOTAL_API_KEY = %q after the in-memory load", got)
+	}
+}
+
+// retiredStandaloneV8 is the config a 0.8.10 host that ran the retired
+// openshell-sandbox standalone mode (`defenseclaw init --sandbox`) carries
+// into the upgrade, after the 0.8.5 observability conversion: 0.8.10's
+// OpenShellConfig wrote every openshell key below, and `sandbox setup`
+// pointed guardrail.host and gateway.host at the sandbox's veth link and
+// the OpenClaw home at the sandbox user's (git show
+// 0.8.10:cli/defenseclaw/config.py, :cli/defenseclaw/commands/cmd_setup_sandbox.py).
+func retiredStandaloneV8(dir string) string {
+	return "config_version: 8\ndata_dir: " + dir + "\n" + `claw:
+  home_dir: /home/sandbox/.openclaw
+  config_file: /home/sandbox/.openclaw/openclaw.json
+gateway:
+  host: 10.200.0.2
+  port: 18789
+  api_port: 18970
+  watcher:
+    enabled: true
+guardrail:
+  host: 10.200.0.1
+  port: 4000
+openshell:
+  binary: openshell
+  policy_dir: /etc/openshell/policies
+  mode: standalone
+  version: 0.6.2
+  sandbox_home: /home/sandbox
+  auto_pair: true
+  host_networking: true
+observability: {}
+`
+}
+
+// The migration resets what the retired standalone sandbox left: it drops
+// openshell.mode and openshell.sandbox_home and the two veth hosts, so the
+// 1.0 gateway binds its API on loopback and the upgrade's probes (which ask
+// APIBindHost, as the Python CLI's api_bind_host does) find it there, on
+// disk and in the gateway's in-memory load of the v8 file alike. The ignored
+// legacy sub-keys and every other setting stay; a second run changes
+// nothing; a config that never ran standalone keeps its hosts.
+func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := retiredStandaloneV8(dir)
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The gateway's read-only load of the v8 file (MigrateV8InMemory, as
+	// internal/cli and the config manager run it) already sees the reset.
+	loaded, err := MigrateV8InMemory(configPath, []byte(source), nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	loadedPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(loadedPath, loaded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inMemory, err := LoadFromFile(loadedPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile(in-memory migration): %v", err)
+	}
+	if got := APIBindHost(inMemory); got != "127.0.0.1" || inMemory.Gateway.Host != "127.0.0.1" || inMemory.Guardrail.EffectiveHost() != "127.0.0.1" {
+		t.Fatalf("in-memory v8 load: api %q, gateway.host %q, guardrail host %q; want loopback", got, inMemory.Gateway.Host, inMemory.Guardrail.EffectiveHost())
+	}
+
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	migrated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Gateway   map[string]any `yaml:"gateway"`
+		Guardrail map[string]any `yaml:"guardrail"`
+		OpenShell map[string]any `yaml:"openshell"`
+		Claw      map[string]any `yaml:"claw"`
+	}
+	if err := yaml.Unmarshal(migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for section, keys := range map[string]map[string]any{"gateway": doc.Gateway, "guardrail": doc.Guardrail} {
+		if _, ok := keys["host"]; ok {
+			t.Errorf("%s.host survived the migration: %v", section, keys)
+		}
+	}
+	for _, key := range []string{"mode", "sandbox_home"} {
+		if _, ok := doc.OpenShell[key]; ok {
+			t.Errorf("openshell.%s survived the migration", key)
+		}
+	}
+	if doc.Gateway["port"] != 18789 || doc.Guardrail["port"] != 4000 || doc.OpenShell["version"] != "0.6.2" ||
+		doc.Claw["home_dir"] != "/home/sandbox/.openclaw" {
+		t.Fatalf("the migration changed more than the standalone keys:\n%s", migrated)
+	}
+	for _, key := range []string{"openshell.mode", "openshell.sandbox_home", "guardrail.host", "gateway.host"} {
+		if !slices.Contains(result.Record.Removed, key) {
+			t.Errorf("migration record removed = %v, want %s", result.Record.Removed, key)
+		}
+	}
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile(v9): %v", err)
+	}
+	if got := APIBindHost(cfg); got != "127.0.0.1" || cfg.Gateway.RequiresTLS() {
+		t.Fatalf("migrated config: api %q, gateway requires TLS %v; want loopback without TLS", got, cfg.Gateway.RequiresTLS())
+	}
+
+	// Again: the v9 file is left as it is.
+	again, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9 again: %v", err)
+	}
+	if string(again.Migrated) != string(migrated) {
+		t.Fatalf("a second migration changed the config:\n%s", again.Migrated)
+	}
+
+	// A host that never ran standalone keeps its hosts; the dead keys go.
+	plain := strings.Replace(source, "  mode: standalone\n", "", 1)
+	out, err := MigrateV8InMemory(configPath, []byte(plain), nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	if !strings.Contains(string(out), "host: 10.200.0.1") || !strings.Contains(string(out), "host: 10.200.0.2") || strings.Contains(string(out), "sandbox_home") {
+		t.Fatalf("a config without the standalone mode:\n%s", out)
 	}
 }
 

@@ -484,13 +484,12 @@ class TestProviderGatewayClient(unittest.TestCase):
             with mock.patch.object(gateway, "_ipv6_loopback_available", return_value=False):
                 self.assertEqual(gateway_api_client_host(cfg), "127.0.0.1")
 
-    def test_standalone_guardrail_host_is_connectable_fallback(self) -> None:
+    def test_guardrail_host_never_moves_the_api(self) -> None:
         cfg = SimpleNamespace(
             gateway=SimpleNamespace(api_bind=""),
-            openshell=SimpleNamespace(is_standalone=lambda: True),
             guardrail=SimpleNamespace(host="10.200.0.1"),
         )
-        self.assertEqual(gateway_api_client_host(cfg), "10.200.0.1")
+        self.assertEqual(gateway_api_client_host(cfg), "127.0.0.1")
 
     def test_provider_client_sends_token_headers(self) -> None:
         client = OrchestratorClient(host="127.0.0.1", port=29871, token="test-token")

@@ -11,7 +11,7 @@ The operator guide for the sandbox commands is the
 [published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
 (`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
-servers, the shell wrapper, troubleshooting, and the legacy 0.0.x cleanup.
+servers, the shell wrapper, troubleshooting, and removing what a retired 0.0.x standalone install left.
 Telemetry details are in
 [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md).
 
@@ -2971,11 +2971,11 @@ Measured on an Apple silicon Mac (macOS 27.0) with Docker Desktop (engine
 | `sandbox` commands (setup, run, lifecycle, pull, policy, images, teardown) | [`../internal/openshell/sandboxcli/`](../internal/openshell/sandboxcli/), [`../internal/cli/sandbox.go`](../internal/cli/sandbox.go) |
 | Shell wrappers (`sandbox enable`/`disable`) | [`../internal/openshell/wrapper/`](../internal/openshell/wrapper/) |
 | Nested-repository guard | [`../internal/openshell/nestguard/`](../internal/openshell/nestguard/), [`../internal/openshell/manager/guard.go`](../internal/openshell/manager/guard.go) |
-| Python `sandbox` stubs and legacy cleanup | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py), [`../cli/defenseclaw/sandbox_legacy.py`](../cli/defenseclaw/sandbox_legacy.py) |
+| Python `sandbox` stubs | [`../cli/defenseclaw/commands/cmd_sandbox.py`](../cli/defenseclaw/commands/cmd_sandbox.py) |
 | Python sandbox API client (REST and the activity stream) | [`../cli/defenseclaw/gateway.py`](../cli/defenseclaw/gateway.py) |
 | TUI Sandboxes panel, launch dialog and setup wizard | [`../cli/defenseclaw/tui/sandbox_panel.py`](../cli/defenseclaw/tui/sandbox_panel.py), [`../cli/defenseclaw/tui/services/sandbox_state.py`](../cli/defenseclaw/tui/services/sandbox_state.py), [`../cli/defenseclaw/tui/panels/setup.py`](../cli/defenseclaw/tui/panels/setup.py) |
 | macOS app sandboxes (menu bar, Overview, panel) | [`../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift`](../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift), [`../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift`](../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift) |
-| Legacy bind shim (Go, and its Python twin `legacy_standalone_api_host`) | [`../internal/config/legacy_openshell.go`](../internal/config/legacy_openshell.go), [`../cli/defenseclaw/config.py`](../cli/defenseclaw/config.py) |
+| Reset of a retired standalone install (config_version 9 migration) | [`../internal/config/migrate_v9.go`](../internal/config/migrate_v9.go) (`migrateRetiredStandaloneSandbox`) |
 
 ## Testing
 
@@ -3012,24 +3012,20 @@ them.
 
 The legacy standalone integration targeted the `openshell-sandbox` 0.0.x
 binary on Linux, for OpenClaw only, and its generated sandbox policy was never
-enforced. It was removed. OpenClaw and ZeptoClaw use the `shims` subprocess
-policy on every platform. Review the cleanup plan, then run it:
+enforced. It was removed, with its cleanup command and the bind shim that
+kept the gateway API on the veth host. OpenClaw and ZeptoClaw use the `shims`
+subprocess policy on every platform.
 
-```bash
-defenseclaw sandbox legacy-cleanup --dry-run
-defenseclaw sandbox legacy-cleanup
-```
-
-Cleanup stops the systemd units itself but changes nothing else while any part
-of the legacy sandbox still runs. Stop the non-systemd launcher first with
-`sudo <data_dir>/scripts/run-sandbox.sh stop`. The
-[published cleanup guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
-lists every step, the opt-in `--remove-user` and `--remove-binary` removals,
-and the follow-up commands.
-
-Until cleanup runs, a config that still says `openshell.mode: standalone` with
-a non-localhost `guardrail.host` keeps the gateway API bound to that host (an
-explicit `gateway.api_bind` still wins). While `openshell.mode: standalone`
-remains, `/health` reports the `sandbox` subsystem as `degraded`, and
-`defenseclaw doctor` and `defenseclaw status` point at
-`defenseclaw sandbox legacy-cleanup`.
+The upgrade to 1.0 resets what it left in DefenseClaw's config: the
+`config_version` 9 migration (`migrateRetiredStandaloneSandbox` in
+`internal/config/migrate_v9.go`, which the gateway's in-memory load of a v8
+file runs too) drops `openshell.mode` and `openshell.sandbox_home` from every
+config and, on one that said `openshell.mode: standalone`, the non-loopback
+`guardrail.host` and `gateway.host` (the veth addresses), which take their
+defaults. So the gateway binds its API on loopback and every probe (upgrade,
+watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
+migration record lists the removed keys. Running it again changes nothing.
+The root systemd units, launchers, network namespace, NAT rules and `sandbox`
+user are removed by hand, as the
+[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox)
+lists.

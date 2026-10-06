@@ -8585,11 +8585,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             + ("  — administrator-owned (managed_enterprise)" if managed else "  — edit config.yaml directly"),
         ),
     ]
-    legacy_mode = _value(cfg, "openshell.mode")
-    if legacy_mode:
-        fields.append(
-            _header("Legacy Mode", "openshell.mode", f"{legacy_mode}  — run: defenseclaw sandbox legacy-cleanup --dry-run")
-        )
     summary = "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
     if managed:
         summary += " Administrator-owned (managed_enterprise): read-only."

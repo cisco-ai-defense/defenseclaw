@@ -1461,53 +1461,40 @@ func TestMCPScannerConfigNoLLMFields(t *testing.T) {
 	}
 }
 
-func TestOpenShellConfig_IsStandalone(t *testing.T) {
-	tests := []struct {
-		mode string
-		want bool
-	}{
-		{"standalone", true},
-		{"", false},
-		{"cluster", false},
+// The Python CLI dials the API through api_bind_host in
+// cli/defenseclaw/config.py; both read the same precedence corpus so they
+// cannot drift.
+func TestAPIBindHostSharedCorpus(t *testing.T) {
+	if got := APIBindHost(nil); got != "127.0.0.1" {
+		t.Fatalf("APIBindHost(nil) = %q, want loopback", got)
 	}
-	for _, tt := range tests {
-		t.Run(tt.mode, func(t *testing.T) {
-			oc := OpenShellConfig{Mode: tt.mode}
-			if got := oc.IsStandalone(); got != tt.want {
-				t.Errorf("IsStandalone() = %v, want %v", got, tt.want)
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "api_bind_host", "cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var corpus struct {
+		SchemaVersion int `json:"schema_version"`
+		Cases         []struct {
+			Name          string `json:"name"`
+			GuardrailHost string `json:"guardrail_host"`
+			APIBind       string `json:"api_bind"`
+			Want          string `json:"want"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &corpus); err != nil {
+		t.Fatal(err)
+	}
+	if corpus.SchemaVersion != 2 || len(corpus.Cases) == 0 {
+		t.Fatalf("unexpected corpus: schema %d, %d cases", corpus.SchemaVersion, len(corpus.Cases))
+	}
+	for _, tc := range corpus.Cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Guardrail.Host, cfg.Gateway.APIBind = tc.GuardrailHost, tc.APIBind
+			if got := APIBindHost(cfg); got != tc.Want {
+				t.Fatalf("APIBindHost() = %q, want %q", got, tc.Want)
 			}
 		})
-	}
-}
-
-func TestOpenShellConfig_EffectiveSandboxHome(t *testing.T) {
-	tests := []struct {
-		home string
-		want string
-	}{
-		{"", DefaultSandboxHome},
-		{"/opt/sandbox", "/opt/sandbox"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.home, func(t *testing.T) {
-			oc := OpenShellConfig{SandboxHome: tt.home}
-			if got := oc.EffectiveSandboxHome(); got != tt.want {
-				t.Errorf("EffectiveSandboxHome() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestDefaultConfig_OpenShellFields(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.OpenShell.Mode != "" {
-		t.Errorf("expected legacy openshell.mode to be empty by default, got %q", cfg.OpenShell.Mode)
-	}
-	if cfg.OpenShell.SandboxHome != "" {
-		t.Errorf("expected sandbox_home to be empty by default, got %q", cfg.OpenShell.SandboxHome)
-	}
-	if got := cfg.OpenShell.EffectiveSandboxHome(); got != DefaultSandboxHome {
-		t.Errorf("EffectiveSandboxHome() = %q, want %q", got, DefaultSandboxHome)
 	}
 }
 

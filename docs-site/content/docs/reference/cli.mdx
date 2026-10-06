@@ -1233,8 +1233,7 @@ moved keys and the upgrade steps.
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
 work on a copy (see [macOS](/docs/sandboxes/guide#macos)). The `sandbox`
 commands run coding agents in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
-line, then hands it unchanged to `defenseclaw-gateway sandbox`;
-`legacy-cleanup` is the one command the Python CLI runs itself. Every command
+line, then hands it unchanged to `defenseclaw-gateway sandbox`. Every command
 and flag, with an example, is on [Sandbox CLI](/docs/reference/sandbox-cli);
 see also [Sandbox](/docs/sandboxes/guide).
 
@@ -1251,7 +1250,6 @@ see also [Sandbox](/docs/sandboxes/guide).
 | `defenseclaw sandbox image build\|list\|prune\|rm` | Build, list, prune, and remove the harness images. |
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
-| `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. |
 
 ## Enterprise
 

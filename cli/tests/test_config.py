@@ -32,7 +32,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import defenseclaw.config as config_mod
 from defenseclaw.config import (
-    DEFAULT_SANDBOX_HOME,
     AIDiscoveryConfig,
     AssetPolicyConfig,
     AssetPolicyRule,
@@ -1550,7 +1549,7 @@ class TestConfigTopLevelSections(unittest.TestCase):
                 policy_dir=os.path.join(tmpdir, "policies"),
                 environment="linux",
                 guardrail=GuardrailConfig(host="10.200.0.1"),
-                openshell=OpenShellConfig(mode="standalone"),
+                openshell=OpenShellConfig(enabled=True),
             )
             cfg.save()
 
@@ -1558,7 +1557,8 @@ class TestConfigTopLevelSections(unittest.TestCase):
             with open(config_file) as f:
                 raw = yaml.safe_load(f)
             self.assertEqual(raw["guardrail"]["host"], "10.200.0.1")
-            self.assertEqual(raw["openshell"]["mode"], "standalone")
+            self.assertIs(raw["openshell"]["enabled"], True)
+            self.assertNotIn("mode", raw["openshell"])
 
     def test_load_reads_new_sections(self):
         import yaml
@@ -1764,48 +1764,8 @@ class TestGuardrailHostField(unittest.TestCase):
         self.assertEqual(aliased.hilt.min_severity, "MEDIUM")
 
 
-class TestOpenShellModeField(unittest.TestCase):
-    def test_default_mode_empty(self):
-        oc = OpenShellConfig()
-        self.assertEqual(oc.mode, "")
-
-    def test_mode_from_load(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            import yaml
-            cfg_data = {
-                "openshell": {"mode": "standalone"},
-            }
-            cfg_file = os.path.join(tmpdir, "config.yaml")
-            with open(cfg_file, "w") as f:
-                yaml.dump(cfg_data, f)
-
-            with patch("defenseclaw.config.default_data_path") as mock_dp:
-                mock_dp.return_value = Path(tmpdir)
-                cfg = load()
-                self.assertEqual(cfg.openshell.mode, "standalone")
-
-
-class TestOpenShellSandboxFields(unittest.TestCase):
-    """The openshell section is the legacy shim's read-only remnant."""
-
-    def test_default_sandbox_home(self):
-        oc = OpenShellConfig()
-        self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
-        self.assertEqual(oc.effective_sandbox_home(), DEFAULT_SANDBOX_HOME)
-
-    def test_custom_sandbox_home(self):
-        oc = OpenShellConfig(sandbox_home="/opt/sandbox")
-        self.assertEqual(oc.effective_sandbox_home(), "/opt/sandbox")
-
-    def test_is_standalone(self):
-        self.assertFalse(OpenShellConfig().is_standalone())
-        self.assertTrue(OpenShellConfig(mode="standalone").is_standalone())
-        self.assertFalse(OpenShellConfig(mode="cluster").is_standalone())
-
-    def test_merge_openshell_none(self):
-        oc = _merge_openshell(None)
-        self.assertEqual(oc.mode, "")
-        self.assertEqual(oc.sandbox_home, DEFAULT_SANDBOX_HOME)
+class TestOpenShellLegacyKeys(unittest.TestCase):
+    """The openshell-sandbox (0.0.x) sub-keys are accepted and ignored."""
 
     def test_merge_openshell_ignores_legacy_keys(self):
         oc = _merge_openshell({
@@ -1817,7 +1777,8 @@ class TestOpenShellSandboxFields(unittest.TestCase):
             "auto_pair": False,
             "host_networking": True,
         })
-        self.assertEqual(oc, OpenShellConfig(mode="standalone", sandbox_home="/opt/sandbox"))
+        self.assertEqual(oc, OpenShellConfig())
+        self.assertEqual(_merge_openshell(None), OpenShellConfig())
 
     def test_load_accepts_legacy_openshell_keys(self):
         import yaml
@@ -1837,66 +1798,48 @@ class TestOpenShellSandboxFields(unittest.TestCase):
             with patch("defenseclaw.config.default_data_path") as mock_dp:
                 mock_dp.return_value = Path(tmpdir)
                 cfg = load()
-                self.assertEqual(cfg.openshell.mode, "standalone")
-                self.assertEqual(cfg.openshell.sandbox_home, "/opt/sandbox")
-                self.assertFalse(hasattr(cfg.openshell, "version"))
+                for key in ("mode", "sandbox_home", "version"):
+                    self.assertFalse(hasattr(cfg.openshell, key), key)
 
 
-class TestLegacyStandaloneAPIHost(unittest.TestCase):
-    """Python twin of internal/config/legacy_openshell.go LegacyStandaloneAPIHost."""
+class TestAPIBindHost(unittest.TestCase):
+    """Python twin of internal/config APIBindHost: api_bind, else loopback."""
 
-    def _cfg(self, mode: str, guardrail_host: str) -> Config:
+    def _cfg(self, guardrail_host: str) -> Config:
         cfg = Config()
-        cfg.openshell = OpenShellConfig(mode=mode)
         cfg.guardrail.host = guardrail_host
         return cfg
 
-    def test_matches_go_shim_table(self):
-        from defenseclaw.config import legacy_standalone_api_host
-
-        cases = [
-            ("", "10.200.0.1", None),
-            ("cluster", "10.200.0.1", None),
-            ("standalone", "10.200.0.1", "10.200.0.1"),
-            ("standalone", " 10.200.0.1 ", "10.200.0.1"),
-            ("standalone", "localhost", None),
-            ("standalone", "", None),
-        ]
-        for mode, host, want in cases:
-            with self.subTest(mode=mode, host=host):
-                self.assertEqual(legacy_standalone_api_host(self._cfg(mode, host)), want)
-        self.assertIsNone(legacy_standalone_api_host(object()))
-
-    def test_gateway_client_host_prefers_api_bind_then_shim(self):
+    def test_gateway_client_host_prefers_api_bind(self):
         from defenseclaw.gateway import gateway_api_client_host
 
-        cfg = self._cfg("standalone", "10.200.0.1")
-        self.assertEqual(gateway_api_client_host(cfg), "10.200.0.1")
+        # guardrail.host never moves the API: the retired standalone sandbox
+        # kept it there, and the config_version 9 migration resets it.
+        cfg = self._cfg("10.200.0.1")
+        self.assertEqual(gateway_api_client_host(cfg), "127.0.0.1")
         cfg.gateway.api_bind = "127.0.0.2"
         self.assertEqual(gateway_api_client_host(cfg), "127.0.0.2")
-        self.assertEqual(gateway_api_client_host(self._cfg("", "10.200.0.1")), "127.0.0.1")
 
     def test_api_bind_host_matches_the_shared_go_corpus(self):
         from defenseclaw.config import api_bind_host
 
         corpus_path = Path(__file__).resolve().parents[2] / "testdata" / "api_bind_host" / "cases.json"
         corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
-        self.assertEqual(corpus["schema_version"], 1)
+        self.assertEqual(corpus["schema_version"], 2)
         for case in corpus["cases"]:
             with self.subTest(case=case["name"]):
-                cfg = self._cfg(case["mode"], case["guardrail_host"])
+                cfg = self._cfg(case["guardrail_host"])
                 cfg.gateway.api_bind = case["api_bind"]
                 self.assertEqual(api_bind_host(cfg), case["want"])
         self.assertEqual(api_bind_host(None), "127.0.0.1")
 
     def test_cli_sidecar_clients_honor_an_explicit_api_bind(self):
-        # A legacy host that pinned gateway.api_bind: 127.0.0.1 has its
-        # gateway there; plugin, skill, and status must not dial 10.200.0.1.
+        # plugin, skill, and status dial the API where the gateway binds it.
         # (`defenseclaw upgrade` runs the release installer and dials no
         # sidecar.)
         from defenseclaw.commands import cmd_plugin, cmd_skill
 
-        cfg = self._cfg("standalone", "10.200.0.1")
+        cfg = self._cfg("10.200.0.1")
         cfg.gateway.api_bind = "127.0.0.1"
         app = SimpleNamespace(cfg=cfg)
         self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
@@ -1904,9 +1847,7 @@ class TestLegacyStandaloneAPIHost(unittest.TestCase):
         cfg.gateway.api_bind = "0.0.0.0"
         self.assertEqual(cmd_plugin._api_bind_host(app), "127.0.0.1")
         cfg.gateway.api_bind = ""
-        self.assertEqual(cmd_skill._api_bind_host(app), "10.200.0.1")
-
-
+        self.assertEqual(cmd_skill._api_bind_host(app), "127.0.0.1")
 class TestWebhookConfig(unittest.TestCase):
     """Tests for WebhookConfig, _merge_webhooks, and resolved_secret."""
 

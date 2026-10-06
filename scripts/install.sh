@@ -243,7 +243,7 @@ if [[ "${INSTALL_SANDBOX}" == true ]]; then
     # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
     # accepted until 1.1.0 so existing automation keeps working, and does
     # nothing. It is not forwarded to another release's installer either.
-    warn "--sandbox is deprecated and ignored, and removed in 1.1.0: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
+    warn "--sandbox is deprecated and ignored, and removed in 1.1.0: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, see https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox."
 fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"

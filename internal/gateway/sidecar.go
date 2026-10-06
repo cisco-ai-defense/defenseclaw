@@ -325,9 +325,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	retainJudge := cfg.Guardrail.RetainJudgeBodies
 	SetRetainJudgeBodies(retainJudge)
 
-	// Loopback gateways serve plain WS, and so does a legacy standalone
-	// install's point-to-point veth link unless gateway.tls forces TLS on.
-	if !cfg.Gateway.RequiresTLS() || config.LegacyStandalonePlainGatewayWS(cfg) {
+	// Loopback gateways serve plain WS.
+	if !cfg.Gateway.RequiresTLS() {
 		cfg.Gateway.NoTLS = true
 	}
 
@@ -1204,9 +1203,6 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}()
 	}
-	// The sandbox subsystem is only reported for a legacy standalone install.
-	s.reportLegacySandboxHealth()
-
 	// Wait for context cancellation (signal handler in CLI layer)
 	<-runCtx.Done()
 	fmt.Fprintf(os.Stderr, "[sidecar] context cancelled, waiting for subsystems to stop ...\n")
@@ -2170,12 +2166,10 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	// The legacy openshell sub-keys only matter through the bind shim, and
-	// every other openshell key is read per sandbox launch, so neither may
-	// bounce the API listener.
+	// Every openshell key but the listeners' is read per sandbox launch, so
+	// none may bounce the API listener.
 	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
-		config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) ||
 		oldCfg.Guardrail.Host != newCfg.Guardrail.Host ||
 		openShellListenersChanged(oldCfg, newCfg)
 }
@@ -7027,31 +7021,9 @@ func (s *Sidecar) logHello(h *HelloOK) {
 
 // apiListenAddr is the host:port the REST API listens on and the address every
 // hook script, plugin, and health probe must dial. config.APIBindHost owns the
-// host so a legacy standalone install keeps one consistent listener.
+// host so they share one listener.
 func apiListenAddr(cfg *config.Config) string {
 	return fmt.Sprintf("%s:%d", config.APIBindHost(cfg), cfg.Gateway.APIPort)
-}
-
-// legacySandboxHealthError is the remediation surfaced while a host still
-// carries the removed openshell-sandbox standalone configuration.
-const legacySandboxHealthError = "legacy standalone install detected — run `defenseclaw sandbox legacy-cleanup`"
-
-// reportLegacySandboxHealth marks the sandbox subsystem degraded while the
-// config still records the removed openshell-sandbox (0.0.x) standalone mode.
-// Nothing supervises that sandbox anymore; the gateway only keeps its API on
-// the legacy bind host until legacy-cleanup resets the config. Hosts without
-// the legacy config report no sandbox subsystem at all.
-//
-// LEGACY(openshell-0.0.x): delete one release after cleanup.
-func (s *Sidecar) reportLegacySandboxHealth() {
-	cfg := s.currentConfig()
-	if !config.IsLegacyStandalone(cfg) {
-		return
-	}
-	s.health.SetSandbox(StateDegraded, legacySandboxHealthError, map[string]interface{}{
-		"api_bind":    config.APIBindHost(cfg),
-		"remediation": "defenseclaw sandbox legacy-cleanup",
-	})
 }
 
 // Client returns the underlying gateway client for direct RPC calls.

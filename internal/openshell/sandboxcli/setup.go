@@ -51,10 +51,10 @@ func (a *App) defaultInstaller(consent func(*openshell.InstallPlan) (bool, error
 		ConfirmBreakingUpgrade: func(*openshell.InstallPlan) (bool, error) {
 			// Only a person can say the old runtime is backed up: --yes
 			// does not answer this.
-			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up (`defenseclaw sandbox legacy-cleanup`)?", false, false)
+			ok, err := a.ask("An OpenShell 0.0.x runtime is installed; 0.1 cannot use its state. Have you backed it up and cleaned it up?", false, false)
 			if errors.Is(err, ErrNoTerminal) {
 				return false, errors.New("an OpenShell 0.0.x runtime is installed and 0.1 cannot use its state; back it up, clean it up " +
-					"(`defenseclaw sandbox legacy-cleanup`) and run setup again on a terminal")
+					"and run setup again on a terminal")
 			}
 			return ok, err
 		},

@@ -20,31 +20,20 @@ func openShellReloadConfig(edit func(*config.Config)) *config.Config {
 	return cfg
 }
 
-// legacyStandaloneConfig is a host still configured for the removed
-// openshell-sandbox 0.0.x standalone mode.
-func legacyStandaloneConfig(edit func(*config.Config)) *config.Config {
-	cfg := &config.Config{}
-	cfg.OpenShell.Mode = "standalone"
-	cfg.Guardrail.Host = "10.200.0.1"
-	cfg.Gateway.APIPort = 18970
-	if edit != nil {
-		edit(cfg)
-	}
-	return cfg
-}
-
 // Every API listener, hook/plugin address, and health probe must agree on one
-// address, or an upgrade health check on a legacy host dials 127.0.0.1 while
-// the API listens on the veth host (or the reverse) and rolls back.
-func TestAPIListenAddrUsesTheLegacyBindShim(t *testing.T) {
+// address, or an upgrade health check dials one host while the API listens on
+// another and rolls back. guardrail.host never moves the API (the retired
+// standalone sandbox's veth address, 10.200.0.1, is reset by the
+// config_version 9 migration).
+func TestAPIListenAddrIsAPIBindOrLoopback(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		cfg  *config.Config
 		want string
 	}{
-		{"legacy standalone", legacyStandaloneConfig(nil), "10.200.0.1:18970"},
-		{"explicit api_bind", legacyStandaloneConfig(func(c *config.Config) { c.Gateway.APIBind = "127.0.0.1" }), "127.0.0.1:18970"},
-		{"host mode", legacyStandaloneConfig(func(c *config.Config) { c.OpenShell.Mode = "" }), "127.0.0.1:18970"},
+		{"default", openShellReloadConfig(nil), "127.0.0.1:18970"},
+		{"guardrail host", openShellReloadConfig(func(c *config.Config) { c.Guardrail.Host = "10.200.0.1" }), "127.0.0.1:18970"},
+		{"explicit api_bind", openShellReloadConfig(func(c *config.Config) { c.Gateway.APIBind = "192.168.65.2" }), "192.168.65.2:18970"},
 	} {
 		if got := apiListenAddr(tc.cfg); got != tc.want {
 			t.Errorf("%s listener = %q, want %q", tc.name, got, tc.want)
@@ -52,9 +41,8 @@ func TestAPIListenAddrUsesTheLegacyBindShim(t *testing.T) {
 	}
 }
 
-// Only the sandbox listeners (and leaving the legacy bind shim) are tied to
-// the API server's lifecycle; every other openshell key is read per sandbox
-// launch and must hot-reload.
+// Only the sandbox listeners are tied to the API server's lifecycle; every
+// other openshell key is read per sandbox launch and must hot-reload.
 func TestAPINeedsRestartForOpenShellListenersOnly(t *testing.T) {
 	base := openShellReloadConfig(nil)
 	disabled := func(c *config.Config) { c.OpenShell.Enabled = false }
@@ -76,9 +64,6 @@ func TestAPINeedsRestartForOpenShellListenersOnly(t *testing.T) {
 		{"admin", base, openShellReloadConfig(func(c *config.Config) { c.OpenShell.Admin.MinProfile = "strict" }), false},
 		{"egress lists", base, openShellReloadConfig(func(c *config.Config) { c.OpenShell.Egress.Block = []string{"paste.example"} }), false},
 		{"harnesses", base, openShellReloadConfig(func(c *config.Config) { c.OpenShell.Harnesses = []string{"codex"} }), false},
-		{"leave legacy standalone", legacyStandaloneConfig(nil), legacyStandaloneConfig(func(c *config.Config) { c.OpenShell.Mode = "" }), true},
-		{"legacy-only sub-key", legacyStandaloneConfig(nil),
-			legacyStandaloneConfig(func(c *config.Config) { c.OpenShell.SandboxHome = "/srv/sandbox" }), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := apiNeedsRestart(tc.oldCfg, tc.newCfg); got != tc.restart {
@@ -88,47 +73,14 @@ func TestAPINeedsRestartForOpenShellListenersOnly(t *testing.T) {
 	}
 }
 
-// The openshell section hot-reloads, legacy keys included, except the flip
-// out of legacy standalone mode.
+// The openshell section hot-reloads.
 func TestDiffConfigsTreatsOpenShellSectionAsHot(t *testing.T) {
-	for _, tc := range []struct {
-		name           string
-		oldCfg, newCfg *config.Config
-		restart        []string
-	}{
-		{"openshell 0.1 keys", openShellReloadConfig(nil), openShellReloadConfig(func(c *config.Config) {
-			c.OpenShell.Enabled = false
-			c.OpenShell.Profile = "balanced"
-			c.OpenShell.Admin.AllowedHarnesses = []string{"codex"}
-		}), nil},
-		{"legacy sandbox_home", legacyStandaloneConfig(nil),
-			legacyStandaloneConfig(func(c *config.Config) { c.OpenShell.SandboxHome = "/srv/sandbox" }), nil},
-		{"legacy mode flip", legacyStandaloneConfig(nil),
-			legacyStandaloneConfig(func(c *config.Config) { c.OpenShell.Mode = "" }), []string{"openshell.mode"}},
-	} {
-		diff := diffConfigs(tc.oldCfg, tc.newCfg)
-		if tc.restart == nil && (!slices.Contains(diff.Changed, "openshell") || len(diff.RestartRequired) != 0) {
-			t.Errorf("%s: changed=%v restart=%v, want a hot reload", tc.name, diff.Changed, diff.RestartRequired)
-		}
-		for _, key := range tc.restart {
-			if !slices.Contains(diff.RestartRequired, key) {
-				t.Errorf("%s: restart_required = %v, want %s", tc.name, diff.RestartRequired, key)
-			}
-		}
-	}
-}
-
-func TestLegacySandboxHealthIsDegradedWithCleanupRemediation(t *testing.T) {
-	s := &Sidecar{cfg: legacyStandaloneConfig(nil), health: NewSidecarHealth()}
-	s.reportLegacySandboxHealth()
-	sandbox := s.health.Snapshot().Sandbox
-	if sandbox == nil || sandbox.State != StateDegraded || sandbox.LastError != legacySandboxHealthError ||
-		sandbox.Details["api_bind"] != "10.200.0.1" || sandbox.Details["remediation"] != "defenseclaw sandbox legacy-cleanup" {
-		t.Fatalf("legacy install sandbox health = %#v, want degraded with the cleanup remediation", sandbox)
-	}
-	host := &Sidecar{cfg: &config.Config{}, health: NewSidecarHealth()}
-	host.reportLegacySandboxHealth()
-	if got := host.health.Snapshot().Sandbox; got != nil {
-		t.Fatalf("host-mode install reported a sandbox subsystem: %#v", got)
+	diff := diffConfigs(openShellReloadConfig(nil), openShellReloadConfig(func(c *config.Config) {
+		c.OpenShell.Enabled = false
+		c.OpenShell.Profile = "balanced"
+		c.OpenShell.Admin.AllowedHarnesses = []string{"codex"}
+	}))
+	if !slices.Contains(diff.Changed, "openshell") || len(diff.RestartRequired) != 0 {
+		t.Errorf("changed=%v restart=%v, want a hot reload", diff.Changed, diff.RestartRequired)
 	}
 }

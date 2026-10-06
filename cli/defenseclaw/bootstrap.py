@@ -117,7 +117,8 @@ class StepResult:
 SANDBOX_FLAG_DEPRECATION = (
     "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
     "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
-    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
+    "a host with an old standalone install removes its leftovers by hand first "
+    "(see 'Remove a retired standalone sandbox' in the OpenShell sandboxes guide)."
 )
 
 
@@ -959,7 +960,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                     "Sandbox",
                     "warn",
                     SANDBOX_FLAG_DEPRECATION,
-                    "defenseclaw sandbox legacy-cleanup --dry-run",
+                    "defenseclaw sandbox setup",
                 )
             )
 

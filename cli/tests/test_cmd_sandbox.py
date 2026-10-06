@@ -33,9 +33,6 @@ from defenseclaw.context import AppContext
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = REPO_ROOT / "internal" / "cli" / "testdata" / "sandbox_commands.json"
 
-# Python-native commands that have no Go counterpart.
-PYTHON_ONLY = {"sandbox legacy-cleanup"}
-
 
 def _manifest() -> dict[str, dict[str, Any]]:
     return {entry["path"]: entry for entry in json.loads(MANIFEST.read_text(encoding="utf-8"))}
@@ -99,7 +96,7 @@ def test_every_go_command_has_a_python_stub() -> None:
 
 
 def test_every_python_stub_exists_in_go() -> None:
-    extra = sorted(set(_python_tree()) - set(_manifest()) - PYTHON_ONLY)
+    extra = sorted(set(_python_tree()) - set(_manifest()))
     assert not extra, f"Python sandbox stubs the Go tree does not have: {extra}"
 
 
@@ -138,11 +135,6 @@ def test_bool_and_repeatable_flags_have_the_matching_click_shape() -> None:
                 assert param.multiple, f"{path} --{param.name}"
             else:
                 assert not param.is_flag and not param.multiple, f"{path} --{param.name}"
-
-
-def test_legacy_cleanup_stays_python_native() -> None:
-    command = sandbox.commands["legacy-cleanup"]
-    assert not isinstance(command, GatewayCommand)
 
 
 @pytest.fixture

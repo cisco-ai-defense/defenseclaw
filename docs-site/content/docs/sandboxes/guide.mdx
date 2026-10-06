@@ -185,8 +185,7 @@ What setup does, in order:
 2. **Installs OpenShell 0.1.1** when it is missing or too old and you agree.
    NVIDIA's installer script is checked against a pinned SHA-256 before it
    runs. An early 0.0.x runtime cannot be upgraded in place, so setup first
-   asks whether you backed it up and cleaned it up (see
-   [legacy cleanup](/docs/sandboxes/legacy-cleanup)). On a Mac it installs the
+   asks whether you backed it up and cleaned it up. On a Mac it installs the
    `nvidia/openshell` Homebrew formula, without `sudo`; the plan also lists
    what else NVIDIA's script changes: Homebrew may update itself and its
    taps first (its auto-update, which `HOMEBREW_NO_AUTO_UPDATE=1` skips),
@@ -1637,13 +1636,48 @@ your working tree alone and put the changes on a branch and in a patch file
 (a conflict, or git older than 2.38), 69 means no hook of the session reached
 DefenseClaw, and a harness's own non-zero status is passed through.
 
-## Legacy sandbox cleanup
+## Remove a retired standalone sandbox
 
-A Linux host that ran the retired standalone `openshell-sandbox` 0.0.x
-integration needs a one-time cleanup with
-`defenseclaw sandbox legacy-cleanup` before you set up OpenShell 0.1
-sandboxes. See [legacy sandbox cleanup](/docs/sandboxes/legacy-cleanup) for
-how to tell whether you need it and what it changes.
+You need this only on a Linux host that ran the retired `openshell-sandbox`
+0.0.x standalone integration (`defenseclaw init --sandbox` before 1.0), which
+ran OpenClaw as a `sandbox` user in a network namespace joined to the host by
+a veth pair (`10.200.0.1` host, `10.200.0.2` sandbox). The upgrade to 1.0
+resets DefenseClaw's own config: it drops `openshell.mode` and
+`openshell.sandbox_home`, and resets `guardrail.host` and `gateway.host` to
+their defaults, so the gateway API listens on loopback like on every other
+host (the migration record, `migration-v9.json`, lists them). It leaves what
+that integration set up as root, which you remove by hand before you set up
+OpenShell 0.1 sandboxes:
+
+```bash
+sudo systemctl disable --now defenseclaw-sandbox.target openshell-sandbox.service
+sudo rm -f /etc/systemd/system/defenseclaw-sandbox.target /etc/systemd/system/openshell-sandbox.service
+sudo rm -f /usr/local/lib/defenseclaw/{pre,start,post,cleanup}-sandbox.sh
+sudo systemctl daemon-reload
+sudo ip netns list                       # delete the sandbox's: sudo ip netns delete <name>
+sudo iptables -t nat -S | grep 10.200.0  # delete each: sudo iptables -t nat -D <the rule, without -A>
+sudo pgrep -u sandbox                    # nothing may run as the sandbox user any more
+sudo userdel -r sandbox                  # also removes /home/sandbox and its .openclaw link
+```
+
+Then give the OpenClaw home back to your user
+(`sudo chown -R "$USER": ~/.openclaw`, and `sudo setfacl -R -b ~/.openclaw` if
+`getfacl` still lists ACL entries), point `claw.home_dir` and
+`claw.config_file` back at it if they name `/home/sandbox`
+(`defenseclaw config set claw.home_dir ~/.openclaw` and
+`defenseclaw config set claw.config_file ~/.openclaw/openclaw.json`),
+and in `openclaw.json` set `gateway.bind` back to `loopback` and the
+`defenseclaw` provider's `baseUrl` back to `localhost`. If you had not set
+`net.ipv4.conf.all.route_localnet` yourself, set it back to `0`. The agent
+could write anywhere in the OpenClaw home while it was sandboxed, so scan it
+before OpenClaw runs on the host again, then rewire the guardrail:
+
+```bash
+defenseclaw skill scan --all
+defenseclaw plugin scan --all
+defenseclaw mcp scan --all
+defenseclaw setup guardrail
+```
 
 ## Related
 

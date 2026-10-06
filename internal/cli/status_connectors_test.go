@@ -52,23 +52,15 @@ func TestGatewayBindHostIsSharedAcrossStatusEndpoints(t *testing.T) {
 			cfg: &config.Config{
 				Gateway:   config.GatewayConfig{APIBind: "192.0.2.10"},
 				Guardrail: config.GuardrailConfig{Host: "192.0.2.20"},
-				OpenShell: config.OpenShellConfig{Mode: "standalone"},
 			},
 			want: "192.0.2.10",
 		},
 		{
-			name: "standalone guardrail host",
+			// The retired standalone sandbox's veth address never moves the
+			// API (the config_version 9 migration resets it).
+			name: "guardrail host keeps loopback",
 			cfg: &config.Config{
-				Guardrail: config.GuardrailConfig{Host: "192.0.2.20"},
-				OpenShell: config.OpenShellConfig{Mode: "standalone"},
-			},
-			want: "192.0.2.20",
-		},
-		{
-			name: "localhost guardrail keeps loopback",
-			cfg: &config.Config{
-				Guardrail: config.GuardrailConfig{Host: "localhost"},
-				OpenShell: config.OpenShellConfig{Mode: "standalone"},
+				Guardrail: config.GuardrailConfig{Host: "10.200.0.1"},
 			},
 			want: "127.0.0.1",
 		},

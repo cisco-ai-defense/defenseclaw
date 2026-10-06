@@ -31,15 +31,14 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 - **One entry point.** Type `defenseclaw sandbox …`. The Python CLI checks the
   command line against the same commands and flags, then replaces itself with
   `defenseclaw-gateway sandbox …` and passes your arguments on exactly as
-  typed. `legacy-cleanup` is the only command the Python CLI runs itself.
-- **Linux and macOS only.** On Windows every command except `legacy-cleanup`
-  stops with exit status 3 before doing anything; `legacy-cleanup` stops with
-  status 1. `setup`, `run`, `image build`, and `enable` also stop with status
+  typed.
+- **Linux and macOS only.** On Windows every command stops with exit status 3
+  before doing anything. `setup`, `run`, `image build`, and `enable` also stop with status
   3 under WSL2, in a `managed_enterprise` install, and when run as root:
   sandboxes run as your own user. `teardown` also stops with status 3 in a
   `managed_enterprise` install. On a Mac sandboxes run in OpenShell
   MicroVMs, on Apple silicon only: on an Intel Mac every command except
-  `teardown` and `legacy-cleanup` stops with exit status 3. A MicroVM mounts
+  `teardown` stops with exit status 3. A MicroVM mounts
   no host folders, so every run on a Mac works on a copy (see
   [macOS](/docs/sandboxes/guide#macos)).
 - **The daemon does the work.** Commands that create, change, or read
@@ -105,7 +104,6 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | [`sandbox pull`](#sandbox-pull) | Bring a copy-mode sandbox's work back. |
 | [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, and edit the sandbox policy. |
 | [`sandbox pack`](#sandbox-pack) | List, show, and validate policy packs. |
-| [`sandbox legacy-cleanup`](#sandbox-legacy-cleanup) | Remove a retired `openshell-sandbox` 0.0.x install. |
 
 ## Set up and maintain
 
@@ -373,8 +371,8 @@ defenseclaw sandbox disable claude
 Deletes DefenseClaw's sandboxes, its OpenShell providers, and its harness
 images. Provider profiles are shared by every DefenseClaw data directory on
 the OpenShell gateway, and teardown removes each DefenseClaw profile that no
-remaining provider uses: this data directory's ingress profiles, the legacy
-`defenseclaw-ingress` profile, and the shared model-credential and
+remaining provider uses: this data directory's ingress profiles and the
+shared model-credential and
 `--credential` profiles, including ones another DefenseClaw data directory
 imported. The daemons import them again when they need them. Another daemon's
 ingress profile is never removed. With the images it removes the MicroVM
@@ -1396,28 +1394,3 @@ defenseclaw sandbox pack validate ~/.defenseclaw/policies/sandbox/team-web/pack.
 {/* AUTOGEN-BEGIN: sandbox-flags pack validate */}
 This command has no flags.
 {/* AUTOGEN-END: sandbox-flags */}
-
-## Legacy cleanup
-
-### `sandbox legacy-cleanup`
-
-Linux only, and the one `sandbox` command the Python CLI runs itself. It
-removes a retired `openshell-sandbox` 0.0.x standalone install and restores
-the host's OpenClaw networking, ownership, and config. It prints every step
-with its exact commands and asks once, unless you pass `--yes`. Progress is
-recorded in `<data_dir>/legacy-sandbox-cleanup.json`, so running it again only
-does what is left.
-[Detect a legacy install](/docs/sandboxes/legacy-cleanup#detect-a-legacy-install) says
-when you need it.
-
-```bash
-defenseclaw sandbox legacy-cleanup --dry-run
-defenseclaw sandbox legacy-cleanup
-```
-
-| Flag | Description |
-| --- | --- |
-| `--dry-run` | Print the cleanup plan and exact commands; change nothing. |
-| `-y`, `--yes` | Apply the plan without asking for confirmation. |
-| `--remove-user` | Also delete the `sandbox` user and its home (`userdel -r`). Refused while it has processes, or until its ownership and ACLs are gone from the OpenClaw home. |
-| `--remove-binary` | Also remove `/usr/local/bin/openshell-sandbox` when it is a legacy 0.0.x build that no package owns. |
