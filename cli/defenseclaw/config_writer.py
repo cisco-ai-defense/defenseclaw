@@ -381,6 +381,19 @@ def _current_generation(target: str) -> int:
         return 0
 
 
+_GENERATION_COUNTER = re.compile(rb'"generation"\s*:\s*([0-9]{1,20})')
+
+
+def _salvage_generation(target: str) -> int:
+    """Return the counter a corrupt ``config.generation.json`` still holds, or 0."""
+    try:
+        with open(generation_path(target), "rb") as handle:
+            match = _GENERATION_COUNTER.search(handle.read())
+    except OSError:
+        return 0
+    return int(match.group(1)) if match else 0
+
+
 def record_generation(target: str, sha256: str, actor: str, reason: str) -> GenerationState:
     """Advance ``config.generation.json`` for bytes already at ``target``.
 
@@ -393,6 +406,9 @@ def record_generation(target: str, sha256: str, actor: str, reason: str) -> Gene
         previous = read_generation_state(target).generation
     except (OSError, ValueError):
         reset = True
+        # A truncated or hand-broken file may still carry its counter; never
+        # go backwards from it (the Go writer salvages it the same way).
+        previous = _salvage_generation(target)
     state = GenerationState(
         generation=previous + 1,
         config_sha256=sha256,

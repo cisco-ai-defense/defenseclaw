@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -75,9 +77,28 @@ func ReadGenerationState(configPath string) (GenerationState, error) {
 	}
 	var state GenerationState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return GenerationState{}, fmt.Errorf("configwrite: decode %s: %w", GenerationFileName, err)
+		// A truncated or hand-broken file may still carry its counter. Return
+		// it with the error so the next writer never goes backwards.
+		return GenerationState{Generation: salvageGeneration(raw)},
+			fmt.Errorf("configwrite: decode %s: %w", GenerationFileName, err)
 	}
 	return state, nil
+}
+
+var generationCounter = regexp.MustCompile(`"generation"\s*:\s*([0-9]{1,20})`)
+
+// salvageGeneration reads the "generation" counter out of bytes that are
+// not valid JSON. It returns 0 when there is none.
+func salvageGeneration(raw []byte) uint64 {
+	m := generationCounter.FindSubmatch(raw)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(string(m[1]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // SHA256Hex is the hex sha256 the writer records for config bytes.
@@ -196,8 +217,9 @@ func (t *Txn) RecordGeneration(configSHA256, actor, reason string) (GenerationSt
 	case err == nil:
 		next.Generation = previous.Generation + 1
 	default:
-		// Missing or corrupt: start over and say so. A corrupt file may
-		// still carry a readable counter; never go backwards from it.
+		// Missing or corrupt: say so. A corrupt file may still carry a
+		// readable counter (ReadGenerationState salvages it); never go
+		// backwards from it.
 		next.Generation = 1
 		next.GenerationReset = true
 		if previous.Generation > 0 {

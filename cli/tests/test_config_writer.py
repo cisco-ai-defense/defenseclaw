@@ -53,6 +53,11 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
         path=path,
     )
     assert second.generation == 2 and second.restart_required == ["gateway.api_port"]
+    # A truncated state file keeps its counter: the next write resumes past it.
+    with open(config_writer.generation_path(path), "w", encoding="utf-8") as handle:
+        handle.write('{"generation": 41, "config_sha')
+    third = config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    assert third.generation == 42 and config_writer.read_generation_state(path).generation_reset
     # The writer names every key the running gateway applies only on restart.
     assert config_writer.restart_required(
         ["guardrail.hook_fail_mode", "guardrail.connectors.codex.enabled", "guardrail.block_at", "gateway.watcher.enabled"]

@@ -79,6 +79,19 @@ func TestApplyPatchesValidatesAndAdvancesGeneration(t *testing.T) {
 	if second.Generation != 2 || len(second.RestartRequired) != 1 || second.RestartRequired[0] != "gateway.api_port" {
 		t.Fatalf("second result = %+v", second)
 	}
+
+	// A truncated state file keeps its counter: the next write resumes past
+	// it instead of resetting to 1.
+	if err := os.WriteFile(GenerationPath(path), []byte(`{"generation": 41, "config_sha`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, err := Apply(context.Background(), path, []Change{{Path: "guardrail.mode", Value: "action"}}, opt)
+	if err != nil {
+		t.Fatalf("third Apply: %v", err)
+	}
+	if state, err := ReadGenerationState(path); err != nil || third.Generation != 42 || !state.GenerationReset {
+		t.Fatalf("after a corrupt state file: result %+v, state %+v, %v", third, state, err)
+	}
 }
 
 func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
