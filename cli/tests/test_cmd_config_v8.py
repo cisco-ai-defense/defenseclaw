@@ -163,6 +163,10 @@ def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monke
             return CliRunner().invoke(cmd_config.config_cmd, list(args))
 
     assert run("set", "asset_policy.skill.denied[0]", "--json", '{"name": "evil", "reason": "x"}').exit_code == 0
+    # A string enum whose value YAML 1.1 reads as a boolean (GAP-0157).
+    assert run("set", "ai_discovery.ide_inventory", "off").exit_code == 0
+    off = run("get", "ai_discovery.ide_inventory")
+    assert off.exit_code == 0 and off.output.strip() == "off"
     got = run("get", "asset_policy.skill.denied[0].name")
     assert got.exit_code == 0 and got.output.strip() == "evil"
 
