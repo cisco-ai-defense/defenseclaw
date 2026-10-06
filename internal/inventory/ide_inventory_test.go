@@ -131,6 +131,17 @@ func TestIDEAIIndexFlagsPreRenameDevinPlugins(t *testing.T) {
 	}
 }
 
+// The built-in catalog flags JetBrains' own AI Assistant plugin as AI.
+func TestIDEAIIndexFlagsJetBrainsAIAssistant(t *testing.T) {
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sig, ok := newIDEAIIndex(catalog).match(ideplugins.FamilyJetBrains, "com.intellij.ml.llm"); !ok || sig.ID != "jetbrains-ai" {
+		t.Fatalf("com.intellij.ml.llm matched %+v, %t", sig, ok)
+	}
+}
+
 // A v3 inventory.db (the 1.0.0 schema) migrates to v4 in place: existing
 // rows survive and the new columns and tables are there.
 func TestInventoryStoreMigratesV3ToV4(t *testing.T) {
