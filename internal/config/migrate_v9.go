@@ -460,7 +460,9 @@ func v9DataDir(configPath string, raw []byte) string {
 		DataDir string `yaml:"data_dir"`
 	}
 	if yaml.Unmarshal(raw, &plain) == nil && strings.TrimSpace(plain.DataDir) != "" {
-		return strings.TrimSpace(plain.DataDir)
+		// "~/..." is valid v8; it names the home directory, not a folder
+		// relative to the working directory.
+		return expandPath(strings.TrimSpace(plain.DataDir))
 	}
 	return filepath.Dir(configPath)
 }

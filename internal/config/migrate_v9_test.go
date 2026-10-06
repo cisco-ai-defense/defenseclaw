@@ -307,3 +307,27 @@ func TestMigrateV8InMemory(t *testing.T) {
 		t.Errorf("a config_version 9 source changed: %v", err)
 	}
 }
+
+// TestMigrateV9InlineKeyWithTildeDataDir: data_dir "~/..." is valid v8, so
+// the inline VirusTotal key goes to the .env under the home directory.
+func TestMigrateV9InlineKeyWithTildeDataDir(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dataDir := filepath.Join(home, ".dctest")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dataDir, "config.yaml")
+	source := "config_version: 8\ndata_dir: ~/.dctest\nscanners:\n  skill_scanner:\n    use_virustotal: true\n" +
+		"    virustotal_api_key: vt-test-value\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath}); err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if env, err := os.ReadFile(filepath.Join(dataDir, ".env")); err != nil || !strings.Contains(string(env), "VIRUSTOTAL_API_KEY=vt-test-value") {
+		t.Fatalf("data_dir .env = %q, %v", env, err)
+	}
+}
