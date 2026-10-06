@@ -423,6 +423,18 @@ _V8SourceLoader.add_implicit_resolver(
 )
 
 
+def load_config_value(text: str) -> Any:
+    """Parse one ``config set`` VALUE as the gateway reads config.yaml.
+
+    ``yaml.safe_load`` is YAML 1.1, where ``off`` and ``on`` are booleans, so
+    ``config set ai_discovery.ide_inventory off`` wrote ``false`` and the
+    schema refused it; the core schema keeps them text, as the file reader and
+    Go do.
+    """
+
+    return yaml.load(text, Loader=_V8SourceLoader)
+
+
 def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> ValidatedV8Config:
     """Parse and validate one exact-v8 source without reading secrets or network."""
 

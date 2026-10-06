@@ -53,7 +53,8 @@ var rulePackCmd = &cobra.Command{
 	Short: "Inspect a guardrail rule pack without starting the gateway",
 	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
 config. Administrators validate a custom pack with this command before
-pointing guardrail.rule_pack_dir at it.`,
+registering it as guardrail.custom_packs.<name> (its path and the digest this
+command prints) and selecting it with guardrail.rule_pack.`,
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},

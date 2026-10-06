@@ -11,10 +11,12 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -161,8 +163,9 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	tuned := profileConnectorNames(cfg)
 	for _, name := range names {
-		for _, scope := range profileRulePackScopes(derived[name].Config) {
+		for _, scope := range profileRulePackScopes(derived[name].Config, tuned) {
 			key := scope.key()
 			if _, done := set.rules[key]; done {
 				continue
@@ -188,8 +191,11 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 }
 
 // profileRulePackScopes lists every rule-pack scope a derived configuration
-// can resolve for some connector, one per composed-pack key.
-func profileRulePackScopes(cfg *config.Config) []rulePackScope {
+// can resolve for some connector, one per composed-pack key, including the
+// connectors some profile tunes (tuned, from profileConnectorNames: computed
+// once for all profiles, as walking every profile for each derived
+// configuration was quadratic).
+func profileRulePackScopes(cfg *config.Config, tuned []string) []rulePackScope {
 	if cfg == nil {
 		return nil
 	}
@@ -209,7 +215,7 @@ func profileRulePackScopes(cfg *config.Config) []rulePackScope {
 	for name := range cfg.Guardrail.Connectors {
 		add(connectorRulePackScope(cfg, name))
 	}
-	for _, name := range profileConnectorNames(cfg) {
+	for _, name := range tuned {
 		add(connectorRulePackScope(cfg, name))
 	}
 	if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
@@ -231,7 +237,8 @@ func profileConnectorNames(cfg *config.Config) []string {
 			names = append(names, config.NormalizeConnectorName(name))
 		}
 	}
-	return names
+	sort.Strings(names)
+	return slices.Compact(names)
 }
 
 func profileRulePackKey(dir string) string {
@@ -517,9 +524,17 @@ func localProfileSubject(account *osuser.User) profileSubject {
 // subject. On Windows each group is its SID followed by its name, as the
 // Windows directory facts list them; identityGroupCount counts the SIDs.
 func localAccountGroups(account *osuser.User) []string {
+	groups, _ := accountGroups(account)
+	return groups
+}
+
+// accountGroups is localAccountGroups with the error when the OS account
+// database cannot list the account's groups: facts a lookup resolves for
+// the hook path must not be cached as resolved without them.
+func accountGroups(account *osuser.User) ([]string, error) {
 	gids, err := account.GroupIds()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var groups []string
 	for _, gid := range gids {
@@ -532,7 +547,7 @@ func localAccountGroups(account *osuser.User) []string {
 			groups = append(groups, group.Name)
 		}
 	}
-	return groups
+	return groups, nil
 }
 
 // match runs the ordered assignments: the first match wins; within one
@@ -542,8 +557,12 @@ func localAccountGroups(account *osuser.User) []string {
 // request authenticated for that connector.
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
 	verified := subject != nil && source != "" && !subject.LookupFailed
+	groups := &subjectGroups{}
+	if verified {
+		groups.list = subject.Groups
+	}
 	for _, assignment := range set.assignments {
-		reason, group, ok := assignmentMatches(assignment.Match, subject, verified, connectorName, agent)
+		reason, group, ok := assignmentMatches(assignment.Match, subject, groups, verified, connectorName, agent)
 		if !ok {
 			continue
 		}
@@ -569,7 +588,7 @@ func (set *guardrailProfileSet) decision(name, reason, group, source string) pro
 	return decision
 }
 
-func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified bool, connectorName, agent string) (reason, group string, ok bool) {
+func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *subjectGroups, verified bool, connectorName, agent string) (reason, group string, ok bool) {
 	if m.Empty() {
 		return "", "", false
 	}
@@ -587,7 +606,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 	if len(m.Groups) > 0 {
 		matched := ""
 		for _, want := range m.Groups {
-			if profileGroupMatches(subject.Groups, want) {
+			if groups.has(want) {
 				matched = strings.TrimSpace(want)
 				break
 			}
@@ -616,24 +635,71 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 	return reason, group, true
 }
 
-// profileGroupMatches reports whether one of a subject's groups is want,
-// compared without regard to case. Windows subjects carry each group as its
-// SID and DOMAIN\name, so a bare group name in an assignment also matches
-// the name part of a DOMAIN\name group.
-func profileGroupMatches(groups []string, want string) bool {
-	if anyEqualFold(groups, want) {
-		return true
-	}
+// subjectGroups answers whether one of a subject's groups is the group an
+// assignment names, compared without regard to case. Windows subjects carry
+// each group as its SID and DOMAIN\name, so a bare group name in an
+// assignment also matches the name part of a DOMAIN\name group.
+//
+// It indexes the groups on first use. A request is matched against every
+// assignment in order, and scanning the whole group list for each one made
+// a request cost assignments x groups comparisons (11 ms at 2,000
+// assignments and 400 groups, 50 ms at 10,000, on each hook call, twice).
+type subjectGroups struct {
+	list  []string
+	built bool
+	// exact holds every group, tails the name part after the last
+	// backslash of those that have one, both folded.
+	exact, tails map[string]struct{}
+}
+
+func (g *subjectGroups) has(want string) bool {
 	want = strings.TrimSpace(want)
-	if want == "" || strings.Contains(want, `\`) {
+	if want == "" || len(g.list) == 0 {
 		return false
 	}
-	for _, group := range groups {
-		if i := strings.LastIndexByte(group, '\\'); i >= 0 && strings.EqualFold(strings.TrimSpace(group[i+1:]), want) {
-			return true
+	if !g.built {
+		g.build()
+	}
+	key := foldKey(want)
+	if _, ok := g.exact[key]; ok {
+		return true
+	}
+	if strings.Contains(want, `\`) {
+		return false
+	}
+	_, ok := g.tails[key]
+	return ok
+}
+
+func (g *subjectGroups) build() {
+	g.built = true
+	g.exact = make(map[string]struct{}, len(g.list))
+	for _, group := range g.list {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		g.exact[foldKey(group)] = struct{}{}
+		if i := strings.LastIndexByte(group, '\\'); i >= 0 {
+			if g.tails == nil {
+				g.tails = map[string]struct{}{}
+			}
+			g.tails[foldKey(strings.TrimSpace(group[i+1:]))] = struct{}{}
 		}
 	}
-	return false
+}
+
+// foldKey maps every rune to the smallest rune of its case-folding orbit,
+// so two strings have the same key exactly when strings.EqualFold says
+// they are equal.
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		smallest := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			smallest = min(smallest, f)
+		}
+		return smallest
+	}, s)
 }
 
 func anyMatches(values []string, pred func(string) bool) bool {

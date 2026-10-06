@@ -165,6 +165,32 @@ func TestFailedUninstallKeepsTheRecordForARetryOrReinstall(t *testing.T) {
 	}
 }
 
+// failingRemoveAccounts cannot delete the service account.
+type failingRemoveAccounts struct{ AccountManager }
+
+func (failingRemoveAccounts) Remove(context.Context, string) error {
+	return errors.New("remove /Users/_defenseclaw: eDSPermissionError")
+}
+
+// macOS can deny the directory-record delete of the service account (GAP-0101).
+// The uninstall had already removed the binaries, the CLI included, so
+// failing it left a command that could not be rerun. It completes and tells
+// the administrator how to delete the account.
+func TestUninstallCompletesWhenTheServiceAccountCannotBeDeleted(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Accounts = failingRemoveAccounts{h.env.Accounts}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if len(done.Warnings) != 1 || done.Warnings[0].Code != codeAccount ||
+		!strings.Contains(done.Warnings[0].Message, "sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser) {
+		t.Fatalf("warnings = %+v, want the service-account warning with the delete command", done.Warnings)
+	}
+	if exists(h.env.deploymentPath()) {
+		t.Fatal("the deployment record is still there: the uninstall did not complete")
+	}
+}
+
 // removeAllRunner answers `enterprise hooks remove-all` with answer.
 type removeAllRunner struct {
 	Runner

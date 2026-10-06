@@ -454,7 +454,7 @@ end. The gateway's other HTTPS clients take the proxy from `HTTPS_PROXY`,
 - The gateway reads `enterprise.network` only when it starts. A config
   reload that changes it is reported as restart-required, and the gateway
   keeps the previous proxy until it restarts. On Linux and macOS, a
-  lifecycle run that applies the changed config restarts the services.
+  lifecycle run that changes it restarts the gateway.
 - When `https_proxy` is empty, the AI Defense client and the telemetry
   exporters use the process environment's proxy variables (`HTTPS_PROXY`,
   `NO_PROXY`), if any.

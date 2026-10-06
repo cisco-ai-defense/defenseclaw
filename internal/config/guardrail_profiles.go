@@ -263,7 +263,7 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("guardrail profile %q is not defined", name)
 	}
-	out, err := deepCopyConfig(c)
+	out, err := copyConfigSharingProfiles(c)
 	if err != nil {
 		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 	}
@@ -559,6 +559,23 @@ func (g *GuardrailConfig) profileConnectorOverlay(connector string, overlay PerC
 		return overlayGuardrailPolicy(overlay, profile, false)
 	}
 	return overlay
+}
+
+// copyConfigSharingProfiles is deepCopyConfig for a derived configuration:
+// the copy shares c's profile table and assignments instead of copying
+// them. A derived configuration is read-only, and the copy used to carry
+// every profile again, so deriving P profiles copied P tables of P
+// profiles (500 profiles took 4 s, 1000 took 17 s and 2000 took 68 s, at
+// every start and reload of the gateway).
+func copyConfigSharingProfiles(c *Config) (*Config, error) {
+	slim := *c
+	slim.Guardrail.Profiles, slim.Guardrail.ProfileAssignments = nil, nil
+	out, err := deepCopyConfig(&slim)
+	if err != nil {
+		return nil, err
+	}
+	out.Guardrail.Profiles, out.Guardrail.ProfileAssignments = c.Guardrail.Profiles, c.Guardrail.ProfileAssignments
+	return out, nil
 }
 
 // deepCopyConfig copies c through JSON, which keeps nil and empty maps and

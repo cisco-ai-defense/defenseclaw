@@ -97,14 +97,9 @@ references (rule packs, Rego modules, signature packs, scanner policies), as
 the gateway does when it applies a configuration. Compare it with
 "policy.effective_digest" on the gateway's /health to see whether the running
 gateway applied this configuration.`,
-	Args: cobra.NoArgs,
-	// Only the strict runtime config is needed; the audit store stays closed
-	// so this short-lived process never becomes a second SQLite owner.
-	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
-		return loadGatewayCommandConfigFor(cmd)
-	},
-	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
+	Args:              cobra.NoArgs,
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		policy, err := gateway.ComputeEffectivePolicy(cmd.Context(), cfg)
 		if err != nil {

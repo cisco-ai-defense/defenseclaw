@@ -131,6 +131,10 @@ How the keys combine:
 - **Case does not matter.** Groups, account names, principals and UPNs compare
   without regard to case, so `alice@CORP.EXAMPLE.COM` and
   `alice@corp.example.com` are the same user.
+- **An account name is not unique.** It is the name without its domain, so
+  `alice` matches a local account `alice` and a directory account
+  `alice@corp.example.com` alike. Use the principal, the uid or the SID to
+  tell two people of the same short name apart.
 - **Nothing matches: the default.** A request that no assignment selects gets
   `guardrail.default_profile`. An empty default keeps the global `guardrail.*`
   settings.
@@ -164,7 +168,9 @@ than one key, the reason names the most specific key, in the order
 
 The subject of a profile decision is the user the kernel or a per-user
 credential proved, with the directory facts the gateway resolved for that
-user from the operating system. **Identity headers, hook payloads and claimed
+user from the operating system. An agent in a sandbox counts as the user who
+started the sandbox, with the same facts and refresh as that user's other
+agents. **Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
 `KRB5CCNAME`, edits a local file or overrides a config directory cannot move
 to a weaker profile.
@@ -178,11 +184,15 @@ What follows when the identity is missing:
   gateway has not seen yet waits up to two seconds for a cold SSSD or Active
   Directory answer, then the default profile applies
   (`default_lookup_failed`) and the lookup is retried 15 seconds later. Later
-  requests use the cached answer.
+  requests use the cached answer. A lookup counts as failed unless every part
+  of it finished: an account whose group list timed out, or that is in more
+  than 2,048 groups, has no facts rather than part of its membership.
 - **Group changes take time.** The gateway caches a user's directory facts for
   15 minutes and refreshes them in the background. A user added to a group
   gets the group's profile within that time. On Windows the groups are those
-  of the sign-in token, so the user must also sign out and back in.
+  of the sign-in token, so the user must also sign out and back in. While the
+  directory does not answer, the gateway keeps using a user's last facts until
+  a lookup succeeds again.
 
 Because an unverified or failed lookup always lands on the default profile,
 **set a strict `default_profile`**. A lenient default means a lookup failure

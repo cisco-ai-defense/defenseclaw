@@ -144,6 +144,12 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// serviceAccountKept is set when an uninstall could not delete the
+	// service account (macOS can deny the directory-record delete).
+	serviceAccountKept bool
+	// gatewayKeptRunning is set when the gateway applied a config change
+	// itself (hotConfigApply) and was not restarted.
+	gatewayKeptRunning bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1051,7 +1057,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
-	l.quiesce(ctx, units, l.keepRunningDuringChange(p))
+	keep := l.keepRunningDuringChange(p)
+	hot := l.hotConfigApply(ctx, record, p, adopting)
+	if gateway, ok := gatewayUnitOf(units); hot && ok {
+		keep[gateway.Name] = true
+	}
+	l.quiesce(ctx, units, keep)
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -1105,7 +1116,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	_ = env.savePending(pending)
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
-		if err := l.activate(ctx, units, restartSockets); err != nil {
+		if err := l.activate(ctx, units, restartSockets, hot); err != nil {
 			// A readiness failure on the API port already names the holder.
 			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
 				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
@@ -1125,7 +1136,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			switch {
 			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
-			case changesApplied && unit.Kind == "gateway":
+			case changesApplied && unit.Kind == "gateway" && !l.gatewayKeptRunning:
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
@@ -1469,8 +1480,9 @@ func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, chang
 // gateway to report healthy. A running socket keeps its listener (queued
 // hooks survive the change) unless its definition changed; a changed one is
 // restarted in one service-manager job, so the port is unbound only for
-// the moment the listener is replaced.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool) error {
+// the moment the listener is replaced. With hot, a gateway that kept running
+// is not started again: it is waited for until it has applied the config.
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
@@ -1500,6 +1512,12 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			}
 			if err := restartUnit(ctx, env.Services, unit); err != nil {
 				return fmt.Errorf("restart %s: %w", unit.Name, err)
+			}
+			continue
+		}
+		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {
+			if err := l.settleHotGateway(ctx, unit); err != nil {
+				return err
 			}
 			continue
 		}
@@ -2023,8 +2041,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
 		if !l.opts.KeepServiceAccount {
+			// By now the services, the binaries (this CLI included) and the
+			// deployment record are gone, so failing the uninstall here would
+			// leave a command that cannot be rerun. The account is a leftover
+			// to delete by hand.
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
-				errs = append(errs, err)
+				l.serviceAccountKept = true
+				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
+					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
 			}
 		}
 	}
@@ -2054,6 +2078,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
+// serviceAccountDeleteCommand is how an administrator deletes the service
+// account by hand after an uninstall could not.
+func serviceAccountDeleteCommand(goos, name string) string {
+	if goos == "darwin" {
+		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+	}
+	return "`sudo userdel " + name + "`"
+}
+
 // uninstallSummary says what a completed uninstall removed and kept, like
 // the change list of ensure and repair. A bare "uninstall: done" did not
 // tell the administrator what happened to the machine state or to the
@@ -2079,6 +2112,8 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 	case l.opts.KeepServiceAccount:
 		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	case l.serviceAccountKept:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}

@@ -367,8 +367,8 @@ admission:
 guardrail:
   rule_pack: strict
   rules:
-    disable: [ENT-DATA-EMPLOYEE-ID]
-    severity_overrides: {SEC-AWS-SECRET: HIGH}
+    disable: [ENT-DATA-EMPLOYEE-ID, exec.remote_ip_download_execute_same_artifact]
+    severity_overrides: {SEC-AWS-SECRET: HIGH, impact.cloud_s3_data_delete: HIGH}
   profiles:
     contractors:
       rules: {severity_overrides: {SEC-OPENAI-V2: LOW}}
@@ -410,6 +410,10 @@ observability: {}
 	}
 	if got := cfg.Guardrail.Rules.SeverityOverrides["SEC-AWS-SECRET"]; got != "HIGH" || cfg.Guardrail.RulePack != "strict" {
 		t.Errorf("rules = %+v rule_pack = %q; rule IDs must keep their case", cfg.Guardrail.Rules, cfg.Guardrail.RulePack)
+	}
+	// The newer semantic packs spell their IDs in lower case with dots.
+	if rules := cfg.Guardrail.Rules; len(rules.Disable) != 2 || rules.SeverityOverrides["impact.cloud_s3_data_delete"] != "HIGH" {
+		t.Errorf("lower-case dotted rule IDs = %+v", rules)
 	}
 	if rules := cfg.Guardrail.Profiles["contractors"].Rules; rules == nil || rules.SeverityOverrides["SEC-OPENAI-V2"] != "LOW" {
 		t.Errorf("profile rules = %+v", rules)
