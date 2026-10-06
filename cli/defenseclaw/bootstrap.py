@@ -654,8 +654,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 StepResult(
                     "Config",
                     "fail",
-                    "configuration schema v8 is required",
-                    "defenseclaw upgrade",
+                    "the configuration was written by an older DefenseClaw",
+                    "defenseclaw migrate",
                 )
             )
             return FirstRunReport(
@@ -665,7 +665,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 connector=connector,
                 profile=profile,
                 setup=setup,
-                next_commands=["defenseclaw upgrade"],
+                next_commands=["defenseclaw migrate"],
                 connector_mode_warnings=connector_mode_warnings,
             )
     try:

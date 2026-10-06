@@ -314,7 +314,7 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if not is_current_schema(version):
         if version == 0 and config_is_empty(path):
             raise ConfigVersionError(empty_config_message(path))
-        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+        raise ConfigVersionError("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
 
 
 require_v8_config = require_current_config
@@ -3598,7 +3598,7 @@ class Config:
             version = CURRENT_CONFIG_VERSION
             baseline = _config_to_dict(default_config())
         if not is_current_schema(version):
-            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+            raise ConfigVersionError("This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first.")
         existing = _load_existing_config_yaml(path)
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.

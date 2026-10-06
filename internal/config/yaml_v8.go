@@ -161,9 +161,6 @@ func ParseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := validateV8YAMLVersion(source, root); err != nil {
 		return nil, err
 	}
-	if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
-		return nil, err
-	}
 	if err := rejectV9RemovedKeys(source, root); err != nil {
 		return nil, err
 	}
@@ -313,54 +310,6 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	}
 }
 
-func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
-	for _, legacy := range []struct{ key, target string }{
-		{"otel", "observability resource, policies, and destinations"},
-		{"audit_sinks", "observability.destinations"},
-		{"audit_db", "observability.local.path"},
-		{"judge_bodies_db", "observability.local.judge_bodies_path"},
-	} {
-		if node := v8YAMLMapValue(root, legacy.key); node != nil {
-			return v8YAMLLegacyError(source, v8YAMLChildPath("$", legacy.key), node, legacy.target)
-		}
-	}
-	if privacy := v8YAMLMapValue(root, "privacy"); privacy != nil && privacy.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(privacy, "disable_redaction"); node != nil {
-			return v8YAMLLegacyError(source, "$.privacy.disable_redaction", node,
-				"observability defaults, bucket policies, and destination routes")
-		}
-	}
-	if discovery := v8YAMLMapValue(root, "ai_discovery"); discovery != nil && discovery.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(discovery, "emit_otel"); node != nil {
-			return v8YAMLLegacyError(source, "$.ai_discovery.emit_otel", node,
-				"the ai.discovery bucket and destination routing policy")
-		}
-	}
-	if node := v8YAMLMapValue(root, "splunk"); node != nil {
-		return v8YAMLLegacyError(source, "$.splunk", node, "an observability destination with kind: splunk_hec")
-	}
-
-	observability := v8YAMLMapValue(root, "observability")
-	if observability == nil || observability.Kind != yaml.MappingNode {
-		return nil
-	}
-	connectors := v8YAMLMapValue(observability, "connectors")
-	if connectors == nil || connectors.Kind != yaml.MappingNode {
-		return nil
-	}
-	for index := 0; index+1 < len(connectors.Content); index += 2 {
-		name, connector := connectors.Content[index], connectors.Content[index+1]
-		if name.Kind != yaml.ScalarNode || connector.Kind != yaml.MappingNode {
-			continue
-		}
-		if node := v8YAMLMapValue(connector, "audit_sinks"); node != nil {
-			path := v8YAMLChildPath("$.observability.connectors", name.Value) + ".audit_sinks"
-			return v8YAMLLegacyError(source, path, node, "observability destinations with connector selectors")
-		}
-	}
-	return nil
-}
-
 // rejectV9RemovedKeys refuses, in a config_version 9 source, the v8 keys
 // that config_version 9 replaced. A v8 source keeps them: they are the
 // input of the v8 to v9 migration (MigrateV9).
@@ -443,12 +392,6 @@ func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string)
 func v9RemovedKeyError(source, path string, node *yaml.Node, target string) error {
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
 		"a v8 configuration key is not accepted in config_version 9",
-		"use "+target)
-}
-
-func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) error {
-	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
-		"a pre-v8 configuration key is not accepted by the v8 entrypoint",
 		"use "+target)
 }
 

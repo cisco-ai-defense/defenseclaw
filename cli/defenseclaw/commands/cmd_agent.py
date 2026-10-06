@@ -3760,7 +3760,7 @@ def _require_loaded_config(app: AppContext):
 
         if not is_current_schema(getattr(cfg, "_source_config_version", None)):
             raise click.ClickException(
-                "Configuration schema v8 is required — run 'defenseclaw migrate' first."
+                "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
             )
         return cfg
     from defenseclaw import config as cfg_mod
