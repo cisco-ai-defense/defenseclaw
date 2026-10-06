@@ -458,12 +458,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		return 1, fmt.Errorf("refusing to replace an existing directory without valid DefenseClaw installer state: %s", installRoot)
 	}
 	if oldState != nil {
-		if replacement, retired := retiredConnectorReplacementAt(installRoot); retired && !opts.ConnectorSet {
-			// Older pre-release state selected a connector this release no
-			// longer ships; move the selection to its replacement.
-			opts.Connector = replacement
-			opts.PreserveConnectorConfiguration = false
-		} else if !opts.ConnectorSet && validConnector(oldState.Connector) {
+		if !opts.ConnectorSet && validConnector(oldState.Connector) {
 			opts.Connector = oldState.Connector
 			opts.PreserveConnectorConfiguration = !opts.ModeSet
 		}
@@ -1601,10 +1596,9 @@ func loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenan
 		return nil, err
 	}
 	var state installState
-	if err := readInstallStateJSON(path, &state); err != nil {
+	if err := readJSON(path, &state); err != nil {
 		return nil, fmt.Errorf("read existing installer state: %w", err)
 	}
-	retireInstallStateConnector(&state)
 	if err := validateInstallStateForRoots(&state, installRoot, dataRoot, maintenancePath); err != nil {
 		return nil, fmt.Errorf("existing installer state: %w", err)
 	}
@@ -1614,7 +1608,7 @@ func loadInstallStateFromTreeForRoots(treeRoot, installRoot, dataRoot, maintenan
 func updateInstalledPathOwnership(installRoot string, owned, reusedSeparator, valueCreated bool) error {
 	path := filepath.Join(installRoot, "installer", "install-state.json")
 	var state installState
-	if err := readInstallStateJSON(path, &state); err != nil {
+	if err := readJSON(path, &state); err != nil {
 		return err
 	}
 	state.PathEntryOwned = owned
