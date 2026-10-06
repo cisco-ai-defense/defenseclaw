@@ -346,11 +346,21 @@ def _toggle_connector_guardrail(
     if restart:
         from defenseclaw.commands import cmd_setup
 
+        # Enable waits for the whole roster the gateway publishes (every
+        # enabled connector), not this connector alone: an enabled peer is a
+        # normal lock entry, so a wait on just this one rejected it as an
+        # unexpected peer and failed after about 3 minutes (GAP-0163).
+        roster = (
+            [n for n in _active_connector_set(app.cfg, key) if app.cfg.guardrail.effective_enabled(n)]
+            if enable
+            else None
+        )
         cmd_setup._restart_services(
             app.cfg.data_dir,
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=key,
+            connectors=roster,
             teardown=not enable,
             # Report "setup complete" only once the gateway admitted the
             # connector (GAP-0069).

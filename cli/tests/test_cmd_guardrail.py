@@ -651,6 +651,9 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(list(record.call_args.args[1]), ["codex"])
         self.assertTrue(restart.call_args.kwargs["wait_for_connector_ready"])
+        # The wait covers the whole enabled roster, so an active peer is not an
+        # unexpected lock entry (GAP-0163).
+        self.assertEqual(restart.call_args.kwargs["connectors"], ["claudecode", "codex"])
 
         app = make_multi_ctx({"codex": False, "claudecode": None})
         with (
