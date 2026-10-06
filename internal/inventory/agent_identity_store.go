@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,6 +22,11 @@ var agentIdentitiesDDL = []string{
 	`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_last_seen ON agent_identities(last_seen DESC, agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
+	// The sessions an agent identity has counted: the count is of distinct
+	// session ids, so a session resumed after a gateway restart, which the
+	// in-memory session registry sees as new, is not counted again.
+	`CREATE TABLE IF NOT EXISTS agent_identity_sessions (agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL, PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_first_seen ON agent_identity_sessions(first_seen)`,
 }
 
 // agentIdentityTimeLayout is fixed-width UTC so the stored strings order the
@@ -40,13 +46,33 @@ type AgentIdentityRecord struct {
 	LastSeen      time.Time `json:"last_seen"`
 	LastSessionID string    `json:"last_session_id,omitempty"`
 	// SessionsSeen is the session count. In an UpsertAgentIdentities batch
-	// it is the number of sessions first seen since the previous flush.
+	// it is the number of sessions this process first saw since the previous
+	// flush.
 	SessionsSeen int64 `json:"sessions_seen"`
-	// FirstSessionID is, in a batch, the first session the batch counted.
-	// The session registry lives in memory, so a session resumed after a
-	// gateway restart is counted again; when it is the stored row's last
-	// session the upsert does not count it twice.
-	FirstSessionID string `json:"-"`
+	// SessionIDs is, in a batch, the ids of those sessions (up to
+	// agentIdentityBatchSessionCap). The session registry lives in memory,
+	// so a session resumed after a gateway restart is new to it; the upsert
+	// counts only the ids the store has not counted for this agent.
+	SessionIDs []string `json:"-"`
+}
+
+// agentIdentityBatchSessionCap bounds the session ids a batch names. A
+// session past it is counted without its id.
+const agentIdentityBatchSessionCap = 1024
+
+// NoteSession counts a session this process saw for the first time, once per
+// id within a batch.
+func (r *AgentIdentityRecord) NoteSession(id string) {
+	if id == "" {
+		return
+	}
+	if len(r.SessionIDs) < agentIdentityBatchSessionCap {
+		if slices.Contains(r.SessionIDs, id) {
+			return
+		}
+		r.SessionIDs = append(r.SessionIDs, id)
+	}
+	r.SessionsSeen++
 }
 
 // AgentIdentityFilter narrows ListAgentIdentities. Empty fields match
@@ -76,8 +102,9 @@ func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
 }
 
 // UpsertAgentIdentities writes one batch in a single transaction. A known
-// agent keeps its first_seen, moves last_seen forward, adds the batch's
-// session count and takes the newest session id and user name.
+// agent keeps its first_seen, moves last_seen forward, adds the sessions of
+// the batch it had not counted and takes the newest session id and user
+// name.
 func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []AgentIdentityRecord) error {
 	if s == nil || s.db == nil {
 		return errors.New("inventory store: not open")
@@ -99,13 +126,17 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 				last_session_id = CASE
 					WHEN excluded.last_session_id <> '' AND excluded.last_seen >= agent_identities.last_seen
 					THEN excluded.last_session_id ELSE agent_identities.last_session_id END,
-				sessions_seen = agent_identities.sessions_seen + excluded.sessions_seen - CASE
-					WHEN excluded.sessions_seen > 0 AND ? <> '' AND ? = agent_identities.last_session_id
-					THEN 1 ELSE 0 END`)
+				sessions_seen = agent_identities.sessions_seen + excluded.sessions_seen`)
 		if err != nil {
 			return err
 		}
 		defer stmt.Close()
+		sessionStmt, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO agent_identity_sessions
+			(agent_id, session_id, first_seen) VALUES (?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer sessionStmt.Close()
 		for _, rec := range batch {
 			if strings.TrimSpace(rec.AgentID) == "" {
 				continue
@@ -117,18 +148,51 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 			if first.IsZero() || first.After(last) {
 				first = last
 			}
-			sessions := rec.SessionsSeen
-			if sessions < 0 {
-				sessions = 0
+			// Sightings the batch holds no id for count as they are; each
+			// named session counts once, ever.
+			sessions := max(rec.SessionsSeen-int64(len(rec.SessionIDs)), 0)
+			for _, sessionID := range rec.SessionIDs {
+				if sessionID == "" {
+					continue
+				}
+				inserted, err := sessionStmt.ExecContext(ctx, rec.AgentID, sessionID, formatAgentIdentityTime(last))
+				if err != nil {
+					return err
+				}
+				if added, err := inserted.RowsAffected(); err == nil {
+					sessions += added
+				}
 			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
-				rec.LastSessionID, sessions, rec.FirstSessionID, rec.FirstSessionID); err != nil {
+				rec.LastSessionID, sessions); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// PruneAgentIdentitySessions deletes the session ids first counted before
+// cutoff and returns how many. They only remember which sessions were
+// counted, so a session older than the window that resumes is counted again.
+func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("inventory store: not open")
+	}
+	var removed int64
+	err := s.runInTx(ctx, "agent_identities.prune_sessions", func(tx *sql.Tx) error {
+		if err := ensureAgentIdentitiesTable(ctx, tx); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `DELETE FROM agent_identity_sessions WHERE first_seen < ?`, formatAgentIdentityTime(cutoff))
+		if err != nil {
+			return err
+		}
+		removed, _ = result.RowsAffected()
+		return nil
+	})
+	return removed, err
 }
 
 // ListAgentIdentities returns the stored identities matching filter, most

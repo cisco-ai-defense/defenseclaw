@@ -18,6 +18,7 @@ package config
 
 import (
 	"errors"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -80,7 +81,9 @@ func ValidateCandidateAssets(configFile string, raw []byte) error {
 // for configFile before any writer installs them: the strict YAML and JSON
 // Schema pass, the observability compiler and the runtime decode (which
 // includes the guardrail profile checks). It reads nothing but raw; an
-// editing writer also runs ValidateCandidateAssets.
+// editing writer also runs ValidateCandidateAssets. The only thing it reads
+// besides raw is the data directory's .env, which environment-backed secret
+// references resolve from, as they do for `config validate` and the gateway.
 func ValidateCandidate(configFile string, raw []byte) error {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
@@ -90,6 +93,10 @@ func ValidateCandidate(configFile string, raw []byte) error {
 	if value, ok := document.Plain["data_dir"].(string); ok && strings.TrimSpace(value) != "" {
 		dataDir = strings.TrimSpace(value)
 	}
+	// A destination key that `defenseclaw keys set` stored in .env resolves
+	// here too. Without this the 8 -> 9 migration check refused, as "not
+	// set", the config of a user who had followed its remedy (GAP-0173).
+	LoadDotEnv(filepath.Join(expandPath(dataDir), ".env"))
 	if _, err := ParseCompileObservabilityV8(configFile, raw, ObservabilityV8CompileOptions{DefaultDataDir: dataDir}); err != nil {
 		return err
 	}

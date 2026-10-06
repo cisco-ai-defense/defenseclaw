@@ -17,7 +17,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -255,8 +254,9 @@ func claimedInstallHint(payload map[string]interface{}) string {
 // hookSubagentID is the sub-agent a hook belongs to, or "" for the session's
 // root agent. A sub-agent that runs in a child session already has its own
 // session instance, so only a sub-agent sharing its parent's session needs
-// one derived. Claude Code reports agent_id only inside a sub-agent; other
-// connectors are treated as sub-agent hooks only when they say so.
+// one derived. Claude Code and Codex report agent_id only inside a
+// sub-agent; other connectors are treated as sub-agent hooks only when they
+// say so.
 func hookSubagentID(req agentHookRequest) string {
 	agentID := strings.TrimSpace(req.AgentID)
 	if agentID == "" || strings.TrimSpace(req.ChildSessionID) != "" {
@@ -265,8 +265,9 @@ func hookSubagentID(req agentHookRequest) string {
 	switch event := canonicalEvent(req.HookEventName); {
 	case event == "subagentstart" || event == "subagentstop":
 		return agentID
-	case req.CorrelationProfileVersion == connector.CorrelationProfileClaudeCodeV1:
-		// Claude Code reports agent_id only inside a sub-agent. Any other
+	case subagentOnlyAgentIDConnector(req.ConnectorName):
+		// These connectors report agent_id only inside a sub-agent, on every
+		// hook of it (GAP-0137), not only on its start and stop. Any other
 		// agent id is one correlation minted or restored for the main agent
 		// on a session or turn boundary; keying the instance on it moved
 		// ais- whenever a new one was minted, as on a resume after a
@@ -279,6 +280,30 @@ func hookSubagentID(req agentHookRequest) string {
 		return agentID
 	}
 	return ""
+}
+
+// subagentOnlyAgentIDConnector reports whether name's hooks carry agent_id
+// only inside a sub-agent: the main agent's hooks carry none. Claude Code
+// and Codex (0.159 and later) do. Any hook of such a connector that names an
+// agent belongs to a child of the session's main agent, whatever the event.
+func subagentOnlyAgentIDConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claudecode", "codex":
+		return true
+	}
+	return false
+}
+
+// payloadNamesSubagent reports whether a hook of source names agentID in its
+// own payload and source reports agent_id only inside a sub-agent. An agent
+// id that correlation minted or restored for the main agent is not in the
+// payload, so it never counts.
+func payloadNamesSubagent(source, agentID string, payload map[string]interface{}) bool {
+	if agentID == "" || !subagentOnlyAgentIDConnector(source) {
+		return false
+	}
+	reported, _, _ := extractAgentIdentityFromHookPayload(payload)
+	return strings.TrimSpace(reported) == agentID
 }
 
 var agentIdentityIDPattern = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
