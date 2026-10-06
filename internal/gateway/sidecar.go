@@ -3270,6 +3270,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
 		return livePolicyDigestV8(), livePolicyGenerationV8()
 	})
+	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return livePolicyDigestV8(), livePolicyGenerationV8()
+	})
 	if conn != nil {
 		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),

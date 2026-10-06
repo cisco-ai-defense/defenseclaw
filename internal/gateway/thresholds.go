@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -98,9 +99,16 @@ func resolveThresholds(cfg *config.Config, connector string) ResolvedThresholds 
 }
 
 // ConfigThresholds is resolveThresholds for a caller outside the gateway
-// (`defenseclaw-gateway policy show`).
+// (`defenseclaw-gateway policy show`). No generation build ran in that
+// process, so it reads the pack's manifest posture itself, as the gateway
+// recorded it when it loaded the pack.
 func ConfigThresholds(cfg *config.Config, connector string) ResolvedThresholds {
-	return resolveThresholds(cfg, config.NormalizeConnectorName(connector))
+	connector = config.NormalizeConnectorName(connector)
+	if cfg != nil {
+		dir := cfg.ResolveRulePackDir(cfg.EffectiveRulePackRefForConnector(connector))
+		rememberPackPosture(dir, guardrail.ReadPackPosture(dir))
+	}
+	return resolveThresholds(cfg, connector)
 }
 
 // resolvePackThresholds is the rule pack's posture levels alone, without

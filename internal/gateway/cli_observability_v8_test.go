@@ -114,6 +114,15 @@ func TestCLIObservabilityV8SkillFindingScannerContract(t *testing.T) {
 		t.Fatalf("asset scan traces=%d, want one", len(capture.traces))
 	}
 
+	// A sub-analyzer of the scan's own scanner is accepted (GAP-0070).
+	const subAnalyzer = `{"kind":"scan","run_id":"mcp-yara-run","scan":{"scanner":"mcp-scanner","target":"http://127.0.0.1:1/mcp","timestamp":"2026-07-24T16:00:00Z","findings":[{"id":"mcp-YARA-0","severity":"HIGH","title":"x","description":"","location":"","remediation":"","scanner":"mcp-scanner/YARA","tags":[]}],"duration_ms":5}}`
+	request = httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(subAnalyzer))
+	response = httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("sub-analyzer finding status=%d response=%q", response.Code, response.Body.String())
+	}
+
 	request = httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(leakedAnalyzer))
 	response = httptest.NewRecorder()
 	api.handleCLIObservabilityV8(response, request)

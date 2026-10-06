@@ -163,12 +163,11 @@ func DefaultConfig() *Config {
 			LLM:           DefaultOpenShellLLM,
 		},
 		Watch: WatchConfig{
-			DebounceMs:          500,
-			AutoBlock:           true,
-			AllowListBypassScan: true,
-			RescanEnabled:       true,
-			RescanIntervalMin:   60,
-			RescanContentGated:  true,
+			DebounceMs:         500,
+			AutoBlock:          true,
+			RescanEnabled:      true,
+			RescanIntervalMin:  60,
+			RescanContentGated: true,
 		},
 		AIDiscovery: AIDiscoveryConfig{
 			Enabled:                   true,

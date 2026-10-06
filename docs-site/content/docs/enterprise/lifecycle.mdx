@@ -243,8 +243,8 @@ config change; see
 [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
 
 A change to `enterprise.network` (the outbound proxy) takes effect only when
-the gateway restarts. On Linux and macOS a lifecycle run that applies a
-changed config stops and starts the services, so the new proxy is used. A
+the gateway restarts. On Linux and macOS a lifecycle run that changes it
+restarts the gateway, so the new proxy is used. A
 config reload inside a running gateway reports a change to
 `enterprise.network` as restart-required and keeps the previous proxy until
 the gateway restarts. See [Network proxy](/docs/enterprise/configuration#network-proxy).
@@ -427,7 +427,14 @@ restart fails closed.
 | Windows | Run the installed release's Setup with `/repair JSON=1` | The same |
 
 Restart the gateway after you edit a rule pack or policy file in place.
-Config changes, secrets and upgrades restart it on their own.
+Secrets and upgrades restart it on their own. On Linux and macOS, `ensure`
+applies a config change that only touches keys the gateway reloads in place
+(most of them) in the running gateway, without a restart, and waits until the
+gateway reports the new policy: the policy generation on `/health` and on
+decisions goes up by one. A change to a process-level key restarts it:
+`gateway.*`, `guardrail.connectors.*.enabled`, `guardrail.hook_fail_mode`,
+`enterprise.network` and the other keys that
+[Source of truth](/docs/reference/source-of-truth) lists.
 
 ## Uninstall
 

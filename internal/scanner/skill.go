@@ -191,8 +191,10 @@ func (s *SkillScanner) judge() (skillJudge, bool) {
 func (s *SkillScanner) buildArgs(target, policy string) []string {
 	args := []string{"scan", "--format", "json", "--policy", policy}
 
+	judged := false
 	if s.Config.UseLLM {
 		if j, ok := s.judge(); ok {
+			judged = true
 			args = append(args, "--use-llm")
 			if j.provider != "" {
 				args = append(args, "--llm-provider", j.provider)
@@ -205,7 +207,10 @@ func (s *SkillScanner) buildArgs(target, policy string) []string {
 	if s.Config.UseBehavioral {
 		args = append(args, "--use-behavioral")
 	}
-	if s.Config.EnableMeta {
+	// The meta-analyzer needs the judge: without one skill-scanner exits 2
+	// ("Meta-Analyzer LLM API key not configured"), which fails the scan
+	// closed. Python runs meta under the same condition.
+	if s.Config.EnableMeta && judged {
 		args = append(args, "--enable-meta")
 	}
 	if s.Config.UseTrigger {

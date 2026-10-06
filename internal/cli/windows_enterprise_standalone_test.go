@@ -1943,3 +1943,46 @@ func TestWindowsEnterpriseGatewayDownReportsLocalInspectionUnknown(t *testing.T)
 		}
 	}
 }
+
+// The Windows result reports the effective policy as the Unix lifecycle does:
+// applied when the gateway reports the computed digest, a policy_not_applied
+// warning on a change action when it does not, and nothing while the gateway
+// is not ready.
+func TestWindowsEnterprisePolicyReportsWhetherTheGatewayAppliedIt(t *testing.T) {
+	previous := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = previous })
+	report := func(computed, reported string) {
+		windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
+			return []byte(`{"effective_digest":"` + computed + `","config_generation":6,"gateway_reported_digest":"` + reported + `"}`), nil
+		}
+	}
+	run := func(action string, ready bool) *enterprisestatus.Result {
+		result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
+		result.Installed, result.Readiness.Gateway = true, ready
+		applyWindowsEnterprisePolicy(context.Background(), result)
+		return result
+	}
+
+	report("sha256:aa", "sha256:aa")
+	if result := run("ensure", true); result.Policy == nil || !result.Policy.Applied || result.Policy.ConfigGeneration != 6 || len(result.Warnings) != 0 {
+		t.Fatalf("applied policy = %+v warnings=%+v", result.Policy, result.Warnings)
+	}
+	report("sha256:aa", "sha256:bb")
+	if result := run("ensure", true); result.Policy == nil || result.Policy.Applied || !containsString(warningCodes(result), "policy_not_applied") {
+		t.Fatalf("stale gateway policy = %+v warnings=%+v", result.Policy, result.Warnings)
+	}
+	if result := run("status", true); result.Policy == nil || len(result.Warnings) != 0 {
+		t.Fatalf("status reports the policy without a warning: %+v %+v", result.Policy, result.Warnings)
+	}
+	if result := run("ensure", false); result.Policy != nil {
+		t.Fatalf("policy reported while the gateway is not ready: %+v", result.Policy)
+	}
+}
+
+func warningCodes(result *enterprisestatus.Result) []string {
+	codes := []string{}
+	for _, warning := range result.Warnings {
+		codes = append(codes, warning.Code)
+	}
+	return codes
+}

@@ -121,6 +121,18 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(len(action_selects), 1)
         self.assertEqual(action_selects[0].count("SUM(CASE"), 4)
 
+    def test_counts_include_the_operator_lists_of_asset_policy(self):
+        from defenseclaw.config import AssetPolicyRule, default_config
+
+        cfg = default_config()
+        cfg.asset_policy.skill.denied = [AssetPolicyRule(name="evil")]
+        cfg.asset_policy.mcp.allowed = [AssetPolicyRule(name="trusted")]
+        self.store.set_action_field("skill", "scan-blocked", "install", "block", "scan")
+
+        for counts in (self.store.get_counts(cfg=cfg), self.store.get_enforcement_counts(cfg=cfg)):
+            self.assertEqual((counts.blocked_skills, counts.allowed_mcps), (2, 1))
+        self.assertEqual(self.store.get_counts().blocked_skills, 1)
+
     def test_count_scan_results_since_falls_back_for_legacy_schema(self):
         self.store.insert_scan_result(
             "scan-before",

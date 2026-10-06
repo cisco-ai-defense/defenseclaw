@@ -268,10 +268,13 @@ func (l *Logger) emitEnforcementQuarantineV8(
 				if buildErr != nil {
 					return observability.Record{}, buildErr
 				}
+				policyDigest, policyGeneration := livePolicyStamp()
 				record, buildErr := builder.BuildLogAssetQuarantined(observability.LogAssetQuarantinedInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel,
 					Outcome:                             observability.OutcomeQuarantined,
 					DefenseClawPolicyID:                 optionalControlPlaneV8Identifier(event.PolicyID),
+					DefenseClawPolicyEffectiveDigest:    policyDigest,
+					DefenseClawPolicyGeneration:         policyGeneration,
 					DefenseClawEnforcementID:            observability.Present(input.EnforcementID),
 					DefenseClawAssetID:                  input.AssetID,
 					DefenseClawAssetType:                optionalAssetLifecycleType(input.AssetType),

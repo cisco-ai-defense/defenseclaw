@@ -728,9 +728,9 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
     if not mutations:
         return current, []
     if not current.strip():
-        from defenseclaw.config import FRESH_CONFIG_VERSION
+        from defenseclaw.config import CURRENT_CONFIG_VERSION
 
-        current = f"config_version: {FRESH_CONFIG_VERSION}\n".encode()
+        current = f"config_version: {CURRENT_CONFIG_VERSION}\n".encode()
     prepared = prepare_v8_yaml_write(current, mutations, source_name=source_name, any_path=True)
     return prepared.candidate, changed
 

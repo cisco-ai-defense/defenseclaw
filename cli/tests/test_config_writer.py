@@ -71,6 +71,31 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
     ) == ["guardrail.hook_fail_mode", "guardrail.connectors.codex.enabled"]
 
 
+def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
+    # GAP-0084: the digest pins the pack, so each key alone is refused.
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_config
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(
+        tmp_path,
+        "openshell:\n  admin:\n    required_pack: balanced\n    required_pack_digest: sha256:" + "ab" * 32 + "\n",
+    )
+    pack, digest = "openshell.admin.required_pack", "openshell.admin.required_pack_digest"
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+    ):
+        alone = CliRunner().invoke(cmd_config.config_cmd, ["unset", pack])
+        both = CliRunner().invoke(cmd_config.config_cmd, ["unset", pack, digest])
+    assert alone.exit_code != 0 and f"config unset {pack} {digest}" in alone.output
+    assert both.exit_code == 0, both.output
+    text = open(path, encoding="utf-8").read()
+    assert "required_pack" not in text
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 
@@ -146,3 +171,37 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     )
     other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the canonical v8 schema")
     assert "canonical v8 schema" not in config_writer.plain_error(other)
+
+
+def test_only_the_writer_writes_config_yaml():
+    """Spec section 3 guard: config.yaml is written through config_writer
+    (which takes config.yaml.lock, validates and records the generation).
+    The modules listed here are that writer, its callers' shared helpers and
+    the 0.x import steps, which lock and record the generation themselves."""
+    import pathlib
+    import re
+
+    package = pathlib.Path(config_writer.__file__).resolve().parent
+    allowed = {
+        "config.py",
+        "config_writer.py",
+        "migrations.py",
+        "observability/v8_writer.py",
+        "commands/cmd_setup.py",  # setup rollback: replace_document, or a recorded exact restore
+    }
+    names = r"(?:config_path|cfg_path|config_file|CONFIG_PATH)"
+    direct = re.compile(
+        rf"open\([^)\n]*\b{names}\b[^)\n]*,\s*[\"'][wax]"
+        rf"|os\.replace\([^)\n]*,\s*{names}\s*\)"
+        rf"|\b\w*atomic_write\w*\(\s*{names}\b"
+        rf"|\b{names}\.write_(?:text|bytes)\("
+    )
+    offenders = []
+    for path in package.rglob("*.py"):
+        rel = path.relative_to(package).as_posix()
+        if rel in allowed:
+            continue
+        match = direct.search(path.read_text(encoding="utf-8"))
+        if match:
+            offenders.append(f"{rel}: {match.group(0)}")
+    assert not offenders, "config.yaml written outside config_writer: " + "; ".join(offenders)

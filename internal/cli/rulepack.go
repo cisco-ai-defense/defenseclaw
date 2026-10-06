@@ -168,10 +168,11 @@ func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON 
 	if response.Valid && response.Summary != nil {
 		_, err := fmt.Fprintf(
 			w,
-			"valid rule pack: %d files, %d rules, digest %s\n",
+			"valid rule pack: %d files, %d rules, digest %s\ncustom_packs pin: sha256:%s\n",
 			response.Summary.RuleFileCount,
 			response.Summary.RuleCount,
 			response.Summary.Digest,
+			response.Summary.FilesDigest,
 		)
 		return err
 	}

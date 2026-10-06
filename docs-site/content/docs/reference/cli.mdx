@@ -922,7 +922,7 @@ model and [Configuration](/docs/reference/configuration) for every key.
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw config get KEY [--effective] [--format yaml\|json]` | Print one value or a whole section (secrets masked). A key `config.yaml` leaves out prints its default and says so on stderr. With `--effective`, guardrail levels (`guardrail.block_at`, `guardrail.connectors.C.alert_at`) and `admission.<type>` print the value the gateway enforces and its source on stderr: `config:<key>`, `pack-default:<pack>` or `derived:scanners.skill_scanner`. Exit `1` when the key has no value and no default, `2` for an unknown section. |
+| `defenseclaw config get KEY [--effective] [--format yaml\|json]` | Print one value or a whole section (secrets masked). A key `config.yaml` leaves out prints its default and says so on stderr. With `--effective`, guardrail levels (`guardrail.block_at`, `guardrail.connectors.C.alert_at`) and `admission[.<type>]` print the value the gateway enforces and its source on stderr: `config:<key>`, `pack-default:<pack>`, `derived:scanners.skill_scanner` or `builtin` (the shipped admission defaults). An `admission` key `config.yaml` leaves out prints that enforced value without the flag too. Exit `1` when the key has no value and no default, `2` for an unknown section. |
 | `defenseclaw config set KEY VALUE [--json] [--expect-sha256 S]` | Change one value through the config writer. `KEY` is a dotted path with `[i]` list indexes; `VALUE` is a YAML scalar, or any JSON value with `--json`. See [`config set` and `config unset`](#config-set-and-config-unset). |
 | `defenseclaw config unset KEY [--expect-sha256 S]` | Remove a key, so its default applies again. |
 | `defenseclaw config show [--section NAME] [--source] [--format yaml\|json]` | Print the whole configuration, or one top-level section, with the defaults that apply to the keys `config.yaml` leaves out. `--source` prints `config.yaml` as written, unresolved. `--effective` (with optional `--provenance`) prints only the observability section, resolved the way the gateway runs it. |
@@ -962,8 +962,8 @@ min_severity: HIGH
 ```
 
 To read one item of a list, put its number in the path: `config get
-asset_policy.skill.denied.0.name`. `config set` and `config unset` write the
-same item as `asset_policy.skill.denied[0].name`.
+asset_policy.skill.denied.0.name`. `config get` also takes the spelling
+`config set` and `config unset` use, `asset_policy.skill.denied[0].name`.
 
 `--effective` answers "what does the gateway enforce, and why". The value goes
 to standard output and the source to standard error:
@@ -1002,7 +1002,9 @@ The first line names the config generation and the first 12 characters of the
 new file's SHA-256; the second is the effective policy digest the gateway will
 report once it applies the change. Setting a key to the value it already has
 changes nothing and says so (`guardrail.block_at already has that value
-(generation 7).`).
+(generation 7).`). `config unset` of a key that is not set says its default
+already applies, and exits `1` for a key that does not exist, such as a
+misspelled one.
 
 - **A list item or a whole value as JSON.** Quote a path that has brackets in
   your shell, and use `--json` for anything that is not a single scalar:
@@ -1064,7 +1066,7 @@ changes nothing and says so (`guardrail.block_at already has that value
 
 | Exit code | `config set` / `config unset` |
 | --- | --- |
-| `0` | Written, or already had that value |
+| `0` | Written, already had that value, or (unset) already at its default |
 | `1` | Refused: invalid value or reference, a stale `--expect-sha256`, or another process holds the config lock |
 | `2` | Malformed `KEY` or `--json` value |
 | `3` | The device is managed; see below |

@@ -135,11 +135,6 @@ CURRENT_CONFIG_VERSION = 9
 #: loads (the gateway migrates it in memory) until ``defenseclaw migrate``
 #: rewrites it as 9.
 FIRST_CURRENT_CONFIG_VERSION = 8
-#: The config_version a brand-new config.yaml is written with. It stays 8
-#: until the setup commands write the v9 keys (rule_pack, admission,
-#: scanner analyzers) themselves; ``defenseclaw migrate`` then moves the
-#: file to 9, and the gateway reads either.
-FRESH_CONFIG_VERSION = 8
 
 
 def is_current_schema(version: Any) -> bool:
@@ -1557,7 +1552,6 @@ def api_bind_host(cfg: Any) -> str:
 class WatchConfig:
     debounce_ms: int = 500
     auto_block: bool = True
-    allow_list_bypass_scan: bool = True
     rescan_enabled: bool = True
     rescan_interval_min: int = 60
 
@@ -1826,82 +1820,6 @@ class SeverityAction:
     file: str = "none"
     runtime: str = "enable"
     install: str = "none"
-
-
-@dataclass
-class SkillActionsConfig:
-    critical: SeverityAction = field(default_factory=SeverityAction)
-    high: SeverityAction = field(default_factory=SeverityAction)
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_disable(self, severity: str) -> bool:
-        return self.for_severity(severity).runtime == "disable"
-
-    def should_quarantine(self, severity: str) -> bool:
-        return self.for_severity(severity).file == "quarantine"
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
-class MCPActionsConfig:
-    critical: SeverityAction = field(
-        default_factory=lambda: SeverityAction(file="none", runtime="enable", install="block"),
-    )
-    high: SeverityAction = field(
-        default_factory=lambda: SeverityAction(file="none", runtime="enable", install="block"),
-    )
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
-class PluginActionsConfig:
-    critical: SeverityAction = field(default_factory=SeverityAction)
-    high: SeverityAction = field(default_factory=SeverityAction)
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_disable(self, severity: str) -> bool:
-        return self.for_severity(severity).runtime == "disable"
-
-    def should_quarantine(self, severity: str) -> bool:
-        return self.for_severity(severity).file == "quarantine"
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
 
 
 @dataclass
@@ -3342,9 +3260,6 @@ class Config:
     splunk: SplunkConfig = field(default_factory=SplunkConfig)
     otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
-    skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
-    mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
-    plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
     # config_version 9: admission replaces data.json and the *_actions keys.
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
@@ -3791,7 +3706,7 @@ class Config:
             verify=verify,
         )
         if self._source_config_version == 0:
-            self._source_config_version = FRESH_CONFIG_VERSION
+            self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
         return result
 
@@ -3806,7 +3721,7 @@ class Config:
             # canonical defaults as its structural baseline so explicit
             # caller choices are persisted while removed v7 fields remain
             # excluded. Existing unversioned/v7 files still fail closed below.
-            version = FRESH_CONFIG_VERSION
+            version = CURRENT_CONFIG_VERSION
             baseline = _config_to_dict(default_config())
         if not is_current_schema(version):
             raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
@@ -3868,7 +3783,7 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
         document = data
         if not current.strip() and "config_version" not in document:
             # A writer creating config.yaml writes a current-schema document.
-            document = {"config_version": FRESH_CONFIG_VERSION, **document}
+            document = {"config_version": CURRENT_CONFIG_VERSION, **document}
             document.setdefault("observability", {})
         candidate = config_writer.render_document(current, document, source_name)
         return candidate, config_writer.diff_documents(current, candidate)
@@ -5021,42 +4936,6 @@ def _serialize_application_protection(cfg: Config, block: Any) -> None:
                 entry.pop("asset_policy", None)
 
 
-def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
-    if not raw:
-        return SeverityAction()
-    return SeverityAction(
-        file=raw.get("file", "none"),
-        runtime=raw.get("runtime", "enable"),
-        install=raw.get("install", "none"),
-    )
-
-
-def _merge_skill_actions(raw: dict[str, Any] | None) -> SkillActionsConfig:
-    defaults = SkillActionsConfig()
-    if not raw:
-        return defaults
-    return SkillActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
-
-
-def _merge_mcp_actions(raw: dict[str, Any] | None) -> MCPActionsConfig:
-    defaults = MCPActionsConfig()
-    if not raw:
-        return defaults
-    return MCPActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
-
-
 def _merge_inspect_llm(raw: dict[str, Any] | None) -> InspectLLMConfig:
     if not raw:
         return InspectLLMConfig()
@@ -5288,19 +5167,6 @@ def _derive_instance_name_from_base_url(cfg: Config) -> None:
     _maybe_apply(cfg.scanners.skill_scanner.llm)
     _maybe_apply(cfg.scanners.mcp_scanner.llm)
     _maybe_apply(cfg.scanners.plugin_llm)
-
-
-def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
-    defaults = PluginActionsConfig()
-    if not raw:
-        return defaults
-    return PluginActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
 
 
 def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
@@ -6758,7 +6624,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         watch=WatchConfig(
             debounce_ms=raw.get("watch", {}).get("debounce_ms", 500),
             auto_block=raw.get("watch", {}).get("auto_block", True),
-            allow_list_bypass_scan=raw.get("watch", {}).get("allow_list_bypass_scan", True),
             rescan_enabled=raw.get("watch", {}).get("rescan_enabled", True),
             rescan_interval_min=raw.get("watch", {}).get("rescan_interval_min", 60),
         ),
@@ -6803,9 +6668,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
             watchdog=_merge_gateway_watchdog(gw_raw.get("watchdog")),
         ),
-        skill_actions=_merge_skill_actions(raw.get("skill_actions")),
-        mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
-        plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
         asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
@@ -7137,15 +6999,16 @@ def default_config() -> Config:
 
 
 def prepare_fresh_v8_config(cfg: Config) -> Config:
-    """Mark a never-persisted default config as a canonical v8 source.
+    """Mark a never-persisted default config as a current-schema source.
 
-    Capturing dataclass defaults as the v8 baseline means the first save writes
-    only explicit first-run choices, plus ``config_version`` and the canonical
+    Capturing dataclass defaults as the baseline means the first save writes
+    only explicit first-run choices, plus ``config_version`` (the current one,
+    so a fresh install has nothing to migrate) and the canonical
     ``observability`` block.
     """
 
     if cfg is None or cfg._source_config_version != 0:
         raise ValueError("fresh v8 configuration requires an unversioned default")
-    cfg._source_config_version = FRESH_CONFIG_VERSION
+    cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg

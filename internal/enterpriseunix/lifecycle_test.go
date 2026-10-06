@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
@@ -218,6 +219,30 @@ func TestFailedActivationRollsBack(t *testing.T) {
 	}
 	if exists(h.env.pendingPath()) {
 		t.Fatal("pending intent survived a rollback")
+	}
+}
+
+// A rollback after the transaction recorded the new config's generation
+// records the restored config as the next one: a generation number never
+// names two configs.
+func TestFailedEnsureKeepsTheConfigGenerationMonotonic(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	before, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := h.read(h.env.Layout.ConfigPath)
+	h.healthy = false
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: writeTempConfig(t, previousDefaultConfig(h.env.Layout))})
+	requireError(t, r, codeActivate)
+	after, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.read(h.env.Layout.ConfigPath) != installed || after.Generation != before.Generation+2 ||
+		after.ConfigSHA256 != sha256Bytes([]byte(installed)) {
+		t.Fatalf("generation %d -> %+v; want %d naming the restored config", before.Generation, after, before.Generation+2)
 	}
 }
 

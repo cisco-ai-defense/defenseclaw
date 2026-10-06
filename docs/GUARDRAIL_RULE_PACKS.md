@@ -18,7 +18,7 @@ DefenseClaw deliberately ships two distinct policy mechanisms:
 | Guardrail rule packs | [`../policies/guardrail/`](../policies/guardrail/) | Trusted tool-call CEL rules with bounded regex fallback, unstructured runtime rules, sensitive-tool metadata, judge prompts, and suppressions |
 
 Activating an admission policy does not select a rule-pack directory, and
-selecting `guardrail.rule_pack_dir` does not activate an admission policy. Keep
+selecting `guardrail.rule_pack` does not activate an admission policy. Keep
 that separation explicit in code and tests.
 
 ## Implementation ownership

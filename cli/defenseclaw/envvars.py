@@ -432,7 +432,7 @@ def managed_standalone() -> bool:
     try:
         with open(config_path(), "rb") as handle:
             raw = handle.read(4 * 1024 * 1024)
-    except OSError:
+    except (OSError, RuntimeError):  # RuntimeError: no home directory to look in
         raw = b""
     return standalone_managed(raw)
 

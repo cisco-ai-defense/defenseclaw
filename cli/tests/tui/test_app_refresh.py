@@ -517,7 +517,7 @@ def test_refresh_cached_config_replaces_snapshot_repository(monkeypatch, tmp_pat
 
     repositories: list[FakeRepository] = []
 
-    def repository_factory(path: str) -> FakeRepository:
+    def repository_factory(path: str, **_: object) -> FakeRepository:
         repository = FakeRepository(path)
         repositories.append(repository)
         return repository
@@ -566,7 +566,7 @@ def test_startup_retries_configured_audit_db_that_does_not_exist_yet(monkeypatch
     paths: list[str] = []
 
     class Repository:
-        def __init__(self, path: str) -> None:
+        def __init__(self, path: str, **_: object) -> None:
             paths.append(path)
 
         def close(self) -> None:
@@ -634,7 +634,7 @@ def test_refresh_alerts_mirrors_loaded_alerts_with_cheap_enforcement_counts(tmp_
         def get_counts(self) -> object:
             raise AssertionError("refresh should not scan counts")
 
-        def get_enforcement_counts(self) -> Counts:
+        def get_enforcement_counts(self, cfg=None) -> Counts:
             return Counts(
                 blocked_skills=7,
                 allowed_skills=8,

@@ -144,6 +144,9 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// gatewayKeptRunning is set when the gateway applied a config change
+	// itself (hotConfigApply) and was not restarted.
+	gatewayKeptRunning bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -969,9 +972,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		snapPaths = append(snapPaths, adopting.removeFiles...)
 	}
 	snapPaths = append(snapPaths, filepath.Join(env.Layout.LifecycleDir, deploymentFileName))
-	// The writer's generation record and the migration evidence go back
-	// with the config on a rollback.
-	snapPaths = append(snapPaths, configwrite.GenerationPath(env.Layout.ConfigPath))
+	// The migration evidence goes back with the config on a rollback. An
+	// existing generation record does not: the counter never goes back, and
+	// the rollback records the restored config as a new generation. One this
+	// transaction creates goes away with the config it names.
+	if generation := configwrite.GenerationPath(env.Layout.ConfigPath); !exists(env.P(generation)) {
+		snapPaths = append(snapPaths, generation)
+	}
 	if p.config.Migration != nil {
 		snapPaths = append(snapPaths, env.Layout.ConfigPath+config.ConfigV8BackupSuffix, config.MigrationRecordPath(env.Layout.ConfigPath))
 		if p.config.Migration.EnvKey != "" {
@@ -1047,7 +1054,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
-	l.quiesce(ctx, units, l.keepRunningDuringChange(p))
+	keep := l.keepRunningDuringChange(p)
+	hot := l.hotConfigApply(ctx, record, p, adopting)
+	if gateway, ok := gatewayUnitOf(units); hot && ok {
+		keep[gateway.Name] = true
+	}
+	l.quiesce(ctx, units, keep)
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -1101,7 +1113,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	_ = env.savePending(pending)
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
-		if err := l.activate(ctx, units, restartSockets); err != nil {
+		if err := l.activate(ctx, units, restartSockets, hot); err != nil {
 			// A readiness failure on the API port already names the holder.
 			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
 				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
@@ -1121,7 +1133,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			switch {
 			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
-			case changesApplied && unit.Kind == "gateway":
+			case changesApplied && unit.Kind == "gateway" && !l.gatewayKeptRunning:
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
@@ -1465,8 +1477,9 @@ func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, chang
 // gateway to report healthy. A running socket keeps its listener (queued
 // hooks survive the change) unless its definition changed; a changed one is
 // restarted in one service-manager job, so the port is unbound only for
-// the moment the listener is replaced.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool) error {
+// the moment the listener is replaced. With hot, a gateway that kept running
+// is not started again: it is waited for until it has applied the config.
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
@@ -1496,6 +1509,12 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			}
 			if err := restartUnit(ctx, env.Services, unit); err != nil {
 				return fmt.Errorf("restart %s: %w", unit.Name, err)
+			}
+			continue
+		}
+		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {
+			if err := l.settleHotGateway(ctx, unit); err != nil {
+				return err
 			}
 			continue
 		}
@@ -1590,6 +1609,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	if beforeStart != nil {
 		beforeStart()
 	}
+	if err := l.recordRestoredGeneration(ctx); err != nil {
+		l.result.AddWarning(codeRolledBack, "could not record the restored config.yaml in "+configwrite.GenerationFileName+": "+err.Error())
+	}
 	reloadErr := env.Services.Reload(ctx)
 	var startErrs []error
 	for _, name := range previouslyEnabled {
@@ -1616,6 +1638,39 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 	}
 	return restoreErr == nil, errors.Join(restoreErr, reloadErr, errors.Join(disableErrs...), errors.Join(startErrs...))
+}
+
+// recordRestoredGeneration records the config.yaml a rollback put back as a
+// new config generation (actor lifecycle). The transaction may already have
+// recorded, and the gateway reported, a generation for the config it
+// installed; a monotonic counter keeps that number for that config only.
+// Nothing is recorded when there is no config or no generation record, or
+// when the record already names the restored bytes.
+func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
+	env := l.env
+	configPath := env.P(env.Layout.ConfigPath)
+	statePath := env.P(configwrite.GenerationPath(env.Layout.ConfigPath))
+	uid, gid, mode, err := statOwnerMode(statePath)
+	if err != nil {
+		return nil
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return nil
+	}
+	_, err = configwrite.Locked(ctx, configPath, configwrite.Options{
+		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback",
+	}, func() (bool, error) {
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			return false, err
+		}
+		state, stateErr := configwrite.ReadGenerationState(configPath)
+		return stateErr != nil || state.ConfigSHA256 != configwrite.SHA256Hex(raw), nil
+	})
+	if err != nil {
+		return err
+	}
+	return env.fixMetadata(statePath, mode.Perm(), fileOwner{UID: uid, GID: gid})
 }
 
 // recoverInterrupted rolls back a transaction a previous run left pending,

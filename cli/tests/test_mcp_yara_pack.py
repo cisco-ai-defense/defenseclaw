@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import pytest  # noqa: E402
 import yara  # noqa: E402
+from defenseclaw.config import AssetFileRef, MCPScannerYARAConfig  # noqa: E402
 from defenseclaw.paths import bundled_mcp_yara_rules_dir  # noqa: E402
 from defenseclaw.scanner.mcp import _supplemental_yara_analyzers  # noqa: E402
 
@@ -388,3 +391,20 @@ def test_supplemental_pack_uses_sdk_yara_analyzer() -> None:
     analyzers = _supplemental_yara_analyzers(RecordingAnalyzer)
     assert len(analyzers) == 1
     assert analyzers[0].rules_dir == bundled_mcp_yara_rules_dir()
+
+
+def test_supplemental_pack_applies_the_pinned_extra_rules(tmp_path) -> None:
+    # GAP-0071: scanners.mcp_scanner.yara.extra_rules reaches the scanner.
+    rule = tmp_path / "extra.yar"
+    rule.write_text('rule extra_marker { strings: $a = "p0-marker" condition: $a }')
+    digest = "sha256:" + hashlib.sha256(rule.read_bytes()).hexdigest()
+
+    class RecordingAnalyzer:
+        def __init__(self, *, rules_dir: object) -> None:
+            self.files = sorted(p.name for p in Path(rules_dir).iterdir())
+
+    pinned = MCPScannerYARAConfig(include_bundled=False, extra_rules=[AssetFileRef(path=str(rule), digest=digest)])
+    assert [a.files for a in _supplemental_yara_analyzers(RecordingAnalyzer, pinned)] == [["extra-0.yar"]]
+    stale = MCPScannerYARAConfig(extra_rules=[AssetFileRef(path=str(rule), digest="sha256:" + "0" * 64)])
+    with pytest.raises(ValueError, match="digest mismatch"):
+        _supplemental_yara_analyzers(RecordingAnalyzer, stale)
