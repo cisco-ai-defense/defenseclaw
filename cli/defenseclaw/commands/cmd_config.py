@@ -16,7 +16,7 @@
 
 """defenseclaw config — inspect and validate configuration.
 
-Five subcommands:
+Subcommands:
 
 * ``config validate`` — parse ``~/.defenseclaw/config.yaml`` and
   return a non-zero exit code on any error. Used both by the operator
@@ -25,6 +25,9 @@ Five subcommands:
   masked (observability resolved; every other section as written, with
   defaults for the keys config.yaml leaves out).
 * ``config get`` — print one dotted key of that view.
+* ``config set`` / ``config unset`` — change one key through the single
+  config writer (validated first; refused with exit 3 on a managed device).
+* ``config migrate`` — move config.yaml to config_version 9.
 * ``config reference`` — render schema-generated v8 reference material.
 * ``config path`` — print the filesystem layout DefenseClaw uses.
 """
@@ -70,10 +73,10 @@ _SECRET_FIELDS = (
 _V8_VERSION_LINE = re.compile(
     rb"(?m)^config_version\s*:\s*"
     rb"(?:(?:!!int|tag:yaml\.org,2002:int)\s+)?"
-    rb"(?:8|['\"]8['\"])\s*(?:#.*)?$"
+    rb"(?:[89]|['\"][89]['\"])\s*(?:#.*)?$"
 )
 _MAX_VERSION_PROBE_BYTES = 4 * 1024 * 1024 + 1
-_V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "path"})
+_V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "path", "migrate"})
 
 
 @click.group("config")
@@ -222,8 +225,13 @@ def config_show(
     show_default=True,
     help="Format of a section or list value.",
 )
+@click.option(
+    "--effective",
+    is_flag=True,
+    help="Also print where the value comes from (config.yaml or the default).",
+)
 @pass_ctx
-def config_get(app: AppContext, key: str, fmt: str) -> None:
+def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     """Print one configuration value (secrets masked).
 
     KEY is a dotted path such as asset_policy.enabled or
@@ -253,6 +261,8 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
         written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
         if not _lookup(written, parts)[0]:
             click.echo(f"(default: config.yaml does not set {key})", err=True)
+        elif effective:
+            click.echo(f"(source: {config_module.config_path()})", err=True)
     if isinstance(value, (dict, list)) or fmt.lower() == "json":
         _emit(value, fmt)
     elif isinstance(value, bool):
@@ -261,6 +271,133 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
         click.echo("null")
     else:
         click.echo(str(value))
+
+
+# ---------------------------------------------------------------------------
+# set / unset / migrate (the single config writer)
+# ---------------------------------------------------------------------------
+
+#: Exit code for a change refused on a managed device.
+MANAGED_EXIT_CODE = 3
+
+
+def _write_config_change(app: AppContext, change: object, expect_sha256: str | None, verb: str) -> None:
+    from defenseclaw import config_writer
+
+    path = str(config_module.config_path())
+    try:
+        result = config_writer.apply(
+            [change],
+            config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
+            f"defenseclaw config {verb}",
+            expect_sha256,
+            path=path,
+        )
+    except config_writer.ManagedConfigWriteError as exc:
+        click.echo(f"error: {exc}", err=True)
+        raise SystemExit(MANAGED_EXIT_CODE) from exc
+    except config_writer.ConfigConflictError as exc:
+        raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
+    except (config_writer.ConfigWriteError, V8ConfigError, ValueError) as exc:
+        raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
+    key = getattr(change, "path", "")
+    if not result.changed:
+        click.echo(f"{key} already has that value (generation {result.generation}).")
+        return
+    click.echo(f"{verb.capitalize()} {key} (config generation {result.generation}, sha256 {result.sha256[:12]}).")
+    if result.restart_required:
+        click.echo(
+            f"Restart the gateway to apply {', '.join(result.restart_required)}: defenseclaw-gateway restart"
+        )
+    logger = getattr(app, "logger", None)
+    if logger is not None:
+        try:
+            logger.log_config_change(
+                f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
+            )
+        except Exception:  # noqa: BLE001 - the change is committed; audit is best effort
+            pass
+
+
+@config_cmd.command("set")
+@click.argument("key")
+@click.argument("value")
+@click.option("--json", "as_json", is_flag=True, help="Parse VALUE as JSON instead of a YAML scalar.")
+@click.option("--expect-sha256", default=None, help="Refuse the change unless config.yaml still has this sha256.")
+@pass_ctx
+def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha256: str | None) -> None:
+    """Set one configuration value through the config writer.
+
+    KEY is a dotted path with [i] list indexes, for example
+    guardrail.block_at or asset_policy.skill.denied[0].name. VALUE is a YAML
+    scalar (true, 3, HIGH) or, with --json, any JSON value. The change is
+    validated before it is written; on a managed device it is refused (exit 3).
+    """
+    from defenseclaw.config_writer import Change, parse_path
+
+    try:
+        parse_path(key)
+        parsed = json.loads(value) if as_json else yaml.safe_load(value)
+    except (ValueError, yaml.YAMLError) as exc:
+        raise click.UsageError(str(exc)) from exc
+    _write_config_change(app, Change(key, parsed), expect_sha256, "set")
+
+
+@config_cmd.command("unset")
+@click.argument("key")
+@click.option("--expect-sha256", default=None, help="Refuse the change unless config.yaml still has this sha256.")
+@pass_ctx
+def config_unset(app: AppContext, key: str, expect_sha256: str | None) -> None:
+    """Remove one configuration key (its default applies again)."""
+    from defenseclaw.config_writer import Change, parse_path
+
+    try:
+        parse_path(key)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    _write_config_change(app, Change(key, unset=True), expect_sha256, "unset")
+
+
+@config_cmd.command("migrate")
+@click.option("--dry-run", is_flag=True, help="Show what would move; write nothing.")
+@click.option("--ack", is_flag=True, help="Mark migration-v9.json as read so doctor stops reporting it.")
+@click.option("--json", "as_json", is_flag=True, help="Print the migration result as JSON.")
+def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
+    """Migrate config.yaml to config_version 9 (or acknowledge the migration).
+
+    Moves the admission policy in policies/rego/data.json, the *_actions
+    keys, rule_pack_dir, the v8 scanner keys, update_check and the operator
+    block/allow entries of audit.db into config.yaml. Keeps
+    config.yaml.v8.bak and writes migration-v9.json.
+    """
+    from defenseclaw.config_inspect import migrate_config_v9
+
+    path = str(config_module.config_path())
+    try:
+        result = migrate_config_v9(config_path=path, dry_run=dry_run, ack=ack)
+    except ConfigInspectError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if ack:
+        click.echo("Marked the config_version 9 migration record as read.")
+        return
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    record = result.get("record") or {}
+    if record.get("from_version") == 9:
+        click.echo("config.yaml is already config_version 9; nothing to migrate.")
+        return
+    verb = "Would move" if dry_run else "Moved"
+    click.echo(
+        f"{verb} {len(record.get('moved') or [])} values into config.yaml; "
+        f"{len(record.get('conflicts') or [])} conflicts."
+    )
+    for move in record.get("moved") or []:
+        click.echo(f"  {move.get('from')} -> {move.get('to')}")
+    for conflict in record.get("conflicts") or []:
+        click.echo(f"  conflict {conflict.get('to')}: kept {conflict.get('kept')}, dropped {conflict.get('lost')}")
+    for note in record.get("notes") or []:
+        click.echo(f"  note: {note}")
 
 
 def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
@@ -797,11 +934,11 @@ def _looks_like_v8_config(path: str) -> bool:
             if not isinstance(key_node, yaml.ScalarNode) or key_node.value != "config_version":
                 continue
             if isinstance(value_node, yaml.ScalarNode):
-                if value_node.value.strip() == "8":
+                if value_node.value.strip() in ("8", "9"):
                     return True
                 if value_node.tag == "tag:yaml.org,2002:int":
                     try:
-                        if yaml.safe_load(value_node.value) == 8:
+                        if yaml.safe_load(value_node.value) in (8, 9):
                             return True
                     except yaml.YAMLError:
                         pass

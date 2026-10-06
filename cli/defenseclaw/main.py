@@ -325,10 +325,11 @@ def cli(ctx: click.Context) -> None:
     if invoked == "doctor":
         return
 
+    from defenseclaw.config import is_current_schema
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
-    source_is_v8 = getattr(app.cfg, "_source_config_version", None) == 8
+    source_is_v8 = is_current_schema(getattr(app.cfg, "_source_config_version", None))
 
     if invoked == "setup" and not source_is_v8:
         # A missing config is represented by an in-memory source version of

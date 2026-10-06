@@ -54,7 +54,7 @@ def test_setup_llm_judge_records_operator_activity_without_key_value() -> None:
         operation, details = app.logger.log_config_change.call_args.args
         assert "sk-test-not-logged" not in details
         activity = _activity(operation, details)
-        assert activity["actor"] == "cli:operator"
+        assert activity["actor"].startswith("cli:")
         assert activity["target_id"] == "llm:guardrail.judge"
         assert activity["diff"][0]["path"] == "model"
         assert activity["diff"][0]["after"] == "anthropic/claude-sonnet-4-5"

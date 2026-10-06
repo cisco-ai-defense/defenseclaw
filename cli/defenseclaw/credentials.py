@@ -385,7 +385,9 @@ def _load_v8_observability_credential_refs(
     values and performs no secret resolution or network I/O.
     """
 
-    if getattr(cfg, "_source_config_version", None) != 8:
+    from defenseclaw.config import is_current_schema
+
+    if not is_current_schema(getattr(cfg, "_source_config_version", None)):
         return None
     try:
         from defenseclaw.config import config_path  # noqa: PLC0415

@@ -8233,10 +8233,22 @@ def _restore_setup_config_file_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> 
 
     if not cfg.data_dir:
         return
+    from defenseclaw import config_writer
+
     config_path = os.path.abspath(os.fspath(config_path_for_data_dir(cfg.data_dir)))
+    actor = config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI)
     with locked_config_yaml(config_path):
         if snapshot.config_existed:
-            atomic_write_private_bytes(config_path, snapshot.config_bytes)
+            try:
+                config_writer.replace_document(snapshot.config_bytes, actor, "setup rollback", path=config_path)
+            except (config_writer.ConfigWriteError, ValueError):
+                # The prior bytes are restored exactly even when today's
+                # validator would not accept them; the rollback must not
+                # leave the failed generation in place.
+                atomic_write_private_bytes(config_path, snapshot.config_bytes)
+                config_writer.record_generation(
+                    config_path, hashlib.sha256(snapshot.config_bytes).hexdigest(), actor, "setup rollback"
+                )
         elif os.path.lexists(config_path):
             delete_file_durable(config_path)
 

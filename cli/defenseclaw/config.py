@@ -23,6 +23,7 @@ so that the Go orchestrator and Python CLI share the same config file.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import ntpath
 import os
@@ -68,13 +69,11 @@ from defenseclaw.connector_paths import (  # noqa: F401
 from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
-from defenseclaw.file_lock import locked_file_update
+from defenseclaw.file_lock import locked_file_update  # noqa: F401 - re-exported for setup and keys
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
-    atomic_write_text_secure,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
-    make_private_directory,
     read_regular_file_no_follow,
 )
 
@@ -131,7 +130,21 @@ class ConfigVersionError(RuntimeError):
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
 # gateway's MaxSupportedConfigVersion.
-CURRENT_CONFIG_VERSION = 8
+CURRENT_CONFIG_VERSION = 9
+#: The first config_version of the current schema family. A v8 file still
+#: loads (the gateway migrates it in memory) until ``defenseclaw migrate``
+#: rewrites it as 9.
+FIRST_CURRENT_CONFIG_VERSION = 8
+#: The config_version a brand-new config.yaml is written with. It stays 8
+#: until the setup commands write the v9 keys (rule_pack, admission,
+#: scanner analyzers) themselves; ``defenseclaw migrate`` then moves the
+#: file to 9, and the gateway reads either.
+FRESH_CONFIG_VERSION = 8
+
+
+def is_current_schema(version: Any) -> bool:
+    """Whether ``config_version`` is one this build loads and writes (8 or 9)."""
+    return type(version) is int and FIRST_CURRENT_CONFIG_VERSION <= version <= CURRENT_CONFIG_VERSION
 
 
 def source_config_version(*, path: str | None = None) -> int | None:
@@ -303,7 +316,7 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
             f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
             "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
         )
-    if version != CURRENT_CONFIG_VERSION:
+    if not is_current_schema(version):
         if version == 0 and config_is_empty(path):
             raise ConfigVersionError(empty_config_message(path))
         raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
@@ -3693,70 +3706,87 @@ class Config:
             llm.max_retries = base.effective_max_retries()
         return llm
 
-    def save(self) -> None:
-        """Persist this :class:`Config` to ``~/.defenseclaw/config.yaml``.
+    def save(self, *, actor: str | None = None, reason: str = "") -> Any:
+        """Persist this :class:`Config` through the single config writer.
 
-        A v8 document preserves the canonical ``observability`` graph and
-        applies only modeled values that changed since load. This keeps the
-        Go-owned routing/redaction graph authoritative while allowing Python
-        setup commands to update their own modeled sections safely. Legacy
-        documents use the compatibility merge only inside the upgrade input
-        boundary; target-runtime commands reject them before mutation.
-
-        Write is atomic via ``tmp + os.replace`` (matches the
-        canonical config writer) so a crash mid-write cannot
-        leave a half-written ``config.yaml`` that the Go gateway
-        refuses to reload.
+        Only modeled values that changed since load are applied to the file
+        on disk, so the Go-owned observability graph and anything this
+        dataclass does not model stay as they are; comments and key order
+        are kept where the comment-preserving patcher can express the edit.
+        The writer locks ``config.yaml.lock``, validates the candidate with
+        the canonical validator, replaces the file durably and advances
+        ``config.generation.json``. ``actor`` defaults to ``cli:<os user>``.
+        Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        with locked_config_yaml(path):
-            self._save_locked(path)
+        return self._write(path, actor=actor, reason=reason)
 
-    def save_verified(self, verify: Callable[[str], None]) -> None:
+    def save_verified(self, verify: Callable[[str], None], *, actor: str | None = None, reason: str = "") -> Any:
         """Persist, verify the exact written generation, and roll back on failure.
 
-        Verification runs while the canonical per-config lock is held. If it
-        fails after the atomic replacement, the prior v8 document is restored
-        atomically before the original error is re-raised.
+        Verification runs while the writer lock is held. If it fails, the
+        prior document is restored (as a new generation) before the original
+        error is re-raised.
         """
         path = str(config_path_for_data_dir(self.data_dir))
         previous_source_version = self._source_config_version
         previous_snapshot = copy.deepcopy(self._loaded_v8_modeled_snapshot)
-        with locked_config_yaml(path):
-            existed = os.path.exists(path)
-            existing = _load_existing_config_yaml(path)
-            self._save_locked(path)
-            try:
-                verify(path)
-            except Exception as verify_error:
-                self._source_config_version = previous_source_version
-                self._loaded_v8_modeled_snapshot = previous_snapshot
-                try:
-                    if existed:
-                        write_config_yaml_secure(path, existing)
-                    else:
-                        os.unlink(path)
-                except Exception as rollback_error:
-                    raise RuntimeError(
-                        "config verification failed and the previous configuration "
-                        f"could not be restored: {rollback_error}"
-                    ) from verify_error
-                raise
+        try:
+            return self._write(path, actor=actor, reason=reason, verify=verify)
+        except Exception:
+            self._source_config_version = previous_source_version
+            self._loaded_v8_modeled_snapshot = previous_snapshot
+            raise
 
-    def _save_locked(self, path: str) -> None:
-        """Persist using an already-held config lock."""
+    def _save_locked(self, path: str) -> Any:
+        """Persist while the caller already holds :func:`locked_config_yaml`."""
+        return self._write(path)
 
-        if self._source_config_version == 0 and not os.path.lexists(path):
+    def _write(
+        self,
+        path: str,
+        *,
+        actor: str | None = None,
+        reason: str = "",
+        verify: Callable[[str], None] | None = None,
+    ) -> Any:
+        from defenseclaw import config_writer
+
+        dataclass_data = _config_to_dict(self)
+
+        def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
+            merged = self._merged_document(path, dataclass_data)
+            _assert_config_write_allowed(path, merged)
+            candidate = config_writer.render_document(current, merged, source_name)
+            return candidate, config_writer.diff_documents(current, candidate)
+
+        result = config_writer.write_with(
+            mutate,
+            actor or config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
+            reason or "config save",
+            path=path,
+            verify=verify,
+        )
+        if self._source_config_version == 0:
+            self._source_config_version = FRESH_CONFIG_VERSION
+        self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
+        return result
+
+    def _merged_document(self, path: str, dataclass_data: dict[str, Any]) -> dict[str, Any]:
+        """The on-disk document with this Config's changed modeled values."""
+
+        version = self._source_config_version
+        baseline = self._loaded_v8_modeled_snapshot
+        if version == 0 and not os.path.lexists(path):
             # A programmatically constructed Config with no source file is a
             # fresh target configuration, not a legacy document. Use the
             # canonical defaults as its structural baseline so explicit
             # caller choices are persisted while removed v7 fields remain
             # excluded. Existing unversioned/v7 files still fail closed below.
-            self._source_config_version = 8
-            self._loaded_v8_modeled_snapshot = _config_to_dict(default_config())
-        if self._source_config_version != 8:
+            version = FRESH_CONFIG_VERSION
+            baseline = _config_to_dict(default_config())
+        if not is_current_schema(version):
             raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
-        dataclass_data = _config_to_dict(self)
         existing = _load_existing_config_yaml(path)
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
@@ -3764,9 +3794,9 @@ class Config:
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
-            _baseline_keeping_migrated_llm_slots(dataclass_data, self._loaded_v8_modeled_snapshot),
+            _baseline_keeping_migrated_llm_slots(dataclass_data, baseline),
         )
-        merged["config_version"] = 8
+        merged["config_version"] = version
         merged.setdefault("observability", {})
         # The Go runtime requires an explicit profile selector whenever ACP is
         # enabled. A literal ``default`` value otherwise looks unchanged from
@@ -3777,11 +3807,9 @@ class Config:
             if not isinstance(acp_document, dict):
                 raise ConfigVersionError("acp must be a mapping")
             acp_document["default_profile"] = self.acp.default_profile
-        from defenseclaw.observability.v8_config import load_validate_v8
-
-        load_validate_v8(merged, source_name=path)
-        write_config_yaml_secure(path, merged)
-        self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
+        if version >= CONFIG_VERSION_V9:
+            _project_v9_modeled_keys(merged)
+        return merged
 
 
 # ---------------------------------------------------------------------------
@@ -3791,43 +3819,135 @@ class Config:
 
 @contextmanager
 def locked_config_yaml(path: str):
-    """Hold an exclusive per-config lock for a read/merge/write cycle."""
-    directory = os.path.dirname(path) or "."
-    # On elevated Windows accounts, a directory created with bare
-    # ``os.makedirs`` can inherit the token's default owner (for example the
-    # Administrators group) instead of the interactive user's SID.  The
-    # subsequent fail-closed config/audit writers then correctly refuse to
-    # mutate that foreign-owned directory.  Apply the private creation DACL at
-    # creation time so the config lock is never exposed in a permissive or
-    # ambiguously owned parent.
-    make_private_directory(directory)
-    with locked_file_update(path):
+    """Hold the config writer lock for a read/merge/write cycle.
+
+    It is the same ``config.yaml.lock`` the writer (``config_writer``) and
+    the Go ``configwrite`` package take, and it is reentrant in this thread,
+    so a ``Config.save`` inside the block joins it instead of waiting.
+    """
+    from defenseclaw import config_writer
+
+    with config_writer.hold_lock(path, timeout_s=None):
         yield
 
 
-def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
-    """Atomically write YAML without widening config.yaml permissions."""
+def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | None = None, reason: str = "") -> Any:
+    """Write a whole config document through the single writer.
+
+    The document is validated before the write and the generation advances;
+    comments are kept where the patcher can express the change.
+    """
+    from defenseclaw import config_writer
+
     _assert_config_write_allowed(path, data)
 
-    def write_yaml(stream) -> None:
-        yaml.safe_dump(data, stream, default_flow_style=False, sort_keys=False)
+    def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
+        document = data
+        if not current.strip() and "config_version" not in document:
+            # A writer creating config.yaml writes a current-schema document.
+            document = {"config_version": FRESH_CONFIG_VERSION, **document}
+            document.setdefault("observability", {})
+        candidate = config_writer.render_document(current, document, source_name)
+        return candidate, config_writer.diff_documents(current, candidate)
 
-    atomic_write_text_secure(
-        path,
-        write_yaml,
-        prefix=f".{os.path.basename(path)}.",
+    return config_writer.write_with(
+        mutate,
+        actor or config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
+        reason or "config write",
+        path=path,
     )
-    try:
-        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-    except OSError:
-        return
-    try:
+
+
+_V9_PRESET_PACKS = ("default", "strict", "permissive")
+
+
+def _v9_rule_pack_for_dir(directory: str) -> tuple[str, list[str]]:
+    """Map a v8 rule_pack_dir to a v9 rule_pack name (and protections)."""
+    clean = os.path.normpath(directory)
+    base = os.path.basename(clean).lower()
+    parent = os.path.basename(os.path.dirname(clean))
+    if base == "balanced":
+        base = "default"
+    if base in _V9_PRESET_PACKS and parent == "guardrail":
+        return base, []
+    if base in _V9_PRESET_PACKS and parent.startswith("protected-"):
         try:
-            os.fsync(dir_fd)
-        except OSError as exc:
-            _log.warning("config.save: directory fsync failed after atomic replace of %s: %s", path, exc)
-    finally:
-        os.close(dir_fd)
+            with open(os.path.join(clean, "defenseclaw-pack.json"), encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            protections = [str(p) for p in manifest.get("protection", []) if str(p).strip()]
+        except (OSError, ValueError, AttributeError):
+            protections = []
+        return base, protections
+    raise ConfigVersionError(
+        f"guardrail rule pack folder {directory} is a custom pack; config_version 9 references custom packs by "
+        "digest under guardrail.custom_packs (run 'defenseclaw-gateway config migrate' on a v8 file)"
+    )
+
+
+def _project_v9_modeled_keys(merged: dict[str, Any]) -> None:
+    """Write v8-modeled fields a caller changed in their config_version 9 keys.
+
+    Setup commands that still set a v8 field (``rule_pack_dir``, the
+    ``*_actions`` maps, the v8 scanner toggles) would otherwise write a key
+    config_version 9 rejects. This maps them the way the Go migration does;
+    it goes away as each caller moves to the v9 key.
+    """
+    for key in ("skill_actions", "mcp_actions", "plugin_actions", "update_check"):
+        value = merged.pop(key, None)
+        if key == "update_check" and isinstance(value, bool):
+            merged.setdefault("update", {})["check"] = value
+    watch = merged.get("watch")
+    if isinstance(watch, dict):
+        watch.pop("allow_list_bypass_scan", None)
+        if not watch:
+            merged.pop("watch")
+    guardrail = merged.get("guardrail")
+    if isinstance(guardrail, dict):
+        scopes = [guardrail]
+        scopes += [c for c in (guardrail.get("connectors") or {}).values() if isinstance(c, dict)]
+        for profile in (guardrail.get("profiles") or {}).values():
+            if isinstance(profile, dict):
+                scopes.append(profile)
+                scopes += [c for c in (profile.get("connectors") or {}).values() if isinstance(c, dict)]
+        for scope in scopes:
+            directory = scope.pop("rule_pack_dir", None)
+            if isinstance(directory, str) and directory.strip():
+                name, protections = _v9_rule_pack_for_dir(directory.strip())
+                scope["rule_pack"] = name
+                if protections:
+                    scope.setdefault("rules", {})["protections"] = protections
+    scanners = merged.get("scanners")
+    if not isinstance(scanners, dict):
+        return
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        skill.pop("binary", None)
+        if skill.pop("virustotal_api_key", None):
+            raise ConfigVersionError(
+                "config_version 9 does not store the VirusTotal key in config.yaml; "
+                "store it with 'defenseclaw keys set VIRUSTOTAL_API_KEY'"
+            )
+        analyzers = skill.setdefault("analyzers", {})
+        use_vt = skill.pop("use_virustotal", None)
+        key_env = skill.pop("virustotal_api_key_env", None)
+        if use_vt is not None:
+            analyzers.setdefault("virustotal", {})["enabled"] = bool(use_vt)
+        if key_env:
+            analyzers.setdefault("virustotal", {})["api_key_env"] = key_env
+        use_aid = skill.pop("use_aidefense", None)
+        if use_aid is not None:
+            analyzers.setdefault("aidefense", {})["enabled"] = bool(use_aid)
+        if not analyzers:
+            skill.pop("analyzers")
+    mcp = scanners.get("mcp_scanner")
+    if isinstance(mcp, dict):
+        mcp.pop("binary", None)
+        if isinstance(mcp.get("analyzers"), str):
+            items = [a.strip().lower() for a in mcp["analyzers"].split(",") if a.strip()]
+            rest = [a for a in dict.fromkeys(items) if a != "auto"]
+            if "auto" in items and rest and "yara" not in rest:
+                rest.insert(0, "yara")
+            mcp["analyzers"] = rest
 
 
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:
@@ -6397,6 +6517,7 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     env_path = os.path.join(data_dir, ".env")
     credential_provenance.begin_dotenv_load(data_dir, env_path)
     seen_keys: set[str] = set()
+    managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
         for raw_line in body.splitlines():
@@ -6462,7 +6583,7 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
     if cfg.scanners.skill_scanner.virustotal_api_key:
         _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-    if cfg._source_config_version != 8 and cfg.splunk.hec_token:
+    if not is_current_schema(cfg._source_config_version) and cfg.splunk.hec_token:
         _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
@@ -6670,7 +6791,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     # validated by their respective writers at write time.
     cfg.observability.validate()
     cfg.application_protection.validate()
-    if source_config_version == 8:
+    if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
 
@@ -6688,7 +6809,7 @@ def _exact_config_version(value: Any) -> int:
 def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
     """Resolve Python readers/writers to the same local store as config v8."""
 
-    if source_version == 8:
+    if is_current_schema(source_version):
         observability = raw.get("observability")
         local = observability.get("local") if isinstance(observability, dict) else None
         configured = local.get("path") if isinstance(local, dict) else None
@@ -6968,6 +7089,6 @@ def prepare_fresh_v8_config(cfg: Config) -> Config:
 
     if cfg is None or cfg._source_config_version != 0:
         raise ValueError("fresh v8 configuration requires an unversioned default")
-    cfg._source_config_version = 8
+    cfg._source_config_version = FRESH_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg

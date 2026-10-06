@@ -273,7 +273,7 @@ class Logger:
             }
         )
 
-    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+    def log_config_change(self, operation: str, details: str, *, actor: str | None = None) -> None:
         """Record a CLI setting change as an Activity mutation that names it.
 
         ``log_action("config-update", "config", ...)`` reaches the v8 trail
@@ -284,6 +284,10 @@ class Logger:
         field becomes the diff (``mode: observe -> action``).
         """
 
+        if actor is None:
+            from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
+
+            actor = current_actor(ACTOR_PREFIX_CLI)
         fields: dict[str, str] = {}
         for token in details.split():
             key, sep, value = token.partition("=")

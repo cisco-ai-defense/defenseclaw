@@ -371,6 +371,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         config_path,
         default_config,
         detect_environment,
+        is_current_schema,
         load,
         prepare_fresh_v8_config,
     )
@@ -410,7 +411,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             click.echo("  Proxy port:    " + ux._style(proxy_note, fg="yellow"))
     else:
         cfg = load()
-        if getattr(cfg, "_source_config_version", None) != 8:
+        if not is_current_schema(getattr(cfg, "_source_config_version", None)):
             raise click.ClickException("configuration schema v8 is required; run 'defenseclaw migrate' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
 
@@ -462,7 +463,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # is unavailable instead of silently dropping setup mutations.
     logger = (
         Logger.no_runtime()
-        if is_new_config or getattr(cfg, "_source_config_version", None) != 8
+        if is_new_config or not is_current_schema(getattr(cfg, "_source_config_version", None))
         else Logger.from_config(cfg)
     )
     logger.log_action("init", cfg.data_dir, f"environment={env}")
@@ -618,7 +619,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         _rollup_status,
         run_first_run,
     )
-    from defenseclaw.config import config_path, default_data_path, source_config_version
+    from defenseclaw.config import config_path, default_data_path, is_current_schema, source_config_version
     from defenseclaw.ux import CLIRenderer
 
     data_dir = default_data_path()
@@ -635,7 +636,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     # spending an entire interactive setup session before discovering that
     # precondition is both misleading and, for multi-connector selection,
     # previously let the follow-on merge reach Config.save and raise.
-    legacy_config = os.path.exists(config_path()) and source_config_version() != 8
+    legacy_config = os.path.exists(config_path()) and not is_current_schema(source_config_version())
     # --observe-all / --action-connectors express an explicit, scripted
     # connector selection. Honor them deterministically even on a TTY instead
     # of dropping into the wizard (which would silently ignore the flags).

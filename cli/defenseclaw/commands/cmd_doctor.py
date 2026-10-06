@@ -2602,7 +2602,9 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
         # mandatory local SQLite destination exists even when no remote export
         # is configured. The retired OTel master-switch DTO cannot describe
         # this subsystem and made doctor accept a stale disabled runtime.
-        return getattr(cfg, "_source_config_version", 0) == 8
+        from defenseclaw.config import is_current_schema
+
+        return is_current_schema(getattr(cfg, "_source_config_version", 0))
     if sub == "gateway":
         return _gateway_fleet_expected_enabled(cfg)
     if sub == "watcher":

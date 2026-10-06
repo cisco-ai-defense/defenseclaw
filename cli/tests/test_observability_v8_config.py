@@ -257,7 +257,7 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
     assert "run defenseclaw upgrade" in str(captured.value)
 
 
-@pytest.mark.parametrize("version", [7, 9, "8", 8.0, True])
+@pytest.mark.parametrize("version", [7, 10, "8", 8.0, True])
 def test_exact_v8_rejects_other_version_values(version: object) -> None:
     with pytest.raises(V8ConfigError) as captured:
         load_validate_v8({"config_version": version})

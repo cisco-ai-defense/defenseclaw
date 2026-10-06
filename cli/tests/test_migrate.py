@@ -46,7 +46,17 @@ def _write_config(data_dir: Path, body: str) -> Path:
 
 
 @pytest.fixture()
-def recorded(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def v8_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the target to config_version 8 so a test sees only the 0.x chain
+    and the framework (the 8 -> 9 step is test_v8_config_runs_the_go_v9_step)."""
+    from defenseclaw import config as config_module
+
+    monkeypatch.setattr(config_module, "CURRENT_CONFIG_VERSION", 8)
+    monkeypatch.setattr(migrations, "CONFIG_MIGRATIONS", {})
+
+
+@pytest.fixture()
+def recorded(monkeypatch: pytest.MonkeyPatch, v8_target: None) -> list[str]:
     """Replace the frozen 0.x chain with recording steps."""
 
     calls: list[str] = []
@@ -86,12 +96,12 @@ def test_current_config_is_a_no_op(data_dir: Path, recorded: list[str]) -> None:
 
 
 def test_config_from_a_newer_release_is_refused(data_dir: Path) -> None:
-    config = _write_config(data_dir, "config_version: 9\n")
+    config = _write_config(data_dir, "config_version: 10\n")
 
     with pytest.raises(ConfigTooNewError):
         migrate(str(data_dir), check=True)
 
-    assert config.read_text(encoding="utf-8") == "config_version: 9\n"
+    assert config.read_text(encoding="utf-8") == "config_version: 10\n"
 
 
 def test_v7_import_runs_only_steps_after_the_previous_version(data_dir: Path, recorded: list[str]) -> None:
@@ -176,10 +186,31 @@ def test_failing_step_names_itself(data_dir: Path, monkeypatch: pytest.MonkeyPat
         migrate(str(data_dir), from_version="0.8.4")
 
 
+def test_v8_config_runs_the_go_v9_step(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw import config_inspect
+
+    config = _write_config(data_dir, "config_version: 8\nobservability: {}\n")
+    calls: list[str] = []
+
+    def go_migrate(*, config_path: str, **_kwargs):
+        calls.append(config_path)
+        Path(config_path).write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+        return {"migrated": True, "record": {"moved": [{"to": "update.check"}], "conflicts": []}}
+
+    monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
+    monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
+
+    result = migrate(str(data_dir), from_version="1.0.0")
+
+    assert calls == [str(config)]
+    assert result.applied == ["config_version 8 → 9"]
+    assert result.to_config_version == 9
+
+
 def test_config_migrations_bump_the_version_line(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from defenseclaw import config as config_module
 
-    config = _write_config(data_dir, "# operator comment\nconfig_version: 8\nguardrail:\n  enabled: true\n")
+    config = _write_config(data_dir, "# operator comment\nconfig_version: 8\nguardrail:\n  mode: observe\n")
     seen: list[int] = []
     monkeypatch.setattr(config_module, "CURRENT_CONFIG_VERSION", 9)
     monkeypatch.setattr(migrations, "CONFIG_MIGRATIONS", {8: lambda ctx: seen.append(8)})
@@ -189,7 +220,7 @@ def test_config_migrations_bump_the_version_line(data_dir: Path, monkeypatch: py
 
     assert seen == [8]
     assert result.to_config_version == 9
-    assert config.read_text(encoding="utf-8") == "# operator comment\nconfig_version: 9\nguardrail:\n  enabled: true\n"
+    assert config.read_text(encoding="utf-8") == "# operator comment\nconfig_version: 9\nguardrail:\n  mode: observe\n"
 
 
 def test_missing_config_migration_step_is_an_error(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -203,7 +234,7 @@ def test_missing_config_migration_step_is_an_error(data_dir: Path, monkeypatch: 
         migrate(str(data_dir))
 
 
-def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest.MonkeyPatch, v8_target: None) -> None:
     _write_config(data_dir, "config_version: 7\nclaw:\n  home_dir: /srv/openclaw\n")
     homes: list[str] = []
     monkeypatch.setattr(
@@ -221,7 +252,7 @@ def test_openclaw_home_comes_from_the_config(data_dir: Path, monkeypatch: pytest
     assert homes == ["/srv/openclaw"]
 
 
-def test_installed_observability_bundle_is_refreshed(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_installed_observability_bundle_is_refreshed(data_dir: Path, monkeypatch: pytest.MonkeyPatch, v8_target: None) -> None:
     from defenseclaw import bundle_refresh
 
     _write_config(data_dir, "config_version: 8\n")
@@ -244,7 +275,7 @@ def test_installed_observability_bundle_is_refreshed(data_dir: Path, monkeypatch
     assert calls[0][0] == str(data_dir)
 
 
-def test_bundle_refresh_failure_only_warns(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bundle_refresh_failure_only_warns(data_dir: Path, monkeypatch: pytest.MonkeyPatch, v8_target: None) -> None:
     from defenseclaw import bundle_refresh
 
     _write_config(data_dir, "config_version: 8\n")
@@ -471,7 +502,7 @@ def test_cli_check_lists_pending_steps_as_pending(data_dir: Path, recorded: list
     assert config.read_text(encoding="utf-8") == "config_version: 7\n"
 
 
-def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path) -> None:
+def test_cli_rejects_a_from_version_that_is_not_a_release(data_dir: Path, v8_target: None) -> None:
     # GAP-1449: --from-version banana is a usage error, not "current", rc 0.
     _write_config(data_dir, "config_version: 8\n")
     result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--check", "--from-version", "banana"])

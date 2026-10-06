@@ -917,9 +917,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
         # first-run against v8 must use the live owner and must not silently drop
         # ordinary v8 setup mutations.
+        from defenseclaw.config import is_current_schema
+
         logger = (
             Logger.no_runtime()
-            if new_config or getattr(cfg, "_source_config_version", None) != 8
+            if new_config or not is_current_schema(getattr(cfg, "_source_config_version", None))
             else Logger.from_config(cfg)
         )
 

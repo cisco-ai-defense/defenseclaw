@@ -235,6 +235,7 @@ def prepare_v8_yaml_write(
     mutations: Iterable[V8YAMLMutation],
     *,
     source_name: str = "config.yaml",
+    any_path: bool = False,
 ) -> PreparedV8YAMLWrite:
     """Validate and prepare a comment-preserving v8 YAML candidate.
 
@@ -242,6 +243,10 @@ def prepare_v8_yaml_write(
     lock, compare the current file digest with ``expected_sha256``, preserve
     permissions, write ``candidate`` to a sibling temporary file, validate it,
     and atomically replace the original.
+
+    ``any_path`` lifts the observability path allowlist for the single
+    config writer (``config_writer``), which validates the whole candidate
+    with the canonical validator before it writes.
     """
 
     original = _source_bytes(source, source_name)
@@ -252,7 +257,7 @@ def prepare_v8_yaml_write(
     candidate = text
     for mutation in mutations:
         path = tuple(mutation.path)
-        if not _supported_path(path):
+        if not any_path and not _supported_path(path):
             raise V8YAMLMutationError(
                 "unsupported_mutation_path",
                 "the requested path is not an exact supported v8 observability mutation",
@@ -372,10 +377,10 @@ def _parse_v8(text: str, source_name: str) -> _ParsedYAML:
             column=root.start_mark.column + 1,
         )
     version = value.get("config_version", _MISSING)
-    if type(version) is not int or version != 8:
+    if type(version) is not int or version not in (8, 9):
         raise V8YAMLMutationError(
             "not_v8_configuration",
-            "comment-preserving observability mutations require config_version 8",
+            "comment-preserving config mutations require config_version 8 or 9",
             source=source_name,
             path=("config_version",),
         )

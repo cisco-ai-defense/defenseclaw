@@ -25,8 +25,6 @@ from typing import Any
 
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
 
-TUI_ACTOR = "tui:operator"
-
 
 def record_config_save(
     cfg: Any,
@@ -54,8 +52,10 @@ def record_config_save(
         for e in entries
     ]
     try:
+        from defenseclaw.config_writer import ACTOR_PREFIX_TUI, current_actor
+
         logger_factory(cfg).log_activity(
-            actor=TUI_ACTOR,
+            actor=current_actor(ACTOR_PREFIX_TUI),
             action=ACTION_CONFIG_UPDATE,
             target_type="config",
             target_id="config.yaml",

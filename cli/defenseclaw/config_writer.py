@@ -27,7 +27,11 @@ the two interoperate:
 5. Write atomically (temp file, fsync, rename, directory fsync; a failed
    directory fsync is an error).
 6. Write ``config.generation.json`` with the generation incremented.
-7. Release the lock and audit ``config.change.applied``.
+7. Release the lock. Callers that own an audit logger record the change
+   (``defenseclaw config set`` does) from the returned :class:`WriteResult`.
+
+The lock is reentrant within one thread (:func:`hold_lock`), so a
+``Config.save`` inside ``locked_config_yaml`` joins the held lock.
 
 On a managed (standalone enterprise) host both writers refuse unless the
 actor is :data:`ACTOR_LIFECYCLE` or :data:`ACTOR_MIGRATION`
@@ -36,11 +40,27 @@ actor is :data:`ACTOR_LIFECYCLE` or :data:`ACTOR_MIGRATION`
 
 from __future__ import annotations
 
+import getpass
+import hashlib
 import json
+import logging
 import os
+import re
+import stat
+import sys
+import tempfile
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
+
+from defenseclaw import file_permissions
+from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 
 LOCK_SUFFIX = ".lock"
 GENERATION_FILE_NAME = "config.generation.json"
@@ -53,6 +73,42 @@ ACTOR_PREFIX_TUI = "tui:"
 ACTOR_PREFIX_API = "api:"
 ACTOR_PREFIX_SANDBOX = "sandbox:"
 ACTOR_PREFIX_HAND_EDIT = "hand-edit:"
+
+#: Shown when a local writer is refused on a managed (standalone) device.
+MANAGED_REFUSAL = (
+    "This device is managed: change config.yaml in the admin config "
+    "(MDM or management plane), not on the device"
+)
+
+# Process-level keys a running gateway can not apply without a restart
+# (internal/config/configwrite restartKeys); everything else is hot.
+RESTART_KEYS = (
+    "data_dir",
+    "observability.local.path",
+    "observability.local.judge_bodies_path",
+    "gateway.host",
+    "gateway.port",
+    "gateway.api_port",
+    "gateway.api_bind",
+    "gateway.tls",
+    "gateway.tls_skip_verify",
+    "gateway.device_key_file",
+    "gateway.token",
+    "gateway.token_env",
+    "gateway.fleet_mode",
+    "gateway.config_reload.mode",
+    "guardrail.host",
+    "guardrail.port",
+    "deployment_mode",
+    "enterprise.profile",
+    "enterprise.network",
+    "environment",
+    "tenant_id",
+    "workspace_id",
+    "discovery_source",
+)
+
+_log = logging.getLogger(__name__)
 
 
 class ConfigWriteError(RuntimeError):
@@ -131,6 +187,26 @@ def read_generation_state(config_path: str | os.PathLike[str]) -> GenerationStat
     )
 
 
+def current_actor(prefix: str = ACTOR_PREFIX_CLI) -> str:
+    """Return ``prefix`` + the OS user (``cli:alice``)."""
+    try:
+        name = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no user database entry
+        name = ""
+    return prefix + (name or "unknown")
+
+
+def restart_required(changed: list[str]) -> list[str]:
+    """Return the paths in ``changed`` that need a gateway restart."""
+    out = []
+    for path in changed:
+        for key in RESTART_KEYS:
+            if path == key or path.startswith((key + ".", key + "[")) or key.startswith(path + "."):
+                out.append(path)
+                break
+    return out
+
+
 def apply(
     changes: list[Change],
     actor: str,
@@ -141,8 +217,13 @@ def apply(
     timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
 ) -> WriteResult:
     """Apply ``changes`` to config.yaml (``path`` defaults to the active
-    config) under the writer lock and return the new generation."""
-    raise NotImplementedError("config_writer.apply lands with the single-writer change")
+    config) under the writer lock and return the new generation. Comments
+    and key order are kept. When nothing changes, nothing is written."""
+
+    def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
+        return _patch(current, changes, source_name)
+
+    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s)
 
 
 def replace_document(
@@ -156,4 +237,454 @@ def replace_document(
 ) -> WriteResult:
     """Write ``raw`` as the whole config.yaml after the same validation.
     Migrations and restores use it."""
-    raise NotImplementedError("config_writer.replace_document lands with the single-writer change")
+    candidate = bytes(raw)
+
+    def mutate(current: bytes, _source_name: str) -> tuple[bytes, list[str]]:
+        return candidate, diff_documents(current, candidate)
+
+    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s)
+
+
+Mutator = Callable[[bytes, str], "tuple[bytes, list[str]]"]
+
+
+def write_with(
+    mutate: Mutator,
+    actor: str,
+    reason: str,
+    expect_sha256: str | None = None,
+    *,
+    path: str | os.PathLike[str] | None = None,
+    timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
+    verify: Callable[[str], None] | None = None,
+) -> WriteResult:
+    """Run one writer transaction: ``mutate(current_bytes, path)`` returns
+    the candidate bytes and the changed paths. ``Config.save`` uses it to
+    merge its modeled values inside the lock. ``verify(path)`` runs after the
+    commit, still under the lock; when it raises, the previous bytes are
+    restored (as a new generation) and the error re-raised."""
+
+    if not str(actor or "").strip():
+        raise ConfigWriteError("a config writer actor is required")
+    target = _resolve(path)
+    with hold_lock(target, timeout_s=timeout_s):
+        return _transact(target, mutate, actor, reason, expect_sha256, verify)
+
+
+_held = threading.local()
+
+
+@contextmanager
+def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT_LOCK_TIMEOUT_S) -> Iterator[None]:
+    """Hold ``config.yaml.lock``; reentrant in the thread that holds it.
+
+    ``timeout_s=None`` waits without a bound (the legacy
+    ``locked_config_yaml`` contract). A timeout raises
+    :class:`ConfigLockBusyError`.
+    """
+    target = os.path.abspath(os.fspath(path))
+    held: dict[str, int] = getattr(_held, "paths", None) or {}
+    _held.paths = held
+    if held.get(target):
+        held[target] += 1
+        try:
+            yield
+        finally:
+            held[target] -= 1
+        return
+    file_permissions.make_private_directory(os.path.dirname(target) or ".")
+    stack = ExitStack()
+    try:
+        stack.enter_context(locked_file_update(target, timeout_seconds=timeout_s))
+    except FileLockTimeoutError as exc:
+        raise ConfigLockBusyError("another DefenseClaw process is changing config.yaml") from exc
+    with stack:
+        held[target] = 1
+        try:
+            yield
+        finally:
+            held.pop(target, None)
+
+
+def _transact(
+    target: str,
+    mutate: Mutator,
+    actor: str,
+    reason: str,
+    expect_sha256: str | None,
+    verify: Callable[[str], None] | None,
+) -> WriteResult:
+    current, mode, exists = _read_current(target)
+    digest = hashlib.sha256(current).hexdigest()
+    if expect_sha256 and expect_sha256.lower() != digest:
+        raise ConfigConflictError("config.yaml changed since it was read")
+    if managed_refuses(current, actor):
+        raise ManagedConfigWriteError(MANAGED_REFUSAL)
+    candidate, changed = mutate(current, target)
+    if exists and candidate == current:
+        return WriteResult(_current_generation(target), digest, [], [])
+    validate_candidate(target, candidate)
+    _write_durable(target, candidate, mode)
+    state = record_generation(target, hashlib.sha256(candidate).hexdigest(), actor, reason)
+    if verify is not None:
+        try:
+            verify(target)
+        except Exception:
+            if exists:
+                _write_durable(target, current, mode)
+                record_generation(target, digest, actor, f"rollback: {reason}")
+            else:
+                os.unlink(target)
+            raise
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+
+
+def _resolve(path: str | os.PathLike[str] | None) -> str:
+    if path is None:
+        from defenseclaw.config import config_path
+
+        path = config_path()
+    return os.path.abspath(os.fspath(path))
+
+
+def _read_current(target: str) -> tuple[bytes, int, bool]:
+    try:
+        info = os.lstat(target)
+    except FileNotFoundError:
+        return b"", 0o600, False
+    if stat.S_ISLNK(info.st_mode):
+        raise ConfigWriteError("refusing to edit config.yaml through a symbolic link")
+    if not stat.S_ISREG(info.st_mode):
+        raise ConfigWriteError("config.yaml must be a regular file")
+    with open(target, "rb") as handle:
+        return handle.read(), stat.S_IMODE(info.st_mode), True
+
+
+def _current_generation(target: str) -> int:
+    try:
+        return read_generation_state(target).generation
+    except (OSError, ValueError):
+        return 0
+
+
+def record_generation(target: str, sha256: str, actor: str, reason: str) -> GenerationState:
+    """Advance ``config.generation.json`` for bytes already at ``target``.
+
+    For writers that install config.yaml under their own transaction while
+    holding ``config.yaml.lock`` (the v8 activation, the upgrade import).
+    """
+    previous = 0
+    reset = False
+    try:
+        previous = read_generation_state(target).generation
+    except (OSError, ValueError):
+        reset = True
+    state = GenerationState(
+        generation=previous + 1,
+        config_sha256=sha256,
+        actor=actor,
+        written_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        reason=reason,
+        generation_reset=reset,
+    )
+    payload: dict[str, Any] = {
+        "generation": state.generation,
+        "config_sha256": state.config_sha256,
+        "actor": state.actor,
+    }
+    if reason:
+        payload["reason"] = reason
+    payload["written_at"] = state.written_at
+    if reset:
+        payload["generation_reset"] = True
+    _write_durable(generation_path(target), (json.dumps(payload, indent=2) + "\n").encode("utf-8"), 0o600)
+    return state
+
+
+def _write_durable(target: str, data: bytes, mode: int) -> None:
+    """Temp file in the same directory (mode kept, protected before the
+    bytes land), fsync, rename (MoveFileExW write-through on Windows), then
+    an fsync of the directory on POSIX. Every failure is an error."""
+
+    directory = os.path.dirname(target) or "."
+    # Narrow-only mirror of the existing mode (0600, or 0640 for a
+    # group-readable file; a stricter 0400 stays 0400).
+    target_mode = mode & 0o600 or 0o600
+    if target_mode == 0o600 and mode & 0o077 == 0o040:
+        target_mode = 0o640
+    fd, staged = tempfile.mkstemp(prefix=f".{os.path.basename(target)}.", suffix=".tmp", dir=directory)
+    try:
+        file_permissions.set_file_mode(fd, staged, target_mode, set_owner=True)
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        file_permissions.replace_file_durable(staged, target)
+        staged = ""
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if staged:
+            try:
+                os.unlink(staged)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Managed gate
+
+
+def _standalone_profile(document: dict[str, Any]) -> bool:
+    pinned = os.environ.get("DEFENSECLAW_ENTERPRISE_PROFILE", "").strip().lower()
+    enterprise = document.get("enterprise") if isinstance(document, dict) else None
+    configured = ""
+    if isinstance(enterprise, dict):
+        configured = str(enterprise.get("profile") or "").strip().lower()
+    profile = pinned or configured or ("standalone" if sys.platform.startswith("linux") else "secure_client")
+    return profile == "standalone"
+
+
+def standalone_managed(current: bytes) -> bool:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
+    managed deployment on the standalone profile. Secure Client hosts are
+    not standalone, so their path is unchanged."""
+    from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
+
+    try:
+        document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
+    except (UnicodeDecodeError, yaml.YAMLError):
+        document = {}
+    if not isinstance(document, dict):
+        document = {}
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
+        str(document.get("deployment_mode") or "")
+    )
+    return managed and _standalone_profile(document)
+
+
+def managed_refuses(current: bytes, actor: str) -> bool:
+    """The writer's managed gate: a standalone managed host refuses every
+    actor but the lifecycle and migrations."""
+    if actor in (ACTOR_LIFECYCLE, ACTOR_MIGRATION):
+        return False
+    return standalone_managed(current)
+
+
+# ---------------------------------------------------------------------------
+# Validation
+
+
+_warned_python_only = False
+
+
+def _use_go_validator() -> bool:
+    """Whether the canonical Go validator is available (tests stub this)."""
+    try:
+        from defenseclaw.gateway import resolve_trusted_gateway_binary
+
+        return bool(resolve_trusted_gateway_binary())
+    except Exception:  # noqa: BLE001 - an unsafe or missing binary falls back below
+        return False
+
+
+def validate_candidate(target: str, candidate: bytes) -> None:
+    """Validate candidate bytes before any write: the Go canonical validator
+    (``defenseclaw-gateway config-v8 validate``) on a private sibling copy,
+    or ``load_validate_v8`` with a warning when the binary is missing."""
+    from defenseclaw.observability.v8_config import load_validate_v8
+
+    load_validate_v8(candidate, source_name=target)
+    if not _use_go_validator():
+        global _warned_python_only
+        if not _warned_python_only:
+            _warned_python_only = True
+            _log.warning("defenseclaw-gateway is not installed; config.yaml is validated by the Python checks only")
+        return
+    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+
+    directory = os.path.dirname(target) or "."
+    fd, staged = tempfile.mkstemp(prefix=f".{os.path.basename(target)}.candidate-", suffix=".yaml", dir=directory)
+    try:
+        file_permissions.set_file_mode(fd, staged, 0o600, set_owner=True)
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(candidate)
+        try:
+            inspect_v8_config("validate", config_path=staged, data_dir=_data_dir_for(target, candidate))
+        except ConfigInspectError as exc:
+            raise ConfigWriteError(f"config.yaml change rejected: {exc}") from exc
+    finally:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+
+
+def _data_dir_for(target: str, candidate: bytes) -> str:
+    try:
+        document = yaml.safe_load(candidate.decode("utf-8")) or {}
+    except (UnicodeDecodeError, yaml.YAMLError):
+        document = {}
+    value = document.get("data_dir") if isinstance(document, dict) else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return os.path.dirname(target)
+
+
+# ---------------------------------------------------------------------------
+# Paths and patches
+
+_SEGMENT = re.compile(r'\["((?:[^"\\]|\\.)*)"\]|\[(\d+)\]|([^.\[\]]+)')
+
+
+def parse_path(path: str) -> tuple[str | int, ...]:
+    """Split ``a.b[0]["c.d"]`` into ``("a", "b", 0, "c.d")``."""
+    parts: list[str | int] = []
+    position = 0
+    expect_key = True
+    while position < len(path):
+        if path[position] == ".":
+            if expect_key:
+                raise ValueError(f"empty segment in config path {path!r}")
+            expect_key = True
+            position += 1
+            continue
+        match = _SEGMENT.match(path, position)
+        if match is None:
+            raise ValueError(f"invalid config path {path!r}")
+        quoted, index, key = match.groups()
+        if key is not None:
+            if not expect_key:
+                raise ValueError(f"missing '.' before {key!r} in config path {path!r}")
+            parts.append(key)
+        elif index is not None:
+            parts.append(int(index))
+        else:
+            parts.append(json.loads(f'"{quoted}"'))
+        expect_key = False
+        position = match.end()
+    if not parts or expect_key or not isinstance(parts[0], str):
+        raise ValueError(f"invalid config path {path!r}")
+    return tuple(parts)
+
+
+def format_path(parts: tuple[str | int, ...]) -> str:
+    out = ""
+    for part in parts:
+        if isinstance(part, int):
+            out += f"[{part}]"
+        elif re.fullmatch(r"[A-Za-z0-9_-]+", part):
+            out += ("." if out else "") + part
+        else:
+            out += "[" + json.dumps(part) + "]"
+    return out
+
+
+_MISSING = object()
+
+
+def _lookup(document: Any, parts: tuple[str | int, ...]) -> Any:
+    current = document
+    for part in parts:
+        if isinstance(part, int):
+            if not isinstance(current, list) or part >= len(current):
+                return _MISSING
+            current = current[part]
+        else:
+            if not isinstance(current, dict) or part not in current:
+                return _MISSING
+            current = current[part]
+    return current
+
+
+def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[bytes, list[str]]:
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
+
+    document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
+    mutations = []
+    changed: list[str] = []
+    for change in changes:
+        parts = parse_path(change.path)
+        before = _lookup(document, parts)
+        if change.unset:
+            if before is _MISSING:
+                continue
+            mutations.append(V8YAMLMutation.delete(parts))
+        else:
+            if before is not _MISSING and before == change.value:
+                continue
+            mutations.append(V8YAMLMutation.set(parts, change.value))
+        changed.append(change.path)
+    if not mutations:
+        return current, []
+    if not current.strip():
+        from defenseclaw.config import FRESH_CONFIG_VERSION
+
+        current = f"config_version: {FRESH_CONFIG_VERSION}\n".encode()
+    prepared = prepare_v8_yaml_write(current, mutations, source_name=source_name, any_path=True)
+    return prepared.candidate, changed
+
+
+def render_document(current: bytes, document: dict[str, Any], source_name: str) -> bytes:
+    """Return ``current`` edited to equal ``document``, keeping comments and
+    order where the comment-preserving patcher can; anything it can not
+    express is rendered whole."""
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation, V8YAMLMutationError, prepare_v8_yaml_write
+
+    try:
+        before = yaml.safe_load(current.decode("utf-8")) if current.strip() else None
+    except (UnicodeDecodeError, yaml.YAMLError):
+        before = None
+    if isinstance(before, dict) and before:
+        mutations = [
+            V8YAMLMutation.set(parts, value) if value is not _MISSING else V8YAMLMutation.delete(parts)
+            for parts, value in _document_changes((), before, document)
+        ]
+        if not mutations:
+            return current
+        try:
+            candidate = prepare_v8_yaml_write(current, mutations, source_name=source_name, any_path=True).candidate
+            if yaml.safe_load(candidate.decode("utf-8")) == document:
+                return candidate
+        except V8YAMLMutationError:
+            pass
+    return yaml.safe_dump(document, default_flow_style=False, sort_keys=False).encode("utf-8")
+
+
+_Changes = list[tuple[tuple[str | int, ...], Any]]
+
+
+def _document_changes(prefix: tuple[str | int, ...], before: Any, after: Any) -> _Changes:
+    if isinstance(before, dict) and isinstance(after, dict):
+        out: _Changes = []
+        for key in before:
+            if key not in after:
+                out.append(((*prefix, key), _MISSING))
+        for key, value in after.items():
+            if key not in before:
+                out.append(((*prefix, key), value))
+            elif before[key] != value:
+                out.extend(_document_changes((*prefix, key), before[key], value))
+        return out
+    if before == after:
+        return []
+    return [(prefix, after)]
+
+
+def diff_documents(before_raw: bytes, after_raw: bytes) -> list[str]:
+    try:
+        before = yaml.safe_load(before_raw.decode("utf-8")) if before_raw.strip() else {}
+    except (UnicodeDecodeError, yaml.YAMLError):
+        before = {}
+    after = yaml.safe_load(after_raw.decode("utf-8")) if after_raw.strip() else {}
+    out = []
+    for parts, _value in _document_changes((), before if isinstance(before, dict) else {}, after or {}):
+        out.append(format_path(parts) or "$")
+    return sorted(out)

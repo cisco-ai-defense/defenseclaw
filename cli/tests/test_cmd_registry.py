@@ -1101,7 +1101,7 @@ class TestRegistryRequire(RegistryCommandTestBase):
             before = yaml.safe_load(stream)
 
         with patch(
-            "defenseclaw.config.write_config_yaml_secure",
+            "defenseclaw.config_writer._write_durable",
             side_effect=OSError("write fixture"),
         ):
             result = self.invoke(["require", "--type", "mcp", "--enabled", "--json"])
