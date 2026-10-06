@@ -885,7 +885,13 @@ const (
 // ActivityEvent is one item of the live activity feed.
 type ActivityEvent struct {
 	// Seq increases by one per event; resume with ?since=<seq>.
-	Seq     uint64    `json:"seq"`
+	Seq uint64 `json:"seq"`
+	// Epoch names the feed that numbered Seq. The feed lives in the
+	// daemon's memory, so a daemon that restarted numbers its events from
+	// one again under another epoch: a client that sees the epoch change
+	// reads the new feed from its start instead of resuming after its old
+	// Seq.
+	Epoch   string    `json:"epoch,omitempty"`
 	Time    time.Time `json:"time"`
 	Kind    string    `json:"kind"`
 	Sandbox string    `json:"sandbox,omitempty"`

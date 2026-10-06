@@ -359,15 +359,15 @@ def test_a_restarted_daemon_resets_the_resume_point() -> None:
 
 def test_a_feed_that_started_over_is_read_from_its_start() -> None:
     model = _model()
-    last = {**ALLOWED, "seq": 40, "time": "2026-09-27T12:00:00Z"}
+    last = {**ALLOWED, "seq": 40, "epoch": "a1"}
     model.add_events([last], toast=False)
     # The daemon still holds the resume point, or only newer events pushed it out.
-    assert model.resume_point_lost([last, {**BLOCKED, "seq": 41}]) is False
-    assert model.resume_point_lost([{**BLOCKED, "seq": 45}]) is False
-    # A restarted daemon numbers from one again: nothing at or after 40, or
-    # another event under that number.
+    assert model.resume_point_lost([last, {**BLOCKED, "seq": 41, "epoch": "a1"}]) is False
+    assert model.resume_point_lost([{**BLOCKED, "seq": 45, "epoch": "a1"}]) is False
+    # A restarted daemon numbers from one again in a feed of another epoch,
+    # or holds nothing at or after 40 yet.
     assert model.resume_point_lost([]) is True
-    assert model.resume_point_lost([{**BLOCKED, "seq": 40, "time": "2026-09-27T13:00:00Z"}]) is True
+    assert model.resume_point_lost([{**BLOCKED, "seq": 40, "epoch": "b2"}]) is True
     model.reset_resume_point()
     assert model.last_seq == 0 and model.resume_point_lost([]) is False
 

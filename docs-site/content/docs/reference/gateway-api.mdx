@@ -989,17 +989,24 @@ events after `since`, or after the `Last-Event-ID` header, which wins over
 ```text
 id: 42
 event: activity
-data: {"seq":42,"time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
+data: {"seq":42,"epoch":"3f9c2a1d7b6e4058","time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
 ```
 
 A `: keepalive` comment follows the replay and repeats every 15 seconds.
 `sandbox` limits the feed to one sandbox. Too many open streams get 429.
 
-Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
-`sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
+Each `ActivityEvent` has a `seq` (one higher per event), `epoch`, `time`,
+`kind`, and `sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
 (`dc-egress-proxy` or `openshell`), `category`, `rule`, `unblockable`,
 `bytes_up`, `bytes_down`, `threshold`, `approval_id`, `tool`, `event`,
 `phase`, `severity`, `reason`, and `message`.
+
+The feed lives in the daemon's memory. A daemon that restarts starts a new
+feed, numbered from one again under a new `epoch` (16 hex digits), so a
+client that resumes with `since` compares the epoch of what it reads with
+the one it last saw: another epoch, or nothing at all after `since - 1`,
+means the daemon restarted, and the client reads the new feed from its start
+(`since=0`). The TUI and the macOS app do this.
 
 | `kind` | Meaning |
 | --- | --- |

@@ -1202,6 +1202,11 @@ deleted.
   sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
   with `pack` locked, a run cannot switch to a pack that alerts or waits
   longer. The threshold was a fixed 10 minutes and silence only alerted.
+- **The activity feed names its epoch.** Every activity event carries
+  `epoch`, which names the daemon's in-memory feed; a restarted daemon
+  numbers its events from one again under a new epoch. The TUI's Sandboxes
+  panel and the macOS app compare it when they resume (instead of guessing
+  from the event under the old number) and read a new feed from its start.
 - **The banner says how the model hosts are reached.** A new line under
   `Model` states that OpenShell opens them to the harness's own program
   directly, around the egress proxy, and that for an npm or Python harness

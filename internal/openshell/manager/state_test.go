@@ -795,6 +795,11 @@ func TestFeed(t *testing.T) {
 	if got := f.Since(0, "s1"); len(got) != 2 || got[0].Seq != 3 || got[1].Seq != 5 {
 		t.Fatalf("filtered = %+v", got)
 	}
+	// Every event carries the feed's epoch, and a new feed (a restarted
+	// daemon's) has another one.
+	if all := f.Since(0, ""); len(f.Epoch()) != 16 || all[0].Epoch != f.Epoch() || all[3].Epoch != f.Epoch() || NewFeed(4, nil).Epoch() == f.Epoch() {
+		t.Fatalf("epochs = %q, %+v", f.Epoch(), all)
+	}
 
 	f = NewFeed(16, nil)
 	f.Publish(sandboxapi.ActivityEvent{Kind: "old", Sandbox: "a"})
@@ -828,7 +833,7 @@ func TestFeed(t *testing.T) {
 		<-ch
 	}
 	f.Publish(sandboxapi.ActivityEvent{Kind: "after"})
-	if marker, ev := <-ch, <-ch; marker.Kind != sandboxapi.ActivityDropped || marker.BytesUp != 10 || ev.Kind != "after" {
+	if marker, ev := <-ch, <-ch; marker.Kind != sandboxapi.ActivityDropped || marker.BytesUp != 10 || ev.Kind != "after" || marker.Epoch != f.Epoch() {
 		t.Fatalf("marker = %+v, then %+v", marker, ev)
 	}
 

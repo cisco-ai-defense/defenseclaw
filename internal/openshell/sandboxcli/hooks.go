@@ -138,9 +138,10 @@ func (s *session) restoreTitle() {
 }
 
 // firstSight reports whether the session sees ev for the first time: a
-// reconnect of the activity stream reads the daemon's buffer again.
+// reconnect of the activity stream reads the daemon's buffer again (and a
+// restarted daemon's feed reuses the numbers under another epoch).
 func (s *session) firstSight(ev sandboxapi.ActivityEvent) bool {
-	key := fmt.Sprintf("event %d %d %s %s %s %s %s", ev.Seq, ev.Time.UnixNano(), ev.Kind, ev.ApprovalID, ev.Host, ev.Reason, ev.Message)
+	key := fmt.Sprintf("event %s %d %d %s %s %s %s %s", ev.Epoch, ev.Seq, ev.Time.UnixNano(), ev.Kind, ev.ApprovalID, ev.Host, ev.Reason, ev.Message)
 	s.noticeMu.Lock()
 	defer s.noticeMu.Unlock()
 	if s.noticeKeys == nil {

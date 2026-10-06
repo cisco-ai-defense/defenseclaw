@@ -17,6 +17,9 @@
 package manager
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"strconv"
 	"sync"
 	"time"
 
@@ -33,9 +36,12 @@ const (
 // Feed is the activity ring buffer behind GET /api/v1/sandbox/activity. Late
 // subscribers replay what is still buffered; slow subscribers skip events
 // and are told how many with an ActivityDropped event, so a stuck client can
-// never block a producer.
+// never block a producer. It lives in memory: a daemon that restarts starts
+// a new feed, numbered from one again under another epoch, which every
+// event carries so that a client can tell.
 type Feed struct {
-	now func() time.Time
+	now   func() time.Time
+	epoch string
 
 	mu   sync.Mutex
 	buf  []sandboxapi.ActivityEvent
@@ -59,8 +65,21 @@ func NewFeed(size int, now func() time.Time) *Feed {
 	if now == nil {
 		now = time.Now
 	}
-	return &Feed{now: now, buf: make([]sandboxapi.ActivityEvent, size), subs: map[*subscriber]struct{}{}}
+	return &Feed{now: now, epoch: newFeedEpoch(), buf: make([]sandboxapi.ActivityEvent, size), subs: map[*subscriber]struct{}{}}
 }
+
+// newFeedEpoch names a feed: 16 random hex digits, or the time in
+// nanoseconds should the system's randomness fail.
+func newFeedEpoch() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// Epoch names this feed (sandboxapi.ActivityEvent.Epoch).
+func (f *Feed) Epoch() string { return f.epoch }
 
 // Publish stamps ev with the next sequence number (and the time, when
 // unset), buffers it and hands it to every matching subscriber. Its text
@@ -75,7 +94,7 @@ func (f *Feed) Publish(ev sandboxapi.ActivityEvent) sandboxapi.ActivityEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seq++
-	ev.Seq = f.seq
+	ev.Seq, ev.Epoch = f.seq, f.epoch
 	if ev.Time.IsZero() {
 		ev.Time = f.now().UTC()
 	}
@@ -95,7 +114,7 @@ func (f *Feed) Publish(ev sandboxapi.ActivityEvent) sandboxapi.ActivityEvent {
 
 func (f *Feed) deliverLocked(s *subscriber, ev sandboxapi.ActivityEvent) {
 	if s.missed > 0 {
-		marker := sandboxapi.ActivityEvent{Seq: ev.Seq, Time: ev.Time, Kind: sandboxapi.ActivityDropped,
+		marker := sandboxapi.ActivityEvent{Seq: ev.Seq, Epoch: ev.Epoch, Time: ev.Time, Kind: sandboxapi.ActivityDropped,
 			Sandbox: s.sandbox, BytesUp: int64(s.missed), Message: "the activity stream skipped events; reconnect with ?since to replay"}
 		select {
 		case s.ch <- marker:
