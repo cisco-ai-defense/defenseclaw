@@ -46,8 +46,6 @@ COMMAND_CAPS = {
     "device.health": 0x40,   # DCLAW_CAP_SENSOR_READ
 }
 
-ACTION_NAMES = {0: "allow", 1: "block", 2: "warn", 3: "escalate"}
-
 
 def _compute_tool_hash(command: str, params: dict[str, Any]) -> bytes:
     """SHA-256 of the canonical command + params representation."""
