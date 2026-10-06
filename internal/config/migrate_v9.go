@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -1221,6 +1222,12 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 		dir := strings.TrimSpace(node.Value)
 		if dir == "" {
 			m.record.Removed = append(m.record.Removed, scope.name+".rule_pack_dir")
+			if scope.name == "guardrail" && m.embeddedPackDropped() {
+				m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+					To: "guardrail.rule_pack", Kept: "pack-default:default", Lost: "config:guardrail.rule_pack_dir:embedded",
+					Reason: "an empty rule_pack_dir selected the gateway's embedded rule packs; config_version 9 selects the default pack of policy_dir (or the shipped default pack), whose rules, suppressions and judge prompts differ. Review that pack, or set guardrail.rule_pack",
+				})
+			}
 			continue
 		}
 		if name := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, "rule_pack"))); name != "" {
@@ -1251,6 +1258,15 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 		}
 	}
 	return nil
+}
+
+// embeddedPackDropped reports whether dropping an empty rule_pack_dir changes
+// the pack: config_version 9 keeps the embedded packs only for a standalone
+// Windows host without a policy_dir of its own (standaloneRulePackDefault);
+// everywhere else the implicit default pack is a folder.
+func (m *v9Migrator) embeddedPackDropped() bool {
+	return !(runtime.GOOS == "windows" && m.in.Managed &&
+		strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir"))) == "")
 }
 
 // v9DirPosture is the posture the gateway gives a rule-pack directory: the
@@ -1306,6 +1322,21 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	}
 	if v9BuiltinPacks[base] && v9SameDir(clean, filepath.Join(m.policyDir(), "guardrail", filepath.Base(clean))) {
 		return base, nil, nil
+	}
+	if v9BuiltinPacks[base] {
+		// The shipped pack of the standalone layout is product-owned: a
+		// package update replaces it, so it is never pinned by digest. The
+		// preset name resolves to it while policy_dir has no such folder
+		// (Config.ResolveRulePackDir).
+		if layout, ok := standaloneUnixLayoutForConfig(m.configPath); ok &&
+			v9SameDir(clean, filepath.Join(layout.VendorPolicyDir, "guardrail", filepath.Base(clean))) {
+			shadow := filepath.Join(m.policyDir(), "guardrail", base)
+			if _, err := os.Stat(shadow); errors.Is(err, fs.ErrNotExist) {
+				return base, nil, nil
+			}
+			m.note("%s is the shipped %s pack, but %s exists and the %s name selects it; the shipped pack is pinned as a custom pack, which a package update that changes it refuses until it is pinned again",
+				dir, base, shadow, base)
+		}
 	}
 	if strings.HasPrefix(parent, "protected-") && v9BuiltinPacks[base] {
 		var manifest struct {

@@ -21,13 +21,16 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestMigrateV9MovesEveryV8Source(t *testing.T) {
@@ -521,5 +524,54 @@ func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
 	if !strings.Contains(string(result.Migrated), "block_at: HIGH") || len(result.Record.Conflicts) != 1 ||
 		result.Record.Conflicts[0].To != "guardrail.block_at" || !strings.HasSuffix(result.Record.Conflicts[0].Lost, ":MEDIUM") {
 		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
+
+// TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected: an explicit
+// empty rule_pack_dir selected the embedded packs in v8; v9 has no such key,
+// so the switch to the default pack folder is a recorded conflict, not silent.
+func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a standalone Windows host without policy_dir keeps the embedded packs")
+	}
+	source := "config_version: 8\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n"
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: filepath.Join(t.TempDir(), "config.yaml"), Source: []byte(source), InMemory: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if strings.Contains(string(result.Migrated), "rule_pack_dir") || len(result.Record.Conflicts) != 1 ||
+		result.Record.Conflicts[0].To != "guardrail.rule_pack" {
+		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
+
+// TestMigrateV9KeepsTheShippedPackAPreset: a v8 rule_pack_dir naming the
+// standalone layout's shipped strict pack, with policy_dir elsewhere, stays
+// the strict preset (which resolves to that pack) instead of a custom pack
+// pinned to files the next package replaces.
+func TestMigrateV9KeepsTheShippedPackAPreset(t *testing.T) {
+	layout, err := managed.StandaloneLayoutFor("linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyDir := t.TempDir()
+	shipped := path.Join(layout.VendorPolicyDir, "guardrail", "strict")
+	source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\npolicy_dir: " +
+		policyDir + "\nguardrail:\n  rule_pack_dir: " + shipped + "\nobservability: {}\n"
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: layout.ConfigPath, Source: []byte(source), PolicyDir: policyDir, Managed: true, InMemory: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "rule_pack: strict") || strings.Contains(got, "custom_packs") {
+		t.Fatalf("the shipped strict pack did not stay the preset:\n%s", got)
+	}
+	cfg := &Config{PolicyDir: policyDir, ConfigFilePath: layout.ConfigPath, DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	if got := cfg.ResolveRulePackDir(RulePackRef{Name: "strict"}); got != shipped {
+		t.Fatalf("strict resolves to %q, want the shipped %s while policy_dir has none", got, shipped)
 	}
 }
