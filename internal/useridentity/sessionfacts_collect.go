@@ -31,6 +31,10 @@ import (
 // SessionFactsCacheTTL is how long the hook reuses its cached facts.
 const SessionFactsCacheTTL = 5 * time.Minute
 
+// sessionFactsRetryAfter is how long facts whose Kerberos read failed in
+// transit are reused, so a hung KCM delays one hook per interval.
+const sessionFactsRetryAfter = 30 * time.Second
+
 // SessionFactsCacheFileName is the cache file under ~/.defenseclaw.
 const SessionFactsCacheFileName = "session-facts.json"
 
@@ -97,8 +101,9 @@ func cachedSessionFactsHeader(path, key, envKey string, now time.Time) (string, 
 	return cached.Header, true
 }
 
-// writeSessionFactsCache replaces the cache atomically, owner-only. Errors
-// are ignored by the caller: the cache is an optimisation.
+// writeSessionFactsCache replaces the cache atomically, owner-only, written
+// at now: its modification time too, which the shell hooks age it by.
+// Errors are ignored by the caller: the cache is an optimisation.
 func writeSessionFactsCache(path, key, envKey, header string, now time.Time) error {
 	data, err := json.Marshal(sessionFactsCacheFile{Key: key, EnvKey: envKey, WrittenAt: now.UTC(), Header: header})
 	if err != nil {
@@ -119,6 +124,9 @@ func writeSessionFactsCache(path, key, envKey, header string, now time.Time) err
 	}
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
+	}
+	if err == nil {
+		err = os.Chtimes(tmpName, now, now)
 	}
 	if err != nil {
 		return err

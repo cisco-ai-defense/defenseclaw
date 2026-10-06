@@ -52,8 +52,7 @@ type AgentIdentityRecord struct {
 // everything.
 type AgentIdentityFilter struct {
 	// User matches the user id exactly or the user name case-insensitively,
-	// also in its qualified forms: user@realm and DOMAIN\user select the
-	// bare account name the rows carry (GAP-0075).
+	// bare or qualified on either side (useridentity.AccountFilterMatches).
 	User      string
 	Connector string
 	// Limit caps the rows returned; 0 or less means 1000.
@@ -139,10 +138,6 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
 		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities WHERE 1=1`
 	var args []any
-	if user := strings.TrimSpace(filter.User); user != "" {
-		query += ` AND (user_id = ? OR lower(COALESCE(user_name, '')) IN (lower(?), lower(?)))`
-		args = append(args, user, user, useridentity.BareAccountName(user))
-	}
 	if connector := strings.TrimSpace(filter.Connector); connector != "" {
 		query += ` AND connector = ?`
 		args = append(args, strings.ToLower(connector))
@@ -151,8 +146,15 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 	if limit <= 0 {
 		limit = 1000
 	}
-	query += ` ORDER BY last_seen DESC, agent_id LIMIT ?`
-	args = append(args, limit)
+	// The user filter runs in Go (useridentity.AccountFilterMatches), so a
+	// bare name selects a row stored as user@realm or DOMAIN\user and the
+	// other way round; the limit applies after it.
+	user := strings.TrimSpace(filter.User)
+	query += ` ORDER BY last_seen DESC, agent_id`
+	if user == "" {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	rows, err := s.queryDB(ctx, "agent_identities.list", query, args...)
 	if err != nil {
 		return nil, err
@@ -166,9 +168,15 @@ func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentId
 			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen); err != nil {
 			return nil, err
 		}
+		if user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
+			continue
+		}
 		rec.FirstSeen, _ = time.Parse(agentIdentityTimeLayout, first)
 		rec.LastSeen, _ = time.Parse(agentIdentityTimeLayout, last)
 		out = append(out, rec)
+		if len(out) == limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }

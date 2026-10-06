@@ -20,7 +20,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
-	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // agentIdentityFromContext returns the agent identity
@@ -94,9 +93,12 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
-		UserName:    useridentity.BareAccountName(user.Name),
-		Connector:   connectorName,
-		InstallFP:   agentIdentityInstallFP(connectorName, user),
+		// The account as the host names it (an SSSD dcad-alice@dclab.test
+		// stays qualified), so an agent-identities row can be passed back
+		// to the other admin views. defenseclaw.user.name stays bare.
+		UserName:  user.Name,
+		Connector: connectorName,
+		InstallFP: agentIdentityInstallFP(connectorName, user),
 	}
 	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
 		MachineHash: facts.MachineHash, UserID: facts.UserID, Connector: facts.Connector, InstallFP: facts.InstallFP,
@@ -155,7 +157,7 @@ func gatewaySelfUser() agentIdentityUser {
 	gatewaySelf.once.Do(func() {
 		self := agentIdentityUser{Self: true, Verified: true}
 		if current, err := osuser.Current(); err == nil && current != nil {
-			self.ID, self.Name, self.Home = current.Uid, useridentity.BareAccountName(current.Username), current.HomeDir
+			self.ID, self.Name, self.Home = current.Uid, current.Username, current.HomeDir
 		}
 		if self.ID == "" {
 			if uid := os.Getuid(); uid >= 0 {
