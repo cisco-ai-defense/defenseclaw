@@ -74,6 +74,10 @@ ACTOR_PREFIX_API = "api:"
 ACTOR_PREFIX_SANDBOX = "sandbox:"
 ACTOR_PREFIX_HAND_EDIT = "hand-edit:"
 
+#: The runtime descriptor the enterprise lifecycle writes next to the managed
+#: config.yaml. The folder that holds it is the lifecycle's, not the writer's.
+MANAGED_RUNTIME_DESCRIPTOR = "managed-runtime.json"
+
 #: Shown when a local writer is refused on a managed (standalone) device.
 MANAGED_REFUSAL = (
     "This device is managed: change config.yaml in the admin config "
@@ -305,7 +309,11 @@ def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT
         finally:
             held[target] -= 1
         return
-    file_permissions.make_private_directory(os.path.dirname(target) or ".")
+    directory = os.path.dirname(target) or "."
+    # The managed config folder is root-owned 0755 on purpose (every user's
+    # hook reads it); a refused or lifecycle write must not tighten it.
+    if not os.path.isfile(os.path.join(directory, MANAGED_RUNTIME_DESCRIPTOR)):
+        file_permissions.make_private_directory(directory)
     stack = ExitStack()
     try:
         stack.enter_context(locked_file_update(target, timeout_seconds=timeout_s))
@@ -506,12 +514,26 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     return profile == "standalone"
 
 
+def machine_managed_standalone() -> bool:
+    """Whether this computer is a managed standalone host: the enterprise
+    lifecycle published its runtime descriptor (Linux, macOS) or the Windows
+    marker with the standalone profile. Any account's CLI sees it, so a
+    standard user's per-user config cannot opt out of the managed gate.
+    Secure Client hosts publish neither, so their path is unchanged."""
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
+
+
 def standalone_managed(current: bytes) -> bool:
-    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
-    managed deployment on the standalone profile. Secure Client hosts are
-    not standalone, so their path is unchanged."""
+    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
+    describe a managed deployment on the standalone profile. Secure Client
+    hosts are not standalone, so their path is unchanged."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
+    if machine_managed_standalone():
+        return True
     try:
         document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
     except (UnicodeDecodeError, yaml.YAMLError):

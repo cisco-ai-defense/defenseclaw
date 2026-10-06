@@ -409,7 +409,7 @@ guardrail:
       digest: sha256:<64 hex digits>
   rules:                       # layered on the selected pack in memory; no files are written
     protections: []            # built-in use-case packs, for example database-destruction-protection
-    enable: []                 # rule IDs, upper case
+    enable: []                 # rule IDs, as the pack spells them (SEC-AWS-KEY, exec.remote_ip_download_execute_same_artifact)
     disable: []
     severity_overrides: {}     # RULE-ID: CRITICAL | HIGH | MEDIUM | LOW | INFO
     suppressions: []           # {id, finding_pattern, entity_pattern, reason}
@@ -578,7 +578,7 @@ concept pages explain how they combine: [Rules](/docs/policies/rules) and
 | `guardrail.rule_pack` | `default` | The rule pack: `default`, `strict`, `permissive`, or a name from `guardrail.custom_packs`. Lower case letters, digits, `_` and `-`, up to 64 characters. `defenseclaw guardrail use-pack NAME` writes it. |
 | `guardrail.custom_packs.<name>` | none | A rule-pack directory pinned by digest: `path` and `digest` (`sha256:` plus 64 hex digits, printed by `defenseclaw guardrail validate-pack`). If the directory no longer hashes to the digest, the change does not build into a generation and the previous policy keeps running. At most 64 packs. |
 | `guardrail.rules.protections` | `[]` | Built-in use-case packs layered on the selected pack, such as `database-destruction-protection`. `defenseclaw guardrail protection list` shows them. |
-| `guardrail.rules.enable`, `guardrail.rules.disable` | `[]` | Rule IDs (upper case) to switch on or off. An unknown ID fails validation. |
+| `guardrail.rules.enable`, `guardrail.rules.disable` | `[]` | Rule IDs to switch on or off, spelled and cased exactly as the pack has them (`SEC-AWS-KEY`, `exec.remote_ip_download_execute_same_artifact`). An unknown ID fails validation. |
 | `guardrail.rules.severity_overrides` | `{}` | Rule ID to `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`. |
 | `guardrail.rules.suppressions` | `[]` | `{id, finding_pattern, entity_pattern, reason}` entries appended to the pack's suppressions. IDs are unique across the pack and the config. |
 | `guardrail.rules.sensitive_tools` | `[]` | `{name, result_inspection, judge_result, min_entities_for_alert}` entries merged into the pack's sensitive tools by name. |

@@ -527,6 +527,32 @@ func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
 	}
 }
 
+// TestMigrateV9NamesTheActionsAHostWithoutDataJSONDropped: a managed layout
+// never has a data.json, so enforcement used the built-in defaults and a
+// customised skill_actions key was never read. The migration removes the key,
+// so each customised severity (and the watch bypass) is a recorded conflict
+// instead of a silent drop.
+func TestMigrateV9NamesTheActionsAHostWithoutDataJSONDropped(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nskill_actions:\n  high: {install: block, file: none, runtime: disable}\n" +
+		"watch:\n  allow_list_bypass_scan: false\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	conflicts := result.Record.Conflicts
+	if len(conflicts) != 2 || conflicts[0].To != "admission.defaults.allow_list_bypass_scan" || conflicts[0].Kept != "defaults:true" ||
+		conflicts[1].To != "admission.skill.actions.high" || !strings.HasPrefix(conflicts[1].Kept, "defaults:") ||
+		!strings.HasPrefix(conflicts[1].Lost, "skill_actions.high:") || !strings.Contains(conflicts[1].Reason, "no data.json") {
+		t.Fatalf("conflicts = %+v", conflicts)
+	}
+}
+
 // TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected: an explicit
 // empty rule_pack_dir selected the embedded packs in v8; v9 has no such key,
 // so the switch to the default pack folder is a recorded conflict, not silent.
