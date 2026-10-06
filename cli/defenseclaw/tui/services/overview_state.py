@@ -163,7 +163,6 @@ class OverviewConfig:
     guardrail_rule_pack_dir: str = ""
     guardrail_port: int = 0
     guardrail_model: str = ""
-    guardrail_strategy: str = "default"
     guardrail_judge_enabled: bool = False
     guardrail_judge_model: str = ""
     hilt_enabled: bool = False
@@ -186,7 +185,7 @@ class OverviewConfig:
     # ``(connector, mode)`` keep working untouched. Empty for single-connector
     # installs. Surfaced on the roster rows so the Overview reflects that
     # connectors can enforce different packs (block thresholds), which the
-    # process-global ``guardrail_strategy`` posture line cannot show.
+    # process-global posture line cannot show.
     connector_packs: tuple[tuple[str, str], ...] = ()
     # Connectors that are configured + still in the roster (so their history
     # stays filterable) but have enforcement turned off via
@@ -1628,8 +1627,6 @@ class OverviewPanelModel:
             parts.append(mode)
         if self.cfg.guardrail_port and self.cfg.uses_guardrail_proxy_port():
             parts.append(f"port {self.cfg.guardrail_port}")
-        # The rule pack, not guardrail_strategy: that is read from a
-        # "strategy" key the config doesn't have, so it always said "default".
         applied = self._applied_profile()
         pack_dir = str(applied[1].get("rule_pack_dir") or "") if applied else self.cfg.guardrail_rule_pack_dir
         pack = _rule_pack_label(pack_dir)

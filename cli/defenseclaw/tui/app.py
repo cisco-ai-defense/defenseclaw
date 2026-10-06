@@ -167,6 +167,7 @@ from defenseclaw.tui.services.overview_state import (
     ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
+    _rule_pack_label,
     format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
@@ -16274,7 +16275,6 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         guardrail_rule_pack_dir=effective_rule_pack_dir,
         guardrail_port=int(getattr(guardrail, "port", 0) or 0),
         guardrail_model=str(getattr(guardrail, "model", "") or ""),
-        guardrail_strategy=str(getattr(guardrail, "strategy", "") or "default"),
         guardrail_judge_enabled=bool(getattr(guardrail, "judge_enabled", False)),
         guardrail_judge_model=str(getattr(guardrail, "judge_model", "") or ""),
         hilt_enabled=bool(getattr(effective_hilt, "enabled", False)),
@@ -17082,7 +17082,7 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
     if cfg is None:
         return "unknown"
     mode = cfg.guardrail_mode or "observe"
-    scanner = cfg.guardrail_strategy or "default"
+    rule_pack = _rule_pack_label(cfg.guardrail_rule_pack_dir) or "default"
     # Multi-connector: each connector can carry its own rule pack (and thus
     # its own block threshold), so naming one global pack would be wrong.
     # Detect whether the connectors actually diverge; if they do, point the
@@ -17092,12 +17092,12 @@ def _policy_posture(cfg: OverviewConfig | None, active: object | None = None) ->
         modes = {m for _conn, m in cfg.connector_modes if m}
         if len(packs) > 1 or len(modes) > 1:
             return "per-connector (see roster)"
-        only_pack = next(iter(packs)) if packs else scanner
+        only_pack = next(iter(packs)) if packs else rule_pack
         only_mode = next(iter(modes)) if modes else mode
         return f"all connectors: {only_mode} ({only_pack})"
     if mode == "action":
-        return f"action: block CRIT, alert MED+ ({scanner})"
-    return f"balanced: block CRIT, alert MED+ ({scanner})"
+        return f"action: block CRIT, alert MED+ ({rule_pack})"
+    return f"balanced: block CRIT, alert MED+ ({rule_pack})"
 
 
 def _enforcement_label(cfg: OverviewConfig | None) -> str:

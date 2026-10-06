@@ -203,7 +203,7 @@ def test_validation_json_decodes_all_three_outcomes() -> None:
 
 
 def test_posture_names_the_active_policy_thresholds() -> None:
-    cfg = OverviewConfig(guardrail_mode="action", guardrail_strategy="default")
+    cfg = OverviewConfig(guardrail_mode="action")
     active = policy("strict", active=True, block="MEDIUM+", alert="LOW+")
     assert _policy_posture(cfg, active) == "strict · block MEDIUM+ · alert LOW+"
     divergent = OverviewConfig(
