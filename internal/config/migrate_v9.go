@@ -1764,6 +1764,15 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 			LocalEnforcementEntriesIgnored, path, err)
 		return nil
 	}
+	if err != nil && m.in.InMemory && v9AuditDBDamaged(err) {
+		// A damaged store is the daemon's to repair: it moves the file aside
+		// and carries the entries over (audit.OpenDaemonStore), and the next
+		// reload migrates them. Refusing here would stop that repair, and a
+		// damaged store must not stop teardown either. Any other read error
+		// still refuses the file, and a persisted migration always does.
+		m.note("%s is damaged (%v); its block/allow entries are not migrated until the store is repaired", path, err)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
 	}
@@ -1788,6 +1797,14 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 	}
 	m.record.ActionsRowsMoved = len(m.rows)
 	return nil
+}
+
+// v9AuditDBDamaged reports whether err says the audit.db file itself is
+// damaged, as opposed to busy, missing or not permitted (audit.isSQLiteCorrupt).
+func v9AuditDBDamaged(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database disk image is malformed") ||
+		strings.Contains(message, "file is not a database")
 }
 
 // v9SecureClientDocument reports whether the document is a managed

@@ -547,6 +547,33 @@ func TestMigrateV9RecordsTheEmbeddedPackAnEmptyRulePackDirSelected(t *testing.T)
 	}
 }
 
+// TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon: a damaged audit.db
+// is repaired by the daemon's store open, so the in-memory migration notes it
+// and goes on; a persisted migration, which would lose the rows for good,
+// still refuses.
+func TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	auditDB := filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(auditDB, []byte(strings.Repeat("not a database ", 512)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := MigrateV9Input{ConfigPath: configPath, Source: []byte(source), AuditDBPath: auditDB, InMemory: true}
+	result, err := MigrateV9(context.Background(), input)
+	if err != nil || len(result.Record.Notes) == 0 {
+		t.Fatalf("in-memory migration of a damaged audit.db: err=%v notes=%v", err, result.Record.Notes)
+	}
+	input.InMemory = false
+	if _, err := MigrateV9(context.Background(), input); err == nil {
+		t.Fatal("a persisted migration must refuse a damaged audit.db")
+	}
+}
+
 // TestMigrateV9KeepsTheShippedPackAPreset: a v8 rule_pack_dir naming the
 // standalone layout's shipped strict pack, with policy_dir elsewhere, stays
 // the strict preset (which resolves to that pack) instead of a custom pack
