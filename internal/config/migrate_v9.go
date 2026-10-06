@@ -908,6 +908,16 @@ func v9SameFirstParty(a, b []AdmissionFirstParty) bool {
 
 var v9RankNames = map[int]string{4: "CRITICAL", 3: "HIGH", 2: "MEDIUM", 1: "LOW"}
 
+// v9RankOf is the data.json rank of a severity name (0 when unknown).
+func v9RankOf(name string) int {
+	for rank, n := range v9RankNames {
+		if n == name {
+			return rank
+		}
+	}
+	return 0
+}
+
 // v9PostureRanks are the block and alert ranks of a built-in pack posture
 // (the folder-name table the gateway used in v8).
 func v9PostureRanks(pack string) (int, int) {
@@ -944,10 +954,23 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		{"block_at", data.Guardrail.BlockThreshold, packBlock, shippedBlock},
 		{"alert_at", data.Guardrail.AlertThreshold, packAlert, shippedAlert},
 	} {
-		if item.value == nil || *item.value == item.pack {
+		if item.value == nil {
 			continue
 		}
-		if strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(guardrail, item.key))) != "" {
+		if set := strings.ToUpper(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(guardrail, item.key)))); set != "" {
+			// The config value wins (spec 2.2), but in v8 it only governed
+			// hook tool calls: a stricter data.json level was the LLM
+			// proxy's, and the proxy now follows the config value.
+			if lost, ok := v9RankNames[*item.value]; ok && *item.value < v9RankOf(set) {
+				m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+					To: "guardrail." + item.key, Kept: "config:guardrail." + item.key + ":" + set,
+					Lost:   "data.json:guardrail." + strings.Replace(item.key, "_at", "_threshold", 1) + ":" + lost,
+					Reason: "the stricter data.json level applied to the LLM proxy; guardrail." + item.key + " now applies to the proxy too",
+				})
+			}
+			continue
+		}
+		if *item.value == item.pack {
 			continue
 		}
 		// v8 hook prompts and tool calls took the pack posture, and only the

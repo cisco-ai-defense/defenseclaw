@@ -343,3 +343,27 @@ func TestMigrateV9InlineKeyWithTildeDataDir(t *testing.T) {
 		t.Fatalf("data_dir .env = %q, %v", env, err)
 	}
 }
+
+// TestMigrateV9ReportsAStricterProxyThreshold: block_at set in config wins,
+// but the stricter data.json level the LLM proxy used is a recorded conflict.
+func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  block_at: HIGH\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{"guardrail": {"block_threshold": 2}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, DryRun: true})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if !strings.Contains(string(result.Migrated), "block_at: HIGH") || len(result.Record.Conflicts) != 1 ||
+		result.Record.Conflicts[0].To != "guardrail.block_at" || !strings.HasSuffix(result.Record.Conflicts[0].Lost, ":MEDIUM") {
+		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
