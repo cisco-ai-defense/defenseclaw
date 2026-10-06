@@ -82,6 +82,9 @@
     "agent": {
       "$ref": "#/$defs/agent"
     },
+    "acp": {
+      "$ref": "#/$defs/acp"
+    },
     "inspect_llm": {
       "$ref": "#/$defs/inspectLLM"
     },
@@ -163,84 +166,120 @@
     "managed": {
       "$ref": "#/$defs/managedIPC"
     },
+    "enterprise": {
+      "$ref": "#/$defs/enterprise"
+    },
     "routing": {
-      "type": "object",
-      "description": "Semantic routing configuration for model selection based on request signals.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "version": {
-          "type": "string"
-        },
-        "port": {
-          "type": "integer"
-        },
-        "algorithm": {
-          "type": "string"
-        },
-        "remote": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "embedding": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "llm_classifier": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "models": {
-          "type": "array"
-        },
-        "signals": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {}
-        },
-        "decisions": {
-          "type": "array"
-        }
-      }
+      "$ref": "#/$defs/routing"
     },
     "training": {
-      "type": "object",
-      "description": "GRPO training pipeline configuration for model improvement.",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "backend": {
-          "type": "string"
-        },
-        "models_dir": {
-          "type": "string"
-        },
-        "llama_server_port": {
-          "type": "integer"
-        },
-        "training_timeout_hours": {
-          "type": "integer"
-        },
-        "trace_retention_days": {
-          "type": "integer"
-        },
-        "base_models": {
-          "type": "array"
-        },
-        "categories": {
-          "type": "array"
-        }
-      }
+      "$ref": "#/$defs/training"
     }
   },
   "$defs": {
+    "acp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/acpMode"
+        },
+        "default_profile": {
+          "$ref": "#/$defs/stableName"
+        },
+        "clients": {
+          "$ref": "#/$defs/acpBindings"
+        },
+        "agents": {
+          "$ref": "#/$defs/acpBindings"
+        },
+        "bindings": {
+          "$ref": "#/$defs/acpPairBindings"
+        },
+        "profiles": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": {
+            "$ref": "#/$defs/stableName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/acpProfile"
+          }
+        }
+      }
+    },
+    "acpMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "action"
+      ]
+    },
+    "acpBindings": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/stableName"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "profile": {
+            "$ref": "#/$defs/stableName"
+          }
+        }
+      }
+    },
+    "acpProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/acpMode"
+        },
+        "fail_mode": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "allowed_clients": {
+          "$ref": "#/$defs/acpNameList"
+        },
+        "allowed_agents": {
+          "$ref": "#/$defs/acpNameList"
+        },
+        "denied_methods": {
+          "$ref": "#/$defs/acpMethodList"
+        }
+      }
+    },
+    "acpNameList": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/stableName"
+      }
+    },
+    "acpMethodList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
     "boundedString": {
       "type": "string",
       "maxLength": 4096
@@ -603,34 +642,493 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
         "binary": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "default": "openshell"
+        },
+        "gateway": {
+          "$ref": "#/$defs/openShellGateway"
+        },
+        "ingress_port": {
+          "$ref": "#/$defs/openShellListenPort"
+        },
+        "egress_port": {
+          "$ref": "#/$defs/openShellListenPort"
+        },
+        "pack": {
+          "$ref": "#/$defs/openShellPackRef"
+        },
+        "pack_dir": {
+          "$ref": "#/$defs/openShellPackDir"
+        },
+        "profile": {
+          "$ref": "#/$defs/openShellProfileOrInherit"
+        },
+        "yolo": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "llm": {
+          "description": "The model credential a sandbox run shares: the default of `sandbox run --llm`, which the shell wrappers, the TUI and the macOS app take too.",
+          "type": "string",
+          "enum": [
+            "auto",
+            "none",
+            "anthropic",
+            "claude-oauth",
+            "openai",
+            "bedrock",
+            "gemini"
+          ],
+          "default": "auto"
+        },
+        "keep_headless": {
+          "description": "Keep the sandbox a foreground one-prompt `sandbox run --prompt` (or a harness print mode) creates; by default it is deleted at the run's end when nothing is left in it to bring back or undo.",
+          "type": "boolean",
+          "default": false
+        },
+        "workdir": {
+          "$ref": "#/$defs/openShellWorkdir"
+        },
+        "egress": {
+          "$ref": "#/$defs/openShellEgress"
+        },
+        "image": {
+          "$ref": "#/$defs/openShellImage"
+        },
+        "approvals": {
+          "$ref": "#/$defs/openShellApprovals"
+        },
+        "resources": {
+          "$ref": "#/$defs/openShellResources"
+        },
+        "harnesses": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "wrappers": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "mcp": {
+          "$ref": "#/$defs/openShellMCP"
+        },
+        "upstream_telemetry": {
+          "type": "boolean",
+          "default": false
+        },
+        "token_delivery": {
+          "type": "string",
+          "enum": [
+            "provider",
+            "env"
+          ],
+          "default": "provider"
+        },
+        "middleware": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "admin": {
+          "$ref": "#/$defs/openShellAdmin"
         },
         "policy_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true
         },
         "mode": {
           "type": "string",
-          "maxLength": 64
+          "maxLength": 64,
+          "deprecated": true
         },
         "version": {
           "type": "string",
           "maxLength": 128,
-          "default": "0.6.2"
+          "default": "0.6.2",
+          "deprecated": true
         },
         "sandbox_home": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true
         },
         "auto_pair": {
           "type": [
             "boolean",
             "null"
           ],
-          "default": true
+          "default": true,
+          "deprecated": true
         },
         "host_networking": {
           "type": "boolean",
+          "default": true,
+          "deprecated": true
+        }
+      }
+    },
+    "openShellPort": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "openShellListenPort": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "default": 0
+    },
+    "openShellPortList": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/openShellPort"
+      }
+    },
+    "openShellPackRef": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "openShellProfileOrInherit": {
+      "type": "string",
+      "enum": [
+        "",
+        "open",
+        "balanced",
+        "strict"
+      ]
+    },
+    "openShellEgressPattern": {
+      "description": "An egress proxy host pattern: a host name, \"*.<host>\" (every subdomain), an IP address, or a CIDR prefix; no \"*\", scheme, port, path or inner wildcard.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 253,
+      "pattern": "^((\\*\\.)?[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\\.?|\\[?[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*\\]?|[0-9A-Fa-f:.]+/[0-9]{1,3})$"
+    },
+    "openShellEgressPatternList": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/openShellEgressPattern"
+      }
+    },
+    "openShellNameList": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/connectorName"
+      }
+    },
+    "openShellPackDir": {
+      "description": "The custom pack directory: empty (no custom packs), an absolute path (\"/...\", \"C:/...\" or a UNC path), or one under the home directory (\"~\" or \"~/...\"). The pack loader refuses relative paths.",
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(|~|~/.*|[/\\\\].*|[A-Za-z]:[/\\\\].*)$"
+    },
+    "openShellHarnessVersionKey": {
+      "description": "A harness name keying image.harness_versions. No \".\": the gateway's config loader reads a dotted key as a key path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+    },
+    "openShellGlobList": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "$ref": "#/$defs/pathString"
+      }
+    },
+    "openShellGateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "workspace": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "openShellWorkdir": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "",
+            "mount",
+            "copy"
+          ]
+        },
+        "masks": {
+          "$ref": "#/$defs/openShellGlobList"
+        },
+        "unmask": {
+          "$ref": "#/$defs/openShellGlobList"
+        },
+        "max_upload_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "git_depth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000,
+          "default": 200
+        },
+        "on_exit": {
+          "type": "string",
+          "enum": [
+            "ask",
+            "keep",
+            "undo"
+          ],
+          "default": "ask"
+        },
+        "undo_ignored": {
+          "$ref": "#/$defs/openShellUndoIgnored"
+        }
+      }
+    },
+    "openShellUndoIgnored": {
+      "description": "Keep, with a mounted project's undo point (Linux mount mode), a copy of the dependency directories git ignores, so `sandbox undo` restores them. Copy mode, every sandbox on a Mac, is unaffected.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_mb": {
+          "description": "The cap on one undo point's copies, in MiB; 0 means 500. A directory whose copy would pass it keeps none.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576,
+          "default": 500
+        },
+        "dirs": {
+          "description": "Directory names kept at any depth; empty means node_modules, .venv and venv.",
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^\\.?[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$",
+            "not": {
+              "const": ".git"
+            }
+          },
+          "default": [
+            "node_modules",
+            ".venv",
+            "venv"
+          ]
+        }
+      }
+    },
+    "openShellEgress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "block": {
+          "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "allow": {
+          "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "unblocked": {
+          "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "ports": {
+          "$ref": "#/$defs/openShellPortList"
+        },
+        "large_upload_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "block_large_uploads": {
+          "description": "Also cut the upload that crosses large_upload_mb to a destination the sandbox had not contacted before, and refuse later requests there, for every sandbox; false follows the pack's egress.block_large_uploads. An unblock of the destination, or an allow entry naming it, lifts the block.",
+          "type": "boolean",
+          "default": false
+        },
+        "feed": {
+          "type": "string",
+          "enum": [
+            "",
+            "builtin",
+            "none"
+          ]
+        }
+      }
+    },
+    "openShellImage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "harness_versions": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/$defs/openShellHarnessVersionKey"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      }
+    },
+    "openShellApprovals": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "debounce_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000,
+          "default": 3000
+        },
+        "agent_proposals": {
+          "type": [
+            "boolean",
+            "null"
+          ],
           "default": true
+        }
+      }
+    },
+    "openShellResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu": {
+          "type": "string",
+          "pattern": "^(|[0-9]{1,6}(\\.[0-9]{1,3})?|[0-9]{1,9}m)$"
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^(|[0-9]{1,15}(Ki|Mi|Gi|Ti|k|K|M|G|T)?)$"
+        }
+      }
+    },
+    "openShellMCP": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "import": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "host_ports": {
+          "$ref": "#/$defs/openShellPortList"
+        }
+      }
+    },
+    "openShellAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "required_pack": {
+          "$ref": "#/$defs/openShellPackRef"
+        },
+        "required_pack_digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
+        },
+        "min_profile": {
+          "$ref": "#/$defs/openShellProfileOrInherit"
+        },
+        "allow_yolo": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_mount": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_host_ports": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_unblock": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allow_learn_mode": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowed_harnesses": {
+          "$ref": "#/$defs/openShellNameList"
+        },
+        "egress_block": {
+          "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "egress_allow_only": {
+          "$ref": "#/$defs/openShellEgressPatternList"
+        },
+        "block_large_uploads": {
+          "description": "Block large uploads to first-seen destinations for every sandbox, whatever its pack and the user's openshell.egress.block_large_uploads say; a pack's large_upload_mb of 0 then takes the default threshold. false imposes nothing.",
+          "type": "boolean",
+          "default": false
+        },
+        "require_copy_for": {
+          "$ref": "#/$defs/openShellGlobList"
+        },
+        "max_resources": {
+          "$ref": "#/$defs/openShellResources"
+        },
+        "locked": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "mcp.host_ports",
+              "mcp.import",
+              "pack",
+              "profile",
+              "resources",
+              "workdir.mode",
+              "workdir.unmask",
+              "yolo"
+            ]
+          }
         }
       }
     },
@@ -697,6 +1195,11 @@
         "observe",
         "action"
       ]
+    },
+    "guardrailLevelOrInherit": {
+      "type": "string",
+      "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+      "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
     },
     "detectionStrategy": {
       "type": "string",
@@ -832,6 +1335,12 @@
         "rule_pack_dir": {
           "$ref": "#/$defs/boundedString"
         },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
         "enabled": {
           "type": "boolean"
         }
@@ -916,6 +1425,12 @@
         },
         "hilt": {
           "$ref": "#/$defs/hilt"
+        },
+        "block_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "alert_at": {
+          "$ref": "#/$defs/guardrailLevelOrInherit"
         },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
@@ -1650,6 +2165,11 @@
       "type": "string",
       "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,255}$"
     },
+    "credentialName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
+      "description": "Protected credential of a standalone enterprise deployment, stored with enterprise secret set. It resolves only in that profile."
+    },
     "claw": {
       "type": "object",
       "additionalProperties": false,
@@ -1876,6 +2396,11 @@
         "include_network_domains": {
           "type": "boolean"
         },
+        "include_user_email": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to attaching the end-user email address a connector reports to identity telemetry. Off by default: unlike the uid or SID it accompanies, the address identifies a person across systems and is emitted as plaintext."
+        },
         "lookup_model_provenance_online": {
           "type": "boolean",
           "default": false,
@@ -1907,6 +2432,77 @@
           "items": {
             "$ref": "#/$defs/pathString"
           }
+        },
+        "runtime": {
+          "$ref": "#/$defs/aiDiscoveryRuntime"
+        }
+      }
+    },
+    "aiDiscoveryRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AI Discovery runtime planes: what actually ran, alongside the surrounding block's inventory of what is present. Disabled by default. Reads process argv, which the inventory detector deliberately does not collect; argv is classified as content and governed by each destination's redaction profile. Environment variable values are never read.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "poll_interval_s": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "Sampling interval, and the window that distinguishes sustained inference from a momentary CPU spike."
+        },
+        "min_risk_to_report": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "planes": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "a",
+              "b",
+              "c"
+            ]
+          },
+          "description": "Empty means a and b. Plane c additionally requires enable_host_plane; selecting it without that opt-in is ignored."
+        },
+        "enable_host_plane": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicit opt-in for kernel process, file, and identity events. Every host-plane signal is gated on an AI agent appearing in the process lineage."
+        },
+        "dns_capture": {
+          "type": "boolean",
+          "default": false,
+          "description": "Passive DNS observation, so an egress peer is named from the answer the process received rather than inferred from an address. Requires elevated privilege."
+        },
+        "chain_window_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "How long a kill chain may take. A chain is a chain within a window, not over the lifetime of a long-running agent."
+        },
+        "sanctioned_endpoints": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          },
+          "description": "Gateway hostnames through which AI use is approved. Reaching one is inventory rather than alarm; going around one that exists is scored as a bypass."
+        },
+        "correlate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Join runtime observations against the inventory snapshot. Disabling removes the read; it does not make findings score as though the inventory disagreed."
         }
       }
     },
@@ -2191,8 +2787,7 @@
             "none",
             "sensitive",
             "content",
-            "strict",
-            "legacy-v7"
+            "strict"
           ]
         },
         {
@@ -2214,8 +2809,7 @@
                 "none",
                 "sensitive",
                 "content",
-                "strict",
-                "legacy-v7"
+                "strict"
               ]
             }
           }
@@ -2335,8 +2929,8 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 106751,
-          "default": 90,
-          "description": "Zero retains event, evidence, and judge-body history forever and requires a persistent capacity warning. The maximum is the largest whole-day period representable as a Go time.Duration."
+          "default": 7,
+          "description": "Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."
@@ -2496,8 +3090,7 @@
       "required": [
         "name",
         "kind",
-        "endpoint",
-        "token_env"
+        "endpoint"
       ],
       "properties": {
         "name": {
@@ -2513,7 +3106,11 @@
           "$ref": "#/$defs/httpEndpoint"
         },
         "token_env": {
-          "$ref": "#/$defs/envName"
+          "$ref": "#/$defs/envName",
+          "description": "Required unless token_credential is set."
+        },
+        "token_credential": {
+          "$ref": "#/$defs/credentialName"
         },
         "index": {
           "type": "string",
@@ -2552,6 +3149,20 @@
       "allOf": [
         {
           "$ref": "#/$defs/sendRoutesExclusive"
+        },
+        {
+          "oneOf": [
+            {
+              "required": [
+                "token_env"
+              ]
+            },
+            {
+              "required": [
+                "token_credential"
+              ]
+            }
+          ]
         }
       ]
     },
@@ -2588,6 +3199,9 @@
         "bearer_env": {
           "$ref": "#/$defs/envName"
         },
+        "bearer_credential": {
+          "$ref": "#/$defs/credentialName"
+        },
         "headers": {
           "$ref": "#/$defs/headers"
         },
@@ -2613,6 +3227,14 @@
       "allOf": [
         {
           "$ref": "#/$defs/sendRoutesExclusive"
+        },
+        {
+          "not": {
+            "required": [
+              "bearer_env",
+              "bearer_credential"
+            ]
+          }
         }
       ]
     },
@@ -2909,6 +3531,9 @@
         },
         {
           "$ref": "#/$defs/secretEnvRef"
+        },
+        {
+          "$ref": "#/$defs/secretCredentialRef"
         }
       ]
     },
@@ -2924,6 +3549,19 @@
         }
       },
       "description": "Explicit secret-provider reference name. Runtime resolution checks the DefenseClaw key store first, then the named environment variable; resolved bytes never enter effective configuration."
+    },
+    "secretCredentialRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential"
+      ],
+      "properties": {
+        "credential": {
+          "$ref": "#/$defs/credentialName"
+        }
+      },
+      "description": "Protected credential reference of a standalone enterprise deployment. The gateway reads the credential stored with enterprise secret set; resolved bytes never enter effective configuration."
     },
     "signalOverrides": {
       "type": "object",
@@ -3344,6 +3982,662 @@
         "HIGH",
         "CRITICAL"
       ]
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Semantic model router configuration for intelligent LLM request routing via vLLM Semantic Router sidecar.",
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "enabled"
+            ],
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "models"
+            ],
+            "properties": {
+              "models": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "0.3.0",
+            "v0.3.0"
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "algorithm": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 5000
+            }
+          }
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "provider",
+              "model"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+              },
+              "base_url": {
+                "$ref": "#/$defs/boundedString"
+              },
+              "api_key_env": {
+                "$ref": "#/$defs/envName"
+              },
+              "capabilities": {
+                "$ref": "#/$defs/stringList"
+              }
+            }
+          }
+        },
+        "signals": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "keywords": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "keywords"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 4096,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    }
+                  },
+                  "operator": {
+                    "type": "string",
+                    "enum": [
+                      "AND",
+                      "OR",
+                      "and",
+                      "or"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "decisions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "model_refs"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "priority": {
+                "type": "integer"
+              },
+              "conditions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "name"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "keyword",
+                        "KEYWORD"
+                      ]
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    }
+                  }
+                }
+              },
+              "operator": {
+                "type": "string",
+                "enum": [
+                  "AND",
+                  "OR",
+                  "and",
+                  "or"
+                ]
+              },
+              "model_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 256,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "algorithm": {
+                "$ref": "#/$defs/boundedString"
+              }
+            }
+          }
+        }
+      }
+    },
+    "training": {
+      "type": "object",
+      "description": "GRPO training pipeline configuration for model improvement.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "models_dir": {
+          "type": "string"
+        },
+        "llama_server_port": {
+          "type": "integer"
+        },
+        "training_timeout_hours": {
+          "type": "integer"
+        },
+        "trace_retention_days": {
+          "type": "integer"
+        },
+        "base_models": {
+          "type": "array"
+        },
+        "categories": {
+          "type": "array"
+        }
+      }
+    },
+    "acpPairName": {
+      "type": "string",
+      "description": "Per-pair binding key, \"<client>/<agent>\" \u2014 the identifier `defenseclaw acp status` prints.",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "acpPairBindings": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": {
+        "$ref": "#/$defs/acpPairName"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "profile": {
+            "$ref": "#/$defs/stableName"
+          }
+        }
+      }
+    },
+    "enterpriseConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "verify_only",
+            "off"
+          ]
+        },
+        "managed_hooks_only": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "preserve"
+          ]
+        },
+        "foreign_hooks": {
+          "type": "string",
+          "enum": [
+            "remove",
+            "report",
+            "allow"
+          ]
+        },
+        "higher_precedence_sources": {
+          "type": "string",
+          "enum": [
+            "fail",
+            "warn"
+          ]
+        },
+        "allowed_hooks": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(sha256:)?[0-9A-Fa-f]{64}$"
+          }
+        }
+      }
+    },
+    "enterpriseClaudeCodeConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprise.machine_policy.connectors.claudecode: the connector policy keys plus version_floor, which only Claude Code has.",
+      "properties": {
+        "ownership": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/ownership"
+        },
+        "managed_hooks_only": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/managed_hooks_only"
+        },
+        "foreign_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/foreign_hooks"
+        },
+        "higher_precedence_sources": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/higher_precedence_sources"
+        },
+        "allowed_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/allowed_hooks"
+        },
+        "version_floor": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "report",
+            "off"
+          ]
+        }
+      }
+    },
+    "enterpriseCopilotConnectorPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "enterprise.machine_policy.connectors.copilot: the connector policy keys plus harness_preference and local_harness, which govern GitHub Copilot in VS Code.",
+      "properties": {
+        "ownership": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/ownership"
+        },
+        "managed_hooks_only": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/managed_hooks_only"
+        },
+        "foreign_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/foreign_hooks"
+        },
+        "higher_precedence_sources": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/higher_precedence_sources"
+        },
+        "allowed_hooks": {
+          "$ref": "#/$defs/enterpriseConnectorPolicy/properties/allowed_hooks"
+        },
+        "harness_preference": {
+          "type": "string",
+          "enum": [
+            "sdk",
+            "unmanaged"
+          ]
+        },
+        "local_harness": {
+          "type": "string",
+          "enum": [
+            "govern",
+            "retire"
+          ]
+        }
+      }
+    },
+    "enterprise": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "managed_enterprise profile selection and standalone-profile settings. Only valid with deployment_mode managed_enterprise; settings other than profile apply only to the standalone profile.",
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "secure_client",
+            "standalone"
+          ]
+        },
+        "inspection": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ai_defense": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "credential": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+                }
+              }
+            }
+          }
+        },
+        "enrollment": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "manifest"
+              ]
+            },
+            "include_users": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "exclude_users": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "include_groups": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "exclude_groups": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "exempt_users": {
+              "type": "array",
+              "maxItems": 1024,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "unenrolled_users": {
+              "type": "string",
+              "enum": [
+                "inspect",
+                "deny"
+              ]
+            },
+            "root": {
+              "type": "string",
+              "enum": [
+                "inspect",
+                "deny",
+                "exempt"
+              ]
+            },
+            "unverified_versions": {
+              "type": "string",
+              "enum": [
+                "report",
+                "refuse"
+              ]
+            },
+            "unverified_versions_by_connector": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "enum": [
+                  "report",
+                  "refuse"
+                ]
+              }
+            },
+            "uid_min": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967294
+            },
+            "uid_max": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967294
+            },
+            "home_roots": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
+            },
+            "agent_prefixes": {
+              "type": "array",
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/pathString"
+              }
+            }
+          }
+        },
+        "machine_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": {
+              "$ref": "#/$defs/enterpriseConnectorPolicy"
+            },
+            "connectors": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+              },
+              "properties": {
+                "claudecode": {
+                  "$ref": "#/$defs/enterpriseClaudeCodeConnectorPolicy"
+                },
+                "copilot": {
+                  "$ref": "#/$defs/enterpriseCopilotConnectorPolicy"
+                }
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/enterpriseConnectorPolicy"
+              }
+            },
+            "windows_wsl": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Windows standalone only: agent sessions inside a WSL 2 distribution (Claude Desktop WSL sessions, the Codex app and IDE extension in WSL mode). Other operating systems ignore it.",
+              "properties": {
+                "agent_sessions": {
+                  "type": "string",
+                  "enum": [
+                    "block",
+                    "allow"
+                  ]
+                },
+                "platform": {
+                  "type": "string",
+                  "enum": [
+                    "leave",
+                    "disable"
+                  ]
+                },
+                "editor_settings": {
+                  "type": "string",
+                  "enum": [
+                    "repair",
+                    "report",
+                    "allow"
+                  ]
+                },
+                "claude_desktop_key": {
+                  "type": "string",
+                  "enum": [
+                    "merge",
+                    "create"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "trust": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "",
+                "authenticode",
+                "hash_pinned"
+              ]
+            },
+            "allowed_signers": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9A-Fa-f]{64}$"
+              }
+            }
+          }
+        },
+        "coexistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_user_install": {
+              "type": "string",
+              "enum": [
+                "migrate",
+                "block",
+                "ignore"
+              ]
+            },
+            "disable_self_update": {
+              "type": "boolean"
+            }
+          }
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "https_proxy": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "no_proxy": {
+              "$ref": "#/$defs/boundedString"
+            }
+          }
+        }
+      }
     }
   }
 }
