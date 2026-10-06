@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -208,8 +210,27 @@ type enterprisePolicyReport struct {
 	// Errors carries the failure (an unknown --user, an unreadable policy
 	// source) for a --json caller, which gets no "Error:" line (GAP-2456).
 	Errors []string `json:"errors,omitempty"`
+	// Policy is the effective policy digest and config generation of the
+	// installed config (show only; spec section 5).
+	Policy *enterprisePolicyDigest `json:"policy,omitempty"`
 	// goos is the host the report describes; it only changes wording.
 	goos string
+}
+
+// enterprisePolicyDigest is effective_policy_digest and config_generation.
+type enterprisePolicyDigest struct {
+	EffectiveDigest  string `json:"effective_digest"`
+	ConfigGeneration uint64 `json:"config_generation"`
+}
+
+// installedPolicyDigest computes the installed config's effective policy as
+// the gateway does; nil when it can not be computed.
+func installedPolicyDigest(ctx context.Context) *enterprisePolicyDigest {
+	policy, err := gateway.ComputeEffectivePolicy(ctx, cfg)
+	if err != nil || policy.Digest == "" {
+		return nil
+	}
+	return &enterprisePolicyDigest{EffectiveDigest: policy.Digest, ConfigGeneration: policy.ConfigGeneration}
 }
 
 func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []string, project string) (enterprisePolicyReport, error) {
@@ -362,6 +383,7 @@ func runEnterprisePolicyShow(cmd *cobra.Command, _ []string) error {
 	}
 	report, reportErr := buildEnterprisePolicyReport(ctx, connectors, project)
 	recordEnterprisePolicyReportError(cmd, &report, reportErr)
+	report.Policy = installedPolicyDigest(cmd.Context())
 	if err := writeEnterprisePolicyReport(cmd.OutOrStdout(), report); err != nil {
 		return err
 	}
@@ -477,7 +499,15 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(report)
 	}
-	fmt.Fprintf(out, "Standalone machine agent policy (hook binary %s)\n\n", report.HookBinary)
+	fmt.Fprintf(out, "Standalone machine agent policy (hook binary %s)\n", report.HookBinary)
+	if p := report.Policy; p != nil {
+		short := p.EffectiveDigest
+		if len(short) > len("sha256:")+12 {
+			short = short[:len("sha256:")+12]
+		}
+		fmt.Fprintf(out, "Effective policy %s, config generation %d\n", short, p.ConfigGeneration)
+	}
+	fmt.Fprintln(out)
 	for _, state := range report.Result.States {
 		if state.Ownership == config.MachinePolicyOwnershipOff && report.goos != "windows" &&
 			enterprisepolicy.RouteFor(state.Connector, report.goos) == enterprisepolicy.RouteMachinePolicy {

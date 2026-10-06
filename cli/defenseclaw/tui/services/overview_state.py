@@ -121,6 +121,17 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
+    # The effective policy the gateway applied (/status ``policy``): its
+    # applied generation and effective_policy_digest ("" when not reported).
+    policy_generation: int = 0
+    policy_digest: str = ""
+
+    def applied_policy_label(self) -> str:
+        """``gen N · <12 hex>`` for the status strip, "" when not reported."""
+        digest = self.policy_digest.removeprefix("sha256:")
+        if not digest:
+            return ""
+        return f"gen {self.policy_generation} · {digest[:12]}"
 
 
 # Probe states that mean the sidecar is not running.

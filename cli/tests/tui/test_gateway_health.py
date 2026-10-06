@@ -520,6 +520,16 @@ def test_hook_only_footer_and_setup_readiness_are_online() -> None:
     assert gateway_check.status == "pass"
 
 
+def test_status_strip_names_the_applied_policy_generation_and_digest() -> None:
+    # Spec section 5: the TUI header shows the generation and digest the
+    # gateway applied (from /status policy).
+    overview = OverviewPanelModel(OverviewConfig(claw_mode="codex"))
+    overview.set_health(HealthSnapshot(policy_generation=7, policy_digest="sha256:" + "ab" * 32))
+    app = DefenseClawTUI(config=_config(), overview_model=overview)
+
+    assert app._hint_status_model().policy_posture.endswith("gen 7 · abababababab")
+
+
 def test_disabled_gateway_availability_is_terminal_readiness() -> None:
     readiness = build_readiness_checks(
         {},

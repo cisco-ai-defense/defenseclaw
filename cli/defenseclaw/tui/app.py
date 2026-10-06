@@ -10946,6 +10946,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             elif mode:
                 policy_posture = f"policy {mode}"
 
+        health = self.overview_model.health
+        applied = health.applied_policy_label() if health is not None else ""
+        if applied:
+            policy_posture = f"{policy_posture} · {applied}" if policy_posture else applied
+
         return StatusModel(
             gateway=ServiceStatus("Gateway", gateway_state, gateway_detail),
             watchdog=ServiceStatus("Watchdog", self.overview_model.subsystem_state("watcher")),
@@ -15700,6 +15705,13 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     snapshot = _health_snapshot_from_mapping(payload)
     if snapshot is None:
         return GatewayHealthResult("error", "authenticated sidecar health is invalid")
+    policy = document.get("policy")
+    if isinstance(policy, dict) and policy.get("effective_digest"):
+        snapshot = replace(
+            snapshot,
+            policy_generation=_coerce_int(policy.get("generation")),
+            policy_digest=_coerce_str(policy.get("effective_digest")),
+        )
     snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
     detail = _gateway_snapshot_detail(snapshot, state)
