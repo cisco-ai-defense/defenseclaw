@@ -292,7 +292,9 @@ func runWindowsEnterpriseStandaloneAction(
 // windowsEnterprisePolicyDigest runs the installed CLI's `policy digest`
 // with the managed standalone environment, so the digest comes from the
 // binary the gateway service runs, computed from the config and assets it
-// loads. A seam for tests.
+// loads. Its stdout is the report even when the exit status is not 0 (a
+// policy that cannot be built still reports what the gateway says). A seam
+// for tests.
 var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
@@ -302,27 +304,67 @@ var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 // applyWindowsEnterprisePolicy fills Result.Policy as the Unix lifecycle
 // does: the effective policy digest and config_generation the installed
 // config computes to, and whether the running gateway reports the same
-// digest. A change action warns when it does not. Nothing is reported while
-// the gateway is not ready or when the installed CLI cannot compute it.
+// digest. A change action warns when it does not, and records
+// policy-state.json beside deployment.json when it does. A gateway that
+// rejected a reload and a config.yaml edited outside the lifecycle are
+// reported for every action. Nothing is reported while the gateway is not
+// ready or when the installed CLI cannot compute it.
 func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
 	if !result.Installed || !result.Readiness.Gateway {
 		return
 	}
-	out, err := windowsEnterprisePolicyDigest(ctx)
+	out, _ := windowsEnterprisePolicyDigest(ctx)
+	change := result.Action != "status" && result.Action != "verify"
+	state := applyEnterprisePolicyReport(result, out, change)
+	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
+		return
+	}
+	if err := writeWindowsEnterprisePolicyState(state); err != nil {
+		result.AddWarning("policy_state_unrecorded", "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
+	}
+}
+
+// writeWindowsEnterprisePolicyState records the applied policy in
+// policy-state.json beside deployment.json, with the same access control.
+// deployment.json itself is not extended: an earlier release decodes it
+// strictly and must still read it after a rollback.
+func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) error {
+	deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || deployment.MetadataPath == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(enterprisestatus.PolicyStateRecord{
+		EffectiveDigest:  state.EffectiveDigest,
+		ConfigGeneration: state.ConfigGeneration,
+		AppliedAt:        time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	state, ok := enterprisePolicyFromDigest(out)
-	if !ok {
-		return
+	return writeFileKeepingDACL(filepath.Join(filepath.Dir(deployment.MetadataPath), enterprisestatus.PolicyStateFileName), append(data, '\n'), deployment.MetadataPath)
+}
+
+// writeFileKeepingDACL replaces path with data, giving the new file the
+// DACL of sibling before it is renamed into place, so it is never readable
+// by more than sibling is.
+func writeFileKeepingDACL(path string, data []byte, sibling string) error {
+	restore, err := keepConfigDACL(sibling)
+	if err != nil {
+		return err
 	}
-	result.Policy = state
-	if state.Applied || result.Action == "status" || result.Action == "verify" {
-		return
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return err
 	}
-	result.AddWarning("policy_not_applied", fmt.Sprintf(
-		"the gateway reports effective policy %q but the installed config computes to %q; it applies the config on its next reload",
-		state.GatewayReportedDigest, state.EffectiveDigest))
+	if err := restore(temporary); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
 }
 
 // addWindowsEnterpriseNothingInstalledError fails an install or upgrade
@@ -1698,6 +1740,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
 			result.Noop = true
 			result.NoopReason = plan.Reason
+			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
@@ -1809,6 +1852,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	addWindowsEnterpriseNothingInstalledError(result, report, plan.Action)
+	applyWindowsEnterprisePolicy(ctx, result)
 	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }

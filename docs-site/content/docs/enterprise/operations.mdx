@@ -142,7 +142,7 @@ The MDM wrapper scripts print the same document.
 | `machine_policy.<connector>` | `ownership`, `lock`, `effective_lock`, `owned_entries`, `foreign_entries`, and any `higher_precedence` sources or `conflicts` |
 | `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table); on Windows standalone also `accounts`: each enrolled account (`account`, `sid`) with each connector's state from the guardian's last reconcile (`enrolled`, `pending` or `failed`), which status and verify also print one line per account |
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
-| `policy` | Linux and macOS: the effective policy the host runs. `effective_digest` and `config_generation` say which config, `applied` says whether the running gateway reports it. Omitted when the lifecycle cannot compute it. See [Effective policy digest](#effective-policy-digest-and-config-generation) |
+| `policy` | The effective policy the host runs. `effective_digest` and `config_generation` say which config, `applied` says whether the running gateway reports it. Omitted when the lifecycle cannot compute it. See [Effective policy digest](#effective-policy-digest-and-config-generation) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
 | `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
 
@@ -271,8 +271,8 @@ compare digests instead of files. Two numbers identify it:
   new policy generation and stamps it on `/health` and `/status`
   (`policy.effective_digest`) and on its decision events.
 
-On Linux and macOS every lifecycle result (`status`, `verify`, `ensure` and
-the other actions) carries both in the `policy` object:
+On every OS every lifecycle result (`status`, `verify`, `ensure` and the other
+actions) carries both in the `policy` object:
 
 | Field | Meaning |
 | --- | --- |
@@ -280,6 +280,8 @@ the other actions) carries both in the `policy` object:
 | `config_generation` | The generation recorded in `config.generation.json`. `0` means none recorded |
 | `applied` | `true` when the running gateway reports the same digest on `/health` |
 | `gateway_reported_digest` | The digest `/health` reported. Omitted when the gateway did not answer |
+| `last_reload_error` | `policy.last_reload_error` from `/health`: why the gateway kept an earlier policy instead of the config or asset on disk. Omitted when the last reload succeeded. `applied` is `false` while it is set |
+| `config_unrecorded` | `true` when `config.yaml` was changed outside the lifecycle: `config.generation.json` does not record it, and the running gateway may already enforce it. Omitted otherwise |
 
 ```json title="policy (a healthy host)"
 "policy": {
@@ -325,11 +327,20 @@ What the lifecycle does with it:
   release). `deployment.json` itself is not extended, because an earlier
   release decodes it strictly and must still read it after a rollback.
 - **Windows.** The Windows lifecycle migrates a `config_version: 8` config and
-  records the generation as actor `lifecycle`, but its results carry no
-  `policy` object in this release. Read the digest with
-  `enterprise policy show`, which prints a line such as
+  records the generation as actor `lifecycle`. Its `status`, `verify` and
+  `ensure` results carry the same `policy` object, and a changing action that
+  applied the policy writes `policy-state.json` next to `deployment.json` in
+  `C:\ProgramData\Cisco\DefenseClaw\install` with the same access control. You can also
+  read the digest with `enterprise policy show`, which prints a line such as
   `Effective policy sha256:7b38f1df3862, config generation 3` (and adds `policy`
   to `--json`), as in [Machine policy status](#machine-policy-status).
+- **Warnings on every action.** `policy_reload_failed` says the gateway rejected
+  the last policy change (a rule pack edited away from its pinned digest, for
+  example) and keeps enforcing an earlier one. `policy_not_buildable` says the
+  installed config and its assets no longer build into a policy; the gateway
+  keeps enforcing the earlier one. `config_edited_outside_lifecycle` says
+  `config.yaml` was changed by hand; run `ensure` with the intended config to
+  put the managed config back. None of them changes `ok`.
 - **Secure Client.** Nothing changes under the Secure Client profile: the
   gateway omits `policy` from `/health` and `/status`, and the lifecycle result
   has no `policy` object.
