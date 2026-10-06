@@ -53,6 +53,7 @@ type SandboxTelemetry interface {
 	RecordSandboxHealth(context.Context, SandboxHealthEvent) error
 	RecordSandboxFinding(context.Context, SandboxFindingEvent) error
 	RecordSandboxWorkspace(context.Context, SandboxWorkspaceEvent) error
+	RecordSandboxActivity(context.Context, SandboxActivityEvent) error
 }
 
 // SandboxPhase is the defenseclaw.sandbox.phase vocabulary: the OpenShell
@@ -144,6 +145,9 @@ type SandboxIdentity struct {
 	Phase SandboxPhase
 	// WorkdirMode is SandboxWorkdirMount or SandboxWorkdirCopy.
 	WorkdirMode string
+	// BindingID is the DefenseClaw ingress binding the sandbox's hooks and
+	// egress proxy credential authenticate with (never its token).
+	BindingID string
 }
 
 // SandboxLifecycleTrigger is what caused a lifecycle transition.
@@ -196,12 +200,45 @@ const (
 	SandboxEgressSourceProxy     SandboxEgressSource = "dc-egress-proxy"
 )
 
-// SandboxEgressEvent is one sandbox egress decision. It emits
-// log.egress.allowed or log.egress.blocked and increments
-// metric.defenseclaw.egress.events.
+// SandboxEgressEnd says how an allowed connection or request ended.
+type SandboxEgressEnd string
+
+const (
+	// SandboxEgressCompleted: the connection or request finished
+	// (log.egress.completed), with its byte counts and duration.
+	SandboxEgressCompleted SandboxEgressEnd = "completed"
+	// SandboxEgressFailed: the destination was allowed but DNS, the connect,
+	// TLS or the upstream failed (log.egress.failed).
+	SandboxEgressFailed SandboxEgressEnd = "failed"
+)
+
+// SandboxEgressEvent is one sandbox egress decision or, with End, the end
+// of an allowed connection. A decision emits log.egress.allowed or
+// log.egress.blocked and increments metric.defenseclaw.egress.events; an end
+// emits log.egress.completed or log.egress.failed and no metric (the
+// decision counted it).
 type SandboxEgressEvent struct {
 	Sandbox SandboxIdentity
 	Source  SandboxEgressSource
+	// End is empty for a decision.
+	End SandboxEgressEnd
+	// TimedOut marks a failure the proxy timed out on (End failed only):
+	// its outcome is timed_out rather than failed.
+	TimedOut bool
+	// BytesUp and BytesDown are the payload bytes an ended connection sent
+	// and received; Duration how long it took (completed and failed).
+	BytesUp   int64
+	BytesDown int64
+	Duration  time.Duration
+	// PID and Executable are the process OpenShell reported making the
+	// connection. The workload chooses both, so they are display text; an
+	// out-of-range PID or an executable that is not UTF-8 is omitted.
+	PID        int
+	Executable string
+	// ConversationID is the harness session the sandbox's hooks last named;
+	// it wins over the envelope's session for gen_ai.conversation.id. Both
+	// are agent-chosen and omitted when not a registered identifier.
+	ConversationID string
 	// Host is the destination the sandboxed agent named: a host name, an IP
 	// literal, or a host:port authority. It is canonicalized (port split off,
 	// lowercased, IDNA-encoded); a value that cannot be is recorded as
@@ -294,6 +331,11 @@ type SandboxApprovalEvent struct {
 	Reason    string
 	Severity  string
 	Timestamp time.Time
+	// UserID and UserName are the host account that launched the sandbox.
+	UserID   string
+	UserName string
+	// ConversationID is as SandboxEgressEvent's.
+	ConversationID string
 }
 
 // SandboxPolicyOperation is the registered defenseclaw.admin.operation of a
@@ -370,10 +412,6 @@ type SandboxFindingKind string
 const (
 	// SandboxFindingOCSF is an OpenShell OCSF FINDING event.
 	SandboxFindingOCSF SandboxFindingKind = "ocsf_finding"
-	// SandboxFindingBinaryDrift is a harness binary whose hash left its pin.
-	SandboxFindingBinaryDrift SandboxFindingKind = "binary_drift"
-	// SandboxFindingTamperAttempt is an attempt to alter hooks or managed config.
-	SandboxFindingTamperAttempt SandboxFindingKind = "tamper_attempt"
 	// SandboxFindingHookSilence is harness activity with no hook traffic.
 	SandboxFindingHookSilence SandboxFindingKind = "hook_silence"
 	// SandboxFindingHookTamper is a tool that ran without a DefenseClaw
@@ -386,6 +424,10 @@ const (
 	// its configuration could run code when version control runs there on
 	// the host.
 	SandboxFindingNestedRepo SandboxFindingKind = "nested_repo"
+	// SandboxFindingShadowAI is an AI API the sandbox reached (or tried to)
+	// that is neither its model provider nor its harness's vendor: a
+	// catalogued AI provider or an inference-shaped host.
+	SandboxFindingShadowAI SandboxFindingKind = "shadow_ai"
 )
 
 // SandboxFindingEvent is one sandbox security observation, emitted as
@@ -411,6 +453,9 @@ type SandboxFindingEvent struct {
 	// Confidence is in (0, 1]; 0 means not reported.
 	Confidence float64
 	Timestamp  time.Time
+	// UserID and UserName are the host account that launched the sandbox.
+	UserID   string
+	UserName string
 }
 
 // SandboxWorkspaceOperation is the workspace protection operation.
@@ -491,6 +536,73 @@ type SandboxWorkspaceEvent struct {
 	Timestamp time.Time
 }
 
+// SandboxActivityKind selects the family of a sandbox activity record.
+type SandboxActivityKind string
+
+const (
+	// SandboxActivityProcess is a process start or exit (log.sandbox.process).
+	SandboxActivityProcess SandboxActivityKind = "process"
+	// SandboxActivitySSH is an SSH listener or connection event of the
+	// sandbox (log.sandbox.ssh).
+	SandboxActivitySSH SandboxActivityKind = "ssh"
+	// SandboxActivityInference is a model call OpenShell's inference route
+	// reported (log.sandbox.inference).
+	SandboxActivityInference SandboxActivityKind = "inference"
+)
+
+// Registered sandbox process events and sources.
+const (
+	SandboxProcessStart = "start"
+	SandboxProcessExit  = "exit"
+
+	SandboxProcessSourceOpenShell = "openshell"
+	SandboxProcessSourceSampled   = "sampled"
+)
+
+// SandboxActivityEvent is one observation of what runs in, or reaches
+// into, a sandbox: a process start or exit, an SSH event, or a model call.
+// Kind selects the family and which fields apply; the rest are ignored.
+// Every value but the identity and the user comes from the workload or its
+// supervisor, so a value that does not fit its registered shape is omitted,
+// never allowed to fail the record.
+type SandboxActivityEvent struct {
+	Sandbox SandboxIdentity
+	Kind    SandboxActivityKind
+	// ProcessEvent is SandboxProcessStart or SandboxProcessExit (process,
+	// required); ProcessSource is SandboxProcessSource* (default openshell).
+	ProcessEvent  string
+	ProcessSource string
+	// PID and Executable name the process (process).
+	PID        int
+	Executable string
+	// CommandLine is the process's command line (process start); each
+	// destination's redaction profile governs it.
+	CommandLine string
+	// ExitCode is the exit code of an exited process, when reported.
+	ExitCode *int
+	// SSHActivity is OpenShell's SSH activity (LISTEN, OPEN, ...; ssh,
+	// required), SSHAllowed and SSHDenied its verdict when it reported one,
+	// SSHAuth the scheme and Peer the remote address.
+	SSHActivity string
+	SSHAllowed  bool
+	SSHDenied   bool
+	SSHAuth     string
+	Peer        string
+	// Provider, Model, Status, Latency and Operation describe a model call
+	// (inference). A status other than Success records a failed outcome.
+	Provider  string
+	Model     string
+	Status    string
+	Latency   time.Duration
+	Operation string
+	// UserID and UserName are the host account that launched the sandbox.
+	UserID   string
+	UserName string
+	// ConversationID is as SandboxEgressEvent's (process and inference).
+	ConversationID string
+	Timestamp      time.Time
+}
+
 // SandboxRecorder implements SandboxTelemetry on top of the Logger's bound v8
 // runtime. It also tracks the last recorded phase of each sandbox name so it
 // can supply the previous phase and publish the
@@ -540,6 +652,13 @@ const (
 	maxSandboxHostBytes          = 253
 	maxSandboxNetworkTargetBytes = 256 // defenseclaw.network.target_ref
 	maxSandboxPolicyTargetBytes  = 1024
+	maxSandboxBindingIDBytes     = 128
+	maxSandboxExecutableBytes    = 1024
+	maxSandboxCommandLineBytes   = 4096
+	maxSandboxActivityTokenBytes = 64
+	maxSandboxOperationBytes     = 128
+	maxSandboxPID                = 4194304
+	maxSandboxInferenceLatencyMs = 86400000
 )
 
 // sandboxInvalidHost is the target_ref of a destination that cannot be
@@ -614,7 +733,7 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-				DefenseClawSandboxPhase: string(identity.Phase), DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxPhase: string(identity.Phase), DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 				DefenseClawSandboxPhasePrevious:    optionalSandboxEnum(string(previous)),
 				DefenseClawSandboxLifecycleTrigger: optionalSandboxEnum(string(input.Trigger)),
 				DefenseClawSandboxExitCode:         exitCode,
@@ -645,11 +764,13 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 
 // RecordSandboxEgress emits log.egress.allowed or log.egress.blocked with the
 // sandbox correlation and increments metric.defenseclaw.egress.events with
-// source openshell or dc-egress-proxy. A blocked decision is mandatory. The
-// destination is agent-chosen, so no host or port value fails the record.
-// Neither does the session or agent ID: the agent fills both through the
-// correlation envelope, so a value that is not a registered identifier is
-// omitted (see sandboxAgentCorrelation).
+// source openshell or dc-egress-proxy, labelled with the sandbox's
+// connector. A blocked decision is mandatory. The end of an allowed
+// connection (End) emits log.egress.completed or log.egress.failed instead,
+// with no metric. The destination is agent-chosen, so no host or port value
+// fails the record. Neither does the session or agent ID: the agent fills
+// both through the correlation envelope or its hooks, so a value that is not
+// a registered identifier is omitted (see sandboxAgentCorrelation).
 func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input SandboxEgressEvent) error {
 	if err := recorder.ready(); err != nil {
 		return err
@@ -660,6 +781,24 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	}
 	if input.Source != SandboxEgressSourceOpenShell && input.Source != SandboxEgressSourceProxy {
 		return fmt.Errorf("audit: sandbox egress source %q is not registered", input.Source)
+	}
+	switch input.End {
+	case "":
+		if input.TimedOut {
+			return fmt.Errorf("audit: only a failed sandbox egress record times out")
+		}
+	case SandboxEgressCompleted, SandboxEgressFailed:
+		if input.Blocked {
+			return fmt.Errorf("audit: a blocked sandbox egress decision has no end")
+		}
+		if input.TimedOut && input.End != SandboxEgressFailed {
+			return fmt.Errorf("audit: only a failed sandbox egress record times out")
+		}
+	default:
+		return fmt.Errorf("audit: sandbox egress end %q is not registered", input.End)
+	}
+	if input.BytesUp < 0 || input.BytesDown < 0 || input.Duration < 0 {
+		return fmt.Errorf("audit: sandbox egress byte counts and duration must not be negative")
 	}
 	destination := canonicalSandboxDestination(input.Host, input.Port)
 	host, serverAddress, port := destination.ref(), destination.address(), destination.port
@@ -685,8 +824,15 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	fields := sandboxV8FieldsFor(identity)
 	event := recorder.newEvent(ctx, ActionSandboxEgress, identity, host, severity, input.Timestamp)
 	decision, eventName, outcome := "allow", observability.TelemetryEventEgressAllowed, observability.OutcomeAllowed
-	if input.Blocked {
+	switch {
+	case input.Blocked:
 		decision, eventName, outcome = "block", observability.TelemetryEventEgressBlocked, observability.OutcomeBlocked
+	case input.End == SandboxEgressCompleted:
+		eventName, outcome = observability.TelemetryEventEgressCompleted, observability.OutcomeCompleted
+	case input.End == SandboxEgressFailed && input.TimedOut:
+		eventName, outcome = observability.TelemetryEventEgressFailed, observability.OutcomeTimedOut
+	case input.End == SandboxEgressFailed:
+		eventName, outcome = observability.TelemetryEventEgressFailed, observability.OutcomeFailed
 	}
 	source := observability.Present(string(input.Source))
 	path := sandboxEgressPath(input.Path)
@@ -694,7 +840,15 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	reason := optionalSandboxText(input.Reason, maxSandboxEgressReasonBytes)
 	policyOutcome := optionalSandboxText(input.PolicyOutcome, maxSandboxEgressOutcomeBytes)
 	decisionCode := optionalNetworkIdentifier(input.DecisionCode)
-	conversationID, agentID := sandboxAgentCorrelation(event)
+	conversationID, agentID := sandboxAgentCorrelation(event, input.ConversationID)
+	bytesUp, bytesDown, duration := observability.Absent[int64](), observability.Absent[int64](), observability.Absent[int64]()
+	if input.End == SandboxEgressCompleted {
+		bytesUp, bytesDown = observability.Present(input.BytesUp), observability.Present(input.BytesDown)
+	}
+	if input.End != "" {
+		duration = observability.Present(input.Duration.Milliseconds())
+	}
+	actorPID, actorExe := optionalSandboxPID(input.PID), optionalSandboxText(input.Executable, maxSandboxExecutableBytes)
 	log := sandboxV8Log{
 		action: ActionSandboxEgress, event: event, bucket: observability.BucketNetworkEgress,
 		eventName: eventName, phase: "policy", outcome: outcome, mandatory: input.Blocked,
@@ -716,13 +870,22 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawNetworkReason: reason, DefenseClawNetworkSource: source,
 				DefenseClawNetworkBlocked: observability.Present(input.Blocked),
 				URLScheme:                 scheme, ServerAddress: serverAddress, ServerPort: port,
+				DefenseClawNetworkBytesUp: bytesUp, DefenseClawNetworkBytesDown: bytesDown,
+				DefenseClawNetworkDurationMs: duration,
+				DefenseClawSandboxProcessPid: actorPID, DefenseClawSandboxProcessExecutable: actorExe,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxBindingID: fields.bindingID,
 			}
-			if !input.Blocked {
+			switch eventName {
+			case observability.TelemetryEventEgressCompleted:
+				return builder.BuildLogEgressCompleted(observability.LogEgressCompletedInput(allowed))
+			case observability.TelemetryEventEgressFailed:
+				return builder.BuildLogEgressFailed(observability.LogEgressFailedInput(allowed))
+			case observability.TelemetryEventEgressAllowed:
 				return builder.BuildLogEgressAllowed(allowed)
 			}
 			return builder.BuildLogEgressBlocked(observability.LogEgressBlockedInput{
@@ -737,18 +900,22 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawNetworkReason: reason, DefenseClawNetworkSource: source,
 				DefenseClawNetworkBlocked: allowed.DefenseClawNetworkBlocked,
 				URLScheme:                 scheme, ServerAddress: allowed.ServerAddress, ServerPort: port,
+				DefenseClawSandboxProcessPid: actorPID, DefenseClawSandboxProcessExecutable: actorExe,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
-				MandatoryEnforcedOutcome: true,
+				DefenseClawSandboxBindingID: fields.bindingID,
+				MandatoryEnforcedOutcome:    true,
 			})
 		},
 	}
-	return recorder.emit(ctx, log, []RuntimeV8GeneratedMetric{
-		newSandboxEgressMetric(event, identity.Connector, decision, string(input.Source)),
-	})
+	var metrics []RuntimeV8GeneratedMetric
+	if input.End == "" {
+		metrics = append(metrics, newSandboxEgressMetric(event, identity.Connector, decision, string(input.Source)))
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // RecordSandboxApproval emits log.approval.requested or log.approval.resolved
@@ -811,7 +978,10 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 	reason := optionalSandboxText(input.Reason, maxSandboxFindingTextBytes)
 	kind := observability.Present(string(input.Kind))
 	risky := observability.Present(input.Risky)
-	conversationID, agentID := sandboxAgentCorrelation(event)
+	conversationID, agentID := sandboxAgentCorrelation(event, input.ConversationID)
+	userID := optionalNetworkIdentifier(input.UserID)
+	userKind := optionalNetworkUserIDKind(useridentity.KindForID(input.UserID))
+	userName := optionalNetworkIdentifier(input.UserName)
 	log := sandboxV8Log{
 		action: ActionSandboxApproval, event: event, bucket: observability.BucketComplianceActivity,
 		eventName: eventName, phase: "approval", outcome: outcome, mandatory: resolved,
@@ -822,8 +992,9 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 			if !resolved {
 				return builder.BuildLogApprovalRequested(observability.LogApprovalRequestedInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
-					GenAIConversationID:   conversationID,
-					GenAIAgentID:          agentID,
+					GenAIConversationID: conversationID,
+					GenAIAgentID:        agentID,
+					UserID:              userID, DefenseClawUserIDKind: userKind, DefenseClawUserName: userName,
 					DefenseClawApprovalID: approvalID, DefenseClawApprovalDangerous: risky,
 					DefenseClawGuardrailReason: reason, DefenseClawSandboxApprovalKind: kind,
 					ServerAddress: host, ServerPort: port,
@@ -831,13 +1002,14 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 				})
 			}
 			return builder.BuildLogApprovalResolved(observability.LogApprovalResolvedInput{
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
-				GenAIConversationID:   conversationID,
-				GenAIAgentID:          agentID,
+				GenAIConversationID: conversationID,
+				GenAIAgentID:        agentID,
+				UserID:              userID, DefenseClawUserIDKind: userKind, DefenseClawUserName: userName,
 				DefenseClawApprovalID: approvalID, DefenseClawApprovalResult: input.Result,
 				DefenseClawApprovalActorType: optionalSandboxEnum(input.ActorType),
 				DefenseClawApprovalDangerous: risky, DefenseClawGuardrailReason: reason,
@@ -848,7 +1020,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 				MandatoryApprovalResolution: true,
 			})
 		},
@@ -925,7 +1097,7 @@ func (recorder *SandboxRecorder) RecordSandboxPolicy(ctx context.Context, input 
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 				MandatoryControlPlaneMutation: true,
 			})
 		},
@@ -992,7 +1164,7 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 				MandatoryDurableHealthTransition: true,
 			}
 			switch eventName {
@@ -1010,7 +1182,7 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 					MandatoryDurableHealthTransition: true,
 				})
 			default:
@@ -1022,7 +1194,7 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 }
 
 // RecordSandboxFinding emits log.finding.observed for an OCSF FINDING event,
-// binary drift, a tamper attempt, hook silence, or a large-upload anomaly.
+// hook silence or tamper, a large upload, a nested repository, or shadow AI.
 func (recorder *SandboxRecorder) RecordSandboxFinding(ctx context.Context, input SandboxFindingEvent) error {
 	if err := recorder.ready(); err != nil {
 		return err
@@ -1080,11 +1252,14 @@ func (recorder *SandboxRecorder) RecordSandboxFinding(ctx context.Context, input
 				DefenseClawFindingTitle:             optionalSandboxText(input.Title, maxSandboxFindingTextBytes),
 				DefenseClawFindingDescription:       optionalSandboxText(input.Description, maxSandboxFindingTextBytes),
 				DefenseClawFindingRemediation:       optionalSandboxText(input.Remediation, maxSandboxFindingTextBytes),
+				UserID:                              optionalNetworkIdentifier(input.UserID),
+				DefenseClawUserIDKind:               optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
+				DefenseClawUserName:                 optionalNetworkIdentifier(input.UserName),
 				DefenseClawSandboxID:                fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 			})
 		},
 	}
@@ -1175,7 +1350,7 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
-				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
 				DefenseClawEnforcementEffectiveAction:   observability.Present(string(input.Operation)),
 				DefenseClawEnforcementInitiator:         optionalSandboxEnum(initiator),
 				DefenseClawEnforcementFailureClass:      optionalSandboxEnum(input.FailureClass),
@@ -1195,6 +1370,173 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 		},
 	}
 	return recorder.emit(ctx, log, nil)
+}
+
+// RecordSandboxActivity emits log.sandbox.process, log.sandbox.ssh or
+// log.sandbox.inference (by Kind). None is mandatory: the manager bounds
+// them per sandbox, and a route's collection settings decide whether they
+// leave the host. Only the sandbox identity can fail the record; every
+// workload-reported value that does not fit is omitted.
+func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, input SandboxActivityEvent) error {
+	if err := recorder.ready(); err != nil {
+		return err
+	}
+	identity := input.Sandbox
+	if err := identity.validate(true); err != nil {
+		return err
+	}
+	var (
+		eventName string
+		bucket    observability.Bucket
+		outcome   observability.Outcome
+		target    = identity.Name
+	)
+	switch input.Kind {
+	case SandboxActivityProcess:
+		eventName, bucket = observability.TelemetryEventSandboxProcess, observability.BucketToolActivity
+		switch input.ProcessEvent {
+		case SandboxProcessStart:
+			outcome = observability.OutcomeAttempted
+		case SandboxProcessExit:
+			outcome = observability.OutcomeCompleted
+			if input.ExitCode != nil && *input.ExitCode != 0 {
+				outcome = observability.OutcomeFailed
+			}
+		default:
+			return fmt.Errorf("audit: sandbox process event %q is not registered", input.ProcessEvent)
+		}
+		switch input.ProcessSource {
+		case "", SandboxProcessSourceOpenShell, SandboxProcessSourceSampled:
+		default:
+			return fmt.Errorf("audit: sandbox process source %q is not registered", input.ProcessSource)
+		}
+	case SandboxActivitySSH:
+		eventName, bucket = observability.TelemetryEventSandboxSsh, observability.BucketComplianceActivity
+		if !sandboxIdentifier(strings.TrimSpace(input.SSHActivity), maxSandboxActivityTokenBytes) {
+			return fmt.Errorf("audit: a sandbox ssh record requires its activity")
+		}
+		switch {
+		case input.SSHDenied:
+			outcome = observability.OutcomeBlocked
+		case input.SSHAllowed:
+			outcome = observability.OutcomeAllowed
+		default:
+			outcome = observability.OutcomeCompleted
+		}
+	case SandboxActivityInference:
+		eventName, bucket = observability.TelemetryEventSandboxInference, observability.BucketModelIO
+		outcome = observability.OutcomeCompleted
+		if !strings.EqualFold(strings.TrimSpace(input.Status), "success") {
+			outcome = observability.OutcomeFailed
+		}
+	default:
+		return fmt.Errorf("audit: sandbox activity kind %q is not registered", input.Kind)
+	}
+	fields := sandboxV8FieldsFor(identity)
+	event := recorder.newEvent(ctx, ActionSandboxActivity, identity, target, "INFO", input.Timestamp)
+	conversationID, _ := sandboxAgentCorrelation(event, input.ConversationID)
+	userID := optionalNetworkIdentifier(input.UserID)
+	userKind := optionalNetworkUserIDKind(useridentity.KindForID(input.UserID))
+	userName := optionalNetworkIdentifier(input.UserName)
+	log := sandboxV8Log{
+		action: ActionSandboxActivity, event: event, bucket: bucket, eventName: eventName, phase: "activity", outcome: outcome,
+		build: func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput,
+			severity observability.Optional[observability.Severity], logLevel observability.Optional[observability.LogLevel],
+		) (observability.Record, error) {
+			switch input.Kind {
+			case SandboxActivityProcess:
+				source := input.ProcessSource
+				if source == "" {
+					source = SandboxProcessSourceOpenShell
+				}
+				exitCode := observability.Absent[int64]()
+				if input.ExitCode != nil && input.ProcessEvent == SandboxProcessExit {
+					exitCode = observability.Present(int64(*input.ExitCode))
+				}
+				commandLine := observability.Absent[string]()
+				if input.ProcessEvent == SandboxProcessStart {
+					commandLine = optionalSandboxText(input.CommandLine, maxSandboxCommandLineBytes)
+				}
+				return builder.BuildLogSandboxProcess(observability.LogSandboxProcessInput{
+					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
+					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
+					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
+					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+					DefenseClawSandboxBindingID:          fields.bindingID,
+					DefenseClawSandboxProcessEvent:       input.ProcessEvent,
+					DefenseClawSandboxProcessSource:      observability.Present(source),
+					DefenseClawSandboxProcessPid:         optionalSandboxPID(input.PID),
+					DefenseClawSandboxProcessExecutable:  optionalSandboxText(input.Executable, maxSandboxExecutableBytes),
+					DefenseClawSandboxProcessCommandLine: commandLine,
+					DefenseClawSandboxProcessExitCode:    exitCode,
+					UserID:                               userID, DefenseClawUserIDKind: userKind, DefenseClawUserName: userName,
+					GenAIConversationID: conversationID,
+				})
+			case SandboxActivitySSH:
+				return builder.BuildLogSandboxSsh(observability.LogSandboxSshInput{
+					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
+					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
+					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
+					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+					DefenseClawSandboxBindingID:   fields.bindingID,
+					DefenseClawSandboxSshActivity: strings.TrimSpace(input.SSHActivity),
+					DefenseClawSandboxSshAuth:     optionalSandboxToken(input.SSHAuth, maxSandboxActivityTokenBytes),
+					ClientAddress:                 optionalSandboxPeer(input.Peer),
+					UserID:                        userID, DefenseClawUserIDKind: userKind, DefenseClawUserName: userName,
+				})
+			default:
+				latency := observability.Absent[int64]()
+				if ms := input.Latency.Milliseconds(); ms >= 0 && ms <= maxSandboxInferenceLatencyMs && input.Latency > 0 {
+					latency = observability.Present(ms)
+				}
+				return builder.BuildLogSandboxInference(observability.LogSandboxInferenceInput{
+					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
+					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
+					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
+					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+					DefenseClawSandboxBindingID:          fields.bindingID,
+					GenAIProviderName:                    optionalSandboxText(strings.ToLower(input.Provider), maxSandboxOperationBytes),
+					GenAIRequestModel:                    optionalSandboxToken(input.Model, 256),
+					DefenseClawSandboxInferenceStatus:    optionalSandboxToken(input.Status, maxSandboxActivityTokenBytes),
+					DefenseClawSandboxInferenceLatencyMs: latency,
+					DefenseClawSandboxInferenceOperation: optionalSandboxToken(input.Operation, maxSandboxOperationBytes),
+					UserID:                               userID, DefenseClawUserIDKind: userKind, DefenseClawUserName: userName,
+					GenAIConversationID: conversationID,
+				})
+			}
+		},
+	}
+	return recorder.emit(ctx, log, nil)
+}
+
+// optionalSandboxToken keeps a workload-reported token that is a bounded
+// identifier, else omits it.
+func optionalSandboxToken(value string, maxBytes int) observability.Optional[string] {
+	value = strings.TrimSpace(value)
+	if !sandboxIdentifier(value, maxBytes) {
+		return observability.Absent[string]()
+	}
+	return observability.Present(value)
+}
+
+// optionalSandboxPeer is the address of a sandbox SSH peer as
+// client.address: an IP literal (its port dropped), else omitted.
+func optionalSandboxPeer(value string) observability.Optional[string] {
+	value = strings.TrimSpace(value)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		value = host
+	}
+	ip := parseSandboxIP(strings.Trim(value, "[]"))
+	if ip == nil {
+		return observability.Absent[string]()
+	}
+	return observability.Present(sandboxIPIdentifier(ip))
 }
 
 // sandboxV8Log is one audit-owned generated log occurrence. The family is
@@ -1382,6 +1724,7 @@ type sandboxActiveCount struct {
 type sandboxV8Fields struct {
 	id, name, runtime, driver, imageDigest observability.Optional[string]
 	profile, pack, phase, workdirMode      observability.Optional[string]
+	bindingID                              observability.Optional[string]
 	policyVersion                          observability.Optional[int64]
 }
 
@@ -1391,7 +1734,7 @@ func sandboxV8FieldsFor(identity SandboxIdentity) sandboxV8Fields {
 		runtime: optionalSandboxEnum(identity.Runtime), driver: optionalSandboxEnum(identity.Driver),
 		imageDigest: optionalSandboxEnum(identity.ImageDigest), profile: optionalSandboxEnum(identity.Profile),
 		pack: optionalSandboxEnum(identity.Pack), phase: optionalSandboxEnum(string(identity.Phase)),
-		workdirMode: optionalSandboxEnum(identity.WorkdirMode),
+		workdirMode: optionalSandboxEnum(identity.WorkdirMode), bindingID: optionalSandboxEnum(identity.BindingID),
 	}
 	if identity.PolicyVersion > 0 {
 		fields.policyVersion = observability.Present(int64(identity.PolicyVersion))
@@ -1410,6 +1753,9 @@ func (identity SandboxIdentity) validate(requireName bool) error {
 	}
 	if identity.ID != "" && !sandboxIdentifier(identity.ID, maxSandboxIDBytes) {
 		return fmt.Errorf("audit: sandbox id is not a bounded identifier")
+	}
+	if identity.BindingID != "" && !sandboxIdentifier(identity.BindingID, maxSandboxBindingIDBytes) {
+		return fmt.Errorf("audit: sandbox binding id is not a bounded identifier")
 	}
 	if identity.Connector != "" && !observability.IsStableToken(identity.Connector) {
 		return fmt.Errorf("audit: sandbox connector %q is not a stable token", identity.Connector)
@@ -1470,8 +1816,8 @@ func (operation SandboxPolicyOperation) valid() bool {
 
 func (kind SandboxFindingKind) valid() bool {
 	switch kind {
-	case SandboxFindingOCSF, SandboxFindingBinaryDrift, SandboxFindingTamperAttempt,
-		SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload, SandboxFindingNestedRepo:
+	case SandboxFindingOCSF, SandboxFindingHookSilence, SandboxFindingHookTamper, SandboxFindingLargeUpload,
+		SandboxFindingNestedRepo, SandboxFindingShadowAI:
 		return true
 	default:
 		return false
@@ -1479,7 +1825,7 @@ func (kind SandboxFindingKind) valid() bool {
 }
 
 // defaultRuleID is the stable rule identity of a finding kind, for example
-// SANDBOX-BINARY-DRIFT.
+// SANDBOX-SHADOW-AI.
 func (kind SandboxFindingKind) defaultRuleID() string {
 	return "SANDBOX-" + strings.ToUpper(strings.ReplaceAll(string(kind), "_", "-"))
 }
@@ -1791,13 +2137,27 @@ func sandboxIPIdentifier(ip net.IP) string {
 }
 
 // sandboxAgentCorrelation projects the envelope's session and agent IDs onto
-// gen_ai.conversation.id and gen_ai.agent.id. The agent chooses both (the
-// session header and the hook payload's session_id feed the envelope), so a
-// value that is not a registered identifier is omitted rather than allowed
-// to fail the record. The record's correlation keeps the envelope's IDs
-// unchanged, as every producer's does, so the request's records still join.
-func sandboxAgentCorrelation(event Event) (conversationID, agentID observability.Optional[string]) {
-	return optionalNetworkIdentifier(event.SessionID), optionalNetworkIdentifier(event.AgentID)
+// gen_ai.conversation.id and gen_ai.agent.id; session, the harness session
+// the sandbox's hooks last named, wins over the envelope's. The agent
+// chooses all of them (the session header and the hook payload's session_id
+// feed the envelope), so a value that is not a registered identifier is
+// omitted rather than allowed to fail the record. The record's correlation
+// keeps the envelope's IDs unchanged, as every producer's does, so the
+// request's records still join.
+func sandboxAgentCorrelation(event Event, session string) (conversationID, agentID observability.Optional[string]) {
+	conversationID = optionalNetworkIdentifier(event.SessionID)
+	if strings.TrimSpace(session) != "" {
+		conversationID = optionalNetworkIdentifier(session)
+	}
+	return conversationID, optionalNetworkIdentifier(event.AgentID)
+}
+
+// optionalSandboxPID keeps a sandbox process ID within its registered range.
+func optionalSandboxPID(pid int) observability.Optional[int64] {
+	if pid <= 0 || pid > maxSandboxPID {
+		return observability.Absent[int64]()
+	}
+	return observability.Present(int64(pid))
 }
 
 // sandboxEgressPath keeps only an origin-form path: userinfo cannot appear in
@@ -2013,8 +2373,9 @@ func newSandboxEgressMetric(event Event, connector, decision, source string) Run
 			}
 			return builder.BuildMetricDefenseClawEgressEvents(observability.MetricDefenseClawEgressEventsInput{
 				Envelope: envelope, Value: 1,
-				DefenseClawMetricDecision: observability.Present(decision),
-				DefenseClawMetricSource:   observability.Present(source),
+				DefenseClawMetricDecision:  observability.Present(decision),
+				DefenseClawMetricSource:    observability.Present(source),
+				DefenseClawConnectorSource: optionalSandboxEnum(connector),
 			})
 		},
 	}

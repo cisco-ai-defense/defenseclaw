@@ -81,6 +81,7 @@ classes:
       ActionSandboxPolicy: "sandbox-policy"
       ActionSandboxHealth: "sandbox-health"
       ActionSandboxFinding: "sandbox-finding"
+      ActionSandboxActivity: "sandbox-activity"
       ActionSidecarStart: "sidecar-start"
       ActionSidecarStop: "sidecar-stop"
       ActionSidecarConnected: "sidecar-connected"
@@ -289,7 +290,7 @@ classes:
       "defenseclaw.connector.hook.outcome": {type: "counter", unit: "{decision}", labels: ["action", "connector", "event_type", "severity", "would_block"]}
       "defenseclaw.connector.hook.tokens": {type: "counter", unit: "{token}", labels: ["connector", "kind", "model"]}
       "defenseclaw.connector.hook.unified_dispatch": {type: "counter", unit: "{invocation}", labels: ["connector"]}
-      "defenseclaw.egress.events": {type: "counter", unit: "{event}", labels: ["branch", "decision", "source"]}
+      "defenseclaw.egress.events": {type: "counter", unit: "{event}", labels: ["branch", "connector", "decision", "source"]}
       "defenseclaw.gateway.errors": {type: "counter", unit: "{error}", labels: ["error.code", "error.subsystem"]}
       "defenseclaw.gateway.events.emitted": {type: "counter", unit: "{event}", labels: ["event_type", "severity"]}
       "defenseclaw.gateway.forwarded_headers": {type: "counter", unit: "{header}", labels: ["path", "result"]}

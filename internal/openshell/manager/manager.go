@@ -769,6 +769,9 @@ func (nopTelemetry) RecordSandboxFinding(context.Context, audit.SandboxFindingEv
 func (nopTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspaceEvent) error {
 	return nil
 }
+func (nopTelemetry) RecordSandboxActivity(context.Context, audit.SandboxActivityEvent) error {
+	return nil
+}
 
 // truncate cuts s to at most n bytes without splitting a UTF-8 sequence, so
 // valid text stays valid in the telemetry, feed and API fields it bounds.
