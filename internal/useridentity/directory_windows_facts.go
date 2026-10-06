@@ -35,14 +35,6 @@ const (
 	entraUserSIDPrefix    = "S-1-12-1-"
 )
 
-// Windows join types reported in DirectoryFacts.JoinType.
-const (
-	JoinTypeAD        = "ad"
-	JoinTypeEntra     = "entra"
-	JoinTypeHybrid    = "hybrid"
-	JoinTypeWorkgroup = "workgroup"
-)
-
 // windowsDirectoryReader is the OS state the Windows resolver reads.
 type windowsDirectoryReader interface {
 	// StringValue reads one REG_SZ value under HKLM.
@@ -61,9 +53,9 @@ type windowsDirectoryReader interface {
 	DNSDomain() string
 }
 
-// windowsJoinState is the machine's join state.
+// windowsJoinState is the machine's join state: the Entra tenant and the AD
+// domain it is joined to, either or both.
 type windowsJoinState struct {
-	JoinType  string
 	TenantID  string
 	ADDomain  string
 	DNSDomain string
@@ -91,16 +83,6 @@ func readWindowsJoinState(r windowsDirectoryReader) windowsJoinState {
 		state.ADDomain = strings.TrimSpace(domain)
 		state.DNSDomain = strings.TrimSpace(r.DNSDomain())
 	}
-	switch {
-	case adJoined && state.TenantID != "":
-		state.JoinType = JoinTypeHybrid
-	case adJoined:
-		state.JoinType = JoinTypeAD
-	case state.TenantID != "":
-		state.JoinType = JoinTypeEntra
-	default:
-		state.JoinType = JoinTypeWorkgroup
-	}
 	return state
 }
 
@@ -127,7 +109,6 @@ func resolveWindowsDirectoryFacts(
 		return DirectoryFacts{}
 	}
 	join := readWindowsJoinState(r)
-	facts.JoinType = join.JoinType
 	account, domain, ok := r.LookupAccount(sid)
 	upn, provider := identityStoreUPN(r, sid)
 	switch {
@@ -143,8 +124,11 @@ func resolveWindowsDirectoryFacts(
 	case ok && strings.EqualFold(domain, r.ComputerName()):
 		facts.Directory = DirectoryLocal
 	case ok && domain != "":
+		// The domain is reported in lower case, by its DNS name when it is
+		// the machine's own domain, as SSSD and winbind report it on
+		// Linux; LookupAccountSid gives only the NetBIOS name.
 		facts.Directory = DirectoryActiveDirectory
-		facts.Domain = domain
+		facts.Domain = strings.ToLower(domain)
 		if upn != "" && strings.EqualFold(provider, entraProviderName) {
 			// A hybrid user signed in to Entra: the identity store has the
 			// cloud UPN, which is the synced AD UPN.
@@ -158,6 +142,7 @@ func resolveWindowsDirectoryFacts(
 			// The account is in the machine's own domain, whose DNS name
 			// is the Kerberos realm.
 			facts.Realm = strings.ToUpper(join.DNSDomain)
+			facts.Domain = strings.ToLower(join.DNSDomain)
 		}
 	default:
 		return DirectoryFacts{}

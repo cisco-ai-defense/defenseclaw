@@ -65,9 +65,6 @@ func mergeSpoolFacts(own, spool useridentity.DirectoryFacts) useridentity.Direct
 	if spool.TenantID != "" {
 		merged.TenantID = spool.TenantID
 	}
-	if spool.JoinType != "" {
-		merged.JoinType = spool.JoinType
-	}
 	if len(merged.Groups) == 0 {
 		merged.Groups = spool.Groups
 	}

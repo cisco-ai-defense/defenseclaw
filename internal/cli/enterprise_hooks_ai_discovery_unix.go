@@ -47,9 +47,42 @@ var enterpriseHookAIDiscoveryState struct {
 
 func init() {
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
+		run.Rows = enterpriseHookEnrolledAccountRows(stderr, run)
 		startEnterpriseHookAIDiscovery(ctx, stderr, run)
 		startEnterpriseHookIdentitySpool(ctx, stderr, run)
 	}
+}
+
+// enterpriseHookEnrolledAccountRows is the run's rows plus one row for each
+// eligible account the enumerator published that has none. Rows exist only
+// for per-user hook connectors: a deployment that selects only the
+// machine-policy connectors (Claude Code, Codex) has none, and its enrolled
+// accounts still need their identity records and per-user scans (GAP-0021).
+func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
+	rows := append([]enterpriseHookReconcileRow(nil), run.Rows...)
+	manifest := strings.TrimSpace(run.Manifest)
+	if manifest == "" {
+		return rows
+	}
+	accounts, err := enterpriseHookLoadEligibleAccounts(enterprisehooks.UnixEligibleAccountsPath(manifest))
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] eligible accounts: %v\n", err)
+		return rows
+	}
+	seen := map[int]bool{}
+	for _, row := range rows {
+		seen[row.UID] = true
+	}
+	for _, account := range accounts {
+		if account.UID <= 0 || seen[account.UID] {
+			continue
+		}
+		seen[account.UID] = true
+		rows = append(rows, enterpriseHookReconcileRow{
+			User: account.User, UserHome: account.Home, UID: account.UID, HomeInode: account.HomeInode, OK: true,
+		})
+	}
+	return rows
 }
 
 // startEnterpriseHookAIDiscovery starts a pass in the background when one is

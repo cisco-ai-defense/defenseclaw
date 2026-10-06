@@ -1,0 +1,42 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"runtime"
+	"testing"
+)
+
+// A managed host has no Python CLI: `enterprise <platform> profile-explain`
+// asks the managed gateway for the same answer as `defenseclaw guardrail
+// profile explain` (GAP-0022, GAP-0023).
+func TestEnterpriseProfileExplainReadsTheManagedGateway(t *testing.T) {
+	previous := enterpriseIdentityViewGet
+	t.Cleanup(func() { enterpriseIdentityViewGet = previous })
+	var asked string
+	enterpriseIdentityViewGet = func(path string, out any) (string, error) {
+		asked = path
+		return "127.0.0.1:18970", json.Unmarshal([]byte(`{"profile":"ml-team","match":"group"}`), out)
+	}
+	platform := runtime.GOOS
+	if platform == "darwin" {
+		platform = "macos"
+	}
+	cmd := newEnterpriseIdentityViewCommand(platform, enterpriseIdentityViews[0])
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--user", "alice@corp.example", "--connector", "codex"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if asked != "/api/v1/guardrail/profiles/resolve?connector=codex&user=alice%40corp.example" {
+		t.Fatalf("asked the gateway for %q", asked)
+	}
+	if out.String() != "{\n  \"profile\": \"ml-team\",\n  \"match\": \"group\"\n}\n" {
+		t.Fatalf("printed %q", out.String())
+	}
+}

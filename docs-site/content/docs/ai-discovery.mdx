@@ -316,8 +316,11 @@ enabled:
 These per-user scans run on Linux and macOS. On Windows the gateway service
 scans every enrolled user's profile itself: the hook enumerator grants the
 service read access to each user's agent folders (`.claude`, `.codex`,
-`.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others), and
-nothing else in the profile. A folder on an enrolled connector's hook path
+`.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others) and to
+the IDE folders the [IDE plugin inventory](#ide-plugin-inventory) reads
+(`.vscode\extensions` and the forks', `%APPDATA%\Code\User\globalStorage`
+and `profiles`, `%APPDATA%\JetBrains`, `%LOCALAPPDATA%\Microsoft\VisualStudio`,
+Zed, Neovim, `vimfiles` and `.eclipse`), and nothing else in the profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
 it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
@@ -363,6 +366,8 @@ Each row carries its user: the home's owner, or on a managed host the account
 the guardian scanned. The standalone enterprise per-user scans include the
 IDE inventory on Linux and macOS; on Windows the gateway reads each enrolled
 profile's IDE folders, and Visual Studio installs under Program Files. A
+managed Windows gateway does not read VS Code-family remote servers,
+`%LOCALAPPDATA%\JetBrains` or Android Studio folders in a profile. A
 per-user install inventories only its own user's home.
 
 Set the scope with `ai_discovery.ide_inventory`:
@@ -381,6 +386,13 @@ defenseclaw agent ide-plugins --user alice --ai-only
 defenseclaw agent ide-plugins --ide cursor --json
 defenseclaw aibom scan --only ide_plugins
 ```
+
+A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
+or macOS host, `defenseclaw-gateway enterprise linux ide-plugins` (or
+`enterprise macos ide-plugins`) prints the managed gateway's inventory as
+JSON, with the same `--user`, `--ide`, `--ai-only` and `--cursor` filters.
+On a managed Windows computer, `defenseclaw.exe enterprise windows
+ide-plugins` does the same from an elevated prompt.
 
 - `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's plugins,
   filtered by `user` (account name or ID), `ide` (product or family) and
