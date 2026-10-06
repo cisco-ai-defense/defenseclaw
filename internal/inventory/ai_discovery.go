@@ -2105,10 +2105,10 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 	return out
 }
 
-// readMCPServerNamesWithErr wraps readMCPServerNames with the parser's
-// error state so signalFromMCPConfigPath can distinguish
-// "unparseable" from "no servers declared". The plain readMCPServerNames
-// remains for callers that don't need the reason.
+// readMCPServerNamesWithErr parses path with the format-specific reader
+// and returns the declared MCP server names, with the parser's error so
+// signalFromMCPConfigPath can tell "unparseable" from "no servers
+// declared".
 func readMCPServerNamesWithErr(path string) ([]string, error) {
 	// An empty MCP config declares no server; it is not malformed.
 	// Antigravity leaves a 0-byte mcp_config.json, which read as a
@@ -2141,24 +2141,6 @@ func isBlankFile(path string) bool {
 	}
 	raw, err := os.ReadFile(path) // #nosec G304 -- catalog MCP config path
 	return err == nil && strings.TrimSpace(string(raw)) == ""
-}
-
-// readMCPServerNames parses `path` with the appropriate format-specific
-// reader and returns the declared MCP server names. Best-effort: an
-// unreadable/unparseable/format-unknown file yields nil.
-func readMCPServerNames(path string) []string {
-	entries, err := parseMCPConfigForNames(path)
-	if err != nil || len(entries) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		name := strings.TrimSpace(e.Name)
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 // parseMCPConfigForNames dispatches to the right config parser for
@@ -4600,21 +4582,6 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 	return managed.WriteServiceRuntimeFile(
 		managed.PinnedDeploymentMode(), s.path, "ai discovery state", payload,
 	)
-}
-
-// processNames is kept for backward compatibility with existing
-// callers and tests that only care about the process basename. The
-// new code path (detectProcesses) uses processSnapshot() instead.
-func processNames() ([]string, error) {
-	infos, err := processSnapshot()
-	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(infos))
-	for _, p := range infos {
-		out = append(out, p.Comm)
-	}
-	return out, nil
 }
 
 // processCommExactlyEquals reports whether `have` is byte-for-byte
