@@ -16,10 +16,7 @@
 
 package config
 
-import (
-	"fmt"
-	"strings"
-)
+import "fmt"
 
 func DefaultSkillActions() SkillActionsConfig {
 	return SkillActionsConfig{
@@ -29,38 +26,6 @@ func DefaultSkillActions() SkillActionsConfig {
 		Low:      SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone},
 		Info:     SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone},
 	}
-}
-
-// ForSeverity returns the configured action for a given severity string.
-// Severity is matched case-insensitively; unknown values fall back to the Info action.
-func (a *SkillActionsConfig) ForSeverity(severity string) SeverityAction {
-	switch strings.ToUpper(severity) {
-	case "CRITICAL":
-		return a.Critical
-	case "HIGH":
-		return a.High
-	case "MEDIUM":
-		return a.Medium
-	case "LOW":
-		return a.Low
-	default:
-		return a.Info
-	}
-}
-
-// ShouldDisable returns true if the runtime action for the given severity is "disable".
-func (a *SkillActionsConfig) ShouldDisable(severity string) bool {
-	return a.ForSeverity(severity).Runtime == RuntimeDisable
-}
-
-// ShouldQuarantine returns true if the file action for the given severity is "quarantine".
-func (a *SkillActionsConfig) ShouldQuarantine(severity string) bool {
-	return a.ForSeverity(severity).File == FileActionQuarantine
-}
-
-// ShouldInstallBlock returns true if the install action for the given severity is "block".
-func (a *SkillActionsConfig) ShouldInstallBlock(severity string) bool {
-	return a.ForSeverity(severity).Install == InstallBlock
 }
 
 func (a *SkillActionsConfig) Validate() error {
@@ -86,25 +51,6 @@ func DefaultMCPActions() MCPActionsConfig {
 	}
 }
 
-func (a *MCPActionsConfig) ForSeverity(severity string) SeverityAction {
-	switch strings.ToUpper(severity) {
-	case "CRITICAL":
-		return a.Critical
-	case "HIGH":
-		return a.High
-	case "MEDIUM":
-		return a.Medium
-	case "LOW":
-		return a.Low
-	default:
-		return a.Info
-	}
-}
-
-func (a *MCPActionsConfig) ShouldInstallBlock(severity string) bool {
-	return a.ForSeverity(severity).Install == InstallBlock
-}
-
 func (a *MCPActionsConfig) Validate() error {
 	return validateActions("mcp_actions", []struct {
 		label  string
@@ -126,33 +72,6 @@ func DefaultPluginActions() PluginActionsConfig {
 		Low:      SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone},
 		Info:     SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone},
 	}
-}
-
-func (a *PluginActionsConfig) ForSeverity(severity string) SeverityAction {
-	switch strings.ToUpper(severity) {
-	case "CRITICAL":
-		return a.Critical
-	case "HIGH":
-		return a.High
-	case "MEDIUM":
-		return a.Medium
-	case "LOW":
-		return a.Low
-	default:
-		return a.Info
-	}
-}
-
-func (a *PluginActionsConfig) ShouldDisable(severity string) bool {
-	return a.ForSeverity(severity).Runtime == RuntimeDisable
-}
-
-func (a *PluginActionsConfig) ShouldQuarantine(severity string) bool {
-	return a.ForSeverity(severity).File == FileActionQuarantine
-}
-
-func (a *PluginActionsConfig) ShouldInstallBlock(severity string) bool {
-	return a.ForSeverity(severity).Install == InstallBlock
 }
 
 func (a *PluginActionsConfig) Validate() error {

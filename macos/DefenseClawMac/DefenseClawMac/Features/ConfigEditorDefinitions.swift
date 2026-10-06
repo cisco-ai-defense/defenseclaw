@@ -153,6 +153,25 @@ enum ConfigEditorCatalog {
     ]
     static let detectionStrategies = ["regex_only", "regex_judge", "judge_first"]
 
+    /// admission.<type>.actions.<severity> as a shorthand; blank inherits
+    /// (admission.defaults, then the built-in default).
+    private static func admissionActionFields() -> [ConfigEditorField] {
+        var out: [ConfigEditorField] = [
+            .init(label: "Allow List Bypass", key: "admission.defaults.allow_list_bypass_scan", kind: .bool,
+                  hint: "Allow-listed assets skip the install scan."),
+        ]
+        for assetType in ["defaults", "skill", "mcp", "plugin"] {
+            out.append(.init(label: ".. \(assetType.uppercased()) ..", key: "", kind: .header))
+            for severity in ["critical", "high", "medium", "low", "info"] {
+                let label = severity.prefix(1).uppercased() + severity.dropFirst()
+                out.append(.init(label: label, key: "admission.\(assetType).actions.\(severity)", kind: .choice,
+                                 options: ["", "block", "quarantine", "warn", "allow"],
+                                 hint: "On \(severity.uppercased()): blank inherits."))
+            }
+        }
+        return out
+    }
+
     /// Seven-field "<Component> LLM Override" group (TUI _component_llm_fields).
     private static func llmOverrideFields(_ title: String, _ prefix: String) -> [ConfigEditorField] {
         [
@@ -185,30 +204,6 @@ enum ConfigEditorCatalog {
             .init(label: "Component Scan Interval (min)", key: "\(prefix).component_scan_interval_minutes",
                   kind: .int, hint: "Minimum minutes between repeated scans."),
         ]
-    }
-
-    /// Severity → file/runtime/install action matrix (TUI action_matrix_fields).
-    private static func actionMatrixFields(_ prefix: String) -> [ConfigEditorField] {
-        var out: [ConfigEditorField] = [
-            .init(label: ".. \(prefix.replacingOccurrences(of: "_", with: " ").uppercased()) (severity -> file / runtime / install) ..",
-                  key: "", kind: .header,
-                  headerValue: "file: quarantine/none; runtime: enable/disable; install: none/block/allow"),
-        ]
-        for severity in ["critical", "high", "medium", "low", "info"] {
-            let label = severity.prefix(1).uppercased() + severity.dropFirst()
-            out += [
-                .init(label: "\(label) - file", key: "\(prefix).\(severity).file", kind: .choice,
-                      options: ["none", "quarantine"],
-                      hint: "On \(severity.uppercased()): quarantine moves the artifact; none leaves it in place."),
-                .init(label: "\(label) - runtime", key: "\(prefix).\(severity).runtime", kind: .choice,
-                      options: ["enable", "disable"],
-                      hint: "On \(severity.uppercased()): disable stops runtime invocation."),
-                .init(label: "\(label) - install", key: "\(prefix).\(severity).install", kind: .choice,
-                      options: ["none", "block", "allow"],
-                      hint: "On \(severity.uppercased()): block/allow pins the install decision."),
-            ]
-        }
-        return out
     }
 
     /// The `openshell:` keys (OpenShell 0.1 sandboxes), a port of the TUI's
@@ -477,7 +472,8 @@ enum ConfigEditorCatalog {
                   options: [""] + detectionStrategies, hint: "Completion override; blank=inherit."),
             .init(label: "Strategy (Tool Call)", key: "guardrail.detection_strategy_tool_call", kind: .choice,
                   options: [""] + detectionStrategies, hint: "Tool-call override; blank=inherit."),
-            .init(label: "Rule Pack Dir", key: "guardrail.rule_pack_dir", hint: "Path to active rule pack."),
+            .init(label: "Rule Pack", key: "guardrail.rule_pack",
+                  hint: "default, strict, permissive or a guardrail.custom_packs name."),
             .init(label: "Judge Sweep", key: "guardrail.judge_sweep", kind: .bool,
                   hint: "Judge all requests in regex_only mode."),
             .init(label: ".. LLM Judge ..", key: "", kind: .header),
@@ -510,8 +506,8 @@ enum ConfigEditorCatalog {
                 .init(label: ".. \(friendlyConnectorName(connector)) Override ..", key: "", kind: .header),
                 .init(label: "Mode", key: "guardrail.connectors.\(connector).mode", kind: .choice,
                       options: ["observe", "action"], hint: "Per-connector mode."),
-                .init(label: "Rule Pack Dir", key: "guardrail.connectors.\(connector).rule_pack_dir",
-                      hint: "Per-connector rule pack (blank inherits)."),
+                .init(label: "Rule Pack", key: "guardrail.connectors.\(connector).rule_pack",
+                      hint: "Per-connector rule pack name (blank inherits)."),
                 .init(label: "Enabled", key: "guardrail.connectors.\(connector).enabled", kind: .bool,
                       hint: "Per-connector switch (off tears down hooks)."),
                 .init(label: "Hook Fail Mode", key: "guardrail.connectors.\(connector).hook_fail_mode", kind: .choice,
@@ -549,13 +545,11 @@ enum ConfigEditorCatalog {
             .init(label: "Enable Meta", key: "scanners.skill_scanner.enable_meta", kind: .bool, hint: "Scan skill metadata."),
             .init(label: "Use Trigger", key: "scanners.skill_scanner.use_trigger", kind: .bool,
                   hint: "Enable trigger-word heuristics."),
-            .init(label: "Use VirusTotal", key: "scanners.skill_scanner.use_virustotal", kind: .bool,
+            .init(label: "Use VirusTotal", key: "scanners.skill_scanner.analyzers.virustotal.enabled", kind: .bool,
                   hint: "Submit artifact hashes."),
-            .init(label: "VirusTotal Key Env", key: "scanners.skill_scanner.virustotal_api_key_env",
-                  hint: "Env var NAME for the VirusTotal key."),
-            .init(label: "VirusTotal API Key (redacted)", key: "scanners.skill_scanner.virustotal_api_key",
-                  kind: .password, hint: "Inline VirusTotal key."),
-            .init(label: "Use AI Defense", key: "scanners.skill_scanner.use_aidefense", kind: .bool,
+            .init(label: "VirusTotal Key Env", key: "scanners.skill_scanner.analyzers.virustotal.api_key_env",
+                  hint: "Env var NAME for the VirusTotal key (store it with defenseclaw keys set)."),
+            .init(label: "Use AI Defense", key: "scanners.skill_scanner.analyzers.aidefense.enabled", kind: .bool,
                   hint: "Chain Cisco AI Defense scan."),
         ]
         scanners += llmOverrideFields("Skill Scanner", "scanners.skill_scanner.llm")
@@ -726,16 +720,8 @@ enum ConfigEditorCatalog {
         ))
 
         sections.append(ConfigEditorSection(
-            name: "Skill Actions", summary: "Skill admission response matrix.",
-            fields: actionMatrixFields("skill_actions")
-        ))
-        sections.append(ConfigEditorSection(
-            name: "MCP Actions", summary: "MCP admission response matrix.",
-            fields: actionMatrixFields("mcp_actions")
-        ))
-        sections.append(ConfigEditorSection(
-            name: "Plugin Actions", summary: "Plugin admission response matrix.",
-            fields: actionMatrixFields("plugin_actions")
+            name: "Admission", summary: "Install-time verdict per finding severity (admission:).",
+            fields: admissionActionFields()
         ))
 
         sections.append(ConfigEditorSection(
@@ -745,8 +731,6 @@ enum ConfigEditorCatalog {
                 .init(label: "Debounce MS", key: "watch.debounce_ms", kind: .int,
                       hint: "Milliseconds to wait for edits to settle."),
                 .init(label: "Auto Block", key: "watch.auto_block", kind: .bool, hint: "Block high findings automatically."),
-                .init(label: "Allow List Bypass", key: "watch.allow_list_bypass_scan", kind: .bool,
-                      hint: "Skip allow-listed rescans."),
                 .init(label: "Rescan Enabled", key: "watch.rescan_enabled", kind: .bool,
                       hint: "Periodically re-scan installed artifacts."),
                 .init(label: "Rescan Interval Min", key: "watch.rescan_interval_min", kind: .int,

@@ -148,7 +148,7 @@ struct ObservabilityDestinationRow: Identifiable, Sendable {
 struct ConnectorHealth: Identifiable, Sendable {
     var name: String
     var mode: String          // from config guardrail.connectors.<name>.mode
-    var rulePack: String      // from config …rule_pack_dir (basename)
+    var rulePack: String      // from config …rule_pack (v8: rule_pack_dir basename)
     var lastActivity: Date?   // derived from audit events (connector= kv)
     var calls: Int            // /health requests, audit fallback for hook connectors
     var blocks: Int           // tool_blocks + subprocess_blocks, audit fallback

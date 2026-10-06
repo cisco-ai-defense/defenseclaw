@@ -1558,7 +1558,6 @@ _BOOL_FIELD_KEYS = frozenset(
         "gateway.watcher.mcp.take_action",
         "gateway.watchdog.enabled",
         "watch.auto_block",
-        "watch.allow_list_bypass_scan",
         "watch.rescan_enabled",
         "asset_policy.enabled",
         "asset_policy.skill.registry_required",

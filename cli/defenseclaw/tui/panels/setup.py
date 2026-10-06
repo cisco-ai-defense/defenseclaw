@@ -8317,7 +8317,6 @@ def _watch_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         (
             _field(cfg, "Debounce MS", "watch.debounce_ms", "int", hint="Milliseconds to wait for edits to settle."),
             _field(cfg, "Auto Block", "watch.auto_block", "bool", hint="Block high findings automatically."),
-            _field(cfg, "Allow List Bypass", "watch.allow_list_bypass_scan", "bool", hint="Skip allow-listed rescans."),
             _field(
                 cfg, "Rescan Enabled", "watch.rescan_enabled", "bool", hint="Periodically re-scan installed artifacts."
             ),

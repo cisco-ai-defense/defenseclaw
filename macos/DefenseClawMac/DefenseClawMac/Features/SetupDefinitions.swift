@@ -599,10 +599,12 @@ enum TUIWizards {
         if let mode = raw["guardrail.mode"]?.string { out["mode"] = mode }
         if let scanner = raw["guardrail.scanner_mode"]?.string { out["scanner-mode"] = scanner }
         if let strategy = raw["guardrail.detection_strategy"]?.string { out["detection-strategy"] = strategy }
-        if let packDir = raw["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
-            let pack = (packDir as NSString).lastPathComponent
-            if ["default", "strict", "permissive"].contains(pack) { out["rule-pack"] = pack }
+        // config_version 9 names the pack; a v8 file carries its folder.
+        var packName = raw["guardrail.rule_pack"]?.string ?? ""
+        if packName.isEmpty, let packDir = raw["guardrail.rule_pack_dir"]?.string {
+            packName = (packDir as NSString).lastPathComponent
         }
+        if ["default", "strict", "permissive"].contains(packName) { out["rule-pack"] = packName }
         if let message = raw["guardrail.block_message"]?.string { out["block-message"] = message }
         if let judge = raw["guardrail.judge.model"]?.string { out["judge-model"] = judge }
         return out
