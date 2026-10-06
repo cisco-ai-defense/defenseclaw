@@ -342,6 +342,39 @@ account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 such as the profile root that `scan_roots: ["~"]` names, are skipped
 without failing the scan.
 
+### Inside OpenShell sandboxes
+
+While sandboxes are on (`openshell.enabled`), the gateway also inventories
+what the agent in each running [sandbox](/docs/sandboxes) installed and
+configured there, which its own scan of this machine never sees:
+
+- Once a sandbox is ready, every `scan_interval_min` while it runs, and on
+  demand with `defenseclaw sandbox discover NAME`, the daemon reads the
+  sandbox with one read-only command it builds itself: the agent config,
+  MCP configuration, skill, rule and plugin paths of the signature catalog
+  under the sandbox's home and project, the agent CLIs in its bin folders,
+  its running agents, the names (never the values) of its environment
+  variables, its shell history and, for a copy (`--copy`, every sandbox on
+  macOS), its package manifests. A mounted project is this machine's folder,
+  which the gateway's own scan reads.
+- Everything the sandbox sends back is checked as the agent's: only
+  absolute, printable paths under the sandbox's home, projects or harness
+  install, within what was asked for and within `max_file_bytes`,
+  `max_files_per_scan` and a 4 MiB stream, are kept. They are written as
+  private regular files (never links or FIFOs) under
+  `<data_dir>/sandboxes/NAME/discovery` and scanned on this machine with the
+  same detectors, without the machine-wide ones (applications, IDEs,
+  loopback endpoints, model files).
+- Each signal carries the sandbox's name and id (`sandbox_name`,
+  `sandbox_id`, and `defenseclaw.sandbox.name` and `.id` on the
+  `ai_component.*` records), and its hashes are its sandbox's own, so the
+  same file in two sandboxes, or in a sandbox and on this machine, are
+  separate entries. `defenseclaw agent usage --sandbox NAME` shows one
+  sandbox's; every view tags them "(sandbox NAME)".
+- A stopped sandbox keeps what was found, without its processes; a deleted
+  one's entries turn `gone`. `ai_discovery.enabled: false` turns this off
+  too.
+
 ### Tunable knobs
 
 `agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:
@@ -590,7 +623,7 @@ defenseclaw agent usage --json | jq '.signals[] | select(.category == "local_mod
 
 Without `--refresh`, the command reads the most recent snapshot. `--refresh` first triggers a full scan and then renders its result. The default table groups repeated observations; `--detail` renders one row per signal. Local-model rows add model ID, installed/loaded status, and format columns when available.
 
-Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`, `--wide`. The default table keeps the columns that fit the terminal; `--wide` adds model format, version and the identity/presence confidence columns. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
+Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--sandbox` (what AI discovery found inside that sandbox; repeatable), `--show-gone`, `--by-detector`, `--limit`, `--wide`. The default table keeps the columns that fit the terminal; `--wide` adds model format, version and the identity/presence confidence columns. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
   </Tab>
   <Tab value="Processes">
 ```bash
