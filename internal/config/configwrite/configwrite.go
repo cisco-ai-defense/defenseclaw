@@ -26,13 +26,14 @@
 //  3. Apply the changes as a node-level YAML patch that keeps comments and
 //     order.
 //  4. Validate the candidate bytes with the canonical validator (schema,
-//     runtime semantics, guardrail profiles, asset digests) before writing.
+//     runtime semantics, guardrail profiles) before writing.
 //  5. Write a temp file in the same directory, fsync, rename over the
 //     config (MoveFileExW on Windows), fsync the directory. A failed
 //     directory fsync is an error.
 //  6. Write config.generation.json (GenerationState) the same way, with the
 //     generation incremented.
-//  7. Release the lock and audit config.change.applied.
+//  7. Release the lock. Callers that own an audit logger record
+//     config.change.applied from the Result.
 //
 // Both writers refuse when the host is StandaloneEnterprise() and the actor
 // is not ActorLifecycle or ActorMigration. Under SecureClientIntegration()
@@ -40,23 +41,31 @@
 package configwrite
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"os/user"
+	"reflect"
+	"sort"
+	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 )
 
 const (
 	// LockSuffix is appended to the config path for the writer lock; it is
 	// the same file Python's locked_config_yaml uses.
-	LockSuffix = ".lock"
+	LockSuffix = cfgtxn.LockSuffix
 	// GenerationFileName is the writer's state file, next to config.yaml.
-	GenerationFileName = "config.generation.json"
+	GenerationFileName = cfgtxn.GenerationFileName
 	// DefaultLockTimeout bounds the wait for another writer.
-	DefaultLockTimeout = 10 * time.Second
+	DefaultLockTimeout = cfgtxn.DefaultLockTimeout
 )
 
 // Actors that may write on a managed (StandaloneEnterprise) host.
@@ -78,16 +87,18 @@ var (
 	// ErrConflict means config.yaml changed after the caller read it.
 	ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
 	// ErrLockBusy means another writer held the lock past the timeout.
-	ErrLockBusy = errors.New("configwrite: another DefenseClaw process is changing config.yaml")
+	ErrLockBusy = cfgtxn.ErrLockBusy
 	// ErrManaged means the host is managed and the actor may not write.
 	ErrManaged = errors.New("configwrite: this device is managed; policy changes are made in the management plane")
-	// ErrNotImplemented is returned until the writer lands.
+	// ErrNotImplemented was returned by the frozen stubs. Nothing returns it
+	// now; it stays for callers that compiled against the stub contract.
 	ErrNotImplemented = errors.New("configwrite: not implemented yet")
 )
 
 // Change is one edit. Path is dotted, with [i] for list items, for example
-// asset_policy.skill.denied[0].name. Unset removes the key; Value is then
-// ignored.
+// asset_policy.skill.denied[0].name. A key that contains a dot is written
+// ["a.b"]. Unset removes the key; Value is then ignored. An index equal to
+// the list length appends.
 type Change struct {
 	Path  string
 	Value any
@@ -121,50 +132,534 @@ type Result struct {
 }
 
 // GenerationState is config.generation.json.
-type GenerationState struct {
-	// Generation is monotonic; a writer that finds the file missing or
-	// corrupt starts from max(previous+1, 1) and sets GenerationReset.
-	Generation   uint64 `json:"generation"`
-	ConfigSHA256 string `json:"config_sha256"`
-	Actor        string `json:"actor"`
-	Reason       string `json:"reason,omitempty"`
-	// WrittenAt is RFC 3339 UTC.
-	WrittenAt       string `json:"written_at"`
-	GenerationReset bool   `json:"generation_reset,omitempty"`
-}
+type GenerationState = cfgtxn.GenerationState
 
 // Apply edits config.yaml at path under the writer lock and returns the new
-// generation.
+// generation. When no change alters a value nothing is written and the
+// result carries the current generation.
 func Apply(ctx context.Context, path string, changes []Change, opt Options) (Result, error) {
-	_, _, _, _ = ctx, path, changes, opt
-	return Result{}, ErrNotImplemented
+	return transact(ctx, path, opt, func(current []byte) ([]byte, []string, error) {
+		return patchDocument(current, changes)
+	})
 }
 
 // ReplaceDocument writes raw as the whole config.yaml at path under the
 // writer lock, after the same validation. Migrations and restores use it.
 func ReplaceDocument(ctx context.Context, path string, raw []byte, opt Options) (Result, error) {
-	_, _, _, _ = ctx, path, raw, opt
-	return Result{}, ErrNotImplemented
+	candidate := append([]byte(nil), raw...)
+	return transact(ctx, path, opt, func(current []byte) ([]byte, []string, error) {
+		changed, err := diffDocuments(current, candidate)
+		if err != nil {
+			return nil, nil, err
+		}
+		return candidate, changed, nil
+	})
+}
+
+// Locked runs install with config.yaml.lock held and then records the
+// bytes now at path in config.generation.json. It is for writers that
+// install the file themselves under their own transaction, such as the
+// enterprise lifecycle (actor ActorLifecycle). install returns whether it
+// changed the file; an unchanged file keeps the generation.
+func Locked(ctx context.Context, path string, opt Options, install func() (bool, error)) (Result, error) {
+	if err := checkActor(opt.Actor); err != nil {
+		return Result{}, err
+	}
+	txn, err := cfgtxn.Begin(ctx, path, opt.Timeout)
+	if err != nil {
+		return Result{}, err
+	}
+	defer txn.Close()
+	changed, err := install()
+	if err != nil {
+		return Result{}, err
+	}
+	raw, _, _, err := txn.Read()
+	if err != nil {
+		return Result{}, err
+	}
+	sum := cfgtxn.SHA256Hex(raw)
+	if !changed {
+		state, _ := cfgtxn.ReadGenerationState(txn.Path())
+		return Result{Generation: state.Generation, SHA256: sum}, nil
+	}
+	state, err := txn.RecordGeneration(sum, opt.Actor, opt.Reason)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Generation: state.Generation, SHA256: sum}, nil
 }
 
 // LockPath returns the writer lock path for a config path.
-func LockPath(configPath string) string { return configPath + LockSuffix }
+func LockPath(configPath string) string { return cfgtxn.LockPath(configPath) }
 
 // GenerationPath returns the config.generation.json path for a config path.
-func GenerationPath(configPath string) string {
-	return filepath.Join(filepath.Dir(configPath), GenerationFileName)
-}
+func GenerationPath(configPath string) string { return cfgtxn.GenerationPath(configPath) }
 
 // ReadGenerationState reads config.generation.json next to configPath. A
 // missing file returns os.ErrNotExist (wrapped).
 func ReadGenerationState(configPath string) (GenerationState, error) {
-	raw, err := os.ReadFile(GenerationPath(configPath))
+	return cfgtxn.ReadGenerationState(configPath)
+}
+
+// SHA256Hex is the hex sha256 the writer records and compares
+// (Options.ExpectSHA256, Result.SHA256).
+func SHA256Hex(raw []byte) string { return cfgtxn.SHA256Hex(raw) }
+
+// CurrentActor returns prefix + the OS user name ("cli:alice").
+func CurrentActor(prefix string) string {
+	name := ""
+	if u, err := user.Current(); err == nil {
+		name = u.Username
+	}
+	if name == "" {
+		name = os.Getenv("USER")
+	}
+	if name == "" {
+		name = os.Getenv("USERNAME")
+	}
+	if name == "" {
+		name = "unknown"
+	}
+	return prefix + name
+}
+
+func checkActor(actor string) error {
+	if strings.TrimSpace(actor) == "" {
+		return errors.New("configwrite: an actor is required")
+	}
+	return nil
+}
+
+// managedRefuses reports whether the managed gate refuses actor for the
+// current bytes: a standalone managed document (or environment) and an
+// actor other than the lifecycle or a migration.
+func managedRefuses(current []byte, actor string) bool {
+	if actor == ActorLifecycle || actor == ActorMigration {
+		return false
+	}
+	return config.StandaloneManagedSource(current)
+}
+
+type mutateFunc func(current []byte) (candidate []byte, changed []string, err error)
+
+func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) (Result, error) {
+	if err := checkActor(opt.Actor); err != nil {
+		return Result{}, err
+	}
+	if strings.TrimSpace(path) == "" {
+		path = config.ConfigPath()
+	}
+	txn, err := cfgtxn.Begin(ctx, path, opt.Timeout)
 	if err != nil {
-		return GenerationState{}, err
+		return Result{}, err
 	}
-	var state GenerationState
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return GenerationState{}, fmt.Errorf("configwrite: decode %s: %w", GenerationFileName, err)
+	defer txn.Close()
+
+	current, mode, exists, err := txn.Read()
+	if err != nil {
+		return Result{}, err
 	}
-	return state, nil
+	sum := cfgtxn.SHA256Hex(current)
+	if opt.ExpectSHA256 != "" && !strings.EqualFold(opt.ExpectSHA256, sum) {
+		return Result{}, ErrConflict
+	}
+	if managedRefuses(current, opt.Actor) {
+		return Result{}, ErrManaged
+	}
+	candidate, changed, err := mutate(current)
+	if err != nil {
+		return Result{}, err
+	}
+	if exists && bytes.Equal(candidate, current) {
+		state, _ := cfgtxn.ReadGenerationState(txn.Path())
+		return Result{Generation: state.Generation, SHA256: sum}, nil
+	}
+	if err := config.ValidateCandidate(txn.Path(), candidate); err != nil {
+		return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{}, err
+	}
+	state, err := txn.Commit(candidate, mode, opt.Actor, opt.Reason)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{
+		Generation:      state.Generation,
+		SHA256:          state.ConfigSHA256,
+		Changed:         changed,
+		RestartRequired: RestartRequired(changed),
+	}, nil
+}
+
+// restartKeys are the process-level keys a running gateway can not apply
+// without a restart (spec section 4); everything else is hot.
+var restartKeys = []string{
+	"data_dir",
+	"observability.local.path",
+	"observability.local.judge_bodies_path",
+	"gateway.host", "gateway.port", "gateway.api_port", "gateway.api_bind",
+	"gateway.tls", "gateway.tls_skip_verify", "gateway.device_key_file",
+	"gateway.token", "gateway.token_env", "gateway.fleet_mode",
+	"gateway.config_reload.mode",
+	"guardrail.host", "guardrail.port",
+	"deployment_mode", "enterprise.profile", "enterprise.network",
+	"environment", "tenant_id", "workspace_id", "discovery_source",
+}
+
+// RestartRequired returns the paths in changed that need a gateway restart.
+func RestartRequired(changed []string) []string {
+	var out []string
+	for _, path := range changed {
+		for _, key := range restartKeys {
+			if path == key || strings.HasPrefix(path, key+".") || strings.HasPrefix(path, key+"[") ||
+				strings.HasPrefix(key, path+".") {
+				out = append(out, path)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// pathPart is one segment of a change path: a mapping key or a list index.
+type pathPart struct {
+	key   string
+	index int
+	isIdx bool
+}
+
+// parsePath splits a change path (a.b[0]["c.d"]) into its segments.
+func parsePath(path string) ([]pathPart, error) {
+	var parts []pathPart
+	i := 0
+	expectKey := true
+	for i < len(path) {
+		switch c := path[i]; {
+		case c == '.':
+			if expectKey {
+				return nil, fmt.Errorf("configwrite: empty segment in path %q", path)
+			}
+			expectKey = true
+			i++
+		case c == '[':
+			end := strings.IndexByte(path[i:], ']')
+			if end < 0 {
+				return nil, fmt.Errorf("configwrite: unclosed [ in path %q", path)
+			}
+			inner := path[i+1 : i+end]
+			if strings.HasPrefix(inner, `"`) && strings.HasSuffix(inner, `"`) && len(inner) >= 2 {
+				// A quoted key may itself contain ']'; find the closing quote.
+				close := strings.Index(path[i+2:], `"]`)
+				if close < 0 {
+					return nil, fmt.Errorf("configwrite: unclosed quoted key in path %q", path)
+				}
+				parts = append(parts, pathPart{key: path[i+2 : i+2+close]})
+				i = i + 2 + close + 2
+			} else {
+				var n int
+				if _, err := fmt.Sscanf(inner, "%d", &n); err != nil || n < 0 || fmt.Sprint(n) != inner {
+					return nil, fmt.Errorf("configwrite: bad list index [%s] in path %q", inner, path)
+				}
+				parts = append(parts, pathPart{index: n, isIdx: true})
+				i += end + 1
+			}
+			expectKey = false
+		default:
+			if !expectKey {
+				return nil, fmt.Errorf("configwrite: missing . before %q in path %q", path[i:], path)
+			}
+			end := strings.IndexAny(path[i:], ".[")
+			if end < 0 {
+				end = len(path) - i
+			}
+			parts = append(parts, pathPart{key: path[i : i+end]})
+			i += end
+			expectKey = false
+		}
+	}
+	if len(parts) == 0 || expectKey {
+		return nil, fmt.Errorf("configwrite: empty path %q", path)
+	}
+	if parts[0].isIdx {
+		return nil, fmt.Errorf("configwrite: path %q must start with a key", path)
+	}
+	return parts, nil
+}
+
+func parseDocument(current []byte) (*yaml.Node, error) {
+	var doc yaml.Node
+	if len(bytes.TrimSpace(current)) > 0 {
+		if err := yaml.Unmarshal(current, &doc); err != nil {
+			return nil, fmt.Errorf("configwrite: parse config.yaml: %w", err)
+		}
+	}
+	if doc.Kind == 0 {
+		doc.Kind = yaml.DocumentNode
+	}
+	if len(doc.Content) == 0 {
+		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
+	}
+	if doc.Content[0].Kind != yaml.MappingNode {
+		return nil, errors.New("configwrite: config.yaml root must be a mapping")
+	}
+	return &doc, nil
+}
+
+func encodeDocument(doc *yaml.Node) ([]byte, error) {
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		_ = enc.Close()
+		return nil, fmt.Errorf("configwrite: encode config.yaml: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return nil, fmt.Errorf("configwrite: encode config.yaml: %w", err)
+	}
+	return out.Bytes(), nil
+}
+
+func patchDocument(current []byte, changes []Change) ([]byte, []string, error) {
+	doc, err := parseDocument(current)
+	if err != nil {
+		return nil, nil, err
+	}
+	var changed []string
+	for _, change := range changes {
+		parts, err := parsePath(change.Path)
+		if err != nil {
+			return nil, nil, err
+		}
+		before := lookup(doc.Content[0], parts)
+		if change.Unset {
+			if before == nil {
+				continue
+			}
+			if err := unsetPath(doc.Content[0], parts); err != nil {
+				return nil, nil, fmt.Errorf("configwrite: unset %s: %w", change.Path, err)
+			}
+			changed = append(changed, change.Path)
+			continue
+		}
+		value, err := valueNode(change.Value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("configwrite: value for %s: %w", change.Path, err)
+		}
+		if before != nil && sameValue(before, value) {
+			continue
+		}
+		if err := setPath(doc.Content[0], parts, value); err != nil {
+			return nil, nil, fmt.Errorf("configwrite: set %s: %w", change.Path, err)
+		}
+		changed = append(changed, change.Path)
+	}
+	if len(changed) == 0 {
+		return current, nil, nil
+	}
+	out, err := encodeDocument(doc)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, changed, nil
+}
+
+func valueNode(value any) (*yaml.Node, error) {
+	if node, ok := value.(*yaml.Node); ok {
+		return node, nil
+	}
+	var node yaml.Node
+	if err := node.Encode(value); err != nil {
+		return nil, err
+	}
+	return &node, nil
+}
+
+func sameValue(a, b *yaml.Node) bool {
+	var left, right any
+	if a.Decode(&left) != nil || b.Decode(&right) != nil {
+		return false
+	}
+	return reflect.DeepEqual(left, right)
+}
+
+func mapLookup(m *yaml.Node, key string) (int, *yaml.Node) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return -1, nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return i, m.Content[i+1]
+		}
+	}
+	return -1, nil
+}
+
+func lookup(root *yaml.Node, parts []pathPart) *yaml.Node {
+	cur := root
+	for _, part := range parts {
+		if cur == nil {
+			return nil
+		}
+		if part.isIdx {
+			if cur.Kind != yaml.SequenceNode || part.index >= len(cur.Content) {
+				return nil
+			}
+			cur = cur.Content[part.index]
+			continue
+		}
+		_, cur = mapLookup(cur, part.key)
+	}
+	return cur
+}
+
+func setPath(root *yaml.Node, parts []pathPart, value *yaml.Node) error {
+	cur := root
+	for i, part := range parts {
+		last := i == len(parts)-1
+		var next *yaml.Node
+		if part.isIdx {
+			if cur.Kind != yaml.SequenceNode {
+				return fmt.Errorf("segment %d is not a list", i)
+			}
+			switch {
+			case part.index < len(cur.Content):
+				next = cur.Content[part.index]
+				if last {
+					keepComments(value, next)
+					cur.Content[part.index] = value
+					return nil
+				}
+			case part.index == len(cur.Content):
+				next = newContainer(parts, i+1, value, last)
+				cur.Content = append(cur.Content, next)
+				if last {
+					return nil
+				}
+			default:
+				return fmt.Errorf("list index %d is past the end (%d items)", part.index, len(cur.Content))
+			}
+		} else {
+			if cur.Kind != yaml.MappingNode {
+				return fmt.Errorf("segment %q is not a mapping", part.key)
+			}
+			idx, existing := mapLookup(cur, part.key)
+			if existing != nil {
+				if last {
+					keepComments(value, existing)
+					cur.Content[idx+1] = value
+					return nil
+				}
+				if existing.Kind == yaml.ScalarNode && existing.Tag == "!!null" {
+					*existing = *newContainer(parts, i+1, value, false)
+				}
+				next = existing
+			} else {
+				next = newContainer(parts, i+1, value, last)
+				cur.Content = append(cur.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: part.key}, next)
+				if last {
+					return nil
+				}
+			}
+		}
+		cur = next
+	}
+	return nil
+}
+
+// newContainer returns value for the last segment, else an empty mapping or
+// list matching the next segment.
+func newContainer(parts []pathPart, nextIndex int, value *yaml.Node, last bool) *yaml.Node {
+	if last {
+		return value
+	}
+	if parts[nextIndex].isIdx {
+		return &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	}
+	return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+}
+
+func keepComments(dst, src *yaml.Node) {
+	if dst.HeadComment == "" {
+		dst.HeadComment = src.HeadComment
+	}
+	if dst.LineComment == "" {
+		dst.LineComment = src.LineComment
+	}
+	if dst.FootComment == "" {
+		dst.FootComment = src.FootComment
+	}
+}
+
+func unsetPath(root *yaml.Node, parts []pathPart) error {
+	parent := lookup(root, parts[:len(parts)-1])
+	if len(parts) == 1 {
+		parent = root
+	}
+	if parent == nil {
+		return nil
+	}
+	last := parts[len(parts)-1]
+	if last.isIdx {
+		if parent.Kind != yaml.SequenceNode || last.index >= len(parent.Content) {
+			return nil
+		}
+		parent.Content = append(parent.Content[:last.index], parent.Content[last.index+1:]...)
+		return nil
+	}
+	idx, _ := mapLookup(parent, last.key)
+	if idx < 0 {
+		return nil
+	}
+	parent.Content = append(parent.Content[:idx], parent.Content[idx+2:]...)
+	return nil
+}
+
+// diffDocuments lists the leaf paths whose values differ between two
+// documents. Lists compare as a whole.
+func diffDocuments(before, after []byte) ([]string, error) {
+	var left, right any
+	if len(bytes.TrimSpace(before)) > 0 {
+		if err := yaml.Unmarshal(before, &left); err != nil {
+			// An unparseable current file is replaced wholesale.
+			left = nil
+		}
+	}
+	if err := yaml.Unmarshal(after, &right); err != nil {
+		return nil, fmt.Errorf("configwrite: parse the new document: %w", err)
+	}
+	var out []string
+	diffValues("", left, right, &out)
+	sort.Strings(out)
+	return out, nil
+}
+
+func diffValues(prefix string, left, right any, out *[]string) {
+	lm, lok := left.(map[string]any)
+	rm, rok := right.(map[string]any)
+	if lok && rok {
+		keys := map[string]struct{}{}
+		for k := range lm {
+			keys[k] = struct{}{}
+		}
+		for k := range rm {
+			keys[k] = struct{}{}
+		}
+		for k := range keys {
+			child := k
+			if prefix != "" {
+				child = prefix + "." + k
+			}
+			diffValues(child, lm[k], rm[k], out)
+		}
+		return
+	}
+	if !reflect.DeepEqual(left, right) {
+		if prefix == "" {
+			prefix = "$"
+		}
+		*out = append(*out, prefix)
+	}
 }
