@@ -257,6 +257,20 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
     assert "run defenseclaw upgrade" in str(captured.value)
 
 
+def test_a_misspelled_admission_key_is_named_and_v9_errors_say_v9() -> None:
+    with pytest.raises(V8ConfigError) as typo:
+        load_validate_v8("config_version: 9\nadmission:\n  skil: {}\n")
+    assert "at $.admission" in str(typo.value) and "unsupported field skil" in str(typo.value)
+
+    with pytest.raises(V8ConfigError) as legacy:
+        load_validate_v8("config_version: 8\nadmission:\n  skil: {}\n")
+    assert "unsupported field skil" in str(legacy.value) and "defenseclaw upgrade" in str(legacy.value)
+
+    with pytest.raises(V8ConfigError) as wrong_type:
+        load_validate_v8("config_version: 9\nobservability: 5\n")
+    assert "v8" not in str(wrong_type.value)
+
+
 @pytest.mark.parametrize(
     ("removed", "path", "target"),
     [

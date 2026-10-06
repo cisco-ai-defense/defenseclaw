@@ -940,21 +940,39 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     error = errors[0]
     path = _json_path(tuple(error.absolute_path))
     keyword = str(error.validator or "schema")
+    label = "v9" if v9 else "v8"
+    unsupported = _unsupported_field_names(error) if keyword == "additionalProperties" else ""
     action = {
         "additionalProperties": (
-            "remove unsupported fields; see the configuration reference"
+            f"{unsupported}remove it; see the configuration reference"
+            if v9 and unsupported
+            else "remove unsupported fields; see the configuration reference"
             if v9
+            else f"{unsupported}remove it, or run defenseclaw upgrade if it is a legacy field"
+            if unsupported
             else "remove unsupported or legacy fields and run defenseclaw upgrade"
         ),
-        "required": "add the required field shown by the v8 reference",
-        "const": "use the exact v8 value from the canonical reference",
-        "enum": "choose a value from the canonical v8 vocabulary",
-        "oneOf": "use exactly one supported v8 source shape",
-        "type": "use the value type documented by the canonical v8 schema",
-    }.get(keyword, "correct the field using the canonical v8 schema and reference")
-    raise V8ConfigError(
-        source_name, path, keyword, _declared_action(keyword, error) or action, label="v9" if v9 else "v8"
-    )
+        "required": f"add the required field shown by the {label} reference",
+        "const": f"use the exact {label} value from the canonical reference",
+        "enum": f"choose a value from the canonical {label} vocabulary",
+        "oneOf": f"use exactly one supported {label} source shape",
+        "type": f"use the value type documented by the canonical {label} schema",
+    }.get(keyword, f"correct the field using the canonical {label} schema and reference")
+    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action, label=label)
+
+
+_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
+
+
+def _unsupported_field_names(error: Any) -> str:
+    """The key names of an additionalProperties failure, as "unsupported field
+    x: ". Only identifier-shaped names are listed (a key is not a secret
+    value); anything else leaves the message generic."""
+
+    names = re.findall(r"'([^']*)'", str(getattr(error, "message", "")))
+    if not 0 < len(names) <= 3 or not all(_FIELD_NAME.fullmatch(name) for name in names):
+        return ""
+    return f"unsupported field{'s' if len(names) > 1 else ''} {', '.join(names)}: "
 
 
 # An enum longer than this is left to the reference rather than listed.

@@ -379,7 +379,8 @@ def _decode_validation_failure(value: str | None, operation: str) -> tuple[str, 
 def _helper_failure(stderr: str | None, operation: str) -> str:
     detail = _safe_detail(stderr)
     if detail:
-        return detail
+        # The helper prints "Error: ..." and click adds its own prefix.
+        return detail.removeprefix("Error: ")
     return f"canonical configuration {operation} failed; correct config.yaml and retry"
 
 
