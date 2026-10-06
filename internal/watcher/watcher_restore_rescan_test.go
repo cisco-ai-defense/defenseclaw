@@ -103,6 +103,27 @@ func TestRestoreAfterUnblockRescanQuarantinesAgain(t *testing.T) {
 	}
 }
 
+// A block verdict (install block, runtime disable, no file action) leaves the
+// skill files where they are; only quarantine moves them (GAP-0020).
+func TestRescanBlockWithoutFileActionKeepsFiles(t *testing.T) {
+	w, store, evt := restoredRescanFixture(t, false)
+	out := &policy.AdmissionOutput{
+		Verdict: "rejected", InstallAction: "block", FileAction: "none", RuntimeAction: "block",
+	}
+	w.applyPostScanEnforcement(
+		context.Background(), enforce.NewPolicyEngine(w.store), out, evt, "skill",
+		&scanner.ScanResult{Scanner: "skill-scanner", Target: evt.Path}, "skill-scanner",
+	)
+
+	if _, err := os.Lstat(evt.Path); err != nil {
+		t.Fatalf("a block without a file action moved the skill files: %v", err)
+	}
+	entry, err := store.GetActionForConnector("skill", "review-two", "")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" {
+		t.Fatalf("actions = %#v err=%v, want install=block runtime=disable", entry, err)
+	}
+}
+
 // A restore that kept the install block still keeps the restored files, and
 // the record no longer claims they are quarantined.
 func TestRestoreWhileBlockedRescanKeepsFilesNotQuarantined(t *testing.T) {

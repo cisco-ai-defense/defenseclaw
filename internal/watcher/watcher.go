@@ -953,7 +953,9 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
 				fmt.Sprintf("type=%s reason=%s", targetType, blockReason), enforcement)
 
-			if fileAction == "quarantine" || runtimeAction == "block" {
+			// Only a file action moves files: block disables the asset and
+			// leaves it in place; quarantine is the action that relocates it.
+			if fileAction == "quarantine" {
 				w.enforceBlockWith(ctx, evt, retainRestored)
 			}
 		}
