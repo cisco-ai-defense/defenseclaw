@@ -68,11 +68,15 @@ func runWindowsNamespacePurge(opts *windowsNamespacePurgeOptions) error {
 	if err := readWindowsTargetRuntimeProtectedJSON(requestPath, &request); err != nil {
 		return fmt.Errorf("read protected exact-root cleanup request: %w", err)
 	}
-	if err := validateWindowsNamespacePurgeExchangePaths(
-		requestPath,
-		outputPath,
-		request.Root,
-	); err != nil {
+	validateExchange := validateWindowsNamespacePurgeExchangePaths
+	if request.Mode == enterprisehooks.WindowsNamespacePurgeModeUninstallStatePurge ||
+		request.Mode == enterprisehooks.WindowsNamespacePurgeModeUninstallInstallPurge {
+		// Uninstall roots may deny ordinary attribute reads. The
+		// privileged native walker authenticates and pins the exact root;
+		// exchange preflight only needs to keep request/output outside it.
+		validateExchange = validateWindowsNamespacePurgeUninstallExchangePaths
+	}
+	if err := validateExchange(requestPath, outputPath, request.Root); err != nil {
 		return err
 	}
 	report, purgeErr := enterprisehooks.PurgeWindowsNamespaceRoot(request)
@@ -123,6 +127,30 @@ func validateWindowsNamespacePurgeExchangePaths(requestPath, outputPath, root st
 		outputFinal,
 		rootFinal,
 	)
+}
+
+func validateWindowsNamespacePurgeUninstallExchangePaths(requestPath, outputPath, root string) error {
+	if err := validateWindowsNamespacePurgeExchangePathStrings(requestPath, outputPath, root); err != nil {
+		return err
+	}
+	// Resolve both protected exchange files by handle, while leaving the
+	// ACL-denied cleanup root to the privileged no-follow walker. A symlinked
+	// exchange path that resolves inside the cleanup root is still refused.
+	requestFinal, requestExists, err := windowsNamespacePurgeFinalPathResolver(requestPath, false)
+	if err != nil || !requestExists {
+		if err == nil {
+			err = errors.New("request disappeared")
+		}
+		return fmt.Errorf("resolve final namespace-root-cleanup request: %w", err)
+	}
+	outputFinal, outputExists, err := windowsNamespacePurgeFinalPathResolver(outputPath, false)
+	if err != nil || !outputExists {
+		if err == nil {
+			err = errors.New("output disappeared")
+		}
+		return fmt.Errorf("resolve final namespace-root-cleanup output: %w", err)
+	}
+	return validateWindowsNamespacePurgeExchangePathStrings(requestFinal, outputFinal, root)
 }
 
 func validateWindowsNamespacePurgeExchangePathStrings(requestPath, outputPath, root string) error {

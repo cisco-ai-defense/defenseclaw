@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -236,6 +238,10 @@ type codexMachineRequirementsLayout struct {
 	samePath      func(left, right string) bool
 	groups        []codexHookGroup
 	handler       func(codexHookGroup) map[string]interface{}
+	// reclaimStaleManagedDir overwrites a managed directory that names
+	// another install instead of refusing it (bulldoze, Windows machine
+	// policy only); TrustStrictAncestors restores the refusal.
+	reclaimStaleManagedDir bool
 	// owned, when set, recognizes a DefenseClaw group of any release that
 	// is not the exact one, so reconcile replaces it instead of adding the
 	// exact group next to it.
@@ -280,10 +286,11 @@ func windowsCodexMachineHandler(command string, timeout int) map[string]interfac
 
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
 	layout := codexMachineRequirementsLayout{
-		managedDirKey: "windows_managed_dir",
-		managedDir:    opts.ManagedDir,
-		samePath:      sameWindowsCodexMachinePath,
-		groups:        codexHookGroups,
+		managedDirKey:          "windows_managed_dir",
+		managedDir:             opts.ManagedDir,
+		samePath:               sameWindowsCodexMachinePath,
+		groups:                 codexHookGroups,
+		reclaimStaleManagedDir: true,
 		handler: func(group codexHookGroup) map[string]interface{} {
 			return windowsCodexMachineHandler(windowsCodexManagedHookCommandFor(opts, group.eventType), group.timeout)
 		},
@@ -424,12 +431,24 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 			return fmt.Errorf("hooks.%s has unsupported type %T", l.managedDirKey, existing)
 		}
 		if !l.samePath(value, l.managedDir) {
-			return fmt.Errorf(
-				"hooks.%s=%q conflicts with protected managed directory %q",
-				l.managedDirKey,
-				value,
-				l.managedDir,
-			)
+			if !l.reclaimStaleManagedDir || managed.TrustStrictAncestors() {
+				return fmt.Errorf(
+					"hooks.%s=%q conflicts with protected managed directory %q",
+					l.managedDirKey,
+					value,
+					l.managedDir,
+				)
+			}
+			// Bulldoze: a prior unsigned certification install at a scoped
+			// path left the managed directory pointing at its (now stale) bin
+			// directory, and refusing stranded the current install. The
+			// statement below overwrites it with the current install's
+			// canonical directory; log it so a DART review can find the
+			// recovery. ReconcileWindowsCodexMachineRequirements adopts a stale
+			// ownership record for the same reason.
+			fmt.Fprintf(os.Stderr,
+				"[enterprise-hooks] reclaiming stale Codex hooks.%s = %q, overwriting with current install's canonical ManagedDir %q\n",
+				l.managedDirKey, value, l.managedDir)
 		}
 	}
 	hooks[l.managedDirKey] = l.managedDir
@@ -627,38 +646,6 @@ func windowsCodexRequirementsContainExactManagedHook(
 		}
 	}
 	return false, nil
-}
-
-// adoptWindowsCodexOrphanedRequirements is the standalone answer to Codex
-// requirements that still hold this deployment's exact DefenseClaw hooks
-// with no ownership record: a purge that ran without the state root left
-// requirements.toml and the managed runtime state behind, and the next
-// fresh ensure refused 1603 with no file and no way out (GAP-0938). The
-// preimage to adopt is the file without DefenseClaw's own changes; existed
-// reports whether anything else is left in it (an administrator's keys), so
-// a later removal restores those and deletes a file DefenseClaw created.
-// Secure Client (no hook contract) keeps the refusal.
-func adoptWindowsCodexOrphanedRequirements(
-	current []byte,
-	opts WindowsCodexMachineRequirementsOptions,
-) ([]byte, bool, error) {
-	if strings.TrimSpace(opts.HookContractID) == "" {
-		return nil, false, errors.New("Codex requirements contain an exact DefenseClaw hook without protected ownership metadata")
-	}
-	preimage, _, err := removeWindowsCodexRequirementsOwnedChanges(current, nil, opts)
-	if err != nil {
-		return nil, false, fmt.Errorf("%s holds DefenseClaw's Codex hooks from a removed deployment and they could not be separated from the rest (%w); "+
-			"remove DefenseClaw's [hooks] entries from it (or the file, if DefenseClaw created it) and %s, then run Setup /ensure again",
-			opts.RequirementsPath, err, opts.ManagedStatePath)
-	}
-	left, err := parseWindowsCodexRequirements(preimage)
-	if err != nil {
-		return nil, false, err
-	}
-	if len(left) == 0 {
-		return nil, false, nil
-	}
-	return preimage, true, nil
 }
 
 func removeWindowsCodexRequirementsOwnedChanges(

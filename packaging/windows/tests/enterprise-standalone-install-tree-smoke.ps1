@@ -96,6 +96,23 @@ try {
                     }
                 }
             }
+            function Test-SecureClientTreeDrift([string]$Label, [hashtable]$Layout, [string]$Pattern) {
+                $prior = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                try {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                    Test-Refused "$Label (strict)" { Assert-DefenseClawManagedInstallTree -Layout $Layout } $Pattern
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $null, 'Process')
+                    try {
+                        Assert-DefenseClawManagedInstallTree -Layout $Layout 3>$null
+                    }
+                    catch {
+                        $failures.Add("${Label}: bulldoze posture refused: $($_.Exception.Message)")
+                    }
+                }
+                finally {
+                    [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $prior, 'Process')
+                }
+            }
             function Test-Accepted([string]$Label, [hashtable]$Layout) {
                 try {
                     Assert-DefenseClawManagedInstallTree -Layout $Layout
@@ -302,7 +319,10 @@ try {
             Test-Accepted 'Secure Client empty ipc directory' $secureClient
             $secureClientStray = [IO.Path]::Combine($secureClient.ManagedIPCDirectory, 'stray.txt')
             [IO.File]::WriteAllText($secureClientStray, 'x')
-            Test-Refused 'Secure Client allow-list (ipc content)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected file'
+            # Release 26.8.4 (#1068) bulldozes Secure Client install-tree
+            # drift: an unexpected item is reported and removed with the tree
+            # unless the strict trust pin is set, which restores the refusal.
+            Test-SecureClientTreeDrift 'Secure Client allow-list (ipc content)' $secureClient 'unexpected file'
             [IO.File]::Delete($secureClientStray)
             Remove-DefenseClawStandaloneManagedIPCDirectory -Layout $secureClient
             if (-not [IO.Directory]::Exists($secureClient.ManagedIPCDirectory)) {
@@ -310,7 +330,7 @@ try {
             }
             $secureClient = New-TestLayout 'secure-client-share'
             $secureClientPlugin = New-Plugin $secureClient
-            Test-Refused 'Secure Client allow-list (share)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'
+            Test-SecureClientTreeDrift 'Secure Client allow-list (share)' $secureClient 'unexpected directory'
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $secureClient
             if (-not [IO.File]::Exists($secureClientPlugin)) {
                 $failures.Add('Secure Client share content was removed by the standalone helper')

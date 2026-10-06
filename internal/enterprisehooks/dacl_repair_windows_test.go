@@ -256,6 +256,30 @@ func TestWindowsGuardianDACLRepairRequiresExactTargetAuthorization(t *testing.T)
 	}
 }
 
+func setWindowsSelfDenyDACL(t *testing.T, path string, owner *windows.SID, denied windows.ACCESS_MASK) {
+	t.Helper()
+	setWindowsTestDACL(t, path, windowsSelfDenyTestACL(t, owner, denied))
+}
+
+func setWindowsTestDACL(t *testing.T, path string, acl *windows.ACL) {
+	t.Helper()
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatalf("set hostile DACL on %s: %v", path, err)
+	}
+}
+
 func setWindowsSelfDenyDACLOnHandle(
 	t *testing.T,
 	handle windows.Handle,
