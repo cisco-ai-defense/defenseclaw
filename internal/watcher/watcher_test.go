@@ -601,6 +601,8 @@ func TestWatcherQuarantineRecordsConnectorHashAndRestoresWithoutRequarantine(t *
 	if err := store.SetActionField("skill", "review-pr", "runtime", "disable", "fixture"); err != nil {
 		t.Fatal(err)
 	}
+	// Since config_version 9 the block list is asset_policy, not audit.db.
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "review-pr", Reason: "fixture"})
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	evt := InstallEvent{
 		Type: InstallSkill, Name: "review-pr", Path: skillPath,
@@ -753,6 +755,7 @@ func newWatcherQuarantineRetryFixture(
 			t.Fatal(err)
 		}
 	}
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "review-pr", Reason: "fixture"})
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	if result := w.runAdmission(context.Background(), InstallEvent{
 		Type: InstallSkill, Name: "review-pr", Path: skillPath,
