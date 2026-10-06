@@ -70,12 +70,12 @@ gateway:
 guardrail:
   enabled: false
   connector: codex
-  rule_pack_dir: ""
 observability: {}
 `, home, port, token)
 	if err := os.WriteFile(filepath.Join(home, config.DefaultConfigName), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedExecutableTestRulePack(t, home)
 
 	d := daemon.New(home)
 	t.Cleanup(func() {
@@ -314,12 +314,12 @@ gateway:
     enabled: false
 guardrail:
   enabled: false
-  rule_pack_dir: ""
 observability: {}
 `, home, fleetPort, apiPort)
 	if err := os.WriteFile(filepath.Join(home, config.DefaultConfigName), []byte(configText), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	seedExecutableTestRulePack(t, home)
 
 	d := daemon.New(home)
 	t.Cleanup(func() {
@@ -393,13 +393,30 @@ func reserveExecutableTestPort(t *testing.T) int {
 	return port
 }
 
-func buildGatewayExecutable(t *testing.T) string {
+func executableTestRepoRoot(t *testing.T) string {
 	t.Helper()
 	_, sourceFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("locate test source")
 	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", ".."))
+	return filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", ".."))
+}
+
+// seedExecutableTestRulePack installs the shipped default rule pack where an
+// install puts it. config_version 9 reads the default pack from
+// <data_dir>/policies/guardrail/default, with no embedded fallback for a
+// config that names none.
+func seedExecutableTestRulePack(t *testing.T, home string) {
+	t.Helper()
+	shipped := filepath.Join(executableTestRepoRoot(t), "policies", "guardrail", "default")
+	if err := os.CopyFS(filepath.Join(home, "policies", "guardrail", "default"), os.DirFS(shipped)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func buildGatewayExecutable(t *testing.T) string {
+	t.Helper()
+	repoRoot := executableTestRepoRoot(t)
 	binary := filepath.Join(t.TempDir(), "defenseclaw-gateway.exe")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

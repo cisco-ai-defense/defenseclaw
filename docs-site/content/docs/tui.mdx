@@ -63,7 +63,7 @@ to filter.
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others), with block and allow actions |
 | `T` | Tools | The tool block/allow list, which is `asset_policy.tool` in `config.yaml` (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
-| `6` | Inventory | Combined inventory view, with sub-tabs for skills, plugins, MCPs, agents, tools, models, memory and [IDE plugins](#ide-plugins) |
+| `6` | Inventory | Combined inventory view, with sub-tabs for skills, plugins, MCPs, agents (including agent identities), tools, models, memory and [IDE plugins](#ide-plugins) |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
 | `9` | Audit | Audit trail. `3` (Blocks) lists the calls DefenseClaw blocked, hook and guardrail blocks included, from the whole trail; the other views load the newest 500 events (the header says since when; use `defenseclaw audit export` for older ones). A row's detail names the connector, decision, mode and rule. `e` writes the rows of the current view to a new `defenseclaw-audit-export-<date>-<time>.json` in the data directory; an earlier export is never replaced |
@@ -84,13 +84,30 @@ the detail view when the source reports them.
 
 On Inventory (`6`), move to the **IDE plugins** sub-tab with `l` or Right
 (`h` or Left goes back). It lists every IDE extension and plugin the gateway's
-last full scan found, one row each: User, IDE, Plugin, Version, Enabled and
-AI. Enabled is `yes`, `no`, `client side` (a remote IDE server, whose client
-keeps that state) or `unknown`. The list matches
-`defenseclaw agent ide-plugins`; see
-[IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). When more
-than one user is present, the Plugins, Agents and MCPs sub-tabs add a User
-column too, and Agents lists the agent identities that
+last full scan found, one row each: IDE, Plugin, Version, Enabled and AI. When
+more than one user is present a User column comes first.
+
+- **Enabled** is `yes`, `no`, `client side` (a remote IDE server, whose client
+  keeps that state) or `unknown`. A Remote-SSH server's IDE cell reads
+  `vscode (ssh)`, so a local and a server copy of the same extension look
+  different.
+- **AI** is `yes` for plugins the signature catalog flags as AI.
+- At 80 columns the Enabled and AI columns stay whole and the wider text
+  columns shrink.
+
+Press `Enter` for the detail card: Enabled, AI, IDE, Version, User, Name,
+Publisher, where the enabled state came from, the scope, the matched AI
+signature, and the installed and last-seen times. At 80x24 the card shows its
+first lines only; scroll it with `PageUp` and `PageDown`. The periodic refresh
+keeps the open card and your cursor.
+
+The list matches `defenseclaw agent ide-plugins`; see
+[IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). When AI
+discovery is off, or `ai_discovery.ide_inventory` is `off`, the tab says so
+instead of showing an empty list.
+
+The Plugins, Agents and MCPs sub-tabs add a User column too when more than one
+user is present. Agents lists the agent identities (`agt-`) that
 `defenseclaw agent identities` shows.
 
 ### Doctor status and cache

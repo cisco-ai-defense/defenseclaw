@@ -1,11 +1,13 @@
 ---
 title: End-user identity
-description: Understand how DefenseClaw attributes v8 telemetry to endpoint users, which identity sources are trusted, and how to opt in to connector email collection.
+description: Understand how DefenseClaw attributes v8 telemetry to endpoint users and agents, which identity facts are verified or claimed, how to join records, and how to opt in to the principal and connector email.
 keywords:
   - DefenseClaw user identity
   - telemetry attribution
   - user.id
   - end-user email
+  - verified claimed identity
+  - agent identity
 ---
 
 DefenseClaw v8 can attribute hook activity and per-profile AI inventory to the
@@ -24,8 +26,12 @@ gateway's service account is not the person running the AI agent.
 | `defenseclaw.user.tenant_id` | Cloud directory tenant, for an Entra-joined Windows account. |
 | `defenseclaw.user.identity.source` | The OS facility that resolved the directory facts. |
 | `defenseclaw.user.principal.assurance` | `verified` when the gateway or the root guardian resolved the facts, `claimed` when only the hook reported them (`defenseclaw.user.identity.source` is then `hook_reported`). |
-| `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. |
+| `defenseclaw.session.kind` | Login session of the agent: `local`, `ssh`, `rdp` or `console`. Reported when the session has the same assurance as the directory facts. |
+| `client.address` | The client address of an SSH or remote session, reported with the session kind. |
+| `defenseclaw.session.kerberos_principal` | The principal of the login session's Kerberos ticket cache. Always claimed. Sent only with `ai_discovery.include_user_principal`. |
 | `defenseclaw.agent.identity.id` | The agent's own stable identity (`agt-`), one per connector install, user and machine. |
+| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The [guardrail profile](/docs/guardrail/user-and-group-policies) that decided the request, its policy digest, why it was chosen, and the matching group. |
+| `defenseclaw.user.group_count` | On the `identity.observed` record only: how many groups the user has, never their names. |
 
 An absent field means DefenseClaw could not establish it safely. Consumers
 must not infer `id_kind` from an identifier's shape or synthesize an email from
@@ -33,17 +39,24 @@ an account name.
 
 The directory fields come only from the operating system: DefenseClaw never
 calls an identity provider. See
+[How DefenseClaw knows who a user is](/docs/enterprise/identity-sources) for
+what is read on each OS and which facts are verified, and
 [Identity and authentication](/docs/enterprise/identity-and-authentication)
-for the identity types supported on each OS, which facts are verified, and the
-agent identity hierarchy.
+for the supported identity types and the agent identity hierarchy. The
+Secure Client profile emits none of the directory, session, agent identity or
+profile attributes.
 
 ## Attribution, not authorization
 
-Hooks execute in the interactive user's session and obtain uid/name or SID/name
-from the operating system. They carry that identity to the loopback gateway.
-The gateway prefers these hook headers, then uses a connector-native payload
-identity only for a connector that supplies one. An unmanaged gateway may use
-its own OS identity because it runs as the interactive user.
+Hooks execute in the interactive user's session, read uid/name or SID/name
+from the operating system and send them to the loopback gateway as headers.
+Those headers are a claim, not proof. Where the gateway authenticates the
+request (a managed hook peer, a per-user credential, or the account a
+per-user gateway runs as), it replaces the claimed user with the verified one,
+so a forged `X-DefenseClaw-User-*` header or payload user cannot re-attribute
+a record to another account. A connector-native payload identity is used only
+for a connector that supplies one, and an unmanaged gateway may use its own OS
+identity because it runs as the interactive user.
 
 In managed enterprise mode, the gateway runs as a service identity. DefenseClaw
 does not attribute that identity to the endpoint user. Inventory instead derives
@@ -68,6 +81,13 @@ Managed per-profile MCP inventory carries the same identity in `ai.discovery`.
 The `ide.plugin.*` records and the `identity.observed` record carry the same
 `user.id`. To follow one agent across its sessions, join on
 `defenseclaw.agent.identity.id` instead of the session ID.
+
+| Record | What it adds |
+| --- | --- |
+| `hook.decision`, `guardrail.evaluation`, `tool.activity` and the agent, model, tool and guardrail spans | The directory, session and agent identity attributes, and the guardrail profile on decisions and evaluations |
+| `identity.observed` | Once per user per identity cache lifetime (15 minutes): the directory, source and assurance, and the group count |
+| `ai_component.*` and the endpoint inventory | The owning user's principal, domain, directory, assurance and agent identity |
+| `ide.plugin.discovered`, `changed` and `removed` | One IDE plugin and its enabled state, for the user who owns it |
 
 Join records by `user.id` only after checking
 `defenseclaw.user.id_kind`. Do not join a POSIX uid to a Windows SID or assume
@@ -140,6 +160,7 @@ ai_discovery:
 Like the email, the principal is an identifier, so v8 redaction profiles keep
 it. Enable it only when every selected destination may receive it.
 
-See [AI Discovery](/docs/ai-discovery) for profile inventory and runtime-plane
-coverage, and [Redaction](/docs/observability/redaction) for the identifier
-preservation boundary.
+See [AI Discovery](/docs/ai-discovery) for profile inventory, the
+[IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory) and
+runtime-plane coverage, and [Redaction](/docs/observability/redaction) for the
+identifier preservation boundary.

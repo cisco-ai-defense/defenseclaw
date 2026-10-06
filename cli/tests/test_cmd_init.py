@@ -3545,9 +3545,9 @@ class TestMultiConnectorInit(unittest.TestCase):
                 overrides_before=before,
             )
             gc = cfg_mod.load().guardrail
-            self.assertEqual(gc.effective_rule_pack_dir("claudecode"), "/p/strict")
+            self.assertEqual(gc.effective_rule_pack_dir("claudecode"), os.path.abspath("/p/strict"))
             self.assertEqual(gc.connectors["claudecode"].block_at, "HIGH")
-            self.assertEqual(gc.effective_rule_pack_dir("codex"), "/p/custom")
+            self.assertEqual(gc.effective_rule_pack_dir("codex"), os.path.abspath("/p/custom"))
             # The mode is the answer given in this init run, not the old override.
             self.assertEqual(gc.connectors["claudecode"].mode, "")
 
