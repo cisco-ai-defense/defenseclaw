@@ -89,14 +89,18 @@ type configSnapshotLoader func(string, []byte) (*config.Config, error)
 type configFileSnapshotReader func(string) (configFileSnapshot, error)
 
 type ConfigManager struct {
-	path            string
-	applySnapshot   configSnapshotApplyFunc
-	logger          *audit.Logger
-	health          *SidecarHealth
-	loadSnapshot    configSnapshotLoader
-	readSnapshot    configFileSnapshotReader
-	v8PlanDigest    string
-	v8Plan          *config.ObservabilityV8Plan
+	path          string
+	applySnapshot configSnapshotApplyFunc
+	logger        *audit.Logger
+	health        *SidecarHealth
+	loadSnapshot  configSnapshotLoader
+	readSnapshot  configFileSnapshotReader
+	v8PlanDigest  string
+	v8Plan        *config.ObservabilityV8Plan
+	// appliedRaw is the config.yaml bytes of the last applied or reconciled
+	// generation, so an applied change can name the paths that changed.
+	// Guarded by mu.
+	appliedRaw      []byte
 	afterWatchAdded func()
 	observabilityV8 hookLifecycleMetricV8Runtime
 	// assetDirs lists the directories of the assets the live generation
@@ -743,6 +747,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if len(diff.Changed) == 0 {
 		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
+		m.appliedRaw = source.raw
 		if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 			m.v8PlanDigest = source.compiledV8.Plan.Digest()
 			m.v8Plan = source.compiledV8.Plan
@@ -816,9 +821,14 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	version.SetContentHash(source.raw)
 	if m.logger != nil {
-		_ = m.logger.LogActionCtx(ctx, string(audit.ActionConfigUpdate), m.path,
-			fmt.Sprintf("generation=%d changed=%s reason=%s", gen, strings.Join(diff.Changed, ","), reason))
+		if activity, ok := configChangeActivity(m.path, m.appliedRaw, source.raw, diff.Changed); ok && !next.SecureClientIntegration() {
+			_ = m.logger.LogActivity(activity)
+		} else {
+			_ = m.logger.LogActionCtx(ctx, string(audit.ActionConfigUpdate), m.path,
+				fmt.Sprintf("generation=%d changed=%s reason=%s", gen, strings.Join(diff.Changed, ","), reason))
+		}
 	}
+	m.appliedRaw = source.raw
 	if m.health != nil {
 		state := StateRunning
 		msg := ""

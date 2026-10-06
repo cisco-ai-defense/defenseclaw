@@ -676,6 +676,11 @@ func unsetPath(root *yaml.Node, parts []pathPart) error {
 	return nil
 }
 
+// ChangedPaths lists the dotted leaf paths whose values differ between two
+// config.yaml documents, the same list Result.Changed carries for a write.
+// Lists compare as a whole. Values are never returned.
+func ChangedPaths(before, after []byte) ([]string, error) { return diffDocuments(before, after) }
+
 // diffDocuments lists the leaf paths whose values differ between two
 // documents. Lists compare as a whole.
 func diffDocuments(before, after []byte) ([]string, error) {
