@@ -80,6 +80,48 @@ func TestUnannouncedSubagentHooksAreChildrenOfTheMainAgent(t *testing.T) {
 	}
 }
 
+// Codex 0.160 runs a spawned agent as a thread with its own session id and
+// fires no SubagentStart; only the parent's create_thread result names it.
+// The thread's hooks are then a child of the calling agent, one level down,
+// with the parent session named (GAP-0179). A session nobody spawned stays a
+// root.
+func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
+	api := &APIServer{}
+	const parentSession = "01a112f0-847b-7161-9d89-41cd7dbafd82"
+	const childSession = "01a112f1-8bff-77b2-b8f8-a675ceccfdd2"
+	parentAgent := stableLLMEventID("agent", "codex", parentSession, "root")
+	childAgent := stableLLMEventID("agent", "codex", childSession, "root")
+	emit := func(session, event, tool string, response any) {
+		api.emitCodexHookLLMEvent(t.Context(), codexHookRequest{
+			HookEventName: event, SessionID: session, ToolName: tool, ToolUseID: "call-" + session + event,
+			ToolInput: map[string]any{"prompt": "run it"}, ToolResponse: response,
+			Payload: map[string]any{"source": "startup"},
+		}, nil, nil)
+	}
+	emit(parentSession, "SessionStart", "", nil)
+	emit(parentSession, "PreToolUse", "mcp__codex_tui__create_thread", nil)
+	emit(parentSession, "PostToolUse", "mcp__codex_tui__create_thread",
+		map[string]any{"content": `{"threadId":"` + childSession + `"}`})
+	emit(childSession, "SessionStart", "", nil)
+	emit(childSession, "PreToolUse", "Bash", nil)
+	emit("01a112f2-0000-7000-8000-000000000001", "SessionStart", "", nil)
+
+	child, ok := api.hookLifecycleSnapshot("codex", childSession, childAgent)
+	if !ok || child.AgentDepth != 1 || child.ParentAgentID != parentAgent || child.RootAgentID != parentAgent ||
+		child.ParentSessionID != parentSession || child.RootSessionID != parentSession {
+		t.Fatalf("child thread lineage = %+v (retained %v), want depth 1 under %s in session %s", child, ok, parentAgent, parentSession)
+	}
+	parent, ok := api.hookLifecycleSnapshot("codex", parentSession, parentAgent)
+	if !ok || parent.AgentDepth != 0 || parent.ParentAgentID != "" {
+		t.Fatalf("parent lineage = %+v (retained %v), want depth 0", parent, ok)
+	}
+	other := "01a112f2-0000-7000-8000-000000000001"
+	stranger, ok := api.hookLifecycleSnapshot("codex", other, stableLLMEventID("agent", "codex", other, "root"))
+	if !ok || stranger.AgentDepth != 0 || stranger.ParentSessionID != "" {
+		t.Fatalf("a session nobody spawned = %+v (retained %v), want a root", stranger, ok)
+	}
+}
+
 func hookSpawnIntentCount(api *APIServer) int {
 	api.llmPromptMu.Lock()
 	defer api.llmPromptMu.Unlock()

@@ -642,6 +642,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	meta.ToolName = codexToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
+	meta = a.applyHookChildThreadLineage(meta)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)
@@ -700,6 +701,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 			codexToolResponseString(req.ToolResponse),
 		)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentCompleted, arguments, response)
+		a.rememberHookChildThread(meta, codexToolName(req), response)
 		completionContext := a.emitHookToolSpan(ctx, meta, codexToolName(req), arguments, response, nil)
 		a.emitToolInvocationEventV8(completionContext, meta, "result", codexToolName(req), "", response, nil)
 	case "Stop", "SubagentStop":

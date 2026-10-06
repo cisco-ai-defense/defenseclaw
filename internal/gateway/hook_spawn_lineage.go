@@ -13,6 +13,8 @@ import (
 )
 
 const (
+	hookChildThreadMaxEntries = 1024
+	hookChildThreadTTL        = time.Hour
 	hookSpawnIntentMaxEntries = 1024
 	hookSpawnIntentTTL        = 2 * time.Minute
 	hookSpawnAliasMaxBytes    = 512
@@ -310,6 +312,96 @@ func (a *APIServer) forgetHookSpawnIntent(meta llmEventMeta) {
 	a.llmPromptMu.Lock()
 	defer a.llmPromptMu.Unlock()
 	a.removeHookSpawnIntentLocked(key)
+}
+
+// hookChildThread is a session a parent agent's spawn tool call started: the
+// parent as it was when the call returned the child's thread id.
+type hookChildThread struct {
+	parent    llmEventMeta
+	createdAt time.Time
+}
+
+var codexThreadIDPattern = regexp.MustCompile(`"threadId"\s*:\s*"([A-Za-z0-9][A-Za-z0-9._-]{7,127})"`)
+
+// isCodexThreadSpawnTool reports whether tool is the Codex TUI's
+// create_thread. Codex 0.160 runs a spawned agent as a thread of its own: it
+// hooks as a session with its own id, fires no SubagentStart, and names the
+// child only in this call's result, as {"threadId": "..."} (GAP-0179).
+func isCodexThreadSpawnTool(tool string) bool {
+	return strings.HasSuffix(canonicalEvent(tool), "codextuicreatethread")
+}
+
+func hookChildThreadKey(source, sessionID string) string {
+	return strings.ToLower(strings.TrimSpace(source)) + "\x00" + strings.TrimSpace(sessionID)
+}
+
+// rememberHookChildThread records the thread a completed create_thread call
+// started, so the first hook of that session is linked to the calling agent.
+func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response string) {
+	if a == nil || !isCodexThreadSpawnTool(tool) {
+		return
+	}
+	match := codexThreadIDPattern.FindStringSubmatch(response)
+	if match == nil || match[1] == strings.TrimSpace(meta.SessionID) {
+		return
+	}
+	parent := a.canonicalHookSpawnParent(meta)
+	if strings.TrimSpace(parent.AgentID) == "" || parent.AgentDepth < 0 || parent.AgentDepth >= 64 {
+		return
+	}
+	now := time.Now().UTC()
+	key := hookChildThreadKey(meta.Source, match[1])
+
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	if a.hookChildThreads == nil {
+		a.hookChildThreads = make(map[string]hookChildThread)
+	}
+	kept := a.hookChildThreadOrder[:0]
+	for _, candidate := range a.hookChildThreadOrder {
+		if link, ok := a.hookChildThreads[candidate]; ok && candidate != key && now.Sub(link.createdAt) <= hookChildThreadTTL {
+			kept = append(kept, candidate)
+		} else {
+			delete(a.hookChildThreads, candidate)
+		}
+	}
+	a.hookChildThreadOrder = kept
+	for len(a.hookChildThreads) >= hookChildThreadMaxEntries && len(a.hookChildThreadOrder) > 0 {
+		delete(a.hookChildThreads, a.hookChildThreadOrder[0])
+		a.hookChildThreadOrder = a.hookChildThreadOrder[1:]
+	}
+	a.hookChildThreads[key] = hookChildThread{parent: parent, createdAt: now}
+	a.hookChildThreadOrder = append(a.hookChildThreadOrder, key)
+}
+
+// applyHookChildThreadLineage links a hook of a session that a create_thread
+// call started to the agent that called it: depth one under it, the parent
+// session named. It changes nothing for a hook that already has a parent, a
+// reported lineage, or another user's session.
+func (a *APIServer) applyHookChildThreadLineage(meta llmEventMeta) llmEventMeta {
+	if a == nil || meta.LineageProvenance == "reported" || meta.ParentAgentReported || meta.ParentLineageResolved ||
+		strings.TrimSpace(meta.ParentAgentID) != "" || strings.TrimSpace(meta.ParentSessionID) != "" || meta.AgentDepth != 0 {
+		return meta
+	}
+	a.llmPromptMu.Lock()
+	link, ok := a.hookChildThreads[hookChildThreadKey(meta.Source, meta.SessionID)]
+	a.llmPromptMu.Unlock()
+	if !ok || time.Since(link.createdAt) > hookChildThreadTTL {
+		return meta
+	}
+	parent := link.parent
+	if parent.UserID != "" && meta.UserID != "" && parent.UserID != meta.UserID {
+		return meta
+	}
+	meta.ParentAgentID = parent.AgentID
+	meta.RootAgentID = firstNonEmpty(parent.RootAgentID, parent.AgentID)
+	meta.ParentSessionID = parent.SessionID
+	meta.RootSessionID = firstNonEmpty(parent.RootSessionID, parent.SessionID)
+	meta.AgentDepth = parent.AgentDepth + 1
+	meta.AgentType = "subagent"
+	meta.LineageProvenance = "inferred"
+	meta.ParentLineageResolved = true
+	return meta
 }
 
 // hookAgentStateKnown reports whether the agent's lifecycle is retained: a
