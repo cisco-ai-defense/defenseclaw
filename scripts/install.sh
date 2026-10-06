@@ -185,7 +185,7 @@ Options:
   --no-openclaw            First install only: do not install OpenClaw
   --quickstart             Run 'defenseclaw quickstart' afterwards if nothing is configured yet
   --quickstart-mode MODE   observe or action (implies --quickstart)
-  --sandbox                Deprecated no-op (the legacy openshell-sandbox installer was removed)
+  --sandbox                Deprecated no-op, removed in 1.1.0 (the legacy openshell-sandbox installer was removed)
   --help, -h               Show this help
 
 Exit codes:
@@ -230,9 +230,9 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ "${INSTALL_SANDBOX}" == true ]]; then
     # The legacy openshell-sandbox (0.0.x) installer was removed; --sandbox is
-    # accepted so existing automation keeps working, and does nothing. It is
-    # not forwarded to another release's installer either.
-    warn "--sandbox is deprecated and ignored: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
+    # accepted until 1.1.0 so existing automation keeps working, and does
+    # nothing. It is not forwarded to another release's installer either.
+    warn "--sandbox is deprecated and ignored, and removed in 1.1.0: the legacy openshell-sandbox installer was removed. To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' after the install; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'."
 fi
 if [[ "${NO_OPENCLAW}" == true ]]; then
     [[ "${CONNECTOR}" != openclaw ]] || die "--no-openclaw cannot be combined with --connector openclaw"
