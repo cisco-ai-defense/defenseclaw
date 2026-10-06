@@ -400,17 +400,15 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 }
 
 // profileRows labels the provider profiles teardown removes: this install's
-// own ingress profiles, the gateway-wide one of an earlier release, and the
-// model and credential profiles every install on the gateway shares, which
-// no provider uses now (an install that needs one imports it again).
+// own ingress profiles, and the model and credential profiles every install
+// on the gateway shares, which no provider uses now (an install that needs
+// one imports it again).
 func (a *App) profileRows(p *teardownPlan) []string {
-	var own, legacy, shared, creds []string
+	var own, shared, creds []string
 	for _, id := range p.profiles {
 		switch {
 		case p.ownIngress[id]:
 			own = append(own, id)
-		case id == profiles.LegacyIngressID:
-			legacy = append(legacy, id)
 		case strings.HasPrefix(id, "dc-cred-"):
 			creds = append(creds, id)
 		default:
@@ -426,9 +424,6 @@ func (a *App) profileRows(p *teardownPlan) []string {
 	var rows []string
 	if len(own) > 0 {
 		rows = append(rows, strings.Join(own, ", ")+" (this install's hook ingress)")
-	}
-	if len(legacy) > 0 {
-		rows = append(rows, strings.Join(legacy, ", ")+" (from an earlier DefenseClaw release)")
 	}
 	if len(shared) > 0 {
 		rows = append(rows, strings.Join(shared, ", ")+" (shared by every DefenseClaw install on this gateway and unused now; an install that needs one imports it again)")

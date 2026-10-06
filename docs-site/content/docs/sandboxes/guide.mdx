@@ -1349,8 +1349,7 @@ the daemon still records, such as a kept snapshot, are listed as
 
 Provider profiles are shared by everything on the OpenShell gateway, so
 teardown removes more than this install's own. It deletes this install's
-hook ingress profile, the older gateway-wide `defenseclaw-ingress` profile,
-and every DefenseClaw credential profile (`dc-cred-…`) and model provider
+hook ingress profile and every DefenseClaw credential profile (`dc-cred-…`) and model provider
 profile (`defenseclaw-…`) that no remaining provider uses, including ones
 another DefenseClaw install imported. Another DefenseClaw daemon on the same
 gateway imports them again when it needs them, and another install's

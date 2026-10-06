@@ -1166,15 +1166,13 @@ providers (`<sandbox>-ingress`, `<sandbox>-llm`, `<sandbox>-cred-<n>`) carry
 the data dir's owner label, and a create never replaces a provider of that
 name that another data dir (or a user) owns. Policy rules, `defenseclaw_egress`
 among them, belong to one sandbox's policy, and the overlay image tags hash
-the owner and the ingress port. Earlier releases imported one gateway-wide
-`defenseclaw-ingress` profile, holding one daemon's port, and single-region
-`defenseclaw-claude-bedrock-mantle` and `defenseclaw-codex-bedrock-mantle`
-profiles. Sandboxes created then keep using them, and nothing updates them
-any more.
+the owner and the ingress port. The ingress and Bedrock Mantle templates are
+only ever imported under ids naming their inputs (`defenseclaw-ingress-<port>`,
+`<template>-<region>`), never under the bare template ID.
 
 `defenseclaw sandbox teardown` deletes this data dir's own ingress profiles
-(the configured listener's and any its providers used), the legacy
-`defenseclaw-ingress`, and the shared LLM and credential profiles, each only
+(the configured listener's and any its providers used) and the shared LLM
+and credential profiles, each only
 when no other provider uses it. It never deletes another daemon's ingress
 profile, and OpenShell refuses to delete a profile a provider still uses.
 
@@ -1351,9 +1349,7 @@ only while that count is unchanged: the next start takes a fresh snapshot,
 and any session after the acceptance ends it (a `--no-snapshot` start's,
 or one that ran although its start failed on DefenseClaw's side), while a
 start that never ran the sandbox leaves it in place. `sandbox start --new-snapshot` accepts the changes and takes a
-fresh one; `--no-snapshot` always keeps the previous one. An acceptance an
-earlier CLI recorded in `cli/accepted.json` is honoured once, as
-`--new-snapshot`.
+fresh one; `--no-snapshot` always keeps the previous one.
 
 `Undo` needs the sandbox stopped first (the manager must stop it), and has a
 preview mode. A stop of a ready sandbox first sends SIGTERM to the harness's
@@ -1382,10 +1378,8 @@ stop's interrupted mark goes through a descriptor checked to be a regular
 file, after it has said how the run stands, so a FIFO swapped in for
 `latest.exit` gets no write. The CLI
 only asks first, on a terminal, before `sandbox stop` ends a run still
-going. `sandbox logs` names the run a kept log is of (its start), and still
-shows a log an earlier CLI kept in `cli/run.log`, said to be that CLI's,
-until the daemon sees the sandbox start again (its `session` count): every
-stop after that is the daemon's. In a git project undo:
+going. `sandbox logs` names the run a kept log is of (its start). In a git
+project undo:
 
 - restores the working tree, HEAD and the branch, the staging area and the
   git control files the agent could write;
@@ -1648,8 +1642,8 @@ phase `deleted`, `undo` and `review` still work on it, and `delete` drops the
 snapshot. Until then its name cannot be reused.
 
 Sandbox names follow the OpenShell rule (a DNS label: lowercase letters,
-digits and `-`, starting and ending with a letter or digit), and `git` is
-reserved. OpenShell 0.1.1 creates sandboxes of at most 19 characters, so a
+digits and `-`, starting and ending with a letter or digit). OpenShell 0.1.1
+creates sandboxes of at most 19 characters, so a
 new name is held to that; the default is `<folder>-<rand4>`, the folder name
 cut to fit, with the harness and DefenseClaw ownership carried as labels.
 

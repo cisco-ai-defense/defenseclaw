@@ -116,8 +116,7 @@ func TestSnapshotObjectCopyLimit(t *testing.T) {
 
 // TestShadowStorageStaysOutOfSnapshotDirs: shadows live under <data>/shadows,
 // apart from the per-name snapshot directories, and a snapshot directory
-// that holds anything Snapshot does not write (such as the shared shadow
-// root older builds kept at snapshots/git) is neither reused nor deleted.
+// that holds anything Snapshot does not write is neither reused nor deleted.
 func TestShadowStorageStaysOutOfSnapshotDirs(t *testing.T) {
 	e := newEnv(t)
 	e.initRepo()
@@ -132,8 +131,4 @@ func TestShadowStorageStaysOutOfSnapshotDirs(t *testing.T) {
 		t.Fatal("DeleteSnapshot removed a directory holding other data")
 	}
 	wantFiles(t, e.data, "snapshots/dc-old/0123abcd.git/defenseclaw-project.json", "marker")
-	// "git" names no sandbox: it was the shared shadow root.
-	if _, err := Snapshot(bg, e.snapOpts("git")); err == nil || DeleteSnapshot(bg, e.data, "git") == nil {
-		t.Fatalf("a snapshot named git was accepted: %v", err)
-	}
 }

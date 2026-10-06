@@ -1598,14 +1598,13 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 		}
 	}
 	// Ingress profiles: this config's listener's, an earlier port's (our
-	// orphan's provider uses it), another daemon's unused one (it is not
-	// ours to remove) and the legacy gateway-wide one of earlier releases.
+	// orphan's provider uses it) and another daemon's unused one (it is not
+	// ours to remove).
 	ownPort := ta.Cfg.OpenShellIngressPort()
 	oldPort, otherPort := ownPort+1000, ownPort+2000
 	for _, port := range []int{ownPort, oldPort, otherPort} {
 		importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: port}, "")
 	}
-	importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: 18000}, profiles.LegacyIngressID)
 	importProfile(t, client, profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}, "")
 	for _, p := range []*openshell.Provider{
 		{Name: "dc-claude-orphan-ingress", Type: profiles.IngressProfileID(oldPort), Labels: ours, Spec: openshell.ProviderSpec{Credentials: map[string]string{"DEFENSECLAW_SANDBOX_TOKEN": "t"}}},
@@ -1632,11 +1631,9 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale", "copy", "stage", "proj", "README.md"), "x")
 
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
-	// The profiles, each labeled: this install's ingress ones, then the
-	// earlier release's gateway-wide one.
+	// The profiles, labeled: this install's ingress ones.
 	has(t, ta.output(), "leftover data     dc-claude-stale", "dc-claude-live, dc-claude-orphan",
-		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n"+
-			"                    "+profiles.LegacyIngressID+" (from an earlier DefenseClaw release)\n  images ")
+		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n  images ")
 	lacks(t, ta.output(), "dc-claude-theirs")
 	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
@@ -1656,7 +1653,6 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 		"our provider":                          {errOf(client.GetProvider(bg, "dc-claude-orphan-ingress")), true},
 		"our ingress profile":                   {errOf(client.GetProfile(bg, profiles.IngressProfileID(ownPort))), true},
 		"our earlier port's ingress profile":    {errOf(client.GetProfile(bg, profiles.IngressProfileID(oldPort))), true},
-		"the legacy ingress profile":            {errOf(client.GetProfile(bg, profiles.LegacyIngressID)), true},
 		"another daemon's ingress profile":      {errOf(client.GetProfile(bg, profiles.IngressProfileID(otherPort))), false},
 		"a profile another provider still uses": {errOf(client.GetProfile(bg, profiles.AnthropicID)), false},
 	} {
@@ -1723,8 +1719,7 @@ func TestTeardownDryRunListsEveryStep(t *testing.T) {
 }
 
 // The daemon's delete leaves the CLI's own state of a sandbox (the run's
-// options, a copy's hand-over, and what an earlier CLI kept there: a run
-// log, the accepted undo point) under its data directory, which `sandbox
+// options, a copy's hand-over) under its data directory, which `sandbox
 // delete` removes after it: teardown removes it too.
 func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	ta := newTestApp(t, "")
@@ -1741,11 +1736,11 @@ func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "run.log"), "what the agent printed\n")
+	writeFile(t, filepath.Join(dir, runLaunchFile), `{"harness":"claudecode"}`)
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
 	ta.wantCalls(t, 1, "DELETE", "dc-claude-live")
 	if _, err := os.Stat(filepath.Join(sandboxes, "dc-claude-live")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the sandbox's directory (and its kept run log) is still there: %v", err)
+		t.Fatalf("the sandbox's directory (and the CLI's state in it) is still there: %v", err)
 	}
 }
 

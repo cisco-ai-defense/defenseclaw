@@ -364,16 +364,14 @@ func newUnreadable(rec *SnapshotRecord, now *sentinelScan) []string {
 	return out
 }
 
-// undoIgnored fills res.Ignored from the snapshot's ignored manifest, if it
-// has one, and returns the manifest; nowRoots are the ignored places now and
-// changes the snapshot's own comparison.
+// undoIgnored fills res.Ignored from the snapshot's ignored manifest and
+// returns the manifest (nil, with a warning, when it cannot be read);
+// nowRoots are the ignored places now and changes the snapshot's own
+// comparison.
 func undoIgnored(rec *SnapshotRecord, dataDir string, nowRoots []string, changes []TreeChange, res *UndoResult) *ignoredManifest {
 	man, err := loadIgnored(dataDir, rec.Name)
 	if err != nil {
 		res.Warnings = append(res.Warnings, "the record of the files the undo point does not copy is unreadable ("+err.Error()+"); undo cannot say what changed there")
-		return nil
-	}
-	if man == nil {
 		return nil
 	}
 	irep, err := diffIgnored(rec.Project, man, nowRoots, nil, changedPaths(changes))
@@ -964,10 +962,6 @@ func undoCopy(rec *SnapshotRecord, opts UndoOptions, res *UndoResult) error {
 	res.NestedRepos = nested
 	if capped {
 		res.Warnings = append(res.Warnings, "the folder is too large to check completely for new nested git repositories")
-	}
-	if man, _ := loadIgnored(opts.DataDir, rec.Name); man == nil && len(rec.Copy.Opaque) > 0 {
-		// A snapshot from before the ignored manifest: say what undo skips.
-		res.Warnings = append(res.Warnings, "left as the session left them: "+strings.Join(firstN(rec.Copy.Opaque, 5), ", "))
 	}
 	man := undoIgnored(rec, opts.DataDir, now.heavy, changes, res)
 	if opts.Preview {

@@ -18,17 +18,11 @@ package sandboxcli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // The undo point of a mounted project. The daemon decides at every start:
@@ -60,59 +54,15 @@ func (a *App) acceptChanges(ctx context.Context, api API, sb *sandboxapi.Sandbox
 	return true
 }
 
-// acceptedUndoPoint is the snapshot the user accepted the changes on top
-// of, as an earlier CLI recorded it (cli/accepted.json) before the daemon
-// kept acceptances: the next start still honours it.
-type acceptedUndoPoint struct {
-	SandboxID string    `json:"sandbox_id,omitempty"`
-	Snapshot  time.Time `json:"snapshot_created_at"`
-}
-
-// legacyAcceptedFile is where an earlier CLI recorded an acceptance.
-const legacyAcceptedFile = "accepted.json"
-
-// forgetLegacyAcceptance removes an acceptance an earlier CLI recorded,
-// once a start used it.
-func (a *App) forgetLegacyAcceptance(name string) {
-	if dir, err := a.cliStateDir(name); err == nil {
-		_ = os.Remove(filepath.Join(dir, legacyAcceptedFile))
-	}
-}
-
-// accepted reports whether an earlier CLI recorded that the user accepted
-// the changes on top of sb's snapshot.
-func (a *App) accepted(sb *sandboxapi.Sandbox) bool {
-	if sb.WorkdirMode != config.OpenShellWorkdirMount || sb.Snapshot == nil || !sb.Snapshot.UndoneAt.IsZero() {
-		return false
-	}
-	dir, err := a.cliStateDir(sb.Name)
-	if err != nil {
-		return false
-	}
-	data, err := safefile.ReadRegularFileBounded(filepath.Join(dir, legacyAcceptedFile), 4<<10)
-	if err != nil {
-		return false
-	}
-	var rec acceptedUndoPoint
-	if json.Unmarshal(data, &rec) != nil {
-		return false
-	}
-	return rec.SandboxID == sb.ID && rec.Snapshot.Equal(sb.Snapshot.CreatedAt)
-}
-
 // startSandbox starts a stopped sandbox for a new session. The daemon takes
 // a fresh snapshot when the user accepted the changes on top of the current
-// one (or o says so); an acceptance an earlier CLI recorded asks for one
-// too. It reports whether the undo point from before the start was kept,
-// which the returned sandbox shows: its snapshot is still that one. A
-// session (connect) accepts the changes at its end; `sandbox start`
-// (session false) says how to accept them with --new-snapshot instead.
+// one (or o says so). It reports whether the undo point from before the
+// start was kept, which the returned sandbox shows: its snapshot is still
+// that one. A session (connect) accepts the changes at its end; `sandbox
+// start` (session false) says how to accept them with --new-snapshot
+// instead.
 func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox, o StartOptions, session bool) (*sandboxapi.Sandbox, bool, error) {
 	req := sandboxapi.StartRequest{NoSnapshot: o.NoSnapshot, NewSnapshot: o.NewSnapshot}
-	legacy := a.accepted(sb)
-	if !req.NoSnapshot && !req.NewSnapshot && legacy {
-		req.NewSnapshot = true
-	}
 	// The session can change the copy: what it held as the sandbox stopped
 	// is not known after this (a start that fails may still have started
 	// it).
@@ -120,10 +70,6 @@ func (a *App) startSandbox(ctx context.Context, api API, sb *sandboxapi.Sandbox,
 	started, err := api.Start(ctx, sb.Name, req)
 	if err != nil {
 		return nil, false, a.startError(ctx, api, sb, err)
-	}
-	if legacy {
-		// Used up, as the daemon uses its own acceptance up at a start.
-		a.forgetLegacyAcceptance(sb.Name)
 	}
 	kept := keptUndoPoint(sb, started)
 	if kept && !o.NoSnapshot {

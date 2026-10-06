@@ -626,8 +626,6 @@ func checkNewName(name string) error {
 	case !openshell.ValidNewSandboxName(name):
 		return fmt.Errorf("--name %q: use at most %d lowercase letters, digits and '-', starting and ending with a letter or digit",
 			name, openshell.MaxSandboxNameLen)
-	case workspace.ValidateName(name) != nil:
-		return fmt.Errorf("--name %q is reserved; choose another", name)
 	}
 	return nil
 }

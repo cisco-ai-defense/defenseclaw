@@ -115,12 +115,6 @@ const (
 	GeminiID = "defenseclaw-gemini"
 )
 
-// LegacyIngressID is the gateway-wide ingress profile of earlier releases,
-// holding one daemon's ingress port. Sandboxes created then still use it;
-// nothing imports or updates it any more. The Bedrock template IDs are
-// likewise the ids of the single-region Mantle profiles of earlier releases.
-const LegacyIngressID = IngressID
-
 // IngressProfileID is the gateway profile of the hook ingress listening on
 // port. Each listener has its own, so DefenseClaw daemons on different
 // ports (a dev daemon next to the usual one, or a changed port) never
@@ -159,7 +153,7 @@ func quotedIDs(kind profileKind) []string {
 }
 
 // IngressPort returns the port of an IngressProfileID, and whether id is
-// one (the legacy gateway-wide profile is not).
+// one.
 func IngressPort(id string) (int, bool) {
 	m := ingressProfileRE.FindStringSubmatch(id)
 	if m == nil {
@@ -173,13 +167,13 @@ func IngressPort(id string) (int, bool) {
 }
 
 // IsDefenseClaw reports whether a gateway profile id is one Render
-// produces, now or in an earlier release: a template ID (which covers the
-// legacy ingress and single-region Mantle profiles), an ingress listener's
-// profile or a regional Mantle profile. The sandbox manager's
+// produces: a harness template's ID, an ingress listener's profile or a
+// regional Mantle profile (the ingress and Mantle templates are never
+// imported under their template IDs). The sandbox manager's
 // credential-binding profiles (dc-cred-*) are not rendered here.
 func IsDefenseClaw(id string) bool {
-	if _, ok := catalog[id]; ok {
-		return true
+	if kind, ok := catalog[id]; ok {
+		return kind == kindHarness
 	}
 	if _, ok := IngressPort(id); ok {
 		return true

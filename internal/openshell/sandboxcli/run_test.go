@@ -331,7 +331,6 @@ func TestRunRefusals(t *testing.T) {
 			want: []string{"use at most 19 lowercase letters, digits and '-'"}},
 		{name: "a trailing dash", opts: RunOptions{Harness: "claude", Copy: true, Name: "trailing-"}, offline: true,
 			want: []string{"starting and ending with a letter or digit"}},
-		{name: "a reserved name", opts: RunOptions{Harness: "claude", Copy: true, Name: "git"}, offline: true, want: []string{`--name "git" is reserved`}},
 		{name: "an existing name, headless copy", opts: RunOptions{Harness: "codex", Copy: true, Name: "m2-a", Detach: true, Prompt: "x"},
 			setup: existing("m2-a", "stopped", false), want: []string{"a sandbox named m2-a already exists",
 				"resume it with `defenseclaw sandbox connect m2-a --prompt TEXT`", "delete it with `defenseclaw sandbox delete m2-a`"}},
