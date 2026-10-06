@@ -94,6 +94,10 @@ type box struct {
 	// included.
 	guard       *guardRun
 	guardEnding chan struct{}
+	// observe is the running AI discovery observer of the ready sandbox
+	// (discovery.go); discoverMu serializes its discoveries.
+	observe    *observeRun
+	discoverMu sync.Mutex
 
 	hooks       hookStats
 	activeAt    time.Time
@@ -326,6 +330,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		Message: lifecycleMessage(rec.Name, phase),
 	})
 	m.syncGuard(b, phase)
+	m.syncObserve(b, phase)
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {

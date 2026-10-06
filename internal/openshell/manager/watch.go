@@ -73,6 +73,7 @@ func (m *Manager) startWatch(b *box) {
 
 func (m *Manager) stopWatch(b *box) {
 	m.stopGuard(b)
+	m.stopObserve(b)
 	m.mu.Lock()
 	cancel, done := b.watchCancel, b.watchDone
 	b.watchCancel, b.watchDone = nil, nil

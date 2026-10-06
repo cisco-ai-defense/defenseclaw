@@ -51,6 +51,8 @@ type SandboxController interface {
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
 	// ReportWorkspace records a copy-mode workspace step the CLI ran.
 	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
+	// Discover runs the AI discovery of a ready sandbox now.
+	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
@@ -170,6 +172,12 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 				return nil, err
 			}
 			return map[string]string{"status": "recorded"}, nil
+		case "discover":
+			var req struct{}
+			if err := decodeSandboxBody(r, &req, true); err != nil {
+				return nil, err
+			}
+			return c.Discover(ctx, name)
 		default:
 			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "unknown sandbox action %q", r.PathValue("verb"))
 		}

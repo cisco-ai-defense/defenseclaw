@@ -453,6 +453,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("accept-sensitive", "bool", "bring back changes that can run code on this machine"),
         ),
     ),
+    _Cmd(
+        ("discover",),
+        "Find the AI components inside a running sandbox now (MCP servers, skills, CLIs, agents)",
+        args=(_Arg("name"),),
+        flags=(_OUTPUT, _JSON),
+    ),
     _Cmd(("policy",), "Show, explain and adjust the sandbox policy"),
     _Cmd(("policy", "show"), "Show the effective sandbox policy", flags=_policy_flags()),
     _Cmd(

@@ -68,6 +68,7 @@ type API interface {
 	Accept(ctx context.Context, name string, req sandboxapi.AcceptRequest) (*sandboxapi.Sandbox, error)
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
 	ReportWorkspace(ctx context.Context, name string, r sandboxapi.WorkspaceReport) error
+	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	Decide(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)

@@ -588,6 +588,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	m.recordMountTelemetry(ctx, b, plan, !in.req.NoSnapshot)
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerCreate, false, nil, nil)
+	m.observeNow(b)
 	m.startWatch(b)
 	m.refreshEgress()
 	view := m.viewOf(b)

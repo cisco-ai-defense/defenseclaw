@@ -226,6 +226,8 @@ type Manager struct {
 	// (EgressRefusals).
 	refusals  *refusalMemory
 	toolCalls *hookTamperTracker
+	// catalog is the AI signature catalog of the sandbox discoveries.
+	catalog discoveryCatalog
 	// tamperStops tracks the stops hook tamper started.
 	tamperStops sync.WaitGroup
 

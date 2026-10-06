@@ -1200,6 +1200,36 @@ defenseclaw sandbox pull fix-tests --patch-out fix-tests.patch
 | `--patch-out` | text |  | Write the changes to this patch file. |
 {/* AUTOGEN-END: sandbox-flags */}
 
+## What runs in a sandbox
+
+### `sandbox discover`
+
+Finds the AI components inside a running sandbox now: the MCP servers, skills,
+rules, plugins and AI CLIs the agent installed or configured under the
+sandbox's home, the agents running in it, the names (never the values) of its
+environment variables, shell history mentions and, for a copy (`--copy`, every
+sandbox on macOS), the AI packages its package manifests name. DefenseClaw
+reads the sandbox with one read-only command it builds itself, checks every
+path and file the sandbox sends back, and scans the result on this machine.
+The daemon does the same on its own once the sandbox is ready and every
+`ai_discovery.scan_interval_min` while it runs, and keeps the result when the
+sandbox stops (without its processes). The AI inventory shows the sandbox's
+components, marked with its name, after its next scan:
+`defenseclaw agent usage --sandbox NAME`. `ai_discovery.enabled: false` turns
+it off.
+
+```bash
+defenseclaw sandbox discover myapp-7f3a
+defenseclaw sandbox discover myapp-7f3a --json
+```
+
+{/* AUTOGEN-BEGIN: sandbox-flags discover */}
+| Flag | Takes | Default | Description |
+| --- | --- | --- | --- |
+| `--json` | switch |  | Same as --output json. |
+| `-o`, `--output` | text | `text` | Output format: text or json. |
+{/* AUTOGEN-END: sandbox-flags */}
+
 ## Policy and packs
 
 ### `sandbox policy`

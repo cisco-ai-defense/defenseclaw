@@ -516,6 +516,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
+	m.observeNow(b)
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)
 	return nil
@@ -839,6 +840,7 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 	}
 	warn(m.removeRunConfig(rec.Name))
 	warn(m.removeRunLog(rec.Name))
+	warn(m.removeDiscovery(rec.Name))
 	if !retained {
 		warn(m.removeRecord(b))
 		m.removeSandboxDir(rec.Name)

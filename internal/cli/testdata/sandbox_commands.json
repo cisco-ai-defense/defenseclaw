@@ -142,6 +142,24 @@
     ]
   },
   {
+    "path": "sandbox discover",
+    "use": "discover \u003cname\u003e",
+    "short": "Find the AI components inside a running sandbox now (MCP servers, skills, CLIs, agents)",
+    "flags": [
+      {
+        "name": "json",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "name": "output",
+        "shorthand": "o",
+        "type": "string",
+        "default": "text"
+      }
+    ]
+  },
+  {
     "path": "sandbox doctor",
     "use": "doctor",
     "short": "Check that this machine can run sandboxes",
