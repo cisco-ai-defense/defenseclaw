@@ -995,6 +995,11 @@ jobs:
           --ignore-vuln GHSA-537c-gmf6-5ccf
           --ignore-vuln GHSA-6v7p-g79w-8964
           --ignore-vuln GHSA-4xgf-cpjx-pc3j
+          # TODO: Remove --ignore-vuln CVE-2026-104874 once uv.lock
+          # upgrades multidict from 6.7.1 to >= 6.9.1. Transitive dep;
+          # OSV published this CVE 2026-10-06 (passed on 2026-10-05
+          # with identical lockfile).
+          --ignore-vuln CVE-2026-104874
 
   ts-build-test:
     name: TypeScript Build & Test
