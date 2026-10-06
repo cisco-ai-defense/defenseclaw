@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -75,6 +76,55 @@ type validatedConfig struct {
 	// Loaded is the runtime config the checks loaded; machine policy is
 	// published from it.
 	Loaded *config.Config
+	// Migration is set when the administrator config was config_version 8:
+	// Raw is then the migrated config_version 9 document, and the apply
+	// keeps the v8 bytes and the migration record next to config.yaml.
+	Migration *configMigration
+}
+
+// configMigration is the v8 to v9 migration of an administrator config.
+type configMigration struct {
+	Source []byte
+	Record config.MigrationRecord
+}
+
+// migrateConfigV9 takes a config_version 8 administrator config to 9 in
+// memory (spec 2.0: ensure calls the migration library and accepts a v8
+// config). It returns nil for a config that is not config_version 8. The
+// data.json of policy_dir is read; audit.db operator rows are never moved
+// on a managed host, only counted (local_enforcement_entries_ignored).
+func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConfig) (*config.MigrateV9Result, error) {
+	if !config.NeedsMigrationV9(raw) {
+		return nil, nil
+	}
+	policyDir := e.Layout.VendorPolicyDir
+	if v8 != nil && v8.Loaded != nil && strings.TrimSpace(v8.Loaded.PolicyDir) != "" {
+		policyDir = filepath.Clean(v8.Loaded.PolicyDir)
+	}
+	in := config.MigrateV9Input{
+		ConfigPath:   e.Layout.ConfigPath,
+		Source:       raw,
+		PolicyDir:    policyDir,
+		DataJSONPath: e.P(filepath.Join(policyDir, "rego", "data.json")),
+		AuditDBPath:  e.P(filepath.Join(e.Layout.DataDir, "audit.db")),
+		Managed:      true,
+		InMemory:     true,
+		RulePackDigest: func(dir string) (string, error) {
+			return guardrail.RulePackDigest(e.P(dir))
+		},
+	}
+	envPinMu.Lock()
+	restore := pinEnv(map[string]string{
+		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
+	})
+	result, err := config.MigrateV9(ctx, in)
+	restore()
+	envPinMu.Unlock()
+	if err != nil {
+		return nil, fmt.Errorf("migrate the config to config_version 9: %w", err)
+	}
+	return result, nil
 }
 
 // envPinMu serializes the temporary process-environment pins validation

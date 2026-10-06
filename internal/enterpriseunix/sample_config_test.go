@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -116,7 +118,9 @@ guardrail:
 `, layout.DataDir, layout.PolicyDir))
 }
 
-// ensure keeps working on a host whose config an earlier build wrote.
+// ensure keeps working on a host whose config an earlier build wrote: the
+// config_version 8 file is installed as its v9 migration, with the v8 bytes,
+// migration-v9.json and a lifecycle config generation next to it.
 func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -136,8 +140,22 @@ func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if record.ConfigSHA256 != sha256Bytes(previous) {
-				t.Fatal("record does not reflect the previous default config")
+			installed := h.read(h.env.Layout.ConfigPath)
+			if config.NeedsMigrationV9([]byte(installed)) || !strings.Contains(installed, "config_version: 9") {
+				t.Fatalf("installed config is not config_version 9:\n%s", installed)
+			}
+			if record.ConfigSHA256 != sha256Bytes([]byte(installed)) {
+				t.Fatal("record does not reflect the installed config")
+			}
+			if got := h.read(h.env.Layout.ConfigPath + config.ConfigV8BackupSuffix); got != string(previous) {
+				t.Fatal("config.yaml.v8.bak does not hold the previous config")
+			}
+			if _, err := os.Stat(h.env.P(config.MigrationRecordPath(h.env.Layout.ConfigPath))); err != nil {
+				t.Fatalf("migration-v9.json: %v", err)
+			}
+			state, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+			if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != record.ConfigSHA256 {
+				t.Fatalf("config generation = %+v (%v), want the lifecycle's record of the installed config", state, err)
 			}
 		})
 	}

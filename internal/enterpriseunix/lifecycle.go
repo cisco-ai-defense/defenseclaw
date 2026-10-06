@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -708,7 +710,6 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
-	p.configFromInstalled = fromInstalled
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
@@ -716,6 +717,27 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := env.checkRulePacksReadable(validated, account); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	// A config_version 8 administrator config (a previous release's, or an
+	// MDM file still in that format) is installed as the v9 migration
+	// writes it; its v8 checks above keep their wording.
+	migrated, err := env.migrateConfigV9(ctx, raw, validated)
+	if err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
+	if migrated != nil {
+		v9, err := env.validateConfigSource(migrated.Migrated, l.opts.ConfigFile)
+		if err != nil {
+			return nil, &codedError{code: codeConfig, err: fmt.Errorf("the config_version 9 migration of the config does not validate: %w", err)}
+		}
+		if err := env.checkRulePacksReadable(v9, account); err != nil {
+			return nil, &codedError{code: codeConfig, err: err}
+		}
+		v9.Migration = &configMigration{Source: append([]byte(nil), raw...), Record: migrated.Record}
+		validated = v9
+		// The migrated bytes replace the installed v8 file.
+		fromInstalled = false
+	}
+	p.configFromInstalled = fromInstalled
 	p.config = validated
 
 	p.secrets, p.secretsSHA, err = env.listSecrets()
@@ -935,6 +957,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		snapPaths = append(snapPaths, adopting.removeFiles...)
 	}
 	snapPaths = append(snapPaths, filepath.Join(env.Layout.LifecycleDir, deploymentFileName))
+	// The writer's generation record and the migration evidence go back
+	// with the config on a rollback.
+	snapPaths = append(snapPaths, configwrite.GenerationPath(env.Layout.ConfigPath))
+	if p.config.Migration != nil {
+		snapPaths = append(snapPaths, env.Layout.ConfigPath+config.ConfigV8BackupSuffix, config.MigrationRecordPath(env.Layout.ConfigPath))
+	}
 	dirPaths := []string{}
 	for _, dir := range p.dirs {
 		dirPaths = append(dirPaths, dir.Path)
@@ -1015,7 +1043,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.settleSecretModes(ctx, account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
-	changed, err := l.applyFiles(p)
+	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(codeApply, err)
 	}
@@ -1228,6 +1256,54 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 		}
 	}
 	return created, nil
+}
+
+// applyFilesRecorded is applyFiles under config.yaml.lock, the single
+// writer's lock (actor lifecycle): it then records the installed config in
+// config.generation.json when the config changed or the record does not
+// match it, and keeps the v8 bytes and migration-v9.json when the run
+// migrated a config_version 8 config.
+func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Account) (map[string]bool, error) {
+	env := l.env
+	configPath := env.P(env.Layout.ConfigPath)
+	var changed map[string]bool
+	_, err := configwrite.Locked(ctx, configPath, configwrite.Options{
+		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action,
+	}, func() (bool, error) {
+		var err error
+		if changed, err = l.applyFiles(p); err != nil {
+			return false, err
+		}
+		state, stateErr := configwrite.ReadGenerationState(configPath)
+		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// The gateway service reads the generation record, as it reads config.yaml.
+	serviceGroup := fileOwner{UID: 0, GID: account.GID}
+	if err := env.fixMetadata(env.P(configwrite.GenerationPath(env.Layout.ConfigPath)), 0o640, serviceGroup); err != nil {
+		return nil, err
+	}
+	if migration := p.config.Migration; migration != nil && changed[env.Layout.ConfigPath] {
+		if err := env.writeFileAtomic(configPath+config.ConfigV8BackupSuffix, migration.Source, 0o600, rootOwner()); err != nil {
+			return nil, err
+		}
+		record, err := json.MarshalIndent(migration.Record, "", "  ")
+		if err != nil {
+			return nil, err
+		}
+		if err := env.writeFileAtomic(env.P(config.MigrationRecordPath(env.Layout.ConfigPath)), append(record, '\n'), 0o640, serviceGroup); err != nil {
+			return nil, err
+		}
+		l.noteChange("migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s)",
+			env.Layout.ConfigPath, len(migration.Record.Moved), len(migration.Record.Conflicts), env.Layout.ConfigPath, config.ConfigV8BackupSuffix)
+		if migration.Record.ActionsRowsIgnored > 0 {
+			l.result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
+				"%d local block/allow entries in audit.db are ignored; the administrator config is the policy", migration.Record.ActionsRowsIgnored))
+		}
+	}
+	return changed, nil
 }
 
 // applyFiles writes every binary and file whose bytes differ, fixes the
