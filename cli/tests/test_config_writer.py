@@ -18,6 +18,9 @@
 
 from __future__ import annotations
 
+import os
+import stat
+
 import pytest
 from defenseclaw import config_writer
 from defenseclaw.config_writer import Change
@@ -90,6 +93,18 @@ def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, mo
         config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
     with pytest.raises(FileNotFoundError):
         config_writer.read_generation_state(path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes")
+def test_managed_refusal_leaves_the_config_directory_and_lock_alone(tmp_path, monkeypatch):
+    path = _config(tmp_path)
+    tmp_path.chmod(0o755)
+    monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+    assert not os.path.exists(path + ".lock")
 
 
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):

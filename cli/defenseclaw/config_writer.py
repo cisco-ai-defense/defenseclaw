@@ -280,6 +280,16 @@ def write_with(
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
+    # Refuse a managed host before the lock opens: taking it narrows the
+    # config directory to 0700, which would lock the gateway service account
+    # out of a root-owned managed directory. _transact checks again under the
+    # lock.
+    try:
+        unlocked = Path(target).read_bytes()
+    except OSError:
+        unlocked = b""
+    if managed_refuses(unlocked, actor):
+        raise ManagedConfigWriteError(MANAGED_REFUSAL)
     with hold_lock(target, timeout_s=timeout_s):
         return _transact(target, mutate, actor, reason, expect_sha256, verify)
 

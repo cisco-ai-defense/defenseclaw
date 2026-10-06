@@ -108,6 +108,9 @@ func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	if _, err := ReadGenerationState(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused write recorded a generation: %v", err)
 	}
+	if _, err := os.Stat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused write took the writer lock: %v", err)
+	}
 }
 
 func TestParsePath(t *testing.T) {
