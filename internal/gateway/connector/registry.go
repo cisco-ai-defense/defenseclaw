@@ -200,6 +200,7 @@ func newBuiltinConnectors() []Connector {
 		NewAMPConnector(),
 		NewOmnigentConnector(),
 		NewKiroConnector(),
+		NewMuseConnector(),
 	}
 }
 

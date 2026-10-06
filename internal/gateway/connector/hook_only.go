@@ -533,6 +533,10 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	if c.name == "devin" {
 		profile.Decode = devinProfileDecode
 	}
+	if c.name == "muse" {
+		profile.Decode = museProfileDecode
+		profile.Respond = museProfileRespond
+	}
 	// NOTE: hermes needs no Decode override. Its nested `extra` content
 	// is recovered by the generic decoder's ContentEnvelopeKey fallback
 	// (declared on the hermes hook contract), and its wire replies are
