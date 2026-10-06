@@ -1827,7 +1827,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	if !g.BrewFormulaInstalled() {
 		return st, nil
 	}
-	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Timeout: time.Minute})
+	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
 		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, strings.TrimSpace(string(out)))
 	}
@@ -1838,13 +1838,35 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 		File       string `json:"file"`
 		Registered bool   `json:"registered"`
 	}
-	if err := json.Unmarshal(out, &infos); err != nil || len(infos) == 0 {
+	if err := json.NewDecoder(bytes.NewReader(jsonArrayFrom(out))).Decode(&infos); err != nil || len(infos) == 0 {
 		return nil, fmt.Errorf("openshell: brew services info %s: unexpected output %q", GatewayFormula, strings.TrimSpace(string(out)))
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
 	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
 	return st, nil
+}
+
+// brewQuietEnv turns off the warning Homebrew prints before the JSON of
+// `brew services info --json` when it runs through sudo (an administrator
+// who switched to the user with sudo -u) and its environment hints.
+var brewQuietEnv = []string{"HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1", "HOMEBREW_NO_ENV_HINTS=1"}
+
+// jsonArrayFrom is out from the first line that starts a JSON array: the
+// command's output is its stdout and stderr together, so a warning or a
+// hint can come before the JSON (and after it, which a decoder ignores).
+func jsonArrayFrom(out []byte) []byte {
+	for rest := out; len(rest) > 0; {
+		if bytes.HasPrefix(bytes.TrimLeft(rest, " \t"), []byte("[")) {
+			return rest
+		}
+		nl := bytes.IndexByte(rest, '\n')
+		if nl < 0 {
+			break
+		}
+		rest = rest[nl+1:]
+	}
+	return out
 }
 
 // brewFormulaInstalled reports whether GatewayFormula has a keg under a
