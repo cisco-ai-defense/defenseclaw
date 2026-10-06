@@ -23,16 +23,19 @@ import (
 	"time"
 )
 
-// AutomaticInstallBlockReasonPrefixes start the reason of an install block a
-// scan verdict wrote (the gateway watcher, and the CLI scan and install
-// paths). Such a row is enforcement journal, not operator intent.
-var AutomaticInstallBlockReasonPrefixes = []string{"auto-block:", "post-scan:", "post-install scan:", "scan:"}
+// AutomaticInstallReasonPrefixes start the reason of an install decision a
+// scan verdict wrote (the gateway watcher, and the CLI scan, install and
+// mcp set paths, which also recorded scan-clean allows up to 1.0). Such a
+// row is enforcement journal, not operator intent.
+var AutomaticInstallReasonPrefixes = []string{
+	"auto-block:", "post-scan:", "post-install scan:", "scan:", "scan clean or within policy",
+}
 
-// IsAutomaticInstallBlock reports whether an install block reason is a scan
-// verdict's rather than an operator's.
-func IsAutomaticInstallBlock(reason string) bool {
+// IsAutomaticInstallDecision reports whether an install block or allow
+// reason is a scan verdict's rather than an operator's.
+func IsAutomaticInstallDecision(reason string) bool {
 	reason = strings.TrimSpace(reason)
-	for _, prefix := range AutomaticInstallBlockReasonPrefixes {
+	for _, prefix := range AutomaticInstallReasonPrefixes {
 		if strings.HasPrefix(reason, prefix) {
 			return true
 		}
@@ -41,7 +44,7 @@ func IsAutomaticInstallBlock(reason string) bool {
 }
 
 // OperatorAdmissionRows returns the actions rows that carry operator
-// block/allow intent: install=allow, or install=block with a reason that is
+// block/allow intent: install=block or install=allow with a reason that is
 // not a scan verdict's. Since config_version 9 that intent lives in
 // config.yaml asset_policy, and these rows are the migration input (OSS
 // only). Everything else in the table is the enforcement journal.
@@ -55,7 +58,7 @@ func (s *Store) OperatorAdmissionRows() ([]ActionEntry, error) {
 	}
 	out := rows[:0]
 	for _, row := range rows {
-		if row.Actions.Install == "block" && IsAutomaticInstallBlock(row.Reason) {
+		if IsAutomaticInstallDecision(row.Reason) {
 			continue
 		}
 		out = append(out, row)

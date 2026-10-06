@@ -37,6 +37,7 @@ func TestOperatorAdmissionRowsAndClear(t *testing.T) {
 		{"operator-block", "block", "manually blocked"},
 		{"operator-allow", "allow", "vetted"},
 		{"scan-block", "block", "auto-block: watch detected HIGH findings (scanner=skill-scanner)"},
+		{"scan-allow", "allow", "scan clean or within policy"},
 	} {
 		if err := store.SetActionField("skill", row.name, "install", row.value, row.reason); err != nil {
 			t.Fatal(err)
