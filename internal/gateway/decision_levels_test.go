@@ -204,6 +204,14 @@ func TestGuardrailLevelActions(t *testing.T) {
 	if got := guardrailActionForGuardrailConnector(proxy, "", "LOW", false); got != guardrailActionAllow {
 		t.Errorf("proxy tool call block_at MEDIUM: LOW = %q, want allow", got)
 	}
+
+	// The OpenClaw session-message prompt path takes the connector's levels.
+	session := &config.GuardrailConfig{AlertAt: "MEDIUM", Connectors: map[string]config.PerConnectorGuardrailConfig{
+		"openclaw": {AlertAt: "LOW"},
+	}}
+	if got := guardrailContentActionForGuardrail(session, "openclaw", "LOW"); got != guardrailActionAlert {
+		t.Errorf("openclaw session prompt alert_at LOW: LOW = %q, want alert", got)
+	}
 }
 
 // TestGuardrailLevelsNeverReleaseCritical extends the CRITICAL-always-blocks

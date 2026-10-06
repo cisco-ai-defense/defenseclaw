@@ -154,9 +154,9 @@ func guardrailContentActionForFindings(cfg *config.Config, connector string, fin
 }
 
 // guardrailContentActionForGuardrail is guardrailContentAction for a caller
-// that holds only the guardrail block; the Secure Client posture comes from
-// the process-wide managed flag.
-func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, severity string) string {
+// that holds only the guardrail block, with the connector's levels (spec
+// 2.2); the Secure Client posture comes from the process-wide managed flag.
+func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, connector, severity string) string {
 	if ManagedEnterpriseActive() {
 		posture := "default"
 		if gc != nil {
@@ -166,7 +166,7 @@ func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, severity str
 		blockThreshold, alertThreshold := guardrailProfileThresholds(posture)
 		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
 	}
-	return guardrailActionForGuardrailConnector(gc, "", severity, false)
+	return guardrailActionForGuardrailConnector(gc, connector, severity, false)
 }
 
 // guardrailActionForGuardrailFindings maps the guardrail proxy's findings
