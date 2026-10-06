@@ -339,9 +339,10 @@ func (a *App) providerHint(spec *harness.Spec, choice string) string {
 		return "set ANTHROPIC_API_KEY"
 	case choice == LLMClaudeOAuth:
 		return "set CLAUDE_CODE_OAUTH_TOKEN from " + a.claudeSetupToken(spec)
-	case harnessName == "codex" && (choice == LLMOpenAI || choice == LLMAuto):
-		return "set OPENAI_API_KEY or log in with `codex login --with-api-key`"
-	case choice == LLMOpenAI:
+	case choice == LLMOpenAI, harnessName == "codex" && choice == LLMAuto:
+		// A key a host `codex login --with-api-key` stored is found too,
+		// but naming that login here read as a second way to log in next
+		// to the login inside the sandbox the callers add.
 		return "set OPENAI_API_KEY"
 	case choice == LLMGemini:
 		return "set GEMINI_API_KEY"
