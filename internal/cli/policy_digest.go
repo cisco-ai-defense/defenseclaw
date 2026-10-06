@@ -106,7 +106,8 @@ func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, ch
 	result.Policy = state
 	switch {
 	case reload != "":
-		result.AddWarning("policy_reload_failed", "the gateway rejected the last policy change and keeps enforcing an earlier policy: "+reload)
+		result.AddWarning("policy_reload_rejected", "the gateway reports a policy error and keeps enforcing the policy it last built: "+reload+
+			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
 	case !state.Applied && change:
 		result.AddWarning("policy_not_applied", fmt.Sprintf(
 			"the gateway reports effective policy %s but the installed config computes to %s; it applies the config on its next reload",

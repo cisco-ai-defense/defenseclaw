@@ -236,7 +236,7 @@ The two summary fields are computed differently on each OS:
 | `verify` exit code | Not `0` |
 | `coverage_complete` | `false` |
 | `security_complete` | `false` for longer than one enumerator cycle. On Windows with Claude Code enabled, it stays `false` until you complete the Claude Code attestation, so every such host alerts until then |
-| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `policy_not_applied`: after a change, the gateway reports another effective policy than the installed config computes to. On Windows also `policy_reload_failed`, `policy_not_buildable` and `config_edited_outside_lifecycle`, on every action (see [Troubleshooting](/docs/enterprise/troubleshooting)). `verify` reports each as an error, except `agent_unprotected` and `hook_contract_unverified`, which stay warnings for that account |
+| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `policy_not_applied`: after a change, the gateway reports another effective policy than the installed config computes to. `policy_reload_rejected`: the gateway rejected its last policy reload and keeps enforcing the previous policy; the message gives its reason. On Windows also `policy_not_buildable` (the installed config and its assets no longer build into a policy) and `config_edited_outside_lifecycle` (see [Troubleshooting](/docs/enterprise/troubleshooting)). `verify` reports each as an error, except `agent_unprotected` and `hook_contract_unverified`, which stay warnings for that account |
 | `policy.applied` | `false` for more than one reload (Linux and macOS). `status` and `verify` report it but do not fail on it, so alert on the field |
 | `policy.effective_digest` | Differs between hosts of one OS that received the same config |
 | `machine_policy.<connector>.conflicts` or `.higher_precedence` | Not empty |
@@ -278,9 +278,9 @@ actions) carries both in the `policy` object:
 | --- | --- |
 | `effective_digest` | The digest the installed config computes to. The lifecycle runs the installed gateway binary's `policy digest` with the service environment, so the binary the gateway runs computes it from the config and assets it loads |
 | `config_generation` | The generation recorded in `config.generation.json`. `0` means none recorded |
-| `applied` | `true` when the running gateway reports the same digest on `/health` |
+| `applied` | `true` when the running gateway reports the same digest on `/health` and has no `policy.last_reload_error` |
 | `gateway_reported_digest` | The digest `/health` reported. Omitted when the gateway did not answer |
-| `last_reload_error` | `policy.last_reload_error` from `/health`: why the gateway kept an earlier policy instead of the config or asset on disk. Omitted when the last reload succeeded. `applied` is `false` while it is set |
+| `last_reload_error` | `policy.last_reload_error` from `/health`: why the gateway rejected its last reload. Omitted when there is none |
 | `config_unrecorded` | `true` when `config.yaml` was changed outside the lifecycle: `config.generation.json` does not record it, and the running gateway may already enforce it. Omitted otherwise |
 
 ```json title="policy (a healthy host)"
@@ -314,7 +314,11 @@ What the lifecycle does with it:
 - **`status` and `verify` report; they do not fail.** `applied: false` means
   the gateway runs another policy than the config on disk computes to, for
   example because it rejected the change (`policy.last_reload_error` in its
-  `/health`) or has not reloaded yet. Alert on the field ([What to alert on](#what-to-alert-on)).
+  `/health`) or has not reloaded yet. A rejected reload also adds the warning
+  `policy_reload_rejected` with the gateway's reason to every action,
+  `status` and `verify` included, and the field `last_reload_error`. The
+  gateway clears it when a later reload succeeds, for example once an edited
+  rule pack is restored. Alert on the field ([What to alert on](#what-to-alert-on)).
 - **Changing actions warn and record.** After `install`, `upgrade`, `repair`
   or `ensure`, when the gateway is ready, a different gateway digest adds the
   warning `policy_not_applied` ("the gateway reports effective policy
@@ -334,7 +338,7 @@ What the lifecycle does with it:
   read the digest with `enterprise policy show`, which prints a line such as
   `Effective policy sha256:7b38f1df3862, config generation 3` (and adds `policy`
   to `--json`), as in [Machine policy status](#machine-policy-status).
-- **Warnings on every action.** `policy_reload_failed` says the gateway rejected
+- **Warnings on every action.** `policy_reload_rejected` says the gateway rejected
   the last policy change (a rule pack edited away from its pinned digest, for
   example) and keeps enforcing an earlier one. `policy_not_buildable` says the
   installed config and its assets no longer build into a policy; the gateway

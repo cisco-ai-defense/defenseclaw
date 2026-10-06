@@ -18,8 +18,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 )
 
 // A gateway that fails to start during install or upgrade usually says why
@@ -96,8 +98,39 @@ func tailString(value string, limit int) string {
 	return value
 }
 
-// gatewayOutputExcerpt keeps the last few printable lines, each bounded, for
-// the lifecycle result.
+// gatewayBannerRow matches the indented rows of the gateway's start banner
+// (runSidecar in internal/cli/sidecar.go).
+var gatewayBannerRow = regexp.MustCompile(`^ {2,}(Gateway|Auto-approve|Auth|API port|Watcher|Guardrail|Skill|Skill dirs|Model|API key|Judge):\s`)
+
+// isGatewayBannerLine reports whether a line of the gateway's output belongs
+// to its start banner: the box and its settings rows. The banner says nothing
+// about why the gateway failed to start, and an older gateway prints its
+// token there masked to the first and last characters. That belongs in
+// neither the lifecycle result, which the package manager copies into its own
+// log, nor the kept output.
+func isGatewayBannerLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if r, _ := utf8.DecodeRuneInString(trimmed); r >= 0x2500 && r <= 0x257f {
+		return true
+	}
+	return gatewayBannerRow.MatchString(line)
+}
+
+// withoutGatewayBanner returns the gateway's output without its start banner.
+func withoutGatewayBanner(output string) string {
+	lines := strings.Split(output, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !isGatewayBannerLine(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
+}
+
+// gatewayOutputExcerpt keeps the last few distinct printable lines, each
+// bounded, for the lifecycle result. A gateway that systemd restarts prints
+// the same error on every attempt; it is listed once.
 func gatewayOutputExcerpt(output string) string {
 	lines := []string{}
 	for _, line := range strings.Split(output, "\n") {
@@ -119,10 +152,18 @@ func gatewayOutputExcerpt(output string) string {
 		}
 		lines = append(lines, line)
 	}
-	if len(lines) > gatewayExcerptLines {
-		lines = lines[len(lines)-gatewayExcerptLines:]
+	distinct := make([]string, 0, gatewayExcerptLines)
+	seen := map[string]bool{}
+	for i := len(lines) - 1; i >= 0 && len(distinct) < gatewayExcerptLines; i-- {
+		if !seen[lines[i]] {
+			seen[lines[i]] = true
+			distinct = append(distinct, lines[i])
+		}
 	}
-	return strings.Join(lines, " | ")
+	for i, j := 0, len(distinct)-1; i < j; i, j = i+1, j-1 {
+		distinct[i], distinct[j] = distinct[j], distinct[i]
+	}
+	return strings.Join(distinct, " | ")
 }
 
 // configRefusal asks the installed gateway binary whether it accepts the
@@ -168,7 +209,7 @@ func (l *lifecycle) recordActivationFailure(ctx context.Context) string {
 	if unit == nil {
 		return ""
 	}
-	output := env.gatewayRecentOutput(ctx, *unit)
+	output := withoutGatewayBanner(env.gatewayRecentOutput(ctx, *unit))
 	if strings.TrimSpace(output) == "" {
 		return ""
 	}

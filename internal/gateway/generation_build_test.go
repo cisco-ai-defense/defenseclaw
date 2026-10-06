@@ -125,6 +125,38 @@ func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
 	}
 }
 
+// A policy directory without Rego is the managed packages' config-driven mode:
+// the generation has no OPA and no error to report (GAP-0021).
+func TestBuildGenerationTreatsMissingRegoAsNoOPA(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		g, err := buildGeneration(context.Background(), generationInputs{cfg: &config.Config{PolicyDir: t.TempDir()}, strictOPA: strict})
+		if err != nil {
+			t.Fatalf("strict=%v empty policy dir: %v, want no error", strict, err)
+		}
+		if g.OPA != nil || g.opaError != "" {
+			t.Fatalf("strict=%v empty policy dir: OPA=%v opaError=%q, want no OPA and no error", strict, g.OPA, g.opaError)
+		}
+	}
+}
+
+// A corrupt Rego module rejects a (strict) reload build, so the previous
+// generation stays and last_reload_error names the file; boot falls back
+// (GAP-0043).
+func TestBuildGenerationRejectsACorruptModuleOnlyWhenStrict(t *testing.T) {
+	policyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(policyDir, "bad.rego"), []byte("package defenseclaw\nnot rego {"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{PolicyDir: policyDir}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictOPA: true}); err == nil || !strings.Contains(err.Error(), "bad.rego") {
+		t.Fatalf("strict build with a corrupt module = %v, want a parse error naming the file", err)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg})
+	if err != nil || g.opaError == "" {
+		t.Fatalf("boot build with a corrupt module: err=%v opaError=%q, want the fallback with its reason", err, g.opaError)
+	}
+}
+
 // GAP-0088: guardrail.rules.protections composed onto a custom pack pinned by
 // digest reach every connector's rule set and block the command, as the same
 // rules shipped as files of the custom pack do. An enterprise admin config

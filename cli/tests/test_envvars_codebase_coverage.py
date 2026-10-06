@@ -212,8 +212,6 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
         {
             "cli/defenseclaw/observability/v8_migration.py",
             "docs-site/content/docs/observability/index.mdx",
-            "internal/config/config.go",
-            "internal/config/config_test.go",
         }
     ),
     "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),

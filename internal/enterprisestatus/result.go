@@ -167,8 +167,8 @@ type PolicyState struct {
 	// gateway was not reachable.
 	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
 	// LastReloadError is policy.last_reload_error from /health: why the
-	// gateway kept an earlier generation instead of the config or asset on
-	// disk. Empty when the last reload succeeded.
+	// gateway rejected its last reload. While it is set the gateway enforces
+	// an older policy than the installed config, so Applied is false.
 	LastReloadError string `json:"last_reload_error,omitempty"`
 	// ConfigUnrecorded is true when config.yaml was changed outside the
 	// lifecycle: its generation is not the one config.generation.json

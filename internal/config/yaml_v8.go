@@ -306,12 +306,18 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	case version > MaxSupportedConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
 			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
-			"upgrade DefenseClaw or restore ~/.defenseclaw/previous")
+			newerConfigAction)
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
 	}
 }
+
+// newerConfigAction is the way out of a config_version this release does not
+// read: a managed host keeps the pre-upgrade copy next to the config, a
+// per-user install in its previous folder.
+const newerConfigAction = "upgrade DefenseClaw, or restore the config saved before the upgrade " +
+	"(config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous on a per-user install)"
 
 func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
 	for _, legacy := range []struct{ key, target string }{
@@ -448,8 +454,8 @@ func v9RemovedKeyError(source, path string, node *yaml.Node, target string) erro
 
 func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) error {
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
-		"a legacy v7 configuration key is not accepted by the v8 entrypoint",
-		"run defenseclaw upgrade; use "+target)
+		"a pre-v8 configuration key is not accepted by the v8 entrypoint",
+		"use "+target)
 }
 
 func projectV8YAML(source string, node *yaml.Node, path string) (any, error) {

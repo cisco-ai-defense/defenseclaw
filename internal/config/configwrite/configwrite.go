@@ -307,7 +307,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 // treats as restart-required (internal/gateway diffConfigs and
 // guardrailNeedsRestart): claw, agent and routing (paths, identity and the
 // model router process captured at start), the guardrail listener and
-// enablement, and the hook settings setup bakes into the installed hooks.
+// enablement, and the hook self-heal settings.
 // "*" matches one segment. Everything else is hot; a
 // running gateway keeps a restart-required value at its running value and
 // applies the rest of the change.
@@ -318,8 +318,8 @@ var restartKeys = []string{
 	"gateway",
 	"guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
-	"guardrail.hook_fail_mode", "guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
-	"guardrail.connectors.*.enabled", "guardrail.connectors.*.hook_fail_mode",
+	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
+	"guardrail.connectors.*.enabled",
 	"claw", "agent", "routing",
 	"deployment_mode", "enterprise.profile", "enterprise.network",
 	"environment", "tenant_id", "workspace_id", "discovery_source",

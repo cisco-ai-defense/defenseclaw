@@ -164,6 +164,7 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		add("service account %s is %d:%d, deployment recorded %d:%d", record.ServiceUser, account.UID, account.GID, record.ServiceUID, record.ServiceGID)
 	}
 
+	packageDrift, packageDriftChecked := "", false
 	for _, path := range sortedKeys(record.Files) {
 		if inputsChanged && path == env.Layout.ConfigPath {
 			continue
@@ -174,8 +175,19 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 			continue
 		}
 		if got != record.Files[path] {
+			if record.Channel == ChannelPackage && filepath.Dir(path) == env.Layout.BinDir {
+				if !packageDriftChecked {
+					packageDrift, packageDriftChecked = l.packageVersionDrift(ctx, record), true
+				}
+				if packageDrift != "" {
+					continue // one message below, not one per binary
+				}
+			}
 			add("%s was modified after install", path)
 		}
+	}
+	if packageDrift != "" {
+		add("%s", packageDrift)
 	}
 	problems = append(problems, env.installedModeProblems(record, inputsChanged)...)
 	loadCredential := env.GOOS == "linux" && env.Services.Version(ctx) >= loadCredentialSystemd
@@ -294,6 +306,28 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	return problems
 }
 
+// packageVersionDrift explains package-owned binaries that differ from the
+// record when the package on disk is another version than the deployment
+// applied: the package manager replaced the binaries and the package's own
+// install run did not finish (it failed and rolled back, or an older package
+// was refused). The lifecycle cannot put the previous package's binaries back,
+// so the state is named instead of read as a modified file (GAP-0111). ""
+// when the versions agree, which leaves a real modification to its own message.
+func (l *lifecycle) packageVersionDrift(ctx context.Context, record *Deployment) string {
+	env := l.env
+	version, err := env.binaryVersion(ctx, filepath.Join(env.P(env.Layout.BinDir), binGateway))
+	if err != nil || version == "" || version == record.ProductVersion {
+		return ""
+	}
+	cause := ""
+	if failure := env.lastPackageInstallFailure(); failure != "" {
+		cause = " (" + failure + ")"
+	}
+	return fmt.Sprintf("the installed package is version %s but the deployment applied %s: the package's install run did not finish%s; "+
+		"fix that and run `%s --from-package` to apply it (add --allow-downgrade when %s is the older package you meant to go back to)",
+		version, record.ProductVersion, cause, env.lifecycleCommand(ActionEnsure), version)
+}
+
 // restartSettle bounds the wait for a unit its service manager is about to
 // start again. The sensor helper exits on purpose when the guardian manifest
 // changes (an account was enrolled or revoked), and systemd (RestartSec=5s)
@@ -390,18 +424,20 @@ const lastPackageResultFile = "last-package-result.json"
 // lastPackageLogFile is the standard error of the same run.
 const lastPackageLogFile = "last-package-result.log"
 
-// clearSupersededPackageFailure removes the failed result of the package's
-// own install run once a later run has committed a deployment. Left in
+// clearSupersededFailures removes what an earlier failed run left once a
+// later run has committed a deployment: the gateway output kept by a failed
+// activation, and the failed result of the package's own install run. Left in
 // place, an upgrade whose activation was rolled back keeps reporting ok:false
 // and the previous version to MDM detection and to administrators after
-// ensure recovered the host. The package's own run is left alone: its shell
-// holds the result file open and the run writes the document after the
-// lifecycle returns.
-func (l *lifecycle) clearSupersededPackageFailure() {
+// ensure recovered the host, and a healthy host keeps the old failure details.
+// The package's own run leaves its result alone: its shell holds the result
+// file open and the run writes the document after the lifecycle returns.
+func (l *lifecycle) clearSupersededFailures() {
+	dir := l.env.P(l.env.Layout.LifecycleDir)
+	_ = os.Remove(filepath.Join(dir, activationFailureFileName))
 	if l.opts.Reason == "package" || l.env.lastPackageInstallFailure() == "" {
 		return
 	}
-	dir := l.env.P(l.env.Layout.LifecycleDir)
 	for _, name := range []string{lastPackageResultFile, lastPackageLogFile} {
 		_ = os.Remove(filepath.Join(dir, name))
 	}
@@ -558,7 +594,7 @@ func (l *lifecycle) ledgerProblem() string {
 func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
-	reportedPolicy := ""
+	reportedPolicy, reloadError := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
@@ -579,7 +615,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 				if body, err := l.gatewayHealth(ctx, unit, serviceUID); err == nil {
 					r.Readiness.Gateway = true
 					l.readInspection(body)
-					reportedPolicy = gatewayPolicyDigest(body)
+					reportedPolicy, reloadError = gatewayPolicyHealth(body)
 				}
 			}
 		case "guardian":
@@ -595,7 +631,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.InstalledVersion = record.ProductVersion
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy)
+	l.describePolicy(ctx, reportedPolicy, reloadError)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.

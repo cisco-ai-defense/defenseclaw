@@ -15,6 +15,7 @@ package enterpriseunix
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -385,6 +387,25 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	requireError(t, r, codeConfig)
 	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 		t.Fatal("binaries installed despite an invalid config")
+	}
+}
+
+// A guardrail.rules layer the gateway would refuse when it starts is refused
+// with its reason before any change, not left to keep the gateway from
+// starting (GAP-0025).
+func TestRuleLayerTheGatewayRefusesIsRefusedBeforeAnyChange(t *testing.T) {
+	h := newTestHost(t, "linux")
+	config.RegisterCandidateAssetCheck(func(*config.Config) error {
+		return errors.New("guardrail.rules: suppression SUPP-IP-PRIVATE already exists in the rule pack or config")
+	})
+	t.Cleanup(func() { config.RegisterCandidateAssetCheck(nil) })
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	requireError(t, r, codeConfig)
+	if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, "suppression SUPP-IP-PRIVATE already exists") {
+		t.Fatalf("errors = %+v, want the rule layer's reason", r.Errors)
+	}
+	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Fatal("binaries installed despite a rule layer the gateway refuses")
 	}
 }
 

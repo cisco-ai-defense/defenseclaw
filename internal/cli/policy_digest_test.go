@@ -76,7 +76,7 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 	}
 	// The gateway rejected the last reload: not applied, and every action says so.
 	if result, state := run(false, report(reported, reported, `,"gateway_last_reload_error":"digest mismatch"`)); state == nil ||
-		state.Applied || state.LastReloadError != "digest mismatch" || codes(result) != "policy_reload_failed" {
+		state.Applied || state.LastReloadError != "digest mismatch" || codes(result) != "policy_reload_rejected" {
 		t.Fatalf("rejected reload: state=%+v warnings=%s", state, codes(result))
 	}
 	// A config.yaml nobody recorded.

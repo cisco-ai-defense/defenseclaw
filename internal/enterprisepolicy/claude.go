@@ -321,7 +321,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	}
 	for _, event := range events {
 		if missingAll[event] {
-			state.conflict("Claude Code event %s has no DefenseClaw managed hook", event)
+			state.entryConflict("Claude Code event %s has no DefenseClaw managed hook", event)
 		}
 	}
 	if value, from := claudeEffectiveScalar(sources, "disableAllHooks"); value == true {

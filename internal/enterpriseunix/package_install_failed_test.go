@@ -96,9 +96,10 @@ func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
 
 // A package upgrade whose activation was rolled back left
 // last-package-result.json at ok:false after ensure recovered the host
-// (GAP-0151). A later run that commits a deployment removes it; the
-// package's own run leaves the file to its shell, which writes the document
-// after the lifecycle returns.
+// (GAP-0151), and last-activation-failure.log with it (GAP-0162). A later run
+// that commits a deployment removes both; the package's own run leaves the
+// result to its shell, which writes the document after the lifecycle
+// returns.
 func TestRecoveringRunClearsTheFailedPackageResult(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -107,12 +108,22 @@ func TestRecoveringRunClearsTheFailedPackageResult(t *testing.T) {
 	if err := os.WriteFile(last, []byte(failed), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	activation := h.env.activationFailurePath()
+	if err := os.WriteFile(activation, []byte("gateway exited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1"), Reason: "package"}))
 	if !exists(last) {
 		t.Fatal("the package's own run removed the result its shell writes")
 	}
+	if exists(activation) {
+		t.Fatal("a committed run left the kept output of the failed activation in place")
+	}
+	if err := os.WriteFile(activation, []byte("gateway exited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.2")}))
-	if exists(last) {
-		t.Fatal("a recovering run left the failed package result in place")
+	if exists(last) || exists(activation) {
+		t.Fatal("a recovering run left the failed package result or the kept activation output in place")
 	}
 }
