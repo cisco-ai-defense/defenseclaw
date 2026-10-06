@@ -2255,15 +2255,7 @@ def hilt_cmd(
         ux.err(f"Failed to save config: {exc}", indent="  ")
         raise click.Abort()
 
-    # Mirror the global HILT block into the OPA Rego data.json so the
-    # Rego/proxy fallback path stays consistent with config.yaml (parity
-    # with `setup guardrail`). Best-effort; the gateway reads config.yaml
-    # directly for correctness. Per-connector overrides are hook-path only
-    # and intentionally not mirrored (data.json is global).
     from defenseclaw.commands import cmd_setup
-
-    if not hilt_targets:
-        cmd_setup._sync_guardrail_hilt_to_opa(getattr(app.cfg, "policy_dir", ""), gc)
 
     if restart and gc.enabled:
         cmd_setup._restart_services(

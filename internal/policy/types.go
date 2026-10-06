@@ -24,6 +24,10 @@ type AdmissionInput struct {
 	BlockList  []ListEntry      `json:"block_list"`
 	AllowList  []ListEntry      `json:"allow_list"`
 	ScanResult *ScanResultInput `json:"scan_result,omitempty"`
+	// Admission is config admission: compiled for TargetType
+	// (CompileAdmission). Nil fails closed: a scan is required, nothing
+	// bypasses it, and every finding severity blocks.
+	Admission *CompiledAdmission `json:"admission,omitempty"`
 }
 
 // ListEntry represents one entry in the block or allow list.
@@ -90,19 +94,16 @@ type GuardrailInput struct {
 	LocalResult   *GuardrailScanResult `json:"local_result"`
 	CiscoResult   *GuardrailScanResult `json:"cisco_result"`
 	ContentLength int                  `json:"content_length"`
-	// HILT carries the live human-in-the-loop configuration from
-	// config.yaml so the Rego policy can decide `confirm` vs `alert`.
-	// Absent means HILT is off.
+	// HILT carries config.yaml guardrail.hilt so the Rego policy can
+	// decide `confirm` vs `alert`. Nil means HILT is off.
 	HILT *GuardrailHILTInput `json:"hilt,omitempty"`
-	// Thresholds are the resolved block/alert ranks and the Cisco AI
-	// Defense trust level for the request's connector and profile.
-	// Absent means CRITICAL blocks, MEDIUM alerts and full trust.
+	// Thresholds is input.thresholds. Nil evaluates with
+	// DefaultThresholds (block CRITICAL, alert MEDIUM, full trust).
 	Thresholds *ThresholdsInput `json:"thresholds,omitempty"`
 }
 
 // GuardrailHILTInput is the gateway-provided HILT view passed to the
-// guardrail policy. Mirrors `config.HILTConfig` but kept in `internal/policy`
-// to avoid an import cycle between policy and config.
+// guardrail policy. Mirrors `config.HILTConfig`.
 type GuardrailHILTInput struct {
 	Enabled     bool   `json:"enabled"`
 	MinSeverity string `json:"min_severity"`
@@ -128,33 +129,4 @@ type FirewallInput struct {
 type FirewallOutput struct {
 	Action   string `json:"action"`
 	RuleName string `json:"rule_name"`
-}
-
-// AuditInput is the structured input passed to the OPA audit policy.
-type AuditInput struct {
-	EventType     string   `json:"event_type"`
-	Severity      string   `json:"severity"`
-	AgeDays       int      `json:"age_days"`
-	ExportTargets []string `json:"export_targets"`
-}
-
-// AuditOutput is the structured output from the OPA audit policy.
-type AuditOutput struct {
-	Retain       bool     `json:"retain"`
-	RetainReason string   `json:"retain_reason"`
-	ExportTo     []string `json:"export_to"`
-}
-
-// SkillActionsInput is the structured input passed to the OPA skill_actions policy.
-type SkillActionsInput struct {
-	Severity   string `json:"severity"`
-	TargetType string `json:"target_type,omitempty"`
-}
-
-// SkillActionsOutput is the structured output from the OPA skill_actions policy.
-type SkillActionsOutput struct {
-	RuntimeAction string `json:"runtime_action"`
-	FileAction    string `json:"file_action"`
-	InstallAction string `json:"install_action"`
-	ShouldBlock   bool   `json:"should_block"`
 }

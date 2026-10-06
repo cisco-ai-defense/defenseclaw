@@ -3494,87 +3494,13 @@ func TestAPIScanResultHandlerRejectsUnboundRuntime(t *testing.T) {
 	}
 }
 
-func TestAPIEnforceBlockListAndUnblock(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
-
-	blockBody := []byte(`{"target_type":"skill","target_name":"bad-skill","reason":"malware"}`)
-	blockReq := httptest.NewRequest(http.MethodPost, "/enforce/block", bytes.NewReader(blockBody))
-	blockW := httptest.NewRecorder()
-	api.handleEnforceBlock(blockW, blockReq)
-	if blockW.Result().StatusCode != http.StatusOK {
-		t.Fatalf("block status = %d, want %d", blockW.Result().StatusCode, http.StatusOK)
-	}
-
-	listReq := httptest.NewRequest(http.MethodGet, "/enforce/blocked", nil)
-	listW := httptest.NewRecorder()
-	api.handleEnforceBlocked(listW, listReq)
-	if listW.Result().StatusCode != http.StatusOK {
-		t.Fatalf("list status = %d, want %d", listW.Result().StatusCode, http.StatusOK)
-	}
-
-	var blocked []enforcementEntry
-	if err := json.NewDecoder(listW.Result().Body).Decode(&blocked); err != nil {
-		t.Fatalf("decode blocked: %v", err)
-	}
-	if len(blocked) != 1 {
-		t.Fatalf("blocked len = %d, want 1", len(blocked))
-	}
-	if blocked[0].TargetName != "bad-skill" {
-		t.Errorf("target_name = %q, want bad-skill", blocked[0].TargetName)
-	}
-
-	unblockReq := httptest.NewRequest(http.MethodDelete, "/enforce/block", bytes.NewReader([]byte(`{"target_type":"skill","target_name":"bad-skill"}`)))
-	unblockW := httptest.NewRecorder()
-	api.handleEnforceBlock(unblockW, unblockReq)
-	if unblockW.Result().StatusCode != http.StatusOK {
-		t.Fatalf("unblock status = %d, want %d", unblockW.Result().StatusCode, http.StatusOK)
-	}
-
-	listW = httptest.NewRecorder()
-	api.handleEnforceBlocked(listW, listReq)
-	if err := json.NewDecoder(listW.Result().Body).Decode(&blocked); err != nil {
-		t.Fatalf("decode blocked after unblock: %v", err)
-	}
-	if len(blocked) != 0 {
-		t.Fatalf("blocked len after unblock = %d, want 0", len(blocked))
-	}
-}
-
-func TestAPIEnforceAllowList(t *testing.T) {
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
-
-	body := []byte(`{"target_type":"mcp","target_name":"trusted-mcp","reason":"reviewed"}`)
-	req := httptest.NewRequest(http.MethodPost, "/enforce/allow", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	api.handleEnforceAllow(w, req)
-	if w.Result().StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
-	}
-
-	listReq := httptest.NewRequest(http.MethodGet, "/enforce/allowed", nil)
-	listW := httptest.NewRecorder()
-	api.handleEnforceAllowed(listW, listReq)
-
-	var allowed []enforcementEntry
-	if err := json.NewDecoder(listW.Result().Body).Decode(&allowed); err != nil {
-		t.Fatalf("decode allowed: %v", err)
-	}
-	if len(allowed) != 1 {
-		t.Fatalf("allowed len = %d, want 1", len(allowed))
-	}
-	if allowed[0].TargetType != "mcp" {
-		t.Errorf("target_type = %q, want mcp", allowed[0].TargetType)
-	}
-}
-
 func TestAPIEnforceAllowSkillReenablesRuntimeDisable(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), client: client, store: store, logger: logger}
+	api, recorded := enforceTestAPI(t, "{}\n")
+	api.client = client
+	store := api.store
 
 	pe := enforce.NewPolicyEngine(store)
 	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
@@ -3594,12 +3520,8 @@ func TestAPIEnforceAllowSkillReenablesRuntimeDisable(t *testing.T) {
 		t.Fatalf("Method = %q, want skills.update", rpc.Method)
 	}
 
-	allowed, err := pe.IsAllowed("skill", "blocked-skill")
-	if err != nil {
-		t.Fatalf("IsAllowed: %v", err)
-	}
-	if !allowed {
-		t.Fatal("expected allowed after API allow")
+	if len(*recorded) == 0 || (*recorded)[len(*recorded)-1].Path != "asset_policy.skill.allowed" {
+		t.Fatalf("expected an asset_policy.skill.allowed write after API allow, got %#v", *recorded)
 	}
 
 	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
@@ -3628,8 +3550,9 @@ func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
 		}
 	})
 	client := connectToMockGW(t, srv)
-	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), client: client, store: store, logger: logger}
+	api, recorded := enforceTestAPI(t, "{}\n")
+	api.client = client
+	store := api.store
 
 	pe := enforce.NewPolicyEngine(store)
 	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
@@ -3644,12 +3567,8 @@ func TestAPIEnforceAllowSkillFailsWhenGatewayEnableFails(t *testing.T) {
 		t.Fatalf("status = %d, want %d", w.Result().StatusCode, http.StatusBadGateway)
 	}
 
-	allowed, err := pe.IsAllowed("skill", "blocked-skill")
-	if err != nil {
-		t.Fatalf("IsAllowed: %v", err)
-	}
-	if allowed {
-		t.Fatal("skill should not become allowed when gateway re-enable fails")
+	if len(*recorded) != 0 {
+		t.Fatalf("skill should not become allowed when gateway re-enable fails: %#v", *recorded)
 	}
 
 	disabled, err := store.HasAction("skill", "blocked-skill", "runtime", "disable")
@@ -3708,16 +3627,10 @@ func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 
 func TestAPIPolicyEvaluateFallback(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
+	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger, scannerCfg: &config.Config{}}
 	runtime, _ := newProxyGeneratedTraceRuntime(t)
 	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
-
-	blockReq := httptest.NewRequest(http.MethodPost, "/enforce/block", bytes.NewReader([]byte(`{"target_type":"plugin","target_name":"evil-plugin","reason":"malicious"}`)))
-	blockW := httptest.NewRecorder()
-	api.handleEnforceBlock(blockW, blockReq)
-	if blockW.Result().StatusCode != http.StatusOK {
-		t.Fatalf("block status = %d, want %d", blockW.Result().StatusCode, http.StatusOK)
-	}
+	denyAsset(api.scannerCfg, "plugin", "evil-plugin", "", "malicious")
 
 	body := []byte(`{
 		"domain":"admission",
@@ -3774,9 +3687,10 @@ func TestAPIPolicyEvaluateFallback(t *testing.T) {
 func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {
 	api, capture := newGuardrailEventV8TestAPI(t)
 
-	if err := api.store.SetActionField("skill", "evil-skill", "install", "block", "malicious"); err != nil {
-		t.Fatal(err)
+	if api.scannerCfg == nil {
+		api.scannerCfg = &config.Config{}
 	}
+	denyAsset(api.scannerCfg, "skill", "evil-skill", "", "malicious")
 
 	body := []byte(`{
 		"domain":"admission",

@@ -44,6 +44,7 @@ from defenseclaw.commands.cmd_skill import (
     skill,
 )
 from defenseclaw.config import SeverityAction
+from defenseclaw.enforce import asset_lists
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.hermes_skills import directory_md5
 from defenseclaw.models import ActionState, Finding, ScanResult
@@ -105,7 +106,7 @@ class TestSkillBlock(SkillCommandTestBase):
         self.assertIn("evil-skill", result.output)
         self.assertIn("[skill] Blocked 'evil-skill' (every connector).", result.output)
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_blocked("skill", "evil-skill"))
 
     def test_block_logs_action(self):
@@ -117,7 +118,7 @@ class TestSkillBlock(SkillCommandTestBase):
 
     def test_block_uses_basename(self):
         self.invoke(["block", "/path/to/evil-skill"])
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_blocked("skill", "evil-skill"))
 
     def test_hermes_unchanged_bundled_skill_cannot_be_blocked_or_quarantined(self):
@@ -181,7 +182,7 @@ class TestSkillAllow(SkillCommandTestBase):
         self.assertIn("trusted-skill", result.output)
         self.assertIn("allow list", result.output)
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_allowed("skill", "trusted-skill"))
 
     def test_allow_logs_action(self):
@@ -192,7 +193,7 @@ class TestSkillAllow(SkillCommandTestBase):
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_allow_reenables_runtime_disable_before_clearing_db(self, mock_cls):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("skill", "safe-skill", "runtime blocked")
 
         mock_cls.return_value.enable_skill.return_value = {"status": "enabled"}
@@ -205,7 +206,7 @@ class TestSkillAllow(SkillCommandTestBase):
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_allow_preserves_runtime_disable_when_gateway_enable_fails(self, mock_cls):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("skill", "safe-skill", "runtime blocked")
 
         mock_cls.return_value.enable_skill.side_effect = Exception("timeout")
@@ -221,7 +222,7 @@ class TestSkillAllow(SkillCommandTestBase):
 class TestSkillUnblock(SkillCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_unblock_reenables_runtime_disable_before_clearing_state(self, mock_cls):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "blocked-skill", "manual block")
         pe.disable("skill", "blocked-skill", "runtime blocked")
 
@@ -234,7 +235,7 @@ class TestSkillUnblock(SkillCommandTestBase):
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_unblock_preserves_state_when_gateway_enable_fails(self, mock_cls):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "blocked-skill", "manual block")
         pe.disable("skill", "blocked-skill", "runtime blocked")
 
@@ -252,7 +253,7 @@ class TestSkillUnblock(SkillCommandTestBase):
 class TestSkillScan(SkillCommandTestBase):
     @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
     def test_scan_blocked_skill_shows_blocked(self, _mock_oc):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "blocked-one", "test")
 
         skill_dir = os.path.join(self.tmp_dir, "blocked-one")
@@ -264,7 +265,7 @@ class TestSkillScan(SkillCommandTestBase):
 
     @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value=None)
     def test_scan_allowed_skill_shows_allowed(self, _mock_oc):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.allow("skill", "allow-me", "test")
 
         skill_dir = os.path.join(self.tmp_dir, "allow-me")
@@ -278,7 +279,7 @@ class TestSkillScan(SkillCommandTestBase):
     def test_scan_connector_allow_overrides_global_block(self, _mock_oc):
         self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "scoped-skill", "global block")
         pe.allow_for_connector("skill", "scoped-skill", "codex", "codex allow")
         skill_dir = os.path.join(self.tmp_dir, "scoped-skill")
@@ -293,7 +294,7 @@ class TestSkillScan(SkillCommandTestBase):
     def test_scan_connector_block_overrides_global_allow(self, _mock_oc):
         self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.allow("skill", "scoped-block", "global allow")
         pe.block_for_connector("skill", "scoped-block", "codex", "codex block")
         skill_dir = os.path.join(self.tmp_dir, "scoped-block")
@@ -327,7 +328,7 @@ class TestSkillScan(SkillCommandTestBase):
             findings=[Finding(id="f1", severity="HIGH", title="Shell injection", scanner="skill-scanner")],
             duration=timedelta(seconds=0.5),
         )
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
 
         _apply_scan_enforcement(self.app, pe, "dirty-skill", skill_dir, result, connector="codex")
 
@@ -360,7 +361,7 @@ class TestSkillScan(SkillCommandTestBase):
         )
 
         _apply_scan_enforcement(
-            self.app, PolicyEngine(self.app.store), "dirty-skill", skill_dir, result,
+            self.app, PolicyEngine(self.app.store, self.app.cfg), "dirty-skill", skill_dir, result,
             connector="codex",
         )
 
@@ -392,7 +393,7 @@ class TestSkillScan(SkillCommandTestBase):
         )
 
         _apply_scan_enforcement(
-            self.app, PolicyEngine(self.app.store), "alias-skill", skill_dir, result,
+            self.app, PolicyEngine(self.app.store, self.app.cfg), "alias-skill", skill_dir, result,
             connector="claude-code",
         )
 
@@ -432,7 +433,7 @@ class TestSkillScan(SkillCommandTestBase):
         )
 
         _apply_scan_enforcement(
-            self.app, PolicyEngine(self.app.store), "openclaw-skill", skill_dir, result,
+            self.app, PolicyEngine(self.app.store, self.app.cfg), "openclaw-skill", skill_dir, result,
             connector="openclaw",
         )
 
@@ -458,7 +459,7 @@ class TestSkillScan(SkillCommandTestBase):
             findings=[Finding(id="f1", severity="HIGH", title="inert", scanner="skill-scanner")],
             duration=timedelta(seconds=0.1),
         )
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
 
         with self.assertRaises(click.ClickException):
             _apply_scan_enforcement(
@@ -490,7 +491,7 @@ class TestSkillScan(SkillCommandTestBase):
         runtime_skill = "runtime-persistence-failure"
         runtime_dir = os.path.join(self.tmp_dir, runtime_skill)
         os.makedirs(runtime_dir)
-        runtime_pe = PolicyEngine(self.app.store)
+        runtime_pe = PolicyEngine(self.app.store, self.app.cfg)
         with patch.object(
             runtime_pe, "disable_for_connector", side_effect=OSError("runtime db unavailable"),
         ), self.assertRaises(click.ClickException):
@@ -504,9 +505,9 @@ class TestSkillScan(SkillCommandTestBase):
         install_skill = "install-persistence-failure"
         install_dir = os.path.join(self.tmp_dir, install_skill)
         os.makedirs(install_dir)
-        install_pe = PolicyEngine(self.app.store)
+        install_pe = PolicyEngine(self.app.store, self.app.cfg)
         with patch.object(
-            install_pe, "block_for_connector", side_effect=OSError("install db unavailable"),
+            install_pe, "record_scan_block", side_effect=OSError("install db unavailable"),
         ), self.assertRaises(click.ClickException):
             _apply_scan_enforcement(
                 self.app, install_pe, install_skill, install_dir, result, connector="codex",
@@ -573,7 +574,7 @@ class TestSkillScan(SkillCommandTestBase):
                 connector="codex",
             )
         noop_pe.disable_for_connector.assert_called_once()
-        noop_pe.block_for_connector.assert_called_once()
+        noop_pe.record_scan_block.assert_called_once()
 
         silent_name = "silent-noop-skill"
         silent_dir = os.path.join(self.tmp_dir, silent_name)
@@ -585,7 +586,7 @@ class TestSkillScan(SkillCommandTestBase):
             )
         self.assertIsNone(self.app.store.get_action("skill", silent_name, "codex"))
         silent_pe.disable_for_connector.assert_called_once()
-        silent_pe.block_for_connector.assert_called_once()
+        silent_pe.record_scan_block.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_skill._sidecar_client")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
@@ -748,7 +749,7 @@ class TestSkillScan(SkillCommandTestBase):
             verdict="blocked",
             action=SeverityAction(file="quarantine", runtime="disable", install="block"),
         )
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable_for_connector("skill", name, "codex", "peer state")
 
         scan_result = self.invoke([
@@ -1789,7 +1790,7 @@ class TestSkillQuarantine(SkillCommandTestBase):
         self.assertIn("quarantined", result.output)
         self.assertFalse(os.path.exists(skill_dir))
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_quarantined("skill", "qskill"))
 
         result = self.invoke(["restore", "qskill", "--path", skill_dir])
@@ -1866,7 +1867,7 @@ class TestSkillQuarantine(SkillCommandTestBase):
         self.assertTrue(os.path.isdir(
             os.path.join(self.app.cfg.quarantine_dir, "skills", "claudecode", "dup-skill")
         ))
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_quarantined_for_connector("skill", "dup-skill", "codex"))
         self.assertTrue(pe.is_quarantined_for_connector("skill", "dup-skill", "claudecode"))
         self.assertFalse(pe.is_quarantined("skill", "dup-skill"))
@@ -1881,7 +1882,7 @@ class TestSkillQuarantine(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(os.path.isdir(os.path.join(codex_dir, "dup-skill")))
         self.assertTrue(os.path.isdir(os.path.join(claude_dir, "dup-skill")))
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_quarantined_for_connector("skill", "dup-skill", "codex"))
         self.assertFalse(pe.is_quarantined_for_connector("skill", "dup-skill", "claudecode"))
         self.assertFalse(pe.is_quarantined("skill", "dup-skill"))
@@ -1900,7 +1901,7 @@ class TestSkillQuarantine(SkillCommandTestBase):
         result = self.invoke(["quarantine", "restore-skill", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertFalse(os.path.isdir(skill_dir))
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_quarantined_for_connector("skill", "restore-skill", "codex"))
 
         result = self.invoke(["restore", "restore-skill", "--connector", "codex"])
@@ -2092,7 +2093,7 @@ class TestSkillList(SkillCommandTestBase):
                  "source": "user", "bundled": False, "homepage": ""},
             ]
         }
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "removed-skill", "quarantined after scan")
 
         result = self.invoke(["list", "--json"])
@@ -2144,7 +2145,7 @@ class TestSkillList(SkillCommandTestBase):
                  "source": "user", "bundled": False, "homepage": ""},
             ]
         }
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.allow("skill", "my-skill", "trusted")
 
         result = self.invoke(["list", "--json"])
@@ -2156,7 +2157,7 @@ class TestSkillList(SkillCommandTestBase):
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full", return_value=None)
     def test_list_enforcement_only_shows_blocked_status(self, _mock):
         """Blocked-only entries (no OpenClaw data) should show blocked status."""
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "banned-skill", "dangerous")
 
         result = self.invoke(["list", "--json"])
@@ -2211,7 +2212,7 @@ class TestSkillInfo(SkillCommandTestBase):
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     def test_info_renders_enforcement_phantom(self, _mock):
         # A name present only as an enforcement action also stays inspectable.
-        PolicyEngine(self.app.store).block("skill", "blocked-ghost", "test")
+        PolicyEngine(self.app.store, self.app.cfg).block("skill", "blocked-ghost", "test")
         result = self.invoke(["info", "blocked-ghost"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("blocked-ghost", result.output)
@@ -2332,7 +2333,7 @@ class TestSkillInfo(SkillCommandTestBase):
             return None
 
         mock_info.side_effect = info_impl
-        PolicyEngine(self.app.store).block_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).block_for_connector(
             "skill",
             "dup-skill",
             "hermes",
@@ -2374,7 +2375,7 @@ class TestSkillInfo(SkillCommandTestBase):
             return None
 
         mock_info.side_effect = info_impl
-        PolicyEngine(self.app.store).block("skill", "dup-skill", "global test")
+        PolicyEngine(self.app.store, self.app.cfg).block("skill", "dup-skill", "global test")
 
         result = self.invoke(["info", "dup-skill"])
 
@@ -2532,7 +2533,7 @@ class TestSkillInfo(SkillCommandTestBase):
     def test_info_reports_global_runtime_disable_with_per_field_scoped_fallback(self):
         skill_name = "global-runtime-status-skill"
         self._configure_native_info_fixture(skill_name)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("skill", skill_name, "global fixture")
         pe.allow_for_connector("skill", skill_name, "codex", "unrelated scoped field")
 
@@ -2712,10 +2713,11 @@ class TestBuildActionsMap(SkillCommandTestBase):
 
     def test_build_actions_map_with_data(self):
         from defenseclaw.commands.cmd_skill import _build_actions_map
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "bad-skill", "test")
-        actions_map = _build_actions_map(self.app.store)
+        actions_map = _build_actions_map(self.app.store, cfg=self.app.cfg)
         self.assertIn("bad-skill", actions_map)
+        self.assertEqual(actions_map["bad-skill"].actions.install, "block")
 
 
 # ---------------------------------------------------------------------------
@@ -3382,7 +3384,7 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
 
     def test_enable_connector_clears_scoped_disable_without_gateway(self):
         self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
-        PolicyEngine(self.app.store).disable_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).disable_for_connector(
             "skill", "some-skill", "hermes", "manual",
         )
 
@@ -3432,7 +3434,7 @@ class TestSkillDisableHonesty(SkillCommandTestBase):
             "hermes": [hermes_root],
             "codex": [codex_root],
         }.get(connector, [hermes_root])
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("skill", "sample", "legacy global")
         pe.disable_for_connector("skill", "sample", "hermes", "manual")
         pe.disable_for_connector("skill", "sample", "codex", "manual")
@@ -3468,8 +3470,18 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         super().setUp()
         self.app.cfg.active_connectors = lambda: ["hermes", "codex"]  # type: ignore[method-assign]
 
+
+    def test_block_is_refused_on_a_managed_standalone_device(self):
+        # config_version 9: the admin config is the only block/allow source
+        # on a managed device, so a local block writes nothing.
+        self.app.cfg.deployment_mode = "managed_enterprise"
+        with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}):
+            result = self.runner.invoke(skill, ["block", "sample"], obj=self.app)
+        self.assertEqual(result.exit_code, 3, result.output)
+        self.assertIn("This device is managed", result.output)
+        self.assertEqual(self.app.cfg.asset_policy.skill.denied, [])
     def test_bare_unblock_clears_global_allow_row(self):
-        PolicyEngine(self.app.store).allow("skill", "sample", "manual")
+        PolicyEngine(self.app.store, self.app.cfg).allow("skill", "sample", "manual")
 
         result = self.invoke(["unblock", "sample"])
 
@@ -3477,7 +3489,7 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         # GAP-2085: the bare unblock names the scope a bare block names.
         self.assertIn("[skill] Unblocked 'sample' (every connector).", result.output)
         self.assertIn("It will be scanned on the next check.", result.output)
-        self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
+        self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "", "allow"))
         self.assertIsNone(self.app.store.get_action("skill", "sample"))
 
     def test_bare_block_output_names_matching_connector_copies(self):
@@ -3498,12 +3510,12 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
             "  Copies found for connector=hermes, connector=codex.",
             result.output,
         )
-        self.assertTrue(self.app.store.has_action("skill", "sample", "install", "block"))
+        self.assertTrue(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "", "block"))
         self.assertFalse(
-            self.app.store.has_action("skill", "sample", "install", "block", "hermes")
+            asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "hermes", "block")
         )
         self.assertFalse(
-            self.app.store.has_action("skill", "sample", "install", "block", "codex")
+            asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "codex", "block")
         )
 
         # GAP-2085: bare unblock names the same scope the bare block did.
@@ -3534,7 +3546,7 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
             "hermes": [hermes_root],
             "codex": [codex_root],
         }.get(connector, [hermes_root])
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("skill", "sample", "hermes", "bad")
         pe.block_for_connector("skill", "sample", "codex", "bad")
 
@@ -3543,9 +3555,9 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=hermes", result.output)
         self.assertIn("connector=codex", result.output)
-        self.assertTrue(self.app.store.has_action("skill", "sample", "install", "allow", "hermes"))
-        self.assertTrue(self.app.store.has_action("skill", "sample", "install", "allow", "codex"))
-        self.assertFalse(self.app.store.has_action("skill", "sample", "install", "allow"))
+        self.assertTrue(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "hermes", "allow"))
+        self.assertTrue(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "codex", "allow"))
+        self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "skill", "sample", "", "allow"))
 
     def test_bare_unblock_clears_scoped_rows_for_matching_connector_copies(self):
         hermes_root = os.path.join(self.tmp_dir, "hermes", "skills")
@@ -3556,7 +3568,7 @@ class TestSkillConnectorPolicyValidation(SkillCommandTestBase):
             "hermes": [hermes_root],
             "codex": [codex_root],
         }.get(connector, [hermes_root])
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("skill", "sample", "hermes", "bad")
         pe.quarantine_for_connector("skill", "sample", "codex", "bad")
         pe.disable_for_connector("skill", "sample", "codex", "bad")
@@ -3719,7 +3731,7 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
         self.app.cfg.skill_dirs = self._fake_dirs(  # type: ignore[method-assign]
             {"codex": [active_root], "hermes": [hermes_root]}, "codex",
         )
-        PolicyEngine(self.app.store).block_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).block_for_connector(
             "skill",
             "lone-skill",
             "hermes",

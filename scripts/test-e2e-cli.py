@@ -294,27 +294,12 @@ def test_api_health(t: TestRunner):
 
 
 def test_api_policy(t: TestRunner):
-    print("\n--- API: Policy Evaluation (all 5 domains) ---")
+    print("\n--- API: Policy Evaluation ---")
     t.api(
         "POST /policy/evaluate (admission)",
         "POST", "/policy/evaluate",
         body={"domain": "admission", "input": {"target_type": "skill", "target_name": "test-e2e-skill"}},
         expect_in="verdict",
-    )
-    t.api(
-        "POST /policy/evaluate/skill-actions",
-        "POST", "/policy/evaluate/skill-actions",
-        body={"severity": "high"},
-    )
-    t.api(
-        "POST /policy/evaluate/firewall",
-        "POST", "/policy/evaluate/firewall",
-        body={"destination": "192.168.1.1", "port": 443, "protocol": "tcp"},
-    )
-    t.api(
-        "POST /policy/evaluate/audit",
-        "POST", "/policy/evaluate/audit",
-        body={"action": "install", "target": "test-skill", "target_type": "skill"},
     )
     t.api("POST /policy/reload", "POST", "/policy/reload", expect_in="reloaded")
 
@@ -668,16 +653,17 @@ def test_lifecycle_policy_change(t: TestRunner):
     """Policy change: activate different presets and verify enforcement behavior changes."""
     print("\n--- Lifecycle: Policy Change Enforcement ---")
 
-    # 1. Default policy — evaluate skill-actions for HIGH severity
+    # 1. Default policy — evaluate a HIGH skill admission
     t.check("lifecycle:policy: activate default",
             "defenseclaw policy activate default")
     t.api("lifecycle:policy: reload after default",
           "POST", "/policy/reload", expect_in="reloaded")
 
-    t.api(
-        "lifecycle:policy: skill-actions HIGH (default)",
-        "POST", "/policy/evaluate/skill-actions",
-        body={"severity": "high"})
+    t.api("lifecycle:policy: HIGH skill admission (default)",
+          "POST", "/policy/evaluate",
+          body={"domain": "admission", "input": {"target_type": "skill", "target_name": "lifecycle-skill",
+                "scan_result": {"max_severity": "HIGH", "total_findings": 1}}},
+          expect_in="verdict")
 
     # 2. Activate strict policy
     t.check("lifecycle:policy: activate strict",
@@ -685,9 +671,11 @@ def test_lifecycle_policy_change(t: TestRunner):
     t.api("lifecycle:policy: reload after strict",
           "POST", "/policy/reload", expect_in="reloaded")
 
-    t.api("lifecycle:policy: skill-actions HIGH (strict)",
-          "POST", "/policy/evaluate/skill-actions",
-          body={"severity": "high"})
+    t.api("lifecycle:policy: HIGH skill admission (strict)",
+          "POST", "/policy/evaluate",
+          body={"domain": "admission", "input": {"target_type": "skill", "target_name": "lifecycle-skill",
+                "scan_result": {"max_severity": "HIGH", "total_findings": 1}}},
+          expect_in="verdict")
 
     # 3. Activate permissive policy
     t.check("lifecycle:policy: activate permissive",
@@ -695,20 +683,13 @@ def test_lifecycle_policy_change(t: TestRunner):
     t.api("lifecycle:policy: reload after permissive",
           "POST", "/policy/reload", expect_in="reloaded")
 
-    t.api("lifecycle:policy: skill-actions HIGH (permissive)",
-          "POST", "/policy/evaluate/skill-actions",
-          body={"severity": "high"})
+    t.api("lifecycle:policy: HIGH skill admission (permissive)",
+          "POST", "/policy/evaluate",
+          body={"domain": "admission", "input": {"target_type": "skill", "target_name": "lifecycle-skill",
+                "scan_result": {"max_severity": "HIGH", "total_findings": 1}}},
+          expect_in="verdict")
 
-    # 4. Evaluate across other OPA domains to exercise all policy paths
-    t.api("lifecycle:policy: firewall eval (permissive)",
-          "POST", "/policy/evaluate/firewall",
-          body={"destination": "10.0.0.1", "port": 80, "protocol": "tcp"})
-
-    t.api("lifecycle:policy: audit eval (permissive)",
-          "POST", "/policy/evaluate/audit",
-          body={"action": "install", "target": "lifecycle-skill", "target_type": "skill"})
-
-    # 5. Guardrail evaluate under current policy
+    # 4. Guardrail evaluate under current policy
     t.api("lifecycle:policy: guardrail eval",
           "POST", "/v1/guardrail/evaluate",
           body={"evaluation_id": "e2e-lifecycle-guardrail-evaluate", "direction": "prompt", "mode": "action",

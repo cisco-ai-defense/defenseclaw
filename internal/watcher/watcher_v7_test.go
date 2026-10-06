@@ -5,7 +5,6 @@
 package watcher
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,38 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/version"
 )
-
-func TestPolicyFilePoll_BumpsGeneration(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.PolicyDir = filepath.Join(cfg.DataDir, "policies")
-	if err := os.MkdirAll(cfg.PolicyDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	w := New(cfg, nil, nil, store, logger, nil, nil)
-	blockPath := filepath.Join(cfg.DataDir, "block_list.yaml")
-	if err := os.WriteFile(blockPath, []byte(`- target_type: skill
-  target_name: a
-  reason: t
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	w.pollPolicyFilesOnce(ctx)
-	gen1 := version.Current().Generation
-	if err := os.WriteFile(blockPath, []byte(`- target_type: skill
-  target_name: b
-  reason: t
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	w.pollPolicyFilesOnce(ctx)
-	gen2 := version.Current().Generation
-	if gen2 <= gen1 {
-		t.Fatalf("generation did not bump: %d -> %d", gen1, gen2)
-	}
-}
 
 func TestQuarantineStress_ConcurrentMoves(t *testing.T) {
 	tmp := t.TempDir()

@@ -1719,31 +1719,6 @@ class Store:
         )
         return cur.fetchone()[0] > 0
 
-    def list_by_action(self, field: str, value: str) -> list[ActionEntry]:
-        _validate(field, value)
-        cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
-                FROM actions WHERE json_extract(actions_json, '$.{field}') = ?
-                ORDER BY updated_at DESC""",
-            (value,),
-        )
-        return [self._row_to_action(r) for r in cur.fetchall()]
-
-    def list_by_action_and_type(
-        self,
-        field: str,
-        value: str,
-        target_type: str,
-    ) -> list[ActionEntry]:
-        _validate(field, value)
-        cur = self.db.execute(
-            f"""SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
-                FROM actions WHERE json_extract(actions_json, '$.{field}') = ? AND target_type = ?
-                ORDER BY updated_at DESC""",
-            (value, target_type),
-        )
-        return [self._row_to_action(r) for r in cur.fetchall()]
-
     def list_actions_by_type(
         self,
         target_type: str,
@@ -1768,13 +1743,6 @@ class Store:
                    FROM actions WHERE target_type = ? AND connector = ? ORDER BY updated_at DESC""",
                 (target_type, connector),
             )
-        return [self._row_to_action(r) for r in cur.fetchall()]
-
-    def list_all_actions(self) -> list[ActionEntry]:
-        cur = self.db.execute(
-            """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
-               FROM actions ORDER BY updated_at DESC"""
-        )
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     # -- Physical quarantine provenance --

@@ -72,7 +72,7 @@ var policyCmd = &cobra.Command{
 
 var policyValidateCmd = &cobra.Command{
 	Use:   "validate",
-	Short: "Compile-check all Rego modules and validate data.json",
+	Short: "Compile-check all Rego modules and the admission policy compiled from config.yaml",
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
@@ -81,41 +81,19 @@ var policyValidateCmd = &cobra.Command{
 
 		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
 
-		engine, err := policy.NewExact(regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load failed: %w", err)
-		}
-
-		if err := engine.Compile(); err != nil {
+		if _, err := policy.NewExact(regoDir); err != nil {
 			return fmt.Errorf("policy: compilation failed:\n%w", err)
 		}
-
 		fmt.Println("All Rego modules compiled successfully.")
 
-		data, err := policy.LoadDataExact(regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load effective data: %w", err)
+		for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin, config.AdmissionTypeTool} {
+			compiled := policy.CompileAdmission(cfg)[assetType]
+			fmt.Printf("admission.%s: actions from %s\n", assetType, compiled.Source)
 		}
-
-		required := []string{"config", "actions", "severity_ranking"}
-		for _, key := range required {
-			if _, ok := data[key]; !ok {
-				fmt.Fprintf(os.Stderr, "warning: data.json missing key: %s\n", key)
-			}
-		}
-
-		fmt.Println("data.json schema: OK")
 		return nil
 	},
 }
 
-// ---------------------------------------------------------------------------
-// policy test — run the Rego unit tests with the embedded OPA test runner
-// ---------------------------------------------------------------------------
-
-// policyTestCmd runs the *_test.rego unit tests in-process, so `defenseclaw
-// policy test` works on installs without a separate `opa` binary (GAP-1091).
-// It loads the directory the same way `opa test <dir>` does.
 var policyTestCmd = &cobra.Command{
 	Use:   "test",
 	Short: "Run the Rego unit tests (*_test.rego) without an external opa binary",
@@ -201,19 +179,17 @@ func policyCommandRegoDir(cmd *cobra.Command) (string, error) {
 
 var policyShowCmd = &cobra.Command{
 	Use:   "show",
-	Short: "Display the current OPA data.json policy configuration",
+	Short: "Display the admission policy and thresholds compiled from config.yaml",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
+		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
+		if cfg != nil {
+			view["guardrail"] = map[string]string{
+				"block_at":          cfg.Guardrail.BlockAt,
+				"alert_at":          cfg.Guardrail.AlertAt,
+				"cisco_trust_level": cfg.Guardrail.CiscoTrustLevel,
+			}
 		}
-
-		data, err := policy.LoadDataExact(paths.regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load effective data: %w", err)
-		}
-
-		out, err := json.MarshalIndent(data, "", "  ")
+		out, err := json.MarshalIndent(view, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -221,10 +197,6 @@ var policyShowCmd = &cobra.Command{
 		return nil
 	},
 }
-
-// ---------------------------------------------------------------------------
-// policy evaluate — dry-run admission
-// ---------------------------------------------------------------------------
 
 var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
@@ -249,10 +221,14 @@ var policyEvaluateCmd = &cobra.Command{
 			return err
 		}
 
+		block, allow := policy.AssetPolicyLists(cfg, targetType, "")
 		input := policy.AdmissionInput{
 			TargetType: targetType,
 			TargetName: targetName,
 			Path:       "/dry-run",
+			BlockList:  block,
+			AllowList:  allow,
+			Admission:  policy.AdmissionFor(policy.CompileAdmission(cfg), targetType),
 		}
 
 		if severity != "" {
@@ -298,11 +274,6 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 			return fmt.Errorf("--destination is required")
 		}
 
-		engine, err := policy.NewExact(paths.regoDir)
-		if err != nil {
-			return err
-		}
-
 		input := policy.FirewallInput{
 			TargetType:  targetType,
 			Destination: destination,
@@ -313,7 +284,7 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		out, err := engine.EvaluateFirewall(ctx, input)
+		out, err := policy.EvaluateFirewallExact(ctx, paths.regoDir, input)
 		if err != nil {
 			return fmt.Errorf("evaluation failed: %w", err)
 		}
@@ -398,7 +369,7 @@ var policyReloadCmd = &cobra.Command{
 }
 
 // ---------------------------------------------------------------------------
-// policy domains — list allowed/blocked domains from data.json
+// policy domains — list allowed/blocked domains from data-sandbox.json
 // ---------------------------------------------------------------------------
 
 var policyDomainsCmd = &cobra.Command{
@@ -410,9 +381,9 @@ var policyDomainsCmd = &cobra.Command{
 			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
-		effectiveData, err := policy.LoadDataExact(paths.regoDir)
+		effectiveData, err := policy.LoadSandboxData(paths.regoDir)
 		if err != nil {
-			return fmt.Errorf("policy: load effective data: %w", err)
+			return fmt.Errorf("policy: load firewall data: %w", err)
 		}
 		raw, err := json.Marshal(effectiveData)
 		if err != nil {
@@ -428,7 +399,7 @@ var policyDomainsCmd = &cobra.Command{
 			} `json:"firewall"`
 		}
 		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("policy: parse data.json: %w", err)
+			return fmt.Errorf("policy: parse %s: %w", policy.SandboxDataFile, err)
 		}
 
 		fmt.Printf("Default action: %s\n", data.Firewall.DefaultAction)
@@ -461,7 +432,7 @@ type resolvedPolicyPaths struct {
 // resolvePolicyPaths resolves one immutable layout for every local policy
 // command. Current installations use <policy-root>/rego; releases through
 // 0.3.x used the flat policy root. Canonical evidence always wins, including a
-// data.json without modules, so an incomplete or malformed canonical layout
+// data-sandbox.json without modules, so an incomplete or malformed canonical layout
 // cannot silently downgrade to stale flat policy data.
 func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 	root, err := resolvePolicyRoot()
@@ -473,7 +444,7 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 	if err != nil {
 		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical Rego directory: %w", err)
 	}
-	nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, "data.json"))
+	nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, policy.SandboxDataFile))
 	if err != nil {
 		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical policy data: %w", err)
 	}
@@ -491,7 +462,7 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 		paths.regoDir = nestedDir
 		paths.dataPath = nestedData
 	} else {
-		flatData, err := resolveContainedPolicyPath(root, filepath.Join(root, "data.json"))
+		flatData, err := resolveContainedPolicyPath(root, filepath.Join(root, policy.SandboxDataFile))
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("resolve legacy policy data: %w", err)
 		}
@@ -520,7 +491,7 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested Rego directory: %w", err)
 		}
-		deeperData, err := resolveContainedPolicyPath(root, filepath.Join(deeperDir, "data.json"))
+		deeperData, err := resolveContainedPolicyPath(root, filepath.Join(deeperDir, policy.SandboxDataFile))
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested policy data: %w", err)
 		}

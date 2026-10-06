@@ -79,12 +79,12 @@ type modelRouterHealthChecker interface {
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
-	startedAt     time.Time
-	cfg           *config.Config
-	cfgCurrent    atomic.Pointer[config.Config]
+	startedAt  time.Time
+	cfg        *config.Config
+	cfgCurrent atomic.Pointer[config.Config]
 	// generation is the configuration generation this sidecar last
 	// published (also the process-wide liveGeneration).
-	generation atomic.Pointer[Generation]
+	generation    atomic.Pointer[Generation]
 	client        *Client
 	router        *EventRouter
 	store         *audit.Store
@@ -2808,6 +2808,10 @@ func (s *Sidecar) setEventRouter(router *EventRouter) {
 			lifecycle = nil
 		}
 		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+		// Operator tool and MCP blocks come from the live config.
+		if router.policy != nil {
+			router.policy = router.policy.WithConfig(s.currentConfig)
+		}
 	}
 	s.router = router
 	s.observabilityV8Mu.Unlock()
@@ -3204,6 +3208,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.opa, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
+	w.SetConfigSource(s.currentConfig)
 	if conn != nil {
 		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),

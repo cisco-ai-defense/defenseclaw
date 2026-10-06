@@ -223,10 +223,11 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 }
 
 func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	if a.scannerCfg == nil || !probe.Matched {
+	cfg := a.liveConfig()
+	if cfg == nil || !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor("mcp")
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
 	if !runtimeDetection.Enabled {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -234,7 +235,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		return config.AssetPolicyDecision{}, false
 	}
 	probe = a.resolveMCPProbeEndpoint(connector, probe)
-	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
 		Connector:      connector,
@@ -330,17 +331,18 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if probe.RuntimeDisableOnly {
 		return config.AssetPolicyDecision{}, false
 	}
-	if a.scannerCfg == nil {
+	cfg := a.liveConfig()
+	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor(targetType)
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
 	if !runtimeDetection.Enabled {
 		return config.AssetPolicyDecision{}, false
 	}
 	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
-	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	decision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           probe.SkillName,
 		Connector:      connector,

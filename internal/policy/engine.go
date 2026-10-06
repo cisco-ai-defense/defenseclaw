@@ -18,52 +18,62 @@ package policy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
-	"github.com/open-policy-agent/opa/ast"           //nolint:staticcheck // v0 compat; migrate to opa/v1 later
-	"github.com/open-policy-agent/opa/rego"          //nolint:staticcheck // v0 compat; migrate to opa/v1 later
-	"github.com/open-policy-agent/opa/storage"       //nolint:staticcheck // v0 compat; migrate to opa/v1 later
-	"github.com/open-policy-agent/opa/storage/inmem" //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/ast"  //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+	"github.com/open-policy-agent/opa/rego" //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 )
 
-// Engine evaluates OPA Rego policies for admission, guardrail, firewall,
-// audit, and skill_actions domains.
+const (
+	admissionQuery = "data.defenseclaw.admission"
+	guardrailQuery = "data.defenseclaw.guardrail"
+)
+
+// DefaultThresholds is input.thresholds when a guardrail caller passes none:
+// block at CRITICAL, alert at MEDIUM, full Cisco AI Defense trust.
+var DefaultThresholds = ThresholdsInput{Block: 4, Alert: 2, CiscoTrustLevel: "full"}
+
+// Engine evaluates the admission and guardrail Rego policies. It loads only
+// .rego modules: every policy input (admission, block/allow lists,
+// thresholds, HILT) comes from config.yaml through the evaluation input, so
+// there is no data.json. The queries are prepared once per load; Reload
+// re-reads the modules and swaps them atomically.
 type Engine struct {
 	mu                sync.RWMutex
 	regoDir           string
-	store             storage.Store
-	exactDataPath     bool
 	quarantineInvalid bool
+	prepared          *Prepared
 }
 
-// New creates an Engine. regoDir is the path to the directory containing
-// the Rego modules and data.json (e.g. policies/rego/). If regoDir itself
+// New creates an Engine from the Rego modules in regoDir. If regoDir itself
 // does not contain .rego files but a "rego" subdirectory does, the
-// subdirectory is used instead.
+// subdirectory is used instead. A module that fails to parse is moved to
+// <regoDir>/.policy_quarantine and the load fails.
 func New(regoDir string) (*Engine, error) {
-	regoDir = resolveRegoDir(regoDir)
-	store, err := loadStore(regoDir)
-	if err != nil {
+	e := &Engine{regoDir: resolveRegoDir(regoDir), quarantineInvalid: true}
+	if err := e.Reload(); err != nil {
 		return nil, err
 	}
-	return &Engine{regoDir: regoDir, store: store, quarantineInvalid: true}, nil
+	return e, nil
 }
 
 // NewExact creates a read-only Engine for a caller that has already selected
-// the policy layout. It loads exactly <regoDir>/data.json, treats an existing
-// malformed supplemental data file as an error, and never quarantines or
-// removes a Rego module when parsing fails.
+// the policy layout. It never quarantines or removes a Rego module when
+// parsing fails.
 func NewExact(regoDir string) (*Engine, error) {
-	store, err := loadStoreExact(regoDir)
-	if err != nil {
+	e := &Engine{regoDir: regoDir}
+	if err := e.Reload(); err != nil {
 		return nil, err
 	}
-	return &Engine{regoDir: regoDir, store: store, exactDataPath: true}, nil
+	return e, nil
 }
 
 // resolveRegoDir picks the directory the OPA store should load from when
@@ -76,8 +86,8 @@ func NewExact(regoDir string) (*Engine, error) {
 // The bug surfaced as: HILT confirmation never triggered for prompt-side
 // findings. With both layouts present, the loader picked the stale flat
 // “guardrail.rego“ (no “confirm“ branch, no “_hilt_*“ rules) while
-// reading the up-to-date “data.guardrail.hilt“ from “<dir>/rego/data.json“
-// via the fallback path in “readDataJSON“. Net effect: every HIGH-severity
+// reading the up-to-date HILT data from the nested directory. Net effect:
+// every HIGH-severity
 // prompt finding came back as “alert“ instead of “confirm“, and the
 // HILT dialog only appeared on tool calls (which run through a separate,
 // non-Rego decision tree in “internal/gateway/decision.go“).
@@ -118,27 +128,32 @@ func hasRegoFiles(dir string) bool {
 	return false
 }
 
-// Reload re-reads data.json and all .rego files, replacing the in-memory
-// store atomically. Returns a compilation error if the new modules fail
-// to compile so the caller can decide whether to keep the old state.
+// Reload re-reads every .rego module and prepares the queries again,
+// replacing them atomically. On a parse or compile error the previous
+// modules stay in use and the error is returned.
 func (e *Engine) Reload() error {
-	store, err := e.loadStore()
-	if err != nil {
-		return err
-	}
-
 	modules, err := readModules(e.regoDir, e.quarantineTarget())
 	if err != nil {
 		return err
 	}
-	if err := compileModules(modules); err != nil {
+	prepared, err := prepareModules(context.Background(), modules)
+	if err != nil {
 		return err
 	}
-
 	e.mu.Lock()
-	e.store = store
+	e.prepared = prepared
 	e.mu.Unlock()
 	return nil
+}
+
+// Compile re-checks that the modules on disk still parse and compile,
+// without replacing the prepared queries.
+func (e *Engine) Compile() error {
+	modules, err := readModules(e.regoDir, e.quarantineTarget())
+	if err != nil {
+		return err
+	}
+	return compileModules(modules)
 }
 
 // RegoDir returns the directory the engine loads Rego files from.
@@ -146,14 +161,46 @@ func (e *Engine) RegoDir() string {
 	return e.regoDir
 }
 
+// Prepared returns the queries prepared by the last successful load.
+func (e *Engine) Prepared() *Prepared {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.prepared
+}
+
+// Prepare reads the .rego modules of regoDir (or its rego/ subdirectory,
+// as New does) without quarantining, and prepares the admission and
+// guardrail queries once. The gateway calls it once per configuration
+// generation; every evaluation reuses the prepared queries.
+func Prepare(ctx context.Context, regoDir string) (*Prepared, error) {
+	modules, err := readModules(resolveRegoDir(regoDir), nil)
+	if err != nil {
+		return nil, err
+	}
+	return prepareModules(ctx, modules)
+}
+
 // ---------------------------------------------------------------------------
 // Admission
 // ---------------------------------------------------------------------------
 
 // Evaluate runs the admission policy against the provided input and returns
-// the verdict, reason, file_action, install_action, and runtime_action.
+// the verdict, reason, file_action, install_action, and runtime_action. An
+// evaluation failure is a fail-closed rejection, never an error.
 func (e *Engine) Evaluate(ctx context.Context, input AdmissionInput) (*AdmissionOutput, error) {
-	result, err := e.eval(ctx, "data.defenseclaw.admission", input)
+	return e.Prepared().EvaluateAdmission(ctx, input)
+}
+
+// EvaluateAdmission evaluates the prepared admission query. An evaluation
+// failure is a fail-closed rejection, never an error.
+func (p *Prepared) EvaluateAdmission(ctx context.Context, input AdmissionInput) (*AdmissionOutput, error) {
+	var result map[string]interface{}
+	var err error
+	if p == nil {
+		err = fmt.Errorf("policy: no prepared admission query")
+	} else {
+		result, err = evalPrepared(ctx, p.Admission, input)
+	}
 	if err != nil {
 		return &AdmissionOutput{
 			Verdict:       "rejected",
@@ -178,91 +225,34 @@ func (e *Engine) Evaluate(ctx context.Context, input AdmissionInput) (*Admission
 
 // EvaluateGuardrail runs the LLM guardrail policy against combined scanner results.
 func (e *Engine) EvaluateGuardrail(ctx context.Context, input GuardrailInput) (*GuardrailOutput, error) {
-	result, err := e.eval(ctx, "data.defenseclaw.guardrail", input)
+	return e.Prepared().EvaluateGuardrail(ctx, input)
+}
+
+// EvaluateGuardrail evaluates the prepared guardrail query. A nil
+// input.Thresholds uses DefaultThresholds.
+func (p *Prepared) EvaluateGuardrail(ctx context.Context, input GuardrailInput) (*GuardrailOutput, error) {
+	if p == nil {
+		return nil, fmt.Errorf("policy: guardrail eval: no prepared guardrail query")
+	}
+	if input.Thresholds == nil {
+		defaults := DefaultThresholds
+		input.Thresholds = &defaults
+	}
+	result, err := evalPrepared(ctx, p.Guardrail, input)
 	if err != nil {
 		return nil, fmt.Errorf("policy: guardrail eval: %w", err)
 	}
-
-	sources := toStringSlice(result, "scanner_sources")
 	return &GuardrailOutput{
 		Action:         stringVal(result, "action"),
 		Severity:       stringVal(result, "severity"),
 		Reason:         stringVal(result, "reason"),
-		ScannerSources: sources,
+		ScannerSources: toStringSlice(result, "scanner_sources"),
 	}, nil
 }
 
 // ---------------------------------------------------------------------------
-// Firewall
+// Internal helpers
 // ---------------------------------------------------------------------------
-
-// EvaluateFirewall runs the egress firewall policy for a given destination.
-func (e *Engine) EvaluateFirewall(ctx context.Context, input FirewallInput) (*FirewallOutput, error) {
-	result, err := e.eval(ctx, "data.defenseclaw.firewall", input)
-	if err != nil {
-		return nil, fmt.Errorf("policy: firewall eval: %w", err)
-	}
-	return &FirewallOutput{
-		Action:   stringVal(result, "action"),
-		RuleName: stringVal(result, "rule_name"),
-	}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Audit
-// ---------------------------------------------------------------------------
-
-// EvaluateAudit runs the audit retention/export policy for a given event.
-func (e *Engine) EvaluateAudit(ctx context.Context, input AuditInput) (*AuditOutput, error) {
-	result, err := e.eval(ctx, "data.defenseclaw.audit", input)
-	if err != nil {
-		return nil, fmt.Errorf("policy: audit eval: %w", err)
-	}
-	return &AuditOutput{
-		Retain:       boolVal(result, "retain"),
-		RetainReason: stringVal(result, "retain_reason"),
-		ExportTo:     toStringSlice(result, "export_to"),
-	}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Skill Actions
-// ---------------------------------------------------------------------------
-
-// EvaluateSkillActions runs the skill_actions policy to map severity to actions.
-func (e *Engine) EvaluateSkillActions(ctx context.Context, input SkillActionsInput) (*SkillActionsOutput, error) {
-	result, err := e.eval(ctx, "data.defenseclaw.skill_actions", input)
-	if err != nil {
-		return nil, fmt.Errorf("policy: skill_actions eval: %w", err)
-	}
-	return &SkillActionsOutput{
-		RuntimeAction: stringVal(result, "runtime_action"),
-		FileAction:    stringVal(result, "file_action"),
-		InstallAction: stringVal(result, "install_action"),
-		ShouldBlock:   boolVal(result, "should_block"),
-	}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Compile
-// ---------------------------------------------------------------------------
-
-// Compile performs a one-time compilation check of the Rego modules,
-// useful for fast-failing at startup.
-func (e *Engine) Compile() error {
-	modules, err := readModules(e.regoDir, e.quarantineTarget())
-	if err != nil {
-		return err
-	}
-	return compileModules(modules)
-}
-
-func (e *Engine) loadStore() (storage.Store, error) {
-	if e.exactDataPath {
-		return loadStoreExact(e.regoDir)
-	}
-	return loadStore(e.regoDir)
-}
 
 func (e *Engine) quarantineTarget() *Engine {
 	if e.quarantineInvalid {
@@ -271,39 +261,16 @@ func (e *Engine) quarantineTarget() *Engine {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map[string]interface{}, error) {
-	e.mu.RLock()
-	store := e.store
-	e.mu.RUnlock()
-
-	inputMap, err := toMap(input)
-	if err != nil {
-		return nil, fmt.Errorf("marshal input: %w", err)
-	}
-	modules, err := readModules(e.regoDir, e.quarantineTarget())
-	if err != nil {
-		return nil, err
-	}
-
+// regoOptions hardens the OPA evaluator against user-supplied Rego that
+// ships in policy bundles (PR #141 audit H4). The default builtins include
+// http.send (outbound network), opa.runtime (build/host info) and
+// net.lookup_ip_addr (DNS probing); policy authors never need them.
+// StrictBuiltinErrors turns silent builtin failures into evaluation errors
+// so a banned builtin can never be reached behind a `with` shim and noop
+// into a pass verdict.
+func regoOptions(query string, modules map[string]string) []func(*rego.Rego) {
 	opts := []func(*rego.Rego){
 		rego.Query(query),
-		rego.Store(store),
-		rego.Input(inputMap),
-		// PR #141 audit H4: harden the OPA evaluator against
-		// user-supplied Rego that ships in policy bundles. The
-		// default builtins surface includes:
-		//   - http.send         — outbound network from the eval path
-		//   - opa.runtime       — leaks build/host info
-		//   - net.lookup_ip_addr — DNS probing primitive
-		// These are network/info-disclosure vectors that policy
-		// authors should never need from inside a guardrail rule.
-		// StrictBuiltinErrors flips silent builtin failures into hard
-		// evaluation errors so a banned builtin can never be reached
-		// behind a `with` shim and silently noop into a `pass` verdict.
 		rego.UnsafeBuiltins(map[string]struct{}{
 			"http.send":          {},
 			"opa.runtime":        {},
@@ -311,113 +278,64 @@ func (e *Engine) eval(ctx context.Context, query string, input interface{}) (map
 		}),
 		rego.StrictBuiltinErrors(true),
 	}
-	for name, src := range modules {
-		opts = append(opts, rego.Module(name, src))
+	names := make([]string, 0, len(modules))
+	for name := range modules {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	for _, name := range names {
+		opts = append(opts, rego.Module(name, modules[name]))
+	}
+	return opts
+}
 
-	rs, err := rego.New(opts...).Eval(ctx)
+func prepareModules(ctx context.Context, modules map[string]string) (*Prepared, error) {
+	if err := compileModules(modules); err != nil {
+		return nil, err
+	}
+	admission, err := rego.New(regoOptions(admissionQuery, modules)...).PrepareForEval(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("policy: prepare admission: %w", err)
+	}
+	guardrail, err := rego.New(regoOptions(guardrailQuery, modules)...).PrepareForEval(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("policy: prepare guardrail: %w", err)
+	}
+	return &Prepared{Admission: admission, Guardrail: guardrail, RegoDigest: regoDigest(modules)}, nil
+}
+
+// regoDigest is "sha256:" + the hex sha256 of the sorted (name, bytes) pairs.
+func regoDigest(modules map[string]string) string {
+	names := make([]string, 0, len(modules))
+	for name := range modules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, name := range names {
+		fmt.Fprintf(h, "%d:%s%d:", len(name), name, len(modules[name]))
+		h.Write([]byte(modules[name]))
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func evalPrepared(ctx context.Context, query rego.PreparedEvalQuery, input interface{}) (map[string]interface{}, error) {
+	inputMap, err := toMap(input)
+	if err != nil {
+		return nil, fmt.Errorf("marshal input: %w", err)
+	}
+	rs, err := query.Eval(ctx, rego.EvalInput(inputMap))
 	if err != nil {
 		return nil, err
 	}
-
 	if len(rs) == 0 || len(rs[0].Expressions) == 0 {
-		err := fmt.Errorf("empty result set")
-		return nil, err
+		return nil, fmt.Errorf("empty result set")
 	}
-
 	result, ok := rs[0].Expressions[0].Value.(map[string]interface{})
 	if !ok {
-		err := fmt.Errorf("unexpected result type %T", rs[0].Expressions[0].Value)
-		return nil, err
+		return nil, fmt.Errorf("unexpected result type %T", rs[0].Expressions[0].Value)
 	}
 	return result, nil
-}
-
-func loadStore(regoDir string) (storage.Store, error) {
-	raw, err := readDataJSON(regoDir)
-	if err != nil {
-		return nil, fmt.Errorf("policy: read data.json: %w", err)
-	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("policy: parse data.json: %w", err)
-	}
-
-	mergeSupplementalData(regoDir, data, "data-sandbox.json")
-
-	return inmem.NewFromObject(data), nil
-}
-
-// LoadDataExact loads the effective OPA data from exactly regoDir. The base
-// data.json is required; data-sandbox.json is optional, but when present it
-// must be readable JSON object data. Supplemental top-level keys override the
-// base object exactly as the policy engine sees them.
-func LoadDataExact(regoDir string) (map[string]interface{}, error) {
-	raw, err := os.ReadFile(filepath.Join(regoDir, "data.json"))
-	if err != nil {
-		return nil, fmt.Errorf("policy: read data.json: %w", err)
-	}
-
-	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, fmt.Errorf("policy: parse data.json: %w", err)
-	}
-	if data == nil {
-		return nil, fmt.Errorf("policy: parse data.json: top-level value must be an object")
-	}
-	if err := mergeSupplementalDataExact(regoDir, data, "data-sandbox.json"); err != nil {
-		return nil, err
-	}
-	return data, nil
-}
-
-func loadStoreExact(regoDir string) (storage.Store, error) {
-	data, err := LoadDataExact(regoDir)
-	if err != nil {
-		return nil, err
-	}
-	return inmem.NewFromObject(data), nil
-}
-
-func mergeSupplementalDataExact(regoDir string, data map[string]interface{}, filename string) error {
-	path := filepath.Join(regoDir, filename)
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("policy: read %s: %w", filename, err)
-	}
-
-	var extra map[string]interface{}
-	if err := json.Unmarshal(raw, &extra); err != nil {
-		return fmt.Errorf("policy: parse %s: %w", filename, err)
-	}
-	if extra == nil {
-		return fmt.Errorf("policy: parse %s: top-level value must be an object", filename)
-	}
-	for key, value := range extra {
-		data[key] = value
-	}
-	return nil
-}
-
-// mergeSupplementalData reads a JSON file from regoDir and merges its
-// top-level keys into data. Missing files are silently skipped.
-func mergeSupplementalData(regoDir string, data map[string]interface{}, filename string) {
-	path := filepath.Join(regoDir, filename)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	var extra map[string]interface{}
-	if err := json.Unmarshal(raw, &extra); err != nil {
-		return
-	}
-	for k, v := range extra {
-		data[k] = v
-	}
 }
 
 func readModules(regoDir string, eng *Engine) (map[string]string, error) {
@@ -511,18 +429,6 @@ func stringVal(m map[string]interface{}, key string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return s
-}
-
-func boolVal(m map[string]interface{}, key string) bool {
-	v, ok := m[key]
-	if !ok {
-		return false
-	}
-	b, ok := v.(bool)
-	if !ok {
-		return false
-	}
-	return b
 }
 
 func toStringSlice(m map[string]interface{}, key string) []string {

@@ -8193,10 +8193,6 @@ def _restore_setup_config_snapshot(
         _restore_setup_config_file_snapshot(cfg, snapshot)
     except Exception as exc:  # noqa: BLE001 — still restore independent protected receipts.
         restore_errors.append(f"config [{_setup_runtime_ref(type(exc).__name__)}]")
-    try:
-        _sync_guardrail_hilt_to_opa(cfg.policy_dir, cfg.guardrail)
-    except Exception as exc:  # noqa: BLE001 — receipt restoration must still run.
-        restore_errors.append(f"HILT policy [{_setup_runtime_ref(type(exc).__name__)}]")
 
     if cfg.data_dir:
         hint_path = os.path.join(cfg.data_dir, _PICKED_CONNECTOR_FILENAME)
@@ -9935,7 +9931,6 @@ def _apply_hook_connector_setup(
         return False
 
     try:
-        _sync_guardrail_hilt_to_opa(cfg.policy_dir, gc)
         _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
     except Exception as exc:  # noqa: BLE001 — no post-save side effect may strand desired state.
         try:
@@ -13405,13 +13400,6 @@ def execute_guardrail_setup(
             ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
 
-    # --- Mirror HILT into the OPA Rego data file ---
-    # The prompt-side guardrail verdict is computed by Rego, which reads
-    # `hilt.enabled` from policies/rego/data.json — NOT from config.yaml.
-    # Keeping the wizard's `gc.hilt` in sync with that file is what makes
-    # `confirm` actually surface on HIGH-severity prompt findings.
-    _sync_guardrail_hilt_to_opa(app.cfg.policy_dir, gc)
-
     return True, warnings
 
 
@@ -14027,74 +14015,6 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
 
     if app.logger:
         app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
-
-
-def _sync_guardrail_hilt_to_opa(policy_dir: str, gc) -> None:
-    """Mirror ``gc.hilt`` into the OPA Rego data.json the gateway evaluates.
-
-    NOTE (architecture): As of the input.hilt SSOT change, the Go gateway
-    now passes ``cfg.Guardrail.HILT`` directly into ``policy.GuardrailInput``
-    so the Rego policy reads ``input.hilt.{enabled,min_severity}`` and
-    ``config.yaml`` is the single source of truth for the gateway path.
-    See ``internal/gateway/guardrail.go`` (``SetHILTConfig`` / ``hiltInput``)
-    and ``policies/rego/guardrail.rego`` (``_hilt := input.hilt if {...}
-    else := object.get(data.guardrail, "hilt", {})``).
-
-    This helper is now a **fallback** that keeps non-gateway callers
-    (direct ``opa eval`` invocations, integration tests that build a
-    ``GuardrailInput`` without HILT, third-party tooling) consistent with
-    the wizard's view of HILT. The gateway no longer DEPENDS on it for
-    correctness, but mirroring the value here costs nothing and avoids
-    confusing operators who introspect ``data.json`` directly.
-
-    The HILT toggle has two consumers:
-
-    1. The Go inspector reads ``cfg.Guardrail.HILT`` from ``config.yaml``
-       and injects it into the Rego ``input`` (the gateway path — primary).
-    2. The Rego ``defenseclaw.guardrail`` policy falls back to
-       ``data.guardrail.hilt`` from ``policies/rego/data.json`` when the
-       caller does not populate ``input.hilt`` (legacy / test path).
-
-    Operator-facing wizards (``defenseclaw init``, ``defenseclaw setup
-    guardrail``) persist (1) via ``config.yaml`` and mirror to (2) via
-    this helper as defense-in-depth. The helper is intentionally narrow:
-    it ONLY mirrors the ``guardrail.hilt`` block, leaving thresholds,
-    patterns, severity_mappings, etc. owned by ``defenseclaw policy
-    activate`` (which calls ``_sync_opa_data`` in ``cmd_policy``). That
-    keeps the wizard from accidentally clobbering activated-policy state.
-    """
-    import json
-
-    if gc is None or getattr(gc, "hilt", None) is None:
-        return
-
-    data_json = os.path.join(policy_dir, "rego", "data.json")
-    if not os.path.isfile(data_json):
-        return
-
-    try:
-        with open(data_json) as f:
-            opa_data = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        ux.echo(f"  ⚠ Failed to read {data_json}: {exc}")
-        return
-
-    desired = {
-        "enabled": bool(gc.hilt.enabled),
-        "min_severity": (gc.hilt.min_severity or "HIGH").upper(),
-    }
-    guardrail_block = opa_data.setdefault("guardrail", {})
-    if guardrail_block.get("hilt") == desired:
-        return
-
-    guardrail_block["hilt"] = desired
-    try:
-        with open(data_json, "w") as f:
-            json.dump(opa_data, f, indent=2)
-            f.write("\n")
-        ux.echo(f"  ✓ HILT synced to OPA: enabled={desired['enabled']} min_severity={desired['min_severity']}")
-    except OSError as exc:
-        ux.echo(f"  ⚠ Failed to write {data_json}: {exc}")
 
 
 def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:

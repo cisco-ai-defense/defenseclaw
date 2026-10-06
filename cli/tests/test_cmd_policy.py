@@ -16,7 +16,6 @@
 
 """Tests for 'defenseclaw policy' command group — create, list, show, activate, delete."""
 
-import json
 import os
 import sys
 import unittest
@@ -209,15 +208,15 @@ class TestPolicyActivate(PolicyCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("activated", result.output)
 
-        # Check config was updated
-        self.assertEqual(self.app.cfg.skill_actions.medium.install, "block")
+        # The preset's actions become config admission defaults.
+        self.assertEqual(self.app.cfg.admission.defaults.actions["medium"]["install"], "block")
 
     def test_activate_custom(self):
         self.invoke(["create", "my-active", "--medium-action", "block"])
         result = self.invoke(["activate", "my-active"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("activated", result.output)
-        self.assertEqual(self.app.cfg.skill_actions.medium.install, "block")
+        self.assertEqual(self.app.cfg.admission.defaults.actions["medium"]["install"], "block")
 
     def test_activate_builtin_updates_watch_rescan_config(self):
         import yaml
@@ -325,22 +324,6 @@ class TestPolicyDelete(PolicyCommandTestBase):
         # A second delete has nothing left to revert.
         self.assertNotEqual(self.invoke(["delete", "strict"]).exit_code, 0)
 
-    def test_delete_active_edited_builtin_reloads_gateway(self):
-        """GAP-1723: the restored built-in reaches the running gateway and the output says so."""
-        from unittest.mock import patch
-
-        self.assertEqual(self.invoke(["activate", "strict", "--no-reload"]).exit_code, 0)
-        result = self.invoke(["edit", "guardrail", "-p", "strict", "--block-threshold", "3", "--no-reload"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        with patch(
-            "defenseclaw.commands.cmd_policy._reload_gateway_policy", return_value=("reloaded", "")
-        ) as reload:
-            result = self.invoke(["delete", "strict"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("built-in version is back", result.output)
-        self.assertIn("Gateway reloaded the policy", result.output)
-        reload.assert_called_once()
-
     def test_delete_asks_on_a_terminal_and_accepts_yes(self):
         # GAP-1887: a user-authored policy is removed for good, so confirm first.
         from unittest.mock import patch
@@ -369,99 +352,16 @@ class TestPolicyDelete(PolicyCommandTestBase):
         self.assertEqual(len(actions), 1)
 
 
-class TestSyncOpaDataFirstParty(PolicyCommandTestBase):
-    def test_sync_writes_guardrail_hilt(self):
-        from defenseclaw.commands.cmd_policy import _sync_opa_data
-
-        rego_dir = os.path.join(self.app.cfg.policy_dir, "rego")
-        os.makedirs(rego_dir, exist_ok=True)
-        data_json_path = os.path.join(rego_dir, "data.json")
-        with open(data_json_path, "w") as f:
-            json.dump({
-                "config": {},
-                "actions": {},
-                "guardrail": {
-                    "block_threshold": 4,
-                    "alert_threshold": 2,
-                    "hilt": {"enabled": False, "min_severity": "HIGH"},
-                },
-            }, f)
-
-        policy_data = {
-            "name": "test-sync",
-            "guardrail": {
-                "block_threshold": 4,
-                "alert_threshold": 2,
-                "hilt": {"enabled": True, "min_severity": "MEDIUM"},
-            },
-        }
-
-        _sync_opa_data(self.app, policy_data)
-
-        with open(data_json_path) as f:
-            result = json.load(f)
-
-        self.assertTrue(result["guardrail"]["hilt"]["enabled"])
-        self.assertEqual(result["guardrail"]["hilt"]["min_severity"], "MEDIUM")
-
-    def test_sync_writes_first_party_allow_list_with_provenance(self):
-        from defenseclaw.commands.cmd_policy import _sync_opa_data
-
-        rego_dir = os.path.join(self.app.cfg.policy_dir, "rego")
-        os.makedirs(rego_dir, exist_ok=True)
-        data_json_path = os.path.join(rego_dir, "data.json")
-        with open(data_json_path, "w") as f:
-            json.dump({
-                "config": {},
-                "actions": {},
-                "first_party_allow_list": [
-                    {
-                        "target_type": "plugin",
-                        "target_name": "defenseclaw",
-                        "reason": "old reason",
-                        "source_path_contains": [".defenseclaw"],
-                    }
-                ],
-            }, f)
-
-        policy_data = {
-            "name": "test-sync",
-            "first_party_allow_list": [
-                {
-                    "target_type": "plugin",
-                    "target_name": "defenseclaw",
-                    "reason": "first-party DefenseClaw plugin",
-                    "source_path_contains": [".defenseclaw", ".openclaw/extensions"],
-                },
-                {
-                    "target_type": "skill",
-                    "target_name": "codeguard",
-                    "reason": "first-party DefenseClaw skill",
-                    "source_path_contains": [".defenseclaw", ".openclaw/skills"],
-                },
-            ],
-        }
-
-        _sync_opa_data(self.app, policy_data)
-
-        with open(data_json_path) as f:
-            result = json.load(f)
-
-        fp_list = result.get("first_party_allow_list", [])
-        self.assertEqual(len(fp_list), 2)
-
-        plugin_entry = next(
-            (e for e in fp_list if e["target_name"] == "defenseclaw"), None
-        )
-        self.assertIsNotNone(plugin_entry)
-        self.assertIn(".openclaw/extensions", plugin_entry["source_path_contains"])
-        self.assertEqual(plugin_entry["reason"], "first-party DefenseClaw plugin")
-
-        skill_entry = next(
-            (e for e in fp_list if e["target_name"] == "codeguard"), None
-        )
-        self.assertIsNotNone(skill_entry)
-        self.assertIn(".openclaw/skills", skill_entry["source_path_contains"])
+class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
+    def test_activate_writes_first_party_and_thresholds_to_config(self):
+        result = self.invoke(["activate", "default", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        plugin = self.app.cfg.admission.plugin.first_party_allow_list
+        self.assertEqual([e.name for e in plugin], ["defenseclaw"])
+        self.assertIn(".openclaw/extensions/defenseclaw", plugin[0].source_path_contains)
+        # The default preset's thresholds are the defaults, so the pack posture applies.
+        self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", ""))
+        self.assertFalse(os.path.exists(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")))
 
 
 class TestPolicyLifecycle(PolicyCommandTestBase):
@@ -488,63 +388,21 @@ class TestPolicyLifecycle(PolicyCommandTestBase):
         # Activate
         result = self.invoke(["activate", "lifecycle-test"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(self.app.cfg.skill_actions.medium.install, "block")
+        self.assertEqual(self.app.cfg.admission.defaults.actions["medium"]["install"], "block")
 
-        # Delete — lifecycle-test is now the active policy, so a bare delete
-        # is refused (N1). --force deletes it and re-activates 'default'.
-        result = self.invoke(["delete", "lifecycle-test", "--force"])
+        # Delete — config.yaml keeps what the activation applied.
+        result = self.invoke(["delete", "lifecycle-test"])
         self.assertEqual(result.exit_code, 0, result.output)
 
 
-class TestPolicyEditSyncGate(PolicyCommandTestBase):
-    """OTHER-2: editing a non-active policy must not touch the live data.json."""
+class TestPolicyEditLive(PolicyCommandTestBase):
+    """Without -p an edit changes the live config.yaml policy."""
 
-    def _data_json_path(self) -> str:
-        return os.path.join(self.app.cfg.policy_dir, "rego", "data.json")
-
-    def test_edit_nonactive_does_not_sync_or_activate(self):
-        from defenseclaw.commands.cmd_policy import _get_active_policy_name
-
-        # default is the live policy.
-        self.assertEqual(self.invoke(["activate", "default"]).exit_code, 0)
-        self.invoke(["create", "draft"])
-
-        with open(self._data_json_path()) as f:
-            before = f.read()
-
-        result = self.invoke(
-            ["edit", "actions", "-s", "low", "--runtime", "disable", "-p", "draft"]
-        )
+    def test_live_edit_writes_config_admission(self):
+        result = self.invoke(["edit", "actions", "-s", "medium", "--install", "block", "--no-reload"])
         self.assertEqual(result.exit_code, 0, result.output)
-
-        # Live data.json untouched; default still active.
-        with open(self._data_json_path()) as f:
-            self.assertEqual(f.read(), before)
-        self.assertEqual(_get_active_policy_name(self.app), "default")
-        self.assertIn("Activate with", result.output)
-
-        # But the draft YAML did get the edit.
-        import yaml
-        with open(os.path.join(self.app.cfg.policy_dir, "draft.yaml")) as f:
-            draft = yaml.safe_load(f)
-        self.assertEqual(draft["skill_actions"]["low"]["runtime"], "disable")
-
-    def test_edit_active_syncs(self):
-        from defenseclaw.commands.cmd_policy import _get_active_policy_name
-
-        self.invoke(["create", "liveone"])
-        self.assertEqual(self.invoke(["activate", "liveone"]).exit_code, 0)
-
-        result = self.invoke(
-            ["edit", "actions", "-s", "low", "--runtime", "disable", "-p", "liveone"]
-        )
-        self.assertEqual(result.exit_code, 0, result.output)
-
-        with open(self._data_json_path()) as f:
-            data = json.load(f)
-        # 'disable' maps to OPA 'block'; the live policy stays liveone.
-        self.assertEqual(data["actions"]["LOW"]["runtime"], "block")
-        self.assertEqual(_get_active_policy_name(self.app), "liveone")
+        self.assertEqual(self.app.cfg.admission.defaults.actions["medium"],
+                         {"install": "block", "file": "none", "runtime": "enable"})
 
 
 class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
@@ -580,7 +438,6 @@ class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
 
     def test_edit_active_builtin_copies_to_user_dir(self):
         import yaml
-        from defenseclaw.commands.cmd_policy import _get_active_policy_name
 
         self.assertEqual(self.invoke(["activate", "default"]).exit_code, 0)
         user_copy = os.path.join(self.app.cfg.policy_dir, "default.yaml")
@@ -597,12 +454,6 @@ class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
             data = yaml.safe_load(f)
         self.assertEqual(data["guardrail"]["block_threshold"], 3)
         self._assert_bundled_unchanged()
-
-        # default is active → the edit also synced the live data.json.
-        self.assertEqual(_get_active_policy_name(self.app), "default")
-        with open(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")) as f:
-            dj = json.load(f)
-        self.assertEqual(dj["guardrail"]["block_threshold"], 3)
 
     def test_edit_guardrail_threshold_takes_severity_names(self):
         """GAP-1724/GAP-1725: names like policy show prints; no plumbing lines."""
@@ -631,11 +482,9 @@ class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
         import yaml
 
         self.assertEqual(self.invoke(["activate", "default"]).exit_code, 0)
-        data_json = os.path.join(self.app.cfg.policy_dir, "rego", "data.json")
-        with open(data_json) as f:
-            before = f.read()
+        before = self.app.cfg.guardrail.block_at
 
-        # strict is bundled and NOT active → COW + no live sync.
+        # strict is bundled: COW, and the live config is untouched.
         result = self.invoke(
             ["edit", "guardrail", "--block-threshold", "2", "-p", "strict"]
         )
@@ -648,37 +497,12 @@ class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):
         self.assertEqual(data["guardrail"]["block_threshold"], 2)
         self._assert_bundled_unchanged()
 
-        with open(data_json) as f:
-            self.assertEqual(f.read(), before)
-        self.assertIn("Activate with", result.output)
+        self.assertEqual(self.app.cfg.guardrail.block_at, before)
+        self.assertIn("Apply it with", result.output)
 
 
-class TestPolicyDeleteActiveGuard(PolicyCommandTestBase):
-    """N1: deleting the active policy is guarded; --force re-activates default."""
-
-    def test_delete_active_refused_without_force(self):
-        self.invoke(["create", "activepol"])
-        self.assertEqual(self.invoke(["activate", "activepol"]).exit_code, 0)
-
-        result = self.invoke(["delete", "activepol"])
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("is active", result.output)
-        self.assertTrue(os.path.isfile(
-            os.path.join(self.app.cfg.policy_dir, "activepol.yaml")
-        ))
-
-    def test_delete_active_with_force_reactivates_default(self):
-        from defenseclaw.commands.cmd_policy import _get_active_policy_name
-
-        self.invoke(["create", "activepol"])
-        self.assertEqual(self.invoke(["activate", "activepol"]).exit_code, 0)
-
-        result = self.invoke(["delete", "activepol", "--force"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertFalse(os.path.exists(
-            os.path.join(self.app.cfg.policy_dir, "activepol.yaml")
-        ))
-        self.assertEqual(_get_active_policy_name(self.app), "default")
+class TestPolicyDeleteKeepsConfig(PolicyCommandTestBase):
+    """Deleting a policy file never changes what config.yaml enforces."""
 
     def test_delete_nonactive_unaffected(self):
         self.invoke(["create", "keep"])

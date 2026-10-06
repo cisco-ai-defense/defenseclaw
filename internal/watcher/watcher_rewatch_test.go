@@ -2,6 +2,7 @@ package watcher
 
 import (
 	"context"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"os"
 	"path/filepath"
 	"sync"
@@ -21,9 +22,7 @@ func TestWatcherRewatchesFolderRecreatedAfterMove(t *testing.T) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetActionField("plugin", "web/pending", "install", "allow", "pre-approved"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Plugin.Allowed = append(cfg.AssetPolicy.Plugin.Allowed, config.AssetPolicyRule{Name: "web/pending", Reason: "pre-approved"})
 	var mu sync.Mutex
 	admitted := 0
 	w := New(cfg, nil, []string{root}, store, logger, nil, func(r AdmissionResult) {

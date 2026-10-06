@@ -25,7 +25,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-//go:embed rego/*.rego rego/data.json *.yaml guardrail/default guardrail/strict guardrail/permissive
+//go:embed rego/*.rego *.yaml guardrail/default guardrail/strict guardrail/permissive
 var files embed.FS
 
 // protectionFiles holds the built-in protection (use-case) packs. They are

@@ -46,6 +46,7 @@ from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 from defenseclaw.models import ActionEntry, ActionState, ScanResult
 
 if TYPE_CHECKING:
@@ -164,7 +165,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
                 )
-                actions_map = _build_mcp_actions_map(app.store, c)
+                actions_map = _build_mcp_actions_map(app.store, c, app.cfg)
                 failed_map = _build_mcp_failed_scan_map(
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
@@ -189,7 +190,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
             )
-            actions_map = _build_mcp_actions_map(app.store, connectors[0])
+            actions_map = _build_mcp_actions_map(app.store, connectors[0], app.cfg)
             failed_map = _build_mcp_failed_scan_map(
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
@@ -232,7 +233,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             app.store, servers, connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
-        actions_map = _build_mcp_actions_map(app.store, connector)
+        actions_map = _build_mcp_actions_map(app.store, connector, app.cfg)
         if not servers:
             if not locations:
                 # Nowhere to look is not the same as looked and found
@@ -807,13 +808,13 @@ def _effective_mcp_action_entry(
     )
 
 
-def _build_mcp_actions_map(store, connector: str = "") -> dict:
+def _build_mcp_actions_map(store, connector: str = "", cfg=None) -> dict:
     """Build effective server-name -> ActionEntry for one connector view."""
     actions_map: dict = {}
     if store is None:
         return actions_map
     try:
-        entries = store.list_actions_by_type("mcp")
+        entries = asset_lists.merge_operator_entries(store.list_actions_by_type("mcp"), cfg, "mcp")
     except Exception:
         return actions_map
     normalized_connector = connector_paths.normalize(connector) if connector else ""
@@ -1267,7 +1268,7 @@ def _scan_all_mcp(
     # (by name or URL) was still spawned/dialed. Filter blocked servers
     # out before scanning; checking both the name and the resolved
     # url/spec mirrors the single-target guard (F-0323).
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     scan_targets = []
     for s in servers:
         scan_target = s.url or s.name
@@ -1475,8 +1476,8 @@ def _mcp_has_connector_enforcement(
     if app.store is None:
         return False
     return (
-        app.store.has_action("mcp", target, "install", "block", connector)
-        or app.store.has_action("mcp", target, "install", "allow", connector)
+        asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "block")
+        or asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow")
         or app.store.has_action("mcp", target, "file", "quarantine", connector)
         or app.store.has_action("mcp", target, "runtime", "disable", connector)
     )
@@ -1748,7 +1749,7 @@ def scan(
 
     connector = resolve_list_connector(app, connector_flag)
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     common = dict(
         analyzers=analyzers,
         scan_prompts=scan_prompts,
@@ -1894,7 +1895,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     if connector_paths.is_bundled_mcp_server(target, connector=connector):
         raise click.ClickException(
@@ -1909,9 +1910,7 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     # global calls.
     if connector:
         if pe.is_blocked_for_connector("mcp", target, connector):
-            if app.store and app.store.has_action(
-                "mcp", target, "install", "block", connector,
-            ):
+            if app.store and asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "block"):
                 click.echo(f"[mcp] Already blocked {target!r} ({connector}).")
             else:
                 click.echo(f"[mcp] Already blocked {target!r} globally (covers {connector}).")
@@ -1964,14 +1963,12 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     _refuse_bundled_mcp_policy_mutation(app, target, connector, "allow")
     if connector:
         if pe.is_allowed_for_connector("mcp", target, connector):
-            if app.store and app.store.has_action(
-                "mcp", target, "install", "allow", connector,
-            ):
+            if app.store and asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow"):
                 click.echo(f"[mcp] Already allowed {target!r} ({connector}).")
             else:
                 click.echo(f"[mcp] Already allowed {target!r} globally (covers {connector}).")
@@ -2019,11 +2016,11 @@ def _mcp_only_allow_entry(app: AppContext, pe, target: str, connector: str) -> b
         return False
     if connector:
         restrictive = (
-            app.store.has_action("mcp", target, "install", "block", connector)
+            asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "block")
             or app.store.has_action("mcp", target, "file", "quarantine", connector)
             or app.store.has_action("mcp", target, "runtime", "disable", connector)
         )
-        allowed = app.store.has_action("mcp", target, "install", "allow", connector)
+        allowed = asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow")
     else:
         restrictive = (
             pe.is_blocked("mcp", target)
@@ -2140,7 +2137,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
     from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     connector = resolve_list_connector(app, connector_flag) if connector_flag else ""
     _refuse_bundled_mcp_policy_mutation(app, target, connector, "unblock")
 
@@ -2435,7 +2432,7 @@ def set_server(
     # connector, so a server rejected on one connector is skipped there while
     # still being written to the connectors that admit it.
     connectors = resolve_list_connectors(app, connector_flag)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     parsed_args = _parse_args(args_str) if args_str else []
 
     entry: dict = {}
@@ -2459,18 +2456,16 @@ def set_server(
     def _admit(connector: str, scan_result=None):
         return evaluate_admission(
             pe,
-            policy_dir=app.cfg.policy_dir,
+            config=app.cfg,
             target_type="mcp",
             name=name,
             scan_result=scan_result,
-            fallback_actions=app.cfg.mcp_actions,
             source_path=(cmd or url or "") if scan_result is not None else "",
             connector=connector,
             command=cmd,
             args=parsed_args,
             url=url,
             transport=transport,
-            asset_policy=app.cfg.asset_policy,
         )
 
     # Pre-scan admission per connector. "blocked" (block list or a connector-
@@ -2563,7 +2558,6 @@ def set_server(
                     )
                     invalid_input.append(c)
                     continue
-        allow_record = False
         if pre_c.verdict == "allowed":
             note = (
                 f"Policy allows {name} without scan"
@@ -2576,13 +2570,12 @@ def set_server(
             if post_c.verdict == "rejected":
                 sev = result.max_severity()
                 ux.secho(
-                    f"  blocked [{c}]: {sev} findings — rejected by mcp_actions policy "
+                    f"  blocked [{c}]: {sev} findings — rejected by the admission policy "
                     "(use --skip-scan to override)",
                     fg="red",
                 )
                 scan_rejected.append(c)
                 continue
-            allow_record = post_c.action.install == "allow"
         try:
             existed = _connector_has_server_quiet(app, c, name)
             _set_mcp_via_connector(app.cfg, name, entry, connector=c)
@@ -2592,8 +2585,6 @@ def set_server(
             )
             if existed:
                 updated.append(c)
-            if allow_record:
-                pe.allow_for_connector("mcp", name, c, "scan clean or within policy")
         except connector_paths.MCPWriteUnsupportedError as exc:
             click.secho(f"  skipped [{c}]: {exc}", fg="yellow")
             skipped.append(c)
@@ -2616,7 +2607,7 @@ def set_server(
         if scan_rejected and result is not None:
             reason = f"scan: {len(result.findings)} findings, max={result.max_severity()}"
             for c in scan_rejected:
-                pe.block_for_connector("mcp", name, c, reason)
+                pe.record_scan_block("mcp", name, c, reason)
             if app.logger:
                 saved_change_audit(app.logger).log_action(
                     "mcp-set-blocked", name,

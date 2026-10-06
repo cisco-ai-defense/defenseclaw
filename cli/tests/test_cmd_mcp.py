@@ -66,11 +66,11 @@ class TestMCPBlock(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[mcp] Blocked 'http://evil.example.com' (every connector).", result.output)
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_blocked("mcp", "http://evil.example.com"))
 
     def test_block_already_blocked(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://blocked.com", "test")
 
         result = self.invoke(["block", "http://blocked.com"])
@@ -81,7 +81,7 @@ class TestMCPBlock(MCPCommandTestBase):
         result = self.invoke(["block", "computer-use"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("vendor-managed", result.output)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertFalse(pe.is_blocked("mcp", "computer-use"))
 
     def test_block_logs_action(self):
@@ -97,11 +97,11 @@ class TestMCPAllow(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Allowed", result.output)
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_allowed("mcp", "http://trusted.example.com"))
 
     def test_allow_already_allowed(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.allow("mcp", "http://already.com", "test")
 
         result = self.invoke(["allow", "http://already.com"])
@@ -111,7 +111,7 @@ class TestMCPAllow(MCPCommandTestBase):
 
 class TestMCPUnblock(MCPCommandTestBase):
     def test_unblock_clears_blocked(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://evil.com", "bad")
 
         result = self.invoke(["unblock", "http://evil.com"])
@@ -134,7 +134,7 @@ class TestMCPUnblock(MCPCommandTestBase):
         # GAP-2397: the URL is not configured, so there is no scan hint.
         self.assertIn("is not configured", result.output)
         self.assertNotIn("To scan it now", result.output)
-        self.assertFalse(PolicyEngine(self.app.store).is_allowed("mcp", "http://trusted.example.com"))
+        self.assertFalse(PolicyEngine(self.app.store, self.app.cfg).is_allowed("mcp", "http://trusted.example.com"))
 
     def test_group_help_lists_unblock_and_says_connector(self):
         # GAP-2224
@@ -156,14 +156,14 @@ class TestMCPUnblock(MCPCommandTestBase):
         self.assertIn("[mcp] Nothing to clear for 'http://clean.com' (openclaw).", result.output)
 
     def test_unblock_does_not_add_to_allow_list(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://evil.com", "bad")
 
         self.invoke(["unblock", "http://evil.com"])
         self.assertFalse(pe.is_allowed("mcp", "http://evil.com"))
 
     def test_unblock_logs_action(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://log-me.com", "test")
 
         self.invoke(["unblock", "http://log-me.com"])
@@ -186,7 +186,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[mcp] Blocked 'http://demo.example.com' (codex).", result.output)
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
         self.assertFalse(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "claudecode"))
         # Bare/global check is untouched — no global row was written.
@@ -196,12 +196,8 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         result = self.invoke(["block", "jira", "--connector", "claude-code"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[mcp] Blocked 'jira' (claudecode).", result.output)
-        self.assertTrue(
-            self.app.store.has_action("mcp", "jira", "install", "block", "claudecode")
-        )
-        self.assertFalse(
-            self.app.store.has_action("mcp", "jira", "install", "block", "claude-code")
-        )
+        rules = [(r.name, r.connector) for r in self.app.cfg.asset_policy.mcp.denied]
+        self.assertEqual(rules, [("jira", "claudecode")])
 
     def test_connector_mutators_reject_unknown_without_policy_row(self):
         for args in (
@@ -219,13 +215,13 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     def test_global_block_applies_to_every_connector(self):
         result = self.invoke(["block", "http://demo.example.com"])
         self.assertEqual(result.exit_code, 0, result.output)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
         self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "claudecode"))
         self.assertTrue(pe.is_blocked("mcp", "http://demo.example.com"))
 
     def test_block_connector_redundant_when_globally_blocked(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://demo.example.com", "global")
         result = self.invoke(["block", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -267,7 +263,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         result = self.invoke(["allow", "http://demo.example.com", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[mcp] Allowed 'http://demo.example.com' (codex).", result.output)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self.assertTrue(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "codex"))
         self.assertFalse(pe.is_allowed_for_connector("mcp", "http://demo.example.com", "claudecode"))
 
@@ -284,7 +280,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
             return []
 
         self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("mcp", "ctx7", "codex", "scoped")
 
         result = self.invoke(["allow", "ctx7"])
@@ -311,7 +307,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
             (ts,),
         )
         db.commit()
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         self._serve({"codex": ["fresh", "never"]})  # configured, so the hint applies
         pe.block_for_connector("mcp", "fresh", "codex", "x")
         pe.block_for_connector("mcp", "never", "codex", "x")
@@ -326,7 +322,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertIn("It has no scan verdict yet (it has not been scanned).", never.output)
 
     def test_unblock_connector_scopes_to_peer(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
         pe.block_for_connector("mcp", "http://demo.example.com", "claudecode", "x")
 
@@ -335,9 +331,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertIn("Unblocked 'http://demo.example.com' (codex).", result.output)
         self.assertFalse(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "codex"))
         # claudecode's scoped block survives the codex-scoped unblock.
-        self.assertTrue(
-            self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "claudecode")
-        )
+        self.assertTrue(pe.is_blocked_for_connector("mcp", "http://demo.example.com", "claudecode"))
 
     def _serve(self, by_connector: dict[str, list[str]]) -> None:
         def _servers(connector=None, **_):
@@ -420,7 +414,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
             [MCPServerEntry(name="demo", url="http://demo.example.com", transport="sse")]
             if connector == "codex" else []
         )
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "x")
         result = self.invoke(["unblock", "http://demo.example.com"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -436,7 +430,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         )
 
     def test_bare_unblock_clears_unscoped_and_connector_block(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://demo.example.com", "global")
         pe.block_for_connector("mcp", "http://demo.example.com", "codex", "scoped")
         result = self.invoke(["unblock", "http://demo.example.com"])
@@ -461,7 +455,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
             return []
 
         self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
 
         scoped_block = self.invoke(["block", "ctx7", "--connector", "codex"])
         self.assertEqual(scoped_block.exit_code, 0, scoped_block.output)
@@ -1416,48 +1410,6 @@ class TestMCPScan(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     @patch("defenseclaw.enforce.admission.evaluate_admission")
-    def test_set_post_scan_allow_records_connector_scoped_allow(
-        self, mock_admit, mock_run_scan, mock_set,
-    ):
-        from defenseclaw.config import SeverityAction
-        from defenseclaw.enforce.admission import AdmissionDecision
-
-        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
-        mock_run_scan.return_value = ScanResult(
-            scanner="mcp-scanner",
-            target="https://x/mcp",
-            timestamp=datetime.now(timezone.utc),
-            findings=[Finding(id="f1", severity="LOW", title="warn", scanner="mcp-scanner")],
-        )
-
-        def _decide(pe, *, connector="", scan_result=None, **kwargs):
-            if scan_result is None:
-                return AdmissionDecision("scan", "scan required")
-            return AdmissionDecision(
-                "warning",
-                "within policy",
-                action=SeverityAction(install="allow"),
-                source="scan-warning",
-            )
-
-        mock_admit.side_effect = _decide
-
-        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--connector", "codex"])
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(mock_set.call_args.kwargs.get("connector"), "codex")
-        self.assertEqual(mock_run_scan.call_args.kwargs.get("audit_target"), "mcp://codex/ctx7")
-        self.assertTrue(
-            self.app.store.has_action("mcp", "ctx7", "install", "allow", "codex")
-        )
-        self.assertFalse(self.app.store.has_action("mcp", "ctx7", "install", "allow"))
-        self.assertFalse(
-            self.app.store.has_action("mcp", "ctx7", "install", "allow", "hermes")
-        )
-
-    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
-    @patch("defenseclaw.commands.cmd_mcp._run_scan")
-    @patch("defenseclaw.enforce.admission.evaluate_admission")
     def test_set_scan_rejection_records_connector_scoped_block(
         self, mock_admit, mock_run_scan, mock_set,
     ):
@@ -1768,7 +1720,7 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(counts.total_scans, 1)
 
     def test_scan_blocked_url_skipped(self):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://evil.com", "unsafe")
 
         result = self.invoke(["scan", "http://evil.com"])
@@ -1778,7 +1730,7 @@ class TestMCPScan(MCPCommandTestBase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_allowed_url_still_scans(self, mock_scan):
         """Allowed servers should still be scannable via explicit 'mcp scan'."""
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.allow("mcp", "http://safe.com", "trusted")
 
         mock_scan.return_value = ScanResult(
@@ -2099,7 +2051,7 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
     def test_list_actions_are_connector_specific_json(self):
         self.app.cfg.mcp_servers = lambda connector=None, **_: self._one_server()  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("mcp", "ctx7", "codex", "manual")
 
         result = self.invoke(["list", "--json"])
@@ -2114,7 +2066,7 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
     def test_list_actions_use_unscoped_fallback_and_scoped_override_json(self):
         self.app.cfg.mcp_servers = lambda connector=None, **_: self._one_server()  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "ctx7", "global")
         pe.allow_for_connector("mcp", "ctx7", "hermes", "peer override")
 

@@ -121,15 +121,9 @@ def _reject_connector_with_source(connector: str, source: str) -> None:
 
 
 def _connector_target(name: str, connector: str) -> str:
-    """Connector-scoped tool key, identical to the merged PolicyEngine encoding
-    (``@<connector>/<tool>``).
-
-    Reuses the canonical encoder so the CLI write surface and the runtime read
-    gate never drift on the encoding.
-    """
-    from defenseclaw.enforce import PolicyEngine
-
-    return PolicyEngine._tool_connector_target(name, connector)
+    """Display key of a tool rule, as PolicyEngine presents asset_policy.tool
+    rules: ``@<connector>/<tool>`` when scoped, else ``<tool>``."""
+    return f"@{connector}/{name}" if connector else name
 
 
 def _parse_target(target_name: str) -> tuple[str, str]:
@@ -268,7 +262,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
     if not reason:
         reason = "manual block via CLI"
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if connector:
         # Connector-scoped block — runtime-enforceable, isolated to C.
@@ -279,16 +273,11 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
             f"{ux._style('added to block list', fg='red')} (connector {connector!r})"
         )
     elif source:
-        # the gateway runtime carries no source on the
-        # request, so a scoped entry like `filesystem/write_file` was never
-        # enforced. Honor a --source block by ALSO writing the unscoped block
-        # (fail-closed); keep the scoped row as an audit record. Use
-        # --connector for runtime-scoped blocks.
+        # The gateway runtime carries no source on the request, so a source
+        # scope was never enforced: a --source block is the unscoped block,
+        # and the source stays in the audit record only. Use --connector for
+        # runtime-scoped blocks.
         pe.block("tool", name, reason)
-        pe.block(
-            "tool", _target_name(name, source),
-            f"{reason} (scoped audit; runtime enforces as unscoped fallback)",
-        )
         log_scope = _target_name(name, source)
         ux.echo(
             f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
@@ -352,7 +341,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     if not reason:
         reason = "manual allow via CLI"
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if connector:
         pe.allow_tool_for_connector(name, connector, reason)
@@ -364,7 +353,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
         cleared_connectors = []
         if not source:
             cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
-        pe.allow("tool", target, reason)
+            pe.allow("tool", target, reason)
         if source:
             scope_note = f" (source {source!r}; audit-only — not runtime-enforced)"
         else:
@@ -418,13 +407,13 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         target = name
         scope_note = _connector_coverage_note(app)
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     if connector:
         pe.unblock_tool_for_connector(name, connector)
     elif not source:
         global_entry = pe.get_action("tool", name)
         cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
-        pe.unblock("tool", target)
+        pe.unblock_tool_for_connector(name, "")
         if not global_entry and not cleared_connectors:
             click.echo(f"{ux.dim('[tool]')} {name!r} has no block/allow state to clear")
             return
@@ -439,8 +428,6 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         )
         _echo_cleared_connector_overrides(cleared_connectors)
         return
-    else:
-        pe.unblock("tool", target)
 
     if app.logger:
         saved_change_audit(app.logger).log_action("tool-unblock", target, "removed from block/allow list")
@@ -490,7 +477,7 @@ def list_tools(
     requested_connector = bool(connector and connector.strip())
     connector = _resolve_connector_scope(app, connector)
     connectors = [connector] if connector else resolve_list_connectors(app, "")
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if filter_blocked:
         entries = pe.list_blocked_tools()
@@ -707,7 +694,7 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
     connector = _resolve_connector_scope(app, connector)
     connectors = [connector] if connector else resolve_list_connectors(app, "")
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     global_entry = pe.get_action("tool", name)
     connector_entry = (

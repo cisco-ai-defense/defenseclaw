@@ -75,7 +75,7 @@ class TestStatusCommand(unittest.TestCase):
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "bad", "test")
         pe.allow("skill", "good", "test")
 

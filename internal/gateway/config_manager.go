@@ -1057,6 +1057,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("skill_actions", oldCfg.SkillActions, newCfg.SkillActions)
 	add("mcp_actions", oldCfg.MCPActions, newCfg.MCPActions)
 	add("plugin_actions", oldCfg.PluginActions, newCfg.PluginActions)
+	add("admission", oldCfg.Admission, newCfg.Admission)
 	add("asset_policy", oldCfg.AssetPolicy, newCfg.AssetPolicy)
 	add("registries", oldCfg.Registries, newCfg.Registries)
 	add("connector_hooks", oldCfg.ConnectorHooks, newCfg.ConnectorHooks)
@@ -1125,9 +1126,12 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// it restart-required failed the whole reload, so a profile edit saved
 		// with an ai_discovery edit silently never applied (GAP-0047).
 		"ai_discovery": {},
-		// Admission, providers and update settings are read from the
-		// generation or by the CLI.
+		// Admission and the asset_policy block/allow lists are read from the
+		// published config on every decision (watcher, API, hook lanes);
+		// providers and update settings are read from the generation or by
+		// the CLI.
 		"admission":     {},
+		"asset_policy":  {},
 		"llm_providers": {},
 		"update":        {},
 	}

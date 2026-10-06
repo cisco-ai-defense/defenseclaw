@@ -1014,7 +1014,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             result = _invoke(
                 [
@@ -2576,7 +2575,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             result = _invoke(
                 [
@@ -2856,7 +2854,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             result = _invoke(
                 [
