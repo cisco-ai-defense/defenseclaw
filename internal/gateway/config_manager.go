@@ -741,6 +741,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
+		recordHandEdit(ctx, next, m.path, source.raw)
 		refreshConfigGeneration(source.raw)
 		if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 			m.v8PlanDigest = source.compiledV8.Plan.Digest()
@@ -791,6 +792,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	gen := m.gen.Add(1)
 	m.current.Store(cloneConfig(next))
+	recordHandEdit(ctx, next, m.path, source.raw)
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil {
 		m.v8PlanDigest = source.compiledV8.Plan.Digest()
 		m.v8Plan = source.compiledV8.Plan
