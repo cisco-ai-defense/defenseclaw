@@ -84,8 +84,8 @@ the standalone enterprise profile with its root guardian or SYSTEM enumerator.
 | Identity | Linux | Windows | macOS |
 | --- | --- | --- | --- |
 | Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | uid, name and groups from Open Directory, reported as `local` (verified), also per-user |
-| LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name and the groups from `initgroups` (verified). Enterprise adds the UPN from SSSD InfoPipe and the directory type from `realm list` (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
-| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` in the background (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
+| LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name, the groups from `initgroups` and, for an SSSD account, the directory type of the realmd realm that serves its domain (verified), also per-user. Enterprise adds the UPN from SSSD InfoPipe (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
+| Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
 | Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified, enterprise). The user's Platform SSO login is not read |
 | Okta | Appears as the AD or LDAP account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified, enterprise). As AD or LDAP when synced |
 
@@ -97,9 +97,11 @@ What differs between platforms and installs, as exercised on real hosts:
   `FILE:/tmp/krb5cc_<uid>_<random>`, named by `KRB5CCNAME`. DefenseClaw reads
   the default principal from either one, directly, and never runs `klist`.
 - **Linux per-user and enterprise.** Both resolve the account, domain, groups
-  and source through NSS. Only enterprise adds the UPN from InfoPipe and the
-  directory type from `realm list`, so a per-user SSSD account has a domain
-  and groups but no `defenseclaw.user.directory`.
+  and source through NSS, and the directory type from realmd, which any
+  account may ask. Only enterprise adds the UPN from InfoPipe, so on a
+  per-user install an SSSD account's principal is `account@REALM`. An SSSD
+  domain that no joined realm covers, such as plain LDAP, has no
+  `defenseclaw.user.directory` on either install.
 - **Windows per-user and managed.** A per-user install resolves the account,
   the AD UPN and the Entra UPN and tenant itself, but has **no group list**:
   `groups` assignments cannot match there. The managed host's SYSTEM
@@ -232,11 +234,13 @@ sudo sss_cache -E
 sudo systemctl restart sssd
 getent passwd alice@corp.example.com
 id alice@corp.example.com
+realm list
 dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice@corp.example.com array:string:userPrincipalName,mail
 ```
 
-`getent` and `id` must show the user and the groups. The `dbus-send` call must
-return the UPN. Note the group spelling `id -Gn` prints (`ml-team@corp.example.com`):
+`getent` and `id` must show the user and the groups. `realm list` must show
+the domain with `server-software: active-directory`: the directory type comes
+from it, on per-user installs too. The `dbus-send` call must return the UPN. Note the group spelling `id -Gn` prints (`ml-team@corp.example.com`):
 it is the name a `groups` assignment uses.
 
 </Step>
@@ -391,7 +395,7 @@ none of these facts.
 | --- | --- |
 | No principal, only `user.id` | `ai_discovery.include_user_principal` is off, which is the default; the domain and directory still appear when they resolved. With it on, the account is local or the directory lookup failed. On Linux run `getent passwd alice@corp.example.com`; on SSSD, check InfoPipe as in the AD guide. |
 | No UPN, the principal reads `account@REALM` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
-| No `defenseclaw.user.directory` for an SSSD account | Expected on a per-user Linux install, and for an SSSD domain that is not managed by realmd. SSSD does not say which directory serves the account; only the standalone enterprise guardian reads it from `realm list`. The domain and groups are still verified. |
+| No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
 | No Kerberos principal, or an old one | The principal is read from the credential cache as a claim. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |

@@ -5,6 +5,7 @@ package useridentity
 
 import (
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,7 +23,8 @@ import (
 //     device is Entra joined, and NetGetJoinInformation says it is AD
 //     joined; both together is a hybrid join.
 //   - An AD account's UPN comes from TranslateNameW, which may contact a
-//     domain controller, so callers run it in the background and cache it.
+//     domain controller, so it runs in the background (adUPNCache) and the
+//     caller says how long it may wait for it.
 //
 // The parsing is here, behind windowsDirectoryReader, so it is tested on
 // every platform; directory_windows.go supplies the real reader.
@@ -95,8 +97,8 @@ func identityStoreUPN(r windowsDirectoryReader, sid string) (upn, provider strin
 }
 
 // resolveWindowsDirectoryFacts resolves the verified directory facts of sid.
-// adUPN, when non-nil, returns a cached TranslateNameW answer for a
-// DOMAIN\account name (it must not block).
+// adUPN, when non-nil, returns the TranslateNameW answer for a
+// DOMAIN\account name; it bounds its own wait.
 func resolveWindowsDirectoryFacts(
 	r windowsDirectoryReader,
 	sid string,
@@ -170,4 +172,77 @@ func validTenantID(id string) bool {
 		}
 	}
 	return true
+}
+
+const (
+	// adUPNTTL is how long a TranslateNameW answer is reused.
+	adUPNTTL = 24 * time.Hour
+	// adUPNFailureTTL is how long a failed lookup (no domain controller
+	// reachable) is reused. It is short so a laptop that starts the gateway
+	// off the corporate network gets its UPN minutes after it is back, not a
+	// day later; the last good answer is kept meanwhile.
+	adUPNFailureTTL = 2 * time.Minute
+)
+
+// adUPNCache resolves DOMAIN\account to a UPN with translate, one lookup per
+// name at a time, in the background.
+type adUPNCache struct {
+	translate func(samName string) string
+	now       func() time.Time
+
+	mu      sync.Mutex
+	entries map[string]adUPNEntry
+}
+
+type adUPNEntry struct {
+	upn     string
+	expires time.Time
+	done    chan struct{} // open while a lookup runs
+}
+
+func newADUPNCache(translate func(string) string) *adUPNCache {
+	return &adUPNCache{translate: translate, now: time.Now, entries: map[string]adUPNEntry{}}
+}
+
+// lookup returns the UPN of samName: the cached answer, or the one a lookup
+// started now (or already running) produces within wait. A lookup that takes
+// longer returns the previous answer, if any, and finishes in the background.
+func (c *adUPNCache) lookup(samName string, wait time.Duration) string {
+	key := strings.ToLower(samName)
+	c.mu.Lock()
+	entry := c.entries[key]
+	if entry.done == nil && !c.now().Before(entry.expires) {
+		if len(c.entries) > 4096 {
+			c.entries = map[string]adUPNEntry{}
+			entry = adUPNEntry{}
+		}
+		entry.done = make(chan struct{})
+		c.entries[key] = entry
+		go c.run(key, samName, entry.upn, entry.done)
+	}
+	c.mu.Unlock()
+	if entry.done == nil || wait <= 0 {
+		return entry.upn
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-entry.done:
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.entries[key].upn
+	case <-timer.C:
+		return entry.upn
+	}
+}
+
+func (c *adUPNCache) run(key, samName, previous string, done chan struct{}) {
+	upn, ttl := c.translate(samName), adUPNTTL
+	if upn == "" {
+		upn, ttl = previous, adUPNFailureTTL
+	}
+	c.mu.Lock()
+	c.entries[key] = adUPNEntry{upn: upn, expires: c.now().Add(ttl)}
+	c.mu.Unlock()
+	close(done)
 }
