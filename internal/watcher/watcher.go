@@ -805,7 +805,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 // apply to the event's connector. Secure Client hosts keep their operator
 // rows in the actions table, unchanged.
 func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent, targetType, connector string) policy.AdmissionInput {
-	block, allow := policy.AssetPolicyLists(cfg, targetType, connector)
+	block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+		TargetType: targetType, Name: evt.Name, Connector: connector, SourcePath: evt.Path,
+	})
 	if cfg.SecureClientIntegration() {
 		block, allow = w.legacyListEntries("block"), w.legacyListEntries("allow")
 	}

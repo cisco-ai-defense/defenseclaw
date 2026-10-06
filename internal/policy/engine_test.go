@@ -241,3 +241,27 @@ func TestSecureClientAdmissionKeepsTheDataJSON(t *testing.T) {
 		t.Fatalf("MEDIUM with a tightened data.json = %q, want rejected", got)
 	}
 }
+
+// TestAssetPolicyListsForUseTheListResolver: a connector-scoped allow
+// overrides a global deny for that connector in Rego and the fallback too,
+// as config.AssetListDecision and the CLI decide.
+func TestAssetPolicyListsForUseTheListResolver(t *testing.T) {
+	eng := repoEngine(t)
+	cfg := config.DefaultConfig()
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "foo"}}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "foo", Connector: "codex"}}
+	for connector, want := range map[string]string{"codex": "allowed", "claudecode": "blocked"} {
+		in := AdmissionInput{TargetType: "skill", TargetName: "foo", Path: "/home/u/.codex/skills/foo"}
+		in.BlockList, in.AllowList = AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+			TargetType: "skill", Name: "foo", Connector: connector, SourcePath: in.Path,
+		})
+		in.Admission = AdmissionFor(CompileAdmission(cfg), "skill")
+		opa, err := eng.Evaluate(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opa.Verdict != want || EvaluateAdmissionFallback(in).Verdict != want {
+			t.Errorf("%s: rego %q fallback %q, want %q", connector, opa.Verdict, EvaluateAdmissionFallback(in).Verdict, want)
+		}
+	}
+}

@@ -351,51 +351,29 @@ func derivedScannerGate(failOn, reviewMin string) map[string]CompiledAction {
 	return out
 }
 
-// AssetPolicyLists returns the input.block_list and input.allow_list entries
-// for one asset type from asset_policy.<type>.denied/allowed: the only
-// operator block/allow source. Rules scoped to another connector are left
-// out; a rule without a name (matched on URL, command or path alone) is
-// decided by config.EvaluateAssetPolicy instead. A rule pinned with
-// source_path_contains yields one entry per path, so admission.rego matches
-// the pin as path components.
-func AssetPolicyLists(cfg *config.Config, assetType, connector string) (block, allow []ListEntry) {
+// AssetPolicyListsFor returns the input.block_list and input.allow_list for
+// one asset from asset_policy.<type>.denied/allowed, the only operator
+// block/allow source. The lists are decided by config.AssetListDecision, the
+// resolver the CLI and the REST API use: a rule scoped to the connector
+// decides before an unscoped one (so a connector-scoped allow overrides a
+// global deny), denied wins at the same scope, a pinned allow matches only
+// its source path, and a rule without a name (an MCP server matched on URL
+// or command) counts. The decided rule becomes the single entry, named for
+// the asset, so Rego and the fallback reach the same verdict as Python.
+func AssetPolicyListsFor(cfg *config.Config, in config.AssetPolicyInput) (block, allow []ListEntry) {
 	if cfg == nil {
 		return nil, nil
 	}
-	var p config.AssetTypePolicy
-	switch strings.ToLower(strings.TrimSpace(assetType)) {
-	case config.AdmissionTypeSkill:
-		p = cfg.AssetPolicy.Skill
-	case config.AdmissionTypeMCP:
-		p = cfg.AssetPolicy.MCP
-	case config.AdmissionTypePlugin:
-		p = cfg.AssetPolicy.Plugin
-	default:
-		return nil, nil
+	verdict, rule := cfg.AssetListDecision(in)
+	entry := []ListEntry{{
+		TargetType: strings.ToLower(strings.TrimSpace(in.TargetType)), TargetName: in.Name,
+		Reason: rule.Reason, Connector: strings.TrimSpace(rule.Connector),
+	}}
+	switch verdict {
+	case config.AssetListDeny:
+		return entry, nil
+	case config.AssetListAllow:
+		return nil, entry
 	}
-	return listEntries(p.Denied, assetType, connector), listEntries(p.Allowed, assetType, connector)
-}
-
-func listEntries(rules []config.AssetPolicyRule, assetType, connector string) []ListEntry {
-	var out []ListEntry
-	for _, rule := range rules {
-		name := strings.TrimSpace(rule.Name)
-		if name == "" {
-			continue
-		}
-		if rc := strings.TrimSpace(rule.Connector); rc != "" && !config.SameConnector(rc, connector) {
-			continue
-		}
-		base := ListEntry{TargetType: assetType, TargetName: name, Reason: rule.Reason, Connector: strings.TrimSpace(rule.Connector)}
-		if len(rule.SourcePathContains) == 0 {
-			out = append(out, base)
-			continue
-		}
-		for _, path := range rule.SourcePathContains {
-			entry := base
-			entry.SourcePath = path
-			out = append(out, entry)
-		}
-	}
-	return out
+	return nil, nil
 }

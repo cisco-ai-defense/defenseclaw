@@ -3836,7 +3836,9 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // prepared query (prepared once for an API server without a generation).
 func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
 	cfg := a.liveConfig()
-	input.BlockList, input.AllowList = policy.AssetPolicyLists(cfg, input.TargetType, "")
+	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+		TargetType: input.TargetType, Name: input.TargetName, SourcePath: input.Path,
+	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
 	if cfg != nil && cfg.SecureClientIntegration() {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)

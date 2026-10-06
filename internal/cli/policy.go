@@ -221,7 +221,9 @@ var policyEvaluateCmd = &cobra.Command{
 			return err
 		}
 
-		block, allow := policy.AssetPolicyLists(cfg, targetType, "")
+		block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+			TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
+		})
 		input := policy.AdmissionInput{
 			TargetType: targetType,
 			TargetName: targetName,
