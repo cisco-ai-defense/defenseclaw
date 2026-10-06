@@ -19,10 +19,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
@@ -282,8 +284,45 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	applyWindowsEnterprisePolicy(ctx, result)
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterprisePolicyDigest runs the installed CLI's `policy digest`
+// with the managed standalone environment, so the digest comes from the
+// binary the gateway service runs, computed from the config and assets it
+// loads. A seam for tests.
+var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, managedWindowsAdminCLI(), "policy", "digest", "--json", "--check-gateway").Output()
+}
+
+// applyWindowsEnterprisePolicy fills Result.Policy as the Unix lifecycle
+// does: the effective policy digest and config_generation the installed
+// config computes to, and whether the running gateway reports the same
+// digest. A change action warns when it does not. Nothing is reported while
+// the gateway is not ready or when the installed CLI cannot compute it.
+func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
+	if !result.Installed || !result.Readiness.Gateway {
+		return
+	}
+	out, err := windowsEnterprisePolicyDigest(ctx)
+	if err != nil {
+		return
+	}
+	state, ok := enterprisePolicyFromDigest(out)
+	if !ok {
+		return
+	}
+	result.Policy = state
+	if state.Applied || result.Action == "status" || result.Action == "verify" {
+		return
+	}
+	result.AddWarning("policy_not_applied", fmt.Sprintf(
+		"the gateway reports effective policy %q but the installed config computes to %q; it applies the config on its next reload",
+		state.GatewayReportedDigest, state.EffectiveDigest))
 }
 
 // addWindowsEnterpriseNothingInstalledError fails an install or upgrade

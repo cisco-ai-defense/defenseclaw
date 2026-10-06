@@ -19,16 +19,69 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
 func init() {
 	policyCmd.AddCommand(policyDigestCmd)
 	policyDigestCmd.Flags().Bool("json", false, "Print the digest, its components and config_generation as JSON")
+	policyDigestCmd.Flags().Bool("check-gateway", false, "Also read the effective policy digest the running gateway reports on /health (JSON: gateway_reported_digest)")
+}
+
+// policyDigestReport is the --json output: the computed policy and, with
+// --check-gateway, the digest the running gateway reports.
+type policyDigestReport struct {
+	gateway.EffectivePolicy
+	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+}
+
+// gatewayReportedPolicyDigest is policy.effective_digest from the gateway's
+// /health, "" when it does not answer or does not publish one.
+func gatewayReportedPolicyDigest(c *config.Config) string {
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(sidecarHealthURL(c))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, gatewayHealthDocumentMaxBytes+1))
+	if err != nil || len(body) > gatewayHealthDocumentMaxBytes {
+		return ""
+	}
+	var health struct {
+		Policy *gateway.PolicyHealth `json:"policy"`
+	}
+	if json.Unmarshal(body, &health) != nil || health.Policy == nil {
+		return ""
+	}
+	return health.Policy.EffectiveDigest
+}
+
+// enterprisePolicyFromDigest turns `policy digest --json --check-gateway`
+// output into the lifecycle result's policy block; ok is false when the
+// output carries no digest (an earlier release, or unreadable inputs).
+func enterprisePolicyFromDigest(out []byte) (*enterprisestatus.PolicyState, bool) {
+	var report policyDigestReport
+	if json.Unmarshal(out, &report) != nil || report.Digest == "" {
+		return nil, false
+	}
+	return &enterprisestatus.PolicyState{
+		EffectiveDigest:       report.Digest,
+		ConfigGeneration:      report.ConfigGeneration,
+		Applied:               report.Digest == report.GatewayReportedDigest,
+		GatewayReportedDigest: report.GatewayReportedDigest,
+	}, true
 }
 
 // policyDigestCmd computes the effective policy digest from config.yaml and
@@ -59,9 +112,13 @@ gateway applied this configuration.`,
 		}
 		out := cmd.OutOrStdout()
 		if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+			report := policyDigestReport{EffectivePolicy: policy}
+			if check, _ := cmd.Flags().GetBool("check-gateway"); check {
+				report.GatewayReportedDigest = gatewayReportedPolicyDigest(cfg)
+			}
 			enc := json.NewEncoder(out)
 			enc.SetIndent("", "  ")
-			return enc.Encode(policy)
+			return enc.Encode(report)
 		}
 		fmt.Fprintf(out, "Effective policy: %s\n", policy.Digest)
 		switch {
