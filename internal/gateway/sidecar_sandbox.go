@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"gopkg.in/yaml.v3"
 )
 
 // The sandbox manager is the SandboxController the REST API drives.
@@ -523,14 +524,31 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
 			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
 	}
-	var list []string
-	switch key {
-	case "openshell.egress.unblocked":
-		list = current.OpenShell.Egress.Unblocked
-	case "openshell.egress.block":
-		list = current.OpenShell.Egress.Block
-	default:
+	if key != "openshell.egress.unblocked" && key != "openshell.egress.block" {
 		return fmt.Errorf("sandbox decisions cannot be saved to %s", key)
+	}
+	// The list comes from the file the write replaces, not from the applied
+	// generation, which lags it (debounce, a rejected reload, another
+	// writer): the CAS below then covers the whole read-modify-write.
+	path := configFilePathForSnapshot(current)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var doc struct {
+		OpenShell struct {
+			Egress struct {
+				Unblocked []string `yaml:"unblocked"`
+				Block     []string `yaml:"block"`
+			} `yaml:"egress"`
+		} `yaml:"openshell"`
+	}
+	if err := yaml.Unmarshal(original, &doc); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	list := doc.OpenShell.Egress.Unblocked
+	if key == "openshell.egress.block" {
+		list = doc.OpenShell.Egress.Block
 	}
 	for _, have := range list {
 		if strings.EqualFold(strings.TrimSpace(have), host) {
@@ -538,11 +556,6 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		}
 	}
 	next := append(append([]string{}, list...), host)
-	path := configFilePathForSnapshot(current)
-	original, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
-	}
 	actor := configwrite.ActorPrefixSandbox + host
 	written, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: key, Value: next}}, configwrite.Options{
 		Actor:        actor,
