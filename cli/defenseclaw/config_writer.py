@@ -205,8 +205,20 @@ def current_actor(prefix: str = ACTOR_PREFIX_CLI) -> str:
     return prefix + (name or "unknown")
 
 
-def restart_required(changed: list[str]) -> list[str]:
-    """Return the paths in ``changed`` that need a gateway restart."""
+def _connector_enabled(raw: bytes, name: str) -> bool:
+    """Whether config bytes enable the guardrail connector ``name`` (unset is enabled)."""
+    try:
+        document = yaml.safe_load(raw.decode("utf-8")) if raw.strip() else {}
+        connectors = document["guardrail"]["connectors"]
+        return connectors[name]["enabled"] is not False
+    except (UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError):
+        return True
+
+
+def restart_required(changed: list[str], before: bytes | None = None, after: bytes | None = None) -> list[str]:
+    """Return the paths in ``changed`` that need a gateway restart. With the
+    document bytes before and after, a connector ``enabled`` that resolves to
+    the same value (``true`` against unset) is not a change."""
     out = []
     for path in changed:
         try:
@@ -219,6 +231,15 @@ def restart_required(changed: list[str]) -> list[str]:
         for key in RESTART_KEYS:
             parts = key.split(".")
             if all(k in ("*", p) for k, p in zip(parts, segs)):
+                if (
+                    before is not None
+                    and after is not None
+                    and len(segs) == 4
+                    and segs[:2] == ["guardrail", "connectors"]
+                    and segs[3] == "enabled"
+                    and _connector_enabled(before, segs[2]) == _connector_enabled(after, segs[2])
+                ):
+                    break
                 out.append(path)
                 break
     return out
@@ -358,7 +379,7 @@ def _transact(
                 os.unlink(target)
             raise
     _refresh_derived_files(target, candidate)
-    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed, current, candidate))
 
 
 def _refresh_derived_files(target: str, candidate: bytes) -> None:
@@ -526,14 +547,11 @@ def machine_managed_standalone() -> bool:
     return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
 
 
-def standalone_managed(current: bytes) -> bool:
-    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
-    describe a managed deployment on the standalone profile. Secure Client
-    hosts are not standalone, so their path is unchanged."""
+def _managed_document(current: bytes) -> tuple[bool, dict[str, Any]]:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) say managed
+    enterprise, with the parsed document."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
-    if machine_managed_standalone():
-        return True
     try:
         document = yaml.safe_load(current.decode("utf-8")) if current.strip() else {}
     except (UnicodeDecodeError, yaml.YAMLError):
@@ -543,7 +561,26 @@ def standalone_managed(current: bytes) -> bool:
     managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
         str(document.get("deployment_mode") or "")
     )
+    return managed, document
+
+
+def standalone_managed(current: bytes) -> bool:
+    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
+    describe a managed deployment on the standalone profile. Secure Client
+    hosts are not standalone, so their path is unchanged."""
+    if machine_managed_standalone():
+        return True
+    managed, document = _managed_document(current)
     return managed and _standalone_profile(document)
+
+
+def secure_client_managed(current: bytes) -> bool:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
+    managed device on the Secure Client profile."""
+    if machine_managed_standalone():
+        return False
+    managed, document = _managed_document(current)
+    return managed and not _standalone_profile(document)
 
 
 def managed_refuses(current: bytes, actor: str) -> bool:

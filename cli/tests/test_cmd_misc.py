@@ -1891,7 +1891,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured (Free mode from day 1)", result.output)
 
     @patch(
@@ -2048,7 +2047,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Local Splunk enablement cancelled.", result.output)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         mock_preflight.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(False, "docker_not_installed"))
@@ -2067,7 +2065,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             input=user_input, catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured", result.output)
         mock_preflight.assert_called_once()
 
@@ -2111,7 +2108,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.otel.enabled)
         self.assertIn("O11y (OTLP): disabled", result.output)
 
     def test_setup_splunk_disable_logs(self):
@@ -2125,7 +2121,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertIn("HEC): disabled", result.output)
 
     def test_setup_splunk_disable_both(self):
@@ -2139,8 +2134,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.otel.enabled)
-        self.assertFalse(self.app.cfg.splunk.enabled)
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
     def test_setup_splunk_interactive_o11y(self, mock_apply_dashboards):

@@ -112,11 +112,14 @@ type generationProviders struct {
 // PolicyHealth is the "policy" object of /health and /status. It is omitted
 // under SecureClientIntegration().
 type PolicyHealth struct {
-	EffectiveDigest          string            `json:"effective_digest"`
-	Generation               uint64            `json:"generation"`
-	ConfigGeneration         uint64            `json:"config_generation"`
-	ConfigGenerationRecorded bool              `json:"config_generation_recorded"`
-	BuiltAt                  string            `json:"built_at"`
-	LastReloadError          string            `json:"last_reload_error,omitempty"`
-	Components               map[string]string `json:"components,omitempty"`
+	EffectiveDigest          string `json:"effective_digest"`
+	Generation               uint64 `json:"generation"`
+	ConfigGeneration         uint64 `json:"config_generation"`
+	ConfigGenerationRecorded bool   `json:"config_generation_recorded"`
+	BuiltAt                  string `json:"built_at"`
+	LastReloadError          string `json:"last_reload_error,omitempty"`
+	// PendingRestart lists the changed config keys that apply only after a
+	// gateway restart.
+	PendingRestart []string          `json:"pending_restart,omitempty"`
+	Components     map[string]string `json:"components,omitempty"`
 }

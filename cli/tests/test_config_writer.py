@@ -250,3 +250,43 @@ def test_only_the_writer_writes_config_yaml():
         if match:
             offenders.append(f"{rel}: {match.group(0)}")
     assert not offenders, "config.yaml written outside config_writer: " + "; ".join(offenders)
+
+
+def test_a_stray_deployment_pin_is_ignored_for_a_per_user_config(tmp_path, monkeypatch):
+    # GAP-0091: DEFENSECLAW_DEPLOYMENT_MODE exported in a user's shell made
+    # the CLI refuse as a managed device (or fail on an invalid mode).
+    from defenseclaw import config as config_module
+    from defenseclaw import envvars
+
+    home = tmp_path / "home"
+    machine = tmp_path / "machine"
+    for directory in (home / ".defenseclaw", machine):
+        directory.mkdir(parents=True)
+    monkeypatch.setattr(config_module, "_home", lambda: home)
+    monkeypatch.setattr(config_module, "_ignored_deployment_pins", [])
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home / ".defenseclaw"))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_JUDGE_TRACE", "1")
+
+    for pin in ("managed_enterprise", "oss"):
+        monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", pin)
+        assert config_module.ignore_unmanaged_deployment_pins() == ["DEFENSECLAW_DEPLOYMENT_MODE"]
+        assert "DEFENSECLAW_DEPLOYMENT_MODE" not in os.environ
+    assert config_module.ignored_deployment_pins() == ["DEFENSECLAW_DEPLOYMENT_MODE"]
+    assert envvars.ignored_off_secure_client() == ["DEFENSECLAW_JUDGE_TRACE"]
+
+    # A machine-owned config (outside any home) keeps its pin.
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(machine / "config.yaml"))
+    monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+    assert config_module.ignore_unmanaged_deployment_pins() == []
+    assert os.environ["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
+
+
+def test_a_connector_enabled_equal_to_its_default_needs_no_restart(tmp_path, monkeypatch):
+    # GAP-0032: enabled: true is the unset default, so flipping between them is no change.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "guardrail:\n  connectors:\n    codex: {mode: observe}\n")
+    on = config_writer.apply([Change("guardrail.connectors.codex.enabled", True)], "cli:test", "t", path=path)
+    assert on.changed and on.restart_required == []
+    off = config_writer.apply([Change("guardrail.connectors.codex.enabled", False)], "cli:test", "t", path=path)
+    assert off.restart_required == ["guardrail.connectors.codex.enabled"]
