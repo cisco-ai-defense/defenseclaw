@@ -305,7 +305,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// child processes still pick it up transparently, and install
 	// the atomic copy for in-process readers that now prefer
 	// gatewaylog.ProcessRunID().
-	runID := strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	runID := strings.TrimSpace(envvars.Getenv("DEFENSECLAW_RUN_ID"))
 	if runID == "" {
 		runID = uuid.NewString()
 		_ = os.Setenv("DEFENSECLAW_RUN_ID", runID)
@@ -5576,7 +5576,7 @@ func (s *Sidecar) connectorLifecycleConfigHome(conn connector.Connector) (string
 		!strings.EqualFold(strings.TrimSpace(conn.Name()), "devin") {
 		return "", nil
 	}
-	boundHome, bound := os.LookupEnv("DEFENSECLAW_DEVIN_CONFIG_HOME")
+	boundHome, bound := envvars.Lookup("DEFENSECLAW_DEVIN_CONFIG_HOME")
 	if !bound {
 		return "", nil
 	}

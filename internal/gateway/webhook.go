@@ -30,7 +30,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -171,7 +170,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.Observabili
 		retryBackoff:       webhookRetryBackoff,
 		sem:                make(chan struct{}, webhookMaxConcurrency),
 		logger:             logger,
-		debug:              os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
+		debug:              envvars.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:               make(chan struct{}),
 	}
 }

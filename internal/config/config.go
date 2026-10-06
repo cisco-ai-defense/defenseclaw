@@ -3810,13 +3810,13 @@ func flatOTelEnvEndpoint(signal string) string {
 	signal = strings.ToUpper(strings.TrimSpace(signal))
 	if signal == "" {
 		return firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_ENDPOINT"),
+			envvars.Getenv("DEFENSECLAW_OTEL_ENDPOINT"),
 			os.Getenv("OPENCLAW_OTEL_ENDPOINT"),
 			os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
 		)
 	}
 	return firstNonEmptyString(
-		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_ENDPOINT"),
+		envvars.Getenv("DEFENSECLAW_OTEL_"+signal+"_ENDPOINT"),
 		os.Getenv("OPENCLAW_OTEL_"+signal+"_ENDPOINT"),
 		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"),
 	)
@@ -3826,13 +3826,13 @@ func flatOTelEnvProtocol(signal string) string {
 	signal = strings.ToUpper(strings.TrimSpace(signal))
 	if signal == "" {
 		return firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_PROTOCOL"),
+			envvars.Getenv("DEFENSECLAW_OTEL_PROTOCOL"),
 			os.Getenv("OPENCLAW_OTEL_PROTOCOL"),
 			os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"),
 		)
 	}
 	return firstNonEmptyString(
-		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_PROTOCOL"),
+		envvars.Getenv("DEFENSECLAW_OTEL_"+signal+"_PROTOCOL"),
 		os.Getenv("OPENCLAW_OTEL_"+signal+"_PROTOCOL"),
 		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"),
 	)

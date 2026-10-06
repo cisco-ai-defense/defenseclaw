@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -114,7 +115,7 @@ func NewClient(cfg *config.GatewayConfig, dataDirs ...string) (*Client, error) {
 		cfg:     cfg,
 		device:  device,
 		dataDir: dataDir,
-		debug:   os.Getenv("DEFENSECLAW_DEBUG") == "1",
+		debug:   envvars.Getenv("DEFENSECLAW_DEBUG") == "1",
 		pending: make(map[string]chan *ResponseFrame),
 		lastSeq: -1,
 	}, nil

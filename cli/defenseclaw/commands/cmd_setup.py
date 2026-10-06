@@ -2434,7 +2434,7 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
     config_file = _config_trusted_bin_prefixes(cfg)
     env_file_raw = _load_dotenv(dotenv_path).get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
     env_file = [p.strip() for p in env_file_raw.split(os.pathsep) if p.strip()]
-    proc_raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    proc_raw = envvars.lookup("DEFENSECLAW_TRUSTED_BIN_PREFIXES") or ""
     proc = [p.strip() for p in proc_raw.split(os.pathsep) if p.strip()]
     env_only = [p for p in proc if p not in env_file and p not in config_file]
 
@@ -2601,7 +2601,7 @@ def trusted_paths_remove(app: AppContext, directory: str, as_json: bool) -> None
 
     process_entries = [
         value.strip()
-        for value in os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "").split(os.pathsep)
+        for value in (envvars.lookup("DEFENSECLAW_TRUSTED_BIN_PREFIXES") or "").split(os.pathsep)
         if value.strip()
     ]
     kept_process = [

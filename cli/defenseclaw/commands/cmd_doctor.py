@@ -61,7 +61,7 @@ try:  # Python 3.11+; the project supports 3.10 via its pinned fallback.
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
 
-from defenseclaw import credential_provenance, legacy_connector, rulepack_validation, ux
+from defenseclaw import credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import (
     openclaw_needs_interception_advisory,
@@ -9337,7 +9337,7 @@ def _anthropic_probe_model(configured_model: str) -> str:
         # surprising "valid key, but model not enabled" 403 when the
         # default probe model isn't in the account's allowed list.
         return configured_model.split("/", 1)[1]
-    override = os.environ.get("DEFENSECLAW_ANTHROPIC_PROBE_MODEL", "").strip()
+    override = (envvars.lookup("DEFENSECLAW_ANTHROPIC_PROBE_MODEL") or "").strip()
     if override:
         return override
     return _ANTHROPIC_DEFAULT_PROBE_MODEL

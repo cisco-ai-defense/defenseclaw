@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -473,12 +474,12 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		ManagedEnterprise:         enterpriseManaged,
 		ManagedGatewayServiceName: managedGatewayService,
 		TraceParent: hookFirstNonEmpty(
-			os.Getenv("DEFENSECLAW_TRACEPARENT"),
+			envvars.Getenv("DEFENSECLAW_TRACEPARENT"),
 			os.Getenv("TRACEPARENT"),
 			os.Getenv("OTEL_TRACEPARENT"),
 		),
 		TraceState: hookFirstNonEmpty(
-			os.Getenv("DEFENSECLAW_TRACESTATE"),
+			envvars.Getenv("DEFENSECLAW_TRACESTATE"),
 			os.Getenv("TRACESTATE"),
 			os.Getenv("OTEL_TRACESTATE"),
 		),

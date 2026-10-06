@@ -33,6 +33,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Static
 
+from defenseclaw import envvars
 from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
@@ -378,7 +379,7 @@ def _refresh_trusted_prefix_env(data_dir: str | None) -> None:
     pieces.extend(persisted.split(os.pathsep))
     if not any(piece.strip() for piece in pieces):
         return
-    current = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    current = envvars.lookup("DEFENSECLAW_TRUSTED_BIN_PREFIXES") or ""
     merged: list[str] = []
     for piece in (*current.split(os.pathsep), *pieces):
         piece = piece.strip()
@@ -403,7 +404,7 @@ def _trust_state_token(data_dir: str | None) -> str:
             mtimes.append(str(os.path.getmtime(os.path.join(resolved_dir, name))))
         except OSError:
             mtimes.append("0")
-    return f"{':'.join(mtimes)}:{os.environ.get('DEFENSECLAW_TRUSTED_BIN_PREFIXES', '')}"
+    return f"{':'.join(mtimes)}:{(envvars.lookup('DEFENSECLAW_TRUSTED_BIN_PREFIXES') or '')}"
 
 
 def untrusted_connector_dir(connector: str, data_dir: str | None = None) -> str | None:

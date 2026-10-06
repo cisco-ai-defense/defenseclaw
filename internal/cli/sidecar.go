@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -328,7 +329,7 @@ func bootstrapConfiguredObservabilityRuntime(
 // signal capture, and defer/return diagnostics to stderr. These are
 // intended for CI troubleshooting only — never enable in production.
 func sidecarDiagEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
 	case "1", "true", "yes", "on":
 		return true
 	}

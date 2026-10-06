@@ -51,6 +51,7 @@ try:  # pragma: no cover - Windows path
 except ImportError:  # pragma: no cover - non-POSIX
     _grp = None  # type: ignore[assignment]
 
+from defenseclaw import envvars
 from defenseclaw.config import config_path_for_data_dir, default_data_path
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
@@ -1330,7 +1331,7 @@ def _trusted_bin_prefixes(
     extras: list[str] = []
     _require, config_prefixes = _ai_discovery_trust_config(data_dir)
     extras.extend(config_prefixes)
-    raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    raw = envvars.lookup("DEFENSECLAW_TRUSTED_BIN_PREFIXES") or ""
     # Split on os.pathsep (':' POSIX, ';' Windows) so a Windows
     # drive-qualified path like 'C:\\Tools' survives unmangled.
     for piece in raw.split(os.pathsep):

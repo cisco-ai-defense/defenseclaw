@@ -31,6 +31,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -4378,7 +4379,7 @@ func currentRunID() string {
 	if v := gatewaylog.ProcessRunID(); v != "" {
 		return v
 	}
-	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	return strings.TrimSpace(envvars.Getenv("DEFENSECLAW_RUN_ID"))
 }
 
 // processAgentInstanceID holds the per-process agent instance ID that

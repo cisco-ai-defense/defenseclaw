@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -66,7 +66,7 @@ func judgeLogTrace() bool {
 	if !g.Config.SecureClientIntegration() {
 		return g.Config.Guardrail.Judge.Trace
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_TRACE"))) {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_JUDGE_TRACE"))) {
 	case "1", "true", "yes", "on":
 		return true
 	}

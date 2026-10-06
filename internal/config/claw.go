@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
@@ -1280,7 +1281,7 @@ func readMCPServersDevin(workspaceDir string) ([]MCPServerEntry, error) {
 // DefenseClaw-only binding; source installs use Devin's documented platform
 // defaults.
 func devinConfigHome() (string, error) {
-	if configured, exists := os.LookupEnv("DEFENSECLAW_DEVIN_CONFIG_HOME"); exists {
+	if configured, exists := envvars.Lookup("DEFENSECLAW_DEVIN_CONFIG_HOME"); exists {
 		if configured == "" || strings.TrimSpace(configured) != configured ||
 			strings.ContainsAny(configured, "\x00\r\n") ||
 			!filepath.IsAbs(configured) || filepath.Clean(configured) != configured {

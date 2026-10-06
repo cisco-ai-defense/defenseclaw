@@ -259,8 +259,11 @@ print(json.dumps(sorted(r.names())))
 }
 
 // TestManagedIgnoredOptOutsAreReadThroughLookup keeps the managed-mode
-// policy enforceable: a security opt-out that a managed standalone host
-// ignores must be read with envvars.Getenv/Lookup, never os.Getenv.
+// policy enforceable: a variable that a managed standalone host ignores
+// (security opt-outs, debug, telemetry, discovery, ...) must be read with
+// envvars.Getenv/Lookup, never os.Getenv. The deployment pins
+// (runtime_path) are what decide managed mode, and test fixtures only
+// steer tests.
 func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 	SetManagedStandalone(true)
 	t.Cleanup(func() { SetManagedStandalone(false) })
@@ -277,8 +280,10 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 	}
 
 	var ignored []string
-	for _, e := range MustLoad().ByCategory(CategorySecurityOptOut) {
-		if e.Managed == ManagedIgnore {
+	registry := MustLoad()
+	for _, name := range registry.Names() {
+		e, _ := registry.Get(name)
+		if e.Managed == ManagedIgnore && e.Category != CategoryRuntimePath && e.Category != CategoryTestFixture {
 			ignored = append(ignored, regexp.QuoteMeta(e.Name))
 		}
 	}
@@ -292,7 +297,7 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 			}
 			raw, readErr := os.ReadFile(path)
 			if readErr == nil && direct.Match(raw) {
-				t.Errorf("%s reads a managed-ignored opt-out with os.Getenv; use envvars.Getenv", path)
+				t.Errorf("%s reads a managed-ignored variable with os.Getenv; use envvars.Getenv", path)
 			}
 			return nil
 		})

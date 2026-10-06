@@ -1196,7 +1196,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
-      "managed": "ignore",
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/transaction.go",
@@ -4078,7 +4078,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "managed": "ignore",
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gatewaylog/runid.go",
@@ -5442,7 +5442,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "managed": "ignore",
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/hook.go",
@@ -5470,7 +5470,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
-      "managed": "ignore",
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/hook.go",

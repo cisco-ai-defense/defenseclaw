@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -1504,7 +1505,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// (defenseclaw.gateway.forwarded_headers) carries the steady-state
 		// signal; this stderr line is opt-in for local triage via
 		// DEFENSECLAW_DEBUG=1. Header names and values are never logged.
-		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+		if envvars.Getenv("DEFENSECLAW_DEBUG") == "1" {
 			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: forwarded_header_count=%d\n", forwardedHeaderCount)
 		}
 		p.recordProxyForwardedHeadersV8(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
@@ -3046,7 +3047,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// Record only headers that survive semantic routing's credential
 		// boundary and reach a dispatchable target. The per-request debug
 		// signal follows the same semantics.
-		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+		if envvars.Getenv("DEFENSECLAW_DEBUG") == "1" {
 			fmt.Fprintf(os.Stderr, "[guardrail] chat: forwarded_header_count=%d\n", forwardedHeaderCount)
 		}
 		p.recordProxyForwardedHeadersV8(
