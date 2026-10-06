@@ -29,6 +29,7 @@ Mirrors internal/config/asset_policy_lists.go and internal/gateway/enforce_confi
 from __future__ import annotations
 
 import contextlib
+import functools
 from typing import Any
 
 import click
@@ -96,6 +97,28 @@ def refuse_if_managed(cfg: Any, *, target_type: str = "", op: str = "", name: st
         action = _REFUSAL_ACTIONS.get((target_type, OP_UNBLOCK if op == OP_CLEAR else op), ACTION_ACTION)
         audit_managed_refusal(action, name or target_type or "config", f"type={target_type}" if target_type else "")
         raise ManagedDeviceError()
+
+
+def refuse_on_managed_device(target_type: str, op: str, name_arg: str = "name"):
+    """Decorator for a block, allow or unblock command (under ``@pass_ctx``).
+
+    A managed device refuses, audited and with exit 3, before the command
+    checks its connector, its arguments or the stored state. Without this the
+    command answered first, telling a standard user to run ``defenseclaw setup
+    <connector>`` (a per-user setup the managed install forbids) or that there
+    was nothing to clear."""
+
+    def decorate(command):
+        @functools.wraps(command)
+        def wrapper(app, *args, **kwargs):
+            refuse_if_managed(
+                getattr(app, "cfg", None), target_type=target_type, op=op, name=str(kwargs.get(name_arg) or "")
+            )
+            return command(app, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
 
 
 def audit_managed_config_refusal(target: str, command: str) -> None:

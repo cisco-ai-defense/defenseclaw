@@ -3903,6 +3903,7 @@ def _plugin_copies_disabled(app: AppContext, plugin_name: str, connector: str) -
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install block list.
 
@@ -4034,6 +4035,7 @@ def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: b
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove plugin enforcement state without adding an allow entry."""
     from defenseclaw.enforce import PolicyEngine
@@ -4133,6 +4135,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install allow list.
 

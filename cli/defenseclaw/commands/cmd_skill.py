@@ -4185,6 +4185,7 @@ def _refuse_bundled_skill_policy_action(
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install block list.
 
@@ -4308,6 +4309,7 @@ def _report_inherited_skill_state(
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove a skill's logical enforcement state.
 
@@ -4466,6 +4468,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("skill", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a skill to the install allow list.
 

@@ -1387,6 +1387,7 @@ def resolve_gateway_binary() -> str | None:
     4. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
+    5. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1409,7 +1410,27 @@ def resolve_gateway_binary() -> str | None:
     if _is_runnable_file(canonical):
         return canonical
 
-    return None
+    return _managed_gateway_binary()
+
+
+#: The gateway each managed runtime descriptor's package installs.
+_MANAGED_GATEWAY_BINARIES = {
+    "/etc/defenseclaw/managed-runtime.json": "/opt/defenseclaw/bin/defenseclaw-gateway",
+    "/opt/cisco/defenseclaw/etc/managed-runtime.json": "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+}
+
+
+def _managed_gateway_binary() -> str | None:
+    """The enterprise package's gateway on a managed Linux or macOS host.
+
+    An administrator's shell has it on no PATH, and the answer to "gateway
+    not found" there must not be ``defenseclaw upgrade``, which a managed
+    device refuses (GAP-0168).
+    """
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    binary = _MANAGED_GATEWAY_BINARIES.get(managed_descriptor() or "")
+    return binary if binary and _is_runnable_file(binary) else None
 
 
 def resolve_trusted_gateway_binary() -> str | None:
