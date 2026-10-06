@@ -80,6 +80,9 @@ type Service struct {
 
 	// emergencySeq tracks the next emergency broadcast sequence number.
 	// Must be strictly increasing per the C-side anti-replay (REQ-31).
+	// NOTE: emergencySeq is not persisted and will reset to 0 on process restart.
+	// For production, this should be stored in the policy store to guarantee
+	// monotonically increasing values across restarts.
 	mu           sync.Mutex
 	emergencySeq uint32
 }

@@ -214,11 +214,11 @@ tail -f ~/edge-connector-audit.log
 
 Example output:
 ```
-[12:44:23] EVAL raw=mcp_vision-ai_battery_status tool=battery_status caps=0x40 session=1 → action=0 reason=CLOUD_BLOCK
-[12:44:27] EVAL raw=mcp_roboclaw_drive tool=drive caps=0x20 session=1 → action=1 reason=CLOUD_TIMEOUT
-[12:44:27] DENY: edge-connector: BLOCKED 'mcp_roboclaw_drive' — reason: CLOUD_TIMEOUT
+[12:44:23] EVAL raw=mcp_vision-ai_battery_status tool=battery_status caps=0x40 dest='' session=1 → action=0 reason=CLOUD_BLOCK
+[12:44:27] EVAL raw=mcp_roboclaw_drive tool=drive caps=0x20 dest='' session=1 → action=1 reason=CLOUD_TIMEOUT
+[12:44:27] DENY: mcp_roboclaw_drive — CLOUD_TIMEOUT
 [12:48:23] EVAL raw=web_fetch tool=web_fetch caps=0x08 dest='evil.hacker.site' session=1 → action=1 reason=DEST_DENY
-[12:48:23] DENY: edge-connector: BLOCKED 'web_fetch' — reason: DEST_DENY
+[12:48:23] DENY: web_fetch — DEST_DENY
 ```
 
 ---
@@ -305,7 +305,7 @@ cd ~/defenseclaw/edge-connector/build/tests
 │                            │  └──────────────────────┘  ││
 │                            │                            ││
 │                            │  Decision: <3μs            ││
-│                            │  RAM: 25KB                 ││
+│                            │  RAM: ~14-19KB             ││
 │                            │  Binary: ~68KB             ││
 │                            └────────────────────────────┘│
 └──────────────────────────────────────────────────────────┘

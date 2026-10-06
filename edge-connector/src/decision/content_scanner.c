@@ -179,12 +179,12 @@ static void scan_secrets(const char *content, uint16_t content_len, dclaw_scan_c
 static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_context_t *ctx) {
     /* Look for SSN pattern: XXX-XX-XXXX */
     for (uint16_t i = 0; i + 10 < content_len; i++) {
-        if (isdigit(content[i]) && isdigit(content[i+1]) && isdigit(content[i+2]) &&
+        if (isdigit((unsigned char)content[i]) && isdigit((unsigned char)content[i+1]) && isdigit((unsigned char)content[i+2]) &&
             content[i+3] == '-' &&
-            isdigit(content[i+4]) && isdigit(content[i+5]) &&
+            isdigit((unsigned char)content[i+4]) && isdigit((unsigned char)content[i+5]) &&
             content[i+6] == '-' &&
-            isdigit(content[i+7]) && isdigit(content[i+8]) &&
-            isdigit(content[i+9]) && isdigit(content[i+10])) {
+            isdigit((unsigned char)content[i+7]) && isdigit((unsigned char)content[i+8]) &&
+            isdigit((unsigned char)content[i+9]) && isdigit((unsigned char)content[i+10])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_CRITICAL, i);
             if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
@@ -206,12 +206,12 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
     for (uint16_t i = 0; i < content_len; i++) {
         /* Format 1: XXX-XXX-XXXX (12 chars) */
         if (i + 11 < content_len &&
-            isdigit(content[i]) && isdigit(content[i+1]) && isdigit(content[i+2]) &&
+            isdigit((unsigned char)content[i]) && isdigit((unsigned char)content[i+1]) && isdigit((unsigned char)content[i+2]) &&
             content[i+3] == '-' &&
-            isdigit(content[i+4]) && isdigit(content[i+5]) && isdigit(content[i+6]) &&
+            isdigit((unsigned char)content[i+4]) && isdigit((unsigned char)content[i+5]) && isdigit((unsigned char)content[i+6]) &&
             content[i+7] == '-' &&
-            isdigit(content[i+8]) && isdigit(content[i+9]) &&
-            isdigit(content[i+10]) && isdigit(content[i+11])) {
+            isdigit((unsigned char)content[i+8]) && isdigit((unsigned char)content[i+9]) &&
+            isdigit((unsigned char)content[i+10]) && isdigit((unsigned char)content[i+11])) {
             /* Disambiguate from SSN (XXX-XX-XXXX): SSN has 2 digits in middle group */
             /* Phone has 3 digits in middle group, so this is different from SSN */
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
@@ -221,24 +221,24 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
         /* Format 2: (XXX) XXX-XXXX (14 chars) */
         if (i + 13 < content_len &&
             content[i] == '(' &&
-            isdigit(content[i+1]) && isdigit(content[i+2]) && isdigit(content[i+3]) &&
+            isdigit((unsigned char)content[i+1]) && isdigit((unsigned char)content[i+2]) && isdigit((unsigned char)content[i+3]) &&
             content[i+4] == ')' && content[i+5] == ' ' &&
-            isdigit(content[i+6]) && isdigit(content[i+7]) && isdigit(content[i+8]) &&
+            isdigit((unsigned char)content[i+6]) && isdigit((unsigned char)content[i+7]) && isdigit((unsigned char)content[i+8]) &&
             content[i+9] == '-' &&
-            isdigit(content[i+10]) && isdigit(content[i+11]) &&
-            isdigit(content[i+12]) && isdigit(content[i+13])) {
+            isdigit((unsigned char)content[i+10]) && isdigit((unsigned char)content[i+11]) &&
+            isdigit((unsigned char)content[i+12]) && isdigit((unsigned char)content[i+13])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
             if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
 
         /* Format 3: XXX.XXX.XXXX (12 chars) */
         if (i + 11 < content_len &&
-            isdigit(content[i]) && isdigit(content[i+1]) && isdigit(content[i+2]) &&
+            isdigit((unsigned char)content[i]) && isdigit((unsigned char)content[i+1]) && isdigit((unsigned char)content[i+2]) &&
             content[i+3] == '.' &&
-            isdigit(content[i+4]) && isdigit(content[i+5]) && isdigit(content[i+6]) &&
+            isdigit((unsigned char)content[i+4]) && isdigit((unsigned char)content[i+5]) && isdigit((unsigned char)content[i+6]) &&
             content[i+7] == '.' &&
-            isdigit(content[i+8]) && isdigit(content[i+9]) &&
-            isdigit(content[i+10]) && isdigit(content[i+11])) {
+            isdigit((unsigned char)content[i+8]) && isdigit((unsigned char)content[i+9]) &&
+            isdigit((unsigned char)content[i+10]) && isdigit((unsigned char)content[i+11])) {
             add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_MEDIUM, i);
             if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
         }
@@ -248,7 +248,7 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
     uint8_t digit_count = 0;
     uint16_t start_pos = 0;
     for (uint16_t i = 0; i < content_len; i++) {
-        if (isdigit(content[i])) {
+        if (isdigit((unsigned char)content[i])) {
             if (digit_count == 0) start_pos = i;
             digit_count++;
             if (digit_count == 16) {
@@ -346,7 +346,7 @@ static void scan_exfil(const char *content, uint16_t content_len, dclaw_scan_con
 
     for (uint16_t i = 0; i < content_len; i++) {
         char c = content[i];
-        if (isalnum(c) || c == '+' || c == '/' || c == '=') {
+        if (isalnum((unsigned char)c) || c == '+' || c == '/' || c == '=') {
             if (b64_len == 0) b64_start = i;
             b64_len++;
         } else {
@@ -561,11 +561,6 @@ dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx,
     if (scope == DCLAW_CONTENT_SCOPE_USER_INPUT) {
         /* USER_INPUT: lower thresholds -- block on MEDIUM+ findings */
         for (uint8_t i = 0; i < ctx->finding_count; i++) {
-            if (ctx->findings[i].severity >= DCLAW_SEV_HIGH) {
-                return DCLAW_ACTION_BLOCK;
-            }
-        }
-        for (uint8_t i = 0; i < ctx->finding_count; i++) {
             if (ctx->findings[i].severity >= DCLAW_SEV_MEDIUM) {
                 return DCLAW_ACTION_BLOCK;
             }
@@ -647,10 +642,51 @@ static bool parse_ipv4(const char *dest, uint8_t octets[4]) {
     return true;
 }
 
+/**
+ * Helper: Extract hostname from a URL or bare host string.
+ * Skips scheme (http://, https://), skips userinfo (user:pass@),
+ * extracts hostname up to ':', '/', or end of string.
+ * Returns pointer into `dest` where hostname starts, and sets *host_len.
+ */
+static const char *extract_host(const char *dest, size_t *host_len) {
+    const char *p = dest;
+
+    /* Skip scheme if present */
+    if (strncmp(p, "https://", 8) == 0) {
+        p += 8;
+    } else if (strncmp(p, "http://", 7) == 0) {
+        p += 7;
+    }
+
+    /* Skip userinfo (user:pass@) */
+    const char *at = NULL;
+    const char *scan = p;
+    while (*scan && *scan != '/' && *scan != '?') {
+        if (*scan == '@') { at = scan; break; }
+        scan++;
+    }
+    if (at) {
+        p = at + 1;
+    }
+
+    /* Hostname extends to ':', '/', '?', or end of string */
+    const char *host_start = p;
+    while (*p && *p != ':' && *p != '/' && *p != '?') {
+        p++;
+    }
+    *host_len = (size_t)(p - host_start);
+    return host_start;
+}
+
 dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
     /* NULL destination: caller must not invoke SSRF check for non-network tools */
     if (!dest) {
         return DCLAW_ACTION_ALLOW;
+    }
+
+    /* Block data: URIs unconditionally */
+    if (strncmp(dest, "data:", 5) == 0) {
+        return DCLAW_ACTION_BLOCK;
     }
 
     /* REQ-61: Only allow http:// and https:// schemes */
@@ -661,6 +697,18 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
             return DCLAW_ACTION_BLOCK; /* Non-http(s) scheme like file://, gopher://, ftp:// */
         }
     }
+
+    /* Extract the hostname from the URL for all subsequent checks */
+    size_t host_len = 0;
+    const char *host_start = extract_host(dest, &host_len);
+    if (host_len == 0 || host_len >= 256) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Copy hostname to a NUL-terminated buffer for safe comparison */
+    char host[256];
+    memcpy(host, host_start, host_len);
+    host[host_len] = '\0';
 
     /* Check for inline credentials (user:pass@host pattern) -- only in URL authority */
     const char *authority_start = dest;
@@ -677,29 +725,29 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
     }
 
     /* Check for "localhost" literal */
-    if (strcmp(dest, "localhost") == 0) {
+    if (strcmp(host, "localhost") == 0) {
         return DCLAW_ACTION_BLOCK;
     }
 
     /* Check for IPv6 loopback */
-    if (strcmp(dest, "::1") == 0) {
+    if (strcmp(host, "::1") == 0) {
         return DCLAW_ACTION_BLOCK;
     }
 
     /* Check for IPv6 ULA (fc00::/7) and link-local (fe80::/10) */
-    if (strncmp(dest, "fc", 2) == 0 || strncmp(dest, "fd", 2) == 0 ||
-        strncmp(dest, "fe80:", 5) == 0 || strncmp(dest, "fe80%", 5) == 0) {
+    if (strncmp(host, "fc", 2) == 0 || strncmp(host, "fd", 2) == 0 ||
+        strncmp(host, "fe80:", 5) == 0 || strncmp(host, "fe80%", 5) == 0) {
         return DCLAW_ACTION_BLOCK;
     }
 
     /* If not starting with digit, assume it's a hostname - pass through */
-    if (!starts_with_digit(dest)) {
+    if (!starts_with_digit(host)) {
         return DCLAW_ACTION_ALLOW;
     }
 
     /* Try to parse as IPv4 */
     uint8_t octets[4];
-    if (!parse_ipv4(dest, octets)) {
+    if (!parse_ipv4(host, octets)) {
         /* Not a valid IPv4, treat as hostname */
         return DCLAW_ACTION_ALLOW;
     }

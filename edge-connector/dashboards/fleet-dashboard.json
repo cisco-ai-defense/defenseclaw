@@ -44,7 +44,7 @@
         "title": "Active Alerts",
         "type": "stat",
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "defenseclaw_fleet_audit_chain_breaks_total + defenseclaw_fleet_emergency_seq_gaps_total"}],
+        "targets": [{"expr": "increase(defenseclaw_fleet_audit_chain_breaks_total[5m]) + increase(defenseclaw_fleet_emergency_seq_gaps_total[5m])"}],
         "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4}
       },
       {
@@ -65,7 +65,7 @@
         "title": "Verdict Cache Hit Rate",
         "type": "gauge",
         "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-        "targets": [{"expr": "sum(defenseclaw_fleet_verdict_cache_hits_total) / (sum(defenseclaw_fleet_verdict_cache_hits_total) + sum(defenseclaw_fleet_verdict_cache_misses_total))"}],
+        "targets": [{"expr": "sum(rate(defenseclaw_fleet_verdict_cache_hits_total[5m])) / (sum(rate(defenseclaw_fleet_verdict_cache_hits_total[5m])) + sum(rate(defenseclaw_fleet_verdict_cache_misses_total[5m]))) or vector(0)"}],
         "gridPos": {"x": 0, "y": 12, "w": 8, "h": 6}
       },
       {

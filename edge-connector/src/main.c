@@ -45,6 +45,7 @@ static const char *action_string(dclaw_action_t a) {
 }
 
 /* Write a JSON-RPC response for a verdict back to the client fd.
+ * Loops on partial writes to ensure the full response is sent.
  * Returns 0 on success, -1 on write failure. */
 static int write_verdict_response(int fd, const dclaw_verdict_t *v, int32_t request_id) {
     char resp[256];
@@ -57,8 +58,18 @@ static int write_verdict_response(int fd, const dclaw_verdict_t *v, int32_t requ
         v->from_cache ? "true" : "false",
         (int)request_id);
     if (n <= 0 || (size_t)n >= sizeof(resp)) return -1;
-    ssize_t w = write(fd, resp, (size_t)n);
-    return (w == n) ? 0 : -1;
+
+    size_t total = (size_t)n;
+    size_t written = 0;
+    while (written < total) {
+        ssize_t w = write(fd, resp + written, total - written);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        written += (size_t)w;
+    }
+    return 0;
 }
 
 int main(void) {
@@ -112,7 +123,12 @@ int main(void) {
     int client_fds[DCLAW_MAX_IPC_CLIENTS];
     int num_clients = 0;
 
+    /* Per-client accumulation buffers for newline-delimited message framing */
+    static char   client_buf[DCLAW_MAX_IPC_CLIENTS][DCLAW_IPC_BUF_SIZE];
+    static size_t client_buf_len[DCLAW_MAX_IPC_CLIENTS];
+
     memset(fds, 0, sizeof(fds));
+    memset(client_buf_len, 0, sizeof(client_buf_len));
     for (int i = 0; i < DCLAW_MAX_IPC_CLIENTS; i++)
         client_fds[i] = -1;
 
@@ -155,8 +171,14 @@ int main(void) {
             if (slot >= nfds) break;
             if (!(fds[slot].revents & POLLIN)) continue;
 
-            char buf[DCLAW_IPC_BUF_SIZE];
-            ssize_t n = read(client_fds[i], buf, sizeof(buf) - 1);
+            /* Read into the per-client accumulation buffer */
+            size_t space = DCLAW_IPC_BUF_SIZE - 1 - client_buf_len[i];
+            if (space == 0) {
+                /* Buffer full with no newline — discard and reset */
+                client_buf_len[i] = 0;
+                space = DCLAW_IPC_BUF_SIZE - 1;
+            }
+            ssize_t n = read(client_fds[i], client_buf[i] + client_buf_len[i], space);
             if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 /* Non-blocking: no data yet, skip this client */
                 continue;
@@ -165,25 +187,47 @@ int main(void) {
                 /* Client disconnected or error */
                 hal_ipc_socket_close(client_fds[i]);
                 client_fds[i] = client_fds[num_clients - 1];
+                client_buf_len[i] = client_buf_len[num_clients - 1];
+                memcpy(client_buf[i], client_buf[num_clients - 1], client_buf_len[i]);
                 client_fds[num_clients - 1] = -1;
+                client_buf_len[num_clients - 1] = 0;
                 num_clients--;
                 i--; /* re-check swapped slot */
                 continue;
             }
-            buf[n] = '\0';
+            client_buf_len[i] += (size_t)n;
 
-            /* Parse JSON-RPC request and evaluate */
-            dclaw_tool_request_t req;
-            if (dclaw_ipc_parse_request(buf, (size_t)n, &req) == 0) {
-                dclaw_verdict_t verdict = dclaw_evaluate(&req);
-                write_verdict_response(client_fds[i], &verdict, req.request_id);
-            } else {
-                /* Malformed request — send error response */
-                const char *err =
-                    "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
-                    "\"message\":\"Invalid Request\"},\"id\":null}\n";
-                write(client_fds[i], err, strlen(err));
+            /* Process complete newline-delimited messages */
+            char *base = client_buf[i];
+            size_t remaining = client_buf_len[i];
+            char *nl;
+            while ((nl = memchr(base, '\n', remaining)) != NULL) {
+                size_t msg_len = (size_t)(nl - base);
+                *nl = '\0';
+
+                /* Parse JSON-RPC request and evaluate */
+                dclaw_tool_request_t req;
+                if (msg_len > 0 && dclaw_ipc_parse_request(base, msg_len, &req) == 0) {
+                    dclaw_verdict_t verdict = dclaw_evaluate(&req);
+                    write_verdict_response(client_fds[i], &verdict, req.request_id);
+                } else if (msg_len > 0) {
+                    /* Malformed request — send error response */
+                    const char *err =
+                        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,"
+                        "\"message\":\"Invalid Request\"},\"id\":null}\n";
+                    write(client_fds[i], err, strlen(err));
+                }
+
+                size_t consumed = msg_len + 1;
+                base += consumed;
+                remaining -= consumed;
             }
+
+            /* Shift any remaining partial message to the front of the buffer */
+            if (remaining > 0 && base != client_buf[i]) {
+                memmove(client_buf[i], base, remaining);
+            }
+            client_buf_len[i] = remaining;
         }
 
         /* MQTT: poll for incoming messages (non-blocking, 10ms max) */

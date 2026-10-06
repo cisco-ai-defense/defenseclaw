@@ -25,6 +25,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -73,6 +74,7 @@ TOOL_CAP_MAP = {
     "fetch": CAP_NET_FETCH,
     # Filesystem
     "read_file": CAP_READ_FS,
+    "cat": CAP_READ_FS,
     "write_file": CAP_WRITE_FS,
     # Execution (sync_block — dangerous)
     "exec": CAP_EXEC_SHELL,
@@ -373,8 +375,6 @@ INJECTION_PATTERNS = [
 ]
 
 # Sensitive data patterns for output scanning
-import re
-
 PII_PATTERNS = [
     (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), "SSN"),
     (re.compile(r'\b\d{16}\b'), "CREDIT_CARD"),

@@ -95,6 +95,8 @@ iot_extensions:
     block_loopback: true
     block_link_local: true
     block_cloud_metadata: true
+    # NOTE: reject_inline_credentials, allowed_schemes, and private_ip_allowlist
+    # are reserved for future use — the current policy compiler does not process them.
     reject_inline_credentials: true
     allowed_schemes:
       - http

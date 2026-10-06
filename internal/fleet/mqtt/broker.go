@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -472,7 +471,3 @@ func EncodeVerdictRequestCBOR(vr *VerdictRequest) []byte {
 	return buf
 }
 
-func init() {
-	// Ensure log has prefix for MQTT bridge messages
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-}

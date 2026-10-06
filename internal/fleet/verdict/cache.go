@@ -5,6 +5,7 @@ package verdict
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,8 +43,8 @@ type Cache struct {
 	entries  map[[32]byte]*CacheEntry
 	maxSize  int
 	pipeline PipelineFunc
-	hits     uint64
-	misses   uint64
+	hits     atomic.Uint64
+	misses   atomic.Uint64
 
 	// Metrics hooks (set externally to avoid circular imports)
 	onHit   func()
@@ -69,35 +70,52 @@ func (c *Cache) SetMetricsHooks(onHit, onMiss, onStore func()) {
 
 // Lookup checks the cache for a tool hash. Returns a copy of the cached entry and true,
 // or a zero CacheEntry and false if not found or expired.
+//
+// The common cache-hit path uses an RLock for concurrency; a write Lock is only
+// taken when the entry has expired (needs delete) or to update CachedAt for LRU.
 func (c *Cache) Lookup(toolHash [32]byte) (CacheEntry, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	// Fast path: check existence and expiry under read lock.
+	c.mu.RLock()
 	entry, ok := c.entries[toolHash]
 	if !ok {
-		c.misses++
+		c.mu.RUnlock()
+		c.misses.Add(1)
+		if c.onMiss != nil {
+			c.onMiss()
+		}
+		return CacheEntry{}, false
+	}
+	expired := time.Since(entry.CachedAt) > entry.TTL
+	entryCopy := *entry
+	c.mu.RUnlock()
+
+	if expired {
+		// Slow path: take write lock to delete expired entry.
+		c.mu.Lock()
+		// Re-check under write lock (another goroutine may have deleted/updated it).
+		if e, still := c.entries[toolHash]; still && time.Since(e.CachedAt) > e.TTL {
+			delete(c.entries, toolHash)
+		}
+		c.mu.Unlock()
+		c.misses.Add(1)
 		if c.onMiss != nil {
 			c.onMiss()
 		}
 		return CacheEntry{}, false
 	}
 
-	if time.Since(entry.CachedAt) > entry.TTL {
-		delete(c.entries, toolHash)
-		c.misses++
-		if c.onMiss != nil {
-			c.onMiss()
-		}
-		return CacheEntry{}, false
+	// Update CachedAt on access for true LRU eviction.
+	c.mu.Lock()
+	if e, still := c.entries[toolHash]; still {
+		e.CachedAt = time.Now()
 	}
+	c.mu.Unlock()
 
-	// Update CachedAt on access for true LRU eviction (M6)
-	entry.CachedAt = time.Now()
-	c.hits++
+	c.hits.Add(1)
 	if c.onHit != nil {
 		c.onHit()
 	}
-	return *entry, true
+	return entryCopy, true
 }
 
 // Evaluate checks cache first, then runs pipeline on miss.
@@ -153,8 +171,9 @@ func (c *Cache) FlushAll() {
 // Stats returns cache hit/miss statistics.
 func (c *Cache) Stats() (hits, misses uint64, size int) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.hits, c.misses, len(c.entries)
+	size = len(c.entries)
+	c.mu.RUnlock()
+	return c.hits.Load(), c.misses.Load(), size
 }
 
 func (c *Cache) evictLRU() {

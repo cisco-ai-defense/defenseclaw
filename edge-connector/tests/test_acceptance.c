@@ -217,7 +217,7 @@ static void test_ac12(void) {
     /* Binary size checked via `size` command in CI.
      * RAM verified via linker map analysis.
      * Here we verify struct sizes are as expected. */
-    assert(sizeof(dclaw_audit_entry_t) == 16);
+    assert(sizeof(dclaw_audit_entry_t) == 24);
 #if DCLAW_PROFILE_EDGE
     assert(sizeof(dclaw_state_t) < 40 * 1024); /* EDGE profile: global state < 40KB */
     printf("  AC-12 PASS: dclaw_state_t = %zu bytes (< 40KB, EDGE profile)\n", sizeof(dclaw_state_t));
@@ -302,8 +302,6 @@ static void test_ac14_ssrf_validation(void) {
 static void test_ac15_enriched_escalation(void) {
     /* Verify that dclaw_cache_entry_t has the enriched fields.
      * The end-to-end escalation CBOR encoding is tested in test_evaluate_pipeline. */
-    extern dclaw_cache_entry_t test_cache_entry; /* Unused, just checking struct exists */
-    (void)test_cache_entry;
 
     /* Verify cache entry has category and evidence fields (compile-time check) */
     dclaw_cache_entry_t entry;
@@ -334,7 +332,7 @@ static void test_ac16_binary_size(void) {
 static void test_ac17_backward_compat(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
-    strncpy(req.tool_name, "read_sensor", DCLAW_TOOL_NAME_MAX);
+    strncpy(req.tool_name, "read_sensor", DCLAW_TOOL_NAME_MAX - 1);
     memset(req.tool_hash, 0xDD, 32);
     req.cap_flags = DCLAW_CAP_SENSOR_READ;
     req.session_id = 200;

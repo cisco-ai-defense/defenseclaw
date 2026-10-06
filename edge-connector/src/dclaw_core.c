@@ -67,11 +67,11 @@ void dclaw_shutdown(void) {
 extern int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size);
 #endif
 
-void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len, size_t buf_size) {
+void dclaw_get_health(uint8_t *out_heartbeat, size_t *out_len, size_t buf_size) {
 #if DCLAW_MQTT_ENABLED
     size_t len = 0;
     if (dclaw_cbor_encode_heartbeat(out_heartbeat, &len, buf_size) == 0) {
-        *out_len = (uint8_t)len;
+        *out_len = len;
     } else {
         *out_len = 0;
     }

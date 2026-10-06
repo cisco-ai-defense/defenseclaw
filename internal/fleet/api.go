@@ -4,6 +4,7 @@ package fleet
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -78,7 +79,8 @@ func authMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != token {
+		got := strings.TrimPrefix(auth, "Bearer ")
+		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
 		}
@@ -488,7 +490,6 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	var req struct {
-		NewDenyHashes   []string `json:"new_deny_hashes"`
 		RevokeAllowHash []string `json:"revoke_allow_hashes"`
 		Emergency       bool     `json:"emergency"`
 	}
@@ -525,7 +526,6 @@ func (a *API) pushThreatIntel(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"revoked": len(req.RevokeAllowHash),
-		"added":   len(req.NewDenyHashes),
 	})
 }
 

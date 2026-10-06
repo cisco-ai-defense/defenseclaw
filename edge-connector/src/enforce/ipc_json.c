@@ -40,7 +40,11 @@ static const char *parse_uint(const char *p, uint32_t *out) {
     if (*p < '0' || *p > '9') return NULL;
     *out = 0;
     while (*p >= '0' && *p <= '9') {
-        *out = (*out * 10) + (*p - '0');
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (*out > (UINT32_MAX - digit) / 10) {
+            return NULL; /* overflow */
+        }
+        *out = (*out * 10) + digit;
         p++;
     }
     return p;

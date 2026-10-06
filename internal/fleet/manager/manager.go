@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -184,7 +185,9 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 		existing.HWProfile = hwProfile
 		existing.Capabilities = capabilities
 		if fm.store != nil {
-			_ = fm.store.SaveDevice(existing)
+			if err := fm.store.SaveDevice(existing); err != nil {
+				log.Printf("[fleet] store error: %v", err)
+			}
 		}
 		devCopy := *existing
 		return &devCopy, ErrDeviceExists
@@ -204,7 +207,9 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 	}
 	fm.devices[fullID] = dev
 	if fm.store != nil {
-		_ = fm.store.SaveDevice(dev)
+		if err := fm.store.SaveDevice(dev); err != nil {
+			log.Printf("[fleet] store error: %v", err)
+		}
 	}
 	if fm.onDeviceRegistered != nil {
 		fm.onDeviceRegistered()
@@ -268,7 +273,9 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 	// Persist updated state
 	if fm.store != nil {
-		_ = fm.store.SaveDevice(dev)
+		if err := fm.store.SaveDevice(dev); err != nil {
+			log.Printf("[fleet] store error: %v", err)
+		}
 	}
 }
 
@@ -282,7 +289,9 @@ func (fm *FleetManager) CheckOfflineDevices() {
 		if dev.Status == StatusOnline && dev.LastHeartbeat.Before(threshold) {
 			dev.Status = StatusOffline
 			if fm.store != nil {
-				_ = fm.store.SaveDevice(dev)
+				if err := fm.store.SaveDevice(dev); err != nil {
+					log.Printf("[fleet] store error: %v", err)
+				}
 			}
 			if fm.onDeviceOffline != nil {
 				fm.onDeviceOffline()
@@ -334,7 +343,9 @@ func (fm *FleetManager) DecommissionDevice(tenantID, fleetID uint16, deviceID ui
 	}
 	delete(fm.devices, fullID)
 	if fm.store != nil {
-		_ = fm.store.DeleteDevice(tenantID, fleetID, deviceID)
+		if err := fm.store.DeleteDevice(tenantID, fleetID, deviceID); err != nil {
+			log.Printf("[fleet] store error: %v", err)
+		}
 	}
 	return true
 }

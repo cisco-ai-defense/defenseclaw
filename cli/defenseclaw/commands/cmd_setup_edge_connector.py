@@ -108,10 +108,18 @@ def edge_connector(
     # --- 1. Build instructions -------------------------------------------
     click.echo()
     ux.info(
-        "To build the edge-connector from source:\n"
+        "Edge Connector Engine (C):\n"
+        "\n"
+        "  cd edge-connector\n"
+        "  mkdir build && cd build\n"
+        "  cmake .. -DDCLAW_PROFILE=STANDARD\n"
+        "  make -j$(nproc)\n"
+        "  sudo make install\n"
+        "\n"
+        "Fleet Manager (Go):\n"
         "\n"
         "  cd internal/fleet\n"
-        "  go build -o edge-connector ./...\n"
+        "  go build -o fleet-manager ./...\n"
         "\n"
         "Or build the full gateway binary which includes the fleet API:\n"
         "\n"
@@ -161,6 +169,10 @@ def edge_connector(
         "\n"
         "       defenseclaw setup edge-connector --emit-policy > fleet-policy.yaml\n"
         "       defenseclaw policy load fleet-policy.yaml\n"
+        "\n"
+        "  Optional environment variables for edge devices:\n"
+        "    DCLAW_OTA_KEY          — Ed25519 public key for OTA policy verification\n"
+        "    DCLAW_MQTT_BROKER_URL  — MQTT broker URL for cloud escalation\n"
     )
 
 

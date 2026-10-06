@@ -95,7 +95,7 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
     dclaw_audit_writer_t *w = &s->audit_writer;
 
     dclaw_audit_entry_t entry = {
-        .timestamp = (uint32_t)hal_tick_ms(),
+        .timestamp = hal_tick_ms(),
         .target_hash = target_hash,
         .session_id = session_id,
         .action = (uint8_t)action,
@@ -130,6 +130,13 @@ int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
     }
 
     /* Buffered write for non-BLOCK events */
+    if (w->count >= DCLAW_AUDIT_RAM_BUFFER_SIZE) {
+        /* Buffer full — flush before writing to prevent out-of-bounds access */
+        if (flush_buffer_to_flash(w) != 0) {
+            /* Flush failed; retry once more on next call. Return error. */
+            return -1;
+        }
+    }
     w->buffer[w->count++] = entry;
 
     /* Check flush triggers */

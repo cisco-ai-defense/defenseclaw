@@ -28,7 +28,7 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-10 test binaries covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-17).
+11 test suites covering input validation, policy evaluation, content scanning, audit integrity, rate limiting, verdict caching, the full 8-stage pipeline, and acceptance tests (AC-01 through AC-17).
 
 ### Install system-wide
 
@@ -124,7 +124,7 @@ iot_extensions:
         severity: critical
         action: block
 
-    ssrf_validation:
+    ssrf_protection:
       enabled: true
       block_private_ranges: true     # 10.x, 172.16-31.x, 192.168.x
       block_metadata_endpoints: true # 169.254.169.254
@@ -260,8 +260,8 @@ Expected on ARM Cortex-A: &lt;5μs decisions, &gt;100K/sec throughput.
 | Problem | Solution |
 | --- | --- |
 | `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
-| All tools blocked | Check `TOOL_CAP_MAP` — unknown tools default to `EXEC_SHELL` |
+| All tools blocked | Check `TOOL_CAP_MAP` — unknown tools default to `SENSOR_READ` (safe); tools with dangerous keywords (`exec`, `shell`, `bash`, `run`, `write`, `delete`, `rm`) upgrade to `EXEC_SHELL` |
 | `CLOUD_TIMEOUT` on allowed tools | Change escalation from `sync_block` to `speculative` |
 | `DEST_DENY` on valid URLs | Add domain to `destination_allowlist` |
 | `CONTENT_BLOCK` false positives | Disable the offending category or add an exception pattern |
-| `SSRF_BLOCK` on internal services | Add trusted hosts to `ssrf_validation.allowlist` |
+| `SSRF_BLOCK` on internal services | Add trusted hosts to `ssrf_protection.private_ip_allowlist` |

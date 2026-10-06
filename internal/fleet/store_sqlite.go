@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
@@ -203,7 +204,11 @@ func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 		dev.RegisteredAt = t
 	}
 	if hmacHex != "" {
-		dev.LastAuditHMAC, _ = hex.DecodeString(hmacHex)
+		if hmacBytes, err := hex.DecodeString(hmacHex); err != nil {
+			log.Printf("[fleet] invalid audit HMAC hex in store for device %d: %v", dev.DeviceID, err)
+		} else {
+			dev.LastAuditHMAC = hmacBytes
+		}
 	}
 
 	return &dev, nil

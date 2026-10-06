@@ -145,8 +145,6 @@ void dclaw_sha256_update(dclaw_sha256_ctx *ctx, const uint8_t *data, size_t len)
 
 void dclaw_sha256_final(dclaw_sha256_ctx *ctx, uint8_t *hash) {
     /* Pad the message: append bit '1', then zeros, then 64-bit length (big-endian) */
-    uint8_t pad[DCLAW_SHA256_BLOCK_SIZE];
-    uint32_t padlen;
 
     /* Append 0x80 byte */
     ctx->buffer[ctx->buflen++] = 0x80;
@@ -172,9 +170,6 @@ void dclaw_sha256_final(dclaw_sha256_ctx *ctx, uint8_t *hash) {
 
     /* Zero sensitive state */
     memset(ctx, 0, sizeof(*ctx));
-
-    (void)pad;
-    (void)padlen;
 }
 
 void dclaw_sha256(const uint8_t *data, size_t len, uint8_t *hash) {

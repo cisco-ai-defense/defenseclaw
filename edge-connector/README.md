@@ -47,7 +47,7 @@ cd build
 ctest --output-on-failure
 ```
 
-10 test binaries, 100+ assertions covering:
+11 test suites, 100+ assertions covering:
 - Input validation (IPC boundary)
 - Policy table (hash deny, destination allow/deny, severity)
 - Capability correlator (sequence detection)

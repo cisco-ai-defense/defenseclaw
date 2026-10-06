@@ -214,9 +214,11 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 
 	payload := EncodeVerdictResponse(resp)
 
-	// Use a background context for the publish since the message handler
-	// context may not be the bridge's long-lived context.
-	if err := b.client.Publish(context.Background(), respTopic, 1, payload); err != nil {
+	// Use a background context with timeout for the publish since the message
+	// handler context may not be the bridge's long-lived context.
+	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pubCancel()
+	if err := b.client.Publish(pubCtx, respTopic, 1, payload); err != nil {
 		b.logger.Printf("[mqtt-bridge] publish verdict response to %s: %v", respTopic, err)
 		b.incErrors()
 		return

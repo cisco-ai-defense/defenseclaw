@@ -139,16 +139,16 @@ typedef struct {
 /* === Audit === */
 
 typedef struct {
-    uint32_t timestamp;     /* 4 */
+    uint64_t timestamp;     /* 8 */
     uint16_t target_hash;   /* 2 */
     uint16_t session_id;    /* 2 */
-    uint8_t  hmac[4];       /* 4 (truncated for 16B fit) */
+    uint8_t  hmac[4];       /* 4 (truncated HMAC-SHA256) */
     uint8_t  action;        /* 1 */
     uint8_t  reason;        /* 1 */
-    uint8_t  _pad[2];       /* 2 */
-} dclaw_audit_entry_t;      /* 16 bytes, naturally aligned */
+    uint8_t  _pad[6];       /* 6 (align to 24 for uint64_t) */
+} dclaw_audit_entry_t;      /* 24 bytes, naturally aligned */
 
-_Static_assert(sizeof(dclaw_audit_entry_t) == 16, "audit entry must be 16 bytes");
+_Static_assert(sizeof(dclaw_audit_entry_t) == 24, "audit entry must be 24 bytes");
 
 typedef struct {
     dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE];
@@ -244,6 +244,7 @@ typedef struct {
     uint32_t last_seen_seq;
     uint32_t gap_start;
     bool     replay_requested;
+    bool     initialized;
 } dclaw_emergency_state_t;
 
 /* === Global Agent State === */
@@ -282,7 +283,7 @@ int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature);
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
 int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
-void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len, size_t buf_size);
+void dclaw_get_health(uint8_t *out_heartbeat, size_t *out_len, size_t buf_size);
 void dclaw_shutdown(void);
 
 typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,

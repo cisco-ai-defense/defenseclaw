@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -124,6 +125,9 @@ func (c *TCPClient) Subscribe(ctx context.Context, topicFilter string, qos byte,
 		return fmt.Errorf("not connected")
 	}
 	c.packetID++
+	if c.packetID == 0 {
+		c.packetID = 1 // M-5: MQTT spec requires packet ID 1-65535
+	}
 	pid := c.packetID
 	conn := c.conn
 	c.mu.Unlock()
@@ -149,6 +153,9 @@ func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload
 		return fmt.Errorf("not connected")
 	}
 	c.packetID++
+	if c.packetID == 0 {
+		c.packetID = 1 // M-5: MQTT spec requires packet ID 1-65535
+	}
 	pid := c.packetID
 	conn := c.conn
 	c.mu.Unlock()
@@ -272,9 +279,27 @@ func (c *TCPClient) handleIncomingPublish(flags byte, body []byte) {
 
 	// QoS is in bits 1-2 of the fixed header flags.
 	qos := (flags >> 1) & 0x03
+	var packetID uint16
 	if qos > 0 {
-		// Skip packet ID (2 bytes).
+		// Bounds check: need 2 bytes for packet ID (M-6: panic on short QoS>0).
+		if pos+2 > len(body) {
+			return
+		}
+		packetID = binary.BigEndian.Uint16(body[pos : pos+2])
 		pos += 2
+	}
+
+	// H-1: Send PUBACK for incoming QoS 1 messages.
+	if qos >= 1 {
+		puback := []byte{0x40, 0x02, byte(packetID >> 8), byte(packetID)}
+		c.mu.Lock()
+		conn := c.conn
+		c.mu.Unlock()
+		if conn != nil {
+			if err := writeAll(conn, puback); err != nil {
+				log.Printf("[mqtt] failed to send PUBACK for packet %d: %v", packetID, err)
+			}
+		}
 	}
 
 	var payload []byte
@@ -431,6 +456,10 @@ func readRemainingLength(r io.Reader) (int, error) {
 		}
 		value += int(buf[0]&0x7F) * multiplier
 		if buf[0]&0x80 == 0 {
+			// L-readRemainingLength: enforce upper bound to prevent memory exhaustion.
+			if value > 1<<20 {
+				return 0, fmt.Errorf("packet too large: %d", value)
+			}
 			return value, nil
 		}
 		multiplier *= 128

@@ -137,8 +137,8 @@ The Edge Connector inspects tool call arguments and LLM responses for dangerous 
         severity: critical
         action: block
 
-    # SSRF validation for network destinations
-    ssrf_validation:
+    # SSRF protection for network destinations
+    ssrf_protection:
       enabled: true
       block_private_ranges: true    # 10.x, 172.16-31.x, 192.168.x, 127.x
       block_metadata_endpoints: true # 169.254.169.254, metadata.google.internal
@@ -398,11 +398,11 @@ sudo make install
 | Problem | Solution |
 |---------|----------|
 | `libdclaw_core.so: cannot open shared object file` | Run `sudo ldconfig` or set `LD_LIBRARY_PATH` |
-| All tools getting blocked | Check TOOL_CAP_MAP — unknown tools default to EXEC_SHELL |
+| All tools getting blocked | Check TOOL_CAP_MAP — unknown tools default to `SENSOR_READ` (safe); tools with dangerous keywords (`exec`, `shell`, `bash`, `run`, `write`, `delete`, `rm`) upgrade to `EXEC_SHELL` |
 | `CLOUD_TIMEOUT` on tools you want allowed | Change escalation_mode from `sync_block` to `speculative` in policy |
 | `DEST_DENY` on valid URLs | Add domain to `destination_allowlist` in policy YAML |
 | `CONTENT_BLOCK` false positives | Disable the offending category in `content_inspection.categories` or add an exception pattern |
-| `SSRF_BLOCK` on internal services you trust | Add trusted internal hosts to `ssrf_validation.allowlist` in policy YAML |
+| `SSRF_BLOCK` on internal services you trust | Add trusted internal hosts to `ssrf_protection.private_ip_allowlist` in policy YAML |
 | Hook not starting | Check `DCLAW_LIB_PATH` points to correct `.so` file |
 | Build fails on GCC 14+ | Use latest source — pragma guards for unused warnings included |
 

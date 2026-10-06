@@ -216,7 +216,7 @@ void dclaw_canary_tick(void) {
     uint64_t elapsed = hal_tick_ms() - s->canary.canary_started_at;
 
     /* Check if canary window has expired (10 minutes) */
-    if (elapsed >= (uint32_t)DCLAW_CANARY_WINDOW_SEC * 1000) {
+    if (elapsed >= (uint64_t)DCLAW_CANARY_WINDOW_SEC * 1000) {
         s->canary.canary_active = false;
         return;
     }
@@ -291,14 +291,20 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
         return -1;
     }
 
-    /* REQ-31: Anti-replay — sequence must be strictly increasing */
-    if (seq <= s->emergency.last_seen_seq) {
-        return -2;
-    }
+    /* REQ-31: Anti-replay — sequence must be strictly increasing.
+     * On first message (initialized==false), accept any sequence to bootstrap. */
+    if (!s->emergency.initialized) {
+        s->emergency.last_seen_seq = seq;
+        s->emergency.initialized = true;
+    } else {
+        if (seq <= s->emergency.last_seen_seq) {
+            return -2;
+        }
 
-    /* REQ-31: Jump attack detection — reject delta > 1000 */
-    if (seq - s->emergency.last_seen_seq > 1000) {
-        return -3;
+        /* REQ-31: Jump attack detection — reject delta > 1000 */
+        if (seq - s->emergency.last_seen_seq > 1000) {
+            return -3;
+        }
     }
 
     /* Apply command */

@@ -8,7 +8,6 @@
 
 extern dclaw_state_t *dclaw_get_state(void);
 
-static int ipc_server_fd = -1;
 static uint32_t ipc_request_count_this_sec = 0;
 static uint64_t ipc_last_rate_check_tick = 0;
 
@@ -69,6 +68,12 @@ int dclaw_ipc_validate_request(const dclaw_tool_request_t *req) {
     return 0;
 }
 
+/*
+ * dclaw_ipc_init() and dclaw_ipc_shutdown() are dead code: main.c manages
+ * the IPC socket directly via hal_ipc_socket_create/close.  Disabled to
+ * avoid confusion and the unused ipc_server_fd variable.
+ */
+#if 0
 int dclaw_ipc_init(void) {
     ipc_server_fd = hal_ipc_socket_create(DCLAW_IPC_SOCKET_PATH);
     return (ipc_server_fd >= 0) ? 0 : -1;
@@ -80,3 +85,4 @@ void dclaw_ipc_shutdown(void) {
         ipc_server_fd = -1;
     }
 }
+#endif
