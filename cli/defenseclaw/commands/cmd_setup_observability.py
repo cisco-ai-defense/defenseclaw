@@ -638,8 +638,8 @@ def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[An
 
     host.name is reserved and always comes from the operating system, so two
     computers with the same name (a cloned VM, for example) are told apart by
-    this tag. A legacy ``deployment.environment`` alias, when present, is kept
-    equal so the validator does not reject the pair as conflicting.
+    this tag. A retired ``deployment.environment`` spelling, when present, is
+    removed so only the canonical name remains.
     """
 
     if environment is None:
@@ -656,7 +656,7 @@ def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[An
     source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
     attributes = ((source.get("observability") or {}).get("resource") or {}).get("attributes") or {}
     if isinstance(attributes, dict) and "deployment.environment" in attributes:
-        mutations.append(V8YAMLMutation.set((*prefix, "deployment.environment"), value))
+        mutations.append(V8YAMLMutation.delete((*prefix, "deployment.environment")))
     return mutations
 
 

@@ -403,6 +403,16 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 			}
 		}
 	}
+	observability := v8YAMLMapValue(root, "observability")
+	if node := v8YAMLMapValue(v8YAMLMapValue(observability, "trace_policy"), "compatibility_aliases"); node != nil {
+		return v9RemovedKeyAction(source, "$.observability.trace_policy.compatibility_aliases", node,
+			"remove it: telemetry carries only canonical attribute names")
+	}
+	attributes := v8YAMLMapValue(v8YAMLMapValue(observability, "resource"), "attributes")
+	if node := v8YAMLMapValue(attributes, "deployment.environment"); node != nil {
+		return v9RemovedKeyError(source, v8YAMLChildPath("$.observability.resource.attributes", "deployment.environment"),
+			node, "deployment.environment.name")
+	}
 	scanners := v8YAMLMapValue(root, "scanners")
 	for _, removed := range []struct{ scanner, key, target string }{
 		{"skill_scanner", "binary", "the managed scanner install"},
@@ -441,9 +451,12 @@ func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string)
 }
 
 func v9RemovedKeyError(source, path string, node *yaml.Node, target string) error {
+	return v9RemovedKeyAction(source, path, node, "use "+target)
+}
+
+func v9RemovedKeyAction(source, path string, node *yaml.Node, action string) error {
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
-		"a v8 configuration key is not accepted in config_version 9",
-		"use "+target)
+		"a v8 configuration key is not accepted in config_version 9", action)
 }
 
 func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) error {

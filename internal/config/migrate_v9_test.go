@@ -24,6 +24,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,7 +53,14 @@ scanners:
     virustotal_api_key_env: VT_KEY
   mcp_scanner:
     analyzers: auto,llm,prompt_defense
-observability: {}
+observability:
+  resource:
+    attributes:
+      deployment.environment: production
+  trace_policy:
+    compatibility_aliases: false
+  destinations:
+    - {name: collector, kind: otlp, endpoint: "https://otel.example.test"}
 `
 	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
 		t.Fatal(err)
@@ -189,6 +197,16 @@ observability: {}
 	}
 	if !strings.Contains(string(migrated), "# keep this comment") {
 		t.Error("the migration dropped a comment")
+	}
+	// Telemetry carries canonical names only: the alias switch is dropped and
+	// reported, the retired environment spelling becomes the canonical one.
+	attributes, _ := get("observability.resource.attributes").(map[string]any)
+	if attributes["deployment.environment.name"] != "production" || attributes["deployment.environment"] != nil ||
+		get("observability.trace_policy") != nil ||
+		!slices.Contains(result.Record.Removed, "observability.trace_policy.compatibility_aliases") ||
+		!strings.Contains(strings.Join(result.Record.Notes, "\n"), "no longer carries the alias attributes") {
+		t.Errorf("telemetry aliases not migrated: attributes=%v removed=%v notes=%v",
+			attributes, result.Record.Removed, result.Record.Notes)
 	}
 	// strict posture is block MEDIUM / alert LOW: alert_threshold 1 matches.
 	if get("guardrail.alert_at") != nil {

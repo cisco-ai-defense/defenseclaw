@@ -2971,7 +2971,9 @@
         },
         "compatibility_aliases": {
           "type": "boolean",
-          "default": true
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: telemetry carries only canonical attribute names. A config_version 8 source may still hold the key and it is ignored; a v9 source may not."
         },
         "limits": {
           "$ref": "#/$defs/traceLimits"
@@ -5559,6 +5561,15 @@
         "skill_actions": false,
         "mcp_actions": false,
         "plugin_actions": false,
+        "observability": {
+          "properties": {
+            "trace_policy": {
+              "properties": {
+                "compatibility_aliases": false
+              }
+            }
+          }
+        },
         "watch": {
           "properties": {
             "allow_list_bypass_scan": false
