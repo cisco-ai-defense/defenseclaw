@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestHandleAIUsageDisabled(t *testing.T) {
@@ -282,7 +283,7 @@ func TestIDEPluginFiltersAndInstallHintKeepWindowsSpelling(t *testing.T) {
 		!ideFilterMatches("jetbrains", "jetbrains", "pycharm") {
 		t.Fatal("ide filter must match products, and families only when the family is not a product")
 	}
-	if !accountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || accountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
+	if !useridentity.AccountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
 		t.Fatal("user filter must accept the account name without its domain")
 	}
 	hint := claimedInstallHint(map[string]interface{}{"transcript_path": `C:\Users\dcad-alice\altcfg\projects\p\s.jsonl`})
