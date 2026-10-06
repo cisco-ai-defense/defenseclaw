@@ -797,11 +797,50 @@ def test_linux_preremove_waits_for_the_lock_and_refuses_the_removal_when_busy(tm
 
 # After preremove refuses a removal (busy lock), dpkg runs "postinst
 # abort-remove": the postinstall must not wait on the same lock again.
-def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path) -> None:
+# "abort-upgrade" follows a refused downgrade the same way.
+@pytest.mark.parametrize("argument", ["abort-remove", "abort-upgrade"])
+def test_linux_postinstall_does_nothing_after_a_refused_removal(tmp_path: Path, argument: str) -> None:
     host = _Host(tmp_path, gateway_rc=75, apply_path_active=True)
-    result = host.run(_linux_scriptlet(host, "postinstall.sh"), "abort-remove")
+    result = host.run(_linux_scriptlet(host, "postinstall.sh"), argument)
     assert result.returncode == 0, result.stderr
     assert host.calls() == []
+
+
+# GAP-0112: an older deb replaced the binaries before its own scripts could
+# refuse it, and the older release cannot read the config_version 9 config, so
+# the services crash-looped. The installed package's prerm refuses the
+# downgrade before any file changes, unless the rollback marker exists.
+@pytest.mark.parametrize(
+    ("incoming", "marker", "exit_code"),
+    [
+        ("1.0.47-SNAPSHOT-aaa", False, 0),
+        ("1.0.46-SNAPSHOT-aaa", False, 0),
+        ("1.0.45-SNAPSHOT-aaa", False, 1),
+        ("1.0.45-SNAPSHOT-aaa", True, 0),
+    ],
+)
+def test_linux_preremove_refuses_a_deb_downgrade_unless_the_marker_exists(
+    tmp_path: Path, incoming: str, marker: bool, exit_code: int
+) -> None:
+    host = _Host(tmp_path)
+    host.state.mkdir()
+    _write_stub(host.bin, "dpkg-query", "printf '1.0.46-SNAPSHOT-bbb'")
+    _write_stub(
+        host.bin,
+        "dpkg",
+        '[ "$1" = --compare-versions ] && [ "$3" = lt ] && [ "$2" != "$4" ] && '
+        '[ "$(printf \'%s\\n%s\\n\' "$2" "$4" | sort -V | head -n 1)" = "$2" ]',
+    )
+    allow = host.state / "allow-downgrade"
+    if marker:
+        allow.write_text("", encoding="utf-8")
+    result = host.run(_linux_scriptlet(host, "preremove.sh"), "upgrade", incoming)
+    assert result.returncode == exit_code, (result.stdout, result.stderr)
+    assert host.calls() == []  # the lifecycle is never run on an upgrade
+    assert not allow.exists() or exit_code == 1
+    if exit_code:
+        assert "refusing to downgrade to " + incoming in result.stderr
+        assert f"sudo touch {allow}" in result.stderr
 
 
 def _macos_pkg_postinstall(host: _Host) -> str:

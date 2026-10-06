@@ -68,6 +68,9 @@ IDE_PLUGIN_ENABLED_LABELS: Mapping[str, str] = {
 }
 
 
+# The most agent identity rows the Agents sub-tab keeps.
+AGENT_IDENTITY_ROWS = 1000
+
 @dataclass(frozen=True)
 class InventoryCommandIntent:
     label: str
@@ -604,12 +607,15 @@ class InventorySubTabInfo:
     label: str
     active: bool = False
     count: int | None = None
+    # The count leaves rows out (the identity list stopped at its page
+    # bound), so the label reads "Agents (64000+)".
+    partial: bool = False
 
     @property
     def display_label(self) -> str:
         if self.count is None:
             return self.label
-        return f"{self.label} ({self.count})"
+        return f"{self.label} ({self.count}{'+' if self.partial else ''})"
 
 
 @dataclass(frozen=True)
@@ -666,8 +672,10 @@ class InventoryPanelModel:
         # breakdown; ``inventory`` holds the merged view used by every tab.
         self.connector_snapshots: tuple[tuple[str, InventorySnapshot], ...] = ()
         # Stable agent ids from ``defenseclaw agent identities --json``; empty
-        # when the command is unavailable or fails.
+        # when the command is unavailable or fails. agent_identities_total is
+        # set when the command listed only the most recently seen ones.
         self.agent_identities: tuple[InventoryAgent, ...] = ()
+        self.agent_identities_total = 0
 
     def set_size(self, width: int, height: int) -> None:
         self.width = width
@@ -803,6 +811,7 @@ class InventoryPanelModel:
                 label=INVENTORY_SUBTAB_LABELS[subtab],
                 active=subtab == self.active_sub,
                 count=counts.get(subtab),
+                partial=subtab == "agents" and self.agent_identities_total > 0,
             )
             for subtab in INVENTORY_SUBTABS
         )
@@ -826,9 +835,11 @@ class InventoryPanelModel:
         self.apply_loaded(InventorySnapshot.from_json(text))
 
     def identities_intent(self) -> InventoryCommandIntent:
+        # The table redraws every row on each key, so it keeps the most
+        # recently seen identities and says when it left some out.
         return InventoryCommandIntent(
             label="agent identities --json",
-            args=("agent", "identities", "--json"),
+            args=("agent", "identities", "--json", "--limit", str(AGENT_IDENTITY_ROWS)),
             hint="Loading agent identities...",
         )
 
@@ -839,12 +850,12 @@ class InventoryPanelModel:
         malformed answer is not an error the panel shows.
         """
         rows: tuple[InventoryAgent, ...] = ()
+        total = 0
         if text:
             try:
                 raw = json.loads(text)
             except (json.JSONDecodeError, ValueError):
                 raw = None
-            #  prints {enabled, identities}.
             identities = raw.get("identities") if isinstance(raw, Mapping) else None
             if isinstance(identities, list):
                 rows = tuple(
@@ -852,8 +863,11 @@ class InventoryPanelModel:
                     for item in identities
                     if isinstance(item, Mapping) and item.get("agent_id")
                 )
+                if raw.get("next_cursor"):
+                    total = max(_safe_int(raw.get("total")), len(rows))
         selected = self._selected_key()
         self.agent_identities = rows
+        self.agent_identities_total = total
         self._reselect(selected)
 
     def apply_merged(self, results: Sequence[tuple[str, str | None]]) -> None:
@@ -1596,11 +1610,13 @@ class InventoryPanelModel:
         if key in {"h", "left"}:
             before = self.active_sub
             self.move_subtab(-1)
-            return InventoryPanelAction(True, hint="" if self.active_sub != before else "(first inventory sub-tab)")
+            hint = self._subtab_hint() if self.active_sub != before else "(first inventory sub-tab)"
+            return InventoryPanelAction(True, hint=hint)
         if key in {"l", "right"}:
             before = self.active_sub
             self.move_subtab(1)
-            return InventoryPanelAction(True, hint="" if self.active_sub != before else "(last inventory sub-tab)")
+            hint = self._subtab_hint() if self.active_sub != before else "(last inventory sub-tab)"
+            return InventoryPanelAction(True, hint=hint)
         if key in {"j", "down"}:
             self.scroll_by(1)
             return InventoryPanelAction(True)
@@ -1622,6 +1638,14 @@ class InventoryPanelModel:
         if key == "r":
             return InventoryPanelAction(True, self.load_intent())
         return InventoryPanelAction(False)
+
+    def _subtab_hint(self) -> str:
+        if self.active_sub == "agents" and self.agent_identities_total:
+            return (
+                f"Agents: newest {len(self.agent_identities)} of {self.agent_identities_total} identities. "
+                "All: defenseclaw agent identities"
+            )
+        return ""
 
     def empty_state(self) -> str:
         if self.message:
