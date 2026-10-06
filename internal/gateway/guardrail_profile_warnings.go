@@ -160,3 +160,55 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 	}
 	return ""
 }
+
+// What requests of the explained account use right now.
+//
+// `explain --user` resolves the account through the operating system, so it
+// reports the profile a request gets after its facts are next refreshed.
+// Requests read the gateway's cache instead, which holds an account's facts
+// for 15 minutes and serves them stale while one background lookup replaces
+// them; so for up to that long after a group changed, explain and the audit
+// rows can disagree. explainCacheView puts the cache's side next to the
+// answer (GAP-0134).
+
+// cachedDirectoryFacts returns the facts requests of an account use, and when
+// they were fetched. Tests replace it.
+var cachedDirectoryFacts = func(id string) (useridentity.DirectoryFacts, time.Time, bool) {
+	return peerDirectoryCache().peek(id)
+}
+
+// explainCacheView describes the cached facts of the explained account: how
+// old they are, and the profile requests currently get from them. warning is
+// non-empty when that profile differs from the explained one.
+func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decision profileDecision, connectorName, agent string, now time.Time) (view map[string]any, warning string) {
+	if set == nil || explained == nil || explained.UserID == "" || explained.LookupFailed {
+		return nil, ""
+	}
+	facts, fetchedAt, ok := cachedDirectoryFacts(explained.UserID)
+	if !ok {
+		return nil, ""
+	}
+	age := now.Sub(fetchedAt).Round(time.Second)
+	if age < 0 {
+		age = 0
+	}
+	refresh := max(identityDirectoryTTL-age, 0)
+	cached := profileSubjectFromVerified(VerifiedSubject{
+		UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, Directory: facts,
+	}, true)
+	live := set.match(&cached, profileSubjectLookup, connectorName, agent)
+	differs := live.Name != decision.Name || live.Match != decision.Match || live.MatchedGroup != decision.MatchedGroup
+	view = map[string]any{
+		"age_seconds":           int(age.Seconds()),
+		"refresh_after_seconds": int(refresh.Seconds()),
+		"profile":               live.Name,
+		"match":                 live.Match,
+		"differs":               differs,
+	}
+	if differs {
+		warning = fmt.Sprintf("requests of this account still use the directory facts the gateway fetched %s ago (profile %s, match %s); "+
+			"the profile above applies from the next refresh, within %s. Restart the gateway to refresh now",
+			age, firstNonEmpty(live.Name, "none"), live.Match, refresh)
+	}
+	return view, warning
+}

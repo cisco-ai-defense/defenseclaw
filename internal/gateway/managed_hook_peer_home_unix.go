@@ -149,12 +149,21 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 	if uid < 0 {
 		return useridentity.DirectoryFacts{}, false
 	}
+	return c.directoryCache().get(strconv.Itoa(uid), block)
+}
+
+// directoryCache returns the cache of verified directory facts per uid,
+// created on first use.
+func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 	c.directoriesOnce.Do(func() {
 		c.directories = newIdentityDirectoryCache(resolvePeerDirectoryFacts)
 		c.directories.incomplete = hasUnnamedGroup
 	})
-	return c.directories.get(strconv.Itoa(uid), block)
+	return c.directories
 }
+
+// peerDirectoryCache is the cache the hook path reads directory facts from.
+func peerDirectoryCache() *identityDirectoryCache { return managedHookPeerHomes.directoryCache() }
 
 // hasUnnamedGroup marks facts with a group that is still a number: no group
 // answered for the id when it was looked up (an SSSD that was cold or could

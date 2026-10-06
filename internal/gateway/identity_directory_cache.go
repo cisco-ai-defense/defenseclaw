@@ -140,6 +140,22 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return entry.facts, entry.ok
 }
 
+// peek returns key's cached facts and when they were fetched, without
+// starting a lookup or waiting for one.
+func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
+	var zero T
+	if c == nil {
+		return zero, time.Time{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || !entry.ok {
+		return zero, time.Time{}, false
+	}
+	return entry.facts, entry.fetchedAt, true
+}
+
 func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T]) {
 	done := make(chan struct{})
 	entry.inflight = done

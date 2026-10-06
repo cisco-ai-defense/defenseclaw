@@ -208,6 +208,24 @@ def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
     ]
 
 
+def test_explain_shows_how_old_the_facts_of_live_requests_are(monkeypatch):
+    """GAP-0134: explain resolves fresh groups, requests keep cached facts for 15 minutes."""
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "ml",
+            "match": "group",
+            "subject": {"user_name": "alice", "group_count": 2},
+            "cache": {"age_seconds": 420, "refresh_after_seconds": 480, "profile": "watch", "match": "default", "differs": True},
+            "warnings": ["requests of this account still use the directory facts the gateway fetched 7m0s ago"],
+        },
+    )
+    assert "cache:   requests use directory facts 7m old (profile watch, match default)" in result.output
+    assert "refreshes them after 15m" in result.output
+    assert "still use the directory facts" in result.output
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

@@ -210,10 +210,16 @@ What follows when the identity is missing:
   directory lookup for 1201 failed: ... in 3000 groups, more than the 2048 ...`)
   and once when it works again, and `guardrail profile explain` shows the same
   reason as a lookup error instead of a profile.
-- **Group changes take time.** The gateway caches a user's directory facts for
-  15 minutes and refreshes them in the background. A user added to a group
-  gets the group's profile within that time. On Windows the groups are those
-  of the sign-in token, so the user must also sign out and back in. While the
+- **Group changes take time.** SSSD caches the account first (90 minutes by
+  default). The gateway then caches a user's directory facts for 15 minutes
+  from the user's first request and refreshes them in the background; the first
+  request after that still uses the old facts while the refresh runs. A user
+  added to a group gets the group's profile after all three. `guardrail profile
+  explain` asks the operating system directly, so it already shows the new
+  profile; its `cache:` line and a warning give the age of the facts requests
+  still use. Restart the gateway to drop its cache at once. On Windows the
+  groups are those of the sign-in token, so the user must also sign out and
+  back in. While the
   directory does not answer, the gateway keeps using a user's last facts until
   a lookup succeeds again.
 

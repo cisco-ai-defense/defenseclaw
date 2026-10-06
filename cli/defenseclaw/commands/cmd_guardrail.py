@@ -4504,6 +4504,12 @@ def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
     click.echo()
 
 
+def _age_text(seconds) -> str:
+    """A short age such as ``45s`` or ``7m``."""
+    seconds = int(seconds or 0)
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
+
+
 # How long explain waits for the gateway. The gateway looks the user up in the
 # directory before it answers, and that lookup is bounded at 20 s (and the
 # account lookup before it at 10 s), so the client waits longer than both.
@@ -4581,6 +4587,15 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         click.echo(f"  match:   {reason}")
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
+    cache = result.get("cache") or {}
+    if cache:
+        age = int(cache.get("age_seconds") or 0)
+        lifetime = age + int(cache.get("refresh_after_seconds") or 0)
+        click.echo(
+            f"  cache:   requests use directory facts {_age_text(age)} old "
+            f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')}); "
+            f"the gateway refreshes them after {_age_text(lifetime)}"
+        )
     if result.get("lookup_error"):
         ux.warn(f"user lookup failed: {result['lookup_error']}")
     for note in result.get("warnings") or []:

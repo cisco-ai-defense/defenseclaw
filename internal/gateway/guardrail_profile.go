@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -1024,7 +1025,16 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["matched_group"] = decision.MatchedGroup
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
-	if warnings := profileExplainWarnings(set, decision, subject); len(warnings) > 0 {
+	warnings := profileExplainWarnings(set, decision, subject)
+	if source == profileSubjectLookup {
+		if view, warning := explainCacheView(set, subject, decision, connectorName, agent, time.Now()); view != nil {
+			out["cache"] = view
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+	}
+	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
 	effective := set.base

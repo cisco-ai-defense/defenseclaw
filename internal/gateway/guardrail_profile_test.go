@@ -441,3 +441,37 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		t.Fatalf("warnings = %q after the pass finished, want 2", late)
 	}
 }
+
+// TestExplainShowsTheProfileRequestsStillGet pins GAP-0134: explain resolves
+// the account's fresh groups, but requests keep the gateway's cached facts
+// for up to 15 minutes, so explain reports their age and the profile they
+// still get when it differs.
+func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
+	set := &guardrailProfileSet{
+		profiles:       map[string]config.DerivedGuardrailProfile{"ml": {Digest: "d1"}, "watch": {Digest: "d2"}},
+		assignments:    []config.ProfileAssignment{{Profile: "ml", Match: config.ProfileMatch{Groups: []string{"dc-ml-team@dclab.test"}}}},
+		defaultProfile: "watch",
+	}
+	explained := &profileSubject{UserID: "1201", Groups: []string{"dc-ml-team@dclab.test"}}
+	decision := set.match(explained, profileSubjectLookup, "", "")
+	now := time.Now()
+	prev := cachedDirectoryFacts
+	t.Cleanup(func() { cachedDirectoryFacts = prev })
+	cached := useridentity.DirectoryFacts{Groups: []string{"dc-devs@dclab.test"}, ResolvedAt: now}
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) {
+		return cached, now.Add(-7 * time.Minute), true
+	}
+	view, warning := explainCacheView(set, explained, decision, "", "", now)
+	if view["age_seconds"] != 420 || view["refresh_after_seconds"] != 480 || view["profile"] != "watch" || view["differs"] != true ||
+		!strings.Contains(warning, "7m0s ago") || !strings.Contains(warning, "within 8m0s") {
+		t.Fatalf("view = %v, warning = %q; want 7 minute old facts that still give watch", view, warning)
+	}
+	cached.Groups = []string{"dc-ml-team@dclab.test"}
+	if view, warning := explainCacheView(set, explained, decision, "", "", now); view["differs"] != false || warning != "" {
+		t.Fatalf("view = %v, warning = %q; cached facts that agree must not warn", view, warning)
+	}
+	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) { return cached, time.Time{}, false }
+	if view, _ := explainCacheView(set, explained, decision, "", "", now); view != nil {
+		t.Fatalf("view = %v for an account nothing is cached for", view)
+	}
+}
