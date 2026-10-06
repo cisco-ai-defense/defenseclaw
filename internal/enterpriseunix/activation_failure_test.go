@@ -5,6 +5,7 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,8 +59,12 @@ func TestLinuxGatewayRefusingTheConfigIsNamedByEveryResult(t *testing.T) {
 	const refusal = `sidecar: init: global rule pack "acme": digest sha256:aaaa does not match guardrail.custom_packs.acme.digest`
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	// An older gateway prints its token, masked, in the start banner; the
+	// service restarts and prints the error again.
+	banner := "╔════╗\n║  DefenseClaw Gateway Sidecar  ║\n╚════╝\n  Gateway:      none\n  Auth:         abcd...wxyz\n  API port:     18970\n  Guardrail:    port=4000 mode=observe\n"
+	journal := "starting\n" + banner + "Error: " + refusal + "\nMain process exited\n" + banner + "Error: " + refusal + "\nMain process exited\n"
 	h.runner.replies = map[string]fakeReply{
-		"journalctl --unit " + unitGateway + " --lines 40 --no-pager --output cat": {result: CommandResult{Stdout: []byte("starting\nError: " + refusal + "\n")}},
+		"journalctl --unit " + unitGateway + " --lines 40 --no-pager --output cat": {result: CommandResult{Stdout: []byte(journal)}},
 		binGateway + " policy digest --json":                                       {result: CommandResult{ExitCode: 1, Stderr: []byte("[sidecar] OPA policy unavailable\nError: policy digest: " + refusal + "\n")}, err: errors.New("exit 1")},
 	}
 	h.services.failStart[unitGateway] = errors.New("systemctl start: exit 1: see journalctl -xeu")
@@ -74,6 +79,22 @@ func TestLinuxGatewayRefusingTheConfigIsNamedByEveryResult(t *testing.T) {
 	if got := messagesOf(r.Errors, codeActivate); !strings.Contains(got, "Error: "+refusal) || !strings.Contains(got, "ensure --config") || !strings.Contains(got, "repair applies the same configuration again") {
 		t.Fatalf("activation error lacks the gateway journal or the fix: %q", got)
 	}
+	activate := messagesOf(r.Errors, codeActivate)
+	kept, err := os.ReadFile(h.env.activationFailurePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{"activation error": activate, "kept output": string(kept)} {
+		if strings.Contains(text, "abcd...wxyz") || strings.Contains(text, "Sidecar") || strings.Contains(text, "API port") {
+			t.Fatalf("%s carries the gateway start banner: %q", name, text)
+		}
+	}
+	if got := strings.Count(activate, "Error: "+refusal); got != 1 {
+		t.Fatalf("activation error lists the repeated gateway error %d times: %q", got, activate)
+	}
+	if got := messagesOf(r.Errors, codeRollbackFailed); !strings.Contains(got, "gateway refuses the configuration the same way") {
+		t.Fatalf("rollback error wording: %q", got)
+	}
 	status := h.run(Options{Action: ActionStatus})
 	if got := messagesOf(status.Errors, codeConfigRefused); !strings.Contains(got, refusal) {
 		t.Fatalf("status does not name the refusal: %+v", status.Errors)
@@ -84,7 +105,7 @@ func TestGatewayOutputExcerptIsBounded(t *testing.T) {
 	long := strings.Repeat("x", 1000)
 	lines := []string{}
 	for i := 0; i < 50; i++ {
-		lines = append(lines, long)
+		lines = append(lines, fmt.Sprintf("%d%s", i, long))
 	}
 	excerpt := gatewayOutputExcerpt(strings.Join(lines, "\n"))
 	if got := strings.Count(excerpt, " | ") + 1; got != gatewayExcerptLines {

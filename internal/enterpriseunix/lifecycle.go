@@ -1042,7 +1042,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if err != nil {
 			message := err.Error()
 			if refusal := l.configRefusal(ctx); refusal != "" {
-				message += "; the restored deployment's gateway is refused the same way: " + refusal
+				message += "; the restored deployment's gateway refuses the configuration the same way: " + refusal
 			}
 			r.AddError(codeRollbackFailed, message)
 		} else {
