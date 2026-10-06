@@ -58,3 +58,30 @@ func TestMigrateManagedStandaloneConfig(t *testing.T) {
 		t.Fatalf("an unchanged config advanced the generation to %d", again.Generation)
 	}
 }
+
+// A destination key kept only in the data directory's .env resolves while the
+// migrated document is validated (GAP-0035).
+func TestConfigMigrateResolvesCredentialsFromDotEnv(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	t.Setenv("P0_MIGRATE_DEST_KEY", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	v8 := "config_version: 8\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"    - name: remote\n      kind: otlp\n      endpoint: https://otel.example.test\n" +
+		"      headers:\n        Authorization: {env: P0_MIGRATE_DEST_KEY}\n"
+	if err := os.WriteFile(path, []byte(v8), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("P0_MIGRATE_DEST_KEY=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := configMigrateV9Input(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.DryRun = true
+	if _, err := config.MigrateV9(context.Background(), input); err != nil {
+		t.Fatalf("dry-run migration with the key in .env: %v", err)
+	}
+}

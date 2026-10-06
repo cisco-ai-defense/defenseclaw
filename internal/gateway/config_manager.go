@@ -853,6 +853,12 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 		if current := m.Current(); current != nil {
 			defaultDataDir = current.DataDir
 		}
+		if defaultDataDir != "" {
+			// A destination key added to .env after the gateway started (by
+			// `setup galileo --persist-api-key` or `keys set`) must resolve
+			// when the config that references it reloads (GAP-0017).
+			config.LoadDotEnv(filepath.Join(defaultDataDir, ".env"))
+		}
 		compiled, compileErr := config.ParseCompileObservabilityV8(
 			m.path,
 			before.raw,

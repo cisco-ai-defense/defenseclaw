@@ -33,6 +33,13 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if lookupErr != nil {
 		return useridentity.DirectoryFacts{}, lookupErr
 	}
+	// Groups that could not be listed fail the lookup: facts cached as
+	// resolved without them would select the default profile as "default"
+	// for 15 minutes instead of "default_lookup_failed".
+	groups, err := accountGroups(account)
+	if err != nil {
+		return useridentity.DirectoryFacts{}, err
+	}
 	return useridentity.DirectoryFacts{
 		Directory:  useridentity.DirectoryLocal,
 		Source:     useridentity.SourceMacOSOpenDirectory,

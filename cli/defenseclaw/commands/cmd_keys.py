@@ -96,6 +96,24 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
         _render_unregistered(app, statuses)
 
 
+def _emit_gateway_restart_hint(cfg, env_name: str) -> None:
+    """Say a running gateway needs a restart to see a changed ``.env`` value (GAP-0016).
+
+    The gateway reads ``.env`` once, at start, so a rotated judge, LLM or
+    destination key keeps its old value until the gateway restarts.
+    """
+    import os
+
+    from defenseclaw.process_liveness import pid_file_alive
+
+    if pid_file_alive(os.path.join(cfg.data_dir, "gateway.pid")):
+        ux.subhead(
+            f"The running gateway keeps the {env_name} it loaded at start; "
+            "apply the change with: defenseclaw-gateway restart",
+            indent="    ",
+        )
+
+
 def _gateway_token_names(cfg) -> set[str]:
     """Env names that hold DefenseClaw's own gateway auth token."""
     names = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
@@ -246,6 +264,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     # One path style: keys remove prints os.path.join too (GAP-1297).
     ux.ok(f"Saved {env_name} = {mask(value)} to {dotenv_path}", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
+    _emit_gateway_restart_hint(app.cfg, env_name)
 
 
 @keys_cmd.command("remove")
@@ -312,6 +331,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
                 err=True,
             )
     ux.ok(f"Removed {env_name} from {dotenv_path}", indent="  ")
+    _emit_gateway_restart_hint(app.cfg, env_name)
     if shell_value and not from_dotenv:
         ux.subhead(f"{env_name} is still exported in this shell; unset it there too.", indent="    ")
 

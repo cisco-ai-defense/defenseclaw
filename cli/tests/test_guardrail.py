@@ -1264,10 +1264,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertNotIn("privacy", raw)
-        self.assertEqual(
-            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
+        # A fresh config is config_version 9: the preset is named, not a directory.
+        self.assertEqual(raw["guardrail"]["rule_pack"], "strict")
+        self.assertNotIn("rule_pack_dir", raw["guardrail"])
 
     def test_yes_alias_updates_rule_pack(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1291,10 +1290,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
-        self.assertEqual(
-            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
+        # A fresh config is config_version 9: the preset is named, not a directory.
+        self.assertEqual(raw["guardrail"]["rule_pack"], "strict")
+        self.assertNotIn("rule_pack_dir", raw["guardrail"])
 
     def test_unscoped_rule_pack_updates_global_for_all_connectors(self):
         from defenseclaw.commands.cmd_setup import setup

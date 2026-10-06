@@ -118,6 +118,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		return nil, fmt.Errorf("generation: %w", err)
 	}
 	g.Components["config"] = configComponent
+	if digest := observabilityDigest(cfg, in.raw); digest != "" {
+		g.Components["observability"] = digest
+	}
 	if digest, err := config.GuardrailPolicyDigest(cfg); err == nil {
 		g.Components["guardrail_policy"] = digest
 	}
@@ -251,8 +254,9 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 		addPack(custom.Path)
 	}
 	if g.Profiles != nil {
+		tuned := profileConnectorNames(cfg)
 		for _, derived := range g.Profiles.profiles {
-			for _, scope := range profileRulePackScopes(derived.Config) {
+			for _, scope := range profileRulePackScopes(derived.Config, tuned) {
 				addPack(scope.dir)
 			}
 		}

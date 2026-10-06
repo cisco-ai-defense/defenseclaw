@@ -147,6 +147,9 @@ type lifecycle struct {
 	// serviceAccountKept is set when an uninstall could not delete the
 	// service account (macOS can deny the directory-record delete).
 	serviceAccountKept bool
+	// gatewayKeptRunning is set when the gateway applied a config change
+	// itself (hotConfigApply) and was not restarted.
+	gatewayKeptRunning bool
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -1054,7 +1057,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
-	l.quiesce(ctx, units, l.keepRunningDuringChange(p))
+	keep := l.keepRunningDuringChange(p)
+	hot := l.hotConfigApply(ctx, record, p, adopting)
+	if gateway, ok := gatewayUnitOf(units); hot && ok {
+		keep[gateway.Name] = true
+	}
+	l.quiesce(ctx, units, keep)
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -1108,7 +1116,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	_ = env.savePending(pending)
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
-		if err := l.activate(ctx, units, restartSockets); err != nil {
+		if err := l.activate(ctx, units, restartSockets, hot); err != nil {
 			// A readiness failure on the API port already names the holder.
 			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
 				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
@@ -1128,7 +1136,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			switch {
 			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
-			case changesApplied && unit.Kind == "gateway":
+			case changesApplied && unit.Kind == "gateway" && !l.gatewayKeptRunning:
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
@@ -1472,8 +1480,9 @@ func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, chang
 // gateway to report healthy. A running socket keeps its listener (queued
 // hooks survive the change) unless its definition changed; a changed one is
 // restarted in one service-manager job, so the port is unbound only for
-// the moment the listener is replaced.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool) error {
+// the moment the listener is replaced. With hot, a gateway that kept running
+// is not started again: it is waited for until it has applied the config.
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
@@ -1503,6 +1512,12 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			}
 			if err := restartUnit(ctx, env.Services, unit); err != nil {
 				return fmt.Errorf("restart %s: %w", unit.Name, err)
+			}
+			continue
+		}
+		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {
+			if err := l.settleHotGateway(ctx, unit); err != nil {
+				return err
 			}
 			continue
 		}
