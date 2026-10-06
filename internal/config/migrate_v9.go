@@ -43,8 +43,10 @@ import (
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
 // admission and guardrail values, the *_actions keys,
 // watch.allow_list_bypass_scan, rule_pack_dir, the v8 scanner keys,
-// update_check and (OSS only) the operator block/allow rows of audit.db and a
-// legacy custom-providers.json overlay.
+// update_check, the reserved privacy: section and (OSS only) the operator
+// block/allow rows of audit.db and a legacy custom-providers.json overlay.
+// The runtime Config has no field for any of those keys; the migration reads
+// them from the raw YAML.
 // It is the one implementation: `defenseclaw-gateway config migrate --to 9`,
 // the Python CONFIG_MIGRATIONS[8] step and enterprise ensure all call it,
 // and the gateway runs it in memory (read-only) on a v8 file at load.
@@ -439,6 +441,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		}
 	}
 	m.migrateTelemetryAliases(root)
+	m.migratePrivacy(root)
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
@@ -885,9 +888,10 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	// The v8 keys enforcement never read: removed, with a conflict when an
 	// operator customised them away from what was enforced.
 	legacy := map[string]map[string]SeverityAction{}
-	for key, assetType := range map[string]string{
-		"skill_actions": AdmissionTypeSkill, "mcp_actions": AdmissionTypeMCP, "plugin_actions": AdmissionTypePlugin,
+	for _, item := range []struct{ key, assetType string }{
+		{"skill_actions", AdmissionTypeSkill}, {"mcp_actions", AdmissionTypeMCP}, {"plugin_actions", AdmissionTypePlugin},
 	} {
+		key, assetType := item.key, item.assetType
 		node := v9Pop(root, key)
 		if node == nil {
 			continue
@@ -1030,22 +1034,35 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	}
 }
 
+// migratePrivacy drops the reserved privacy: section, which config_version 9
+// does not have. A v8 loader refused privacy.disable_redaction, so it was
+// never applied; a true value is reported, and redaction stays as
+// observability.redaction_profiles sets it.
+func (m *v9Migrator) migratePrivacy(root *yaml.Node) {
+	section := v9Pop(root, "privacy")
+	if section == nil {
+		return
+	}
+	if section.Kind != yaml.MappingNode || len(section.Content) == 0 {
+		m.record.Removed = append(m.record.Removed, "privacy")
+		return
+	}
+	for index := 0; index+1 < len(section.Content); index += 2 {
+		key := section.Content[index].Value
+		m.record.Removed = append(m.record.Removed, "privacy."+key)
+		var disabled bool
+		if key == "disable_redaction" && section.Content[index+1].Decode(&disabled) == nil && disabled {
+			m.note("privacy.disable_redaction: true was dropped: no config_version 8 or 9 runtime applies it; " +
+				"redaction follows observability.redaction_profiles (set a destination's redaction_profile to none to send unredacted data)")
+		}
+	}
+}
+
 // legacyActionConflicts records a conflict for every severity an operator
 // customised in a *_actions key away from what was enforced (source names
 // where that came from, read says it in a sentence).
 func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[string]SeverityAction, source, read string) {
-	defaults := map[string]SeverityAction{}
-	switch assetType {
-	case AdmissionTypeSkill:
-		d := DefaultSkillActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	case AdmissionTypeMCP:
-		d := DefaultMCPActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	case AdmissionTypePlugin:
-		d := DefaultPluginActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	}
+	defaults := v9LegacyActionDefaults(assetType)
 	for _, severity := range v9Severities {
 		lower := strings.ToLower(severity)
 		value, ok := old[lower]
@@ -1062,6 +1079,19 @@ func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[
 			Reason: "enforcement read " + read + "; " + assetType + "_actions only filled unknown severities",
 		})
 	}
+}
+
+// v9LegacyActionDefaults are the 0.8.x defaults of a *_actions key: a value
+// equal to its default was never customised. Only MCP servers blocked
+// install at CRITICAL and HIGH.
+func v9LegacyActionDefaults(assetType string) map[string]SeverityAction {
+	none := SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone}
+	block := SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallBlock}
+	defaults := map[string]SeverityAction{"critical": none, "high": none, "medium": none, "low": none, "info": none}
+	if assetType == AdmissionTypeMCP {
+		defaults["critical"], defaults["high"] = block, block
+	}
+	return defaults
 }
 
 func v9NormalAction(a SeverityAction) SeverityAction {

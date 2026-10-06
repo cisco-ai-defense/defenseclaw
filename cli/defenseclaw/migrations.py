@@ -3390,8 +3390,9 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
     The one implementation is Go (``defenseclaw-gateway config migrate --to
     9``, ``internal/config/migrate_v9.go``): it moves data.json admission and
     guardrail values, the *_actions keys, rule_pack_dir, the v8 scanner keys,
-    update_check and the operator block/allow rows of audit.db into
-    config.yaml, keeps ``config.yaml.v8.bak`` and writes ``migration-v9.json``.
+    update_check, a leftover privacy section and the operator block/allow
+    rows of audit.db into config.yaml, keeps ``config.yaml.v8.bak`` and
+    writes ``migration-v9.json``.
     """
     from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
 

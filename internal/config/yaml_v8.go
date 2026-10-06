@@ -324,12 +324,6 @@ func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
 			return v8YAMLLegacyError(source, v8YAMLChildPath("$", legacy.key), node, legacy.target)
 		}
 	}
-	if privacy := v8YAMLMapValue(root, "privacy"); privacy != nil && privacy.Kind == yaml.MappingNode {
-		if node := v8YAMLMapValue(privacy, "disable_redaction"); node != nil {
-			return v8YAMLLegacyError(source, "$.privacy.disable_redaction", node,
-				"observability defaults, bucket policies, and destination routes")
-		}
-	}
 	if discovery := v8YAMLMapValue(root, "ai_discovery"); discovery != nil && discovery.Kind == yaml.MappingNode {
 		if node := v8YAMLMapValue(discovery, "emit_otel"); node != nil {
 			return v8YAMLLegacyError(source, "$.ai_discovery.emit_otel", node,
@@ -369,16 +363,6 @@ func rejectV9RemovedKeys(source string, root *yaml.Node) error {
 	var number int64
 	if version == nil || version.Decode(&number) != nil || number < ConfigVersionV9 {
 		return nil
-	}
-	for _, removed := range []struct{ key, target string }{
-		{"skill_actions", "admission.skill.actions"},
-		{"mcp_actions", "admission.mcp.actions"},
-		{"plugin_actions", "admission.plugin.actions"},
-		{"update_check", "update.check"},
-	} {
-		if node := v8YAMLMapValue(root, removed.key); node != nil {
-			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
-		}
 	}
 	if node := v8YAMLMapValue(v8YAMLMapValue(root, "watch"), "allow_list_bypass_scan"); node != nil {
 		return v9RemovedKeyError(source, "$.watch.allow_list_bypass_scan", node,

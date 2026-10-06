@@ -57,7 +57,7 @@ var configMigrateCmd = &cobra.Command{
 	Use:   "migrate",
 	Short: "Migrate config.yaml to config_version 9 (data.json, *_actions and audit.db block lists move into config)",
 	Long: "Moves the admission policy from policies/rego/data.json, the skill/mcp/plugin_actions keys, " +
-		"rule_pack_dir, the v8 scanner keys, update_check and (on a per-user install) the operator " +
+		"rule_pack_dir, the v8 scanner keys, update_check, a leftover privacy section and (on a per-user install) the operator " +
 		"block/allow entries of audit.db into config.yaml. It keeps config.yaml.v8.bak and writes " +
 		"migration-v9.json with every value moved and every conflict. --dry-run changes nothing.",
 	Args:         cobra.NoArgs,
@@ -105,8 +105,9 @@ func init() {
 }
 
 // configMigrateV9Input resolves the data.json and audit.db inputs of the
-// config at path. A v8 file the runtime loader refuses (update_check is not
-// in the v8 schema) falls back to the document's own path keys.
+// config at path. A v8 file the runtime loader refuses (it still carries a key
+// the runtime no longer knows, such as update_check or skill_actions) falls
+// back to the document's own path keys.
 func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {

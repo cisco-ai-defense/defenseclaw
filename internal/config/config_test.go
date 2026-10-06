@@ -405,37 +405,6 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	}
 }
 
-func TestValidate_ValidConfig(t *testing.T) {
-	sa := DefaultSkillActions()
-	if err := sa.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestValidate_InvalidRuntime(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.Critical.Runtime = "invalid"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid runtime")
-	}
-}
-
-func TestValidate_InvalidFile(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.High.File = "delete"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid file action")
-	}
-}
-
-func TestValidate_InvalidInstall(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.Medium.Install = "reject"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid install action")
-	}
-}
-
 func TestValidateDeploymentMode_EmptyAllowed(t *testing.T) {
 	if err := validateDeploymentMode(""); err != nil {
 		t.Fatalf("validateDeploymentMode(empty) returned unexpected error: %v", err)
@@ -943,29 +912,6 @@ func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
 	}
 	if !stringSliceContains(dirs, filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills")) {
 		t.Fatalf("OpenHands skill dirs = %v, want user public skills cache", dirs)
-	}
-}
-
-func TestPluginActionsValidate(t *testing.T) {
-	pa := DefaultPluginActions()
-	if err := pa.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestPluginActionsValidateInvalid(t *testing.T) {
-	pa := DefaultPluginActions()
-	pa.Critical.Runtime = "invalid"
-	if err := pa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid runtime")
-	}
-}
-
-func TestDefaultConfigPluginActions(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.PluginActions.Critical.Install != InstallNone {
-		t.Errorf("DefaultConfig().PluginActions.Critical.Install = %q, want %q",
-			cfg.PluginActions.Critical.Install, InstallNone)
 	}
 }
 
