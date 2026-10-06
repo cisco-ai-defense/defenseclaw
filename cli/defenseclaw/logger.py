@@ -453,6 +453,14 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "the gateway could not record it in time, likely because its audit database is busy "
             "or slow; gateway.log has the cause. Try again in a minute"
         )
+    if status == 400:
+        # GAP-0070: the gateway named the fixed reason (never payload text); a 400 is not a busy gateway.
+        reason = _gateway_rejection_reason(exc)
+        detail = f" ({reason})" if reason else ""
+        return (
+            f"the gateway rejected it as an invalid request{detail}; "
+            "the CLI and the gateway may be different versions, check 'defenseclaw doctor'"
+        )
     if isinstance(status, int) and status >= 500:
         # GAP-2381: a 5xx is not always a busy database; the gateway logs the cause.
         return (
@@ -460,6 +468,14 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "If it names a busy or locked audit database, try again in a minute"
         )
     return "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
+
+
+def _gateway_rejection_reason(exc: BaseException) -> str:
+    try:
+        reason = exc.response.json().get("reason", "")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        return ""
+    return reason if isinstance(reason, str) and len(reason) <= 80 else ""
 
 
 # Fields the gateway's canonical scan ingress accepts for one finding

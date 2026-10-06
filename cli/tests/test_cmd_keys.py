@@ -245,6 +245,18 @@ class KeysSetTests(unittest.TestCase):
             self.assertIn("DEFENSECLAW_TEST_KEY = …wxyz", result.output)
             self.assertNotIn("abcd", result.output)
 
+    def test_set_tells_a_running_gateway_to_restart(self):
+        # GAP-0016: a rotated key keeps its old value in the running gateway.
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            for alive, expected in ((True, True), (False, False)):
+                with patch("defenseclaw.process_liveness.pid_file_alive", return_value=alive):
+                    result = CliRunner().invoke(
+                        keys_cmd, ["set", "DEFENSECLAW_TEST_KEY", "--value", "s3cret"], obj=app,
+                    )
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual("defenseclaw-gateway restart" in result.output, expected, msg=result.output)
+
     def test_set_rejects_empty_value(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = _make_app_context(tmp)

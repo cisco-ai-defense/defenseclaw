@@ -155,6 +155,13 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		input.DataJSONPath = filepath.Join(policyDir, "rego", "data.json")
 	}
 	input.AuditDBPath = auditDB
+	// The migrated document is validated the way the gateway loads it, with
+	// the credentials of the data directory's .env: a destination key stored
+	// there by `defenseclaw keys set` (the normal layout) must resolve
+	// (GAP-0035).
+	if input.DataDir != "" {
+		loadDotEnvIntoOS(filepath.Join(input.DataDir, ".env"))
+	}
 	return input, nil
 }
 

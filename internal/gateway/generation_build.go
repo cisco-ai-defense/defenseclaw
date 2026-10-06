@@ -118,6 +118,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		return nil, fmt.Errorf("generation: %w", err)
 	}
 	g.Components["config"] = configComponent
+	if digest := observabilityDigest(cfg, in.raw); digest != "" {
+		g.Components["observability"] = digest
+	}
 	if digest, err := config.GuardrailPolicyDigest(cfg); err == nil {
 		g.Components["guardrail_policy"] = digest
 	}

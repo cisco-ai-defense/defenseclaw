@@ -511,6 +511,8 @@ class TestSkillScannerWrapper(unittest.TestCase):
         # because upstream's enum expects ``aws-bedrock`` and would
         # reject ``bedrock`` on the model-less path.
         self.assertNotIn("llm_provider", kwargs)
+        # GAP-0047: the result says which policy and judge model it ran with.
+        self.assertEqual(result.settings, {"policy": "quiet", "judge": "bedrock/us.anthropic.claude-haiku"})
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
     def test_scan_uses_llm_analyzer_for_gemini(self, mock_convert):
