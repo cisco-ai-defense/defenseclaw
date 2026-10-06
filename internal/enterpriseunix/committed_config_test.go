@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,33 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 			t.Fatalf("the applied config copy was not updated: %v", err)
 		}
 	})
+}
+
+// Configuration management that enforces the administrator's v8 file in
+// place puts it back after the upgrade migrated it. ensure keeps those bytes
+// instead of migrating them again on every run, which would loop with the
+// tool.
+func TestReassertedV8ConfigIsNotRewritten(t *testing.T) {
+	h := newTestHost(t, "linux")
+	v8 := v8AdminConfig(h.env.Layout)
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfg, []byte(v8), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
+	if !strings.Contains(h.read(h.env.Layout.ConfigPath), "config_version: 9") {
+		t.Fatal("the v8 admin config was not migrated on install")
+	}
+	if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(v8), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+	if got := h.read(h.env.Layout.ConfigPath); got != v8 {
+		t.Fatalf("the re-asserted v8 config was rewritten:\n%s", got)
+	}
+	if r := h.run(Options{Action: ActionEnsure, Reason: "path"}); !r.Noop {
+		t.Fatalf("the kept v8 config does not settle: %+v", r.Changes)
+	}
 }
 
 func hasMessage(messages []enterprisestatus.Message, substring string) bool {

@@ -298,16 +298,25 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 // installed config uses it, so the same v8 file is not drift once the
 // upgrade migrated it.
 func MigratedFrom(configPath, sourceSHA256, installedSHA256 string) bool {
-	raw, err := os.ReadFile(MigrationRecordPath(configPath))
-	if err != nil {
-		return false
-	}
-	var record MigrationRecord
-	if err := json.Unmarshal(raw, &record); err != nil {
-		return false
-	}
-	return record.SourceSHA256 != "" && strings.EqualFold(record.SourceSHA256, sourceSHA256) &&
+	record, ok := readMigrationRecord(configPath)
+	return ok && strings.EqualFold(record.SourceSHA256, sourceSHA256) &&
 		strings.EqualFold(record.ResultSHA256, installedSHA256)
+}
+
+// MigratedSource reports whether migration-v9.json next to configPath
+// records sourceSHA256 (hex) as the v8 input it migrated.
+func MigratedSource(configPath, sourceSHA256 string) bool {
+	record, ok := readMigrationRecord(configPath)
+	return ok && strings.EqualFold(record.SourceSHA256, sourceSHA256)
+}
+
+func readMigrationRecord(configPath string) (MigrationRecord, bool) {
+	var record MigrationRecord
+	raw, err := os.ReadFile(MigrationRecordPath(configPath))
+	if err != nil || json.Unmarshal(raw, &record) != nil {
+		return MigrationRecord{}, false
+	}
+	return record, record.SourceSHA256 != ""
 }
 
 // AcknowledgeMigrationV9 marks migration-v9.json next to configPath as read

@@ -732,13 +732,22 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err := env.checkRulePacksReadable(v9, account); err != nil {
 			return nil, &codedError{code: codeConfig, err: err}
 		}
-		v9.Migration = &configMigration{
-			Source: append([]byte(nil), raw...), Record: migrated.Record,
-			EnvKey: migrated.EnvKey, EnvValue: migrated.EnvValue,
+		if fromInstalled && config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
+			// Configuration management put back the v8 file this host
+			// already migrated. Rewriting it again would fight that tool on
+			// every run, so its bytes stay, as for any in-place edit (the
+			// gateway migrates a v8 file in memory), and only the v9 checks
+			// apply.
+			v9.Raw, v9.SHA = validated.Raw, validated.SHA
+		} else {
+			v9.Migration = &configMigration{
+				Source: append([]byte(nil), raw...), Record: migrated.Record,
+				EnvKey: migrated.EnvKey, EnvValue: migrated.EnvValue,
+			}
+			// The migrated bytes replace the installed v8 file.
+			fromInstalled = false
 		}
 		validated = v9
-		// The migrated bytes replace the installed v8 file.
-		fromInstalled = false
 	}
 	p.configFromInstalled = fromInstalled
 	p.config = validated
