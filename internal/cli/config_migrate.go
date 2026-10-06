@@ -28,6 +28,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -157,6 +158,46 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 	}
 	input.AuditDBPath = auditDB
 	return input, nil
+}
+
+// migrateManagedStandaloneConfig is the Windows standalone lifecycle's
+// config step (the Unix lifecycle does the same inside its transaction): a
+// config_version 8 administrator config installed by Setup is migrated to 9
+// in place (config.yaml.v8.bak, migration-v9.json, actor lifecycle), and an
+// installed config the writer has not recorded gets its
+// config.generation.json entry. The caller has already pinned the managed
+// standalone environment.
+func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	restoreACL, err := keepConfigDACL(path)
+	if err != nil {
+		return fmt.Errorf("read the access control list of %s: %w", path, err)
+	}
+	written := []string{configwrite.GenerationPath(path)}
+	if config.NeedsMigrationV9(raw) {
+		input, err := configMigrateV9Input(path)
+		if err != nil {
+			return err
+		}
+		input.Managed = true
+		result, err := config.MigrateV9(ctx, input)
+		if err != nil {
+			return fmt.Errorf("migrate %s to config_version 9: %w", path, err)
+		}
+		return restoreACL(append(written, result.Written...)...)
+	}
+	if state, err := configwrite.ReadGenerationState(path); err == nil && state.ConfigSHA256 == configwrite.SHA256Hex(raw) {
+		return nil
+	}
+	if _, err := configwrite.Locked(ctx, path, configwrite.Options{
+		Actor: configwrite.ActorLifecycle, Reason: "enterprise windows ensure",
+	}, func() (bool, error) { return true, nil }); err != nil {
+		return err
+	}
+	return restoreACL(written...)
 }
 
 func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result) error {

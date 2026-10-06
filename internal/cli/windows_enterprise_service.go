@@ -1611,6 +1611,11 @@ func validateWindowsServiceConfig(
 			)
 		}
 		report.Profile = managed.ProfileStandalone
+		// A config_version 8 administrator config becomes 9 here, and the
+		// installed config is recorded in config.generation.json.
+		if err := migrateManagedStandaloneConfig(context.Background(), configPath); err != nil {
+			return windowsServiceConfigValidation{}, err
+		}
 		// The gateway service compiles this file strictly at start; prove
 		// it can before the lifecycle starts it. Secure Client
 		// keeps its historical validation.
