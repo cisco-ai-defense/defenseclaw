@@ -33,6 +33,10 @@ type AssetPolicyConfig struct {
 	MCP     AssetTypePolicy `mapstructure:"mcp"     yaml:"mcp"`
 	Skill   AssetTypePolicy `mapstructure:"skill"   yaml:"skill"`
 	Plugin  AssetTypePolicy `mapstructure:"plugin"  yaml:"plugin"`
+	// Tool holds the operator tool block/allow lists (config_version 9),
+	// which replace the audit.db actions rows for target_type tool. A
+	// rule's Connector scopes it to one connector; empty matches every one.
+	Tool AssetToolPolicy `mapstructure:"tool" yaml:"tool,omitempty"`
 	// Connectors holds per-connector asset_policy overrides keyed by
 	// connector name (OTHER-7). An empty/absent map preserves the legacy
 	// global-only behavior. Only the scalar settings are per-connector;
@@ -107,6 +111,21 @@ type AssetPolicyRule struct {
 	ArgsPrefix         []string `mapstructure:"args_prefix"          yaml:"args_prefix,omitempty"`
 	Transport          string   `mapstructure:"transport"            yaml:"transport,omitempty"`
 	SourcePathContains []string `mapstructure:"source_path_contains" yaml:"source_path_contains,omitempty"`
+}
+
+// AssetToolPolicy is asset_policy.tool: explicit allowed and denied tool
+// rules. Like the other types' lists, they apply whatever Enabled and Mode
+// say.
+type AssetToolPolicy struct {
+	Allowed []AssetPolicyToolRule `mapstructure:"allowed" yaml:"allowed,omitempty"`
+	Denied  []AssetPolicyToolRule `mapstructure:"denied"  yaml:"denied,omitempty"`
+}
+
+// AssetPolicyToolRule names one tool, optionally for one connector.
+type AssetPolicyToolRule struct {
+	Name      string `mapstructure:"name"      yaml:"name"`
+	Connector string `mapstructure:"connector" yaml:"connector,omitempty"`
+	Reason    string `mapstructure:"reason"    yaml:"reason,omitempty"`
 }
 
 type AssetPolicyInput struct {

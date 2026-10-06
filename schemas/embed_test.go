@@ -337,6 +337,9 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"managed",
 		"enterprise",
 		"routing",
+		"admission",
+		"llm_providers",
+		"update",
 	}
 	if len(properties) != len(allowedTopLevel) {
 		t.Errorf("top-level property count = %d, want %d", len(properties), len(allowedTopLevel))
@@ -347,8 +350,8 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		}
 	}
 	version := schemaMap(t, properties, "config_version")
-	if got := version["const"]; got != float64(8) {
-		t.Fatalf("config_version const = %v, want 8", got)
+	if got, ok := version["enum"].([]any); !ok || len(got) != 2 || got[0] != float64(8) || got[1] != float64(9) {
+		t.Fatalf("config_version enum = %v, want [8 9]", version["enum"])
 	}
 	for _, legacy := range []string{"audit_db", "audit_sinks", "judge_bodies_db", "otel", "splunk"} {
 		if _, ok := properties[legacy]; ok {

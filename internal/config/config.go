@@ -268,6 +268,11 @@ type Config struct {
 	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
 	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
 
+	// LLMProviders declares custom LLM providers (config_version 9). It is
+	// the input custom-providers.json is derived from. Decoded from the
+	// source bytes, not viper, so map keys keep their case.
+	LLMProviders LLMProvidersConfig `mapstructure:"-" yaml:"llm_providers,omitempty"`
+
 	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
 	// JudgeBodiesDB is the standalone SQLite file that holds
@@ -281,36 +286,43 @@ type Config struct {
 	// point this at a separate disk in high-throughput
 	// deployments. The legacy judge_responses rows in audit.db
 	// remain readable; new rows only ever land here.
-	JudgeBodiesDB   string                     `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
-	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment     string                     `mapstructure:"environment"      yaml:"environment"`
-	TenantID        string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
-	WorkspaceID     string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
-	DeploymentMode  string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
-	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
-	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
-	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
-	ACP             ACPConfig                  `mapstructure:"acp"              yaml:"acp,omitempty"`
-	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
-	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell       OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
-	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
-	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
-	CloudAuth       CloudAuthConfig            `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
-	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
-	Registries      RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
-	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
-	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
-	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
-	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
+	JudgeBodiesDB   string               `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
+	QuarantineDir   string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir       string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir       string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment     string               `mapstructure:"environment"      yaml:"environment"`
+	TenantID        string               `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
+	WorkspaceID     string               `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
+	DeploymentMode  string               `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
+	DiscoverySource string               `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
+	Claw            ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	Agent           AgentConfig          `mapstructure:"agent"            yaml:"agent,omitempty"`
+	ACP             ACPConfig            `mapstructure:"acp"              yaml:"acp,omitempty"`
+	InspectLLM      InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense  CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners        ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell       OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch           WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall        FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail       GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway         GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	CloudAuth       CloudAuthConfig      `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
+	// Admission is the install-time admission policy (config_version 9).
+	// It replaces policies/rego/data.json and the *_actions keys below.
+	// Decoded from the source bytes, not viper, because an action is either
+	// a shorthand string or an install/file/runtime triple.
+	Admission AdmissionConfig `mapstructure:"-" yaml:"admission,omitempty"`
+	// SkillActions, MCPActions and PluginActions are v8 keys: migration
+	// input for admission, rejected in a config_version 9 source.
+	SkillActions   SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions     MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions  PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	AssetPolicy    AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	Registries     RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
+	OTel           OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
+	ClaudeCode     AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex          AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
 	// AuditSinks preserves v7 decoder fidelity for the explicit upgrade path.
 	// Runtime-v8 loading clears it before any service is constructed; canonical
 	// export ownership lives in observability.destinations/routes.
@@ -333,6 +345,8 @@ type Config struct {
 	// standalone) and tunes the standalone profile. See enterprise.go.
 	Enterprise EnterpriseConfig `mapstructure:"enterprise" yaml:"enterprise,omitempty"`
 	Routing    RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+	// Update holds the self-update settings (config_version 9).
+	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -392,28 +406,11 @@ type RoutingRemoteConfig struct {
 // scope, custom redactor profiles) land here so operators have a
 // single section to audit.
 //
-// Scope: this is a deliberate, persistent operator decision.
-// Defaults match the existing redacting-by-default behavior so a
-// fresh install or a config without a `privacy:` block keeps the
-// historical contract documented in OBSERVABILITY.md.
-type PrivacyConfig struct {
-	// DisableRedaction, when true, instructs the sidecar to bypass
-	// every ForSink* redaction helper at startup — including
-	// persistent sinks (SQLite audit, OTel log exporters, Splunk
-	// HEC, webhooks). Equivalent to setting
-	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
-	// the choice survives restarts and TUI invocations without
-	// per-shell env-var ceremony.
-	//
-	// WARNING: this violates the unconditional-redaction contract
-	// documented in OBSERVABILITY.md. Only enable on single-tenant
-	// installs where every downstream sink already lives inside
-	// the same trust boundary (e.g. lab / prompt-engineering use).
-	// The CLI emits a loud warning on flip-on, and config loaders emit
-	// a once-per-process warning when they observe the setting so the
-	// runtime state stays auditable without spamming reload loops.
-	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
-}
+// PrivacyConfig is the reserved, empty privacy: section. Redaction is
+// controlled by observability.redaction_profiles; the v7 disable_redaction
+// switch is rejected by the v8 entrypoint (yaml_v8.go) and only the 0.x
+// migration reads it.
+type PrivacyConfig struct{}
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
 // supported connectors and broader "shadow AI" usage signals. Outbound
@@ -1481,8 +1478,10 @@ func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
 }
 
 type WatchConfig struct {
-	DebounceMs          int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
-	AutoBlock           bool `mapstructure:"auto_block"             yaml:"auto_block"`
+	DebounceMs int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
+	AutoBlock  bool `mapstructure:"auto_block"             yaml:"auto_block"`
+	// AllowListBypassScan has no reader; it is v8 migration input for
+	// admission.<type>.allow_list_bypass_scan and rejected in config_version 9.
 	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
 	RescanEnabled       bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
 	RescanIntervalMin   int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
@@ -1516,6 +1515,9 @@ func (c *InspectLLMConfig) ResolvedAPIKey() string {
 }
 
 type SkillScannerConfig struct {
+	// Binary, UseVirusTotal, UseAIDefense, VirusTotalKey and
+	// VirusTotalKeyEnv are v8 keys: migration input, rejected in a
+	// config_version 9 source (see Analyzers).
 	Binary        string `mapstructure:"binary"                 yaml:"binary"`
 	UseLLM        bool   `mapstructure:"use_llm"                yaml:"use_llm"`
 	UseBehavioral bool   `mapstructure:"use_behavioral"         yaml:"use_behavioral"`
@@ -1532,6 +1534,20 @@ type SkillScannerConfig struct {
 	LLM              LLMConfig `mapstructure:"llm"                    yaml:"llm,omitempty"`
 	VirusTotalKey    string    `mapstructure:"virustotal_api_key"     yaml:"virustotal_api_key"`
 	VirusTotalKeyEnv string    `mapstructure:"virustotal_api_key_env" yaml:"virustotal_api_key_env"`
+
+	// PolicyFile pins a custom scan policy by digest; required when Policy
+	// is "custom" (config_version 9).
+	PolicyFile AssetFileRef `mapstructure:"policy_file" yaml:"policy_file,omitempty"`
+	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
+	JudgeSource string `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
+	// FailOnSeverity is the blocking gate DefenseClaw applies to the JSON
+	// findings; it is never passed to the scanner. ReviewQueueMin starts
+	// the [ReviewQueueMin, FailOnSeverity) review (warn) band.
+	FailOnSeverity string `mapstructure:"fail_on_severity" yaml:"fail_on_severity,omitempty"`
+	ReviewQueueMin string `mapstructure:"review_queue_min" yaml:"review_queue_min,omitempty"`
+	// Analyzers holds the optional analyzers, all off by default.
+	Analyzers SkillScannerAnalyzers `mapstructure:"analyzers" yaml:"analyzers,omitempty"`
+	Timeouts  SkillScannerTimeouts  `mapstructure:"timeouts"  yaml:"timeouts,omitempty"`
 }
 
 // ResolvedVirusTotalKey returns the VirusTotal key from the env var (if set) or the direct value.
@@ -1545,13 +1561,29 @@ func (c *SkillScannerConfig) ResolvedVirusTotalKey() string {
 }
 
 type MCPScannerConfig struct {
-	Binary           string `mapstructure:"binary"            yaml:"binary"`
-	Analyzers        string `mapstructure:"analyzers"         yaml:"analyzers"`
-	ScanPrompts      bool   `mapstructure:"scan_prompts"      yaml:"scan_prompts"`
-	ScanResources    bool   `mapstructure:"scan_resources"    yaml:"scan_resources"`
-	ScanInstructions bool   `mapstructure:"scan_instructions" yaml:"scan_instructions"`
+	// Binary is a v8 key: migration input, rejected in config_version 9.
+	Binary string `mapstructure:"binary"            yaml:"binary"`
+	// Analyzers lists the analyzers to run; empty lets the scanner choose.
+	// A v8 source holds a comma-separated string, which the loader splits.
+	Analyzers        []string `mapstructure:"analyzers"         yaml:"analyzers"`
+	ScanPrompts      bool     `mapstructure:"scan_prompts"      yaml:"scan_prompts"`
+	ScanResources    bool     `mapstructure:"scan_resources"    yaml:"scan_resources"`
+	ScanInstructions bool     `mapstructure:"scan_instructions" yaml:"scan_instructions"`
 	// LLM overrides the top-level llm: block for the MCP scanner.
 	LLM LLMConfig `mapstructure:"llm"               yaml:"llm,omitempty"`
+
+	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
+	JudgeSource string                     `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
+	API         MCPScannerAPIConfig        `mapstructure:"api"          yaml:"api,omitempty"`
+	YARA        MCPScannerYARAConfig       `mapstructure:"yara"         yaml:"yara,omitempty"`
+	VirusTotal  MCPScannerVirusTotalConfig `mapstructure:"virustotal"   yaml:"virustotal,omitempty"`
+	Timeouts    MCPScannerTimeouts         `mapstructure:"timeouts"     yaml:"timeouts,omitempty"`
+}
+
+// AnalyzersArg renders Analyzers as the scanner's comma-separated
+// --analyzers value ("" lets the scanner choose).
+func (c MCPScannerConfig) AnalyzersArg() string {
+	return strings.Join(c.Analyzers, ",")
 }
 
 type ScannersConfig struct {
@@ -1685,12 +1717,26 @@ type GuardrailConfig struct {
 	// upstream model name the client will see rewritten onto outgoing
 	// requests (Bifrost model-routing). It is orthogonal to the
 	// LLM block.
-	OriginalModel     string      `mapstructure:"original_model"       yaml:"original_model,omitempty"`
-	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
-	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
-	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
-	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
-	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	OriginalModel     string `mapstructure:"original_model"       yaml:"original_model,omitempty"`
+	BlockMessage      string `mapstructure:"block_message"        yaml:"block_message"`
+	StreamBufferBytes int    `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	// RulePackDir is a v8 key: migration input for RulePack/CustomPacks,
+	// rejected in a config_version 9 source.
+	RulePackDir string `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
+	// RulePack names a built-in pack (default, strict, permissive) or a
+	// CustomPacks key; empty uses the default pack (config_version 9).
+	RulePack string `mapstructure:"rule_pack" yaml:"rule_pack,omitempty"`
+	// CustomPacks maps a pack name to its directory and pinned digest.
+	CustomPacks map[string]CustomRulePack `mapstructure:"custom_packs" yaml:"custom_packs,omitempty"`
+	// Rules customises RulePack in memory (protections, enable/disable,
+	// severity overrides, suppressions, sensitive tools). Restored from
+	// the source bytes so rule IDs keep their case.
+	Rules GuardrailRulesConfig `mapstructure:"-" yaml:"rules,omitempty"`
+	// CiscoTrustLevel is full, advisory or none; empty means full. It was
+	// data.json guardrail.cisco_trust_level.
+	CiscoTrustLevel string      `mapstructure:"cisco_trust_level" yaml:"cisco_trust_level,omitempty"`
+	Judge           JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT            HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
@@ -1756,6 +1802,10 @@ type GuardrailConfig struct {
 	// proxy never fails open. The request is still inspected, audited,
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
+
+	// LLMRole is "", judge_only or judge_and_agent. Python setup owns it;
+	// the Go field lets the canonical validator round-trip the key.
+	LLMRole string `mapstructure:"llm_role" yaml:"llm_role,omitempty"`
 
 	// AllowPrivateUpstreams is a list of specific IP addresses that are
 	// exempt from the SSRF private-address block for LLM upstream forwarding.
@@ -1858,7 +1908,12 @@ type PerConnectorGuardrailConfig struct {
 	HILT         *HILTConfig `mapstructure:"hilt"           yaml:"hilt,omitempty"`
 	HookFailMode string      `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
 	BlockMessage string      `mapstructure:"block_message"  yaml:"block_message,omitempty"`
-	RulePackDir  string      `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+	// RulePackDir is a v8 key, rejected in config_version 9 (use RulePack).
+	RulePackDir string `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+	// RulePack and Rules override the global pack and its customisation
+	// for this connector; empty / nil inherit.
+	RulePack string                `mapstructure:"rule_pack" yaml:"rule_pack,omitempty"`
+	Rules    *GuardrailRulesConfig `mapstructure:"-"         yaml:"rules,omitempty"`
 
 	// BlockAt / AlertAt set this connector's block and alert levels,
 	// winning over guardrail.block_at / alert_at and over the levels of
@@ -2329,6 +2384,10 @@ type JudgeConfig struct {
 	// judge off (the proxy lane is unaffected); the "*" entry enables
 	// every connector.
 	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
+
+	// Trace logs judge prompts and responses for debugging. It replaces
+	// DEFENSECLAW_JUDGE_TRACE and is refused in managed mode.
+	Trace bool `mapstructure:"trace" yaml:"trace,omitempty"`
 
 	// HookTimeout caps the hook-lane judge round-trip in seconds.
 	// Distinct from Timeout (proxy lane, default 30s) because hook
@@ -3261,21 +3320,54 @@ func loadConfigSourceChecked(
 	return &cfg, nil
 }
 
-// restoreRuntimeV8GuardrailConnectors closes a Viper decode gap for connector
-// entries whose policy value is an empty mapping (for example, codex: {}).
-// Those entries are semantically meaningful roster members, but Viper omits
-// them while unmarshalling. Decode this one dynamic map from the same immutable
-// target-runtime bytes before migration/defaulting and validation continue.
+// restoreRuntimeV8GuardrailConnectors closes Viper decode gaps by decoding
+// some sections from the same immutable target-runtime bytes before
+// migration/defaulting and validation continue:
+//   - guardrail.connectors: entries whose policy value is an empty mapping
+//     (for example, codex: {}) are roster members, but Viper omits them;
+//   - guardrail.rules (global, profile and profile connector): Viper
+//     lower-cases map keys, and severity_overrides is keyed by rule ID;
+//   - admission: an action is a shorthand string or a triple, which the
+//     mapstructure decode cannot express;
+//   - llm_providers: header and alias map keys keep their case.
 func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
+	type profileConnectorRules struct {
+		Rules *GuardrailRulesConfig `yaml:"rules"`
+	}
+	type profileRules struct {
+		Rules      *GuardrailRulesConfig            `yaml:"rules"`
+		Connectors map[string]profileConnectorRules `yaml:"connectors"`
+	}
 	var source struct {
-		Guardrail struct {
+		Admission    AdmissionConfig    `yaml:"admission"`
+		LLMProviders LLMProvidersConfig `yaml:"llm_providers"`
+		Guardrail    struct {
 			Connectors map[string]PerConnectorGuardrailConfig `yaml:"connectors"`
+			Rules      GuardrailRulesConfig                   `yaml:"rules"`
+			Profiles   map[string]profileRules                `yaml:"profiles"`
 		} `yaml:"guardrail"`
 	}
 	if err := yaml.Unmarshal(raw, &source); err != nil {
 		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
 	}
 	cfg.Guardrail.Connectors = source.Guardrail.Connectors
+	cfg.Guardrail.Rules = source.Guardrail.Rules
+	cfg.Admission = source.Admission
+	cfg.LLMProviders = source.LLMProviders
+	for name, restored := range source.Guardrail.Profiles {
+		profile, ok := cfg.Guardrail.Profiles[name]
+		if !ok {
+			continue
+		}
+		profile.Rules = restored.Rules
+		for connector, entry := range restored.Connectors {
+			if override, ok := profile.Connectors[connector]; ok {
+				override.Rules = entry.Rules
+				profile.Connectors[connector] = override
+			}
+		}
+		cfg.Guardrail.Profiles[name] = profile
+	}
 	return nil
 }
 

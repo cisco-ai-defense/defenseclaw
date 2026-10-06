@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"gopkg.in/yaml.v3"
 )
 
 func TestRuntimeV8LoadersPreserveEmptyConnectorPolicyEntries(t *testing.T) {
@@ -348,5 +350,93 @@ func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
 				t.Fatalf("managed runtime loader error = %v, want authoritative path trust refusal", err)
 			}
 		})
+	}
+}
+
+func TestRuntimeV8LoadsConfigVersion9Keys(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw-v8
+admission:
+  defaults:
+    scan_on_install: false
+    actions: {critical: quarantine, low: {install: none, file: none, runtime: disable}}
+  skill:
+    scanner_overrides: {virustotal: {high: block}}
+    first_party_allow_list: [{name: codeguard, source_path_contains: [.claude/skills/codeguard]}]
+guardrail:
+  rule_pack: strict
+  rules:
+    disable: [ENT-DATA-EMPLOYEE-ID]
+    severity_overrides: {SEC-AWS-SECRET: HIGH}
+  profiles:
+    contractors:
+      rules: {severity_overrides: {SEC-OPENAI-V2: LOW}}
+asset_policy:
+  tool:
+    denied: [{name: shell, connector: codex}]
+llm_providers:
+  custom: [{name: gw, domains: [llm.example.internal], extra_headers: {X-Route: A}}]
+update: {check: false}
+scanners:
+  mcp_scanner: {analyzers: "yara,llm"}
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := cfg.Admission
+	if got := admission.Defaults.Actions.Critical.Expand(); got != (SeverityAction{Install: InstallBlock, File: FileActionQuarantine, Runtime: RuntimeDisable}) {
+		t.Errorf("critical = %+v, want the quarantine triple", got)
+	}
+	if got := admission.Defaults.Actions.Low.Expand(); got.Runtime != RuntimeDisable || got.Install != InstallNone {
+		t.Errorf("low triple = %+v", got)
+	}
+	if admission.Defaults.ScanOnInstall == nil || *admission.Defaults.ScanOnInstall {
+		t.Errorf("scan_on_install = %v, want false", admission.Defaults.ScanOnInstall)
+	}
+	if got := admission.Skill.ScannerOverrides["virustotal"].High; got == nil || got.Shorthand != AdmissionActionBlock {
+		t.Errorf("virustotal high = %+v, want block", got)
+	}
+	if got := cfg.Guardrail.Rules.SeverityOverrides["SEC-AWS-SECRET"]; got != "HIGH" || cfg.Guardrail.RulePack != "strict" {
+		t.Errorf("rules = %+v rule_pack = %q; rule IDs must keep their case", cfg.Guardrail.Rules, cfg.Guardrail.RulePack)
+	}
+	if rules := cfg.Guardrail.Profiles["contractors"].Rules; rules == nil || rules.SeverityOverrides["SEC-OPENAI-V2"] != "LOW" {
+		t.Errorf("profile rules = %+v", rules)
+	}
+	if denied := cfg.AssetPolicy.Tool.Denied; len(denied) != 1 || denied[0] != (AssetPolicyToolRule{Name: "shell", Connector: "codex"}) {
+		t.Errorf("asset_policy.tool.denied = %+v", denied)
+	}
+	if custom := cfg.LLMProviders.Custom; len(custom) != 1 || custom[0].ExtraHeaders["X-Route"] != "A" {
+		t.Errorf("llm_providers.custom = %+v", custom)
+	}
+	if cfg.Update.CheckEnabled() {
+		t.Error("update.check false must disable the update notice")
+	}
+	if got := cfg.Scanners.MCPScanner.Analyzers; !reflect.DeepEqual(got, []string{"yara", "llm"}) {
+		t.Errorf("v8 analyzers CSV = %v, want [yara llm]", got)
+	}
+}
+
+func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
+	for path, body := range map[string]string{
+		"$.skill_actions": "skill_actions: {}\n",
+		"$.guardrail.profiles.p.connectors.codex.rule_pack_dir": "guardrail:\n  profiles:\n    p:\n      connectors:\n        codex: {rule_pack_dir: /x}\n",
+		"$.scanners.skill_scanner.use_virustotal":               "scanners:\n  skill_scanner: {use_virustotal: true}\n",
+	} {
+		for _, version := range []int{8, 9} {
+			var document yaml.Node
+			if err := yaml.Unmarshal([]byte(fmt.Sprintf("config_version: %d\n%s", version, body)), &document); err != nil {
+				t.Fatal(err)
+			}
+			err := rejectV9RemovedKeys("config.yaml", document.Content[0])
+			var yamlErr *V8YAMLError
+			switch {
+			case version == 8 && err != nil:
+				t.Errorf("v8 %s is migration input, got %v", path, err)
+			case version == 9 && (!errors.As(err, &yamlErr) || yamlErr.Path != path || yamlErr.Code != V8YAMLErrorLegacyKeyForbidden):
+				t.Errorf("v9 %s: got %v", path, err)
+			}
+		}
 	}
 }

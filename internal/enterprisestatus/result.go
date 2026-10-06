@@ -147,8 +147,37 @@ type Result struct {
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
-	LogPath        string       `json:"log_path,omitempty"`
-	ExitCode       int          `json:"exit_code"`
+	// Policy is the effective policy state; nil (omitted) under the Secure
+	// Client integration and when the gateway did not report it.
+	Policy   *PolicyState `json:"policy,omitempty"`
+	LogPath  string       `json:"log_path,omitempty"`
+	ExitCode int          `json:"exit_code"`
+}
+
+// PolicyState reports the effective policy a lifecycle step left in place.
+type PolicyState struct {
+	// EffectiveDigest is effective_policy_digest computed from the
+	// committed config and its assets ("sha256:<hex>").
+	EffectiveDigest string `json:"effective_digest"`
+	// ConfigGeneration is config_generation from config.generation.json.
+	ConfigGeneration uint64 `json:"config_generation"`
+	// Applied is true when the gateway reports the same digest.
+	Applied bool `json:"applied"`
+	// GatewayReportedDigest is the digest /health reported; empty when the
+	// gateway was not reachable.
+	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+}
+
+// PolicyStateFileName is the lifecycle state file holding the last applied
+// policy state (PolicyStateRecord), next to deployment.json.
+const PolicyStateFileName = "policy-state.json"
+
+// PolicyStateRecord is policy-state.json.
+type PolicyStateRecord struct {
+	EffectiveDigest  string `json:"effective_digest"`
+	ConfigGeneration uint64 `json:"config_generation"`
+	// AppliedAt is RFC 3339 UTC.
+	AppliedAt string `json:"applied_at"`
 }
 
 // New returns a result with the schema version and empty collections set,

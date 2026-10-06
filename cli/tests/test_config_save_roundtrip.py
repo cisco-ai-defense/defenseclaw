@@ -447,6 +447,53 @@ class TestGatewayFleetModeRoundTrip(unittest.TestCase):
             self.assertEqual(persisted, original)
 
 
+
+class TestConfigVersion9KeysRoundTrip(unittest.TestCase):
+    def test_v9_keys_load_and_survive_an_unrelated_save(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            original = {
+                "config_version": 8,
+                "data_dir": tmpdir,
+                "environment": "linux",
+                "claw": {"mode": "codex"},
+                "admission": {
+                    "skill": {
+                        "scan_on_install": False,
+                        "actions": {"high": "block", "low": {"install": "none", "file": "none", "runtime": "disable"}},
+                    }
+                },
+                "guardrail": {
+                    "rule_pack": "strict",
+                    "rules": {"severity_overrides": {"SEC-AWS-SECRET": "HIGH"}},
+                    "connectors": {"codex": {"rules": {"disable": ["CMD-GIT-PUSH-FORCE"]}}},
+                },
+                "asset_policy": {"tool": {"denied": [{"name": "shell", "connector": "codex"}]}},
+                "llm_providers": {"custom": [{"name": "gw", "domains": ["llm.example.internal"]}]},
+                "update": {"check": False},
+                "observability": {},
+            }
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(original, stream, sort_keys=False)
+
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                os.environ.pop("DEFENSECLAW_CONFIG", None)
+                cfg = load()
+                self.assertIs(cfg.admission.skill.scan_on_install, False)
+                self.assertEqual(cfg.admission.skill.actions["high"], "block")
+                self.assertEqual(cfg.guardrail.rules.severity_overrides, {"SEC-AWS-SECRET": "HIGH"})
+                self.assertEqual(cfg.guardrail.connectors["codex"].rules.disable, ["CMD-GIT-PUSH-FORCE"])
+                self.assertEqual(cfg.asset_policy.tool.denied[0].connector, "codex")
+                self.assertEqual(cfg.llm_providers.custom[0].domains, ["llm.example.internal"])
+                self.assertIs(cfg.update.check, False)
+                cfg.guardrail.rules.disable = ["ENT-DATA-EMPLOYEE-ID"]
+                cfg.save()
+
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+            original["guardrail"]["rules"]["disable"] = ["ENT-DATA-EMPLOYEE-ID"]
+            self.assertEqual(persisted, original)
+
 class TestConfigSaveResilienceContinued(unittest.TestCase):
     def test_corrupt_yaml_falls_back_to_dataclass_only(self):
         """Operator with a half-edited YAML must still be able to recover

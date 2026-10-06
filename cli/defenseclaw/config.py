@@ -1039,6 +1039,197 @@ class CiscoAIDefenseConfig:
         return self.api_key
 
 
+# ---------------------------------------------------------------------------
+# config_version 9 (single source of truth) types. They mirror
+# internal/config/admission.go and internal/config/config_v9_types.go and the
+# canonical schema. Python only loads and serializes them; the gateway
+# compiles and enforces them.
+# ---------------------------------------------------------------------------
+
+CONFIG_VERSION_V9 = 9
+ADMISSION_SEVERITIES = ("critical", "high", "medium", "low", "info")
+ADMISSION_SHORTHANDS = ("block", "quarantine", "warn", "allow")
+
+
+@dataclass
+class AssetFileRef:
+    """A file referenced by path and pinned by ``sha256:<hex>`` digest."""
+
+    path: str = ""
+    digest: str = ""
+
+
+@dataclass
+class AdmissionFirstParty:
+    name: str = ""
+    source_path_contains: list[str] = field(default_factory=list)
+    reason: str = ""
+
+
+@dataclass
+class AdmissionAssetType:
+    """One ``admission.<type>`` block; ``None`` and empty inherit ``defaults``.
+
+    ``actions`` and each ``scanner_overrides`` value map a lower-case severity
+    to a shorthand (block, quarantine, warn, allow) or an
+    ``{install, file, runtime}`` mapping.
+    """
+
+    scan_on_install: bool | None = None
+    allow_list_bypass_scan: bool | None = None
+    actions: dict[str, Any] = field(default_factory=dict)
+    scanner_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    first_party_allow_list: list[AdmissionFirstParty] = field(default_factory=list)
+
+
+@dataclass
+class AdmissionToolType:
+    actions: dict[str, Any] = field(default_factory=dict)
+    scanner_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+@dataclass
+class AdmissionConfig:
+    """``admission:``. Mirrors ``config.AdmissionConfig``."""
+
+    defaults: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    skill: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    mcp: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    plugin: AdmissionAssetType = field(default_factory=AdmissionAssetType)
+    tool: AdmissionToolType = field(default_factory=AdmissionToolType)
+
+
+@dataclass
+class CustomRulePack:
+    path: str = ""
+    digest: str = ""
+
+
+@dataclass
+class GuardrailRuleSuppression:
+    id: str = ""
+    finding_pattern: str = ""
+    entity_pattern: str = ""
+    reason: str = ""
+
+
+@dataclass
+class GuardrailSensitiveTool:
+    name: str = ""
+    result_inspection: bool | None = None
+    judge_result: bool | None = None
+    min_entities_for_alert: int = 0
+
+
+@dataclass
+class GuardrailRulesConfig:
+    """``guardrail[.connectors.C|.profiles.P].rules``. Mirrors
+    ``config.GuardrailRulesConfig``; applied on the rule pack in field order."""
+
+    protections: list[str] = field(default_factory=list)
+    enable: list[str] = field(default_factory=list)
+    disable: list[str] = field(default_factory=list)
+    severity_overrides: dict[str, str] = field(default_factory=dict)
+    suppressions: list[GuardrailRuleSuppression] = field(default_factory=list)
+    sensitive_tools: list[GuardrailSensitiveTool] = field(default_factory=list)
+
+
+@dataclass
+class LLMCustomProviderTLS:
+    ca_cert_file: str = ""
+    insecure_skip_verify: bool = False
+
+
+@dataclass
+class LLMCustomProvider:
+    """One ``llm_providers.custom`` entry; mirrors ``configs.Provider``."""
+
+    name: str = ""
+    domains: list[str] = field(default_factory=list)
+    profile_id: str = ""
+    env_keys: list[str] = field(default_factory=list)
+    base_provider_type: str = ""
+    base_url: str = ""
+    allowed_requests: list[str] = field(default_factory=list)
+    available_models: list[str] = field(default_factory=list)
+    request_path_overrides: dict[str, str] = field(default_factory=dict)
+    tls: LLMCustomProviderTLS | None = None
+    bedrock: BedrockKeyConfig | None = None
+    vertex: VertexKeyConfig | None = None
+    azure: AzureKeyConfig | None = None
+    extra_headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LLMProvidersConfig:
+    """``llm_providers:``; custom-providers.json is derived from it."""
+
+    custom: list[LLMCustomProvider] = field(default_factory=list)
+    ollama_ports: list[int] = field(default_factory=list)
+
+
+@dataclass
+class UpdateConfig:
+    """``update:``. ``check`` ``None`` means on; ``source`` "" is the official
+    release feed, otherwise an HTTPS mirror (signatures are always verified
+    against the compiled release identity)."""
+
+    check: bool | None = None
+    channel: str = ""
+    source: str = ""
+
+
+@dataclass
+class SkillScannerVirusTotal:
+    enabled: bool = False
+    api_key_env: str = ""
+    upload_files: bool = False
+
+
+@dataclass
+class ScannerAnalyzerToggle:
+    enabled: bool = False
+
+
+@dataclass
+class SkillScannerAnalyzers:
+    virustotal: SkillScannerVirusTotal = field(default_factory=SkillScannerVirusTotal)
+    aidefense: ScannerAnalyzerToggle = field(default_factory=ScannerAnalyzerToggle)
+    osv: ScannerAnalyzerToggle = field(default_factory=ScannerAnalyzerToggle)
+
+
+@dataclass
+class SkillScannerTimeouts:
+    scan_s: int = 0
+    llm_s: int = 0
+
+
+@dataclass
+class MCPScannerAPIConfig:
+    endpoint: str = ""
+    api_key_env: str = ""
+
+
+@dataclass
+class MCPScannerYARAConfig:
+    include_bundled: bool | None = None
+    extra_rules: list[AssetFileRef] = field(default_factory=list)
+
+
+@dataclass
+class MCPScannerVirusTotalConfig:
+    api_key_env: str = ""
+    upload_files: bool = False
+    max_files: int = 0
+
+
+@dataclass
+class MCPScannerTimeouts:
+    stdio_s: int = 0
+    remote_s: int = 0
+    llm_s: int = 0
+
+
 @dataclass
 class SkillScannerConfig:
     binary: str = "skill-scanner"
@@ -1057,6 +1248,15 @@ class SkillScannerConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     virustotal_api_key: str = ""
     virustotal_api_key_env: str = ""
+    # config_version 9 scanner model (empty = unset; see the schema).
+    # binary, use_virustotal, use_aidefense and virustotal_api_key[_env] are
+    # v8 migration input.
+    policy_file: AssetFileRef = field(default_factory=AssetFileRef)
+    judge_source: str = ""
+    fail_on_severity: str = ""
+    review_queue_min: str = ""
+    analyzers: SkillScannerAnalyzers = field(default_factory=SkillScannerAnalyzers)
+    timeouts: SkillScannerTimeouts = field(default_factory=SkillScannerTimeouts)
 
     def resolved_virustotal_api_key(self) -> str:
         """Return VirusTotal key from env var (if set) or direct value.
@@ -1080,6 +1280,13 @@ class MCPScannerConfig:
     scan_instructions: bool = False
     # LLM overrides the top-level ``llm:`` block for the MCP scanner.
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # config_version 9 keys (empty = unset). ``analyzers`` stays the v8
+    # comma-separated string here; a v9 list loads joined with commas.
+    judge_source: str = ""
+    api: MCPScannerAPIConfig = field(default_factory=MCPScannerAPIConfig)
+    yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
+    virustotal: MCPScannerVirusTotalConfig = field(default_factory=MCPScannerVirusTotalConfig)
+    timeouts: MCPScannerTimeouts = field(default_factory=MCPScannerTimeouts)
 
 
 @dataclass
@@ -1716,6 +1923,21 @@ class AssetPolicyRule:
 
 
 @dataclass
+class AssetPolicyToolRule:
+    name: str = ""
+    connector: str = ""
+    reason: str = ""
+
+
+@dataclass
+class AssetToolPolicy:
+    """``asset_policy.tool``: explicit tool allow/deny lists."""
+
+    allowed: list[AssetPolicyToolRule] = field(default_factory=list)
+    denied: list[AssetPolicyToolRule] = field(default_factory=list)
+
+
+@dataclass
 class AssetTypePolicy:
     default: str = "allow"
     registry_required: bool = False
@@ -1791,6 +2013,7 @@ class AssetPolicyConfig:
     mcp: AssetTypePolicy = field(default_factory=_default_runtime_asset_type_policy)
     skill: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
     plugin: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+    tool: AssetToolPolicy = field(default_factory=AssetToolPolicy)
     # Per-connector overrides keyed by connector name (OTHER-7). Empty/absent
     # preserves the legacy global-only behavior. Only the scalar settings are
     # per-connector; rule lists + runtime_detection stay on the global per-type
@@ -2029,6 +2252,8 @@ class JudgeConfig:
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
+    trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
     # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
     # directly; the legacy ``model``/``api_key_env``/``api_base`` fields
@@ -2189,7 +2414,9 @@ class PerConnectorGuardrailConfig:
     hilt: HILTConfig | None = None
     hook_fail_mode: str = ""
     block_message: str = ""
-    rule_pack_dir: str = ""
+    rule_pack_dir: str = ""  # v8 key; config_version 9 uses rule_pack
+    rule_pack: str = ""
+    rules: GuardrailRulesConfig | None = None
     # Per-connector on/off switch toggled by
     # ``defenseclaw guardrail {enable,disable} --connector X``. ``None``
     # (the default) means "inherit the default (enabled)" — the connector
@@ -2250,7 +2477,9 @@ class GuardrailProfile:
     block_at: str = ""
     alert_at: str = ""
     hilt: HILTConfig | None = None
-    rule_pack_dir: str = ""
+    rule_pack_dir: str = ""  # v8 key; config_version 9 uses rule_pack
+    rule_pack: str = ""
+    rules: GuardrailRulesConfig | None = None
     block_message: str = ""
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
     enabled: bool | None = None
@@ -2296,7 +2525,13 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
-    rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
+    rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory (v8 key)
+    # config_version 9: built-in pack name or a custom_packs key, the custom
+    # packs pinned by digest, and the in-memory rule customisation.
+    rule_pack: str = ""
+    custom_packs: dict[str, CustomRulePack] = field(default_factory=dict)
+    rules: GuardrailRulesConfig = field(default_factory=GuardrailRulesConfig)
+    cisco_trust_level: str = ""  # full | advisory | none ("" = full)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -2752,20 +2987,12 @@ class RoutingConfig:
 
 @dataclass
 class PrivacyConfig:
-    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
+    """Reserved, empty ``privacy:`` section. Mirrors internal/config.PrivacyConfig.
 
-    ``disable_redaction`` is the persistent kill-switch documented in
-    the Go redaction package: when True the sidecar bypasses every
-    ForSink* helper at startup, including persistent sinks (audit DB,
-    OTel logs, Splunk HEC, webhooks). It violates the
-    unconditional-redaction contract documented in OBSERVABILITY.md
-    by design — only enable on single-tenant installs where every
-    downstream sink lives inside the same trust boundary.
-    The CLI emits a warning on flip, and config loaders emit a
-    once-per-process warning when they observe it.
+    Redaction is configured by ``observability.redaction_profiles``; the v7
+    ``disable_redaction`` switch is rejected by the v8 loader and read only by
+    the 0.x migration.
     """
-
-    disable_redaction: bool = False
 
 
 @dataclass
@@ -3095,6 +3322,8 @@ class Config:
     skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
+    # config_version 9: admission replaces data.json and the *_actions keys.
+    admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
@@ -3120,6 +3349,8 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -3775,6 +4006,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     scanners = d.get("scanners") or {}
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
+    _serialize_v9_scanner_keys(scanners)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
@@ -3782,6 +4014,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_unset_levels(guardrail)
     _strip_empty_llm(guardrail, "llm")
     _strip_empty_llm(guardrail.get("judge"), "llm")
+    _serialize_v9_guardrail_keys(guardrail)
     # Mirror Go's ``yaml:",omitempty"`` on the hook-lane judge keys so a
     # config that never opted into the hook-lane judge stays
     # byte-identical after a load/save round-trip.
@@ -3824,6 +4057,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 if entry.get("hilt") is None:
                     entry.pop("hilt", None)
                 _strip_unset_levels(entry)
+                _serialize_v9_rules_scope(entry)
     _serialize_guardrail_profiles(cfg, guardrail)
     # The compatibility dataclass can preview a retired ``splunk:`` source for
     # upgrade/credential recovery, but exact-v8 serialization must never write
@@ -3858,6 +4092,9 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("asset_policy", None)
     else:
         _serialize_asset_policy_connectors(cfg, d.get("asset_policy"))
+        _prune_v9_block(d["asset_policy"], "tool")
+    for key in ("admission", "llm_providers", "update"):
+        _prune_v9_block(d, key)
     # Per-connector observability (D5b): drop the empty block (omitempty),
     # or serialize it with inherited (None) dimensions + webhook omitempty
     # stripped. Mirrors the asset_policy.connectors handling.
@@ -3873,6 +4110,80 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _serialize_openshell(d)
     _serialize_routing(d)
     return d
+
+
+def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
+    """Recursively drop ``None``, ``""``, empty lists/maps (Go ``omitempty``),
+    plus ``False`` and ``0`` when ``drop_false`` (plain, non tri-state keys).
+    Returns ``_V8_MISSING`` when nothing is left."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            pruned = _prune_unset(item, drop_false=drop_false)
+            if pruned is not _V8_MISSING:
+                out[key] = pruned
+        return out or _V8_MISSING
+    if isinstance(value, list):
+        items = [_prune_unset(item, drop_false=drop_false) for item in value]
+        items = [item for item in items if item is not _V8_MISSING]
+        return items or _V8_MISSING
+    if value is None or value == "":
+        return _V8_MISSING
+    is_zero = isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0
+    if drop_false and (value is False or is_zero):
+        return _V8_MISSING
+    return value
+
+
+def _prune_v9_block(parent: Any, key: str, *, drop_false: bool = False) -> None:
+    """Replace ``parent[key]`` by its pruned form, or drop it when empty."""
+    if not isinstance(parent, dict) or key not in parent:
+        return
+    pruned = _prune_unset(parent[key], drop_false=drop_false)
+    if pruned is _V8_MISSING:
+        parent.pop(key, None)
+    else:
+        parent[key] = pruned
+
+
+def _serialize_v9_rules_scope(block: Any) -> None:
+    """Drop an unset ``rule_pack`` / ``rules`` on a guardrail scope."""
+    if not isinstance(block, dict):
+        return
+    if not block.get("rule_pack"):
+        block.pop("rule_pack", None)
+    _prune_v9_block(block, "rules")
+
+
+def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
+    if not isinstance(guardrail, dict):
+        return
+    _serialize_v9_rules_scope(guardrail)
+    _prune_v9_block(guardrail, "custom_packs")
+    if not guardrail.get("cisco_trust_level"):
+        guardrail.pop("cisco_trust_level", None)
+    judge = guardrail.get("judge")
+    if isinstance(judge, dict) and not judge.get("trace"):
+        judge.pop("trace", None)
+
+
+def _serialize_v9_scanner_keys(scanners: Any) -> None:
+    if not isinstance(scanners, dict):
+        return
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        for key in ("judge_source", "fail_on_severity", "review_queue_min"):
+            if not skill.get(key):
+                skill.pop(key, None)
+        for key in ("policy_file", "analyzers", "timeouts"):
+            _prune_v9_block(skill, key, drop_false=True)
+    mcp = scanners.get("mcp_scanner")
+    if isinstance(mcp, dict):
+        if not mcp.get("judge_source"):
+            mcp.pop("judge_source", None)
+        for key in ("api", "virustotal", "timeouts"):
+            _prune_v9_block(mcp, key, drop_false=True)
+        _prune_v9_block(mcp, "yara")
 
 
 def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
@@ -3920,6 +4231,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 ("description", "mode", "rule_pack_dir", "block_message", "hilt", "enabled", "hook_fail_mode"),
             )
             _strip_unset_levels(profile)
+            _serialize_v9_rules_scope(profile)
             connectors = profile.get("connectors")
             if not connectors:
                 profile.pop("connectors", None)
@@ -3930,6 +4242,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                         entry, ("mode", "hilt", "hook_fail_mode", "block_message", "rule_pack_dir", "enabled")
                     )
                     _strip_unset_levels(entry)
+                    _serialize_v9_rules_scope(entry)
     assignments = guardrail.get("profile_assignments")
     if not assignments:
         guardrail.pop("profile_assignments", None)
@@ -4850,6 +5163,7 @@ def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
         mcp=_merge_asset_type_policy(raw.get("mcp"), runtime=True),
         skill=_merge_asset_type_policy(raw.get("skill"), runtime=False),
         plugin=_merge_asset_type_policy(raw.get("plugin"), runtime=False),
+        tool=_merge_asset_tool_policy(raw.get("tool")),
         connectors=_merge_asset_policy_connectors(raw.get("connectors")),
     )
 
@@ -5065,6 +5379,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
         api_key_env=raw.get("api_key_env", ""),
@@ -5107,6 +5422,10 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
+        rule_pack=str(raw.get("rule_pack", "") or ""),
+        custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
+        rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
+        cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),
@@ -5151,6 +5470,8 @@ def _merge_guardrail_connectors(
             hook_fail_mode=entry.get("hook_fail_mode", ""),
             block_message=entry.get("block_message", ""),
             rule_pack_dir=entry.get("rule_pack_dir", ""),
+            rule_pack=str(entry.get("rule_pack", "") or ""),
+            rules=_merge_guardrail_rules(entry.get("rules")),
             enabled=enabled,
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
@@ -5181,6 +5502,8 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
             hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) else None,
             rule_pack_dir=str(entry.get("rule_pack_dir", "") or ""),
+            rule_pack=str(entry.get("rule_pack", "") or ""),
+            rules=_merge_guardrail_rules(entry.get("rules")),
             block_message=str(entry.get("block_message", "") or ""),
             connectors=_merge_guardrail_connectors(entry.get("connectors")),
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
@@ -5259,13 +5582,258 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
     if isinstance(raw, dict):
         return MCPScannerConfig(
             binary=raw.get("binary", "mcp-scanner"),
-            analyzers=raw.get("analyzers", "auto"),
+            analyzers=_mcp_analyzers_text(raw.get("analyzers", "auto")),
             scan_prompts=raw.get("scan_prompts", False),
             scan_resources=raw.get("scan_resources", False),
             scan_instructions=raw.get("scan_instructions", False),
             llm=_merge_llm(raw.get("llm")),
+            judge_source=str(raw.get("judge_source", "") or ""),
+            api=_merge_mcp_scanner_api(raw.get("api")),
+            yara=_merge_mcp_scanner_yara(raw.get("yara")),
+            virustotal=_merge_mcp_scanner_virustotal(raw.get("virustotal")),
+            timeouts=_merge_mcp_scanner_timeouts(raw.get("timeouts")),
         )
     return MCPScannerConfig()
+
+
+# ---------------------------------------------------------------------------
+# config_version 9 loaders (load only: the gateway validates and compiles).
+# ---------------------------------------------------------------------------
+
+
+def _mapping(raw: Any) -> dict[str, Any]:
+    return raw if isinstance(raw, dict) else {}
+
+
+def _int_or_zero(raw: Any) -> int:
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+
+
+def _optional_bool(raw: Any) -> bool | None:
+    return raw if isinstance(raw, bool) else None
+
+
+def _merge_asset_file_ref(raw: Any) -> AssetFileRef:
+    raw = _mapping(raw)
+    return AssetFileRef(path=str(raw.get("path", "") or ""), digest=str(raw.get("digest", "") or ""))
+
+
+def _merge_admission_actions(raw: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for severity, action in _mapping(raw).items():
+        if isinstance(action, str):
+            out[str(severity)] = action
+        elif isinstance(action, dict):
+            out[str(severity)] = {str(k): str(v) for k, v in action.items()}
+    return out
+
+
+def _merge_admission_scanner_overrides(raw: Any) -> dict[str, dict[str, Any]]:
+    return {str(name): _merge_admission_actions(actions) for name, actions in _mapping(raw).items()}
+
+
+def _merge_admission_asset_type(raw: Any) -> AdmissionAssetType:
+    raw = _mapping(raw)
+    first_party = []
+    for entry in raw.get("first_party_allow_list") or []:
+        if isinstance(entry, dict):
+            first_party.append(
+                AdmissionFirstParty(
+                    name=str(entry.get("name", "") or ""),
+                    source_path_contains=_string_list(entry.get("source_path_contains")),
+                    reason=str(entry.get("reason", "") or ""),
+                )
+            )
+    return AdmissionAssetType(
+        scan_on_install=_optional_bool(raw.get("scan_on_install")),
+        allow_list_bypass_scan=_optional_bool(raw.get("allow_list_bypass_scan")),
+        actions=_merge_admission_actions(raw.get("actions")),
+        scanner_overrides=_merge_admission_scanner_overrides(raw.get("scanner_overrides")),
+        first_party_allow_list=first_party,
+    )
+
+
+def _merge_admission(raw: Any) -> AdmissionConfig:
+    raw = _mapping(raw)
+    tool = _mapping(raw.get("tool"))
+    return AdmissionConfig(
+        defaults=_merge_admission_asset_type(raw.get("defaults")),
+        skill=_merge_admission_asset_type(raw.get("skill")),
+        mcp=_merge_admission_asset_type(raw.get("mcp")),
+        plugin=_merge_admission_asset_type(raw.get("plugin")),
+        tool=AdmissionToolType(
+            actions=_merge_admission_actions(tool.get("actions")),
+            scanner_overrides=_merge_admission_scanner_overrides(tool.get("scanner_overrides")),
+        ),
+    )
+
+
+def _merge_custom_rule_packs(raw: Any) -> dict[str, CustomRulePack]:
+    out: dict[str, CustomRulePack] = {}
+    for name, entry in _mapping(raw).items():
+        entry = _mapping(entry)
+        out[str(name)] = CustomRulePack(
+            path=str(entry.get("path", "") or ""),
+            digest=str(entry.get("digest", "") or ""),
+        )
+    return out
+
+
+def _merge_guardrail_rules(raw: Any) -> GuardrailRulesConfig | None:
+    """Parse a ``rules`` block; ``None`` when absent (inherit)."""
+    if not isinstance(raw, dict):
+        return None
+    suppressions = [
+        GuardrailRuleSuppression(
+            id=str(entry.get("id", "") or ""),
+            finding_pattern=str(entry.get("finding_pattern", "") or ""),
+            entity_pattern=str(entry.get("entity_pattern", "") or ""),
+            reason=str(entry.get("reason", "") or ""),
+        )
+        for entry in raw.get("suppressions") or []
+        if isinstance(entry, dict)
+    ]
+    sensitive_tools = [
+        GuardrailSensitiveTool(
+            name=str(entry.get("name", "") or ""),
+            result_inspection=_optional_bool(entry.get("result_inspection")),
+            judge_result=_optional_bool(entry.get("judge_result")),
+            min_entities_for_alert=_int_or_zero(entry.get("min_entities_for_alert")),
+        )
+        for entry in raw.get("sensitive_tools") or []
+        if isinstance(entry, dict)
+    ]
+    return GuardrailRulesConfig(
+        protections=_string_list(raw.get("protections")),
+        enable=_string_list(raw.get("enable")),
+        disable=_string_list(raw.get("disable")),
+        severity_overrides={str(k): str(v) for k, v in _mapping(raw.get("severity_overrides")).items()},
+        suppressions=suppressions,
+        sensitive_tools=sensitive_tools,
+    )
+
+
+def _merge_asset_tool_policy(raw: Any) -> AssetToolPolicy:
+    raw = _mapping(raw)
+
+    def rules(value: Any) -> list[AssetPolicyToolRule]:
+        return [
+            AssetPolicyToolRule(
+                name=str(entry.get("name", "") or ""),
+                connector=str(entry.get("connector", "") or ""),
+                reason=str(entry.get("reason", "") or ""),
+            )
+            for entry in value or []
+            if isinstance(entry, dict)
+        ]
+
+    return AssetToolPolicy(allowed=rules(raw.get("allowed")), denied=rules(raw.get("denied")))
+
+
+def _merge_llm_providers(raw: Any) -> LLMProvidersConfig:
+    raw = _mapping(raw)
+    custom = []
+    for entry in raw.get("custom") or []:
+        if not isinstance(entry, dict):
+            continue
+        tls_raw = entry.get("tls")
+        custom.append(
+            LLMCustomProvider(
+                name=str(entry.get("name", "") or ""),
+                domains=_string_list(entry.get("domains")),
+                profile_id=str(entry.get("profile_id", "") or ""),
+                env_keys=_string_list(entry.get("env_keys")),
+                base_provider_type=str(entry.get("base_provider_type", "") or ""),
+                base_url=str(entry.get("base_url", "") or ""),
+                allowed_requests=_string_list(entry.get("allowed_requests")),
+                available_models=_string_list(entry.get("available_models")),
+                request_path_overrides={
+                    str(k): str(v) for k, v in _mapping(entry.get("request_path_overrides")).items()
+                },
+                tls=(
+                    LLMCustomProviderTLS(
+                        ca_cert_file=str(tls_raw.get("ca_cert_file", "") or ""),
+                        insecure_skip_verify=tls_raw.get("insecure_skip_verify") is True,
+                    )
+                    if isinstance(tls_raw, dict)
+                    else None
+                ),
+                bedrock=_merge_bedrock(entry.get("bedrock")),
+                vertex=_merge_vertex(entry.get("vertex")),
+                azure=_merge_azure(entry.get("azure")),
+                extra_headers={str(k): str(v) for k, v in _mapping(entry.get("extra_headers")).items()},
+            )
+        )
+    ports = [port for port in raw.get("ollama_ports") or [] if isinstance(port, int) and not isinstance(port, bool)]
+    return LLMProvidersConfig(custom=custom, ollama_ports=ports)
+
+
+def _merge_update(raw: Any) -> UpdateConfig:
+    raw = _mapping(raw)
+    return UpdateConfig(
+        check=_optional_bool(raw.get("check")),
+        channel=str(raw.get("channel", "") or ""),
+        source=str(raw.get("source", "") or ""),
+    )
+
+
+def _merge_skill_scanner_analyzers(raw: Any) -> SkillScannerAnalyzers:
+    raw = _mapping(raw)
+    vt = _mapping(raw.get("virustotal"))
+    return SkillScannerAnalyzers(
+        virustotal=SkillScannerVirusTotal(
+            enabled=vt.get("enabled") is True,
+            api_key_env=str(vt.get("api_key_env", "") or ""),
+            upload_files=vt.get("upload_files") is True,
+        ),
+        aidefense=ScannerAnalyzerToggle(enabled=_mapping(raw.get("aidefense")).get("enabled") is True),
+        osv=ScannerAnalyzerToggle(enabled=_mapping(raw.get("osv")).get("enabled") is True),
+    )
+
+
+def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
+    raw = _mapping(raw)
+    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")), llm_s=_int_or_zero(raw.get("llm_s")))
+
+
+def _mcp_analyzers_text(raw: Any) -> str:
+    """The v8 comma-separated analyzers string; a v9 list is joined."""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(item) for item in raw)
+    return str(raw) if raw is not None else ""
+
+
+def _merge_mcp_scanner_api(raw: Any) -> MCPScannerAPIConfig:
+    raw = _mapping(raw)
+    return MCPScannerAPIConfig(
+        endpoint=str(raw.get("endpoint", "") or ""), api_key_env=str(raw.get("api_key_env", "") or "")
+    )
+
+
+def _merge_mcp_scanner_yara(raw: Any) -> MCPScannerYARAConfig:
+    raw = _mapping(raw)
+    return MCPScannerYARAConfig(
+        include_bundled=_optional_bool(raw.get("include_bundled")),
+        extra_rules=[_merge_asset_file_ref(entry) for entry in raw.get("extra_rules") or [] if isinstance(entry, dict)],
+    )
+
+
+def _merge_mcp_scanner_virustotal(raw: Any) -> MCPScannerVirusTotalConfig:
+    raw = _mapping(raw)
+    return MCPScannerVirusTotalConfig(
+        api_key_env=str(raw.get("api_key_env", "") or ""),
+        upload_files=raw.get("upload_files") is True,
+        max_files=_int_or_zero(raw.get("max_files")),
+    )
+
+
+def _merge_mcp_scanner_timeouts(raw: Any) -> MCPScannerTimeouts:
+    raw = _mapping(raw)
+    return MCPScannerTimeouts(
+        stdio_s=_int_or_zero(raw.get("stdio_s")),
+        remote_s=_int_or_zero(raw.get("remote_s")),
+        llm_s=_int_or_zero(raw.get("llm_s")),
+    )
 
 
 def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
@@ -6002,6 +6570,12 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
                 llm=_merge_llm(ss_raw.get("llm")),
                 virustotal_api_key=ss_raw.get("virustotal_api_key", ""),
                 virustotal_api_key_env=ss_raw.get("virustotal_api_key_env", ""),
+                policy_file=_merge_asset_file_ref(ss_raw.get("policy_file")),
+                judge_source=str(ss_raw.get("judge_source", "") or ""),
+                fail_on_severity=str(ss_raw.get("fail_on_severity", "") or ""),
+                review_queue_min=str(ss_raw.get("review_queue_min", "") or ""),
+                analyzers=_merge_skill_scanner_analyzers(ss_raw.get("analyzers")),
+                timeouts=_merge_skill_scanner_timeouts(ss_raw.get("timeouts")),
             ),
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
             plugin_llm=_merge_llm(scanners_raw.get("plugin_llm")),
@@ -6067,6 +6641,9 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
+        admission=_merge_admission(raw.get("admission")),
+        llm_providers=_merge_llm_providers(raw.get("llm_providers")),
+        update=_merge_update(raw.get("update")),
     )
     if not os.path.isabs(cfg.gateway.device_key_file):
         resolved_device_key = _resolve_relative_gateway_device_key_file(

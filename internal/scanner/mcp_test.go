@@ -38,7 +38,7 @@ func TestMCPScanner_BuildArgs_Default(t *testing.T) {
 
 func TestMCPScanner_BuildArgs_AllKnobs(t *testing.T) {
 	cfg := config.MCPScannerConfig{
-		Analyzers:        "yara,llm",
+		Analyzers:        []string{"yara", "llm"},
 		ScanPrompts:      true,
 		ScanResources:    true,
 		ScanInstructions: true,

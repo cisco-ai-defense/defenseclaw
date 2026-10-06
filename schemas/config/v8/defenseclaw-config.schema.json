@@ -17,11 +17,31 @@
     "splunk"
   ],
   "x-defenseclaw-coverage": "closed",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "config_version": {
+            "const": 9
+          }
+        },
+        "required": [
+          "config_version"
+        ]
+      },
+      "then": {
+        "$ref": "#/$defs/v9SourceConstraints"
+      }
+    }
+  ],
   "properties": {
     "config_version": {
       "type": "integer",
-      "const": 8,
-      "description": "Required configuration schema version."
+      "enum": [
+        8,
+        9
+      ],
+      "description": "Required configuration schema version. 9 is the single-source-of-truth layout: the v8 keys marked x-defenseclaw-removed-in: 9 are migration input only."
     },
     "llm": {
       "$ref": "#/$defs/llm"
@@ -35,6 +55,9 @@
       "type": "string",
       "maxLength": 1024,
       "description": "Deprecated pre-v5 model retained by the existing configuration contract."
+    },
+    "llm_providers": {
+      "$ref": "#/$defs/llmProviders"
     },
     "data_dir": {
       "$ref": "#/$defs/pathString"
@@ -112,14 +135,26 @@
     "cloud_auth": {
       "$ref": "#/$defs/cloudAuth"
     },
+    "admission": {
+      "$ref": "#/$defs/admission"
+    },
     "skill_actions": {
-      "$ref": "#/$defs/actionMatrix"
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
     },
     "mcp_actions": {
-      "$ref": "#/$defs/actionMatrix"
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
     },
     "plugin_actions": {
-      "$ref": "#/$defs/actionMatrix"
+      "$ref": "#/$defs/actionMatrix",
+      "deprecated": true,
+      "x-defenseclaw-removed-in": 9,
+      "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source. Use admission."
     },
     "asset_policy": {
       "$ref": "#/$defs/assetPolicy"
@@ -171,6 +206,9 @@
     },
     "routing": {
       "$ref": "#/$defs/routing"
+    },
+    "update": {
+      "$ref": "#/$defs/update"
     }
   },
   "$defs": {
@@ -568,7 +606,10 @@
       "additionalProperties": false,
       "properties": {
         "binary": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "use_llm": {
           "type": "boolean"
@@ -583,10 +624,16 @@
           "type": "boolean"
         },
         "use_virustotal": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "use_aidefense": {
-          "type": "boolean"
+          "type": "boolean",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "llm_consensus_runs": {
           "type": "integer",
@@ -594,20 +641,51 @@
           "maximum": 1000
         },
         "policy": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "description": "strict, balanced, permissive, low-noise, quiet or custom (with policy_file). A v8 source may hold a policy file path; v9 accepts only the names."
+        },
+        "policy_file": {
+          "$ref": "#/$defs/assetFileRef",
+          "description": "Custom scan policy, required when policy is custom. Passed to the scanner only when its digest matches."
         },
         "lenient": {
           "type": "boolean"
+        },
+        "judge_source": {
+          "$ref": "#/$defs/scannerJudgeSource",
+          "description": "inherit uses the top-level llm block; override uses scanners.skill_scanner.llm."
+        },
+        "fail_on_severity": {
+          "$ref": "#/$defs/severityName",
+          "default": "HIGH",
+          "description": "Findings at or above this severity block (applied by DefenseClaw, never passed to the scanner)."
+        },
+        "review_queue_min": {
+          "$ref": "#/$defs/severityName",
+          "default": "MEDIUM",
+          "description": "Findings in [review_queue_min, fail_on_severity) are review (warn) findings."
+        },
+        "analyzers": {
+          "$ref": "#/$defs/skillScannerAnalyzers"
+        },
+        "timeouts": {
+          "$ref": "#/$defs/skillScannerTimeouts"
         },
         "llm": {
           "$ref": "#/$defs/llm"
         },
         "virustotal_api_key": {
           "type": "string",
-          "maxLength": 65536
+          "maxLength": 65536,
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "virustotal_api_key_env": {
-          "$ref": "#/$defs/envNameOrEmpty"
+          "$ref": "#/$defs/envNameOrEmpty",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         }
       }
     },
@@ -616,10 +694,21 @@
       "additionalProperties": false,
       "properties": {
         "binary": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "analyzers": {
-          "$ref": "#/$defs/boundedString"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/boundedString"
+            },
+            {
+              "$ref": "#/$defs/mcpScannerAnalyzerList"
+            }
+          ],
+          "description": "v9: a list of analyzers ([] = auto). A v8 source holds a comma-separated string."
         },
         "scan_prompts": {
           "type": "boolean"
@@ -630,8 +719,65 @@
         "scan_instructions": {
           "type": "boolean"
         },
+        "judge_source": {
+          "$ref": "#/$defs/scannerJudgeSource"
+        },
         "llm": {
           "$ref": "#/$defs/llm"
+        },
+        "api": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Empty values inherit cisco_ai_defense.endpoint and api_key_env.",
+          "properties": {
+            "endpoint": {
+              "type": "string",
+              "maxLength": 8192
+            },
+            "api_key_env": {
+              "$ref": "#/$defs/envNameOrEmpty"
+            }
+          }
+        },
+        "yara": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include_bundled": {
+              "type": "boolean",
+              "default": true
+            },
+            "extra_rules": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "$ref": "#/$defs/assetFileRef"
+              }
+            }
+          }
+        },
+        "virustotal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "api_key_env": {
+              "$ref": "#/$defs/envNameOrEmpty",
+              "default": "VIRUSTOTAL_API_KEY"
+            },
+            "upload_files": {
+              "type": "boolean",
+              "default": false
+            },
+            "max_files": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000,
+              "default": 10
+            }
+          }
+        },
+        "timeouts": {
+          "$ref": "#/$defs/mcpScannerTimeouts"
         }
       }
     },
@@ -1145,7 +1291,10 @@
         },
         "allow_list_bypass_scan": {
           "type": "boolean",
-          "default": true
+          "default": true,
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
         },
         "rescan_enabled": {
           "type": "boolean",
@@ -1305,6 +1454,11 @@
           "minimum": 0,
           "maximum": 86400,
           "default": 5
+        },
+        "trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log judge prompts and responses for debugging (was DEFENSECLAW_JUDGE_TRACE). Refused in managed mode."
         }
       }
     },
@@ -1330,7 +1484,16 @@
           "$ref": "#/$defs/boundedString"
         },
         "rule_pack_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName"
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
         },
         "block_at": {
           "$ref": "#/$defs/guardrailLevelOrInherit"
@@ -1364,7 +1527,16 @@
           "$ref": "#/$defs/hilt"
         },
         "rule_pack_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName"
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
         },
         "block_message": {
           "$ref": "#/$defs/boundedString"
@@ -1396,7 +1568,16 @@
           "$ref": "#/$defs/boundedString"
         },
         "rule_pack_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName"
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
         },
         "block_at": {
           "$ref": "#/$defs/guardrailLevelOrInherit"
@@ -1539,7 +1720,27 @@
           "maximum": 1073741824
         },
         "rule_pack_dir": {
-          "$ref": "#/$defs/boundedString"
+          "$ref": "#/$defs/boundedString",
+          "deprecated": true,
+          "x-defenseclaw-removed-in": 9,
+          "description": "Removed in config_version 9: read only as v8 migration input and rejected in a v9 source."
+        },
+        "rule_pack": {
+          "$ref": "#/$defs/rulePackName",
+          "description": "Built-in pack (default, strict, permissive) or a key of custom_packs. Unset uses the default pack."
+        },
+        "custom_packs": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/$defs/rulePackName"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/customRulePack"
+          }
+        },
+        "rules": {
+          "$ref": "#/$defs/guardrailRules"
         },
         "judge": {
           "$ref": "#/$defs/judge"
@@ -1552,6 +1753,15 @@
         },
         "alert_at": {
           "$ref": "#/$defs/guardrailLevelOrInherit"
+        },
+        "cisco_trust_level": {
+          "type": "string",
+          "enum": [
+            "full",
+            "advisory",
+            "none"
+          ],
+          "default": "full"
         },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
@@ -2070,6 +2280,9 @@
           "additionalProperties": {
             "$ref": "#/$defs/perConnectorAssetPolicy"
           }
+        },
+        "tool": {
+          "$ref": "#/$defs/assetToolPolicy"
         }
       }
     },
@@ -4764,6 +4977,649 @@
             },
             "no_proxy": {
               "$ref": "#/$defs/boundedString"
+            }
+          }
+        }
+      }
+    },
+    "severityName": {
+      "type": "string",
+      "enum": [
+        "CRITICAL",
+        "HIGH",
+        "MEDIUM",
+        "LOW",
+        "INFO"
+      ]
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "assetFileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A file referenced by path and pinned by sha256 digest. Both empty means unset.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(|sha256:[0-9a-f]{64})$"
+        }
+      }
+    },
+    "admissionAction": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "block",
+            "quarantine",
+            "warn",
+            "allow"
+          ]
+        },
+        {
+          "$ref": "#/$defs/severityAction"
+        }
+      ],
+      "description": "Shorthand (block, quarantine, warn, allow) or the exact install/file/runtime triple. block = {install: block, file: none, runtime: disable}; quarantine = {install: block, file: quarantine, runtime: disable}; warn and allow = {install: none, file: none, runtime: enable}."
+    },
+    "admissionActionMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "critical": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "high": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "medium": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "low": {
+          "$ref": "#/$defs/admissionAction"
+        },
+        "info": {
+          "$ref": "#/$defs/admissionAction"
+        }
+      }
+    },
+    "admissionFirstParty": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "source_path_contains"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "source_path_contains": {
+          "$ref": "#/$defs/stringList",
+          "minItems": 1
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        }
+      }
+    },
+    "admissionScannerOverrides": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "$ref": "#/$defs/stableName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/admissionActionMap"
+      },
+      "description": "Per-scanner action maps keyed by scan_result.scanner_name (for example virustotal)."
+    },
+    "admissionAssetType": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scan_on_install": {
+          "type": "boolean"
+        },
+        "allow_list_bypass_scan": {
+          "type": "boolean"
+        },
+        "actions": {
+          "$ref": "#/$defs/admissionActionMap"
+        },
+        "scanner_overrides": {
+          "$ref": "#/$defs/admissionScannerOverrides"
+        },
+        "first_party_allow_list": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/admissionFirstParty"
+          }
+        }
+      }
+    },
+    "admissionToolType": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "$ref": "#/$defs/admissionActionMap"
+        },
+        "scanner_overrides": {
+          "$ref": "#/$defs/admissionScannerOverrides"
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Install-time admission policy (replaces policies/rego/data.json and the *_actions keys). Every asset type inherits defaults field by field. When admission.skill.actions or admission.mcp.actions is unset it is derived from the scanner gate.",
+      "properties": {
+        "defaults": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "skill": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "mcp": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "plugin": {
+          "$ref": "#/$defs/admissionAssetType"
+        },
+        "tool": {
+          "$ref": "#/$defs/admissionToolType"
+        }
+      }
+    },
+    "ruleId": {
+      "type": "string",
+      "pattern": "^[A-Z0-9][A-Z0-9_-]{0,127}$"
+    },
+    "rulePackName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "customRulePack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/pathString"
+        },
+        "digest": {
+          "$ref": "#/$defs/sha256Digest"
+        }
+      }
+    },
+    "guardrailSuppression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "finding_pattern",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ruleId"
+        },
+        "finding_pattern": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "entity_pattern": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        }
+      }
+    },
+    "guardrailSensitiveTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "result_inspection": {
+          "type": "boolean"
+        },
+        "judge_result": {
+          "type": "boolean"
+        },
+        "min_entities_for_alert": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      }
+    },
+    "guardrailRules": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Customisation layered on rule_pack in this order: protections, enable/disable, severity_overrides, suppressions, sensitive_tools.",
+      "properties": {
+        "protections": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/rulePackName"
+          }
+        },
+        "enable": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        },
+        "disable": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/ruleId"
+          }
+        },
+        "severity_overrides": {
+          "type": "object",
+          "maxProperties": 4096,
+          "propertyNames": {
+            "$ref": "#/$defs/ruleId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/severityName"
+          }
+        },
+        "suppressions": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/guardrailSuppression"
+          }
+        },
+        "sensitive_tools": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/guardrailSensitiveTool"
+          }
+        }
+      }
+    },
+    "assetPolicyToolRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "connector": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "reason": {
+          "$ref": "#/$defs/boundedString"
+        }
+      }
+    },
+    "assetToolPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": {
+            "$ref": "#/$defs/assetPolicyToolRule"
+          }
+        },
+        "denied": {
+          "type": "array",
+          "maxItems": 16384,
+          "items": {
+            "$ref": "#/$defs/assetPolicyToolRule"
+          }
+        }
+      }
+    },
+    "llmCustomProviderTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Mirrors configs.ProviderTLS with a CA file reference instead of inline PEM.",
+      "properties": {
+        "ca_cert_file": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "insecure_skip_verify": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "llmCustomProvider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ],
+      "description": "One custom LLM provider; mirrors configs.Provider (custom-providers.json is derived from it).",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "domains": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "profile_id": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "env_keys": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/envName"
+          }
+        },
+        "base_provider_type": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "base_url": {
+          "type": "string",
+          "maxLength": 8192
+        },
+        "allowed_requests": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "available_models": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/boundedString"
+          }
+        },
+        "request_path_overrides": {
+          "$ref": "#/$defs/stringMap"
+        },
+        "tls": {
+          "$ref": "#/$defs/llmCustomProviderTLS"
+        },
+        "bedrock": {
+          "$ref": "#/$defs/bedrock"
+        },
+        "vertex": {
+          "$ref": "#/$defs/vertex"
+        },
+        "azure": {
+          "$ref": "#/$defs/azure"
+        },
+        "extra_headers": {
+          "$ref": "#/$defs/stringMap"
+        }
+      }
+    },
+    "llmProviders": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Custom LLM providers and local model ports; the input custom-providers.json is derived from.",
+      "properties": {
+        "custom": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/llmCustomProvider"
+          }
+        },
+        "ollama_ports": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Self-update settings. source only changes where release bytes are fetched; signature verification always uses the compiled release identity.",
+      "properties": {
+        "check": {
+          "type": "boolean",
+          "default": true
+        },
+        "channel": {
+          "type": "string",
+          "enum": [
+            "stable"
+          ],
+          "default": "stable"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^(|https://[^\\s]+)$",
+          "maxLength": 2056,
+          "default": ""
+        }
+      }
+    },
+    "scannerJudgeSource": {
+      "type": "string",
+      "enum": [
+        "inherit",
+        "override"
+      ],
+      "default": "inherit"
+    },
+    "skillScannerPolicy": {
+      "type": "string",
+      "enum": [
+        "strict",
+        "balanced",
+        "permissive",
+        "low-noise",
+        "quiet",
+        "custom"
+      ]
+    },
+    "skillScannerAnalyzers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "virustotal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            },
+            "api_key_env": {
+              "$ref": "#/$defs/envNameOrEmpty",
+              "default": "VIRUSTOTAL_API_KEY"
+            },
+            "upload_files": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "aidefense": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "osv": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
+    },
+    "skillScannerTimeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scan_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 300
+        },
+        "llm_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 60
+        }
+      }
+    },
+    "mcpScannerAnalyzer": {
+      "type": "string",
+      "enum": [
+        "api",
+        "yara",
+        "llm",
+        "behavioral",
+        "virustotal",
+        "readiness",
+        "vulnerable_package",
+        "prompt_defense"
+      ]
+    },
+    "mcpScannerAnalyzerList": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/mcpScannerAnalyzer"
+      },
+      "description": "Analyzers to run; an empty list lets the scanner choose (auto)."
+    },
+    "mcpScannerTimeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stdio_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 60
+        },
+        "remote_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 120
+        },
+        "llm_s": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "default": 30
+        }
+      }
+    },
+    "v9SourceConstraints": {
+      "description": "Additional constraints for a config_version 9 source: removed v8 keys and v9-only value shapes.",
+      "properties": {
+        "skill_actions": false,
+        "mcp_actions": false,
+        "plugin_actions": false,
+        "watch": {
+          "properties": {
+            "allow_list_bypass_scan": false
+          }
+        },
+        "guardrail": {
+          "properties": {
+            "rule_pack_dir": false,
+            "connectors": {
+              "additionalProperties": {
+                "properties": {
+                  "rule_pack_dir": false
+                }
+              }
+            },
+            "profiles": {
+              "additionalProperties": {
+                "properties": {
+                  "rule_pack_dir": false,
+                  "connectors": {
+                    "additionalProperties": {
+                      "properties": {
+                        "rule_pack_dir": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "scanners": {
+          "properties": {
+            "skill_scanner": {
+              "properties": {
+                "binary": false,
+                "use_virustotal": false,
+                "use_aidefense": false,
+                "virustotal_api_key": false,
+                "virustotal_api_key_env": false,
+                "policy": {
+                  "$ref": "#/$defs/skillScannerPolicy"
+                }
+              }
+            },
+            "mcp_scanner": {
+              "properties": {
+                "binary": false,
+                "analyzers": {
+                  "$ref": "#/$defs/mcpScannerAnalyzerList"
+                }
+              }
             }
           }
         }

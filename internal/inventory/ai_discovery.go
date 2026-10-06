@@ -138,16 +138,8 @@ type AIDiscoveryOptions struct {
 	ConfidencePolicyPath        string
 	RequireTrustedBinaryPaths   bool
 	TrustedBinaryPrefixes       []string
-	// DisableRedaction mirrors config.Privacy.DisableRedaction. When
-	// true, on-the-wire AIDiscovery payloads (gateway events, OTel
-	// logs) carry full Evidence rows including the raw_path field
-	// (raw_path further requires StoreRawLocalPaths). When false (the
-	// default), evidence is sanitized before leaving this process so
-	// remote sinks never see local filesystem paths or unhashed
-	// values.
-	DisableRedaction bool
-	DataDir          string
-	HomeDir          string
+	DataDir                     string
+	HomeDir                     string
 	// HomeDirs is the full set of user homes to walk for per-user
 	// detectors (editor_extension, mcp_server, config paths, shell
 	// history, applications). When empty, detectors fall back to
@@ -740,19 +732,14 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		ConfidencePolicyPath:        ad.ConfidencePolicyPath,
 		RequireTrustedBinaryPaths:   ad.RequireTrustedBinaryPaths,
 		TrustedBinaryPrefixes:       append([]string{}, ad.TrustedBinaryPrefixes...),
-		// DisableRedaction is left at the zero value here: main's
-		// config.Config has no Privacy subtree yet (cf. the release
-		// branch which added cfg.Privacy.DisableRedaction). When the
-		// redaction subtree lands on main, wire it as
-		// `DisableRedaction: cfg.Privacy.DisableRedaction`.
-		DataDir:              cfg.DataDir,
-		HomeDir:              home,
-		HomeDirs:             append([]string{}, ad.HomeDirs...),
-		ManagedEnterprise:    managed.IsManagedEnterprise(cfg.DeploymentMode),
-		StandaloneEnterprise: cfg.StandaloneEnterprise(),
-		UserScanDir:          UserScanDirForConfig(cfg),
-		IDEInventory:         ad.EffectiveIDEInventory(),
-		SecureClient:         cfg.SecureClientIntegration(),
+		DataDir:                     cfg.DataDir,
+		HomeDir:                     home,
+		HomeDirs:                    append([]string{}, ad.HomeDirs...),
+		ManagedEnterprise:           managed.IsManagedEnterprise(cfg.DeploymentMode),
+		StandaloneEnterprise:        cfg.StandaloneEnterprise(),
+		UserScanDir:                 UserScanDirForConfig(cfg),
+		IDEInventory:                ad.EffectiveIDEInventory(),
+		SecureClient:                cfg.SecureClientIntegration(),
 	})
 }
 
