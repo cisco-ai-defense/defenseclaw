@@ -202,6 +202,22 @@ func TestPrepareRefusesPre9Modules(t *testing.T) {
 	}
 }
 
+// TestSecureClientGuardrailThresholdsKeepTheDataJSON: the Secure Client
+// /v1/guardrail/evaluate levels are the 1.0 data.json ones.
+func TestSecureClientGuardrailThresholdsKeepTheDataJSON(t *testing.T) {
+	policyDir := t.TempDir()
+	if got := SecureClientGuardrailThresholds(policyDir); got != (ThresholdsInput{Block: 4, Alert: 2, CiscoTrustLevel: "full"}) {
+		t.Fatalf("without data.json = %+v", got)
+	}
+	data := `{"guardrail": {"block_threshold": 3, "alert_threshold": 1, "cisco_trust_level": "advisory"}}`
+	if err := os.WriteFile(filepath.Join(policyDir, "data.json"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := SecureClientGuardrailThresholds(policyDir); got != (ThresholdsInput{Block: 3, Alert: 1, CiscoTrustLevel: "advisory"}) {
+		t.Fatalf("with data.json = %+v", got)
+	}
+}
+
 // TestSecureClientAdmissionKeepsTheDataJSON: a Secure Client config stays
 // config_version 8, so its admission is the 1.0 one: <policy_dir>/rego/
 // data.json over the shipped defaults, a finding below the block level is a

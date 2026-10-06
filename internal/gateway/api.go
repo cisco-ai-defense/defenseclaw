@@ -3123,6 +3123,11 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 			Alert:           alert,
 			CiscoTrustLevel: decisionCfg.Guardrail.EffectiveCiscoTrustLevel(),
 		}
+		if decisionCfg.SecureClientIntegration() {
+			// The 1.0 verdict of this route read the data.json levels.
+			thresholds := policy.SecureClientGuardrailThresholds(decisionCfg.PolicyDir)
+			input.Thresholds = &thresholds
+		}
 	}
 
 	startedAt := time.Now().UTC()

@@ -130,16 +130,16 @@ type secureClientDataJSON struct {
 		TargetName         string   `json:"target_name"`
 		SourcePathContains []string `json:"source_path_contains"`
 	} `json:"first_party_allow_list"`
+	Guardrail struct {
+		BlockThreshold  *int   `json:"block_threshold"`
+		AlertThreshold  *int   `json:"alert_threshold"`
+		CiscoTrustLevel string `json:"cisco_trust_level"`
+	} `json:"guardrail"`
 }
 
-// secureClientAdmission is the Secure Client admission, unchanged from 1.0
-// (spec section 10): a Secure Client config stays config_version 8 with no
-// admission block, so the actions, per-type overrides, first-party list and
-// scan flags come from <policy_dir>/rego/data.json (or <policy_dir>/data.json)
-// when it is there, over the shipped defaults, with no scanner-gate
-// derivation. Its actions carry no verdict, so a finding below the block
-// level is a warning, as it was.
-func secureClientAdmission(policyDir string) map[string]CompiledAdmission {
+// readSecureClientDataJSON reads <policy_dir>/rego/data.json, else
+// <policy_dir>/data.json; a missing or unreadable file is empty.
+func readSecureClientDataJSON(policyDir string) secureClientDataJSON {
 	var data secureClientDataJSON
 	if dir := strings.TrimSpace(policyDir); dir != "" {
 		for _, path := range []string{filepath.Join(dir, "rego", "data.json"), filepath.Join(dir, "data.json")} {
@@ -153,6 +153,37 @@ func secureClientAdmission(policyDir string) map[string]CompiledAdmission {
 			break
 		}
 	}
+	return data
+}
+
+// SecureClientGuardrailThresholds is the Secure Client input.thresholds of
+// /v1/guardrail/evaluate, unchanged from 1.0: the data.json guardrail
+// block_threshold, alert_threshold and cisco_trust_level (shipped 4, 2 and
+// full), not block_at or the rule pack.
+func SecureClientGuardrailThresholds(policyDir string) ThresholdsInput {
+	g := readSecureClientDataJSON(policyDir).Guardrail
+	out := ThresholdsInput{Block: 4, Alert: 2, CiscoTrustLevel: "full"}
+	if g.BlockThreshold != nil {
+		out.Block = *g.BlockThreshold
+	}
+	if g.AlertThreshold != nil {
+		out.Alert = *g.AlertThreshold
+	}
+	if level := strings.TrimSpace(g.CiscoTrustLevel); level != "" {
+		out.CiscoTrustLevel = level
+	}
+	return out
+}
+
+// secureClientAdmission is the Secure Client admission, unchanged from 1.0
+// (spec section 10): a Secure Client config stays config_version 8 with no
+// admission block, so the actions, per-type overrides, first-party list and
+// scan flags come from <policy_dir>/rego/data.json (or <policy_dir>/data.json)
+// when it is there, over the shipped defaults, with no scanner-gate
+// derivation. Its actions carry no verdict, so a finding below the block
+// level is a warning, as it was.
+func secureClientAdmission(policyDir string) map[string]CompiledAdmission {
+	data := readSecureClientDataJSON(policyDir)
 	out := make(map[string]CompiledAdmission, 3)
 	for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {
 		c := builtinAdmission(assetType)
