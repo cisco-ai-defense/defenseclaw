@@ -424,18 +424,20 @@ const lastPackageResultFile = "last-package-result.json"
 // lastPackageLogFile is the standard error of the same run.
 const lastPackageLogFile = "last-package-result.log"
 
-// clearSupersededPackageFailure removes the failed result of the package's
-// own install run once a later run has committed a deployment. Left in
+// clearSupersededFailures removes what an earlier failed run left once a
+// later run has committed a deployment: the gateway output kept by a failed
+// activation, and the failed result of the package's own install run. Left in
 // place, an upgrade whose activation was rolled back keeps reporting ok:false
 // and the previous version to MDM detection and to administrators after
-// ensure recovered the host. The package's own run is left alone: its shell
-// holds the result file open and the run writes the document after the
-// lifecycle returns.
-func (l *lifecycle) clearSupersededPackageFailure() {
+// ensure recovered the host, and a healthy host keeps the old failure details.
+// The package's own run leaves its result alone: its shell holds the result
+// file open and the run writes the document after the lifecycle returns.
+func (l *lifecycle) clearSupersededFailures() {
+	dir := l.env.P(l.env.Layout.LifecycleDir)
+	_ = os.Remove(filepath.Join(dir, activationFailureFileName))
 	if l.opts.Reason == "package" || l.env.lastPackageInstallFailure() == "" {
 		return
 	}
-	dir := l.env.P(l.env.Layout.LifecycleDir)
 	for _, name := range []string{lastPackageResultFile, lastPackageLogFile} {
 		_ = os.Remove(filepath.Join(dir, name))
 	}

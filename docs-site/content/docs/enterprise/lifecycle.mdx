@@ -26,7 +26,9 @@ upgrade, the result also carries a short excerpt of the gateway's own output
 captured output in `last-activation-failure.log` in the lifecycle directory
 (`/var/lib/defenseclaw-enterprise` on Linux,
 `/opt/cisco/defenseclaw/lifecycle` on macOS). Only root can read it, and the
-rollback does not remove it, even after a first install.
+rollback does not remove it, even after a first install. The excerpt and the
+file leave out the gateway's start banner. A later run that commits a
+deployment removes the file.
 
 Only one lifecycle run works at a time. On Linux and macOS a run that finds
 another one in progress waits 5 seconds and exits `75` (busy); pass
