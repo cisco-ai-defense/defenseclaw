@@ -2815,6 +2815,7 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
             f"sensitive_tools={summary['sensitive_tool_count']}"
         )
         click.echo(f"  digest: {summary['digest']}")
+        click.echo(f"  files digest: {summary['files_digest']} (the guardrail.custom_packs pin)")
     else:
         issue = result.error
         assert issue is not None
@@ -3472,7 +3473,8 @@ def use_pack_cmd(
                     validation=validation,
                     message=f"Rule pack {path} is invalid{detail}. Nothing was changed.",
                 )
-            digest = str((result.summary or {}).get("digest", "") or "")
+            # The pin covers the pack's own files, not the embedded defaults.
+            digest = str((result.summary or {}).get("files_digest", "") or "")
 
     _preflight_config_write(app)
     changes: list = []

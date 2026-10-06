@@ -63,6 +63,8 @@ type RulePack struct {
 	// defaults" — explicitly different from an empty struct, which
 	// would override every field to empty.
 	LocalPatterns *LocalPatterns
+	// filesDigest is FilesDigest, set by LoadRulePack.
+	filesDigest string
 }
 
 // RulePackError is the safe, machine-readable error returned by the strict
@@ -98,6 +100,9 @@ type RulePackSummary struct {
 	SuppressionCount   int    `json:"suppression_count"`
 	SensitiveToolCount int    `json:"sensitive_tool_count"`
 	Digest             string `json:"digest"`
+	// FilesDigest is FilesDigest: the pin guardrail.custom_packs.<name>.digest
+	// holds (hex).
+	FilesDigest string `json:"files_digest"`
 }
 
 // LocalPatterns mirrors `rules/local-patterns.yaml`. Each field corresponds
@@ -301,6 +306,7 @@ func LoadRulePack(dir string) (*RulePack, error) {
 	}
 
 	var bytesRead int64
+	fileSums := make(map[string]string, len(inventory.files))
 	decode := func(rel string, out any) error {
 		file, ok := inventory.files[rel]
 		if !ok {
@@ -310,6 +316,8 @@ func LoadRulePack(dir string) (*RulePack, error) {
 		if err != nil {
 			return err
 		}
+		sum := sha256.Sum256(data)
+		fileSums[rel] = hex.EncodeToString(sum[:])
 		bytesRead += int64(len(data))
 		if bytesRead > maxRulePackAggregateBytes {
 			return rulePackErr(".", "aggregate_size_limit", "rule-pack YAML exceeds the aggregate byte limit")
@@ -368,7 +376,36 @@ func LoadRulePack(dir string) (*RulePack, error) {
 	if err := rp.Validate(); err != nil {
 		return nil, err
 	}
+	rp.filesDigest = filesDigest(fileSums)
 	return rp, nil
+}
+
+// filesDigest hashes the pack's own component files: each relative path
+// and the sha256 of its bytes, in path order.
+func filesDigest(sums map[string]string) string {
+	rels := make([]string, 0, len(sums))
+	for rel := range sums {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	h := sha256.New()
+	for _, rel := range rels {
+		fmt.Fprintf(h, "%s\n%s\n", rel, sums[rel])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// FilesDigest is the hex digest of the files the pack was loaded from (each
+// relative path and the sha256 of its bytes). guardrail.custom_packs pins a
+// custom pack by it. Unlike Summary().Digest it leaves out the components
+// the pack inherits from the binary's embedded defaults, so a release that
+// changes those defaults does not break a pinned pack; the effective policy
+// digest covers them separately (builtin). The embedded pack has no files.
+func (rp *RulePack) FilesDigest() string {
+	if rp == nil || rp.filesDigest == "" {
+		return filesDigest(nil)
+	}
+	return rp.filesDigest
 }
 
 func loadEmbeddedRulePack() (*RulePack, error) {
@@ -1345,15 +1382,15 @@ func safeJudgeName(name string) string {
 	return "component"
 }
 
-// RulePackDigest is the hex RulePackSummary digest of the pack in dir, the
-// value config.yaml pins a custom pack by (the v9 migration's
+// RulePackDigest is the FilesDigest of the valid pack in dir, the value
+// config.yaml pins a custom pack by (the v9 migration's
 // MigrateV9Input.RulePackDigest).
 func RulePackDigest(dir string) (string, error) {
 	pack, err := LoadRulePack(dir)
 	if err != nil {
 		return "", err
 	}
-	return pack.Summary().Digest, nil
+	return pack.FilesDigest(), nil
 }
 
 // Summary returns deterministic counts and a SHA-256 fingerprint of the
@@ -1364,6 +1401,7 @@ func (rp *RulePack) Summary() RulePackSummary {
 		var summary RulePackSummary
 		sum := sha256.Sum256([]byte("null"))
 		summary.Digest = hex.EncodeToString(sum[:])
+		summary.FilesDigest = filesDigest(nil)
 		return summary
 	}
 	summary := rp.counts()
@@ -1396,6 +1434,7 @@ func (rp *RulePack) Summary() RulePackSummary {
 	}
 	sum := sha256.Sum256(encoded)
 	summary.Digest = hex.EncodeToString(sum[:])
+	summary.FilesDigest = rp.FilesDigest()
 	return summary
 }
 

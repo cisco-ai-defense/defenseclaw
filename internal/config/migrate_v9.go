@@ -93,8 +93,8 @@ type MigrateV9Input struct {
 	// InMemory migrates for a read-only load: nothing is written and
 	// audit.db is only read.
 	InMemory bool
-	// RulePackDigest returns the hex RulePackSummary digest of a rule-pack
-	// directory (guardrail.LoadRulePack(dir).Summary().Digest). The config
+	// RulePackDigest returns the hex pin digest of a rule-pack directory
+	// (guardrail.RulePackDigest: the pack's own files). The config
 	// package can not import the guardrail package, so callers that may meet
 	// a custom rule_pack_dir pass it; without it such a directory is a
 	// migration error.

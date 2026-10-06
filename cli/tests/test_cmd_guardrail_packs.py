@@ -31,7 +31,7 @@ from tests.environment import isolated_home_env
 
 def _valid(path, **_kwargs):
     return rulepack_validation.RulePackValidationResult(
-        wire_version=1, kind="validation_result", valid=True, summary={"rule_count": 1, "digest": "a" * 64}
+        wire_version=1, kind="validation_result", valid=True, summary={"rule_count": 1, "digest": "c" * 64, "files_digest": "a" * 64}
     )
 
 

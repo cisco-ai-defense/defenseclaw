@@ -24,7 +24,11 @@ through the managed config, as
 [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs) shows.
 </Callout>
 
-A valid pack exits `0` and prints component counts plus a content digest. A
+A valid pack exits `0` and prints component counts, a content digest of the
+loaded pack and a files digest of the pack's own files. The files digest is
+the value `guardrail.custom_packs.<name>.digest` pins (as `sha256:<hex>`); it
+leaves out the defaults a pack inherits for missing components, so a release
+that changes those defaults does not break the pin. A
 pack that the helper successfully checks and finds invalid exits `1` with a
 bounded diagnostic that identifies the component path, error code, and reason.
 If the authoritative helper is missing, cannot run, times out, or returns an
@@ -38,6 +42,7 @@ Rule pack valid: "/home/you/.defenseclaw/policies/guardrail/default"
   rules: 239/243 enabled across 7 files
   components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
   digest: c447c505a65bf39ecaf5b58f685cb9f7746c63a640cf722191b4b92817f3b5d9
+  files digest: 5f0d3a…  (the guardrail.custom_packs pin)
 ```
 
 `judges=4` counts the compiled-in exfil judge as well as the three judge files.
@@ -61,6 +66,7 @@ defenseclaw guardrail validate-pack /path/to/rule-pack --json
   "summary": {
     "digest": "c447c505…",
     "enabled_rule_count": 239,
+    "files_digest": "5f0d3a…",
     "judge_category_count": 23,
     "judge_count": 4,
     "local_pattern_count": 11,
@@ -162,7 +168,7 @@ Validation is a preflight; it does not change the running gateway. Switch to
 the validated pack with `defenseclaw guardrail use-pack`, which validates the
 pack again and then writes the global or one connector's `rule_pack` (a
 custom directory is also pinned as a `guardrail.custom_packs` entry with its
-digest). An invalid pack changes nothing. The running gateway loads the new
+files digest). An invalid pack changes nothing. The running gateway loads the new
 pack on its next reload, validating it with the same strict validator; if it
 is refused, the previous configuration keeps running.
 
