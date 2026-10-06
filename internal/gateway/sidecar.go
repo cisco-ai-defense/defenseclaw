@@ -39,6 +39,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -252,14 +253,23 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if profileErr != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", profileErr)
 	}
+	// The connector packs a reload would compose are digested too, so the
+	// boot digest equals the one a reload or `policy digest` computes.
+	bootPacks := &sidecarRulePackCandidate{global: globalPack, active: rp}
+	if preflight, preflightErr := preflightSidecarRulePacks(cfg); preflightErr == nil {
+		bootPacks.connectors = preflight.connectors
+	}
 	bootGen, err := buildGeneration(context.Background(), generationInputs{
 		cfg:       cloneConfig(cfg),
-		rulePacks: &sidecarRulePackCandidate{global: globalPack, active: rp},
+		rulePacks: bootPacks,
 		profiles:  bootProfiles,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: build configuration generation: %w", err)
 	}
+	// The boot judge and proxy read the provider registry before the
+	// generation is published.
+	applyGenerationProviders(bootGen.Providers)
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 
@@ -364,13 +374,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// When a richer policy catalog exists (rule-pack id, Rego bundle
 	// digest) callers can override this via SetDefaultPolicyID.
 	router.SetDefaultPolicyID(cfg.Guardrail.Mode)
-
-	// Seed custom-providers overlay from llm.base_url so a custom LLM
-	// gateway domain is recognized by isKnownProviderDomain(). Must run
-	// before providerRegistrySnapshot() calls below.
-	if err := SeedCustomProvidersFromLLMBaseURL(cfg.LLM.BaseURL); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
-	}
 
 	// Wire LLM judge when enabled. The judge handles tool-call injection
 	// detection AND tool-result PII inspection (via inspectToolResult),
@@ -1671,7 +1674,9 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 	return candidate, nil
 }
 
-func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) (*LLMJudge, error) {
+// buildSharedJudge builds the shared judge. providers is the candidate
+// generation's registry; nil uses the published one.
+func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *generationProviders) (*LLMJudge, error) {
 	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
 		return nil, nil
 	}
@@ -1680,8 +1685,11 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) (*LLMJudge, er
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	judgeLLM := cfg.ResolveLLM("guardrail.judge")
-	providers, _, _ := providerRegistrySnapshot()
-	judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
+	registry, _, _ := providerRegistrySnapshot()
+	if providers != nil {
+		registry = &configs.ProvidersConfig{Providers: providers.Providers, OllamaPorts: providers.OllamaPorts}
+	}
+	judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, registry)
 	if judge == nil {
 		return nil, nil
 	}
@@ -1707,7 +1715,7 @@ func buildInitialSidecarJudge(
 	cfg *config.Config,
 	rp *guardrail.RulePack,
 ) (*LLMJudge, error) {
-	judge, err := buildSharedJudge(cfg, rp)
+	judge, err := buildSharedJudge(cfg, rp, nil)
 	if err != nil {
 		if client != nil {
 			_ = client.Close()
@@ -1859,12 +1867,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	var nextJudge *LLMJudge
 	if judgeChanged {
-		if strings.TrimSpace(next.LLM.BaseURL) != "" {
-			if err := SeedCustomProvidersFromLLMBaseURL(next.LLM.BaseURL); err != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
-			}
-		}
-		nextJudge, err = buildSharedJudge(&next, rulePackCandidate.active)
+		nextJudge, err = buildSharedJudge(&next, rulePackCandidate.active, nextGen.Providers)
 		if err != nil {
 			return err
 		}

@@ -1412,6 +1412,9 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if policy, ok := CurrentPolicyHealth(); ok {
+		body["policy"] = policy
+	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
 		body["acp"] = map[string]interface{}{
 			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
@@ -1552,6 +1555,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+	}
+
+	if policy, ok := CurrentPolicyHealth(); ok {
+		status["policy"] = policy
 	}
 
 	if a.client != nil && a.client.Hello() != nil {

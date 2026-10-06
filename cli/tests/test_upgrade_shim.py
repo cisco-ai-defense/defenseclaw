@@ -566,14 +566,21 @@ def test_an_installer_that_cannot_start_is_an_error_not_a_traceback(
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
-def test_the_signer_pattern_escapes_the_repository_name(
+def test_a_release_mirror_changes_only_where_bytes_come_from(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """update.source (and DEFENSECLAW_REPO) move the downloads; the release
+    signature is always checked against the compiled official identity, and a
+    mirror is refused without cosign instead of trusting its checksums.txt."""
     monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
     release = _release_dir(tmp_path, "1.0.1")
     (release / "checksums.txt.bundle").write_text("{}")
     monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(release))
     monkeypatch.setenv(upgrade_shim.REPO_ENV, "acme+corp/defense.claw")
+    config = tmp_path / "config.yaml"
+    config.write_text("update:\n  source: https://mirror.example/defenseclaw\n")
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(config))
+    assert upgrade_shim.release_source() == "https://mirror.example/defenseclaw"
     seen: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim, "_cosign", lambda: "/usr/bin/cosign")
 
@@ -585,7 +592,12 @@ def test_the_signer_pattern_escapes_the_repository_name(
 
     assert upgrade_shim.run(["upgrade", "--yes"]) == 0
     pattern = seen[0][seen[0].index("--certificate-identity-regexp") + 1]
-    assert pattern.startswith("^https://github\\.com/acme\\+corp/defense\\.claw/")
+    assert pattern == upgrade_shim.RELEASE_SIGNER
+    assert pattern.startswith("^https://github\\.com/cisco-ai-defense/defenseclaw/")
+
+    monkeypatch.setattr(upgrade_shim, "_cosign", lambda: None)
+    with pytest.raises(upgrade_shim.ShimError, match="install cosign"):
+        upgrade_shim._verify_release_signature(upgrade_shim.release_source(), "1.0.1", None, str(tmp_path), "")
 
 
 def test_the_update_notice_lookup_swallows_network_errors(monkeypatch: pytest.MonkeyPatch) -> None:

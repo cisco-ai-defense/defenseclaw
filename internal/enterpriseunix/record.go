@@ -115,8 +115,10 @@ func (e *Env) loadDeployment() (*Deployment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read deployment record: %w", err)
 	}
+	// Unknown fields are tolerated so a later release can add one and this
+	// binary still reads the record after a rollback.
 	var record Deployment
-	if err := decodeStrict(data, &record); err != nil {
+	if err := json.Unmarshal(data, &record); err != nil {
 		return nil, fmt.Errorf("parse deployment record: %w", err)
 	}
 	if record.SchemaVersion != deploymentSchemaVersion {

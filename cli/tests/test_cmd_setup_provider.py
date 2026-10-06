@@ -162,6 +162,44 @@ class TestRoundTrip(unittest.TestCase):
                 _read_overlay(path)
 
 
+class TestProviderConfigBacked(unittest.TestCase):
+    def test_add_writes_llm_providers_and_a_derived_overlay(self) -> None:
+        """`setup provider add` writes config.yaml llm_providers (through the
+        config writer) and renders custom-providers.json from it; a hand edit of
+        the rendered file is detected, and a legacy operator overlay seeds
+        llm_providers instead of being lost."""
+        from defenseclaw import derived_providers
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"providers": [{"name": "legacy-gw", "domains": ["llm.legacy.test"], "env_keys": ["LEGACY_KEY"]}]}, f)
+            cfg = Config()
+            cfg.data_dir = d
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d}
+            with mock.patch.object(Config, "save") as save:
+                res = CliRunner().invoke(
+                    provider,
+                    ["add", "--name", "Acme", "--domain", "llm.acme.test", "--env-key", "ACME_API_KEY", "--no-reload"],
+                    obj=app,
+                    env=env,
+                    catch_exceptions=False,
+                )
+            self.assertEqual(res.exit_code, 0, res.output)
+            save.assert_called_once()
+            self.assertEqual([p.name for p in cfg.llm_providers.custom], ["legacy-gw", "Acme"])
+            self.assertEqual(derived_providers.overlay_state(cfg, path)[0], derived_providers.STATE_FRESH)
+            with open(path, encoding="utf-8") as f:
+                rendered = json.load(f)
+            rendered["providers"].append({"name": "hand-added", "domains": ["x.test"]})
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rendered, f)
+            self.assertEqual(derived_providers.overlay_state(cfg, path)[0], derived_providers.STATE_EDITED)
+
+
 class TestProviderAddCommand(unittest.TestCase):
     def _run(self, *args: str, env: dict[str, str] | None = None) -> object:
         runner = CliRunner()

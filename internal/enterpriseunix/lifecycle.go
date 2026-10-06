@@ -1876,6 +1876,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		return 0
 	}
 	_ = removeFile(env.deploymentPath())
+	_ = removeFile(env.policyStatePath())
 	if l.opts.KeepState && record != nil {
 		// Record what stays so a reinstall resumes with it instead of
 		// refusing it as an unmanaged layout.

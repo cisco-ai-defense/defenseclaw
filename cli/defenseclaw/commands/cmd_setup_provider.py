@@ -72,6 +72,7 @@ import shutil
 import sys
 import tempfile
 import urllib.parse
+import dataclasses
 from dataclasses import dataclass
 from typing import Any
 
@@ -341,6 +342,85 @@ def _write_overlay(path: str, overlay: _Overlay) -> None:
         if tmp_path is not None and os.path.exists(tmp_path):
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
+
+
+def _config_backed(app: AppContext | None) -> bool:
+    """True when custom providers live in config.yaml ``llm_providers``."""
+    from defenseclaw.config import Config
+
+    return app is not None and isinstance(getattr(app, "cfg", None), Config)
+
+
+def _load_providers(app: AppContext | None, path: str) -> _Overlay:
+    """The provider set to edit: config.yaml ``llm_providers``. A legacy
+    operator overlay (one config has not absorbed yet) seeds it once."""
+    if not _config_backed(app):
+        return _read_overlay(path)
+    from defenseclaw import derived_providers
+
+    llm_providers = app.cfg.llm_providers
+    if llm_providers.custom or llm_providers.ollama_ports:
+        rendered = derived_providers.render(app.cfg)
+        providers = []
+        for entry, provider in zip(rendered["providers"], llm_providers.custom, strict=True):
+            entry = dict(entry)
+            entry.pop("tls", None)
+            if provider.tls is not None:
+                entry["tls"] = _compact_tls(dataclasses.asdict(provider.tls))
+            providers.append(entry)
+        return _Overlay(providers=providers, ollama_ports=list(llm_providers.ollama_ports))
+    state, _ = derived_providers.overlay_state(app.cfg, path)
+    if state != derived_providers.STATE_LEGACY:
+        return _Overlay.empty()
+    legacy = _read_overlay(path)
+    for entry in legacy.providers:
+        tls = entry.get("tls")
+        if isinstance(tls, dict) and tls.get("ca_cert_pem"):
+            tls = dict(tls)
+            tls["ca_cert_file"] = _store_legacy_ca(app, str(entry.get("name") or "provider"), tls.pop("ca_cert_pem"))
+            entry["tls"] = tls
+    return legacy
+
+
+def _compact_tls(tls: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in tls.items() if v not in ("", None)}
+
+
+def _store_legacy_ca(app: AppContext, name: str, pem: str) -> str:
+    """Write an inline CA bundle from a legacy overlay to a file config can
+    reference (``llm_providers.custom[].tls.ca_cert_file``)."""
+    directory = os.path.join(app.cfg.data_dir, "provider-ca")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", name) or "provider"
+    target = os.path.join(directory, f"{safe}.pem")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(pem)
+    with contextlib.suppress(OSError):
+        os.chmod(target, 0o600)
+    return target
+
+
+def _save_providers(app: AppContext | None, path: str, overlay: _Overlay) -> str:
+    """Persist the provider set: config.yaml ``llm_providers`` through the
+    config writer (refused on a managed device), then the derived overlay.
+    Returns what was written, for the confirmation line."""
+    if not _config_backed(app):
+        _write_overlay(path, overlay)
+        return path
+    from defenseclaw import derived_providers
+    from defenseclaw.config import _merge_llm_providers
+
+    providers = []
+    for entry in overlay.providers:
+        entry = {k: v for k, v in entry.items() if v is not None}
+        tls = entry.get("tls")
+        if isinstance(tls, dict):
+            entry["tls"] = {k: v for k, v in tls.items() if k != "ca_cert_pem"}
+        providers.append(entry)
+    app.cfg.llm_providers = _merge_llm_providers({"custom": providers, "ollama_ports": overlay.ollama_ports})
+    app.cfg.save()
+    derived_providers.write(app.cfg, path)
+    return f"config.yaml llm_providers (derived {path})"
 
 
 # ---------------------------------------------------------------------------
@@ -1485,7 +1565,12 @@ def provider_add(
     if insecure_skip_verify and ca_cert_file:
         raise click.BadParameter("--insecure-skip-verify and --ca-cert-file are mutually exclusive.")
     if ca_cert_file:
-        tls_block["ca_cert_pem"] = _read_ca_cert_file(ca_cert_file)
+        pem = _read_ca_cert_file(ca_cert_file)
+        if _config_backed(app):
+            # config.yaml references the CA file; the derived overlay inlines it.
+            tls_block["ca_cert_file"] = os.path.abspath(ca_cert_file)
+        else:
+            tls_block["ca_cert_pem"] = pem
         # A CA pin replaces any prior skip-verify on this provider (F-0141).
         tls_block["insecure_skip_verify"] = False
     if insecure_skip_verify:
@@ -1545,7 +1630,7 @@ def provider_add(
     # lose entries. The lock is released on exit of the `with` block,
     # after `os.replace` has made the new overlay visible.
     with _OverlayLock(path):
-        overlay = _read_overlay(path)
+        overlay = _load_providers(app, path)
 
         entry: dict[str, Any] | None = None
         for p in overlay.providers:
@@ -1610,10 +1695,10 @@ def provider_add(
         if clean_ports:
             overlay.ollama_ports = sorted({*overlay.ollama_ports, *clean_ports})
 
-        _write_overlay(path, overlay)
+        written = _save_providers(app, path, overlay)
 
     click.echo()
-    ux.ok(f"provider {clean_name!r} written to {path}")
+    ux.ok(f"provider {clean_name!r} written to {written}")
     if entry.get("domains"):
         click.echo(f"  {ux.dim('domains:')} {', '.join(entry['domains'])}")
     if entry.get("env_keys"):
@@ -1636,6 +1721,8 @@ def provider_add(
     if entry.get("tls"):
         tls_info = entry["tls"]
         bits: list[str] = []
+        if tls_info.get("ca_cert_file"):
+            bits.append(f"ca_cert_file={tls_info['ca_cert_file']}")
         if tls_info.get("ca_cert_pem"):
             bits.append("ca_cert_pem=<inline>")
         if tls_info.get("insecure_skip_verify"):
@@ -1706,7 +1793,7 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
     """
     path = _overlay_path(app)
     with _OverlayLock(path):
-        overlay = _read_overlay(path)
+        overlay = _load_providers(app, path)
 
         before = len(overlay.providers)
         overlay.providers = [p for p in overlay.providers if str(p.get("name", "")).lower() != name.strip().lower()]
@@ -1714,8 +1801,8 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
             ux.warn(f"no overlay provider named {name!r}")
             sys.exit(1)
 
-        _write_overlay(path, overlay)
-    ux.ok(f"removed overlay provider {name!r} from {path}")
+        written = _save_providers(app, path, overlay)
+    ux.ok(f"removed overlay provider {name!r} from {written}")
 
     if no_reload:
         ux.subhead("disk-only operation (--no-reload): running sidecar registry was not changed.")

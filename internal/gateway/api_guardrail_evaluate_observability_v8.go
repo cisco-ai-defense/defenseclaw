@@ -295,6 +295,7 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
@@ -409,6 +410,7 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.completedAt),

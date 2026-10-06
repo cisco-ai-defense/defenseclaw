@@ -63,6 +63,30 @@ from defenseclaw.config import (
 )
 
 
+class DoctorPolicyStateTests(unittest.TestCase):
+    """The Policy row: the generation and digest the gateway applied, FAIL
+    when it is stale against config.yaml or rejected the last change, WARN
+    for a hand edit the writer did not record."""
+
+    def test_policy_row(self):
+        from defenseclaw.commands import cmd_doctor
+
+        applied = "sha256:" + "a" * 64
+        cases = [
+            ({}, applied, "pass"),
+            ({}, "sha256:" + "b" * 64, "fail"),
+            ({"last_reload_error": "rule pack digest mismatch"}, applied, "fail"),
+            ({"config_generation": 2, "config_generation_recorded": False}, applied, "warn"),
+        ]
+        for extra, local, want in cases:
+            policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                      "config_generation_recorded": True, **extra}
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": local}):
+                cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+            self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
+
+
 class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""
 
@@ -2497,14 +2521,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 17)
+        self.assertEqual(len(result.repairs), 18)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 8)
+        self.assertEqual(result.repair_summary.noop, 9)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -2594,10 +2618,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 17)
+        self.assertEqual(len(result.repairs), 18)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 8)
+        self.assertEqual(result.repair_summary.noop, 9)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()

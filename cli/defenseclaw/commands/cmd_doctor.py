@@ -8924,6 +8924,150 @@ def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
     _emit("skip", label, "no regional provider in use", r=r)
 
 
+def _short_policy_digest(digest: str) -> str:
+    """``sha256:`` plus the first 12 hex digits, as status and the TUI show it."""
+    return digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
+
+
+def _local_policy_digest(cfg) -> dict | None:
+    """Compute effective_policy_digest from disk with the installed gateway
+    (``defenseclaw-gateway policy digest --json``); None when it cannot."""
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    binary = resolve_gateway_binary()
+    if not binary:
+        return None
+    env = dict(os.environ)
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if data_dir:
+        env["DEFENSECLAW_HOME"] = data_dir
+    try:
+        proc = subprocess.run(
+            [binary, "policy", "digest", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return report if isinstance(report, dict) and report.get("effective_digest") else None
+
+
+def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> None:
+    """The effective policy the gateway applied: its generation and digest.
+
+    FAIL when the gateway rejected the last change (``last_reload_error``) or
+    applies a different digest than config.yaml and its assets compute to
+    (a stale gateway). WARN when config.yaml changed outside the DefenseClaw
+    writer (config.generation.json did not record its bytes).
+    """
+    label = "Policy"
+    if not isinstance(live_health, dict):
+        _emit("skip", label, "the gateway is not running", r=r)
+        return
+    policy = live_health.get("policy")
+    if not isinstance(policy, dict) or not policy.get("effective_digest"):
+        _emit("skip", label, "the gateway does not report an effective policy", r=r)
+        return
+    digest = str(policy.get("effective_digest") or "")
+    generation = policy.get("generation")
+    config_generation = int(policy.get("config_generation") or 0)
+    applied = f"generation {generation}, digest {_short_policy_digest(digest)}"
+    reload_error = str(policy.get("last_reload_error") or "").strip()
+    if reload_error:
+        _emit(
+            "fail",
+            label,
+            f"{applied} is still enforcing: the last change was rejected ({reload_error})",
+            r=r,
+            check_id="doctor.policy.reload",
+            reason_code="policy-reload-rejected",
+            remediation="Fix the change the error names in config.yaml or the policy asset; the gateway applies it once it builds",
+        )
+        return
+    local = _local_policy_digest(cfg)
+    if local is not None and local.get("effective_digest") != digest:
+        _emit(
+            "fail",
+            label,
+            f"the gateway applies {_short_policy_digest(digest)} but config.yaml and its policy assets compute to "
+            f"{_short_policy_digest(str(local.get('effective_digest')))}",
+            r=r,
+            check_id="doctor.policy.stale",
+            reason_code="policy-stale",
+            remediation="Run `defenseclaw-gateway restart`, or check `defenseclaw-gateway status` for a rejected reload",
+        )
+        return
+    if config_generation > 0 and policy.get("config_generation_recorded") is False:
+        _emit(
+            "warn",
+            label,
+            f"{applied}; config.yaml was edited outside the DefenseClaw writer "
+            f"(config generation {config_generation} does not record the current file)",
+            r=r,
+            check_id="doctor.policy.hand-edit",
+            reason_code="config-hand-edit",
+            remediation="Make changes with `defenseclaw config set`, the TUI or `defenseclaw setup`",
+        )
+        return
+    _emit("pass", label, f"{applied} (applied by the gateway)", r=r)
+
+
+def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
+    """Retired policy inputs and the config_version 9 migration record."""
+    from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
+
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if getattr(cfg, "config_version", 0) >= CONFIG_VERSION_V9:
+        policy_dir = getattr(cfg, "policy_dir", "") or ""
+        stale = []
+        for name in ("data.json", "data-sandbox.json"):
+            for base in (os.path.join(policy_dir, "rego"), policy_dir):
+                candidate = os.path.join(base, name)
+                if policy_dir and os.path.isfile(candidate) and candidate not in stale:
+                    stale.append(candidate)
+        if stale:
+            _emit(
+                "warn",
+                "Retired policy data",
+                f"ignored since config_version 9 (admission and thresholds live in config.yaml): {', '.join(stale)}",
+                r=r,
+                check_id="doctor.policy.data-json",
+                reason_code="retired-policy-data",
+                remediation="Review `defenseclaw config get admission`, then remove the file",
+            )
+    if not data_dir:
+        return
+    record_path = os.path.join(os.path.dirname(str(config_path_for_data_dir(data_dir))), "migration-v9.json")
+    try:
+        with open(record_path, encoding="utf-8") as f:
+            record = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(record, dict) or record.get("acknowledged"):
+        return
+    moved = len(record.get("moved") or [])
+    conflicts = len(record.get("conflicts") or [])
+    when = str(record.get("migrated_at") or "")[:10] or "an earlier upgrade"
+    _emit(
+        "warn" if conflicts else "pass",
+        "Config migration",
+        f"migrated to 9 on {when}: {moved} value(s) moved, {conflicts} conflict(s); details in {record_path}",
+        r=r,
+        check_id="doctor.config.migration-v9",
+        reason_code="config-migrated-v9",
+        remediation="Read the record, then run `defenseclaw-gateway config migrate --ack`",
+    )
+
+
 def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
     """Validate ``~/.defenseclaw/custom-providers.json`` consistency.
 
@@ -8954,6 +9098,26 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
         _emit("skip", label, "no data_dir configured", r=r)
         return
     path = os.path.join(data_dir, "custom-providers.json")
+    # custom-providers.json is derived from config.yaml llm_providers.
+    from defenseclaw import derived_providers
+
+    state, _ = derived_providers.overlay_state(cfg, path)
+    if state in (derived_providers.STATE_EDITED, derived_providers.STATE_STALE):
+        why = (
+            "was edited by hand; the gateway ignores those edits"
+            if state == derived_providers.STATE_EDITED
+            else "does not match llm_providers in config.yaml"
+        )
+        _emit(
+            "fail",
+            label,
+            f"{path} {why}",
+            r=r,
+            check_id="doctor.providers.overlay.derived",
+            reason_code="derived-file-drift",
+            remediation="Run `defenseclaw doctor --fix` to regenerate it from config.yaml (change providers with `defenseclaw setup provider`)",
+        )
+        return
     if not os.path.isfile(path):
         _emit("skip", label, "no overlay configured", r=r)
         return
@@ -10644,6 +10808,8 @@ def doctor(
     sidecar_health = _check_sidecar(cfg, r)
     if sidecar_health is not None:
         _check_guardrail_profile(cfg, r)
+    _check_policy_state(cfg, r, live_health=sidecar_health)
+    _check_policy_evidence_files(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
@@ -11672,6 +11838,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             _fix_acp_guard_pins,
             (),
             ("re-pin the upgraded DefenseClaw ACP guard in the editor entries DefenseClaw wrote",),
+            False,
+            False,
+        ),
+        (
+            "doctor.providers.overlay.regenerate",
+            "custom-providers.json",
+            "safe",
+            _fix_custom_provider_overlay,
+            (),
+            ("rewrite custom-providers.json from llm_providers in config.yaml",),
             False,
             False,
         ),
@@ -15017,6 +15193,35 @@ def _fix_plugin_registry_required(
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"cleared plugin.registry_required [{', '.join(offenders)}]")
+
+
+def _fix_custom_provider_overlay(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Regenerate the derived custom-providers.json from ``llm_providers``."""
+    from defenseclaw import derived_providers
+
+    if str(getattr(cfg, "deployment_mode", "") or "").strip() == "managed_enterprise":
+        return ("skip", "managed device: the enterprise ensure regenerates it")
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return ("skip", "no data_dir configured")
+    path = os.path.join(data_dir, "custom-providers.json")
+    state, _ = derived_providers.overlay_state(cfg, path)
+    if state not in (derived_providers.STATE_EDITED, derived_providers.STATE_STALE):
+        return ("skip", "custom-providers.json matches config.yaml")
+    if plan_only:
+        return ("plan", f"rewrite {path} from llm_providers in config.yaml")
+    if not assume_yes and not click.confirm(f"    Rewrite {path} from llm_providers in config.yaml?", default=True):
+        return ("skip", "declined by user")
+    try:
+        derived_providers.write(cfg, path)
+    except OSError as exc:
+        return ("fail", f"could not write {path}: {type(exc).__name__}: {exc}")
+    return ("pass", f"regenerated {path}")
 
 
 def _fix_acp_guard_pins(

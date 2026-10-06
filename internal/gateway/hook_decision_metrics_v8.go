@@ -127,6 +127,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		identityInput := observability.LogCompatHookDecisionInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),

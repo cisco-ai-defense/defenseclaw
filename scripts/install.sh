@@ -41,6 +41,17 @@ umask 077
 readonly DC_VERSION="__DEFENSECLAW_VERSION__"
 readonly DEFAULT_REPO="cisco-ai-defense/defenseclaw"
 REPO="${DEFENSECLAW_REPO:-${DEFAULT_REPO}}"
+# DEFENSECLAW_REPO (the deprecated alias of config.yaml update.source) is a
+# GitHub owner/name or an https mirror base URL. It only changes where release
+# bytes come from: signatures are always checked against the official release
+# identity, and a mirror's downloads are refused without cosign.
+case "${REPO}" in
+    https://*) RELEASE_BASE="${REPO%/}" ;;
+    *) RELEASE_BASE="https://github.com/${REPO}" ;;
+esac
+readonly RELEASE_BASE
+readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
+readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 export DEFENSECLAW_HOME
 readonly VENV="${DEFENSECLAW_HOME}/.venv"
@@ -294,13 +305,13 @@ fetch() {
         cp "${LOCAL_DIR}/${asset}" "${dest}"
     else
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${dest}" \
-            "https://github.com/${REPO}/releases/download/${version}/${asset}"
+            "${RELEASE_BASE}/releases/download/${version}/${asset}"
     fi
 }
 
 latest_release() {
     local location
-    location="$(curl -fsSI --proto '=https' --tlsv1.2 "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+    location="$(curl -fsSI --proto '=https' --tlsv1.2 "${RELEASE_BASE}/releases/latest" 2>/dev/null \
         | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | tail -1)"
     location="${location##*/tag/}"
     location="${location#v}"
@@ -316,10 +327,10 @@ run_release_installer() {
     tmp="$(mktemp -d "${base%/}/defenseclaw-upgrade-XXXXXX")"
     info "Fetching the installer for DefenseClaw ${version}"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
-        "https://github.com/${REPO}/releases/download/${version}/install.sh" \
+        "${RELEASE_BASE}/releases/download/${version}/install.sh" \
         || die "Release ${version} has no install.sh (1.x releases start at 1.0.0)"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt" \
-        "https://github.com/${REPO}/releases/download/${version}/checksums.txt" \
+        "${RELEASE_BASE}/releases/download/${version}/checksums.txt" \
         || die "Release ${version} has no checksums.txt"
     [[ "$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")" == "$(sha256_of "${tmp}/install.sh")" ]] \
         || die "install.sh for ${version} does not match its checksums.txt"
@@ -328,13 +339,15 @@ run_release_installer() {
     major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
     if [[ "${major:-0}" =~ ^[0-9]+$ && "${major:-0}" -ge 2 ]]; then
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
-            "https://github.com/${REPO}/releases/download/${version}/checksums.txt.bundle" \
+            "${RELEASE_BASE}/releases/download/${version}/checksums.txt.bundle" \
             || die "Release ${version} has no checksums.txt.bundle to verify with cosign"
         cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
-            --certificate-identity-regexp "^https://github\.com/${REPO//./\\.}/\.github/workflows/release\.yaml@refs/heads/main$" \
+            --certificate-identity-regexp "${RELEASE_SIGNER}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${tmp}/checksums.txt" >/dev/null 2>&1 \
             || die "The release signature on ${version}'s checksums.txt did not verify"
+    elif [[ "${RELEASE_BASE}" != "${OFFICIAL_RELEASE_BASE}" ]]; then
+        die "Releases from ${RELEASE_BASE} are verified by their signature: install cosign 2.0 or later"
     fi
     [[ -z "${SELF_TMP}" ]] || rm -rf "${SELF_TMP}"
     exec bash "${tmp}/install.sh" "$@"
@@ -355,13 +368,13 @@ if ! is_version "${VERSION}"; then
     elif [[ "${ROLLBACK}" != true ]]; then
         target="${TARGET_VERSION:-$(latest_release)}"
         version_lt "${target}" 1.0.0 \
-            && die "DefenseClaw ${target} predates this installer; see https://github.com/${REPO}/releases/tag/${target}"
+            && die "DefenseClaw ${target} predates this installer; see ${RELEASE_BASE}/releases/tag/${target}"
         run_release_installer "${target}" ${FORWARD[@]+"${FORWARD[@]}"}
     fi
 fi
 if [[ -n "${TARGET_VERSION}" && "${TARGET_VERSION}" != "${VERSION}" && "${ROLLBACK}" != true ]]; then
     version_lt "${TARGET_VERSION}" 1.0.0 \
-        && die "DefenseClaw ${TARGET_VERSION} predates this installer; see https://github.com/${REPO}/releases/tag/${TARGET_VERSION}"
+        && die "DefenseClaw ${TARGET_VERSION} predates this installer; see ${RELEASE_BASE}/releases/tag/${TARGET_VERSION}"
     [[ -z "${LOCAL_DIR}" ]] || die "--local ${LOCAL_DIR} holds ${VERSION}, not ${TARGET_VERSION}"
     run_release_installer "${TARGET_VERSION}" ${FORWARD[@]+"${FORWARD[@]}"}
 fi
@@ -600,7 +613,7 @@ cosign_major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 
 if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; then
     if fetch checksums.txt.bundle "${STAGING}/checksums.txt.bundle" 2>/dev/null; then
         cosign verify-blob --bundle "${STAGING}/checksums.txt.bundle" \
-            --certificate-identity-regexp "^https://github\.com/${REPO//./\\.}/\.github/workflows/release\.yaml@refs/heads/main$" \
+            --certificate-identity-regexp "${RELEASE_SIGNER}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${STAGING}/checksums.txt" >/dev/null 2>&1 \
             || die "The release signature on checksums.txt did not verify; nothing was changed"
@@ -612,6 +625,8 @@ if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; t
     else
         warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
     fi
+elif [[ -z "${LOCAL_DIR}" && "${RELEASE_BASE}" != "${OFFICIAL_RELEASE_BASE}" ]]; then
+    die "Releases from ${RELEASE_BASE} are verified by their signature: install cosign 2.0 or later; nothing was changed"
 elif [[ -z "${LOCAL_DIR}" ]]; then
     info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
 fi

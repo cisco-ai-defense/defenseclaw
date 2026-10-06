@@ -216,6 +216,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityInfo),
 			LogLevel:                            observability.Present(observability.LogLevelInfo),
@@ -294,6 +295,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
 		input := observability.LogGuardrailEvaluationFailedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityHigh),
 			LogLevel: observability.Present(observability.LogLevelError), Outcome: observability.OutcomeFailed,
@@ -423,6 +425,7 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+		DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(completedAt), Source: observability.SourceGateway,
