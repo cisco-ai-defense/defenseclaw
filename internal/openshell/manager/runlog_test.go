@@ -49,11 +49,25 @@ func runDirSandbox(t *testing.T, e *harnessEnv, runs string) {
 }
 
 // runOnHost runs one of the stop's in-sandbox scripts on this machine, as
-// runDirSandbox does.
+// runDirSandbox does. It keeps endHarnessScript off this machine's
+// processes: the script walks an empty directory in place of /proc, under a
+// harness install root no process runs from, and flushes nothing. The real
+// walk would send SIGTERM to every process of this user that names a
+// harness path (another sandbox's harness on a shared host among them),
+// and would take as long as the host is busy.
 func runOnHost(ctx context.Context, call openshelltest.ExecCall, runs string) openshelltest.ExecResponse {
 	argv := slices.Clone(call.Command)
 	if len(argv) < 4 || argv[0] != "/bin/sh" || argv[1] != "-c" {
 		return openshelltest.ExecResponse{}
+	}
+	if argv[3] == "defenseclaw-end-harness" {
+		const walk = "for d in /proc/[0-9]*;"
+		if len(argv) < 5 || strings.Count(argv[2], walk) != 1 {
+			return openshelltest.ExecResponse{Err: errors.New("runOnHost: endHarnessScript no longer walks /proc as this helper expects; keep it off this machine's processes")}
+		}
+		argv[2] = strings.Replace(argv[2], walk, "for d in "+filepath.Join(runs, "no-proc")+"/[0-9]*;", 1)
+		argv[2] = strings.ReplaceAll(argv[2], "/bin/sync", "true")
+		argv[4] = filepath.Join(runs, "no-harness")
 	}
 	for i, a := range argv {
 		if a == harness.RunDir {
