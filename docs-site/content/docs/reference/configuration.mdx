@@ -30,9 +30,10 @@ DefenseClaw 1.0.x writes, still loads: the gateway migrates it in memory.
 keeps the old file as `config.yaml.v8.bak`. See
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) for what moved
 and how to check it, and [Upgrade DefenseClaw](/docs/get-started/upgrade) for
-the upgrade and rollback flow. Version 7 files are converted by the 1.0
-upgrade. The gateway never rewrites a legacy file at startup and does not run
-the v7 and v8 observability formats in parallel.
+the upgrade and rollback flow. A file from a released 0.8.x install that is
+older than version 8 is converted once, by `defenseclaw upgrade` or
+`defenseclaw migrate`, with the original kept as a backup; any command that
+meets such a file stops with that instruction instead of reading it.
 
 <Callout title="Native Windows uses the packaged layout">
 The file tree below describes a source or POSIX installation. The native
