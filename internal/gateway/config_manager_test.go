@@ -850,12 +850,14 @@ func TestDiffConfigsV8ResourceIdentityRequiresRestart(t *testing.T) {
 	}
 }
 
-// TestHoldRestartRequiredAppliesTheRest: a hook_fail_mode edit needs a
+// TestHoldRestartRequiredAppliesTheRest: a hook_self_heal edit needs a
 // restart, so it keeps its running value while an admission edit in the
-// same (or a later) reload still applies hot.
+// same (or a later) reload still applies hot. hook_fail_mode is hot: the
+// hook guard reads it from the live config (GAP-0045).
 func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.HookSelfHeal = !oldCfg.Guardrail.HookSelfHeal
 	newCfg.Guardrail.HookFailMode = "closed"
 	newCfg.Guardrail.BlockAt = "HIGH"
 	newCfg.Admission.Skill.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
@@ -867,8 +869,10 @@ func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
 	}
 	heldDiff := diffConfigs(oldCfg, held)
 	if len(heldDiff.RestartRequired) != 0 || !slices.Contains(heldDiff.Changed, "admission") ||
-		held.Guardrail.HookFailMode != oldCfg.Guardrail.HookFailMode || held.Guardrail.BlockAt != "HIGH" {
-		t.Fatalf("held diff = %+v hook_fail_mode=%q block_at=%q", heldDiff, held.Guardrail.HookFailMode, held.Guardrail.BlockAt)
+		held.Guardrail.HookSelfHeal != oldCfg.Guardrail.HookSelfHeal ||
+		held.Guardrail.HookFailMode != "closed" || held.Guardrail.BlockAt != "HIGH" {
+		t.Fatalf("held diff = %+v hook_self_heal=%v hook_fail_mode=%q block_at=%q",
+			heldDiff, held.Guardrail.HookSelfHeal, held.Guardrail.HookFailMode, held.Guardrail.BlockAt)
 	}
 }
 

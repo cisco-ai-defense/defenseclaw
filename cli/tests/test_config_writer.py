@@ -62,13 +62,15 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
     assert config_writer.restart_required(
         [
             "guardrail.hook_fail_mode",
+            "guardrail.hook_self_heal",
             "guardrail.connectors.codex.enabled",
+            "guardrail.connectors.codex.hook_fail_mode",
             "guardrail.block_at",
             "gateway.watcher.enabled",
             "application_protection.connectors.codex.guardrail.block_at",
             "cisco_ai_defense.endpoint",
         ]
-    ) == ["guardrail.hook_fail_mode", "guardrail.connectors.codex.enabled"]
+    ) == ["guardrail.hook_self_heal", "guardrail.connectors.codex.enabled"]
 
 
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):

@@ -83,7 +83,7 @@ MANAGED_REFUSAL = (
 # Keys a running gateway applies only after a restart: the process-level
 # keys, plus what its reload still treats as restart-required (claw, agent
 # and routing, read once at start; the guardrail listener and enablement;
-# the hook settings setup bakes into the hooks). "*" matches one segment. Everything
+# the hook self-heal settings). "*" matches one segment. Everything
 # else is hot. Mirrors internal/config/configwrite restartKeys.
 RESTART_KEYS = (
     "data_dir",
@@ -96,11 +96,9 @@ RESTART_KEYS = (
     "guardrail.connector",
     "guardrail.scanner_mode",
     "guardrail.retain_judge_bodies",
-    "guardrail.hook_fail_mode",
     "guardrail.hook_self_heal",
     "guardrail.hook_self_heal_debounce_ms",
     "guardrail.connectors.*.enabled",
-    "guardrail.connectors.*.hook_fail_mode",
     "claw",
     "agent",
     "routing",

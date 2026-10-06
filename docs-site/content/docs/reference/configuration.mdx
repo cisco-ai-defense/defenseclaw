@@ -1381,9 +1381,9 @@ touches one prints the command, and the gateway keeps that key's running value
 until you restart it:
 
 ```text
-Set guardrail.hook_fail_mode (config generation 5, sha256 b0eecf44591d).
+Set guardrail.hook_self_heal (config generation 5, sha256 b0eecf44591d).
 Effective policy digest: sha256:4254f65d36b3d7af4e4704a12570e2a4a1e0e5a4063a58d27a18953f5376a8f2
-Restart the gateway to apply guardrail.hook_fail_mode: defenseclaw-gateway restart
+Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway restart
 ```
 
 | Restart-required key | Why |
@@ -1391,12 +1391,12 @@ Restart the gateway to apply guardrail.hook_fail_mode: defenseclaw-gateway resta
 | `data_dir`, `observability.local.path`, `observability.local.judge_bodies_path` | Storage identity: the files the process opened at start |
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
-| `guardrail.hook_fail_mode`, `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled`, `guardrail.connectors.<connector>.hook_fail_mode` | Hook settings that setup bakes into the installed hooks |
+| `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled` | The hook guard and which connectors have hooks installed |
 | `claw`, `agent`, `routing` | Paths, identity and the model router, captured at start |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
-Every other key is hot, including `guardrail.mode`, thresholds, rule packs and
+Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and
 rules, `admission`, `asset_policy`, `scanners`, `llm_providers`,
 `observability.destinations` and `update`. The effective policy digest, which
 is the sha256 of the migrated config (secrets dropped) plus the digests of the
