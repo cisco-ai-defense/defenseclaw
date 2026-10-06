@@ -4,6 +4,7 @@
     "cli",
     "setup-commands",
     "sandbox-cli",
+    "source-of-truth",
     "configuration",
     "env-vars",
     "keys",
