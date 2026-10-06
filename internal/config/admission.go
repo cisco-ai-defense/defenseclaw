@@ -165,6 +165,31 @@ func (a AdmissionAction) MarshalYAML() (any, error) {
 	return a.Triple, nil
 }
 
+// UnmarshalJSON reads what MarshalJSON writes (the gateway clones a config
+// through JSON): a shorthand string or an install/file/runtime object.
+func (a *AdmissionAction) UnmarshalJSON(data []byte) error {
+	var shorthand string
+	if json.Unmarshal(data, &shorthand) == nil {
+		if !validAdmissionShorthand(shorthand) {
+			return fmt.Errorf("config: admission action must be block, quarantine, warn, allow or an install/file/runtime mapping")
+		}
+		*a = AdmissionAction{Shorthand: shorthand}
+		return nil
+	}
+	var triple struct {
+		Install string `json:"install"`
+		File    string `json:"file"`
+		Runtime string `json:"runtime"`
+	}
+	if err := json.Unmarshal(data, &triple); err != nil {
+		return fmt.Errorf("config: admission action must be a string or a mapping: %w", err)
+	}
+	*a = AdmissionAction{Triple: SeverityAction{
+		Install: InstallAction(triple.Install), File: FileAction(triple.File), Runtime: RuntimeAction(triple.Runtime),
+	}}
+	return nil
+}
+
 // MarshalJSON writes the form the action was declared in.
 func (a AdmissionAction) MarshalJSON() ([]byte, error) {
 	if a.Shorthand != "" {

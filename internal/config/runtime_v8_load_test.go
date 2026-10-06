@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -397,6 +398,12 @@ observability: {}
 	}
 	if got := admission.Skill.ScannerOverrides["virustotal"].High; got == nil || got.Shorthand != AdmissionActionBlock {
 		t.Errorf("virustotal high = %+v, want block", got)
+	}
+	// The gateway clones a config through JSON; both action forms survive.
+	var cloned AdmissionConfig
+	if encoded, err := json.Marshal(admission); err != nil || json.Unmarshal(encoded, &cloned) != nil ||
+		!reflect.DeepEqual(cloned, admission) {
+		t.Errorf("admission JSON round trip = %+v (%v)", cloned, err)
 	}
 	if got := cfg.Guardrail.Rules.SeverityOverrides["SEC-AWS-SECRET"]; got != "HIGH" || cfg.Guardrail.RulePack != "strict" {
 		t.Errorf("rules = %+v rule_pack = %q; rule IDs must keep their case", cfg.Guardrail.Rules, cfg.Guardrail.RulePack)
