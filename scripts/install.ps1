@@ -1638,6 +1638,15 @@ function Invoke-Rollback {
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
     $forward = if ($current) { $current } else { "1.x" }
+    # Each install shows only its own audit window, so say how to read the
+    # other one (GAP-0126). The newer build's gateway reads either log.
+    $otherAudit = Join-Path $Previous "data\audit.db"
+    if (Test-Path -LiteralPath $otherAudit) {
+        $newerGateway = if ($current -and (Test-Version $current) -and [version]$backTo -lt [version]$current) {
+            Join-Path $Previous "bin\defenseclaw-gateway.exe"
+        } else { "defenseclaw-gateway" }
+        Write-Info "The other install's audit events (written while $forward ran) are kept apart: $newerGateway audit export --db `"$otherAudit`""
+    }
     if ([version]$backTo -lt [version]"1.0.0") {
         # 0.x has no `defenseclaw rollback`; the 1.x installer is parked in previous\.
         Write-Ok ("Now running DefenseClaw $backTo. To return to $forward, run: " +

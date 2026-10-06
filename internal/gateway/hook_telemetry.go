@@ -99,6 +99,9 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
 	}
 	auditAction := string(audit.ActionConnectorHook)
+	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
+		auditAction = env.AuditActionOverride
+	}
 	jsonDetails, structured := renderHookAuditEnvelopePayload(env)
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",

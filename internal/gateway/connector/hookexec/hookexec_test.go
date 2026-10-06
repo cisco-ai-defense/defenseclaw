@@ -33,6 +33,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // stubRT is an injectable http.RoundTripper returning a canned response (or a
@@ -2594,5 +2596,32 @@ func TestUnreachableDetailNamesTheNextStep(t *testing.T) {
 		if got := unreachableDetail(tc.opts, tc.reason); got != tc.want {
 			t.Errorf("unreachableDetail(%+v, %q) = %q, want %q", tc.opts, tc.reason, got, tc.want)
 		}
+	}
+}
+
+// A Secure Client hook sends no session facts (GAP-0148, issue #1092): it
+// runs no klist and writes no session-facts cache in the home of the user,
+// while a per-user hook in the same SSH session sends them.
+func TestSecureClientHookSendsNoSessionFacts(t *testing.T) {
+	t.Cleanup(func() { useridentity.KeepQualifiedNames(false) })
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.20 22")
+	t.Setenv("SSH_TTY", "/dev/pts/9")
+	secureClient := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	setUserIdentityHeaders(secureClient, Options{ManagedEnterprise: true})
+	if got := secureClient.Header.Get(useridentity.SessionFactsHeader); got != "" {
+		t.Fatalf("Secure Client hook sent session facts %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client hook wrote in the home of the user: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		return
+	}
+	perUser := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/", nil)
+	setUserIdentityHeaders(perUser, Options{})
+	if perUser.Header.Get(useridentity.SessionFactsHeader) == "" {
+		t.Fatal("per-user hook in an SSH session sent no session facts")
 	}
 }

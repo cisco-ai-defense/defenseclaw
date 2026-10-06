@@ -117,3 +117,16 @@ func TestForHomeOnNonDirectoryResolvesNothing(t *testing.T) {
 		}
 	}
 }
+
+// The Secure Client profile keeps passwd names as the system reports them
+// (GAP-0149, issue #1092); every other profile gets the bare account.
+func TestKeepQualifiedNamesKeepsThePasswdName(t *testing.T) {
+	t.Cleanup(func() { KeepQualifiedNames(false) })
+	if got := passwdAccountName(`CORP\alice`); got != "alice" {
+		t.Fatalf("bare name = %q, want alice", got)
+	}
+	KeepQualifiedNames(true)
+	if got := passwdAccountName(`CORP\alice`); got != `CORP\alice` {
+		t.Fatalf("Secure Client name = %q, want CORP\\alice", got)
+	}
+}
