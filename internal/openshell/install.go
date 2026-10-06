@@ -217,6 +217,12 @@ type Installer struct {
 	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
 	// version a failed install on a Mac reports (HomebrewInstallError).
 	XcodeApp string
+	// BrewPrefix is the Homebrew prefix NVIDIA's script installs into on a
+	// Mac (default: HOMEBREW_PREFIX, else the brew LookPath finds, else
+	// /opt/homebrew). Writable reports whether this account can create
+	// entries in a directory (default: access(2)).
+	BrewPrefix string
+	Writable   func(dir string) bool
 }
 
 func (i *Installer) defaults() {
@@ -249,6 +255,12 @@ func (i *Installer) defaults() {
 	}
 	if i.LookPath == nil {
 		i.LookPath = exec.LookPath
+	}
+	if i.BrewPrefix == "" && i.GOOS == "darwin" {
+		i.BrewPrefix = findHomebrewPrefix(os.Getenv, i.LookPath)
+	}
+	if i.Writable == nil {
+		i.Writable = writableByCaller
 	}
 	if i.Candidates == nil {
 		i.Candidates = []string{"/usr/local/bin/openshell", "/usr/bin/openshell", "/opt/homebrew/bin/openshell"}
@@ -305,6 +317,11 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 	plan.BreakingUpgrade = existing != nil && (existing.Version == (Version{}) || existing.Version.Compare(mustParse(breakingReleaseFloor)) < 0)
 
+	// The script runs Homebrew as you: a prefix that belongs to another
+	// account fails it partway with a permission error, so say so first.
+	if err := i.checkBrewWritable(); err != nil {
+		return nil, err
+	}
 	script, err := i.download(ctx)
 	if err != nil {
 		return nil, err
@@ -398,7 +415,19 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 // consent.
 func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 	i.defaults()
+	if err := i.checkBrewWritable(); err != nil {
+		return err
+	}
 	return brew(ctx, i.Runner, "install", "e2fsprogs")
+}
+
+// checkBrewWritable refuses, on a Mac, a Homebrew prefix this account
+// cannot write (HomebrewNotWritableError).
+func (i *Installer) checkBrewWritable() error {
+	if i.GOOS != "darwin" {
+		return nil
+	}
+	return checkHomebrewWritable(i.BrewPrefix, i.Writable)
 }
 
 // ResignVMDriver reruns the nvidia/openshell formula's post-install step

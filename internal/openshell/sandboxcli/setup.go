@@ -236,6 +236,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			return a.ask("Run this plan?", false, false)
 		})
 		res, err := inst.Install(ctx)
+		if serr := a.homebrewNotWritable(err); serr != nil {
+			return serr
+		}
 		if errors.Is(err, openshell.ErrHomebrewInstall) {
 			a.bad("install OpenShell: Homebrew could not install the nvidia/openshell formula")
 			a.note("→ " + homebrewInstallHint(err))
@@ -644,6 +647,19 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 	return nil
 }
 
+// homebrewNotWritable reports a Homebrew prefix that belongs to another
+// account as the error setup returns, already printed with the way on; nil
+// for any other error.
+func (a *App) homebrewNotWritable(err error) error {
+	var hw *openshell.HomebrewNotWritableError
+	if !errors.As(err, &hw) {
+		return nil
+	}
+	a.bad("install OpenShell: " + a.tildeText(hw.Problem()))
+	a.note("→ " + a.tildeText(hw.Fix()))
+	return &Silent{Err: fmt.Errorf("install OpenShell: %w", err)}
+}
+
 // homebrewInstallHint says what to update when Homebrew did not install
 // the nvidia/openshell formula. With current Command Line Tools selected,
 // what it refuses is an older /Applications/Xcode.app, which it checks
@@ -869,6 +885,9 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 		}
 		a.note("Installing e2fsprogs with Homebrew…")
 		if err := a.Installer(nil).InstallE2fsprogs(ctx); err != nil {
+			if serr := a.homebrewNotWritable(err); serr != nil {
+				return nil, serr
+			}
 			return nil, fmt.Errorf("install e2fsprogs: %w", err)
 		}
 		a.ok("e2fsprogs installed")

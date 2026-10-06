@@ -108,6 +108,9 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 		Candidates: []string{f.cliPath},
 		PackageCLI: f.cliPath,
 		GOOS:       "linux",
+		// A Mac's checks do not depend on the machine the tests run on.
+		BrewPrefix: "/opt/homebrew",
+		Writable:   func(string) bool { return true },
 		Out:        &f.out,
 		Consent: func(p *openshell.InstallPlan) (bool, error) {
 			if !strings.Contains(f.out.String(), p.SHA256) {
@@ -430,6 +433,40 @@ func TestInstallFailureOnMacOSNamesHomebrew(t *testing.T) {
 		if err == nil || errors.Is(err, openshell.ErrHomebrewInstall) != homebrew || !strings.Contains(err.Error(), "exit status 1") {
 			t.Fatalf("%s: Install = %v", goos, err)
 		}
+	}
+}
+
+// TestInstallRefusesAHomebrewThisUserCannotWrite: NVIDIA's script runs
+// Homebrew as you, without sudo. On a Mac whose Homebrew belongs to an
+// administrator, a standard user's install failed halfway with "Permission
+// denied @ dir_s_mkdir - /opt/homebrew/Library/Taps/nvidia" and a hint
+// about Xcode (GAP-0109). The installer refuses first, before it downloads
+// or runs anything, and names the owner and the directory.
+func TestInstallRefusesAHomebrewThisUserCannotWrite(t *testing.T) {
+	prefix := t.TempDir()
+	taps := filepath.Join(prefix, "Library", "Taps")
+	if err := os.MkdirAll(taps, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.inst.GOOS, f.inst.BrewPrefix = "darwin", prefix
+	f.inst.Writable = func(dir string) bool { return dir != taps }
+	_, err := f.inst.Install(context.Background())
+	var hw *openshell.HomebrewNotWritableError
+	if !errors.Is(err, openshell.ErrHomebrewNotWritable) || !errors.As(err, &hw) || hw.Prefix != prefix || hw.Dir != taps || f.hits.Load() != 0 || f.ran() {
+		t.Fatalf("Install = %v (downloads %d, ran %t)", err, f.hits.Load(), f.ran())
+	}
+	if !strings.Contains(hw.Problem(), "cannot write to "+taps) || !strings.Contains(hw.Fix(), "a Homebrew of your own") {
+		t.Fatalf("problem %q, fix %q", hw.Problem(), hw.Fix())
+	}
+	// The e2fsprogs install runs Homebrew in the same prefix.
+	if err := f.inst.InstallE2fsprogs(context.Background()); !errors.Is(err, openshell.ErrHomebrewNotWritable) || f.runner.Called("brew") {
+		t.Fatalf("InstallE2fsprogs = %v; calls %v", err, f.runner.Calls())
+	}
+	// A prefix this user can write installs.
+	f.inst.Writable = func(string) bool { return true }
+	if _, err := f.inst.Install(context.Background()); err != nil || !f.ran() {
+		t.Fatalf("Install = %v (ran %t)", err, f.ran())
 	}
 }
 

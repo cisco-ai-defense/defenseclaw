@@ -408,6 +408,28 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 		}
 		has(t, ta.output(), tc.hint)
 	}
+
+	// A Homebrew that belongs to another account (GAP-0109) failed with a
+	// permission error and the Xcode hint above: the installer refuses it
+	// first, and setup names the owner, the folder and the way on.
+	ta = setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	inst = &fakeInstaller{err: &openshell.HomebrewNotWritableError{Prefix: "/opt/homebrew", Dir: "/opt/homebrew/Library/Taps", Owner: "admin", User: "alice"}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err = ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	if !errors.As(err, &silent) || !errors.Is(err, openshell.ErrHomebrewNotWritable) {
+		t.Fatalf("Setup = %v, want the Homebrew permission failure, already printed", err)
+	}
+	has(t, ta.output(), "✗ install OpenShell: Homebrew at /opt/homebrew belongs to admin, and you (alice) cannot write to /opt/homebrew/Library/Taps",
+		"→ ask admin (or an administrator) to make /opt/homebrew writable for you, or use a Homebrew of your own")
+	lacks(t, ta.output(), "Xcode")
 }
 
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo

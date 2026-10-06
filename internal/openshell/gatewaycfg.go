@@ -1878,24 +1878,7 @@ func brewFormulaInstalled() bool {
 // without running brew: HOMEBREW_PREFIX (which `brew shellenv` sets),
 // else the prefix of the brew on PATH (the one holding a Cellar, through
 // its link when it has none), else /opt/homebrew, Apple silicon's.
-var homebrewPrefix = sync.OnceValue(func() string {
-	if p := os.Getenv("HOMEBREW_PREFIX"); filepath.IsAbs(p) {
-		return filepath.Clean(p)
-	}
-	if brew, err := exec.LookPath("brew"); err == nil && filepath.IsAbs(brew) {
-		candidates := []string{brew}
-		if real, err := filepath.EvalSymlinks(brew); err == nil {
-			candidates = append(candidates, real)
-		}
-		for _, c := range candidates {
-			prefix := filepath.Dir(filepath.Dir(c))
-			if info, err := os.Stat(filepath.Join(prefix, "Cellar")); err == nil && info.IsDir() {
-				return prefix
-			}
-		}
-	}
-	return "/opt/homebrew"
-})
+var homebrewPrefix = sync.OnceValue(func() string { return findHomebrewPrefix(os.Getenv, exec.LookPath) })
 
 // runningDriver asks the gateway of opts which compute driver it runs.
 func runningDriver(ctx context.Context, opts DiscoverOptions) (Driver, error) {

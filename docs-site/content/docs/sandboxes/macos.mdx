@@ -54,7 +54,7 @@ MicroVMs do not run in Docker Desktop.
 | --- | --- |
 | A Mac with Apple silicon | The MicroVM driver runs on Apple silicon only. On an Intel Mac sandboxes are refused. If you run the Intel build of DefenseClaw under Rosetta, install the arm64 build. |
 | DefenseClaw | Installed and initialized (see the [quickstart](/docs/get-started/quickstart)), with the daemon running. The [macOS app](/docs/macos-app) starts it for you. Run everything as your own user. |
-| [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` Homebrew formula, and its gateway runs as a Homebrew service. |
+| [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` Homebrew formula, and its gateway runs as a Homebrew service. NVIDIA's installer runs Homebrew as you, without `sudo`, so your account must be able to write to Homebrew's folders: see [a Homebrew that belongs to another account](#a-homebrew-that-belongs-to-another-account). |
 | Xcode or the Command Line Tools | The formula may build from source, and Homebrew then wants current developer tools for your macOS release. See [developer tools](#developer-tools) below. |
 | `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it (`brew install e2fsprogs`). |
 | Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. |
@@ -81,6 +81,23 @@ Update that Xcode or delete it. Updating the Command Line Tools does not
 help.
 </Callout>
 
+### A Homebrew that belongs to another account
+
+On a Mac where an administrator installed Homebrew, a standard user cannot
+write to it. Setup checks `Library/Taps` and `Cellar` under the Homebrew
+prefix before it runs NVIDIA's installer, and stops with the owner and the
+folder instead of failing halfway:
+
+```text
+  ✗ install OpenShell: Homebrew at /opt/homebrew belongs to admin, and you (alice) cannot write to /opt/homebrew/Library/Taps, where Homebrew adds NVIDIA's tap and installs the formula
+  → ask admin (or an administrator) to make /opt/homebrew writable for you, or use a Homebrew of your own (…)
+```
+
+Either have the owner give you write access, or install a Homebrew of your
+own in your home directory (see Homebrew's
+[installation guide](https://docs.brew.sh/Installation)), put it first on
+`PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again.
+
 ## Set up
 
 <Tabs items={['Command line', 'TUI', 'macOS app']}>
@@ -91,11 +108,14 @@ defenseclaw sandbox setup
 ```
 
 Setup checks the machine, then asks before each change. On a new Mac the
-first lines look like this:
+first lines look like this (Landlock is not checked yet: the question that
+switches the gateway to MicroVMs, whose own kernel enforces it, comes
+first):
 
 ```text
 DefenseClaw sandbox setup
-  Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
+  Checking this machine…  ✓ darwin/arm64  ⚠ Landlock not checked  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
+Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n] y
 Install OpenShell 0.1.1 with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
 ```
 
@@ -107,11 +127,8 @@ Then it:
    may update itself first, and the gateway is registered as `openshell` in
    `~/.config/openshell`. With the same consent it installs `e2fsprogs`
    when it is missing.
-2. **Switches the gateway to MicroVMs.** It asks:
-
-   ```text
-   Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in ~/.config/openshell/gateway.toml and restarts the gateway; OpenShell calls this driver experimental) [Y/n]
-   ```
+2. **Switches the gateway to MicroVMs** (the question above, written after
+   the install).
 
    Yes writes the driver, your uid and gid as the MicroVM sandbox user, and
    more resources for each MicroVM (4 vCPUs, up to 4 GiB of memory and a
@@ -359,6 +376,7 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 
 | You see | Do this |
 | --- | --- |
+| `install OpenShell: Homebrew at /opt/homebrew belongs to …, and you (…) cannot write to …` | Homebrew belongs to another account. Have its owner give you write access, or use a Homebrew of your own: see [a Homebrew that belongs to another account](#a-homebrew-that-belongs-to-another-account). |
 | `install OpenShell: Homebrew could not install the nvidia/openshell formula` | Read Homebrew's `Error:` line above it. Most often your developer tools are too old: see [developer tools](#developer-tools). |
 | **MicroVM driver** fails: `e2fsprogs is not installed where the MicroVM driver looks for it` | `brew install e2fsprogs`, or run `defenseclaw sandbox setup` and let it install it. |
 | **MicroVM driver** fails: the driver is not signed for Apple's Hypervisor | `brew postinstall nvidia/openshell/openshell`. Setup runs it for you when you agree. |
