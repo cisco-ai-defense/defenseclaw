@@ -1328,6 +1328,12 @@ func refreshAuditEnvelopeFromIdentity(ctx context.Context, sessionID string, ide
 	return audit.ContextWithEnvelope(ctx, env)
 }
 
+// doctorProbeSessionID is the session defenseclaw doctor sends through a
+// connector's real hook transport to prove it reaches the gateway. The probe is
+// not agent use, so it is not recorded as a session or activity of the
+// agent identity.
+const doctorProbeSessionID = "defenseclaw-doctor-probe"
+
 func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) AgentIdentity {
 	agentName := firstNonEmpty(req.AgentName, req.AgentType, req.ConnectorName)
 	agentType := firstNonEmpty(req.AgentType, req.ConnectorName)
@@ -1362,7 +1368,9 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 			}
 		}
 	}
-	sharedAgentIdentities.observe(facts, req.SessionID, newSession)
+	if req.SessionID != doctorProbeSessionID {
+		sharedAgentIdentities.observe(facts, req.SessionID, newSession)
+	}
 	return identity
 }
 

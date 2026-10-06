@@ -6096,6 +6096,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     payload = json.dumps(
         {
             "hook_event_name": "sessionStart",
+            # The gateway does not record this session on the agent identity
+            # (doctorProbeSessionID in internal/gateway/agent_hook.go).
             "session_id": "defenseclaw-doctor-probe",
             "source": "defenseclaw-doctor",
             "workspace_roots": [],

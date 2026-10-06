@@ -39,6 +39,11 @@ type AgentIdentityRecord struct {
 	// SessionsSeen is the session count. In an UpsertAgentIdentities batch
 	// it is the number of sessions first seen since the previous flush.
 	SessionsSeen int64 `json:"sessions_seen"`
+	// FirstSessionID is, in a batch, the first session the batch counted.
+	// The session registry lives in memory, so a session resumed after a
+	// gateway restart is counted again; when it is the stored row's last
+	// session the upsert does not count it twice.
+	FirstSessionID string `json:"-"`
 }
 
 // AgentIdentityFilter narrows ListAgentIdentities. Empty fields match
@@ -86,7 +91,9 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 				last_session_id = CASE
 					WHEN excluded.last_session_id <> '' AND excluded.last_seen >= agent_identities.last_seen
 					THEN excluded.last_session_id ELSE agent_identities.last_session_id END,
-				sessions_seen = agent_identities.sessions_seen + excluded.sessions_seen`)
+				sessions_seen = agent_identities.sessions_seen + excluded.sessions_seen - CASE
+					WHEN excluded.sessions_seen > 0 AND ? <> '' AND ? = agent_identities.last_session_id
+					THEN 1 ELSE 0 END`)
 		if err != nil {
 			return err
 		}
@@ -108,7 +115,7 @@ func (s *InventoryStore) UpsertAgentIdentities(ctx context.Context, batch []Agen
 			}
 			if _, err := stmt.ExecContext(ctx, rec.AgentID, rec.UserID, rec.UserName, rec.Connector,
 				rec.InstallFP, rec.MachineHash, formatAgentIdentityTime(first), formatAgentIdentityTime(last),
-				rec.LastSessionID, sessions); err != nil {
+				rec.LastSessionID, sessions, rec.FirstSessionID, rec.FirstSessionID); err != nil {
 				return err
 			}
 		}
