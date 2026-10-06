@@ -153,6 +153,18 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --json | jq 
 The `subject` lists the user ID, the principal and the groups exactly as the
 gateway sees them, so the name in your assignment is the name that matches.
 
+Assign by the name `id -Gn` prints, and check the assignments again after a
+group is renamed or deleted in the directory: an assignment that names the old
+name selects nobody, and the users of that group fall through to the next
+assignment or the default. The gateway looks the groups of your assignments up
+in the operating system, and a group it definitely does not find is a warning in
+`guardrail profile explain`, `guardrail profile list`, `guardrail status` and
+`doctor`, and a line in the gateway log at start and at every reload
+(`[guardrail] assignment 1: group "..." is not known to this host`). A lookup
+that fails or times out says nothing. On Windows the SID of a group survives a
+rename, so it is the spelling to use there; on Linux and macOS a group is
+matched by its name.
+
 ### The match reason
 
 Every decision records why a profile was chosen. When an assignment sets more

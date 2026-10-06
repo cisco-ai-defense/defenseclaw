@@ -187,6 +187,19 @@ def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
     status = CliRunner().invoke(cmd_guardrail.guardrail, ["status"], obj=app, catch_exceptions=False)
     assert note in status.output
 
+    # `profile list` reads the config file and adds what the running gateway
+    # warns about, such as a group the host no longer knows (GAP-0135).
+    app.cfg.guardrail.profile_assignments = [
+        GuardrailProfileAssignment(profile="strict", match=GuardrailProfileMatch(groups=["dc-rename-me@dclab.test"]))
+    ]
+    monkeypatch.setattr(
+        gateway.OrchestratorClient, "guardrail_profile_resolve", lambda self, **kwargs: {"warnings": ["assignment 1: group is gone"]}
+    )
+    listed = CliRunner().invoke(cmd_guardrail.guardrail, ["profile", "list"], obj=app, catch_exceptions=False)
+    assert "assignment 1: group is gone" in listed.output
+    as_json = CliRunner().invoke(cmd_guardrail.guardrail, ["profile", "list", "--json"], obj=app, catch_exceptions=False)
+    assert json.loads(as_json.output)["warnings"] == ["assignment 1: group is gone"]
+
     result = cmd_doctor._DoctorResult(quiet=True)
     cmd_doctor._check_guardrail_profile(app.cfg, result)
     assert [(c["status"], c["label"]) for c in result.checks if c["label"].startswith("Guardrail")] == [

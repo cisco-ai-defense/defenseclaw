@@ -4398,6 +4398,31 @@ def _assignment_json(assignment) -> dict:
     return {"profile": assignment.profile, "match": match}
 
 
+def _gateway_profile_warnings(app: AppContext) -> list[str]:
+    """What the running gateway warns about the configured assignments.
+
+    Empty when the gateway is not running: ``profile list`` works from the
+    config file alone and only adds what the gateway can see (a group the
+    host no longer knows).
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=5,
+        )
+        try:
+            result = client.guardrail_profile_resolve()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no gateway, no extra warnings.
+        return []
+    return [str(note) for note in result.get("warnings") or []]
+
+
 @profile_group.command("list")
 @click.option("--json", "json_out", is_flag=True, help="Print the profiles as JSON.")
 @pass_ctx
@@ -4410,6 +4435,9 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         "assignments": [_assignment_json(a) for a in gc.profile_assignments],
         "default_profile": gc.default_profile,
     }
+    warnings = _gateway_profile_warnings(app) if gc.profile_assignments else []
+    if warnings:
+        payload["warnings"] = warnings
     if json_out:
         click.echo(json.dumps(payload, indent=2))
         return
@@ -4436,6 +4464,8 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         ux.echo(f"      {index}. {assignment.profile} ← {match}")
     default = gc.default_profile or ux.dim("none (guardrail.* applies)")
     ux.echo(f"  • {ux._style('default:', fg='bright_black', bold=True)} {default}")
+    for note in warnings:
+        ux.warn(note, indent="  ")
     click.echo()
 
 

@@ -140,6 +140,8 @@ type guardrailProfileSet struct {
 	profiles       map[string]config.DerivedGuardrailProfile
 	assignments    []config.ProfileAssignment
 	defaultProfile string
+	// groupCheck is the last look at whether the assignments' groups exist.
+	groupCheck profileGroupCheck
 	// rules holds the compiled rule pack of every rule_pack_dir a derived
 	// profile can resolve to, keyed by the cleaned directory.
 	rules map[string]*compiledRulePackCategories

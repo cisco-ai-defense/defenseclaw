@@ -4,9 +4,14 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -16,8 +21,120 @@ import (
 // does not show.
 func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) []string {
 	var warnings []string
+	warnings = append(warnings, set.unknownGroupWarnings(profileGroupCheckWait)...)
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
+	}
+	return warnings
+}
+
+// Groups an assignment names that the host does not know.
+//
+// Renaming or deleting a security group in the directory is routine, and an
+// assignment that names the old name then selects nobody without any other
+// sign: the users of that group fall through to the next assignment or the
+// default profile. The groups the assignments name are looked up in the
+// operating system's account database, and each one it answers "no such
+// group" for is a warning in explain, status, doctor and `profile list`, and
+// a line in the gateway log at start and at each reload (GAP-0135). A lookup
+// that fails or runs out of time says nothing: only a definite absence warns.
+
+const (
+	profileGroupCheckTTL    = time.Minute
+	profileGroupCheckBudget = 3 * time.Second
+	// profileGroupCheckWait is how long a command waits for the first pass of
+	// a set; status and doctor give the gateway only 3 s to answer.
+	profileGroupCheckWait = 1500 * time.Millisecond
+	// profileGroupCheckMax bounds how many distinct groups one pass looks up,
+	// so a configuration with thousands of assignments cannot make an
+	// administrator's command wait.
+	profileGroupCheckMax = 64
+)
+
+// profileGroupCheck is the last pass over a set's groups, and the pass in
+// flight.
+type profileGroupCheck struct {
+	mu        sync.Mutex
+	checked   bool
+	checkedAt time.Time
+	warnings  []string
+	running   chan struct{}
+}
+
+// unknownGroupWarnings returns one warning per assignment group the host
+// does not know, from a pass at most profileGroupCheckTTL old. A pass runs in
+// the background, so a command never waits for the directory: it gets the last
+// pass, or, before the first has finished, waits for it at most wait.
+func (set *guardrailProfileSet) unknownGroupWarnings(wait time.Duration) []string {
+	if set == nil {
+		return nil
+	}
+	check := &set.groupCheck
+	check.mu.Lock()
+	if (!check.checked || time.Since(check.checkedAt) >= profileGroupCheckTTL) && check.running == nil {
+		done := make(chan struct{})
+		check.running = done
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
+			warnings := unknownAssignmentGroups(ctx, set.assignments, profileGroupExists)
+			cancel()
+			check.mu.Lock()
+			check.warnings, check.checked, check.checkedAt, check.running = warnings, true, time.Now(), nil
+			check.mu.Unlock()
+			close(done)
+		}()
+	}
+	running, checked := check.running, check.checked
+	out := append([]string(nil), check.warnings...)
+	check.mu.Unlock()
+	if checked || running == nil || wait <= 0 {
+		return out
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-running:
+	case <-timer.C:
+	}
+	check.mu.Lock()
+	defer check.mu.Unlock()
+	return append([]string(nil), check.warnings...)
+}
+
+// logUnknownGroups writes the unknown-group warnings to the gateway log; the
+// gateway calls it for a new set at start and at each reload.
+func (set *guardrailProfileSet) logUnknownGroups() {
+	for _, warning := range set.unknownGroupWarnings(profileGroupCheckBudget + time.Second) {
+		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", warning)
+	}
+}
+
+// unknownAssignmentGroups looks up each distinct group the assignments name
+// and warns for those exists reports as definitely absent. SIDs and ids are
+// not names and are not looked up.
+func unknownAssignmentGroups(ctx context.Context, assignments []config.ProfileAssignment, exists func(context.Context, string) (bool, error)) []string {
+	var warnings []string
+	absent := map[string]bool{} // by folded name; present for every group looked up
+	for i, assignment := range assignments {
+		for _, group := range assignment.Match.Groups {
+			group = strings.TrimSpace(group)
+			if group == "" || strings.HasPrefix(strings.ToUpper(group), "S-1-") || strings.Trim(group, "0123456789") == "" {
+				continue
+			}
+			key := foldKey(group)
+			dead, looked := absent[key]
+			if !looked {
+				if len(absent) >= profileGroupCheckMax || ctx.Err() != nil {
+					continue
+				}
+				known, err := exists(ctx, group)
+				dead = err == nil && !known
+				absent[key] = dead
+			}
+			if dead {
+				warnings = append(warnings, fmt.Sprintf("assignment %d: group %q is not known to this host (renamed or deleted in the directory?), so it selects nobody", i+1, group))
+			}
+		}
 	}
 	return warnings
 }

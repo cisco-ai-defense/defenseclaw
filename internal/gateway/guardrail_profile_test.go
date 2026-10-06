@@ -396,3 +396,48 @@ func TestAssignmentsIgnoreUnicodeNormalisationForm(t *testing.T) {
 		}
 	}
 }
+
+// TestUnknownAssignmentGroupsAreReported pins GAP-0135: a group an assignment
+// names that the host definitely does not know (renamed or deleted in the
+// directory) is a warning; one that exists, one whose lookup failed, and
+// SIDs are not.
+func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"dc-rename-me@dclab.test", "dc-ml-team@dclab.test"}}},
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{"S-1-5-21-1-2-3-1104", "dc-flaky@dclab.test", "DC-RENAME-ME@dclab.test"}}},
+	}
+	exists := func(_ context.Context, name string) (bool, error) {
+		switch name {
+		case "dc-ml-team@dclab.test":
+			return true, nil
+		case "dc-flaky@dclab.test":
+			return false, errors.New("getent timed out")
+		case "S-1-5-21-1-2-3-1104":
+			t.Error("a SID was looked up as a name")
+		}
+		return false, nil
+	}
+	got := unknownAssignmentGroups(context.Background(), assignments, exists)
+	if len(got) != 2 || !strings.HasPrefix(got[0], `assignment 1: group "dc-rename-me@dclab.test" is not known`) ||
+		!strings.HasPrefix(got[1], `assignment 2: group "DC-RENAME-ME@dclab.test" is not known`) {
+		t.Fatalf("warnings = %q, want the renamed group in assignments 1 and 2 only", got)
+	}
+
+	// A command does not wait for a slow directory: the pass runs in the
+	// background, and it is waited for only briefly the first time.
+	prev := profileGroupExists
+	t.Cleanup(func() { profileGroupExists = prev })
+	release := make(chan struct{})
+	profileGroupExists = func(ctx context.Context, name string) (bool, error) {
+		<-release
+		return exists(ctx, name)
+	}
+	set := &guardrailProfileSet{assignments: assignments}
+	if early := set.unknownGroupWarnings(10 * time.Millisecond); len(early) != 0 {
+		t.Fatalf("warnings = %q before the first pass finished", early)
+	}
+	close(release)
+	if late := set.unknownGroupWarnings(2 * time.Second); len(late) != 2 {
+		t.Fatalf("warnings = %q after the pass finished, want 2", late)
+	}
+}
