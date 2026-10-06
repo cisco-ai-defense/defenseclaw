@@ -4,6 +4,11 @@
 package gateway
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,4 +72,112 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("incomplete facts were not refreshed after identityDirectoryIncompleteTTL")
+}
+
+// TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce pins GAP-0124: an
+// account whose lookup cannot finish (in more groups than are named, a
+// directory that never answers) leaves one line with the reason in the
+// gateway log, not one per retry, and one when it works again.
+func TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fail := true
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		if fail {
+			return useridentity.DirectoryFacts{}, errors.New("in 3000 groups, more than the 2048 DefenseClaw names")
+		}
+		return useridentity.DirectoryFacts{Principal: "dcad-manygroups@DCLAB.TEST", ResolvedAt: now}, nil
+	})
+	var mu sync.Mutex
+	var lines []string
+	cache.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	cache.now = func() time.Time { return now }
+	for range 3 {
+		if _, ok := cache.get("94401116", true); ok {
+			t.Fatal("a failing lookup answered")
+		}
+		now = now.Add(identityDirectoryRetry)
+	}
+	fail = false
+	if _, ok := cache.get("94401116", true); !ok {
+		t.Fatal("the lookup did not recover")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 2 || !strings.Contains(lines[0], "94401116 failed: in 3000 groups") ||
+		!strings.Contains(lines[1], "works again after 45s") {
+		t.Fatalf("log lines = %q, want one failure with its reason and one recovery", lines)
+	}
+}
+
+// TestIdentityDirectoryCacheDropsFactsItCannotRefresh pins GAP-0145: facts
+// whose refresh keeps failing are served for the stale-while-revalidate
+// window and then dropped, so a removed user does not keep a group profile
+// for the whole outage; health reports the failing account meanwhile.
+func TestIdentityDirectoryCacheDropsFactsItCannotRefresh(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	advance := func(d time.Duration) { clock.Add(int64(d)) }
+	var down atomic.Bool
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		if down.Load() {
+			return useridentity.DirectoryFacts{}, errors.New("sssd offline")
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"dc-ml-team@dclab.test"}, ResolvedAt: time.Unix(0, clock.Load())}, nil
+	})
+	cache.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	cache.logf = func(string, ...any) {}
+	settled := func(wantFailing int) {
+		t.Helper()
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+			if cache.health().Failing == wantFailing {
+				return
+			}
+		}
+		t.Fatalf("health = %+v, want %d failing", cache.health(), wantFailing)
+	}
+	if _, ok := cache.get("1201", true); !ok {
+		t.Fatal("no facts while the directory is up")
+	}
+	down.Store(true)
+	advance(identityDirectoryTTL + time.Second)
+	if _, ok := cache.get("1201", false); !ok {
+		t.Fatal("the stale facts were not served while the refresh runs")
+	}
+	settled(1)
+	if h := cache.health(); h.Stale != 1 || h.LastError != "sssd offline" || h.OldestAge < identityDirectoryTTL {
+		t.Fatalf("health = %+v, want one failing account served stale facts", h)
+	}
+	advance(identityDirectoryMaxAge)
+	if _, ok := cache.get("1201", false); ok {
+		t.Fatal("facts older than identityDirectoryMaxAge were still served")
+	}
+	down.Store(false)
+	advance(identityDirectoryRetry)
+	if _, ok := cache.get("1201", true); !ok {
+		t.Fatal("the account did not recover when the directory came back")
+	}
+	settled(0)
+}
+
+// TestDirectoryHealthViewNamesTheFailingLookups: doctor, status and explain
+// get one message with the count, the first failure and the reason.
+func TestDirectoryHealthViewNamesTheFailingLookups(t *testing.T) {
+	if view, message := directoryHealthView(identityCacheHealth{}, time.Now()); view != nil || message != "" {
+		t.Fatalf("a healthy directory produced %v %q", view, message)
+	}
+	since := time.Date(2026, 10, 6, 21, 4, 8, 0, time.UTC)
+	view, message := directoryHealthView(identityCacheHealth{Failing: 3, Since: since, LastError: "getent timed out", Stale: 2, OldestAge: 25 * time.Minute}, since)
+	for _, want := range []string{"failing for 3 account(s) since 21:04:08Z", "getent timed out", "default_lookup_failed", "2 account(s) are served facts up to 25m0s old"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message %q lacks %q", message, want)
+		}
+	}
+	if view["failing"] != 3 || view["max_age_seconds"] != 3600 || view["message"] != message {
+		t.Errorf("view = %v", view)
+	}
 }

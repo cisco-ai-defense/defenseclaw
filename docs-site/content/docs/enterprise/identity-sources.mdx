@@ -82,15 +82,17 @@ record.
 | Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports | Verified |
 | Groups | `initgroups` plus a group lookup through NSS | Verified |
 | Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, or the only joined realm for a name without a DNS domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
-| UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool. Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
+| UPN, and the directory type of a domain no realm covers | SSSD InfoPipe, read by the root hook guardian and handed to the gateway through a root-owned spool: `GetUserAttr` for `userPrincipalName`, and, when realmd names no realm for the account, the id provider of its SSSD domain (`ldap` or `ipa` gives `ldap`, `ad` gives `active_directory`). Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
 | Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
 
 The NSS and realmd lookups run on every Linux install, without privilege and
 without a call to the directory. The root guardian adds the InfoPipe facts on
 the standalone enterprise profile only. SSSD serves AD, IPA and plain LDAP
-domains alike, so the directory type comes from realmd, and a plain LDAP
-domain that SSSD serves without realmd has no directory type on any install.
+domains alike, so the directory type comes from realmd. A plain LDAP domain
+that SSSD serves without realmd, such as the Okta LDAP Interface, gets the
+type `ldap` from InfoPipe on standalone enterprise. On a per-user install it
+has no directory type, because InfoPipe answers root only.
 
 ### Windows
 
@@ -133,7 +135,7 @@ standalone enterprise profile.
 | Account, name, uid or SID | Gateway | Gateway |
 | Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
 | Linux directory type and realm | Gateway, through realmd | Gateway, through realmd |
-| Linux UPN and mail | Not available | Root guardian |
+| Linux UPN, and the directory type of a domain no realm covers | Not available | Root guardian |
 | Windows groups | Not available | SYSTEM enumerator |
 | Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
 | macOS directory, domain and SSO provider | Not available | Root enumerator |
@@ -151,8 +153,8 @@ machine.
 | Your setup | What DefenseClaw reports |
 | --- | --- |
 | Okta provisions users into AD, and the machine is AD-joined (SSSD, winbind, Windows domain or an AD-bound Mac) | The AD account: directory `active_directory`, the AD UPN, groups and domain |
-| Okta exposes users over LDAP and the host uses it through SSSD or `nss_ldap` | The LDAP account: directory `ldap` through `nss_ldap`. Through SSSD you get the domain and groups, but no directory type |
-| Mac with Platform SSO or Okta Device Access and Okta Verify | The device's SSO provider: directory `okta`, source `macos_platform_sso` (standalone enterprise only) |
+| The host reads the Okta LDAP Interface through SSSD (`id_provider = ldap`) or `nss_ldap` | The LDAP account: its uid, name and Okta groups, verified, also on a per-user install. Directory `ldap` through `nss_ldap`, and through SSSD on standalone enterprise. No domain unless SSSD uses fully qualified names. No UPN unless SSSD maps the Okta login to it. Tested live on RHEL 9; see the [Okta guide](/docs/enterprise/identity-and-authentication#use-okta-users-on-linux-through-the-okta-ldap-interface) |
+| Mac with Platform SSO or Okta Device Access and Okta Verify | The device's SSO provider: directory `okta`, source `macos_platform_sso` (standalone enterprise only). Not tested live |
 | Linux with an Okta agent that creates local accounts | The local account, directory `local`. No Okta NSS module is recognized |
 | Entra-joined or hybrid-joined Windows | Directory `entra_id` with the UPN and tenant ID, and Entra group SIDs (`S-1-12-1-...`) in the token |
 | Mac with Platform SSO and Company Portal | The device's SSO provider: directory `entra_id`, source `macos_platform_sso` (standalone enterprise only) |
@@ -174,22 +176,30 @@ machine.
 - **A first lookup can be slow.** A cold SSSD or Active Directory answer can
   take seconds. The first request waits up to two seconds, then the default
   profile applies for 15 seconds until the lookup is retried.
-- **Some facts need the enterprise profile.** The UPN and mail on
+- **Some facts need the enterprise profile.** The UPN on
   Linux, the group list on Windows and the bound-Mac facts on macOS are read
   with privilege by the root guardian or enumerator, which a per-user install
   does not have.
 - **The Kerberos principal and the session can be changed by the user.** They
   are always `claimed`, except an SSH session the gateway confirmed through
   logind or utmp.
-- **Okta and Entra paths are parsed from OS state.** The Entra, Okta, bound-Mac
-  and Platform SSO readers are covered by tests against recorded OS output,
-  not against a live tenant.
+- **Most Okta and Entra paths are parsed from OS state.** The Entra, Okta
+  Device Access, bound-Mac and Platform SSO readers are covered by tests
+  against recorded OS output, not against a live tenant. Okta through the
+  Okta LDAP Interface and SSSD is the exception: it was tested against a live
+  Okta org.
 
 What was exercised end to end on real hosts, with a Samba Active Directory
 domain: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9
 and Ubuntu 24.04, per-user and managed; and AD UPN and groups on a
 domain-joined Windows per-user install. Group-based profiles on a managed
-Windows computer were exercised with local groups.
+Windows computer were exercised with local groups. With a live Okta org, on
+RHEL 9.8: Okta users read through the Okta LDAP Interface by SSSD, signed in
+over SSH with their Okta passwords, on per-user installs and on standalone
+enterprise. Their uid, name and Okta groups were verified, the groups chose
+guardrail profiles on live Claude Code hooks, an Okta group change reached
+the profile, and an Okta outage fell back as documented. Okta Device Access
+and macOS Platform SSO were not tested live.
 
 ## What a record carries
 

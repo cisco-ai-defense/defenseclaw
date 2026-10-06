@@ -6,11 +6,13 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -55,7 +57,8 @@ func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
 	// GAP-0103: a row an older build stored with the bare name reads with
 	// the host's name for its uid.
 	stored := []inventory.AgentIdentityRecord{{AgentID: "agt-00000000000000b0", UserID: "4646", UserName: "dcad-bob", Connector: "claudecode"}}
-	if rows := mergeAgentIdentityRows(stored, nil, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].UserName != "dcad-bob@dclab.test" {
+	rows := mergeAgentIdentityRows(stored, nil, nil, inventory.AgentIdentityFilter{})
+	if nameAgentIdentityRows(rows); len(rows) != 1 || rows[0].UserName != "dcad-bob@dclab.test" {
 		t.Fatalf("listed rows = %+v, want the host's account name", rows)
 	}
 }
@@ -197,7 +200,7 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
-	if rows, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{}); err != nil || len(rows) != 1 ||
+	if rows, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{}); err != nil || len(rows) != 1 ||
 		rows[0].SessionsSeen != 3 || rows[0].LastSessionID != "sess-c" {
 		t.Fatalf("stored rows = %+v, err %v; want 3 sessions, last sess-c", rows, err)
 	}
@@ -209,6 +212,66 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	})
 	if pending, _ := sharedAgentIdentities.snapshot(); probe.IdentityID == "" || pending[probe.IdentityID].AgentID != "" {
 		t.Fatalf("doctor probe recorded identity %q: %+v", probe.IdentityID, pending[probe.IdentityID])
+	}
+}
+
+// GAP-0152: the route pages the stored and buffered identities instead of
+// stopping silently at 1000 rows, and says how many there are.
+func TestAgentIdentitiesRoutePages(t *testing.T) {
+	agentIdentityTestSetup(t)
+	store, err := inventory.NewInventoryStore(filepath.Join(t.TempDir(), "inventory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	prev := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
+	sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore { return store }, nil)
+	t.Cleanup(func() { sharedAgentIdentities = prev })
+	base := time.Now().Add(-48 * time.Hour)
+	batch := make([]inventory.AgentIdentityRecord, 0, agentIdentitiesPageLimit+1)
+	for i := range agentIdentitiesPageLimit + 1 {
+		batch = append(batch, inventory.AgentIdentityRecord{AgentID: fmt.Sprintf("agt-%016x", i), UserID: "4242",
+			Connector: "claudecode", MachineHash: "m", LastSeen: base.Add(time.Duration(i) * time.Minute)})
+	}
+	if err := store.UpsertAgentIdentities(context.Background(), batch); err != nil {
+		t.Fatal(err)
+	}
+	sharedAgentIdentities.observe(agentIdentityFacts{ID: "agt-ffffffffffffffff", UserID: "4242", Connector: "codex", MachineHash: "m"}, "s-1", true)
+	// The oldest stored identity is seen again: it moves to the top and is
+	// counted once.
+	sharedAgentIdentities.observe(agentIdentityFacts{ID: "agt-0000000000000000", UserID: "4242", Connector: "claudecode", MachineHash: "m"}, "s-2", true)
+
+	get := func(query string) (int, []agentIdentityRow, int, string) {
+		rec := httptest.NewRecorder()
+		(&APIServer{}).handleAgentIdentities(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/identities"+query, nil))
+		var body struct {
+			Identities []agentIdentityRow `json:"identities"`
+			Total      int                `json:"total"`
+			NextCursor string             `json:"next_cursor"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		return rec.Code, body.Identities, body.Total, body.NextCursor
+	}
+	code, rows, total, next := get("")
+	if code != http.StatusOK || len(rows) != agentIdentitiesPageLimit || total != agentIdentitiesPageLimit+2 || next != "1000" ||
+		rows[0].AgentID != "agt-0000000000000000" || rows[1].AgentID != "agt-ffffffffffffffff" {
+		t.Fatalf("first page: %d, %d rows, total %d, next %q", code, len(rows), total, next)
+	}
+	// The last page, before and after the flush (the store pages then).
+	for _, flushed := range []bool{false, true} {
+		if flushed {
+			if err := sharedAgentIdentities.flush(context.Background(), store); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if code, rows, total, next := get("?cursor=1000&limit=5000"); code != http.StatusOK || len(rows) != 2 ||
+			total != agentIdentitiesPageLimit+2 || next != "" || rows[1].AgentID != "agt-0000000000000001" {
+			t.Fatalf("last page (flushed %v): %d, %+v, total %d, next %q", flushed, code, rows, total, next)
+		}
+	}
+	if code, _, _, _ = get("?limit=0"); code != http.StatusBadRequest {
+		t.Fatalf("limit=0 answered %d, want 400", code)
 	}
 }
 

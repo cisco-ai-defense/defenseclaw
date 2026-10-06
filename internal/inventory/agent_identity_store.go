@@ -16,10 +16,11 @@ import (
 
 // agentIdentitiesDDL is the agent_identities table of inventory.db v4. The
 // v4 migration creates the same table; both statements are IF NOT EXISTS, so
-// whichever runs first wins and the other is a no-op.
+// whichever runs first wins and the other is a no-op. The last_seen index
+// serves the listing's order and its pages.
 var agentIdentitiesDDL = []string{
 	`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
-	`CREATE INDEX IF NOT EXISTS idx_agent_identities_user_id ON agent_identities(user_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_identities_last_seen ON agent_identities(last_seen DESC, agent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
 	// The sessions an agent identity has counted: the count is of distinct
 	// session ids, so a session resumed after a gateway restart, which the
@@ -81,8 +82,12 @@ type AgentIdentityFilter struct {
 	// bare or qualified on either side (useridentity.AccountFilterMatches).
 	User      string
 	Connector string
-	// Limit caps the rows returned; 0 or less means 1000.
-	Limit int
+	// AgentIDs, when set, selects only these agents.
+	AgentIDs []string
+	// Offset skips that many matching rows; Limit caps the rows returned
+	// after them (0 or less: no cap). The total counts every match.
+	Offset int
+	Limit  int
 }
 
 func ensureAgentIdentitiesTable(ctx context.Context, exec interface {
@@ -191,58 +196,90 @@ func (s *InventoryStore) PruneAgentIdentitySessions(ctx context.Context, cutoff 
 }
 
 // ListAgentIdentities returns the stored identities matching filter, most
-// recently seen first.
-func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentIdentityFilter) ([]AgentIdentityRecord, error) {
+// recently seen first, and how many match in all.
+func (s *InventoryStore) ListAgentIdentities(ctx context.Context, filter AgentIdentityFilter) ([]AgentIdentityRecord, int, error) {
 	if s == nil || s.db == nil {
-		return nil, errors.New("inventory store: not open")
+		return nil, 0, errors.New("inventory store: not open")
 	}
 	if err := ensureAgentIdentitiesTable(ctx, s.db); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
-		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities WHERE 1=1`
+	where := ` WHERE 1=1`
 	var args []any
 	if connector := strings.TrimSpace(filter.Connector); connector != "" {
-		query += ` AND connector = ?`
+		where += ` AND connector = ?`
 		args = append(args, strings.ToLower(connector))
 	}
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 1000
+	if len(filter.AgentIDs) > 0 {
+		where += ` AND agent_id IN (?` + strings.Repeat(`, ?`, len(filter.AgentIDs)-1) + `)`
+		for _, id := range filter.AgentIDs {
+			args = append(args, id)
+		}
 	}
+	query := `SELECT agent_id, user_id, COALESCE(user_name, ''), connector, COALESCE(install_fp, ''), machine_hash,
+		first_seen, last_seen, COALESCE(last_session_id, ''), sessions_seen FROM agent_identities` + where +
+		` ORDER BY last_seen DESC, agent_id`
 	// The user filter runs in Go (useridentity.AccountFilterMatches), so a
 	// bare name selects a row stored as user@realm or DOMAIN\user and the
-	// other way round; the limit applies after it.
+	// other way round, and the loop below counts, skips and limits. Without
+	// it SQLite does.
 	user := strings.TrimSpace(filter.User)
-	query += ` ORDER BY last_seen DESC, agent_id`
-	if user == "" {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+	total := -1
+	if user == "" && (filter.Limit > 0 || filter.Offset > 0) {
+		counted, err := s.queryDB(ctx, "agent_identities.count", `SELECT COUNT(*) FROM agent_identities`+where, args...)
+		if err != nil {
+			return nil, 0, err
+		}
+		for counted.Next() {
+			err = counted.Scan(&total)
+		}
+		if err == nil {
+			err = counted.Err()
+		}
+		counted.Close()
+		if err != nil {
+			return nil, 0, err
+		}
+		limit := filter.Limit
+		if limit <= 0 {
+			limit = -1
+		}
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, max(filter.Offset, 0))
+	}
+	skip := 0
+	if total < 0 {
+		skip = filter.Offset
 	}
 	rows, err := s.queryDB(ctx, "agent_identities.list", query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []AgentIdentityRecord
+	matched := 0
 	for rows.Next() {
 		var rec AgentIdentityRecord
 		var first, last string
 		if err := rows.Scan(&rec.AgentID, &rec.UserID, &rec.UserName, &rec.Connector, &rec.InstallFP,
 			&rec.MachineHash, &first, &last, &rec.LastSessionID, &rec.SessionsSeen); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
+			continue
+		}
+		matched++
+		if matched <= skip || filter.Limit > 0 && len(out) == filter.Limit {
 			continue
 		}
 		rec.FirstSeen, _ = time.Parse(agentIdentityTimeLayout, first)
 		rec.LastSeen, _ = time.Parse(agentIdentityTimeLayout, last)
 		out = append(out, rec)
-		if len(out) == limit {
-			break
-		}
 	}
-	return out, rows.Err()
+	if total < 0 {
+		total = matched
+	}
+	return out, total, rows.Err()
 }
 
 func formatAgentIdentityTime(t time.Time) string {
