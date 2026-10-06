@@ -67,13 +67,29 @@ var policyCmd = &cobra.Command{
 	Long:  "Validate, inspect, evaluate, and reload DefenseClaw OPA policies.",
 }
 
+// policyConfigOnlyPreRunE is the setup of the read-only policy views
+// (digest, show, validate): they need the strict runtime config and the
+// policy assets, never the audit store, so a short-lived process does not
+// become a second SQLite owner. On a standalone managed host an
+// administrator's run reads the managed deployment without extra
+// environment variables, as status does; a standard user gets the managed
+// answer instead of a per-user config that does not exist.
+func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
+	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
+	return loadGatewayCommandConfigFor(cmd)
+}
+
+func policyConfigOnlyPostRun(*cobra.Command, []string) {}
+
 // ---------------------------------------------------------------------------
 // policy validate
 // ---------------------------------------------------------------------------
 
 var policyValidateCmd = &cobra.Command{
-	Use:   "validate",
-	Short: "Compile-check all Rego modules and the admission policy compiled from config.yaml",
+	Use:               "validate",
+	Short:             "Compile-check all Rego modules and the admission policy compiled from config.yaml",
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
@@ -179,8 +195,10 @@ func policyCommandRegoDir(cmd *cobra.Command) (string, error) {
 // ---------------------------------------------------------------------------
 
 var policyShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Display the admission policy and thresholds compiled from config.yaml",
+	Use:               "show",
+	Short:             "Display the admission policy and thresholds compiled from config.yaml",
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(_ *cobra.Command, _ []string) error {
 		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
 		if cfg != nil && cfg.SecureClientIntegration() {

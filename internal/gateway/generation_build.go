@@ -262,8 +262,9 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 		addPack(custom.Path)
 	}
 	if g.Profiles != nil {
+		tuned := profileConnectorNames(cfg)
 		for _, derived := range g.Profiles.profiles {
-			for _, scope := range profileRulePackScopes(derived.Config) {
+			for _, scope := range profileRulePackScopes(derived.Config, tuned) {
 				addPack(scope.dir)
 			}
 		}

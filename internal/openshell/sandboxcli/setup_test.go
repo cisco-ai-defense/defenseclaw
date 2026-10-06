@@ -408,6 +408,68 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 		}
 		has(t, ta.output(), tc.hint)
 	}
+
+	// A Homebrew that belongs to another account (GAP-0109) failed with a
+	// permission error and the Xcode hint above: the installer refuses it
+	// first, and setup names the owner, the folder and the way on.
+	ta = setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	inst = &fakeInstaller{err: &openshell.HomebrewNotWritableError{Prefix: "/opt/homebrew", Dir: "/opt/homebrew/Library/Taps", Owner: "admin", User: "alice"}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err = ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	if !errors.As(err, &silent) || !errors.Is(err, openshell.ErrHomebrewNotWritable) {
+		t.Fatalf("Setup = %v, want the Homebrew permission failure, already printed", err)
+	}
+	has(t, ta.output(), "✗ install OpenShell: Homebrew at /opt/homebrew belongs to admin, and you (alice) cannot write to /opt/homebrew/Library/Taps",
+		"→ ask admin (or an administrator) to make /opt/homebrew writable for you, or use a Homebrew of your own")
+	lacks(t, ta.output(), "Xcode")
+}
+
+// TestSetupNamesTheStepAfterTheFormulaInstalled: NVIDIA's script failed
+// registering the gateway after Homebrew had installed the formula and
+// started the service, and setup blamed Homebrew and Xcode (GAP-0110). It
+// says the formula is installed, then shows the check that still fails,
+// with its fix.
+func TestSetupNamesTheStepAfterTheFormulaInstalled(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	missing := hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	const register = "OPENSHELL_LOCAL_TLS_DIR=/Users/a/homebrew/var/openshell/tls openshell gateway add https://127.0.0.1:17670 --local --name openshell"
+	unregistered := hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDRegistration)
+		c.Status, c.Detail = openshell.StatusFail, "no gateway registration"
+		c.Fix = &openshell.Fix{Summary: "register the local gateway", Command: register}
+	})
+	calls := 0
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		if calls++; calls == 1 {
+			return missing(ctx, d)
+		}
+		return unregistered(ctx, d)
+	}
+	inst := &fakeInstaller{err: &openshell.HomebrewInstallError{Err: errors.New("/bin/sh: exit status 1"), FormulaInstalled: true}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	var silent *Silent
+	if !errors.As(err, &silent) {
+		t.Fatalf("Setup = %v, want the failing check, already printed", err)
+	}
+	has(t, ta.output(), "the nvidia/openshell formula is installed, but NVIDIA's installer failed after it",
+		"✗ Gateway registration: no gateway registration", register)
+	lacks(t, ta.output(), "Xcode", "Homebrew could not install")
 }
 
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo
@@ -1097,6 +1159,53 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 	lacks(t, ta.output(), resign)
 	if inst.resigned != 0 || len(ta.gateway.planned) != 0 {
 		t.Fatalf("resigned %d, plans %+v", inst.resigned, ta.gateway.planned)
+	}
+
+	// The driver searches only the kegs under /opt/homebrew and /usr/local
+	// (GAP-0112): an e2fsprogs built in a Homebrew of your own is never
+	// found, so setup builds nothing there, and says where it goes.
+	ta, inst = setup(t, "")
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		r.MicroVM.E2fsprogs, r.MicroVM.OwnBrewPrefix = "", "/Users/a/homebrew"
+	})
+	wantErr(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true}), "the OpenShell MicroVM driver needs e2fsprogs where it looks for it")
+	has(t, ta.output(), "✗ MicroVM driver: the MicroVM driver looks for e2fsprogs only in the Homebrew kegs under /opt/homebrew and /usr/local, "+
+		"not in your Homebrew at /Users/a/homebrew: have an administrator install it with a Homebrew there (brew install e2fsprogs)")
+	if inst.e2fsprogs != 0 || len(ta.gateway.planned) != 0 {
+		t.Fatalf("installed %d, plans %+v", inst.e2fsprogs, ta.gateway.planned)
+	}
+}
+
+// TestSetupRecordsACLIThePathOfTheDaemonMayNotHave: the daemon keeps the
+// PATH it started with, so after setup put a per-user Homebrew's openshell
+// on the shell's PATH the first sandbox failed with "openshell: executable
+// file not found in $PATH" until the daemon restarted (GAP-0112). Setup
+// records the CLI's path as openshell.binary unless it lies where every
+// package and NVIDIA's installer put it, or the user chose a binary.
+func TestSetupRecordsACLIThePathOfTheDaemonMayNotHave(t *testing.T) {
+	for _, tc := range []struct {
+		found, configured, want string
+	}{
+		{"/Users/a/homebrew/bin/openshell", "", "/Users/a/homebrew/bin/openshell"},
+		{"/Users/a/homebrew/bin/openshell", "openshell", "/Users/a/homebrew/bin/openshell"},
+		{"/opt/homebrew/bin/openshell", "", ""},
+		{"/usr/local/bin/openshell", "", ""},
+		{"/usr/bin/openshell", "", ""},
+		{"/Users/a/homebrew/bin/openshell", "/opt/custom/openshell", ""},
+		{"", "", ""},
+	} {
+		if got := cliBinaryToRecord(tc.configured, tc.found); got != tc.want {
+			t.Errorf("cliBinaryToRecord(%q, %q) = %q, want %q", tc.configured, tc.found, got, tc.want)
+		}
+	}
+	ta := setupApp(t, "", "", true)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverVM, func(r *openshell.DoctorReport) { r.CLIPath = "/Users/a/homebrew/bin/openshell" })
+	useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "openshell.binary is /Users/a/homebrew/bin/openshell: the daemon runs the OpenShell CLI from there")
+	if cfg, _ := os.ReadFile(ta.ConfigPath); !strings.Contains(string(cfg), "binary: /Users/a/homebrew/bin/openshell") {
+		t.Fatalf("config.yaml:\n%s", cfg)
 	}
 }
 

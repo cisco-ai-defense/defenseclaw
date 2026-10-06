@@ -23,7 +23,7 @@ import pytest
 from click.testing import CliRunner
 from defenseclaw import config_writer, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
-from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import CustomRulePack, PerConnectorGuardrailConfig, default_config
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
@@ -129,19 +129,24 @@ def test_connector_scope_leaves_peers_alone(env):
     ]
 
 
-def test_custom_pack_key_selects_its_directory(env):
-    # GAP-0068: use-pack took a directory or a preset, but not the key a
-    # custom pack is pinned under in guardrail.custom_packs.
-    from defenseclaw.config import CustomRulePack
-
+def test_registered_custom_pack_key_is_selected_by_name(env):
+    """GAP-0049: a guardrail.custom_packs key selects like config set guardrail.rule_pack does,
+    keeping its pinned digest; a pack edited since it was pinned is refused."""
     app, _root, custom, writes = env
-    app.cfg.guardrail.custom_packs = {"acme": CustomRulePack(path=str(custom), digest="sha256:" + "0" * 64)}
-    result = _run(app, ["use-pack", "acme", "--json"])
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    result = _run(app, ["use-pack", "team", "--json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["path"] == str(custom)
-    pin = next(c for c in writes[-1] if c.path.startswith("guardrail.custom_packs."))
-    assert pin.path == "guardrail.custom_packs.acme" and pin.value == {"path": str(custom), "digest": "sha256:" + "a" * 64}
-    assert ("guardrail.rule_pack", "acme") in [(c.path, c.value) for c in writes[-1]]
+    assert json.loads(result.output)["pack"] == "team"
+    assert writes[-1] == [
+        config_writer.Change("guardrail.rule_pack", "team"),
+        config_writer.Change("guardrail.rule_pack_dir", unset=True),
+    ]
+
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    refused = _run(app, ["use-pack", "team"])
+    assert refused.exit_code == 1
+    assert "config set guardrail.custom_packs.team.digest sha256:" + "a" * 64 in refused.output
+    assert len(writes) == 1
 
 
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):

@@ -14,18 +14,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// profileExplainLookupTimeout bounds the NSS account lookup of explain.
+// profileExplainLookupTimeout bounds the account lookup of explain.
 const profileExplainLookupTimeout = 10 * time.Second
 
-// profileExplainAccount names an account (name or uid) through NSS, so
-// directory accounts resolve even where os/user reads only the local files.
+// profileExplainAccount names an account (name or uid) through the platform
+// resolver the hook path uses: NSS on Linux, so directory accounts resolve
+// even where os/user reads only the local files, and Open Directory on macOS,
+// which has no getent.
 func profileExplainAccount(name string) (id, userName string, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
-	resolver, err := unixidentity.NewNSSResolver(ctx)
-	if err != nil {
-		return "", "", false
-	}
+	resolver := unixidentity.Default(ctx)
 	account, err := resolver.LookupUser(name)
 	if err != nil {
 		uid, convErr := strconv.Atoi(name)
@@ -40,7 +39,7 @@ func profileExplainAccount(name string) (id, userName string, ok bool) {
 }
 
 // profileExplainDirectoryFacts resolves the facts a verified request from
-// uid carries: NSS plus the guardian identity spool.
+// uid carries: the account database plus the guardian identity spool.
 func profileExplainDirectoryFacts(id string) (useridentity.DirectoryFacts, error) {
 	return resolvePeerDirectoryFacts(id)
 }

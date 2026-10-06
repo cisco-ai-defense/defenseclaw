@@ -240,6 +240,14 @@ func TestCLIProfileImporter(t *testing.T) {
 	if !bytes.Equal(run.files[0], p.YAML) || !bytes.Equal(run.files[1], append([]byte("resource_version: 7\n"), p.YAML...)) {
 		t.Fatalf("files:\n%s\n%s", run.files[0], run.files[1])
 	}
+	// The daemon reads openshell.binary at each import: setup changes it
+	// while the daemon runs.
+	imp.BinaryFunc = func() string { return "/Users/a/homebrew/bin/openshell" }
+	must(t, imp.Import(t.Context(), "openshell", p, 0))
+	if got := run.calls[len(run.calls)-1].Name; got != "/Users/a/homebrew/bin/openshell" {
+		t.Fatalf("import ran %q, want the live binary", got)
+	}
+	imp.BinaryFunc = nil
 	if err := imp.Import(t.Context(), "", p, 0); err == nil {
 		t.Fatal("imported without a gateway name")
 	}

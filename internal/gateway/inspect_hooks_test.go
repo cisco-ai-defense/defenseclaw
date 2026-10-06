@@ -23,6 +23,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // ---------------------------------------------------------------------------
@@ -405,6 +407,41 @@ func TestInspectResponse_ObserveDoesNotBlock(t *testing.T) {
 	// that observe mode round-trips the latent decision faithfully.
 	if verdict.RawAction == "allow" && len(verdict.Findings) > 0 {
 		t.Errorf("raw_action collapsed to allow despite findings %v", verdict.Findings)
+	}
+}
+
+// TestInspectToolResponse_SensitiveToolRaisesResultAlert pins GAP-0041:
+// guardrail.rules.sensitive_tools with result_inspection is live on the hook
+// path. A listed tool whose output matches at least min_entities_for_alert
+// findings raises tool-result-pii-alert; an unlisted tool does not.
+func TestInspectToolResponse_SensitiveToolRaisesResultAlert(t *testing.T) {
+	api := testAPIServerWithConfig(t, "observe")
+	pack, err := guardrail.LoadRulePack("")
+	if err != nil {
+		t.Fatalf("load default pack: %v", err)
+	}
+	pack.SensitiveTools = &guardrail.SensitiveToolsConfig{
+		Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 1}},
+	}
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{RulePacks: map[string]*guardrail.RulePack{"global": pack}}
+	})
+	const output = "AWS_SECRET_ACCESS_KEY=AKIA7G4N2K9Q6M8R3T5V"
+	for _, tool := range []string{"unlisted_tool", "listed_tool"} {
+		postInspectToolResponse(t, api, `{"tool":"`+tool+`","output":"`+output+`","exit_code":0}`)
+	}
+	events, err := api.store.ListEvents(50)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	var alerted []string
+	for _, event := range events {
+		if event.Action == "tool-result-pii-alert" {
+			alerted = append(alerted, event.Target)
+		}
+	}
+	if len(alerted) != 1 || alerted[0] != "listed_tool" {
+		t.Fatalf("tool-result-pii-alert targets = %v, want [listed_tool]", alerted)
 	}
 }
 

@@ -6,8 +6,6 @@
 package useridentity
 
 import (
-	"strings"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -16,11 +14,13 @@ import (
 )
 
 // WindowsDirectoryFacts resolves the verified directory facts of a SID from
-// the machine's own state (see directory_windows_facts.go). It never blocks
-// on a domain controller: an AD UPN is looked up in the background and
-// appears on a later call.
-func WindowsDirectoryFacts(sid string) DirectoryFacts {
-	return resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid, adUPNs.lookup, time.Now())
+// the machine's own state (see directory_windows_facts.go). An AD UPN comes
+// from TranslateNameW, which may contact a domain controller: the call waits
+// at most wait for it (0 does not wait), and a lookup still running then
+// finishes in the background and answers a later call.
+func WindowsDirectoryFacts(sid string, wait time.Duration) DirectoryFacts {
+	return resolveWindowsDirectoryFacts(osWindowsDirectoryReader{}, sid,
+		func(samName string) string { return adUPNs.lookup(samName, wait) }, time.Now())
 }
 
 // WindowsGroupNames renders group SIDs as DOMAIN\name where LookupAccountSid
@@ -131,47 +131,7 @@ func (osWindowsDirectoryReader) DomainJoin() (string, bool) {
 	return windows.UTF16PtrToString(name), true
 }
 
-// adUPNTTL is how long a TranslateNameW answer (or its failure) is reused.
-const adUPNTTL = 24 * time.Hour
-
-// adUPNCache resolves DOMAIN\account to a UPN with TranslateNameW in the
-// background, one lookup per name at a time, and caches answers for a day.
-type adUPNCache struct {
-	mu      sync.Mutex
-	entries map[string]adUPNEntry
-}
-
-type adUPNEntry struct {
-	upn      string
-	expires  time.Time
-	inFlight bool
-}
-
-var adUPNs = &adUPNCache{entries: map[string]adUPNEntry{}}
-
-func (c *adUPNCache) lookup(samName string) string {
-	key := strings.ToLower(samName)
-	now := time.Now()
-	c.mu.Lock()
-	entry, found := c.entries[key]
-	if found && (entry.inFlight || now.Before(entry.expires)) {
-		c.mu.Unlock()
-		return entry.upn
-	}
-	if len(c.entries) > 4096 {
-		c.entries = map[string]adUPNEntry{}
-	}
-	entry.inFlight = true
-	c.entries[key] = entry
-	c.mu.Unlock()
-	go func() {
-		upn := translateNameToUPN(samName)
-		c.mu.Lock()
-		c.entries[key] = adUPNEntry{upn: upn, expires: time.Now().Add(adUPNTTL)}
-		c.mu.Unlock()
-	}()
-	return entry.upn
-}
+var adUPNs = newADUPNCache(translateNameToUPN)
 
 // Name formats for TranslateNameW (EXTENDED_NAME_FORMAT).
 const (
