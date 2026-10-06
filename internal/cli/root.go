@@ -208,6 +208,8 @@ func openCommandAuditStore(path string) (*audit.Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open audit store: %w", err)
 	}
+	// A command's output is not the place for per-migration notes (GAP-0153).
+	store.SetMigrationProgress(io.Discard)
 	if err := store.Init(); err != nil {
 		store.Close()
 		return nil, fmt.Errorf("failed to init audit store: %w", err)

@@ -60,7 +60,22 @@ func isSQLiteCorrupt(err error) bool {
 // refused while another process still has the database open. Only the daemon,
 // the store's long-lived owner, calls this; other commands keep failing.
 func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
-	store, err := openCheckedStore(dbPath, warn)
+	return openDaemonStore(dbPath, warn, nil)
+}
+
+// UpgradeDaemonStore applies the pending migrations the way OpenDaemonStore
+// does, then closes the store. The per-migration notes go nowhere: the
+// launcher prints one progress line of its own around the call (GAP-0153).
+func UpgradeDaemonStore(dbPath string, warn io.Writer) error {
+	store, err := openDaemonStore(dbPath, warn, io.Discard)
+	if err != nil {
+		return err
+	}
+	return store.Close()
+}
+
+func openDaemonStore(dbPath string, warn, progress io.Writer) (*Store, error) {
+	store, err := openCheckedStore(dbPath, warn, progress)
 	if err == nil || !isSQLiteCorrupt(err) {
 		return store, err
 	}
@@ -70,6 +85,7 @@ func OpenDaemonStore(dbPath string, warn io.Writer) (*Store, error) {
 	}
 	store, freshErr := NewStore(dbPath)
 	if freshErr == nil {
+		store.progress = progress
 		if freshErr = store.Init(); freshErr != nil {
 			_ = store.Close()
 		}
@@ -121,11 +137,12 @@ func readCarryOverNote(moved string) (carryOverNote, bool) {
 	return note, true
 }
 
-func openCheckedStore(dbPath string, warn io.Writer) (*Store, error) {
+func openCheckedStore(dbPath string, warn, progress io.Writer) (*Store, error) {
 	store, err := NewStore(dbPath)
 	if err != nil {
 		return nil, err
 	}
+	store.progress = progress
 	if err := store.startupQuickCheck(warn); err != nil {
 		_ = store.Close()
 		return nil, err
