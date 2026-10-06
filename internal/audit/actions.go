@@ -101,14 +101,11 @@ const (
 	ActionOTelIngestTraces    Action = "otel.ingest.traces"
 	ActionOTelIngestMalformed Action = "otel.ingest.malformed"
 	ActionConnectorHook       Action = "connector-hook"
-	// ActionConnectorHookSynthetic identifies a hook audit row that
-	// was synthesized by the gateway from a vendor-specific
-	// telemetry endpoint (today: codex's /api/v1/codex/notify
-	// agent-turn-complete callback). The canonical vendor row
-	// (e.g. codex.notify.agent-turn-complete) is always written
-	// too, so downstream SIEM rules that count "1 codex.notify in
-	// → 1 row out" keep working; this action lets new dashboards
-	// reason about the synthesized event without disturbing them.
+	// ActionConnectorHookSynthetic is the hook audit row earlier
+	// releases synthesized from a Codex agent-turn-complete notify. The
+	// gateway no longer writes it (the native Codex Stop hook records the
+	// turn end); it stays registered so rows already in an audit store
+	// still validate and export.
 	ActionConnectorHookSynthetic Action = "connector-hook-synthetic"
 	ActionAssetPolicy            Action = "asset-policy"
 

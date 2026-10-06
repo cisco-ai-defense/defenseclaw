@@ -860,11 +860,9 @@ func TestRefreshAuditEnvelopeFromHook_EmptyPayloadIsNoOp(t *testing.T) {
 	}
 }
 
-// TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale guards the
-// synthetic-row case: when the inbound HTTP request carried a stale
-// session id (or no session id) and the payload supplies a fresher
-// one, the payload wins. This is what makes the connector-hook-
-// synthetic row track the canonical codex.notify.* row by session.
+// TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale: when the
+// inbound HTTP request carried a stale session id (or no session id)
+// and the payload supplies a fresher one, the payload wins.
 func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
 	headerEnv := audit.CorrelationEnvelope{
 		SessionID: "stale-session",

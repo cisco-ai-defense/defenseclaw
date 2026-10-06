@@ -22,3 +22,16 @@ func TestIdentityDirectoryCacheWaitsForColdLookup(t *testing.T) {
 		t.Fatalf("cold blocking lookup = %+v, %v; want the resolved facts", facts, ok)
 	}
 }
+
+// TestIdentityDirectoryCacheFirstLookupWaits pins GAP-0078: the first
+// request for an account after a gateway start gets its verified facts even
+// when nothing asks to block, so its first hook record is not claimed.
+func TestIdentityDirectoryCacheFirstLookupWaits(t *testing.T) {
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		time.Sleep(100 * time.Millisecond)
+		return useridentity.DirectoryFacts{Principal: "dcw-std1", ResolvedAt: time.Now()}, nil
+	})
+	if facts, ok := cache.get("S-1-5-21-1-2-3-1017", false); !ok || facts.Principal != "dcw-std1" {
+		t.Fatalf("first non-blocking lookup = %+v, %v; want the resolved facts", facts, ok)
+	}
+}

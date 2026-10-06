@@ -124,17 +124,6 @@ type HookAuditEnvelope struct {
 	UserID     string `json:"user.id,omitempty"`
 	UserIDKind string `json:"defenseclaw.user.id_kind,omitempty"`
 	UserName   string `json:"defenseclaw.user.name,omitempty"`
-
-	// AuditActionOverride steers the audit ROW action (not the
-	// envelope JSON). When non-empty, the audit.Logger writes the
-	// row under this action constant instead of
-	// audit.ActionConnectorHook. Used by the synthetic codex notify
-	// path to emit ActionConnectorHookSynthetic so SIEM rules can
-	// distinguish synthesized events from operator-fired hooks
-	// without losing visibility. Marshalled JSON omits this
-	// because operators read it from the audit row's `Action`
-	// column, not the details payload.
-	AuditActionOverride string `json:"-"`
 }
 
 // renderHookAuditEnvelope serializes the envelope as a compact JSON

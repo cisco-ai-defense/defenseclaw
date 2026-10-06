@@ -953,156 +953,6 @@ func hookOutputFieldName(connectorName string) string {
 	}
 }
 
-// handleAgentHookSynthetic runs the same unified evaluate + audit +
-// metrics pipeline as handleAgentHook but skips the HTTP-decode
-// step. Callers (handleCodexNotify) construct a fully populated
-// agentHookRequest themselves so the unified collector can ingest
-// non-HTTP-shaped signals (codex notify fire-and-forget POSTs,
-// future webhook-style integrations) the same way as a hook-shaped
-// POST.
-//
-// The function intentionally does NOT write to w — callers own the
-// transport-layer response shape (codex notify returns 200 / "{}"
-// regardless of evaluator outcome, hook POSTs return the
-// agentHookResponse JSON). rawBody is supplied only so the audit
-// envelope can compute BodyBytes; it is never reparsed.
-//
-// Telemetry: same generated v8 metric families as handleAgentHook,
-// active-span enrichment, plus a structured audit envelope persisted
-// under audit.ActionConnectorHookSynthetic.
-//
-// Why a DIFFERENT audit action? The caller (handleCodexNotify)
-// already persists the canonical `codex.notify.<sanitized-type>`
-// audit row, and downstream SIEM rules pin "1 codex.notify in → 1
-// codex.notify.* row out". Routing the synthetic envelope under
-// ActionConnectorHookSynthetic keeps that contract intact while
-// adding a separate row class for the synthetic Stop event so
-// connector.hook dashboards see the synthesized invocation; the
-// two action constants are independent so neither row count
-// changes when the other moves.
-//
-// The OTel attributes carry `defenseclaw.hook.synthetic=true` so
-// dashboards can filter synthetic events out of the "real" hook
-// traffic when needed (set by enrichAgentHookSpanSynthetic).
-func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName string, req agentHookRequest, rawBody []byte) agentHookResponse {
-	// The synthetic entry point receives the route identity separately. Make it
-	// authoritative before any lifecycle or telemetry producer observes the
-	// request; reduced fixtures and future bridges are not required to duplicate
-	// it inside agentHookRequest.
-	ctx = a.withGuardrailProfileDecision(ctx, firstNonEmpty(connectorName, req.ConnectorName))
-	if strings.TrimSpace(connectorName) != "" {
-		req.ConnectorName = connectorName
-	}
-	profile := a.hookProfileForRequest(ctx, connectorName)
-	correlatedCtx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, rawBody)
-	if correlationErr != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] synthetic hook correlation unavailable connector=%s event=%s: %v\n",
-			connectorName, req.HookEventName, correlationErr)
-		req.SuppressCorrelationEmit, req.CorrelationUnavailable = true, true
-	} else {
-		ctx, req = correlatedCtx, correlatedReq
-	}
-	ctx = enrichAgentHookContext(ctx, req)
-	var rawEventIDs []string
-	if !req.SuppressCorrelationEmit {
-		rawEventIDs = a.rememberHookRawEvents(req)
-	}
-	if hookLLMEventExportable(req) {
-		a.emitAgentHookLLMEvent(ctx, req, rawBody)
-	}
-
-	// Synthetic paths use the generic evaluator (notify carries no
-	// scan/tool context), but they still need panic safety: the
-	// codex-notify caller writes "{}" and a 200 regardless of
-	// outcome, but the audit + metrics pipeline below this MUST
-	// run even when the evaluator dies. Same RecordPanic +
-	// fail-open contract as handleAgentHook.
-	t0 := time.Now()
-	accountingCtx := ctx
-	evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
-	resp, panicked := a.safeEvaluateSyntheticHook(evaluationCtx, connectorName, req)
-	elapsed := time.Since(t0)
-	enrichAgentHookSpan(ctx, req, resp, elapsed)
-	enrichAgentHookSpanSynthetic(ctx)
-	if panicked {
-		enrichAgentHookSpanPanic(ctx)
-	}
-
-	if a.recordsConnectorHealth(ctx) {
-		a.health.RecordConnectorRequestFor(connectorName)
-		if resp.Action == "block" {
-			a.health.RecordToolBlockFor(connectorName)
-		}
-	}
-
-	// Persist the synthetic envelope under a distinct audit action
-	// so the canonical caller row count stays intact while SIEM /
-	// dashboards still see the synthesized Stop event. See the
-	// function godoc for the row-counting contract.
-	envResult := "ok"
-	if panicked {
-		envResult = "panic"
-	}
-	extra := map[string]string{"synthetic": "true"}
-	if panicked {
-		extra["panic"] = "true"
-	}
-	env := HookAuditEnvelope{
-		Connector:           connectorName,
-		Event:               req.HookEventName,
-		Result:              envResult,
-		Action:              resp.Action,
-		RawAction:           resp.RawAction,
-		Severity:            resp.Severity,
-		Mode:                resp.Mode,
-		Reason:              hookSourceReason(resp),
-		WouldBlock:          resp.WouldBlock,
-		ElapsedMs:           elapsed.Milliseconds(),
-		BodyBytes:           int64(len(rawBody)),
-		RawOrigin:           rawOriginIfHook(rawEventIDs),
-		RawEventIDs:         rawEventIDs,
-		EvaluationID:        resp.EvaluationID,
-		RuleIDs:             resp.RuleIDs,
-		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
-		Extra:               mergeHookEnvelopeExtra(extra, hookRequestAuditExtra(ctx, profile)),
-	}
-	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
-	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
-		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
-	}
-	// As in finalizeAgentHook: only an exact replay goes without its row.
-	if !req.SuppressCorrelationEmit || req.CorrelationUnavailable {
-		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
-			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
-				connectorName, req.HookEventName, err)
-		} else {
-			if finalizeErr := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); finalizeErr != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] synthetic hook receipt finalization failed connector=%s event=%s: %v\n",
-					connectorName, req.HookEventName, finalizeErr)
-			}
-		}
-	}
-	a.recordManagedAIDFailOpenForSelectedNativeHookResult(
-		accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
-	)
-	return resp
-}
-
-// enrichAgentHookSpanSynthetic stamps a defenseclaw.hook.synthetic
-// attribute on the active span so trace queries can split "real" hook
-// POSTs from notify-bridge synthetic Stop events. Kept as a separate helper so
-// the existing enrichAgentHookSpan signature does not grow a
-// boolean parameter (every existing call site would otherwise need
-// updating).
-func enrichAgentHookSpanSynthetic(ctx context.Context) {
-	span := trace.SpanFromContext(ctx)
-	if span == nil || !span.IsRecording() {
-		return
-	}
-	span.SetAttributes(attribute.Bool("defenseclaw.hook.synthetic", true))
-}
-
 // enrichAgentHookSpanPanic stamps a defenseclaw.hook.panic attribute
 // on the active span AND sets the span status to Error so trace
 // backends surface the failure even though the HTTP response itself
@@ -1354,29 +1204,8 @@ func (a *APIServer) safeEvaluateHook(
 	return resp, false
 }
 
-// safeEvaluateSyntheticHook is the synthetic-path counterpart of
-// safeEvaluateHook. Same fail-open contract; the generic evaluator
-// is the only callee (notify-bridge events have no per-connector
-// scan / asset-policy semantics).
-func (a *APIServer) safeEvaluateSyntheticHook(
-	ctx context.Context,
-	connectorName string,
-	req agentHookRequest,
-) (resp agentHookResponse, panicked bool) {
-	defer func() {
-		if r := recover(); r != nil {
-			panicked = true
-			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
-			resp.Mode = sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName))
-			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
-		}
-	}()
-	resp = a.evaluateAgentHook(ctx, req)
-	return resp, false
-}
-
 // safeHookPanicResponse builds the agentHookResponse returned when
-// safeEvaluateHook / safeEvaluateSyntheticHook recover from a panic.
+// safeEvaluateHook recovers from a panic.
 // The fields here are deliberately conservative — see
 // safeEvaluateHook godoc for the fail-open rationale.
 func safeHookPanicResponse(connectorName, eventName string, _ any) agentHookResponse {
@@ -1422,8 +1251,7 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// MergeEnvelope's contract is "non-empty base fields always
 	// win"; we override that by clearing matching fields when the
 	// payload provides a more specific value, so a hook posted on
-	// a different session than the inbound header (the synthetic
-	// codex-notify path is the canonical case) takes precedence.
+	// a different session than the inbound header takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
@@ -1465,8 +1293,7 @@ func refreshAuditEnvelopeFromHook(ctx context.Context, req agentHookRequest, ide
 // correlation envelope gets payload-derived session_id / agent_id
 // stitched on. The function is kept exported-by-package (lower-case
 // first letter is fine; it's gateway-internal) so other unified
-// paths (handleAgentHookSynthetic for codex notify) can call it
-// directly with an already-resolved AgentIdentity.
+// paths can call it directly with an already-resolved AgentIdentity.
 //
 // History: an earlier iteration of this fix wired only the unified
 // path; live Splunk verification then proved claudecode + codex hook
