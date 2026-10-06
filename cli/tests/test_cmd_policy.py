@@ -411,6 +411,11 @@ class TestPolicyEditLive(PolicyCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(self.app.cfg.admission.defaults.actions["medium"],
                          {"install": "block", "file": "none", "runtime": "enable"})
+        # Skills resolve their scanner gate before the defaults, so the edit
+        # is also theirs.
+        from defenseclaw.enforce.admission import compile_admission
+
+        self.assertEqual(compile_admission(self.app.cfg, "skill").actions["MEDIUM"][0].install, "block")
 
 
 class TestPolicyEditCopyOnWrite(PolicyCommandTestBase):

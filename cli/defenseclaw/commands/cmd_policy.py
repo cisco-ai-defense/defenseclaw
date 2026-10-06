@@ -1089,8 +1089,15 @@ def _edit_live_actions(
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
     getattr(app.cfg.admission, holder_name).actions[severity] = triple
+    updated = [f"admission.{holder_name}.actions.{severity}"]
+    if holder_name == "defaults":
+        # Skills resolve the scanner gate (scanners.skill_scanner
+        # fail_on_severity / review_queue_min) before admission.defaults, and
+        # the gate covers every severity, so the edit is also the skill's own.
+        app.cfg.admission.skill.actions[severity] = dict(triple)
+        updated.append(f"admission.skill.actions.{severity}")
     app.cfg.save()
-    ux.ok(f"Updated admission.{holder_name}.actions.{severity}: {', '.join(changed)}")
+    ux.ok(f"Updated {' and '.join(updated)}: {', '.join(changed)}")
     _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
 
 
@@ -1108,7 +1115,8 @@ def _edit_live_actions(
 @pass_ctx
 def edit_actions(app: AppContext, severity: str, runtime: str | None, file_action: str | None,
                  install: str | None, policy_name: str | None, reload_gateway: bool) -> None:
-    """Edit the severity actions every asset type inherits (admission.defaults)."""
+    """Edit the severity actions of every asset type: admission.defaults,
+    and admission.skill, whose scanner gate outranks the defaults."""
     if policy_name is None:
         _edit_live_actions(app, "defaults", severity, runtime, file_action, install, reload_gateway)
         return

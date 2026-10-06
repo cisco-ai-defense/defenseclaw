@@ -2027,8 +2027,8 @@ def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key
 
 def admission_action_fields(asset_type: str, cfg: object | Mapping[str, Any] | None) -> tuple[ConfigField, ...]:
     """``admission.<type>.actions.<severity>``: the action shorthand a scan
-    finding at that severity gets. Blank inherits admission.defaults, then
-    the built-in default (the skill scanner gate for skills)."""
+    finding at that severity gets. Blank inherits (for skills) the skill
+    scanner gate, then admission.defaults, then the built-in default."""
     if asset_type not in {"skill", "mcp", "plugin"}:
         return (ConfigField("(unknown admission type)", f"admission.{asset_type}.error", "header"),)
     out = [
