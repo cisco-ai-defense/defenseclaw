@@ -1207,9 +1207,12 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	var diffs []ConfigDiff
-	unchanged := false
+	unchanged, rejected := false, false
 	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
 		diffs = append(diffs, diff)
+		if rejected {
+			return errors.New("custom pack digest mismatch")
+		}
 		if unchanged {
 			return errGenerationUnchanged
 		}
@@ -1232,5 +1235,23 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	unchanged = true
 	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || mgr.gen.Load() != gen {
 		t.Fatalf("unchanged asset rebuild = %v, generation %d -> %d", err, gen, mgr.gen.Load())
+	}
+	// A pack that fails its digest check rejects the rebuild and leaves a
+	// last_reload_error; restoring the pack rebuilds the same generation,
+	// which must clear that error (GAP-0027).
+	t.Cleanup(func() { liveReloadError.Store("") })
+	rejected = true
+	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
+		t.Fatal("rejected asset rebuild succeeded")
+	}
+	if msg, _ := liveReloadError.Load().(string); msg == "" {
+		t.Fatal("rejected asset rebuild left no last_reload_error")
+	}
+	rejected = false
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil {
+		t.Fatalf("restored asset rebuild: %v", err)
+	}
+	if msg, _ := liveReloadError.Load().(string); msg != "" {
+		t.Fatalf("last_reload_error = %q after the asset was restored, want it cleared", msg)
 	}
 }
