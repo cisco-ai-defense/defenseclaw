@@ -241,6 +241,19 @@ func (s *State) conflict(format string, args ...any) {
 	s.Conflicts = append(s.Conflicts, fmt.Sprintf(format, args...))
 }
 
+// entryConflict is a conflict about a DefenseClaw entry that is missing,
+// duplicated or changed in a file DefenseClaw publishes (ownership: merge).
+// The next publish rewrites it, so the connector is not in place until then
+// (Drift), and the lifecycle's ensure re-applies instead of reporting up to
+// date while an agent runs without its hook (GAP-0077). Under verify_only
+// DefenseClaw never writes the file, so it stays a plain conflict.
+func (s *State) entryConflict(format string, args ...any) {
+	s.conflict(format, args...)
+	if s.Ownership == config.MachinePolicyOwnershipMerge {
+		s.Drift = true
+	}
+}
+
 func (s *State) detail(format string, args ...any) {
 	s.Details = append(s.Details, fmt.Sprintf(format, args...))
 }

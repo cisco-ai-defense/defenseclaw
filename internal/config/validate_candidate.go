@@ -17,6 +17,7 @@
 package config
 
 import (
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -39,14 +40,19 @@ func RegisterCandidateAssetCheck(check func(*Config) error) { candidateAssetChec
 // CheckCandidateAssets refuses a decoded candidate whose asset references
 // the gateway would refuse when it builds the generation: a rule_pack that
 // is neither built in nor a custom_packs key, a custom pack whose digest
-// does not match, an unknown rule ID in guardrail.rules, or a protection
-// pack that does not exist. Writers run it before they commit, so a bad
+// does not match, an unknown rule ID in guardrail.rules, a protection pack
+// that does not exist, or an enabled webhook whose URL the gateway would
+// refuse to deliver to. Writers run it before they commit, so a bad
 // reference never reaches config.yaml and blocks every later hot reload.
 func CheckCandidateAssets(cfg *Config) error {
 	if candidateAssetCheck == nil || cfg == nil {
 		return nil
 	}
 	if err := candidateAssetCheck(cfg); err != nil {
+		var semantic *V8SemanticError
+		if errors.As(err, &semantic) {
+			return err // the check named its own field
+		}
 		return &V8SemanticError{
 			Path:     "$.guardrail",
 			Summary:  err.Error(),

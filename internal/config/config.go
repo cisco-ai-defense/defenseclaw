@@ -439,7 +439,10 @@ type AIDiscoveryConfig struct {
 	// pinned pack loads only when it matches, and on a managed standalone
 	// device an unpinned pack does not load. ConfidencePolicyDigest pins
 	// ConfidencePolicyPath the same way.
-	SignaturePackDigests   map[string]string `mapstructure:"signature_pack_digests"   yaml:"signature_pack_digests,omitempty"`
+	// The keys are file paths with dots, which Viper would split into nested
+	// maps, so the loader reads this map from the YAML itself
+	// (restoreSignaturePackDigests).
+	SignaturePackDigests   map[string]string `mapstructure:"-"                        yaml:"signature_pack_digests,omitempty"`
 	ConfidencePolicyDigest string            `mapstructure:"confidence_policy_digest" yaml:"confidence_policy_digest,omitempty"`
 }
 
@@ -2661,6 +2664,9 @@ func loadConfigSourceChecked(
 	if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
 		return nil, err
 	}
+	if err := restoreSignaturePackDigests(&cfg, sourceBytes, configFile); err != nil {
+		return nil, err
+	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
@@ -2918,6 +2924,28 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
 	return nil
 }
 
+// restoreSignaturePackDigests reads ai_discovery.signature_pack_digests, keyed
+// by pack file path, from the YAML (the source bytes, else the file): Viper
+// splits a key at every dot, so a path never survived its decode (GAP-0066).
+func restoreSignaturePackDigests(cfg *Config, raw []byte, configFile string) error {
+	if raw == nil {
+		var err error
+		if raw, err = os.ReadFile(configFile); err != nil { // #nosec G304 -- the config file being loaded.
+			return nil
+		}
+	}
+	var source struct {
+		AIDiscovery struct {
+			SignaturePackDigests map[string]string `yaml:"signature_pack_digests"`
+		} `yaml:"ai_discovery"`
+	}
+	if err := yaml.Unmarshal(raw, &source); err != nil {
+		return fmt.Errorf("config: decode ai_discovery.signature_pack_digests: %w", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = source.AIDiscovery.SignaturePackDigests
+	return nil
+}
+
 // validateManagedEnterpriseListenerBindings keeps every inbound enterprise
 // surface on loopback. The managed hook transport is intentionally pinned to
 // canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
@@ -3043,8 +3071,8 @@ func checkRuntimeConfigVersion(version int) error {
 		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
 			version, ObservabilityV8ConfigVersion)
 	case version > MaxSupportedConfigVersion:
-		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); "+
-			"upgrade DefenseClaw or restore ~/.defenseclaw/previous", version)
+		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); %s",
+			version, newerConfigAction)
 	}
 	return nil
 }

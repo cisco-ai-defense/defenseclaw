@@ -323,23 +323,53 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    if parts[0] == "update" and len(parts) <= 2:
+        data, sources = _update_view(cfg)
+        if len(parts) == 1:
+            return data, _whole_source(sources)
+        return (data[parts[1]], sources[parts[1]]) if parts[1] in data else None
     if parts[0] == "admission" and (len(parts) == 1 or parts[1] in _ADMISSION_TYPES):
         if len(parts) == 1:
             views = {name: _admission_view(cfg, name) for name in _ADMISSION_TYPES}
             return (
                 {name: data for name, (data, _) in views.items()},
-                ", ".join(f"{name}={source}" for name, (_, source) in views.items()),
+                ", ".join(f"{name}={_whole_source(sources)}" for name, (_, sources) in views.items()),
             )
-        data, source = _admission_view(cfg, parts[1])
+        data, sources = _admission_view(cfg, parts[1])
         found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
         if not found:
             return None
-        return value, source
+        return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
     return None
 
 
-def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
-    """The admission policy of one asset type as the gateway enforces it, and its source."""
+def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
+    """``update:`` with its defaults resolved (the update notice on, the stable
+    channel, the official release feed), and where each value comes from."""
+    from defenseclaw.upgrade_shim import OFFICIAL_SOURCE
+
+    written = getattr(cfg, "update", None)
+    check = getattr(written, "check", None)
+    channel = str(getattr(written, "channel", "") or "")
+    source = str(getattr(written, "source", "") or "")
+    data = {"check": True if check is None else bool(check), "channel": channel or "stable", "source": source or OFFICIAL_SOURCE}
+    sources = {
+        name: f"config:update.{name}" if is_set else "builtin"
+        for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
+    }
+    return data, sources
+
+
+def _whole_source(sources: dict[str, str]) -> str:
+    """The source of a whole asset type: every field that config.yaml or the
+    scanner gate sets, else builtin."""
+    labels = list(dict.fromkeys(label for label in sources.values() if label != "builtin"))
+    return ", ".join(labels) or "builtin"
+
+
+def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]]:
+    """The admission policy of one asset type as the gateway enforces it, and
+    where each field comes from."""
     from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
 
     compiled = compile_admission(cfg, target_type)
@@ -360,7 +390,7 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
             for name, paths in compiled.first_party_allow.items()
         ],
     }
-    return data, compiled.source
+    return data, compiled.field_sources or {"actions": compiled.source}
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +603,39 @@ def _v8_defaults(app: AppContext) -> dict:
         props = node["properties"]
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
-    return _prune(_config_to_masked_dict(cfg), schema)  # type: ignore[return-value]
+    pruned = _prune(_config_to_masked_dict(cfg), schema)
+    _show_effective_scanner_settings(pruned, cfg)  # type: ignore[arg-type]
+    return pruned  # type: ignore[return-value]
+
+
+#: scanners.skill_scanner keys that config_version 9 no longer reads: they are
+#: migration input, so a v9 source does not list them as settings.
+_SKILL_SCANNER_V8_KEYS = ("binary", "use_virustotal", "use_aidefense", "virustotal_api_key", "virustotal_api_key_env")
+
+
+def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
+    """Fill the scanner keys a blank value stands for with what the gateway
+    runs with (the severity gate and the judge source), and leave out the
+    migration-only keys of a v9 source."""
+    from defenseclaw.enforce.admission import _DEFAULT_FAIL_ON_SEVERITY, _DEFAULT_REVIEW_QUEUE_MIN
+
+    scanners = masked.get("scanners")
+    if not isinstance(scanners, dict):
+        return
+    for name in ("skill_scanner", "mcp_scanner"):
+        block = scanners.get(name)
+        if not isinstance(block, dict):
+            continue
+        if not block.get("judge_source"):
+            llm = block.get("llm")
+            block["judge_source"] = "override" if isinstance(llm, dict) and any(llm.values()) else "inherit"
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        skill["fail_on_severity"] = skill.get("fail_on_severity") or _DEFAULT_FAIL_ON_SEVERITY
+        skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
+        if getattr(cfg, "_source_config_version", 0) >= config_module.CONFIG_VERSION_V9:
+            for key in _SKILL_SCANNER_V8_KEYS:
+                skill.pop(key, None)
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:

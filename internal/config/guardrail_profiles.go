@@ -347,7 +347,7 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 		RulePack:       g.RulePack,
 		ProfileRules:   g.profileRules,
 		BlockMessage:   g.BlockMessage,
-		Connectors:     g.Connectors,
+		Connectors:     digestConnectors(g.Connectors),
 		AutoProtection: cfg.ApplicationProtection.Guardrail,
 		HookModes: map[string]string{
 			"claude_code": cfg.ClaudeCode.Mode,
@@ -376,6 +376,29 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// digestConnectors is the connector overrides with enabled: true cleared:
+// true is the default, so it digests like the unset key (GAP-0032).
+func digestConnectors(in map[string]PerConnectorGuardrailConfig) map[string]PerConnectorGuardrailConfig {
+	var out map[string]PerConnectorGuardrailConfig
+	for name, pc := range in {
+		if pc.Enabled == nil || !*pc.Enabled {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]PerConnectorGuardrailConfig, len(in))
+			for k, v := range in {
+				out[k] = v
+			}
+		}
+		pc.Enabled = nil
+		out[name] = pc
+	}
+	if out == nil {
+		return in
+	}
+	return out
 }
 
 // policyFields returns the profile's policy fields in the per-connector

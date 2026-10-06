@@ -488,6 +488,47 @@ def _is_managed_enterprise_mode(value: str | None) -> bool:
         return False
 
 
+_DEPLOYMENT_PIN_ENVS = (DEPLOYMENT_MODE_ENV, "DEFENSECLAW_ENTERPRISE_PROFILE")
+_DECLARES_MANAGED = re.compile(r"""(?m)^deployment_mode:\s*["']?managed_enterprise""")
+_ignored_deployment_pins: list[str] = []
+
+
+def ignore_unmanaged_deployment_pins() -> list[str]:
+    """Drop the machine-wide deployment pins from this process's environment
+    when it loads a per-user config.
+
+    A managed service always loads a machine-owned config, never one under a
+    user's home, so a pin seen here is a stray export. Left in place it made
+    ``config set`` refuse as a managed device (or, with an invalid mode such as
+    ``oss``, broke validate and doctor); a per-user config that itself declares
+    managed_enterprise keeps its pins. Mirrors Go ``managed.IgnoreUnmanagedPins``.
+    Returns the names dropped, never the values (GAP-0091).
+    """
+    names = [name for name in _DEPLOYMENT_PIN_ENVS if os.environ.get(name, "").strip()]
+    if not names:
+        return []
+    try:
+        path = config_path().resolve()
+        path.relative_to(_home().resolve())
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            declares_managed = bool(_DECLARES_MANAGED.search(handle.read(1 << 20)))
+    except FileNotFoundError:
+        declares_managed = False
+    except (OSError, RuntimeError, ValueError):  # no home, or a config outside it
+        return []
+    if declares_managed:
+        return []
+    for name in names:
+        os.environ.pop(name, None)
+    _ignored_deployment_pins.extend(name for name in names if name not in _ignored_deployment_pins)
+    return names
+
+
+def ignored_deployment_pins() -> list[str]:
+    """Names of the deployment pins this process dropped at startup."""
+    return list(_ignored_deployment_pins)
+
+
 def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) -> None:
     managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_doc(data)
     if not managed:

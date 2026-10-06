@@ -74,7 +74,24 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     _check_hook_runtime_integrity(cfg, "codex", r)
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
-    assert "defenseclaw setup codex" in row["detail"]
+    assert "defenseclaw setup codex" in row["detail"] and "doctor --fix" in row["detail"]
+
+    # GAP-0098: --fix restarts the gateway, which renders the script again.
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+
+    def restart(_cfg, *, start_if_stopped):
+        script.write_text("".join(text))
+        return True, ""
+
+    monkeypatch.setattr(cmd_doctor, "_repair_gateway_lifecycle", restart)
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)[0] == "pass"
+    assert not any("changed since setup" in p for p in hook_runtime_problems(cfg, "codex"))
 
 
 def test_non_executable_script_fails_doctor_and_fix_restores_it(tmp_path, monkeypatch):
@@ -165,4 +182,4 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     with mock.patch.object(cmd_doctor, "_stale_generated_hook_reasons", return_value=[]):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
-    assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]
+    assert row["status"] == "warn" and "defenseclaw doctor --fix" in row["remediation"]

@@ -235,6 +235,28 @@ func TestCodexRemoveRestoresPreimageOrStripsOwned(t *testing.T) {
 	}
 }
 
+// A DefenseClaw hook entry changed to run something else leaves the other
+// entries in place, but the connector is no longer in place: ensure sees the
+// drift and republishes (GAP-0077).
+func TestCodexTamperedEntryIsNotInPlaceUntilRepublished(t *testing.T) {
+	opts := testOptions(t)
+	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	path := codexPath(t, opts)
+	writeFile(t, path, strings.Replace(readFile(t, path), "/opt/defenseclaw/bin/defenseclaw-hook", "/bin/true", 1))
+	result, _ := VerifyAll(opts, []string{"codex"})
+	if len(result.MachinePolicyConnectors) != 0 {
+		t.Fatalf("a tampered requirements.toml still verifies as in place: %+v", result.MachinePolicyConnectors)
+	}
+	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	if result, _ = VerifyAll(opts, []string{"codex"}); len(result.MachinePolicyConnectors) != 1 {
+		t.Fatalf("a republished requirements.toml is not in place: %+v", result.MachinePolicyConnectors)
+	}
+}
+
 func TestCodexVerifyOnlyNeverWrites(t *testing.T) {
 	opts := withPolicy(testOptions(t), "codex", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = "verify_only" })
 	path := codexPath(t, opts)

@@ -698,6 +698,13 @@ var lookupWebhookIPs = net.LookupIP
 // Blocks non-HTTP schemes, localhost, private/link-local IP ranges, and
 // cloud metadata endpoints.
 func validateWebhookURL(rawURL string) error {
+	return validateWebhookURLWith(rawURL, lookupWebhookIPs)
+}
+
+// validateWebhookURLWith is validateWebhookURL with the resolver for host
+// names; a nil resolver checks only what the URL itself shows (scheme, host,
+// IP literals), which is what a config writer can decide without the network.
+func validateWebhookURLWith(rawURL string, lookup func(string) ([]net.IP, error)) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -721,7 +728,10 @@ func validateWebhookURL(rawURL string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, resolveErr := lookupWebhookIPs(host)
+		if lookup == nil {
+			return nil
+		}
+		ips, resolveErr := lookup(host)
 		if resolveErr != nil {
 			return nil // allow DNS names that can't be resolved at config time
 		}

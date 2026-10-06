@@ -279,8 +279,8 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		{version: MaxSupportedConfigVersion},
 		{
 			version: MaxSupportedConfigVersion + 1,
-			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); "+
-				"upgrade DefenseClaw or restore ~/.defenseclaw/previous", MaxSupportedConfigVersion+1),
+			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); %s",
+				MaxSupportedConfigVersion+1, newerConfigAction),
 		},
 	} {
 		err := checkRuntimeConfigVersion(test.version)
@@ -367,6 +367,9 @@ llm_providers:
 update: {check: false}
 scanners:
   mcp_scanner: {analyzers: "yara,llm"}
+ai_discovery:
+  signature_packs: [/home/u/.defenseclaw/signature-packs/p.json]
+  signature_pack_digests: {/home/u/.defenseclaw/signature-packs/p.json: "sha256:0000000000000000000000000000000000000000000000000000000000000001"}
 observability: {}
 `)
 	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
@@ -410,6 +413,11 @@ observability: {}
 	}
 	if cfg.Update.CheckEnabled() {
 		t.Error("update.check false must disable the update notice")
+	}
+	// A pack's pin is keyed by its file path, whose dots Viper would split (GAP-0066).
+	pins := cfg.AIDiscovery.SignaturePackDigests
+	if pins["/home/u/.defenseclaw/signature-packs/p.json"] != "sha256:0000000000000000000000000000000000000000000000000000000000000001" {
+		t.Errorf("signature_pack_digests = %v, want the pin keyed by the full path", pins)
 	}
 	if got := cfg.Scanners.MCPScanner.Analyzers; !reflect.DeepEqual(got, []string{"yara", "llm"}) {
 		t.Errorf("v8 analyzers CSV = %v, want [yara llm]", got)
