@@ -29,12 +29,18 @@ import (
 // the first lookup is in flight or after it failed. A lookup slower than
 // that selects the default profile with match default_lookup_failed; the
 // budget stays well inside the hook request timeout.
+//
+// A resolver can call its own answer incomplete (an AD account whose UPN a
+// slow domain controller has not given yet). That answer is served, but is
+// refreshed after identityDirectoryIncompleteTTL, not after the full TTL.
 
 const (
 	identityDirectoryTTL    = 15 * time.Minute
 	identityDirectoryBudget = 2 * time.Second
 	identityDirectoryRetry  = 15 * time.Second
 	identityDirectoryMax    = 4096
+	// identityDirectoryIncompleteTTL is how long an incomplete answer lasts.
+	identityDirectoryIncompleteTTL = 2 * time.Minute
 )
 
 // identityDirectoryCache caches directory facts per uid or SID.
@@ -45,6 +51,9 @@ type identityDirectoryCache = identityCache[useridentity.DirectoryFacts]
 type identityCache[T any] struct {
 	resolve func(key string) (T, error)
 	now     func() time.Time
+	// incomplete, when set, marks an answer to refresh after
+	// identityDirectoryIncompleteTTL.
+	incomplete func(T) bool
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
@@ -85,7 +94,9 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		entry = &identityCacheEntry[T]{}
 		c.entries[key] = entry
 	}
-	stale := !entry.ok || now.Sub(entry.fetchedAt) >= identityDirectoryTTL
+	age := now.Sub(entry.fetchedAt)
+	stale := !entry.ok || age >= identityDirectoryTTL ||
+		(age >= identityDirectoryIncompleteTTL && c.incomplete != nil && c.incomplete(entry.facts))
 	if stale && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
 	}

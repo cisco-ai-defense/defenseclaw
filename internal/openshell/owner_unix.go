@@ -21,8 +21,28 @@ package openshell
 import (
 	"io/fs"
 	"os"
+	"os/user"
+	"strconv"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
+
+// writableByCaller reports whether the caller can create entries in dir.
+func writableByCaller(dir string) bool { return unix.Access(dir, unix.W_OK|unix.X_OK) == nil }
+
+// ownerName is the account that owns info ("" when that is unknown).
+func ownerName(info fs.FileInfo) string {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return ""
+	}
+	uid := strconv.FormatUint(uint64(st.Uid), 10)
+	if u, err := user.LookupId(uid); err == nil {
+		return u.Username
+	}
+	return "uid " + uid
+}
 
 // ownedByCaller reports whether info belongs to the effective user.
 func ownedByCaller(info fs.FileInfo) bool {

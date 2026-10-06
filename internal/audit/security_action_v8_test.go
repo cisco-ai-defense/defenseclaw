@@ -92,6 +92,7 @@ func TestJudgeCompletionGeneratedMappingsPersistExactlyOnce(t *testing.T) {
 	}{
 		{name: "clean allow", action: "allow", severity: "NONE", outcome: observability.OutcomeAllowed, want: observability.SeverityInfo},
 		{name: "policy block", action: "block", severity: "HIGH", outcome: observability.OutcomeBlocked, want: observability.SeverityHigh},
+		{name: "policy alert", action: "alert", severity: "MEDIUM", outcome: observability.OutcomeAllowed, want: observability.SeverityMedium},
 		{name: "provider failure", action: "error", severity: "HIGH", failure: gatewaylog.JudgeFailureProvider,
 			error: "provider unavailable", outcome: observability.OutcomeFailed, want: observability.SeverityHigh},
 		{name: "empty response", action: "error", severity: "HIGH", failure: gatewaylog.JudgeFailureEmptyResponse,
