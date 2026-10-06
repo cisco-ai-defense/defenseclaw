@@ -119,8 +119,18 @@ Then it:
    used) into `gateway.toml`, with a timestamped backup, then restarts the
    gateway once. These settings apply to every sandbox on the gateway, and
    the question says so.
-3. **Records the harnesses** and turns `openshell.enabled` on.
-4. **Builds the harness images** in Docker Desktop, if you agree, and checks
+3. **Turns OpenShell's anonymous usage telemetry off**, if you agree,
+   unless you keep it (`--upstream-telemetry`):
+
+   ```text
+   Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
+   ```
+
+   Yes sets `OPENSHELL_TELEMETRY_ENABLED=false` in that file, in the same
+   change and restart as the MicroVM settings. Your answer is recorded in
+   `openshell.upstream_telemetry`.
+4. **Records the harnesses** and turns `openshell.enabled` on.
+5. **Builds the harness images** in Docker Desktop, if you agree, and checks
    that each one's hooks fire and block before it is used.
 
 It ends with:
@@ -133,12 +143,10 @@ It ends with:
   ✓ Done →  cd <project> && defenseclaw sandbox run claude
 ```
 
-There is no mounts question and no telemetry question on a Mac. Setup
-changes OpenShell's anonymous usage telemetry on Linux only, so on a Mac it
-stays on and setup says so. The Homebrew service reads
-`~/.config/openshell/gateway.env`, so you can turn the telemetry off
-yourself: set `OPENSHELL_TELEMETRY_ENABLED=false` in that file, then run
-`brew services restart nvidia/openshell/openshell`.
+There is no mounts question on a Mac. A gateway that no Homebrew service
+runs (one started by hand) reads the telemetry setting from the
+environment it was started with, so setup does not ask there and says how
+to turn it off: start the gateway with `OPENSHELL_TELEMETRY_ENABLED=false`.
 
 </Tab>
 <Tab value="TUI">
@@ -205,7 +213,7 @@ On a Mac set up through Homebrew, the output looks like this:
   ✓ Gateway compute driver     vm (OpenShell MicroVM; experimental upstream)
   ✓ Global policy              none; sandbox policies apply
   - Project bind mounts        the OpenShell MicroVM (vm) driver mounts no host folders: every run works on a copy
-  - OpenShell telemetry        DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from ~/.config/openshell/gateway.env
+  ✓ OpenShell telemetry        OpenShell usage telemetry is off in ~/.config/openshell/gateway.env, which the Homebrew service reads
   ✓ Sandbox ingress port       127.0.0.1:18971 is served by the DefenseClaw daemon
   ✓ Sandbox egress port        127.0.0.1:18972 is served by the DefenseClaw daemon
   ✓ DefenseClaw daemon         connected to OpenShell 0.1.1 gateway openshell (MicroVM driver); ingress 127.0.0.1:18971, egress proxy 127.0.0.1:18972

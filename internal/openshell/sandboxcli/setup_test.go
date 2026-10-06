@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -819,18 +820,16 @@ func (g emptyPlans) Plan(ctx context.Context, ch openshell.GatewayChanges) (*ope
 // TestSetupOnMacOSPlansMicroVMsNotBindMounts: on a Mac setup asks about
 // MicroVMs, not bind mounts, and plans the vm driver with this user as
 // every sandbox's and the recommended resources where the configuration
-// has none, in one plan and one restart. It still changes OpenShell's
-// telemetry only through the systemd unit: on macOS it neither asks about
-// it nor edits gateway.env for it, and says how to turn it off (manual
-// test M8).
+// has none, in one plan and one restart. It asks to turn OpenShell's
+// telemetry off as on Linux, in gateway.env, which the Homebrew service
+// reads, in the same plan, unless the telemetry is kept (manual test M8).
 func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
-	const note = "OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
-		"OPENSHELL_TELEMETRY_ENABLED=false in ~/.config/openshell/gateway.env, which the Homebrew service reads, and restart the gateway " +
-		"(`brew services restart nvidia/openshell/openshell`)"
+	const question = "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, " +
+		"and restarts the OpenShell gateway"
 	for _, upstream := range []bool{false, true} {
-		// On a terminal: the MicroVM question; no sandbox runs, so the
-		// restart is not asked.
-		ta := setupApp(t, "y\n", "", false)
+		// On a terminal: the MicroVM question, then the telemetry one
+		// unless it is kept; no sandbox runs, so the restart is not asked.
+		ta := setupApp(t, "y\ny\n", "", false)
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, nil)
 		ta.gateway.state.EnvPath = filepath.Join(ta.home, ".config", "openshell", "gateway.env")
@@ -841,7 +840,11 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 		_, _ = useGateway(ta)
 		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true, UpstreamTelemetry: upstream}))
 		p := ta.gateway.planned
-		if len(p) != 1 || p[0].EnableBindMounts || p[0].ComputeDriver != openshell.DriverVM || len(p[0].Env) != 0 || len(p[0].UnsetEnv) != 0 ||
+		wantEnv := map[string]string{openshell.EnvTelemetryEnabled: "false"}
+		if upstream {
+			wantEnv = nil
+		}
+		if len(p) != 1 || p[0].EnableBindMounts || p[0].ComputeDriver != openshell.DriverVM || !maps.Equal(p[0].Env, wantEnv) || len(p[0].UnsetEnv) != 0 ||
 			p[0].VMIdentity == nil || *p[0].VMIdentity != (openshell.VMIdentity{UID: 501, GID: 20}) ||
 			p[0].VMResources == nil || *p[0].VMResources != (openshell.VMResources{VCPUs: 4, OverlayDiskMiB: 16384}) || ta.gateway.applied != 1 {
 			t.Fatalf("upstream %t: gateway plans = %+v, applied %d", upstream, p, ta.gateway.applied)
@@ -852,10 +855,9 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 				"with `openshell sandbox create`, then runs as 501:20",
 			"✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs",
 			"every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back")
-		lacks(t, ta.output(), "Allow sandboxes to mount", "Disable OpenShell's anonymous usage telemetry?", "does not read gateway.env",
-			"Download the OpenShell base image")
-		if shown := strings.Contains(ta.output(), note); shown == upstream {
-			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, shown, ta.output())
+		lacks(t, ta.output(), "Allow sandboxes to mount", "does not read gateway.env", "Download the OpenShell base image", "telemetry stays on")
+		if asked := strings.Contains(ta.output(), question); asked == upstream {
+			t.Fatalf("upstream %t: telemetry question asked = %t:\n%s", upstream, asked, ta.output())
 		}
 		// The driver clamps runs to a copy: the mode is not recorded.
 		if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != "" {
@@ -959,6 +961,7 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.GOOS = "darwin"
+	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 	ta.App.Gateway = emptyPlans{ta.gateway}
 	ta.HostDoctor = macReport(openshell.DriverVM, nil)
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
@@ -974,6 +977,7 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	// sandbox runs on the gateway.
 	ta = setupApp(t, "\ny\n", "", false)
 	ta.GOOS = "darwin"
+	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 	ta.App.Gateway = emptyPlans{ta.gateway}
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { r.ConfiguredDriver = openshell.DriverVM })
 	runningOn(t, ta, 1)
@@ -1051,7 +1055,7 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 			"(brew postinstall nvidia/openshell/openshell) [y/N]"
 	)
 
-	ta, inst := setup(t, "y\ny\ny\n")
+	ta, inst := setup(t, "y\ny\ny\ny\n")
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 	has(t, ta.output(), e2fsprogs, "✓ e2fsprogs installed", resign, "✓ MicroVM driver signed for Apple's Hypervisor")
 	if inst.e2fsprogs != 1 || inst.resigned != 1 || len(ta.gateway.planned) != 1 {
@@ -1114,7 +1118,9 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 		{openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass, Detail: "ABI 6 in the Linux VM Docker runs in"},
 			"2 sandboxes run on the docker driver (dc-a, dc-b): pull their work now (`defenseclaw sandbox pull NAME`); after the switch it is reachable only by switching back"},
 	} {
-		ta := newTestApp(t, "\n\n", sandboxapi.Sandbox{Name: "dc-b"}, sandboxapi.Sandbox{Name: "dc-a"})
+		// The MicroVM and telemetry questions take their default (yes), the
+		// restart its default (no).
+		ta := newTestApp(t, "\n\n\n", sandboxapi.Sandbox{Name: "dc-b"}, sandboxapi.Sandbox{Name: "dc-a"})
 		writeConfig(t, ta, "")
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = tc.landlock })

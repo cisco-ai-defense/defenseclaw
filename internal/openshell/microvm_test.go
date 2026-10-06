@@ -393,7 +393,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			" (process 7976) was started by hand, not Homebrew's nvidia/openshell/openshell service: it does not start again at login, and DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
 		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
-			"DefenseClaw changes it on Linux only; the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with")
+			"the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with, which DefenseClaw does not change")
 		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}

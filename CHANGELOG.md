@@ -1207,6 +1207,14 @@ deleted.
   numbers its events from one again under a new epoch. The TUI's Sandboxes
   panel and the macOS app compare it when they resume (instead of guessing
   from the event under the old number) and read a new feed from its start.
+- **macOS setup offers to turn OpenShell's usage telemetry off.** As on
+  Linux, `defenseclaw sandbox setup` asks before it sets
+  `OPENSHELL_TELEMETRY_ENABLED=false` in `~/.config/openshell/gateway.env`,
+  which the Homebrew service reads, in the same change and restart as the
+  MicroVM settings, and records the answer in
+  `openshell.upstream_telemetry`. The doctor's telemetry check runs on a Mac
+  too (it was skipped), and `--fix` repairs a mismatch. A Mac gateway that no
+  Homebrew service runs is still left alone.
 - **The banner says how the model hosts are reached.** A new line under
   `Model` states that OpenShell opens them to the harness's own program
   directly, around the egress proxy, and that for an npm or Python harness

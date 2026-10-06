@@ -542,7 +542,7 @@ func TestDoctorChecks(t *testing.T) {
 			want: []checkWant{{"landlock", pass, "ABI 6 in the Linux VM Docker runs in"}, {"linger", skip, ""},
 				{"gateway-service", pass, "nvidia/openshell/openshell"},
 				// The Homebrew service's wrapper sources gateway.env too (M8).
-				{"telemetry", skip, "DefenseClaw changes it on Linux only; the Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from /"}}},
+				{"telemetry", pass, "OpenShell usage telemetry is on in /"}}},
 		// No formula and no gateway answering (one that answers is
 		// TestDoctorOnReleaseBinaries').
 		{name: "macOS without OpenShell", setup: func(f *doctorFixture) {

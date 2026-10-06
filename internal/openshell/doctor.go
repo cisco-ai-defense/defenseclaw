@@ -1757,22 +1757,24 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 	// Only gateway.env holds the setting.
 	envOnly := *st
 	envOnly.TOMLModTime = time.Time{}
+	// The Homebrew service's wrapper sources gateway.env before it starts
+	// the gateway, which launchd cannot be asked to confirm: on a Mac the
+	// check says where the setting comes from.
+	where := ""
+	if r.GOOS == "darwin" {
+		where = " in " + st.EnvPath + ", which the Homebrew service reads"
+	}
 	switch {
 	case r.GOOS == "darwin" && r.report.GatewayUnmanaged():
 		// No Homebrew service: whoever starts the gateway gives it its
 		// environment.
-		tele.Status, tele.Detail = StatusSkip, "DefenseClaw changes it on Linux only; the gateway reads "+EnvTelemetryEnabled+" from the environment it was started with"
-	case r.GOOS == "darwin":
-		// The Homebrew service's wrapper sources gateway.env before it
-		// starts the gateway, but launchd cannot be asked which one, so
-		// DefenseClaw leaves the telemetry to the user there.
-		tele.Status, tele.Detail = StatusSkip, "DefenseClaw changes it on Linux only; the Homebrew service reads "+EnvTelemetryEnabled+" from "+st.EnvPath
+		tele.Status, tele.Detail = StatusSkip, "the gateway reads "+EnvTelemetryEnabled+" from the environment it was started with, which DefenseClaw does not change"
 	case errors.Is(envErr, ErrGatewayMismatch):
 		tele.Status, tele.Detail = StatusWarn, envErr.Error()
 	case r.WantTelemetry != nil && *r.WantTelemetry != on:
 		want := strconv.FormatBool(*r.WantTelemetry)
 		tele.Status = StatusWarn
-		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
+		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s%s but openshell.upstream_telemetry is %s", state, where, want)
 		tele.Fix = r.gatewayChangeFix("set "+EnvTelemetryEnabled+"="+want+" in gateway.env", "",
 			r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}}))
 	case manual && r.restartPending(ctx, &envOnly):
@@ -1783,7 +1785,7 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 		tele.Status, tele.Detail = StatusWarn, "OpenShell usage telemetry is "+state+" in "+st.EnvPath+", "+restartUnknown
 		tele.Fix = r.gatewayChangeFix("", "with the variables in "+filepath.Base(st.EnvPath)+" in its environment, if you have not since it changed", nil)
 	default:
-		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
+		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state+where
 	}
 }
 

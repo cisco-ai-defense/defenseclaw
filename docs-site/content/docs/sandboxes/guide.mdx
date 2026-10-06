@@ -227,7 +227,7 @@ What setup does, in order:
    With `--yes` or `--non-interactive` it doesn't restart the gateway; it
    leaves the change for `defenseclaw sandbox doctor --fix` or
    `defenseclaw sandbox setup --restart-gateway`.
-4. **Turns OpenShell's anonymous usage telemetry off** on Linux, unless you
+4. **Turns OpenShell's anonymous usage telemetry off**, unless you
    keep it (`--upstream-telemetry`). Setup does this in the gateway's
    `gateway.env`, so like step 3 it restarts the gateway. The question says so before you answer, with the
    number of sandboxes running on the gateway, and the restart under running
@@ -235,14 +235,12 @@ What setup does, in order:
    `openshell.upstream_telemetry`: once you keep the telemetry, later runs of
    setup don't ask again (set it to `false` to be asked).
 
-   On macOS setup does not change the telemetry. It does not ask, leaves
-   `gateway.env` alone and says the telemetry stays on, and the doctor shows
-   its telemetry check as skipped (`DefenseClaw changes it on Linux only; the
-   Homebrew service reads OPENSHELL_TELEMETRY_ENABLED from
-   ~/.config/openshell/gateway.env`). The Homebrew service does read that
-   file, so to turn the telemetry off yourself, set
-   `OPENSHELL_TELEMETRY_ENABLED=false` in it and run
-   `brew services restart nvidia/openshell/openshell`.
+   On macOS it asks the same, about `~/.config/openshell/gateway.env`,
+   which the Homebrew service reads, and makes the change with the MicroVM
+   settings in one restart; the doctor's telemetry check says where the
+   setting comes from. A Mac gateway that no Homebrew service runs reads it
+   from the environment it was started with, so there setup does not ask
+   and the doctor skips the check.
 5. **Records the harnesses** in `openshell.harnesses`, then turns
    `openshell.enabled` on. The `Harnesses` lines are information, not a
    checklist: one line for each harness this run sets up, with the model
