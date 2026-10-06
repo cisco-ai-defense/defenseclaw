@@ -2774,7 +2774,7 @@ def _seed_rego_policies(policy_dir: str) -> None:
     os.makedirs(dest_rego, exist_ok=True)
 
     for src in bundled_rego.iterdir():
-        if src.suffix in (".rego", ".json") and not src.name.startswith("."):
+        if src.suffix == ".rego" and not src.name.startswith("."):
             dst = os.path.join(dest_rego, src.name)
             if not os.path.exists(dst):
                 shutil.copy2(str(src), dst)

@@ -196,7 +196,7 @@ enum CommandInvocationError: LocalizedError, Equatable {
 }
 
 enum CommandRegistry {
-    static let sourceCount = 225
+    static let sourceCount = 223
     static let all: [CommandDefinition] = [
         CommandDefinition(id: 0, title: "init", binary: "defenseclaw", arguments: ["init"], summary: "Initialize DefenseClaw", category: "setup", requiresInput: false, usage: ""),
         CommandDefinition(id: 1, title: "init first-run", binary: "defenseclaw", arguments: ["init", "--non-interactive", "--yes", "--verify"], summary: "Run guided first-run backend with defaults", category: "setup", requiresInput: false, usage: ""),
@@ -307,9 +307,7 @@ enum CommandRegistry {
         CommandDefinition(id: 106, title: "policy edit guardrail", binary: "defenseclaw", arguments: ["policy", "edit", "guardrail"], summary: "Edit guardrail policy", category: "policy", requiresInput: false, usage: ""),
         CommandDefinition(id: 107, title: "policy edit firewall", binary: "defenseclaw", arguments: ["policy", "edit", "firewall"], summary: "Edit firewall policy", category: "policy", requiresInput: false, usage: ""),
         CommandDefinition(id: 108, title: "policy evaluate", binary: "defenseclaw-gateway", arguments: ["policy", "evaluate"], summary: "Dry-run admission evaluation", category: "policy", requiresInput: false, usage: ""),
-        CommandDefinition(id: 109, title: "policy evaluate-firewall", binary: "defenseclaw-gateway", arguments: ["policy", "evaluate-firewall"], summary: "Dry-run firewall evaluation", category: "policy", requiresInput: false, usage: ""),
         CommandDefinition(id: 110, title: "policy reload", binary: "defenseclaw-gateway", arguments: ["policy", "reload"], summary: "Reload policy in running sidecar", category: "policy", requiresInput: false, usage: ""),
-        CommandDefinition(id: 111, title: "policy domains", binary: "defenseclaw-gateway", arguments: ["policy", "domains"], summary: "Show firewall domain lists", category: "policy", requiresInput: false, usage: ""),
         CommandDefinition(id: 112, title: "list skills", binary: "defenseclaw", arguments: ["skill", "list"], summary: "List skills with scan status", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 113, title: "list mcps", binary: "defenseclaw", arguments: ["mcp", "list"], summary: "List MCP servers with status", category: "info", requiresInput: false, usage: ""),
         CommandDefinition(id: 114, title: "list plugins", binary: "defenseclaw", arguments: ["plugin", "list"], summary: "List installed plugins", category: "info", requiresInput: false, usage: ""),
