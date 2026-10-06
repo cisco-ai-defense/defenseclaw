@@ -749,7 +749,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		validated = v9
 	}
-	if err := env.checkRuleAssets(validated); err != nil {
+	if err := env.checkCandidateAssets(validated); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
