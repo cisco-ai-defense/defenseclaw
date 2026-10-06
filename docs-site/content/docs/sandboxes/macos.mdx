@@ -56,7 +56,7 @@ MicroVMs do not run in Docker Desktop.
 | DefenseClaw | Installed and initialized (see the [quickstart](/docs/get-started/quickstart)), with the daemon running. The [macOS app](/docs/macos-app) starts it for you. Run everything as your own user. |
 | [Homebrew](https://brew.sh) | OpenShell installs from NVIDIA's `nvidia/openshell` Homebrew formula, and its gateway runs as a Homebrew service. NVIDIA's installer runs Homebrew as you, without `sudo`, so your account must be able to write to Homebrew's folders: see [a Homebrew that belongs to another account](#a-homebrew-that-belongs-to-another-account). |
 | Xcode or the Command Line Tools | The formula may build from source, and Homebrew then wants current developer tools for your macOS release. See [developer tools](#developer-tools) below. |
-| `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it (`brew install e2fsprogs`). |
+| `e2fsprogs` | The MicroVM driver formats each MicroVM's disks with its `mke2fs` and `debugfs`. Setup offers to install it (`brew install e2fsprogs`). The driver looks for it only in the Homebrew kegs under `/opt/homebrew` and `/usr/local`, so with a [Homebrew of your own](#a-homebrew-that-belongs-to-another-account) an administrator installs it there. |
 | Docker Desktop, running | DefenseClaw builds the harness images in Docker, and the MicroVM driver reads them from it. Its buildx plugin is included. |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. The MicroVM driver also keeps a prepared disk of about 5 GB for each image it has started. |
 
@@ -102,9 +102,18 @@ A Homebrew of your own works, with two differences. The OpenShell CLI looks
 for the gateway's client certificates only under `/opt/homebrew` and
 `/usr/local`, so for any other prefix the install plan passes
 `OPENSHELL_LOCAL_TLS_DIR=<prefix>/var/openshell/tls` to NVIDIA's installer
-(and the doctor's registration fix includes it). And Homebrew has no
+(and the doctor's registration fix includes it). Homebrew has no
 prebuilt packages for such a prefix, so it may build dependencies from
-source, which can take many minutes.
+source, which can take many minutes; it prints its progress.
+
+Two more things follow from the prefix. The MicroVM driver looks for
+`e2fsprogs` only in the kegs under `/opt/homebrew` and `/usr/local`, so one
+installed by your own Homebrew is never found: setup stops and asks for an
+administrator to run `brew install e2fsprogs` with a Homebrew there. And the
+DefenseClaw daemon keeps the `PATH` it started with, so when the OpenShell
+CLI is outside `/usr/bin`, `/usr/local/bin` and `/opt/homebrew/bin`, setup
+records its full path as `openshell.binary` in `~/.defenseclaw/config.yaml`.
+The daemon reads that key at every use, so it needs no restart.
 
 ## Set up
 
@@ -387,7 +396,8 @@ instead. `--rm` does not delete a sandbox whose work was not brought back.
 | `install OpenShell: Homebrew at /opt/homebrew belongs to …, and you (…) cannot write to …` | Homebrew belongs to another account. Have its owner give you write access, or use a Homebrew of your own: see [a Homebrew that belongs to another account](#a-homebrew-that-belongs-to-another-account). |
 | `install OpenShell: the nvidia/openshell formula is installed, but NVIDIA's installer failed after it` | Homebrew installed OpenShell and started its gateway; the installer then failed starting it or registering it with the OpenShell CLI. Setup shows the check that still fails and its fix, for example `openshell gateway add …` with `OPENSHELL_LOCAL_TLS_DIR` on a Homebrew outside `/opt/homebrew`. Run it, then run setup again. |
 | `install OpenShell: Homebrew could not install the nvidia/openshell formula` | Read Homebrew's `Error:` line above it. Most often your developer tools are too old: see [developer tools](#developer-tools). |
-| **MicroVM driver** fails: `e2fsprogs is not installed where the MicroVM driver looks for it` | `brew install e2fsprogs`, or run `defenseclaw sandbox setup` and let it install it. |
+| **MicroVM driver** fails: `e2fsprogs is not installed where the MicroVM driver looks for it` | `brew install e2fsprogs`, or run `defenseclaw sandbox setup` and let it install it. If it adds `it does not look in your Homebrew at …`, your Homebrew is not at `/opt/homebrew` or `/usr/local`: the driver never finds an `e2fsprogs` installed there, so have an administrator install it with a Homebrew in one of those places. |
+| A run ends with `import provider profile …: openshell: exec: "openshell": executable file not found in $PATH` | The daemon started before your shell had the OpenShell CLI on its `PATH`. Run `defenseclaw sandbox setup` again (it records the CLI's path as `openshell.binary`), or restart the daemon from this shell: `defenseclaw-gateway restart`. |
 | **MicroVM driver** fails: the driver is not signed for Apple's Hypervisor | `brew postinstall nvidia/openshell/openshell`. Setup runs it for you when you agree. |
 | **Docker** fails | Start Docker Desktop. |
 | **Docker file sharing** fails: your temporary folder is not shared with Docker Desktop | Add the folder it names in Docker Desktop → Settings → Resources → File sharing. `/var/folders` and `/tmp` are shared by default. |

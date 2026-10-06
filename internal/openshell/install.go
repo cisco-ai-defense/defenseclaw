@@ -359,8 +359,12 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the
 		// doctor does not find it: a Mac that has it gets no note.
+		next := "setup offers it next"
+		if driverSkipsHomebrew(i.BrewPrefix, i.E2fsprogsDirs) {
+			next = "the driver does not look in a Homebrew at " + tildePath(i.BrewPrefix) + ", so an administrator installs it under /opt/homebrew or /usr/local"
+		}
 		plan.Notes = append(plan.Notes, "a Mac runs sandboxes in OpenShell MicroVMs, whose driver also needs e2fsprogs, "+
-			"which the formula does not install ("+InstallE2fsprogsCommand+"; setup offers it next)")
+			"which the formula does not install ("+InstallE2fsprogsCommand+"; "+next+")")
 	}
 	if plan.BreakingUpgrade {
 		plan.Env = append(plan.Env, "OPENSHELL_ACK_BREAKING_UPGRADE=1")
@@ -428,7 +432,7 @@ func (i *Installer) InstallE2fsprogs(ctx context.Context) error {
 	if err := i.checkBrewWritable(); err != nil {
 		return err
 	}
-	return brew(ctx, i.Runner, "install", "e2fsprogs")
+	return brewTerminal(ctx, i.Runner, "install", "e2fsprogs")
 }
 
 // brewTLSDir is the certificates directory the script's registration

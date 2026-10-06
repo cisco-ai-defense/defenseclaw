@@ -24,25 +24,57 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // EnvLocalTLSDir names the directory the OpenShell CLI imports the local
 // gateway's client certificates from when it registers the gateway.
 const EnvLocalTLSDir = "OPENSHELL_LOCAL_TLS_DIR"
 
-// cliTLSPrefixes are the Homebrew prefixes whose var/openshell/tls the
-// OpenShell 0.1.1 CLI searches for those certificates when
-// EnvLocalTLSDir is unset (besides its own state directory).
-var cliTLSPrefixes = []string{"/opt/homebrew", "/usr/local"}
+// openShellBrewPrefixes are the only Homebrew prefixes OpenShell 0.1.1
+// looks into: its CLI for the gateway's client certificates
+// (var/openshell/tls, unless EnvLocalTLSDir says where they are) and its
+// MicroVM driver for e2fsprogs (opt/e2fsprogs, besides its own PATH).
+var openShellBrewPrefixes = []string{"/opt/homebrew", "/usr/local"}
+
+// ownHomebrew reports whether prefix is a Homebrew somewhere else (a
+// per-user one), which OpenShell does not look into.
+func ownHomebrew(prefix string) bool {
+	return prefix != "" && !slices.Contains(openShellBrewPrefixes, filepath.Clean(prefix))
+}
+
+// driverSkipsHomebrew reports whether the MicroVM driver does not look
+// for e2fsprogs in the Homebrew at prefix: a per-user one, none of whose
+// folders is among dirs, where the driver looks.
+func driverSkipsHomebrew(prefix string, dirs []string) bool {
+	if !ownHomebrew(prefix) {
+		return false
+	}
+	for _, dir := range dirs {
+		if rel, err := filepath.Rel(prefix, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
+}
 
 // brewTLSDir is where the Homebrew formula generates the gateway's
 // certificates under prefix (var/openshell/tls), for a prefix the CLI does
 // not search; "" for the ones it does.
 func brewTLSDir(prefix string) string {
-	if prefix == "" || slices.Contains(cliTLSPrefixes, filepath.Clean(prefix)) {
+	if !ownHomebrew(prefix) {
 		return ""
 	}
 	return filepath.Join(prefix, "var", "openshell", "tls")
+}
+
+// E2fsprogsOwnPrefixFix says what to do about e2fsprogs when Homebrew is a
+// per-user one: the MicroVM driver searches only the kegs under
+// /opt/homebrew and /usr/local (and its own PATH, which is launchd's), so
+// one installed under prefix is never found.
+func E2fsprogsOwnPrefixFix(prefix string) string {
+	return "the MicroVM driver looks for e2fsprogs only in the Homebrew kegs under /opt/homebrew and /usr/local, not in your Homebrew at " + prefix +
+		": have an administrator install it with a Homebrew there (" + InstallE2fsprogsCommand + ")"
 }
 
 // registerGatewayCommand registers the local gateway with the OpenShell
