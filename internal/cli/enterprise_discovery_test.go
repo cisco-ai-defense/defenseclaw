@@ -52,7 +52,7 @@ func TestEnterpriseDiscoveryListsEachAccountsInventory(t *testing.T) {
 		502: {{Name: "Codex CLI", Category: "agent_cli", SupportedConnector: "codex", State: "active", LastSeen: scanned}},
 	} {
 		user := map[int]string{501: "dcm-std1", 502: "dcm-std2"}[uid]
-		record := inventory.UserScanRecord{Version: 1, UID: uid, User: user, UpdatedAt: scanned,
+		record := inventory.UserScanRecord{Version: inventory.UserScanRecordVersion, UID: uid, User: user, UpdatedAt: scanned,
 			Report: inventory.AIDiscoveryReport{Summary: inventory.AIDiscoverySummary{Result: "ok"}, Signals: signals}}
 		data, _ := json.Marshal(record)
 		if err := os.WriteFile(filepath.Join(dir, filepath.Base(user)+".tmp"), nil, 0o600); err != nil {
