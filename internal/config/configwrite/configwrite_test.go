@@ -113,6 +113,24 @@ func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	}
 }
 
+func TestApplyPutsTheOldConfigBackWhenTheGenerationRecordFails(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")
+	before, _ := os.ReadFile(path)
+	// A directory where config.generation.json goes makes the second write
+	// of the transaction fail after config.yaml was replaced.
+	if err := os.Mkdir(GenerationPath(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	change := []Change{{Path: "guardrail.mode", Value: "action"}}
+	if _, err := Apply(context.Background(), path, change, Options{Actor: "cli:test"}); err == nil {
+		t.Fatal("Apply succeeded although the generation file could not be written")
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatalf("a failed write left the new config in place:\n%s", after)
+	}
+}
+
 func TestParsePath(t *testing.T) {
 	parts, err := parsePath(`asset_policy.skill.denied[2]["a.b"].name`)
 	if err != nil || len(parts) != 6 || !parts[3].isIdx || parts[3].index != 2 || parts[4].key != "a.b" {

@@ -107,6 +107,27 @@ def test_managed_refusal_leaves_the_config_directory_and_lock_alone(tmp_path, mo
     assert not os.path.exists(path + ".lock")
 
 
+def test_failed_generation_record_restores_the_previous_config(tmp_path, monkeypatch):
+    path = _config(tmp_path, "guardrail:\n  mode: observe\n")
+    before = open(path, "rb").read()
+    verified: list[str] = []
+
+    def no_space(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(config_writer, "record_generation", no_space)
+    with pytest.raises(OSError):
+        config_writer.write_with(
+            lambda current, _name: (current.replace(b"observe", b"action"), ["guardrail.mode"]),
+            "cli:test",
+            "t",
+            path=path,
+            verify=verified.append,
+        )
+    assert open(path, "rb").read() == before
+    assert not verified
+
+
 def test_config_save_goes_through_the_writer(tmp_path, monkeypatch):
     from defenseclaw import config as config_module
 
