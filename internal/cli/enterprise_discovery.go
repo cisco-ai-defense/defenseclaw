@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // enterpriseDiscoveryReadRecord is replaceable in tests (the spool records
@@ -279,7 +280,7 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	byUser := map[string]int{}
 	for _, signal := range usage.Signals {
 		name := signal.UserName
-		if user != "" && !strings.EqualFold(user, name) && !strings.EqualFold(user, signal.UserID) {
+		if user != "" && !useridentity.AccountFilterMatches(user, signal.UserID, name) {
 			continue
 		}
 		index, ok := byUser[strings.ToLower(name)]
@@ -297,8 +298,8 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	})
 	if user != "" && len(report.Accounts) == 0 {
 		// A --json caller reads this as JSON too, not an empty stdout (GAP-2456).
-		err := withExitCode(&managedViewRefusal{code: "account_not_found", message: fmt.Sprintf(
-			"no AI Discovery signal for account %q in the gateway's scan; the account has no AI agent, skill or MCP server found yet, or ai_discovery is off", user)}, 1)
+		err := withExitCode(&managedViewRefusal{code: "account_not_found",
+			message: windowsDiscoveryAccountNotFound(user, usage)}, 1)
 		if asJSON {
 			writeManagedViewRefusalJSON(w, err)
 		}
@@ -306,6 +307,25 @@ func writeWindowsEnterpriseDiscovery(w io.Writer, user string, asJSON bool) erro
 	}
 	heading := fmt.Sprintf("AI Discovery inventory from the gateway's scan of each user profile (gateway %s)", host)
 	return writeEnterpriseDiscoveryReport(w, report, user, asJSON, heading)
+}
+
+// windowsDiscoveryAccountNotFound says why --user selected nothing: the
+// scan is off, found nothing yet, or found other accounts only (GAP-0079).
+func windowsDiscoveryAccountNotFound(user string, usage enterpriseGatewayAIUsage) string {
+	message := fmt.Sprintf("no AI Discovery signal for account %q in the gateway's last scan", user)
+	accounts := map[string]struct{}{}
+	for _, signal := range usage.Signals {
+		if signal.UserName != "" {
+			accounts[strings.ToLower(signal.UserName)] = struct{}{}
+		}
+	}
+	switch {
+	case !usage.Enabled:
+		return message + "; ai_discovery is off on this gateway"
+	case len(accounts) == 0:
+		return message + "; the scan has not found an AI agent, skill or MCP server in any profile yet"
+	}
+	return message + fmt.Sprintf("; it found signals for %d other account(s): pass the account name, DOMAIN\\name or SID, or run without --user to list them", len(accounts))
 }
 
 func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error {

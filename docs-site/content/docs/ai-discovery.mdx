@@ -306,8 +306,9 @@ enabled:
 - `mode`, `include_shell_history`, `include_package_manifests` and
   `store_raw_local_paths` apply as usual.
 - Administrators read the per-user records on the host with
-  `defenseclaw-gateway enterprise linux discovery` or
-  `enterprise macos discovery` (root, read-only; `--user`, `--json`).
+  `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
+  or `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos
+  discovery` (root, read-only; `--user`, `--json`).
   On Windows, `defenseclaw.exe enterprise windows discovery` (elevated,
   read-only) shows the gateway's scan the same way.
 - Skills and MCP servers found this way are inventoried only: the managed
@@ -388,8 +389,9 @@ defenseclaw aibom scan --only ide_plugins
 ```
 
 A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
-or macOS host, `defenseclaw-gateway enterprise linux ide-plugins` (or
-`enterprise macos ide-plugins`) prints the managed gateway's inventory as
+or macOS host, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux
+ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
+enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the same `--user`, `--ide`, `--ai-only` and `--cursor` filters.
 On a managed Windows computer, `defenseclaw.exe enterprise windows
 ide-plugins` does the same from an elevated prompt.

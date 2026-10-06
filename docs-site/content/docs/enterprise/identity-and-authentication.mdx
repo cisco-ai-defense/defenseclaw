@@ -186,15 +186,19 @@ defenseclaw guardrail profile explain --user alice --connector codex
 A managed install (the enterprise package, MDM or Setup) has no `defenseclaw`
 Python CLI, so these commands and `defenseclaw agent identities` are not
 there. As root on a managed Linux or macOS host, read the same answers from
-the managed gateway, as JSON:
+the managed gateway, as JSON. The package does not put `defenseclaw-gateway`
+on root's `PATH`, so use its full path:
 
 ```bash
-defenseclaw-gateway enterprise linux profile-explain --user alice --connector codex
-defenseclaw-gateway enterprise linux agent-identities --user alice
-defenseclaw-gateway enterprise linux ide-plugins --user alice --ai-only
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector codex
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux agent-identities --user alice
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ide-plugins --user alice --ai-only
 ```
 
-Use `enterprise macos` on a Mac. On a managed Windows computer, run them from
+On a Mac, run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise
+macos ...` instead. `--user` takes the uid or the account name as
+`getent passwd` (or `id`) shows it: with SSSD's fully qualified names that
+is `alice@corp.example.com`, in any case. On a managed Windows computer, run them from
 an elevated PowerShell prompt (or as LocalSystem from an MDM script):
 
 ```powershell

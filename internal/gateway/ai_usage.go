@@ -105,14 +105,6 @@ func ideFilterMatches(ide, family, product string) bool {
 	return ide == family && !ideFamilyNamesProduct[family]
 }
 
-// accountFilterMatches reports whether a user filter selects a row: the
-// account id or the account name, given bare or qualified (DOMAIN\name,
-// user@realm). Rows carry the bare name.
-func accountFilterMatches(user, id, name string) bool {
-	return user == "" || user == id ||
-		strings.EqualFold(useridentity.BareAccountName(user), useridentity.BareAccountName(name))
-}
-
 func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -177,13 +169,13 @@ func (a *APIServer) handleAIUsageIDEPlugins(w http.ResponseWriter, r *http.Reque
 	resp["scanned_at"] = inv.ScannedAt
 	installs := []inventory.IDEInstallation{}
 	for _, inst := range inv.Installations {
-		if accountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) {
+		if useridentity.AccountFilterMatches(user, inst.UserID, inst.UserName) && ideFilterMatches(ide, inst.Family, inst.Product) {
 			installs = append(installs, inst)
 		}
 	}
 	plugins := []inventory.IDEPlugin{}
 	for _, p := range inv.Plugins {
-		if accountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
+		if useridentity.AccountFilterMatches(user, p.UserID, p.UserName) && ideFilterMatches(ide, p.Family, p.Product) && (!aiOnly || p.IsAI) {
 			plugins = append(plugins, p)
 		}
 	}
