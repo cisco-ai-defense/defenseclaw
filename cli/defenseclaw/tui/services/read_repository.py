@@ -33,8 +33,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 from defenseclaw.db import Store
 from defenseclaw.models import ActionEntry, Counts, Event

@@ -306,7 +306,9 @@ class V8ConfigError(ValueError):
         self.path = path or "$"
         self.keyword = keyword
         self.corrective_action = corrective_action
-        super().__init__(f"{source_name}: invalid {label} configuration at {self.path} ({keyword}); {corrective_action}")
+        super().__init__(
+            f"{source_name}: invalid {label} configuration at {self.path} ({keyword}); {corrective_action}"
+        )
 
 
 @dataclass(frozen=True)
@@ -876,7 +878,10 @@ _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("scanners", "skill_scanner", "use_virustotal"), "scanners.skill_scanner.analyzers.virustotal.enabled"),
     (("scanners", "skill_scanner", "use_aidefense"), "scanners.skill_scanner.analyzers.aidefense.enabled"),
     (("scanners", "skill_scanner", "virustotal_api_key"), "a key stored with defenseclaw keys set"),
-    (("scanners", "skill_scanner", "virustotal_api_key_env"), "scanners.skill_scanner.analyzers.virustotal.api_key_env"),
+    (
+        ("scanners", "skill_scanner", "virustotal_api_key_env"),
+        "scanners.skill_scanner.analyzers.virustotal.api_key_env",
+    ),
     (("scanners", "mcp_scanner", "binary"), "the managed scanner install"),
 )
 
