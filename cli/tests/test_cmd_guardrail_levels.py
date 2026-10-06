@@ -66,7 +66,8 @@ def _multi(app) -> None:
 
 
 def test_global_block_at_sets_only_guardrail_block_at(app) -> None:
-    result, payload = _run(app, "block-at", "high", "--json")
+    # --no-restart is accepted from older scripts and does nothing.
+    result, payload = _run(app, "block-at", "high", "--json", "--no-restart")
     assert result.exit_code == 0, result.output
     assert payload == {
         "version": 1,
