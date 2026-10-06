@@ -3157,6 +3157,8 @@ def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
 # restart the gateway.
 
 _RULE_PACK_NAME = re.compile(r"[^a-z0-9_-]+")
+#: A rule id as the shipped packs spell it: ``SEC-AWS-KEY``, ``exec.remote_ip_download_execute_same_artifact``.
+_RULE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def _cli_actor() -> str:
@@ -3740,8 +3742,9 @@ def rule_group() -> None:
       disable   guardrail.rules.disable += ID
       severity  guardrail.rules.severity_overrides[ID] = SEVERITY
 
-    An ID the scope's rule pack doesn't have is refused by the gateway when
-    it reloads (the previous configuration keeps running).
+    IDs are case-sensitive, as the pack spells them. An ID the scope's rule
+    pack doesn't have is refused by the gateway when it reloads (the previous
+    configuration keeps running).
     """
 
 
@@ -3761,9 +3764,9 @@ def _change_rule_lists(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
-    rule_id = rule_id.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", rule_id):
-        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, _ and -). Nothing was changed.")
+    rule_id = rule_id.strip()
+    if not _RULE_ID.fullmatch(rule_id):
+        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
     connector_key = None
     if connector:
@@ -3843,16 +3846,18 @@ def rule_severity_cmd(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
-    rule_id = rule_id.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", rule_id):
-        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, _ and -). Nothing was changed.")
+    rule_id = rule_id.strip()
+    if not _RULE_ID.fullmatch(rule_id):
+        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
     connector_key = normalize_connector(connector) if connector else None
     if connector and not profile_name:
         connector_key, problem = _resolve_scope_connector(app, connector)
         if problem:
             _fail(1, problem)
-    key = f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides.{rule_id}"
+    # A dotted ID (exec.remote_ip_...) is one key, not a path of keys.
+    overrides = config_writer.parse_path(f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides")
+    key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     change = config_writer.Change(key, unset=True) if level == "DEFAULT" else config_writer.Change(key, level)
     _preflight_config_write(app)
