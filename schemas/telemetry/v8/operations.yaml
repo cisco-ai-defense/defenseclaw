@@ -10312,6 +10312,7 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - body.compliance.activity
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields: []
