@@ -1261,8 +1261,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 }
 
 // holdRestartRequired returns next with every restart-required section at
-// its running value, or nil when a path can not be held (storage paths, the
-// legacy sandbox mode): such a reload still fails as restart-required.
+// its running value, or nil when a path can not be held: storage paths, the
+// resource identity the compiled observability plan already carries, the
+// deployment mode and enterprise profile, and the legacy sandbox mode. Such
+// a reload still fails as restart-required.
 func holdRestartRequired(running, next *config.Config, restart []string) *config.Config {
 	if running == nil || next == nil {
 		return nil
@@ -1280,20 +1282,6 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			held.ApplicationProtection = running.ApplicationProtection
 		case "cisco_ai_defense":
 			held.CiscoAIDefense = running.CiscoAIDefense
-		case "environment":
-			held.Environment = running.Environment
-		case "tenant_id":
-			held.TenantID = running.TenantID
-		case "workspace_id":
-			held.WorkspaceID = running.WorkspaceID
-		case "discovery_source":
-			held.DiscoverySource = running.DiscoverySource
-		case "deployment_mode":
-			held.DeploymentMode = running.DeploymentMode
-		case "enterprise", "enterprise.network":
-			inspection := held.Enterprise.Inspection
-			held.Enterprise = running.Enterprise
-			held.Enterprise.Inspection = inspection
 		case "gateway", "gateway.device_key_file":
 			reload, watcher := held.Gateway.ConfigReload, held.Gateway.Watcher
 			held.Gateway = running.Gateway
