@@ -1,0 +1,26 @@
+{
+  "sandbox": {
+    "update_policy": false,
+    "default_permissions": [],
+    "denied_endpoints_global": []
+  },
+  "firewall": {
+    "default_action": "deny",
+    "blocked_destinations": [
+      "169.254.169.254",
+      "fd00:ec2::254"
+    ],
+    "allowed_domains": [
+      "api.github.com",
+      "github.com",
+      "proxy.golang.org",
+      "sum.golang.org",
+      "registry.npmjs.org",
+      "pypi.org",
+      "files.pythonhosted.org"
+    ],
+    "allowed_ports": [
+      443
+    ]
+  }
+}

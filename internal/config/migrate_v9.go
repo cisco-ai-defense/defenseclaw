@@ -19,6 +19,8 @@ package config
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -356,6 +358,9 @@ type v9Migrator struct {
 	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
 	// replaces with the shipped module (nil data retires the file).
 	rego []v9RegoRefresh
+	// retired are the unmodified 0.8 copies of retired policy files that
+	// commit removes.
+	retired []string
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
@@ -423,6 +428,10 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err := m.planRegoRefresh(); err != nil {
 		return nil, false, err
 	}
+	// A Secure Client policy folder is the deployment's, not the user's.
+	if !v9SecureClientDocument(root) {
+		m.planRetiredPolicyFiles()
+	}
 	versionNode.Value = fmt.Sprint(ConfigVersionV9)
 	versionNode.Tag = "!!int"
 
@@ -486,6 +495,11 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			continue
 		}
 		written = append(written, module.path+DataJSONMigratedSuffix)
+	}
+	for _, path := range m.retired {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			m.note("could not remove the retired policy file %s: %v; nothing reads it", path, err)
+		}
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
@@ -613,6 +627,49 @@ func (m *v9Migrator) planRegoRefresh() error {
 		}
 	}
 	return nil
+}
+
+// v9RetiredPolicyFiles are the policy files 0.8.x could leave under
+// <policy_dir>/rego that 1.0 no longer ships: the firewall and audit Rego
+// modules (seeded by init) and the data file the firewall dry runs read
+// (never seeded by the wheel, but carried by source installs). Every release
+// from 0.5.0 to 0.8.10 carried them byte for byte (SHA-256 below), so a copy
+// that still matches was never edited. Remove this table with the v8 to v9
+// migration (1.1.0).
+var v9RetiredPolicyFiles = []struct{ name, sha256 string }{
+	{"firewall.rego", "cc51d978cf63b63f5bb0f21c4710019d106e9bcf7f9100536d35525b8d4ce5a5"},
+	{"audit.rego", "a40b408b08f976153e5937220efaaeb73460055b3ba10831061b5be55ae2c108"},
+	{"data-sandbox.json", "a1cfab935ac600eefb57d027093b6e615f9e7fa2139febebc034d05527ef7cc4"},
+}
+
+// planRetiredPolicyFiles removes the unmodified 0.8 copies of the retired
+// policy files. An edited copy belongs to the operator: it stays, and the
+// report says so. On a managed host the admin owns policy_dir, so the files
+// are only reported.
+func (m *v9Migrator) planRetiredPolicyFiles() {
+	dir := filepath.Join(m.policyDir(), "rego")
+	for _, file := range v9RetiredPolicyFiles {
+		path := filepath.Join(dir, file.name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		var raw []byte
+		if info.Mode().IsRegular() && info.Size() <= 1<<20 {
+			raw, _ = os.ReadFile(path)
+		}
+		sum := sha256.Sum256(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")))
+		switch {
+		case raw == nil || hex.EncodeToString(sum[:]) != file.sha256:
+			m.note("%s was changed after install and is kept; 1.0 no longer ships or reads it (the firewall and audit "+
+				"Rego policies are retired)", path)
+		case m.in.Managed:
+			m.note("%s is the unmodified 0.8 copy of a retired policy; nothing reads it, remove it", path)
+		default:
+			m.retired = append(m.retired, path)
+			m.note("%s, the unmodified 0.8 copy of a retired policy, is removed", path)
+		}
+	}
 }
 
 func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {

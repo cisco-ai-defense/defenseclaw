@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -30,6 +31,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 const policyPathTestModule = `package defenseclaw
@@ -191,6 +193,26 @@ func TestPolicyCommandsUseSelectedLayout(t *testing.T) {
 		setPolicyPathTestFlags(t)
 		requirePolicyPathCommandsSucceed(t)
 	})
+
+	// An upgraded 0.8 install can still hold the firewall and audit modules
+	// and the firewall data file (an edited copy is kept): the gateway's load
+	// and every policy command work around them.
+	t.Run("leftover 0.8 policies", func(t *testing.T) {
+		root := t.TempDir()
+		canonical := filepath.Join(root, "rego")
+		if err := os.MkdirAll(canonical, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		copyPolicyPathTestFiles(t, filepath.Join("..", "..", "policies", "rego"), canonical, "admission.rego", "guardrail.rego")
+		copyPolicyPathTestFiles(t, filepath.Join("..", "config", "testdata", "rego_0_8_10"), canonical,
+			"firewall.rego", "audit.rego", "data-sandbox.json")
+		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
+		setPolicyPathTestFlags(t)
+		requirePolicyPathCommandsSucceed(t)
+		if _, err := policy.Prepare(context.Background(), root); err != nil {
+			t.Fatalf("the gateway load failed around the leftover 0.8 policies: %v", err)
+		}
+	})
 }
 
 func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
@@ -283,6 +305,19 @@ func writePolicyPathTestLayout(t *testing.T, dir string) {
 	}
 	if err := os.WriteFile(filepath.Join(dir, "policy.rego"), []byte(policyPathTestModule), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func copyPolicyPathTestFiles(t *testing.T, from, to string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		raw, err := os.ReadFile(filepath.Join(from, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(to, name), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

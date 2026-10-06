@@ -79,6 +79,22 @@ observability: {}
 	if err := os.WriteFile(staleRego, []byte("package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"allowed\" if data.config.scan_on_install == false\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// 0.8.x also seeded the firewall and audit modules, which 1.0 retires:
+	// the unmodified copy goes, the edited one stays.
+	retiredFirewall := filepath.Join(dir, "policies", "rego", "firewall.rego")
+	editedAudit := filepath.Join(dir, "policies", "rego", "audit.rego")
+	for src, dst := range map[string]string{"firewall.rego": retiredFirewall, "audit.rego": editedAudit} {
+		raw, err := os.ReadFile(filepath.Join("testdata", "rego_0_8_10", src))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dst == editedAudit {
+			raw = append(raw, []byte("# local edit\n")...)
+		}
+		if err := os.WriteFile(dst, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	auditDB := filepath.Join(dir, "audit.db")
 	db, err := sql.Open("sqlite", auditDB)
 	if err != nil {
@@ -109,6 +125,9 @@ observability: {}
 	}
 	if raw, _ := os.ReadFile(configPath); string(raw) != source {
 		t.Fatal("the dry run changed config.yaml")
+	}
+	if _, err := os.Stat(retiredFirewall); err != nil {
+		t.Fatalf("the dry run removed firewall.rego: %v", err)
 	}
 
 	result, err := MigrateV9(context.Background(), in)
@@ -182,6 +201,16 @@ observability: {}
 	}
 	if _, err := os.Stat(staleRego + DataJSONMigratedSuffix); err != nil {
 		t.Errorf("the pre-9 admission.rego was not kept: %v", err)
+	}
+	if _, err := os.Stat(retiredFirewall); !os.IsNotExist(err) {
+		t.Errorf("the unmodified 0.8 firewall.rego was not removed: %v", err)
+	}
+	if _, err := os.Stat(editedAudit); err != nil {
+		t.Errorf("the edited audit.rego was removed: %v", err)
+	}
+	if notes := strings.Join(result.Record.Notes, "\n"); !strings.Contains(notes, editedAudit+" was changed after install and is kept") ||
+		!strings.Contains(notes, retiredFirewall) {
+		t.Errorf("the report does not name both retired files: %q", notes)
 	}
 	if _, err := os.Stat(MigrationRecordPath(configPath)); err != nil {
 		t.Errorf("migration-v9.json missing: %v", err)
