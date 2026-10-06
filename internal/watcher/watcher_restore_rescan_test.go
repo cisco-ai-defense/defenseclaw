@@ -61,7 +61,7 @@ func restoredRescanFixture(t *testing.T, keepBlock bool) (*InstallWatcher, *audi
 		t.Fatalf("fixture quarantine left the files in place: %v", err)
 	}
 	if !keepBlock {
-		if err := pe.Unblock("skill", "review-two"); err != nil {
+		if err := store.ClearActionField("skill", "review-two", "install"); err != nil {
 			t.Fatal(err)
 		}
 		if err := pe.Enable("skill", "review-two"); err != nil {

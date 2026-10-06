@@ -40,7 +40,6 @@ const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
   { value: 'guardrail', label: 'guardrail' },
   { value: 'firewall', label: 'firewall' },
   { value: 'audit', label: 'audit' },
-  { value: 'skill_actions', label: 'skill_actions' },
 ];
 
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [

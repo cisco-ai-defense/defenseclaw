@@ -93,7 +93,7 @@ func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
 	}
 	// The gateway refuses to start without a rule pack, so the vendor
 	// defaults ship read-only and the default config points at them.
-	for _, rel := range []string{"guardrail/default/rules/secrets.yaml", "guardrail/strict", "rego/guardrail.rego", "rego/data.json", "default.yaml"} {
+	for _, rel := range []string{"guardrail/default/rules/secrets.yaml", "guardrail/strict", "rego/guardrail.rego", "rego/admission.rego", "default.yaml"} {
 		if !exists(h.env.P(filepath.Join(l.VendorPolicyDir, rel))) {
 			t.Fatalf("vendor policy %s not installed", rel)
 		}

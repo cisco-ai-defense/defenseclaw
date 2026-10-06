@@ -2765,6 +2765,10 @@ func (s *Sidecar) setEventRouter(router *EventRouter) {
 			lifecycle = nil
 		}
 		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+		// Operator tool and MCP blocks come from the live config.
+		if router.policy != nil {
+			router.policy = router.policy.WithConfig(s.currentConfig)
+		}
 	}
 	s.router = router
 	s.observabilityV8Mu.Unlock()
@@ -3153,6 +3157,7 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, s.opa, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
+	w.SetConfigSource(s.currentConfig)
 	if conn != nil {
 		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
@@ -6845,6 +6850,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetWebhookSource(s.webhooksSnapshot)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
+		api.SetPolicyEngine(s.opa)
 	}
 	reg := connector.NewDefaultRegistry()
 	if s.currentConfig().PluginDir != "" {

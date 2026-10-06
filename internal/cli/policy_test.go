@@ -39,7 +39,7 @@ import rego.v1
 
 admission := {
 	"verdict": "allowed",
-	"reason": data.marker,
+	"reason": "fixture",
 	"file_action": "allow",
 	"install_action": "allow",
 	"runtime_action": "allow",
@@ -62,7 +62,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if paths.rootDir != root || paths.regoDir != canonical || paths.dataPath != filepath.Join(canonical, "data.json") {
+		if paths.rootDir != root || paths.regoDir != canonical || paths.dataPath != filepath.Join(canonical, "data-sandbox.json") {
 			t.Fatalf("resolved paths = %#v", paths)
 		}
 	})
@@ -75,7 +75,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if paths.regoDir != root || paths.dataPath != filepath.Join(root, "data.json") {
+		if paths.regoDir != root || paths.dataPath != filepath.Join(root, "data-sandbox.json") {
 			t.Fatalf("resolved paths = %#v", paths)
 		}
 	})
@@ -140,11 +140,11 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if paths.dataPath != filepath.Join(trustedRoot, "rego", "data.json") {
+		if paths.dataPath != filepath.Join(trustedRoot, "rego", "data-sandbox.json") {
 			t.Fatalf("dataPath = %q", paths.dataPath)
 		}
-		if err := policyShowCmd.RunE(policyShowCmd, nil); err == nil || !strings.Contains(err.Error(), "data.json") {
-			t.Fatalf("show error = %v", err)
+		if err := policyDomainsCmd.RunE(policyDomainsCmd, nil); err == nil || !strings.Contains(err.Error(), "data-sandbox.json") {
+			t.Fatalf("domains error = %v", err)
 		}
 	})
 
@@ -167,10 +167,10 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 
 	t.Run("sibling prefix containment", func(t *testing.T) {
 		root := t.TempDir()
-		if !policyPathContained(root, filepath.Join(root, "rego", "data.json")) {
+		if !policyPathContained(root, filepath.Join(root, "rego", "data-sandbox.json")) {
 			t.Fatal("contained path rejected")
 		}
-		if policyPathContained(root, root+"-sibling"+string(filepath.Separator)+"data.json") {
+		if policyPathContained(root, root+"-sibling"+string(filepath.Separator)+"data-sandbox.json") {
 			t.Fatal("sibling prefix accepted")
 		}
 	})
@@ -189,7 +189,7 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 	t.Run("redirected supplemental data", func(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
-		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
+		writePolicyPathTestLayout(t, canonical, nil, true)
 		target := filepath.Join(t.TempDir(), "data-sandbox.json")
 		if err := os.WriteFile(target, []byte(`{"outside":true}`), 0o600); err != nil {
 			t.Fatal(err)
@@ -198,7 +198,7 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 			t.Skipf("symbolic links unavailable: %v", err)
 		}
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
-		if _, err := resolvePolicyPaths(); err == nil || !strings.Contains(err.Error(), "supplemental") {
+		if _, err := resolvePolicyPaths(); err == nil || !strings.Contains(err.Error(), "symbolic link") {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -222,7 +222,7 @@ func TestResolvePolicyPathsIgnoresUnusedFlatResidue(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
 		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
-		if err := os.Symlink(filepath.Join(canonical, "data.json"), filepath.Join(root, "data.json")); err != nil {
+		if err := os.Symlink(filepath.Join(canonical, "data-sandbox.json"), filepath.Join(root, "data-sandbox.json")); err != nil {
 			t.Skipf("symbolic links unavailable: %v", err)
 		}
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
@@ -250,28 +250,10 @@ func TestPolicyCommandsUseSelectedAndEffectiveData(t *testing.T) {
 		requirePolicyPathCommandsSucceed(t)
 	})
 
-	t.Run("supplemental", func(t *testing.T) {
+	t.Run("sandbox data", func(t *testing.T) {
 		root := t.TempDir()
 		canonical := filepath.Join(root, "rego")
-		base, err := json.Marshal(map[string]interface{}{
-			"marker": "base", "config": map[string]interface{}{}, "actions": map[string]interface{}{}, "severity_ranking": map[string]interface{}{},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		writePolicyPathTestLayout(t, canonical, base, true)
-		supplemental, err := json.Marshal(map[string]interface{}{
-			"marker": "supplemental",
-			"firewall": map[string]interface{}{
-				"default_action": "allow", "blocked_destinations": []string{}, "allowed_domains": []string{"supplemental.example.invalid"}, "allowed_ports": []int{443},
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(canonical, "data-sandbox.json"), supplemental, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "sandbox"), true)
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		setPolicyPathTestFlags(t)
 		if err := policyValidateCmd.RunE(policyValidateCmd, nil); err != nil {
@@ -282,10 +264,10 @@ func TestPolicyCommandsUseSelectedAndEffectiveData(t *testing.T) {
 			cmd  *cobra.Command
 			want string
 		}{
-			{name: "show", cmd: policyShowCmd, want: `"marker": "supplemental"`},
-			{name: "evaluate", cmd: policyEvaluateCmd, want: `"reason": "supplemental"`},
-			{name: "firewall", cmd: policyEvaluateFirewallCmd, want: `"rule_name": "supplemental"`},
-			{name: "domains", cmd: policyDomainsCmd, want: "supplemental.example.invalid"},
+			{name: "show", cmd: policyShowCmd, want: `"admission"`},
+			{name: "evaluate", cmd: policyEvaluateCmd, want: `"reason": "fixture"`},
+			{name: "firewall", cmd: policyEvaluateFirewallCmd, want: `"rule_name": "sandbox"`},
+			{name: "domains", cmd: policyDomainsCmd, want: "sandbox.example.invalid"},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				output, err := capturePolicyPathTestOutput(t, func() error { return test.cmd.RunE(test.cmd, nil) })
@@ -297,33 +279,28 @@ func TestPolicyCommandsUseSelectedAndEffectiveData(t *testing.T) {
 	})
 }
 
+// The firewall dry runs read data-sandbox.json and fail closed on a missing
+// or malformed copy rather than falling back to the legacy flat one.
 func TestPolicyCommandsFailClosedOnCanonicalData(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		base         []byte
-		supplemental []byte
+		name string
+		data []byte
 	}{
-		{name: "missing", base: nil},
-		{name: "malformed", base: []byte("{")},
-		{name: "null", base: []byte("null")},
-		{name: "malformed supplemental", base: policyPathTestData(t, "canonical"), supplemental: []byte("{")},
+		{name: "missing", data: nil},
+		{name: "malformed", data: []byte("{")},
+		{name: "null", data: []byte("null")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			canonical := filepath.Join(root, "rego")
-			writePolicyPathTestLayout(t, canonical, test.base, true)
+			writePolicyPathTestLayout(t, canonical, test.data, true)
 			writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
-			if test.supplemental != nil {
-				if err := os.WriteFile(filepath.Join(canonical, "data-sandbox.json"), test.supplemental, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 			setPolicyPathTestFlags(t)
-			for _, command := range policyPathTestCommands() {
-				t.Run(command.name, func(t *testing.T) {
-					if err := command.cmd.RunE(command.cmd, nil); err == nil {
-						t.Fatalf("%s accepted %s canonical data", command.name, test.name)
+			for _, command := range []*cobra.Command{policyEvaluateFirewallCmd, policyDomainsCmd} {
+				t.Run(command.Name(), func(t *testing.T) {
+					if err := command.RunE(command, nil); err == nil {
+						t.Fatalf("%s accepted %s sandbox data", command.Name(), test.name)
 					}
 				})
 			}
@@ -420,7 +397,7 @@ func requirePolicyPathCommandsSucceed(t *testing.T) {
 func policyPathTestData(t *testing.T, marker string) []byte {
 	t.Helper()
 	data, err := json.Marshal(map[string]interface{}{
-		"marker": marker, "config": map[string]interface{}{}, "actions": map[string]interface{}{}, "severity_ranking": map[string]interface{}{},
+		"marker": marker,
 		"firewall": map[string]interface{}{
 			"default_action": "allow", "blocked_destinations": []string{}, "allowed_domains": []string{marker + ".example.invalid"}, "allowed_ports": []int{443},
 		},
@@ -442,7 +419,7 @@ func writePolicyPathTestLayout(t *testing.T, dir string, data []byte, withModule
 		}
 	}
 	if data != nil {
-		if err := os.WriteFile(filepath.Join(dir, "data.json"), data, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "data-sandbox.json"), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

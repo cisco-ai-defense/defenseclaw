@@ -654,52 +654,51 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// scanning. Connector-scoped (@C/T) entries resolve before the bare
 	// global entry, mirroring the sidecar lane and the PolicyEngine helpers:
 	//   block @C/T → allow @C/T → block T → allow T → scan
-	if a.store != nil {
-		pe := enforce.NewPolicyEngine(a.store)
-		// MCP-server runtime block: a blocked MCP server denies ALL of its
-		// tools, regardless of any per-tool allow. This is the Go-side runtime
-		// enforcement of `defenseclaw mcp block <server>` (global or
-		// --connector scoped); it is checked before the per-tool block/allow so
-		// a server-level block wins over a tool-level allow, and it fails closed
-		// + loud on a store lookup error.
-		if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
-			return &ToolInspectVerdict{
-				Action:     "block",
-				Severity:   "HIGH",
-				Confidence: 1.0,
-				Reason:     reason,
-				Findings:   []string{"MCP-BLOCK"},
-			}
+	// The lists are config.yaml asset_policy (tool and mcp).
+	pe := enforce.NewPolicyEngine(a.store).WithConfig(a.liveConfig)
+	// MCP-server runtime block: a blocked MCP server denies ALL of its
+	// tools, regardless of any per-tool allow. This is the Go-side runtime
+	// enforcement of `defenseclaw mcp block <server>` (global or
+	// --connector scoped); it is checked before the per-tool block/allow so
+	// a server-level block wins over a tool-level allow, and it fails closed
+	// + loud on a store lookup error.
+	if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     reason,
+			Findings:   []string{"MCP-BLOCK"},
 		}
-		blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
-		if err != nil {
-			return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
+	}
+	blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
+	if err != nil {
+		return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
+	}
+	if blocked {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
+			Findings:   []string{"STATIC-BLOCK"},
 		}
-		if blocked {
-			return &ToolInspectVerdict{
-				Action:     "block",
-				Severity:   "HIGH",
-				Confidence: 1.0,
-				Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
-				Findings:   []string{"STATIC-BLOCK"},
-			}
-		}
-		// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
-		// still run CodeGuard on their content (D2): the allow bypasses the
-		// scan gate, not code-content inspection.
-		allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
-		if err != nil {
-			return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
-		}
-		if allowed {
-			if !isWriteToolName(strings.ToLower(req.Tool)) {
-				return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
-			}
-			if cg := a.runCodeGuardOnArgsWithProvenance(req); len(cg.findings) > 0 {
-				return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
-			}
+	}
+	// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
+	// still run CodeGuard on their content (D2): the allow bypasses the
+	// scan gate, not code-content inspection.
+	allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
+	if err != nil {
+		return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+	}
+	if allowed {
+		if !isWriteToolName(strings.ToLower(req.Tool)) {
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 		}
+		if cg := a.runCodeGuardOnArgsWithProvenance(req); len(cg.findings) > 0 {
+			return a.codeGuardOnlyVerdict(ctx, req, cg, true, action.EnforcementCapable)
+		}
+		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{"STATIC-ALLOW"}}
 	}
 
 	argsStr := string(req.Args)

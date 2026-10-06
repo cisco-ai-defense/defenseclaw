@@ -95,15 +95,6 @@ const REGO_DOMAINS: Array<{
     source: 'audit.rego',
     entrypoints: ['defenseclaw/audit/retain', 'defenseclaw/audit/retain_reason'],
   },
-  {
-    name: 'skill_actions',
-    source: 'skill_actions.rego',
-    entrypoints: [
-      'defenseclaw/skill_actions/runtime_action',
-      'defenseclaw/skill_actions/file_action',
-      'defenseclaw/skill_actions/install_action',
-    ],
-  },
 ];
 
 interface PresetBundle {
@@ -684,17 +675,6 @@ function buildScenarios(): Scenario[] {
         severity: 'CRITICAL',
         age_days: 500,
         export_targets: ['splunk'],
-      },
-    },
-    {
-      id: 'skill-actions-high',
-      title: 'HIGH severity skill verdict',
-      domain: 'skill_actions',
-      description: 'Skill flagged HIGH. Default policy: runtime=disable, file=quarantine, install=block.',
-      expectedVerdict: 'block',
-      input: {
-        severity: 'HIGH',
-        target_type: 'skill',
       },
     },
     // ----- Layer 5: session correlator promotions ---------------------------

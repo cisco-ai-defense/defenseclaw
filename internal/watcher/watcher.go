@@ -150,9 +150,10 @@ type InstallWatcher struct {
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   ObservabilityV8Runtime
 
-	policyFileMu     sync.Mutex
-	policyFileHashes map[string]string   // path → sha256 hex of file contents (policy / list YAML watch)
-	policyListSnap   map[string][]string // path → sorted rule keys for list YAML diffs
+	// configSource returns the live config (the sidecar's published
+	// snapshot), so asset_policy and admission edits apply to the next
+	// admission without a watcher restart. Nil uses cfg.
+	configSource func() *config.Config
 
 	// scannerFactory resolves the scanner for an event. Defaults to
 	// scannerFor; tests inject a fake to observe scan invocations without
@@ -178,18 +179,33 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		debounce = 500 * time.Millisecond
 	}
 	return &InstallWatcher{
-		cfg:              cfg,
-		skillDirs:        skillDirs,
-		pluginDirs:       pluginDirs,
-		store:            store,
-		logger:           logger,
-		opa:              opa,
-		debounce:         debounce,
-		onAdmit:          onAdmit,
-		pending:          make(map[string]time.Time),
-		policyFileHashes: make(map[string]string),
-		policyListSnap:   make(map[string][]string),
+		cfg:        cfg,
+		skillDirs:  skillDirs,
+		pluginDirs: pluginDirs,
+		store:      store,
+		logger:     logger,
+		opa:        opa,
+		debounce:   debounce,
+		onAdmit:    onAdmit,
+		pending:    make(map[string]time.Time),
 	}
+}
+
+// SetConfigSource binds the live config the admission gate reads
+// asset_policy and admission from. Call it before Run.
+func (w *InstallWatcher) SetConfigSource(source func() *config.Config) {
+	w.configSource = source
+}
+
+// liveConfig is the config admission decisions read: the bound source's
+// current snapshot, else the config the watcher started with.
+func (w *InstallWatcher) liveConfig() *config.Config {
+	if w.configSource != nil {
+		if cfg := w.configSource(); cfg != nil {
+			return cfg
+		}
+	}
+	return w.cfg
 }
 
 // SetManagedArtifacts binds exact connector-owned plugin paths before Run.
@@ -333,8 +349,6 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
-
-	go w.watchPolicyListsAndYAML(ctx)
 
 	if w.cfg.Watch.RescanEnabled {
 		go w.rescanLoop(ctx)
@@ -643,36 +657,12 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		fmt.Sprintf("type=%s name=%s", targetType, evt.Name), "detected",
 	)
 
-	// Avarice F-2867: an explicit operator allow that recorded a
-	// source_path MUST NOT auto-allow a different on-disk asset
-	// just because it presents the same target name. We consult
-	// the stored entry first; if its source_path differs from
-	// evt.Path we drop the allow and force a fresh scan/decision.
-	if existing, _ := pe.GetAction(targetType, evt.Name); existing != nil {
-		if existing.Actions.Install == "allow" && existing.SourcePath != "" && existing.SourcePath != evt.Path {
-			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-				fmt.Sprintf("reason=allow-path-mismatch type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
-					targetType, evt.Name, existing.SourcePath, evt.Path))
-			w.enforceBlock(ctx, evt)
-			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{
-				Event:   evt,
-				Verdict: VerdictBlocked,
-				Reason:  "allow entry pinned to different source_path; failing closed (F-2867)",
-			}
-			return res
-		}
-	}
-
-	// Build block/allow lists from the SQLite store for the OPA input.
-	blockList := w.buildListEntries(pe, "block")
-	allowList := w.buildListEntries(pe, "allow")
-	fallbackProfile := policy.LoadFallbackProfile(w.cfg.PolicyDir)
-
-	assetDecision := w.cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	cfg := w.liveConfig()
+	connector := w.eventConnector(evt)
+	assetDecision := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           evt.Name,
-		Connector:      w.eventConnector(evt),
+		Connector:      connector,
 		SourcePath:     evt.Path,
 		RuntimeSurface: "watcher",
 	})
@@ -687,84 +677,38 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 	}
 
-	// Phase 1: pre-scan OPA evaluation (no scan_result yet).
-	if w.opa != nil {
-		input := policy.AdmissionInput{
-			TargetType: targetType,
-			TargetName: evt.Name,
-			Path:       evt.Path,
-			BlockList:  blockList,
-			AllowList:  allowList,
-		}
-		out, err := w.opa.Evaluate(ctx, input)
-		if err == nil {
-			switch out.Verdict {
-			case "blocked":
-				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-					fmt.Sprintf("type=%s reason=blocked", targetType))
-				w.enforceBlock(ctx, evt)
-				w.recordAdmission(ctx, "blocked", targetType)
-				res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
-				return res
-			case "rejected":
-				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-					fmt.Sprintf("type=%s reason=policy-rejected", targetType))
-				w.enforceBlock(ctx, evt)
-				w.recordAdmission(ctx, "rejected", targetType)
-				res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
-				return res
-			case "allowed":
-				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
-					fmt.Sprintf("type=%s reason=allow-listed", targetType))
-				w.recordAdmission(ctx, "allowed", targetType)
-				res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
-				return res
-			}
-			// verdict == "scan" → proceed to scanning below
-		}
-		// On OPA error, fall back to the built-in pre-scan gate so explicit
-		// block/allow semantics still hold even when Rego is unavailable.
-		fallbackOut := policy.EvaluateAdmissionFallback(input, fallbackProfile)
-		switch fallbackOut.Verdict {
-		case "blocked":
-			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-				fmt.Sprintf("type=%s reason=blocked", targetType))
-			w.enforceBlock(ctx, evt)
-			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: fallbackOut.Reason}
-			return res
-		case "allowed":
-			_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
-				fmt.Sprintf("type=%s reason=allow-listed", targetType))
-			w.recordAdmission(ctx, "allowed", targetType)
-			res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: fallbackOut.Reason}
-			return res
-		}
-	} else {
-		input := policy.AdmissionInput{
-			TargetType: targetType,
-			TargetName: evt.Name,
-			Path:       evt.Path,
-			BlockList:  blockList,
-			AllowList:  allowList,
-		}
-		out := policy.EvaluateAdmissionFallback(input, fallbackProfile)
-		switch out.Verdict {
-		case "blocked":
-			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-				fmt.Sprintf("type=%s reason=blocked", targetType))
-			w.enforceBlock(ctx, evt)
-			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
-			return res
-		case "allowed":
-			_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
-				fmt.Sprintf("type=%s reason=allow-listed", targetType))
-			w.recordAdmission(ctx, "allowed", targetType)
-			res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
-			return res
-		}
+	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
+		return res
 	}
+
+	// Phase 1: pre-scan evaluation (no scan_result yet). The operator lists
+	// come from asset_policy; an allow entry pinned to a source path never
+	// transfers to another on-disk asset with the same name (F-2867).
+	input := w.admissionInputFor(cfg, evt, targetType, connector)
+	out := w.evaluateAdmission(ctx, input)
+	switch out.Verdict {
+	case "blocked":
+		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+			fmt.Sprintf("type=%s reason=blocked", targetType))
+		w.enforceBlock(ctx, evt)
+		w.recordAdmission(ctx, "blocked", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
+		return res
+	case "rejected":
+		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+			fmt.Sprintf("type=%s reason=policy-rejected", targetType))
+		w.enforceBlock(ctx, evt)
+		w.recordAdmission(ctx, "rejected", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
+		return res
+	case "allowed":
+		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
+			fmt.Sprintf("type=%s reason=allow-listed", targetType))
+		w.recordAdmission(ctx, "allowed", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
+		return res
+	}
+	// verdict == "scan" → proceed to scanning below
 
 	// Phase 2: Scan.
 	s := w.newScanner(evt)
@@ -802,9 +746,16 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 
-	// Manual block/allow entries should win even if they were added while the
-	// scan was running.
-	if blocked, bErr := pe.IsBlocked(targetType, evt.Name); bErr == nil && blocked {
+	// Phase 3: post-scan evaluation. Re-read the live config so a block or
+	// allow added while the scan was running wins.
+	input = w.admissionInputFor(w.liveConfig(), evt, targetType, connector)
+	input.ScanResult = &policy.ScanResultInput{
+		MaxSeverity:   string(result.MaxSeverity()),
+		TotalFindings: len(result.Findings),
+		ScannerName:   s.Name(),
+		Findings:      toFindingInputs(result.Findings),
+	}
+	if input.BlockListed() {
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
@@ -819,7 +770,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		return res
 	}
-	if allowed, aErr := pe.IsAllowed(targetType, evt.Name); aErr == nil && allowed {
+	if input.AllowListed() {
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
@@ -834,54 +785,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 
-	// Phase 3: post-scan OPA evaluation with scan_result.
-	if w.opa != nil {
-		scanInput := &policy.ScanResultInput{
-			MaxSeverity:   string(result.MaxSeverity()),
-			TotalFindings: len(result.Findings),
-			ScannerName:   s.Name(),
-			Findings:      toFindingInputs(result.Findings),
-		}
-		input := policy.AdmissionInput{
-			TargetType: targetType,
-			TargetName: evt.Name,
-			Path:       evt.Path,
-			BlockList:  blockList,
-			AllowList:  allowList,
-			ScanResult: scanInput,
-		}
-		out, evalErr := w.opa.Evaluate(ctx, input)
-		if evalErr == nil {
-			w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-			scanID := w.logScanID(ctx, evt, result, out.Verdict)
-			w.recordAdmission(ctx, out.Verdict, targetType)
-			res = AdmissionResult{
-				ScanID: scanID,
-				Event:  evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
-				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
-				InstallAction: out.InstallAction,
-				FileAction:    out.FileAction,
-				RuntimeAction: out.RuntimeAction,
-			}
-			return res
-		}
-		// On OPA error, fall through to built-in logic.
-	}
-
-	scanInput := &policy.ScanResultInput{
-		MaxSeverity:   string(result.MaxSeverity()),
-		TotalFindings: len(result.Findings),
-		ScannerName:   s.Name(),
-		Findings:      toFindingInputs(result.Findings),
-	}
-	out := policy.EvaluateAdmissionFallback(policy.AdmissionInput{
-		TargetType: targetType,
-		TargetName: evt.Name,
-		Path:       evt.Path,
-		BlockList:  blockList,
-		AllowList:  allowList,
-		ScanResult: scanInput,
-	}, fallbackProfile)
+	out = w.evaluateAdmission(ctx, input)
 	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
@@ -896,21 +800,83 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	return res
 }
 
+// admissionInputFor builds the admission input from config: the compiled
+// admission: for the asset type and the asset_policy block/allow lists that
+// apply to the event's connector. Secure Client hosts keep their operator
+// rows in the actions table, unchanged.
+func (w *InstallWatcher) admissionInputFor(cfg *config.Config, evt InstallEvent, targetType, connector string) policy.AdmissionInput {
+	block, allow := policy.AssetPolicyLists(cfg, targetType, connector)
+	if cfg.SecureClientIntegration() {
+		block, allow = w.legacyListEntries("block"), w.legacyListEntries("allow")
+	}
+	return policy.AdmissionInput{
+		TargetType: targetType,
+		TargetName: evt.Name,
+		Path:       evt.Path,
+		BlockList:  block,
+		AllowList:  allow,
+		Admission:  policy.AdmissionFor(policy.CompileAdmission(cfg), targetType),
+	}
+}
+
+// legacyListEntries is the Secure Client operator list read from the
+// actions table, unchanged.
+func (w *InstallWatcher) legacyListEntries(value string) []policy.ListEntry {
+	if w.store == nil {
+		return nil
+	}
+	entries, err := w.store.ListByAction("install", value)
+	if err != nil {
+		return nil
+	}
+	out := make([]policy.ListEntry, len(entries))
+	for i, e := range entries {
+		out[i] = policy.ListEntry{TargetType: e.TargetType, TargetName: e.TargetName, Reason: e.Reason}
+	}
+	return out
+}
+
+// legacyAllowPathMismatch is the Secure Client F-2867 check, unchanged: an
+// allow row that recorded a source_path fails closed for an asset at another
+// path. Elsewhere the asset_policy source_path_contains pin does this.
+func (w *InstallWatcher) legacyAllowPathMismatch(ctx context.Context, cfg *config.Config, evt InstallEvent, targetType string) (AdmissionResult, bool) {
+	if !cfg.SecureClientIntegration() || w.store == nil {
+		return AdmissionResult{}, false
+	}
+	existing, _ := w.store.GetAction(targetType, evt.Name)
+	if existing == nil || existing.Actions.Install != "allow" || existing.SourcePath == "" || existing.SourcePath == evt.Path {
+		return AdmissionResult{}, false
+	}
+	_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+		fmt.Sprintf("reason=allow-path-mismatch type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
+			targetType, evt.Name, existing.SourcePath, evt.Path))
+	w.enforceBlock(ctx, evt)
+	w.recordAdmission(ctx, "blocked", targetType)
+	return AdmissionResult{
+		Event:   evt,
+		Verdict: VerdictBlocked,
+		Reason:  "allow entry pinned to different source_path; failing closed (F-2867)",
+	}, true
+}
+
+// evaluateAdmission runs the Rego admission policy, and the built-in Go twin
+// only when OPA is unavailable or fails. A valid OPA verdict (including
+// "scan") is final.
+func (w *InstallWatcher) evaluateAdmission(ctx context.Context, input policy.AdmissionInput) *policy.AdmissionOutput {
+	if w.opa != nil {
+		if out, err := w.opa.Evaluate(ctx, input); err == nil && out != nil {
+			return out
+		}
+	}
+	return policy.EvaluateAdmissionFallback(input)
+}
+
 // applyPostScanEnforcement takes the OPA verdict after scanning and executes
 // the enforcement side-effects (block, quarantine, disable) that OPA cannot
 // perform itself. It respects file_action and install_action from OPA output.
 //
-// Allow-listed items are exempt from auto-enforcement; only a manual block
-// can override an allow entry.
+// The caller has already returned for block- and allow-listed items.
 func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enforce.PolicyEngine, out *policy.AdmissionOutput, evt InstallEvent, targetType string, result *scanner.ScanResult, scannerName string) {
-	// Re-check allow list to guard against races where the item became
-	// allowed between the pre-scan check and post-scan enforcement.
-	if allowed, err := pe.IsAllowed(targetType, evt.Name); err == nil && allowed {
-		_ = w.logger.LogAction(string(audit.ActionInstallAllowedSkipEnforce), evt.Path,
-			fmt.Sprintf("type=%s %s is allow-listed — skipping auto-enforcement", targetType, evt.Name))
-		return
-	}
-
 	switch out.Verdict {
 	case "clean":
 		_ = w.logger.LogAction(string(audit.ActionInstallClean), evt.Path,
@@ -983,30 +949,6 @@ func coalesce(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-// buildListEntries queries the SQLite store for block or allow entries.
-func (w *InstallWatcher) buildListEntries(pe *enforce.PolicyEngine, action string) []policy.ListEntry {
-	var entries []audit.ActionEntry
-	var err error
-	switch action {
-	case "block":
-		entries, err = pe.ListBlocked()
-	case "allow":
-		entries, err = pe.ListAllowed()
-	}
-	if err != nil || entries == nil {
-		return nil
-	}
-	out := make([]policy.ListEntry, len(entries))
-	for i, e := range entries {
-		out[i] = policy.ListEntry{
-			TargetType: e.TargetType,
-			TargetName: e.TargetName,
-			Reason:     e.Reason,
-		}
-	}
-	return out
 }
 
 func toVerdict(s string) Verdict {
@@ -1275,7 +1217,7 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 	}
 	connector := w.eventConnector(evt)
 	pe := enforce.NewPolicyEngine(w.store)
-	blocked, err := pe.IsBlockedForConnector(evt.Type.String(), evt.Name, connector)
+	blocked, err := pe.JournalInstallBlocked(evt.Type.String(), evt.Name, connector)
 	if err != nil || !blocked {
 		return false
 	}

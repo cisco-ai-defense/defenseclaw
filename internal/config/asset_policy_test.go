@@ -51,22 +51,25 @@ func TestEvaluateAssetPolicyDeniedBlocksInActionMode(t *testing.T) {
 	}
 }
 
-func TestEvaluateAssetPolicyDeniedWouldBlockInObserveMode(t *testing.T) {
+// TestEvaluateAssetPolicyExplicitListsApplyInEveryMode pins config_version
+// 9: the operator denied/allowed lists replace the audit.db actions rows and
+// apply with asset_policy disabled or in observe mode; a connector-scoped
+// allow decides before an unscoped deny.
+func TestEvaluateAssetPolicyExplicitListsApplyInEveryMode(t *testing.T) {
 	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
-	cfg.AssetPolicy.Enabled = true
-	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
 	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "untrusted"}}
+	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{Name: "untrusted", Connector: "codex"}}
 
-	decision := cfg.EvaluateAssetPolicy(AssetPolicyInput{
-		TargetType: "skill",
-		Name:       "untrusted",
-	})
-
-	if decision.Action != "allow" || decision.RawAction != "block" {
-		t.Fatalf("decision action=%q raw=%q, want allow/block", decision.Action, decision.RawAction)
-	}
-	if !decision.WouldBlock {
-		t.Fatal("observe-mode denied rule should set WouldBlock")
+	for _, enabled := range []bool{false, true} {
+		cfg.AssetPolicy.Enabled = enabled
+		decision := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "skill", Name: "untrusted", Connector: "claudecode"})
+		if decision.Action != "block" || decision.Source != "admin-deny" || !decision.Enabled {
+			t.Fatalf("enabled=%v: action=%q source=%q, want an enforced admin-deny", enabled, decision.Action, decision.Source)
+		}
+		scoped := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "skill", Name: "untrusted", Connector: "codex"})
+		if scoped.Action != "allow" || scoped.Source != "admin-allow" {
+			t.Fatalf("enabled=%v: codex action=%q source=%q, want admin-allow", enabled, scoped.Action, scoped.Source)
+		}
 	}
 }
 
@@ -335,14 +338,14 @@ func TestAssetPolicyForOverlaysPerConnectorScalars(t *testing.T) {
 	}
 }
 
-// TestPerConnectorModeDiffersByConnector proves a denied rule blocks under a
+// TestPerConnectorModeDiffersByConnector proves a default deny blocks under a
 // connector overriding mode=action but only would-block under one inheriting
 // observe.
 func TestPerConnectorModeDiffersByConnector(t *testing.T) {
 	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
 	cfg.AssetPolicy.Enabled = true
 	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
-	cfg.AssetPolicy.MCP.Denied = []AssetPolicyRule{{Name: "rogue"}}
+	cfg.AssetPolicy.MCP.Default = "deny"
 	cfg.AssetPolicy.Connectors = map[string]PerConnectorAssetPolicy{
 		"codex": {Mode: AssetPolicyModeAction},
 	}

@@ -24,22 +24,19 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
 
 func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
 	store, _ := newNativeSkillRuntimeTestStore(t)
-	pe := enforce.NewPolicyEngine(store)
-	if err := pe.Block("mcp", "globally-blocked", "scan verdict"); err != nil {
-		t.Fatal(err)
-	}
-	if err := pe.BlockForConnector("mcp", "claude-blocked", "claudecode", "manual"); err != nil {
-		t.Fatal(err)
-	}
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.AssetPolicy.Enabled = true
 	cfg.AssetPolicy.Mode = config.AssetPolicyModeAction
-	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "policy-denied"}}
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: "https://x.example/mcp"}, {Name: "claude-blocked", Connector: "claudecode", Reason: "manual"}}
+	pe := configPolicy(store, cfg)
+	// A scan verdict that runtime-disabled the server (journal) also keeps it out.
+	if err := store.SetActionField("mcp", "globally-blocked", "runtime", "disable", "scan verdict"); err != nil {
+		t.Fatal(err)
+	}
 
 	var asked []string
 	inv := &sandboxMCPInventory{
@@ -87,11 +84,11 @@ func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
 		t.Fatal("a claudecode-scoped block left the server out of a codex sandbox")
 	}
 
-	// Observe mode reports but does not block.
+	// An explicit denied rule applies in observe mode too (config_version 9).
 	cfg.AssetPolicy.Mode = config.AssetPolicyModeObserve
 	kept, _, _ = inv.SandboxMCPServers(context.Background(), "claudecode")
-	if !slices.ContainsFunc(kept, func(e config.MCPServerEntry) bool { return e.Name == "policy-denied" }) {
-		t.Fatal("an observe-mode asset policy blocked an import")
+	if slices.ContainsFunc(kept, func(e config.MCPServerEntry) bool { return e.Name == "policy-denied" }) {
+		t.Fatal("an observe-mode asset policy let an explicitly denied server in")
 	}
 }
 

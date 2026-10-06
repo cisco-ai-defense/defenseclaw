@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -212,6 +213,12 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
+	// opa is the gateway's shared OPA engine (the watcher's), used for
+	// /policy/evaluate admission; nil loads one from policy_dir per call.
+	opa *policy.Engine
+	// configApply is the config.yaml writer /enforce/* uses; nil is
+	// configwrite.Apply (tests substitute a recorder).
+	configApply func(context.Context, string, []configwrite.Change, configwrite.Options) (configwrite.Result, error)
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
@@ -779,6 +786,11 @@ func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
 }
 
+// SetPolicyEngine shares the gateway's OPA engine with the API.
+func (a *APIServer) SetPolicyEngine(engine *policy.Engine) {
+	a.opa = engine
+}
+
 // SetConnectorRegistry attaches the connector registry so the
 // /v1/connectors endpoint can list available connectors.
 func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
@@ -1009,9 +1021,6 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/alerts", a.handleAlerts)
 	mux.HandleFunc("/audit/event", a.handleAuditEvent)
 	mux.HandleFunc("/policy/evaluate", a.handlePolicyEvaluate)
-	mux.HandleFunc("/policy/evaluate/firewall", a.handlePolicyEvaluateFirewall)
-	mux.HandleFunc("/policy/evaluate/audit", a.handlePolicyEvaluateAudit)
-	mux.HandleFunc("/policy/evaluate/skill-actions", a.handlePolicyEvaluateSkillActions)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
 	mux.HandleFunc("/skills", a.handleSkills)
 	mux.HandleFunc("/mcps", a.handleMCPs)
@@ -1952,6 +1961,10 @@ type enforcementRequest struct {
 	TargetType string `json:"target_type"`
 	TargetName string `json:"target_name"`
 	Reason     string `json:"reason"`
+	// Connector scopes a config change to one connector; empty is global.
+	Connector string `json:"connector,omitempty"`
+	// SourcePath pins an allow to one install path (source_path_contains).
+	SourcePath string `json:"source_path,omitempty"`
 }
 
 type enforcementEntry struct {
@@ -1960,6 +1973,7 @@ type enforcementEntry struct {
 	TargetName string    `json:"target_name"`
 	Reason     string    `json:"reason"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	Connector  string    `json:"connector,omitempty"`
 }
 
 type policyEvaluateRequest struct {
@@ -2058,46 +2072,41 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.store == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
+	if a.refuseManagedPolicyWrite(w) {
+		return
+	}
+	req, ok := a.decodeEnforcementRequest(w, r)
+	if !ok {
+		return
+	}
+	if a.legacyEnforcementRows() {
+		a.handleLegacyEnforceBlock(w, r, req)
 		return
 	}
 
-	var req enforcementRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+	edit := assetListEdit{Op: assetListOpBlock, TargetType: req.TargetType, Name: req.TargetName, Connector: req.Connector, Reason: req.Reason}
+	if edit.Reason == "" {
+		edit.Reason = "blocked via REST API"
+	}
+	status, action, details := "blocked", audit.ActionAPIEnforceBlock, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(edit.Reason, 120))
+	if r.Method == http.MethodDelete {
+		edit.Op, edit.Reason = assetListOpUnblock, ""
+		status, action, details = "unblocked", audit.ActionAPIEnforceUnblock, fmt.Sprintf("type=%s", req.TargetType)
+	}
+	result, err := a.applyAssetListEdit(r.Context(), edit, apiConfigActor(r.Context()))
+	if err != nil {
+		a.writeAssetListError(w, err)
 		return
 	}
-	if req.TargetType == "" || req.TargetName == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type and target_name are required"})
-		return
+	if r.Method == http.MethodDelete && a.store != nil {
+		// The watcher's own install block is journal state; an operator
+		// unblock clears it too, so a restore no longer keeps it (GAP-1971).
+		_ = a.store.ClearActionField(req.TargetType, req.TargetName, "install")
 	}
-
-	pe := enforce.NewPolicyEngine(a.store)
-	switch r.Method {
-	case http.MethodPost:
-		reason := req.Reason
-		if reason == "" {
-			reason = "blocked via REST API"
-		}
-		if err := pe.Block(req.TargetType, req.TargetName, reason); err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceBlock), req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
-		}
-		a.writeJSON(w, http.StatusOK, map[string]string{"status": "blocked"})
-	case http.MethodDelete:
-		if err := pe.Unblock(req.TargetType, req.TargetName); err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceUnblock), req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
-		}
-		a.writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked"})
+	if a.logger != nil {
+		_ = a.logger.LogActionCtx(r.Context(), string(action), req.TargetName, details)
 	}
+	a.writeJSON(w, http.StatusOK, map[string]any{"status": status, "generation": result.Generation})
 }
 
 func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
@@ -2105,18 +2114,11 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.store == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
+	if a.refuseManagedPolicyWrite(w) {
 		return
 	}
-
-	var req enforcementRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if req.TargetType == "" || req.TargetName == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type and target_name are required"})
+	req, ok := a.decodeEnforcementRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -2133,49 +2135,153 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		runtimeName = resolvePluginRuntimeActionName(pe, req.TargetName, policyName)
 	}
 
-	entry, err := pe.GetAction(req.TargetType, runtimeName)
-	if err != nil {
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if entry != nil && entry.Actions.Runtime == "disable" {
-		if a.client == nil {
-			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway client not configured"})
+	if a.store != nil {
+		entry, err := pe.GetAction(req.TargetType, runtimeName)
+		if err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
-		defer cancel()
-		switch req.TargetType {
-		case "skill":
-			if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-				return a.client.EnableSkill(callCtx, req.TargetName)
-			}); err != nil {
-				a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		if entry != nil && entry.Actions.Runtime == "disable" {
+			if a.client == nil {
+				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway client not configured"})
 				return
 			}
-		case "plugin":
-			if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-				return a.client.EnablePlugin(callCtx, runtimeName)
-			}); err != nil {
-				a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-				return
-			}
-			if runtimeName != policyName {
-				if err := pe.Enable("plugin", runtimeName); err != nil {
-					a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+			defer cancel()
+			switch req.TargetType {
+			case "skill":
+				if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+					return a.client.EnableSkill(callCtx, req.TargetName)
+				}); err != nil {
+					a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 					return
+				}
+			case "plugin":
+				if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
+					return a.client.EnablePlugin(callCtx, runtimeName)
+				}); err != nil {
+					a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+					return
+				}
+				if runtimeName != policyName {
+					if err := pe.Enable("plugin", runtimeName); err != nil {
+						a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+						return
+					}
 				}
 			}
 		}
 	}
-	if err := pe.Allow(req.TargetType, policyName, reason); err != nil {
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+
+	var generation uint64
+	if a.legacyEnforcementRows() {
+		if err := a.legacyAllow(req.TargetType, policyName, reason); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	} else {
+		result, err := a.applyAssetListEdit(r.Context(), assetListEdit{
+			Op: assetListOpAllow, TargetType: req.TargetType, Name: policyName,
+			Connector: req.Connector, Reason: reason, SourcePath: req.SourcePath,
+		}, apiConfigActor(r.Context()))
+		if err != nil {
+			a.writeAssetListError(w, err)
+			return
+		}
+		generation = result.Generation
+		// An operator allow lifts the automatic quarantine/disable journal
+		// state, as it always did.
+		if a.store != nil {
+			_ = a.store.ClearActionField(req.TargetType, policyName, "file")
+			_ = a.store.ClearActionField(req.TargetType, policyName, "runtime")
+		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceAllow), policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
-	a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
+	if a.legacyEnforcementRows() {
+		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{"status": "allowed", "generation": generation})
+}
+
+// decodeEnforcementRequest reads and validates an /enforce/* body.
+func (a *APIServer) decodeEnforcementRequest(w http.ResponseWriter, r *http.Request) (enforcementRequest, bool) {
+	var req enforcementRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return req, false
+	}
+	if req.TargetType == "" || req.TargetName == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type and target_name are required"})
+		return req, false
+	}
+	if !a.legacyEnforcementRows() && !assetListTargetTypes[req.TargetType] {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_type must be skill, mcp, plugin or tool"})
+		return req, false
+	}
+	return req, true
+}
+
+// legacyEnforcementRows reports a Secure Client host, which keeps operator
+// rows in the audit.db actions table unchanged.
+func (a *APIServer) legacyEnforcementRows() bool {
+	cfg := a.liveConfig()
+	return cfg != nil && cfg.SecureClientIntegration()
+}
+
+// handleLegacyEnforceBlock is the Secure Client /enforce/block, unchanged.
+func (a *APIServer) handleLegacyEnforceBlock(w http.ResponseWriter, r *http.Request, req enforcementRequest) {
+	if a.store == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		reason := req.Reason
+		if reason == "" {
+			reason = "blocked via REST API"
+		}
+		if err := a.store.SetActionField(req.TargetType, req.TargetName, "install", "block", reason); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if a.logger != nil {
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceBlock), req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+		}
+		a.writeJSON(w, http.StatusOK, map[string]string{"status": "blocked"})
+	case http.MethodDelete:
+		if err := a.store.ClearActionField(req.TargetType, req.TargetName, "install"); err != nil {
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if a.logger != nil {
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceUnblock), req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
+		}
+		a.writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked"})
+	}
+}
+
+// legacyAllow is the Secure Client allow row write, unchanged.
+func (a *APIServer) legacyAllow(targetType, name, reason string) error {
+	if a.store == nil {
+		return nil
+	}
+	if err := a.store.SetActionField(targetType, name, "install", "allow", reason); err != nil {
+		return err
+	}
+	var errs []error
+	if err := a.store.ClearActionField(targetType, name, "file"); err != nil {
+		errs = append(errs, fmt.Errorf("clear file action: %w", err))
+	}
+	if err := a.store.ClearActionField(targetType, name, "runtime"); err != nil {
+		errs = append(errs, fmt.Errorf("clear runtime action: %w", err))
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("enforce: allow %s %q: partial cleanup: %v", targetType, name, errs)
+	}
+	return nil
 }
 
 func normalizePluginPolicyName(name string) string {
@@ -2212,34 +2318,33 @@ func resolvePluginRuntimeActionName(pe *enforce.PolicyEngine, rawName, policyNam
 }
 
 func (a *APIServer) handleEnforceBlocked(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if a.store == nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
-		return
-	}
-
-	entries, err := enforce.NewPolicyEngine(a.store).ListBlocked()
-	if err != nil {
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	a.writeJSON(w, http.StatusOK, toEnforcementEntries(entries))
+	a.writeEnforcementList(w, r, true)
 }
 
 func (a *APIServer) handleEnforceAllowed(w http.ResponseWriter, r *http.Request) {
+	a.writeEnforcementList(w, r, false)
+}
+
+// writeEnforcementList answers GET /enforce/blocked|allowed from the live
+// config's asset_policy lists (the actions table on Secure Client hosts).
+func (a *APIServer) writeEnforcementList(w http.ResponseWriter, r *http.Request, blocked bool) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.legacyEnforcementRows() {
+		a.writeJSON(w, http.StatusOK, configListEntries(a.liveConfig(), blocked))
 		return
 	}
 	if a.store == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "audit store not configured"})
 		return
 	}
-
-	entries, err := enforce.NewPolicyEngine(a.store).ListAllowed()
+	value := "allow"
+	if blocked {
+		value = "block"
+	}
+	entries, err := a.store.ListByAction("install", value)
 	if err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -2337,8 +2442,6 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		TargetType: req.Input.TargetType,
 		TargetName: req.Input.TargetName,
 		Path:       req.Input.Path,
-		BlockList:  a.blockListEntries(),
-		AllowList:  a.allowListEntries(),
 	}
 	if req.Input.ScanResult != nil {
 		input.ScanResult = &policy.ScanResultInput{
@@ -4048,33 +4151,54 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 	return out
 }
 
-func (a *APIServer) blockListEntries() []policy.ListEntry {
-	return a.policyListEntries(true)
+// evaluateAdmissionPolicy evaluates admission with the input built from the
+// live config: the compiled admission: and the asset_policy lists. The
+// built-in Go twin runs only when OPA fails.
+func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
+	cfg := a.liveConfig()
+	input.BlockList, input.AllowList = policy.AssetPolicyLists(cfg, input.TargetType, "")
+	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
+	}
+	if engine := a.admissionEngine(); engine != nil {
+		if out, err := engine.Evaluate(ctx, input); err == nil && out != nil {
+			return out, nil
+		}
+	}
+	return policy.EvaluateAdmissionFallback(input), nil
 }
 
-func (a *APIServer) allowListEntries() []policy.ListEntry {
-	return a.policyListEntries(false)
-}
-
-func (a *APIServer) policyListEntries(blocked bool) []policy.ListEntry {
-	if a.store == nil {
+// admissionEngine is the gateway's shared OPA engine, else one loaded from
+// policy_dir for this call.
+func (a *APIServer) admissionEngine() *policy.Engine {
+	if a.opa != nil {
+		return a.opa
+	}
+	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
 		return nil
 	}
-
-	pe := enforce.NewPolicyEngine(a.store)
-	var (
-		actions []audit.ActionEntry
-		err     error
-	)
-	if blocked {
-		actions, err = pe.ListBlocked()
-	} else {
-		actions, err = pe.ListAllowed()
-	}
+	engine, err := policy.New(a.scannerCfg.PolicyDir)
 	if err != nil {
 		return nil
 	}
+	return engine
+}
 
+// legacyPolicyListEntries is the Secure Client block/allow list read from
+// the actions table, unchanged.
+func (a *APIServer) legacyPolicyListEntries(blocked bool) []policy.ListEntry {
+	if a.store == nil {
+		return nil
+	}
+	value := "allow"
+	if blocked {
+		value = "block"
+	}
+	actions, err := a.store.ListByAction("install", value)
+	if err != nil {
+		return nil
+	}
 	entries := make([]policy.ListEntry, 0, len(actions))
 	for _, action := range actions {
 		entries = append(entries, policy.ListEntry{
@@ -4084,24 +4208,6 @@ func (a *APIServer) policyListEntries(blocked bool) []policy.ListEntry {
 		})
 	}
 	return entries
-}
-
-func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
-	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err == nil {
-			out, evalErr := engine.Evaluate(ctx, input)
-			if evalErr == nil {
-				return out, nil
-			}
-		}
-	}
-
-	regoDir := ""
-	if a.scannerCfg != nil {
-		regoDir = a.scannerCfg.PolicyDir
-	}
-	return policy.EvaluateAdmissionFallback(input, policy.LoadFallbackProfile(regoDir)), nil
 }
 
 func classifyScanError(err error) string {
@@ -4121,157 +4227,6 @@ func classifyScanError(err error) string {
 	default:
 		return "crash"
 	}
-}
-
-// ---------------------------------------------------------------------------
-// POST /policy/evaluate/firewall
-// ---------------------------------------------------------------------------
-
-func (a *APIServer) handlePolicyEvaluateFirewall(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var input policy.FirewallInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if input.Destination == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "destination is required"})
-		return
-	}
-
-	ctx, observation, err := a.startAPIPolicyEvaluationV8(
-		r.Context(), "firewall", "network", input.Destination,
-	)
-	if err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	engine, err := a.loadPolicyEngine()
-	if err != nil {
-		_ = observation.complete("error", "", "", err)
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	out, err := engine.EvaluateFirewall(ctx, input)
-	if err != nil {
-		_ = observation.complete("error", "", "", err)
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	if err := observation.complete(out.Action, out.RuleName, "", nil); err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
-		return
-	}
-
-	a.writeJSON(w, http.StatusOK, out)
-}
-
-// ---------------------------------------------------------------------------
-// POST /policy/evaluate/audit
-// ---------------------------------------------------------------------------
-
-func (a *APIServer) handlePolicyEvaluateAudit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var input policy.AuditInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-
-	ctx, observation, err := a.startAPIPolicyEvaluationV8(
-		r.Context(), "audit", firstNonEmpty(input.EventType, "audit-event"), input.EventType,
-	)
-	if err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	engine, err := a.loadPolicyEngine()
-	if err != nil {
-		_ = observation.complete("error", "", input.Severity, err)
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	out, err := engine.EvaluateAudit(ctx, input)
-	if err != nil {
-		_ = observation.complete("error", "", input.Severity, err)
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	verdict := "expire"
-	if out.Retain {
-		verdict = "retain"
-	}
-	if err := observation.complete(verdict, out.RetainReason, input.Severity, nil); err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
-		return
-	}
-
-	a.writeJSON(w, http.StatusOK, out)
-}
-
-// ---------------------------------------------------------------------------
-// POST /policy/evaluate/skill-actions
-// ---------------------------------------------------------------------------
-
-func (a *APIServer) handlePolicyEvaluateSkillActions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var input policy.SkillActionsInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	if input.Severity == "" {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "severity is required"})
-		return
-	}
-
-	ctx, observation, err := a.startAPIPolicyEvaluationV8(
-		r.Context(), "skill-actions", firstNonEmpty(input.TargetType, "skill"), "",
-	)
-	if err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	engine, err := a.loadPolicyEngine()
-	if err != nil {
-		_ = observation.complete("error", "", input.Severity, err)
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-
-	out, err := engine.EvaluateSkillActions(ctx, input)
-	if err != nil {
-		_ = observation.complete("error", "", input.Severity, err)
-		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	verdict := out.RuntimeAction
-	if out.ShouldBlock {
-		verdict = "block"
-	}
-	if err := observation.complete(verdict, "", input.Severity, nil); err != nil {
-		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "observability runtime unavailable"})
-		return
-	}
-
-	a.writeJSON(w, http.StatusOK, out)
 }
 
 // ---------------------------------------------------------------------------
@@ -4346,14 +4301,6 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		"status":     "reloaded",
 		"policy_dir": a.scannerCfg.PolicyDir,
 	})
-}
-
-// loadPolicyEngine creates a fresh policy engine from the configured policy_dir.
-func (a *APIServer) loadPolicyEngine() (*policy.Engine, error) {
-	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
-		return nil, fmt.Errorf("policy_dir not configured")
-	}
-	return policy.New(a.scannerCfg.PolicyDir)
 }
 
 // codeScanRequest is the payload for POST /api/v1/scan/code.

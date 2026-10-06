@@ -28,23 +28,13 @@ import rego.v1
 #   cisco_result    - {action, severity, findings[], is_safe} or null
 #   content_length  - int
 #
-# Static data (data.guardrail in data.json):
-#   severity_rank.<SEV>           - int ranking (CRITICAL=4, HIGH=3, ...)
-#   block_threshold               - minimum severity rank to block (default 4 = CRITICAL)
-#   alert_threshold               - minimum severity rank to alert (default 2 = MEDIUM)
-#   hilt.enabled                  - whether HIGH+ can require approval before allow/block
-#                                   (fallback only — see input.hilt below)
-#   hilt.min_severity             - minimum severity for confirmation (default HIGH)
-#                                   (fallback only — see input.hilt below)
-#   cisco_trust_level             - "full" | "advisory" | "none"
+#   thresholds      - {block, alert, cisco_trust_level}: the resolved block and
+#                     alert ranks (4=CRITICAL, 3=HIGH, 2=MEDIUM, 1=LOW) and the
+#                     Cisco AI Defense trust level ("full" | "advisory" | "none"),
+#                     from config.yaml (policy.ThresholdsInput)
+#   hilt            - {enabled, min_severity}: config.yaml guardrail.hilt
 #
-# HILT input override (input.hilt):
-#   The Go gateway injects the live config.yaml HILT settings as
-#   `input.hilt.{enabled, min_severity}`. When present, these take
-#   precedence over `data.guardrail.hilt` so config.yaml is the single
-#   source of truth. When absent (e.g. direct `opa eval` callers, legacy
-#   integrations), the policy falls back to `data.guardrail.hilt` to
-#   preserve backward compatibility.
+# The policy reads only input: config.yaml is the only source.
 
 default severity := "NONE"
 default reason := ""
@@ -53,15 +43,17 @@ default reason := ""
 
 effective_severity := _highest_severity
 
-_local_sev_rank := data.guardrail.severity_rank[input.local_result.severity] if {
+_severity_rank := {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+_local_sev_rank := _severity_rank[input.local_result.severity] if {
 	input.local_result
 	input.local_result.severity
 } else := 0
 
-_cisco_sev_rank := data.guardrail.severity_rank[input.cisco_result.severity] if {
+_cisco_sev_rank := _severity_rank[input.cisco_result.severity] if {
 	input.cisco_result
 	input.cisco_result.severity
-	data.guardrail.cisco_trust_level != "none"
+	input.thresholds.cisco_trust_level != "none"
 } else := 0
 
 _highest_sev_rank := max({_local_sev_rank, _cisco_sev_rank, 0})
@@ -84,32 +76,26 @@ severity := effective_severity
 
 action := "alert" if {
 	input.mode == "observe"
-	_highest_sev_rank >= data.guardrail.alert_threshold
+	_highest_sev_rank >= input.thresholds.alert
 } else := "alert" if {
-	data.guardrail.cisco_trust_level == "advisory"
-	_cisco_sev_rank >= data.guardrail.block_threshold
-	_local_sev_rank < data.guardrail.alert_threshold
+	input.thresholds.cisco_trust_level == "advisory"
+	_cisco_sev_rank >= input.thresholds.block
+	_local_sev_rank < input.thresholds.alert
 } else := "block" if {
-	_highest_sev_rank >= data.guardrail.block_threshold
+	_highest_sev_rank >= input.thresholds.block
 } else := "confirm" if {
 	input.mode == "action"
 	_hilt_enabled
 	_highest_sev_rank >= _hilt_min_rank
 } else := "alert" if {
-	_highest_sev_rank >= data.guardrail.alert_threshold
+	_highest_sev_rank >= input.thresholds.alert
 } else := "allow"
 
-# Prefer the gateway-supplied input.hilt over data.guardrail.hilt so
-# config.yaml drives the verdict without requiring data.json to be
-# kept in sync. The `else` branch keeps non-gateway callers working
-# (direct `opa eval`, legacy integrations that set data only).
-_hilt := input.hilt if {
-	input.hilt
-} else := object.get(data.guardrail, "hilt", {})
+_hilt := object.get(input, "hilt", {})
 
 _hilt_enabled := object.get(_hilt, "enabled", false)
 
-_hilt_min_rank := object.get(data.guardrail.severity_rank, object.get(_hilt, "min_severity", "HIGH"), 3)
+_hilt_min_rank := object.get(_severity_rank, object.get(_hilt, "min_severity", "HIGH"), 3)
 
 # --- Build reason ---
 

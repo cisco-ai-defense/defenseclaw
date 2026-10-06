@@ -956,6 +956,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("skill_actions", oldCfg.SkillActions, newCfg.SkillActions)
 	add("mcp_actions", oldCfg.MCPActions, newCfg.MCPActions)
 	add("plugin_actions", oldCfg.PluginActions, newCfg.PluginActions)
+	add("admission", oldCfg.Admission, newCfg.Admission)
 	add("asset_policy", oldCfg.AssetPolicy, newCfg.AssetPolicy)
 	add("registries", oldCfg.Registries, newCfg.Registries)
 	add("connector_hooks", oldCfg.ConnectorHooks, newCfg.ConnectorHooks)
@@ -1014,6 +1015,10 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// rebind in-process (apiNeedsRestart). Only the legacy standalone
 		// mode behind the bind shim needs a fresh process (below).
 		"openshell": {},
+		// Admission and the asset_policy block/allow lists are read from the
+		// published config on every decision (watcher, API, hook lanes).
+		"admission":    {},
+		"asset_policy": {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)

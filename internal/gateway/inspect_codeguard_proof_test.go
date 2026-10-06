@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -189,9 +188,7 @@ rules:
 		t.Fatal(err)
 	}
 	api.scannerCfg.Scanners.CodeGuard = rulesDir
-	if err := enforce.NewPolicyEngine(api.store).AllowToolForConnector("write_file", "", "test allow"); err != nil {
-		t.Fatal(err)
-	}
+	allowTool(api.scannerCfg, "write_file", "", "test allow")
 
 	cleanVerdict := inspectCodeGuardProofTestRequest(
 		t,

@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -176,9 +177,7 @@ func TestClassifyEvent_ClaudeSkillsAndCacheUseExactBoundaries(t *testing.T) {
 func TestAdmission_BlockedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
-	if err := store.SetActionField("skill", "evil-skill", "install", "block", "known malicious"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "evil-skill", Reason: "known malicious"})
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 
@@ -198,9 +197,7 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 func TestAdmission_AllowedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
-	if err := store.SetActionField("skill", "trusted-skill", "install", "allow", "pre-approved"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: "trusted-skill", Reason: "pre-approved"})
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 
@@ -304,9 +301,7 @@ func TestAdmission_ScanError_NoScanner(t *testing.T) {
 func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
-	if err := store.SetActionField("skill", "new-skill", "install", "allow", "pre-approved"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: "new-skill", Reason: "pre-approved"})
 
 	var mu sync.Mutex
 	var results []AdmissionResult
@@ -373,9 +368,7 @@ func TestAdmission_GatePrecedence_BlockBeatsAllow(t *testing.T) {
 
 	// With the unified table, setting install to "block" after "allow" replaces it.
 	// The block check runs first in the admission gate, so block takes priority.
-	if err := store.SetActionField("skill", "conflict-skill", "install", "block", "security"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "conflict-skill", Reason: "security"})
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 
@@ -450,9 +443,7 @@ func TestFullQuarantineFlow_Skill(t *testing.T) {
 	// blocked skill instead, which triggers enforceBlock and quarantine.
 
 	// Block the skill (simulating auto-block after scan)
-	if err := store.SetActionField("skill", "evil-skill", "install", "block", "auto-block: CRITICAL findings"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "evil-skill", Reason: "auto-block: CRITICAL findings"})
 
 	evt := InstallEvent{Type: InstallSkill, Name: "evil-skill", Path: skillPath, Timestamp: time.Now()}
 	result = w.runAdmission(context.Background(), evt)
@@ -502,9 +493,7 @@ func TestFullQuarantineFlow_Plugin(t *testing.T) {
 	}
 
 	// Block the plugin
-	if err := store.SetActionField("plugin", "malicious-plugin", "install", "block", "CRITICAL: eval detected"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Plugin.Denied = append(cfg.AssetPolicy.Plugin.Denied, config.AssetPolicyRule{Name: "malicious-plugin", Reason: "CRITICAL: eval detected"})
 
 	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil)
 
@@ -874,9 +863,7 @@ func TestAdmission_AllowedSkip_NoQuarantine(t *testing.T) {
 	}
 
 	// Allow-list the skill
-	if err := store.SetActionField("skill", "safe-skill", "install", "allow", "pre-approved"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: "safe-skill", Reason: "pre-approved"})
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 
@@ -925,9 +912,7 @@ func TestActionState_InstallOverwrite(t *testing.T) {
 func TestAdmission_BlockedVerdict(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
-	if err := store.SetActionField("skill", "evil-skill", "install", "block", "malicious"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Denied = append(cfg.AssetPolicy.Skill.Denied, config.AssetPolicyRule{Name: "evil-skill", Reason: "malicious"})
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 
@@ -948,9 +933,7 @@ func TestAdmission_BlockedVerdict(t *testing.T) {
 func TestAdmission_AllowedVerdict(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 
-	if err := store.SetActionField("skill", "trusted-skill", "install", "allow", "pre-approved"); err != nil {
-		t.Fatal(err)
-	}
+	cfg.AssetPolicy.Skill.Allowed = append(cfg.AssetPolicy.Skill.Allowed, config.AssetPolicyRule{Name: "trusted-skill", Reason: "pre-approved"})
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 
@@ -1002,5 +985,33 @@ func TestAdmission_BundledPluginIsNotScanned(t *testing.T) {
 	})
 	if result.Verdict != VerdictAllowed || scanned {
 		t.Fatalf("bundled plugin admission = %+v, scanned=%v", result, scanned)
+	}
+}
+
+// A valid OPA "scan" verdict is final: the built-in fallback runs only when
+// OPA fails. Here the fallback alone would admit the skill (scan_on_install
+// off) while the policy asks for a scan, so the scanner must run.
+func TestAdmission_FallbackOnlyOnOPAError(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Admission.Skill.ScanOnInstall = new(bool)
+	regoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(regoDir, "admission.rego"), []byte("package defenseclaw.admission\n\nimport rego.v1\n\nverdict := \"scan\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := policy.New(regoDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, engine, nil)
+	scanned := false
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { scanned = true; return nil }
+
+	skillPath := filepath.Join(skillDir, "needs-scan")
+	if err := os.MkdirAll(skillPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "needs-scan", Path: skillPath, Timestamp: time.Now()})
+	if !scanned {
+		t.Fatal("the fallback overrode a valid OPA scan verdict")
 	}
 }

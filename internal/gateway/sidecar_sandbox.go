@@ -180,9 +180,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	inflight := sandboxauth.NewInFlight(nil)
 	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: s.health}
 	mcp := &sandboxMCPInventory{config: s.currentConfig}
-	if api.store != nil {
-		mcp.policy = enforce.NewPolicyEngine(api.store)
-	}
+	mcp.policy = enforce.NewPolicyEngine(api.store).WithConfig(s.currentConfig)
 
 	mgr, err := manager.New(manager.Options{
 		DataDir: dataDir,
