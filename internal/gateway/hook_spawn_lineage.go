@@ -398,7 +398,6 @@ func (a *APIServer) applyHookChildThreadLineage(meta llmEventMeta) llmEventMeta 
 	meta.ParentSessionID = parent.SessionID
 	meta.RootSessionID = firstNonEmpty(parent.RootSessionID, parent.SessionID)
 	meta.AgentDepth = parent.AgentDepth + 1
-	meta.AgentType = "subagent"
 	meta.LineageProvenance = "inferred"
 	meta.ParentLineageResolved = true
 	return meta
