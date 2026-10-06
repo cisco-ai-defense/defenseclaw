@@ -1168,6 +1168,18 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     assert format_scanner_overrides_summary((("secrets", "low", "file"),)) == ""  # wrong arity
 
 
+def test_status_and_overview_show_the_same_admission_overrides() -> None:
+    # `defenseclaw status` read the deleted data.json and always printed
+    # nothing; it now lists the admission.<type>.actions the Overview shows.
+    from defenseclaw.commands.cmd_status import _scanner_overrides_summary
+    from defenseclaw.config import default_config
+
+    cfg = default_config()
+    assert _scanner_overrides_summary(cfg) == ""
+    cfg.admission.mcp.actions["medium"] = "warn"
+    assert _scanner_overrides_summary(cfg) == "mcp: MEDIUM install=none, file=none, runtime=enable"
+
+
 def test_guardrail_detail_names_the_rule_pack_not_a_placeholder_strategy() -> None:
     def detail(pack_dir: str) -> str:
         cfg = OverviewConfig(

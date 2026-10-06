@@ -1511,39 +1511,18 @@ def _print_native_delivery_status(summary, *, configured: set[str] | None = None
 
 
 def _scanner_overrides_summary(cfg) -> str:
-    """One-line summary of the active policy's scanner action overrides (N3).
-
-    Reads the active policy's synced ``data.json`` (the same file ``policy
-    show`` reads) and formats its ``scanner_overrides`` block, e.g.
-    ``mcp: MEDIUM install=block, file=quarantine | plugin: HIGH ...``. Returns
-    ``""`` when the policy declares none or the file is unreadable, so default
-    installs and missing-policy installs render nothing.
-    """
+    """One-line summary of the per-type admission actions config.yaml sets
+    (N3), the same list the TUI Overview shows, e.g. ``mcp: MEDIUM
+    install=block, file=quarantine``. ``""`` when none are set."""
     try:
-        from defenseclaw.enforce.admission import _read_policy_data
         from defenseclaw.tui.services.overview_state import (
+            admission_action_overrides,
             format_scanner_overrides_summary,
         )
 
-        data = _read_policy_data(getattr(cfg, "policy_dir", "") or "")
+        return format_scanner_overrides_summary(admission_action_overrides(cfg))
     except Exception:  # noqa: BLE001 — the override line is purely informational.
         return ""
-    if not isinstance(data, dict):
-        return ""
-    overrides = data.get("scanner_overrides", {})
-    flat: list[tuple[str, str, str, str]] = []
-    if isinstance(overrides, dict):
-        for scanner_type, sevs in overrides.items():
-            if not isinstance(sevs, dict):
-                continue
-            for severity, surface_actions in sevs.items():
-                if not isinstance(surface_actions, dict):
-                    continue
-                for surface in ("install", "file", "runtime"):
-                    action = surface_actions.get(surface)
-                    if action:
-                        flat.append((str(scanner_type), str(severity), surface, str(action)))
-    return format_scanner_overrides_summary(tuple(flat))
 
 
 def _scanner_status_map(cfg) -> dict[str, str]:

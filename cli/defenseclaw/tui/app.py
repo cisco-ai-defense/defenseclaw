@@ -168,6 +168,7 @@ from defenseclaw.tui.services.overview_state import (
     HealthSnapshot,
     SubsystemHealth,
     _rule_pack_label,
+    admission_action_overrides,
     format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
@@ -16102,38 +16103,6 @@ def _overview_connector_names(cfg: OverviewConfig | None) -> tuple[str, ...]:
     return (active,) if active else ()
 
 
-def _active_policy_scanner_overrides(
-    config: object | None,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """The per-type admission actions config.yaml sets (N3).
-
-    ``admission.<skill|mcp|plugin>.actions`` refine the inherited
-    ``admission.defaults`` for one asset type. Output: ``(type, severity,
-    surface, action)`` tuples for :func:`format_scanner_overrides_summary`.
-    Malformed entries are skipped so a bad value degrades to a partial list,
-    never a raise.
-    """
-
-    admission = getattr(config, "admission", None)
-    if admission is None:
-        return ()
-    try:
-        from defenseclaw.enforce.admission import _compile_action
-    except Exception:  # noqa: BLE001 - the override summary is purely informational.
-        return ()
-    flat: list[tuple[str, str, str, str]] = []
-    for target_type in ("skill", "mcp", "plugin"):
-        actions = getattr(getattr(admission, target_type, None), "actions", None) or {}
-        for severity, raw in actions.items():
-            compiled = _compile_action(raw)
-            if compiled is None:
-                continue
-            action = compiled[0]
-            for surface in ("install", "file", "runtime"):
-                flat.append((target_type, str(severity).upper(), surface, str(getattr(action, surface))))
-    return tuple(flat)
-
-
 def _overview_config(config: object | None) -> OverviewConfig | None:
     if config is None:
         return None
@@ -16289,7 +16258,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         roster_error=roster_error,
         # N3: per-type admission actions, so the Overview/status surface a
         # policy that changes one asset type's enforcement.
-        scanner_overrides=_active_policy_scanner_overrides(config),
+        scanner_overrides=admission_action_overrides(config),
     )
 
 
