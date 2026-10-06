@@ -698,3 +698,31 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 		t.Fatal("lifecycle recovery load has no gateway API port")
 	}
 }
+
+// GAP-1193: a connector that inherits the global rule pack is not checked
+// again, so a refusal names guardrail.rule_pack_dir, or guardrail.rule_pack
+// when the global pack is selected by name (GAP-0039).
+func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
+	got := RulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
+	})
+	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestRulePackCheckOrderNamesTheSelectedPack(t *testing.T) {
+	got := RulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack":                      `C:\packs\acme`,
+		"guardrail.connectors.amp.rule_pack_dir":   `C:\packs\acme`,
+		"guardrail.custom_packs.acme.path":         `C:\packs\acme`,
+		"guardrail.connectors.codex.rule_pack_dir": `C:\packs\codex`,
+	})
+	want := "guardrail.rule_pack,guardrail.connectors.codex.rule_pack_dir"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("order = %v, want %s", got, want)
+	}
+}
