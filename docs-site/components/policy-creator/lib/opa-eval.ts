@@ -12,6 +12,7 @@
 // included in the docs page until the operator opens the creator.
 
 import type { OpaManifest, OpaResult } from '../types';
+import { withPolicyInput, type OpaData } from './data-projection';
 
 // Next.js basePath ("" or "/defenseclaw") gets baked into client bundles
 // via env.NEXT_PUBLIC_BASE_PATH in next.config — see how it's set there.
@@ -106,9 +107,10 @@ export async function evalEntrypoint(
  */
 export async function evalDomain(
   domain: string,
-  input: unknown,
-  data: unknown,
+  rawInput: unknown,
+  data: OpaData,
 ): Promise<OpaResult> {
+  const input = withPolicyInput(domain, rawInput, data);
   const verdictKey = pickVerdictEntrypoint(domain);
   const reasonKey = pickReasonEntrypoint(domain);
   const [verdict, reason] = await Promise.all([

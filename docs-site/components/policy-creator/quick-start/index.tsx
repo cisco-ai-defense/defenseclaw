@@ -523,7 +523,7 @@ function StepReview({
           <div className="min-w-[200px] flex-1">
             <div className="text-sm font-semibold text-fd-foreground">Download &amp; run</div>
             <p className="mt-0.5 text-[12px] leading-snug text-fd-muted-foreground">
-              One self-contained bash script. Drops every YAML / <code>data.json</code> / Rego file
+              One self-contained bash script. Drops every YAML and Rego file
               under <code>~/.defenseclaw/policies/</code> via heredocs (no curl, no scp), then
               runs <code>defenseclaw policy activate {policy.name}</code>. Re-runs are idempotent.
             </p>

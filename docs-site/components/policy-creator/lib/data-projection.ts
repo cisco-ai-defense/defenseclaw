@@ -1,11 +1,10 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Project a wizard-state Policy into the OPA `data.json` shape that
-// the bundled Rego modules read at evaluation time. This is the
-// browser-side port of cli/defenseclaw/commands/cmd_policy.py
-// :_sync_opa_data — same logic, same field names, same uppercase
-// severity keys, same "enable → allow / disable → block" mapping.
+// Project a wizard-state Policy into the 1.0 `data.json` shape (uppercase
+// severity keys, "enable → allow / disable → block"), and into the
+// evaluation input the config_version 9 Rego modules read instead
+// (input.admission, input.thresholds; see withPolicyInput).
 
 import type {
   CorrelationClause,
@@ -192,4 +191,43 @@ export function projectPolicyToData(policy: Policy): OpaData {
       scan_hook_surface: policy.cisco_ai_defense?.scan_hook_surface ?? true,
     },
   };
+}
+
+/**
+ * The evaluation input of a domain: since config_version 9, admission.rego
+ * reads only input.admission and guardrail.rego only input.thresholds and
+ * input.hilt, which the gateway compiles from config.yaml. They are built
+ * here from the projection the same way (the type's actions over the shared
+ * ones, its first-party entries), unless the test input sets them itself.
+ */
+export function withPolicyInput(domain: string, input: unknown, data: OpaData): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const base = input as Record<string, unknown>;
+  if (domain === 'admission') {
+    const targetType = String(base.target_type ?? 'skill');
+    return {
+      admission: {
+        scan_on_install: data.config.scan_on_install,
+        allow_list_bypass_scan: data.config.allow_list_bypass_scan,
+        actions: { ...data.actions, ...(data.scanner_overrides[targetType] ?? {}) },
+        scanner_overrides: {},
+        first_party_allow_list: data.first_party_allow_list
+          .filter((entry) => entry.target_type === targetType)
+          .map((entry) => ({ name: entry.target_name, source_path_contains: [...entry.source_path_contains] })),
+      },
+      ...base,
+    };
+  }
+  if (domain === 'guardrail') {
+    return {
+      thresholds: {
+        block: data.guardrail.block_threshold,
+        alert: data.guardrail.alert_threshold,
+        cisco_trust_level: data.guardrail.cisco_trust_level,
+      },
+      hilt: { ...data.guardrail.hilt },
+      ...base,
+    };
+  }
+  return input;
 }

@@ -7,7 +7,6 @@
 
 import yaml from 'js-yaml';
 import type { CiscoAIDefenseConfig, Policy } from '../types';
-import { projectPolicyToData } from './data-projection';
 
 export interface EmittedFile {
   path: string;
@@ -102,15 +101,8 @@ export function emit(policy: Policy): EmittedFile[] {
     description: 'Top-level admission/severity/firewall/audit policy YAML',
   });
 
-  // 2) The data.json projection that OPA will read.
-  const opaData = projectPolicyToData(policy);
-  files.push({
-    path: `~/.defenseclaw/policies/rego/data.json`,
-    contents: JSON.stringify(opaData, null, 2) + '\n',
-    description: 'OPA data.json — read by every Rego module at evaluation time',
-  });
-
-  // 3) Per-file rule-pack YAMLs.
+  // 2) Per-file rule-pack YAMLs. (No data.json: since config_version 9
+  // `policy activate` writes the admission and levels into config.yaml.)
   for (const rf of policy.rule_pack.files) {
     if (!rf.rules.length) continue;
     const filename = safePathComponent(rf.filename, 'rule file name');

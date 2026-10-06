@@ -275,7 +275,7 @@ const SECTION_DEFS: SectionDef[] = [
   {
     id: 'review',
     title: 'Review & export',
-    subtitle: () => 'Generated YAML + data.json',
+    subtitle: () => 'Generated YAML and Rego',
     status: () => 'untouched',
     render: (p) => <ReviewSection policy={p} />,
   },

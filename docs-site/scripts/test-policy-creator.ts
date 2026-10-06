@@ -46,6 +46,7 @@ import {
   __TEST_INTERNALS,
 } from '../components/policy-creator/lib/share.js';
 import { emit } from '../components/policy-creator/lib/emit.js';
+import { projectPolicyToData, withPolicyInput } from '../components/policy-creator/lib/data-projection.js';
 import { emitInstallScript } from '../components/policy-creator/lib/emit-script.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
@@ -425,7 +426,8 @@ test('install script executes idempotently and activates the emitted policy', ()
     execFileSync('bash', [scriptPath], { env, stdio: 'pipe' });
 
     assert.ok(existsSync(join(policyHome, 'policies', 'studio-e2e.yaml')));
-    assert.ok(existsSync(join(policyHome, 'policies', 'rego', 'data.json')));
+    // config_version 9 ignores data.json; activation writes config.yaml.
+    assert.ok(!existsSync(join(policyHome, 'policies', 'rego', 'data.json')));
     assert.equal(
       readFileSync(join(policyHome, 'activation-call'), 'utf8').trim(),
       'policy activate studio-e2e',
@@ -433,6 +435,19 @@ test('install script executes idempotently and activates the emitted policy', ()
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('live test: config_version 9 Rego gets the policy as input.admission and input.thresholds', () => {
+  const policy = policyFromPreset('default');
+  policy.admission.scan_on_install = false;
+  const data = projectPolicyToData(policy);
+  const admission = withPolicyInput('admission', { target_type: 'mcp', target_name: 'm', path: '/x' }, data) as {
+    admission: { scan_on_install: boolean; actions: Record<string, unknown> };
+  };
+  assert.equal(admission.admission.scan_on_install, false);
+  assert.deepEqual(admission.admission.actions.MEDIUM, data.scanner_overrides.mcp?.MEDIUM ?? data.actions.MEDIUM);
+  const guardrail = withPolicyInput('guardrail', { mode: 'action' }, data) as { thresholds: { block: number } };
+  assert.equal(guardrail.thresholds.block, policy.guardrail.block_threshold);
 });
 
 test('regex tester supports the shipped Go Unicode scalar syntax', () => {
@@ -723,10 +738,10 @@ test('emit + normalize: stale policy without correlator/cisco_ai_defense survive
   // code path imports a Policy from somewhere new), emit() must not
   // crash on the missing fields. We feed in the raw stale object.
   const files = emit(stale as unknown as Policy);
-  // Sanity: emit returned a useful file list (policy YAML + opa data
-  // at minimum), and none of the entries reference a Cisco AI Defense
+  // Sanity: emit returned a useful file list (the policy YAML at
+  // minimum), and none of the entries reference a Cisco AI Defense
   // block when AID is disabled / absent.
-  assert.ok(files.length >= 2, 'emit must return at least the policy YAML + data.json');
+  assert.ok(files.length >= 1, 'emit must return at least the policy YAML');
   const policyYaml = files.find((f) => f.path.endsWith(`${stale.name}.yaml`));
   assert.ok(policyYaml, 'top-level policy YAML must be emitted');
   assert.equal(

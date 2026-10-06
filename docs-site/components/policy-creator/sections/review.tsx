@@ -3,7 +3,7 @@
 //
 // Review & Export. Three sub-views:
 //
-//   files     — every YAML / data.json / Rego snippet the wizard
+//   files     — every YAML / Rego snippet the wizard
 //               renders, with per-file copy buttons.
 //   install   — one bash script that lays everything down on disk
 //               and runs `defenseclaw policy activate`.
