@@ -2584,7 +2584,7 @@ def _multi_connector_cfg() -> object:
         guardrail=GuardrailConfig(
             enabled=True,
             mode="observe",
-            rule_pack_dir="/global/pack",
+            rule_pack="strict",
             connectors={
                 "codex": PerConnectorGuardrailConfig(mode="action"),
                 "hermes": PerConnectorGuardrailConfig(),
@@ -2599,22 +2599,24 @@ def test_guardrail_section_renders_per_connector_override_groups() -> None:
 
     # Both active connectors get an editable mode + rule-pack override row.
     assert "guardrail.connectors.codex.mode" in fields
-    assert "guardrail.connectors.codex.rule_pack_dir" in fields
+    assert "guardrail.connectors.codex.rule_pack" in fields
     assert "guardrail.connectors.hermes.mode" in fields
-    assert "guardrail.connectors.hermes.rule_pack_dir" in fields
+    assert "guardrail.connectors.hermes.rule_pack" in fields
+    # config_version 9 selects packs by name (guardrail.rule_pack).
+    assert fields["guardrail.rule_pack"].value == "strict"
 
     # codex pins its own mode; the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.mode"].value == "action"
     assert fields["guardrail.connectors.codex.mode"].options == ("observe", "action")
     # hermes has no override → inherits the global mode/rule-pack.
     assert fields["guardrail.connectors.hermes.mode"].value == "observe"
-    assert fields["guardrail.connectors.hermes.rule_pack_dir"].value == "/global/pack"
+    assert fields["guardrail.connectors.hermes.rule_pack"].value == "strict"
 
     # B4/E4c/E4d: every per-connector guardrail control is now exposed.
     for connector in ("codex", "hermes"):
         for leaf in (
             "mode",
-            "rule_pack_dir",
+            "rule_pack",
             "enabled",
             "hook_fail_mode",
             "hilt.enabled",

@@ -7678,6 +7678,15 @@ def _guardrail_connector_keys(cfg: object | Mapping[str, Any] | None) -> list[st
     return merged
 
 
+def _rule_pack_options(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
+    """``guardrail.rule_pack`` choices: the presets, then the custom_packs names."""
+    guardrail = cfg.get("guardrail") if isinstance(cfg, Mapping) else getattr(cfg, "guardrail", None)
+    custom = guardrail.get("custom_packs") if isinstance(guardrail, Mapping) else getattr(guardrail, "custom_packs", None)
+    presets = ("default", "strict", "permissive")
+    names = sorted(str(name) for name in (custom or {}) if str(name) not in presets)
+    return ("", *presets, *names)
+
+
 def _effective_guardrail_value(
     cfg: object | Mapping[str, Any] | None, connector: str, method_name: str, fallback_path: str
 ) -> str:
@@ -7872,14 +7881,16 @@ def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> l
         )
         pack_field = _field(
             cfg,
-            "Rule Pack Dir",
-            f"guardrail.connectors.{connector}.rule_pack_dir",
-            hint=f"Per-connector rule pack for {connector} (blank inherits the global pack).",
+            "Rule Pack",
+            f"guardrail.connectors.{connector}.rule_pack",
+            "choice",
+            _rule_pack_options(cfg),
+            f"Per-connector rule pack for {connector} (blank inherits the global pack).",
         )
         rows.append(
             _field_with_original(
                 pack_field,
-                _effective_guardrail_value(cfg, connector, "effective_rule_pack_dir", "guardrail.rule_pack_dir"),
+                _effective_guardrail_value(cfg, connector, "effective_rule_pack", "guardrail.rule_pack"),
             )
         )
         # E4c: per-connector guardrail enable/disable. ``effective_enabled``
@@ -8070,22 +8081,29 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             ("", "regex_only", "regex_judge", "judge_first"),
             "Tool-call override; blank=inherit.",
         ),
-        _field(cfg, "Rule Pack Dir", "guardrail.rule_pack_dir", hint="Path to active rule pack."),
         _field(
             cfg,
-            "Tool Calls Block At",
-            "guardrail.block_at",
+            "Rule Pack",
+            "guardrail.rule_pack",
             "choice",
-            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
-            "Lowest severity a tool call blocks at; blank=the rule pack's level.",
+            _rule_pack_options(cfg),
+            "Preset or guardrail.custom_packs name; add a custom pack with: guardrail use-pack DIR.",
         ),
         _field(
             cfg,
-            "Tool Calls Alert At",
+            "Block At",
+            "guardrail.block_at",
+            "choice",
+            ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
+            "Lowest severity prompts, completions and tool calls block at; blank=the rule pack's level.",
+        ),
+        _field(
+            cfg,
+            "Alert At",
             "guardrail.alert_at",
             "choice",
             ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
-            "Lowest severity a tool call alerts at; blank=the rule pack's level.",
+            "Lowest severity prompts, completions and tool calls alert at; blank=the rule pack's level.",
         ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),

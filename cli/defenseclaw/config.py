@@ -3922,7 +3922,7 @@ def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[st
         return base, protections
     raise ConfigVersionError(
         f"guardrail rule pack folder {directory} is a custom pack; config_version 9 references custom packs by "
-        "digest under guardrail.custom_packs (run 'defenseclaw-gateway config migrate' on a v8 file)"
+        f"digest under guardrail.custom_packs: select it with 'defenseclaw guardrail use-pack {directory}'"
     )
 
 
