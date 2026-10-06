@@ -570,6 +570,9 @@ def activate_v8_migration(
                 backup_directory=backup_directory,
             ) from None
 
+        from defenseclaw.config_writer import ACTOR_MIGRATION, record_generation
+
+        record_generation(active_config, migration.candidate_sha256, ACTOR_MIGRATION, "config_version 8 activation")
         return V8ActivationResult(
             activated=True,
             already_v8=False,

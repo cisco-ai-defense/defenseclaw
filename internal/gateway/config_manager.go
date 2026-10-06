@@ -178,7 +178,7 @@ func newConfigManagerWithSnapshot(
 	if initial != nil {
 		m.current.Store(cloneConfig(initial))
 	}
-	if initial != nil && initial.ConfigVersion == config.ObservabilityV8ConfigVersion {
+	if initial != nil && config.CurrentSchemaVersion(initial.ConfigVersion) {
 		m.v8PlanDigest = strings.TrimSpace(initialV8PlanDigest)
 	}
 	return m
@@ -481,8 +481,8 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 		}
 		return err
 	}
-	if oldCfg == nil || oldCfg.ConfigVersion != config.ObservabilityV8ConfigVersion ||
-		next.ConfigVersion != config.ObservabilityV8ConfigVersion {
+	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
+		!config.CurrentSchemaVersion(next.ConfigVersion) {
 		m.recordLoadError(ctx, "schema_version")
 		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
 	}
@@ -731,7 +731,7 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			sourceName: m.path,
 			raw:        append([]byte(nil), before.raw...),
 		}
-		if next.ConfigVersion != config.ObservabilityV8ConfigVersion {
+		if !config.CurrentSchemaVersion(next.ConfigVersion) {
 			return nil, configReloadSource{}, fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
 		}
 		if compiled == nil || compiled.Plan == nil {
@@ -1096,8 +1096,8 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	// publishing the Config as hot would make exported telemetry retain stale
 	// identity. Require a process restart until provider-factory replacement is
 	// part of the transaction.
-	if oldCfg.ConfigVersion == config.ObservabilityV8ConfigVersion &&
-		newCfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
+	if config.CurrentSchemaVersion(oldCfg.ConfigVersion) &&
+		config.CurrentSchemaVersion(newCfg.ConfigVersion) {
 		for _, identity := range []struct {
 			path    string
 			changed bool

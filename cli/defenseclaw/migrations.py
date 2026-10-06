@@ -1526,6 +1526,22 @@ def _dotenv_update_keys_locked(
 
 
 def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
+    """Write ``body`` to ``path``; a config.yaml write takes the config
+    writer's lock and records a ``config.generation.json`` generation (actor
+    ``migration``). The 0.x import steps write config shapes the v8
+    validator does not accept, so they skip the writer's validation."""
+    if os.path.basename(path) != "config.yaml":
+        return _atomic_write_text_unlocked(path, body, mode=mode)
+    from defenseclaw.config_writer import ACTOR_MIGRATION, hold_lock, record_generation
+
+    with hold_lock(path, timeout_s=None):
+        if not _atomic_write_text_unlocked(path, body, mode=mode):
+            return False
+        record_generation(path, hashlib.sha256(body.encode("utf-8")).hexdigest(), ACTOR_MIGRATION, "0.x import")
+    return True
+
+
+def _atomic_write_text_unlocked(path: str, body: str, *, mode: int = 0o644) -> bool:
     """Atomically write ``body`` to ``path``.
 
     The temp-file creation is hardened: it uses :func:`tempfile.mkstemp`
@@ -3379,11 +3395,58 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
 # ---------------------------------------------------------------------------
 
 # Steps that move config.yaml from ``config_version`` N to N+1, keyed by N.
-# Empty at 1.0.0. Adding a key only needs a loader default; renaming or
+# 8 -> 9 is the single-source-of-truth migration. Adding a key only needs a
+# loader default; renaming or
 # removing one needs a step here plus a bump of
 # ``config.CURRENT_CONFIG_VERSION`` and the Go gateway's
 # MaxSupportedConfigVersion.
-CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {}
+def _migrate_config_v9(ctx: MigrationContext) -> None:
+    """config_version 8 -> 9: config.yaml becomes the single source of truth.
+
+    The one implementation is Go (``defenseclaw-gateway config migrate --to
+    9``, ``internal/config/migrate_v9.go``): it moves data.json admission and
+    guardrail values, the *_actions keys, rule_pack_dir, the v8 scanner keys,
+    update_check and the operator block/allow rows of audit.db into
+    config.yaml, keeps ``config.yaml.v8.bak`` and writes ``migration-v9.json``.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
+
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    try:
+        result = migrate_config_v9(config_path=config_path)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the config_version 9 migration failed: {exc}") from exc
+    record = result.get("record") or {}
+    moved = len(record.get("moved") or [])
+    conflicts = len(record.get("conflicts") or [])
+    if result.get("migrated"):
+        ctx.changes.append(
+            f"moved {moved} policy values into config.yaml (config_version 9); {conflicts} conflicts "
+            f"recorded in {os.path.join(os.path.dirname(config_path), 'migration-v9.json')}"
+        )
+
+
+CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}
+_V9_STEP_NAME = "config_version 8 → 9"
+
+
+def _preview_config_v9(config_path: str, gateway_binary: str) -> None:
+    """Dry-run the 8 -> 9 migration with the staged gateway (upgrade check).
+
+    A config the new release can not migrate fails the check before the
+    installer swaps anything; otherwise the operator sees what will move.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
+
+    try:
+        preview = migrate_config_v9(config_path=config_path, dry_run=True, gateway_binary=gateway_binary)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the config_version 9 migration check failed: {exc}") from exc
+    record = preview.get("record") or {}
+    ux.echo(
+        f"  {ux.dim('→')} config_version 9: {len(record.get('moved') or [])} policy values move into "
+        f"config.yaml, {len(record.get('conflicts') or [])} conflicts"
+    )
 
 # The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
 # that the frozen ``MIGRATIONS`` chain imports.
@@ -3490,6 +3553,8 @@ def migrate(
                 raise
             except Exception as exc:  # noqa: BLE001 - reported like a failed step
                 raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
+        if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary and _V9_STEP_NAME in names:
+            _preview_config_v9(config_path, gateway_binary)
         return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
 
     if steps:
@@ -3671,12 +3736,20 @@ def _config_version_step(
     config_path: str,
 ) -> Callable[[MigrationContext], None]:
     def run(ctx: MigrationContext) -> None:
+        from defenseclaw.config import source_config_version
+        from defenseclaw.config_writer import ACTOR_MIGRATION, ConfigWriteError, replace_document
+
         step(ctx)
+        if source_config_version(path=config_path) == target:
+            return
         text = _read_config_text(config_path)
         if text is None or _CONFIG_VERSION_LINE.search(text) is None:
             raise MigrationError(f"{config_path} has no top-level config_version")
-        if not _atomic_write_text(config_path, _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1)):
-            raise MigrationError(f"could not write config_version {target} to {config_path}")
+        updated = _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1)
+        try:
+            replace_document(updated.encode("utf-8"), ACTOR_MIGRATION, f"config_version {target}", path=config_path)
+        except (ConfigWriteError, OSError, ValueError) as exc:
+            raise MigrationError(f"could not write config_version {target} to {config_path}: {exc}") from exc
 
     return run
 

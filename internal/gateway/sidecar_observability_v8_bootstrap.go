@@ -133,7 +133,7 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	cfg := s.currentConfig()
-	if cfg == nil || cfg.ConfigVersion != 8 || strings.TrimSpace(cfg.DataDir) == "" {
+	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) || strings.TrimSpace(cfg.DataDir) == "" {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	s.observabilityV8Mu.Lock()

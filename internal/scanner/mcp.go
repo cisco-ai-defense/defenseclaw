@@ -24,13 +24,13 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -55,7 +55,7 @@ func mcpScanTargetLooksLikeURL(target string) bool {
 // that embed inline credentials. The check is opt-out via
 // DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS=1 for local development only.
 func validateMCPScanTargetURL(target string) error {
-	if os.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
+	if envvars.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
 		return nil
 	}
 	u, err := url.Parse(target)

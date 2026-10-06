@@ -125,7 +125,7 @@ func (s *Sidecar) beginObservabilityV8Run() error {
 	}
 	// The target process must have completed mandatory runtime assembly before
 	// any subsystem starts serving.
-	if cfg := s.currentConfig(); cfg == nil || cfg.ConfigVersion != config.ObservabilityV8ConfigVersion || s.observabilityV8 == nil {
+	if cfg := s.currentConfig(); cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) || s.observabilityV8 == nil {
 		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
 	}
 	s.observabilityV8Run = true

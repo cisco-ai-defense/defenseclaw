@@ -29,6 +29,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
@@ -560,7 +561,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name)), "action",
 	)
 	if connector.HookContractNeedsActionOverride(resolution) && actionMode &&
-		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf(
 			"connector reconcile %s: agent version %q is not verified against a known hook contract: %s",
 			name, opts.AgentVersion, resolution.Reason,
@@ -572,7 +573,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		// same agent version, or an agent update that still resolves to a
 		// contract, is refreshed by the Setup below, as at gateway boot.
 		if connector.HookContractCompatibilityDrifted(previous, current) && actionMode &&
-			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" &&
+			envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" &&
 			!connector.HookContractChangedByDefenseClawRelease(previous, current) &&
 			!connector.HookContractAgentUpdateAdmitted(previous, current) {
 			return fmt.Errorf("connector reconcile %s: hook contract compatibility drift", name)

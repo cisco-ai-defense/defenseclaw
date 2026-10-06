@@ -76,7 +76,7 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 		{"missing", "observability: {}\n", V8YAMLErrorVersionRequired},
 		{"zero", "config_version: 0\n", V8YAMLErrorVersionUpgrade},
 		{"past", "config_version: 7\n", V8YAMLErrorVersionUpgrade},
-		{"future", "config_version: 9\n", V8YAMLErrorVersionUnsupported},
+		{"future", "config_version: 10\n", V8YAMLErrorVersionUnsupported},
 		{"negative", "config_version: -1\n", V8YAMLErrorVersionInvalid},
 		{"quoted", "config_version: '8'\n", V8YAMLErrorVersionInvalid},
 		{"float", "config_version: 8.0\n", V8YAMLErrorVersionInvalid},
@@ -94,8 +94,8 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 	if !strings.Contains(past.Error(), "run `defenseclaw migrate`") {
 		t.Fatalf("older config error = %q, want migrate guidance", past.Error())
 	}
-	future := requireV8YAMLError(t, []byte("config_version: 9\n"), V8YAMLErrorVersionUnsupported)
-	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 9)") ||
+	future := requireV8YAMLError(t, []byte("config_version: 10\n"), V8YAMLErrorVersionUnsupported)
+	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 10)") ||
 		!strings.Contains(future.Error(), "restore ~/.defenseclaw/previous") {
 		t.Fatalf("newer config error = %q, want newer-release guidance", future.Error())
 	}

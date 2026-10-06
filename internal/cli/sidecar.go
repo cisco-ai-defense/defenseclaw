@@ -307,7 +307,7 @@ func bootstrapConfiguredObservabilityRuntime(
 	if c == nil {
 		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
 	}
-	if c.ConfigVersion != 8 {
+	if !config.CurrentSchemaVersion(c.ConfigVersion) {
 		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
 	}
 	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {

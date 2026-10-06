@@ -1062,7 +1062,9 @@ def _set_alert_disposition(
     dry_run: bool = False,
     yes: bool = False,
 ) -> int | None:
-    if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
+    from defenseclaw.config import is_current_schema
+
+    if app.cfg is None or not is_current_schema(getattr(app.cfg, "_source_config_version", None)):
         raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
     selector = _alert_selector(

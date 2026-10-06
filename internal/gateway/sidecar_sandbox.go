@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -541,19 +541,27 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 	}
 	next := append(append([]string{}, list...), host)
 	path := configFilePathForSnapshot(current)
-	original, err := captureConfigFileState(path)
+	original, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read %s: %w", path, err)
 	}
-	if err := config.PatchYAMLFile(path, map[string]any{key: next}); err != nil {
-		return err
+	actor := configwrite.ActorPrefixSandbox + host
+	written, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: key, Value: next}}, configwrite.Options{
+		Actor:        actor,
+		Reason:       "sandbox always decision",
+		ExpectSHA256: configwrite.SHA256Hex(original),
+	})
+	if errors.Is(err, configwrite.ErrManaged) {
+		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
+			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
 	}
-	if _, err := config.LoadRuntimeV8File(path); err != nil {
-		_ = restoreConfigFileState(path, original)
-		return fmt.Errorf("the updated %s is invalid: %w", key, err)
+	if err != nil {
+		return fmt.Errorf("save %s: %w", key, err)
 	}
 	if err := a.configReloader(ctx, "sandbox_always_decision"); err != nil {
-		rollbackErr := restoreConfigFileState(path, original)
+		_, rollbackErr := configwrite.ReplaceDocument(ctx, path, original, configwrite.Options{
+			Actor: actor, Reason: "sandbox always decision rollback", ExpectSHA256: written.SHA256,
+		})
 		if rollbackErr == nil {
 			rollbackErr = a.configReloader(ctx, "sandbox_always_decision_rollback")
 		}

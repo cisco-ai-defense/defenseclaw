@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -340,9 +341,13 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 	if err != nil {
 		return nil, nil, err
 	}
-	if candidate.ConfigVersion != config.ObservabilityV8ConfigVersion {
+	if !config.CurrentSchemaVersion(candidate.ConfigVersion) {
 		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw upgrade' first")
 	}
+	// The managed-mode environment policy (envvars.Lookup) follows the
+	// loaded config: on a standalone enterprise host ignore-listed variables
+	// read as unset. Secure Client and per-user hosts read the raw env.
+	envvars.SetManagedStandalone(candidate.StandaloneEnterprise())
 	startup, err := prepareCompiledObservabilityV8Startup(candidate, loaded)
 	if err != nil {
 		return nil, nil, err
@@ -354,7 +359,7 @@ func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, 
 // callers that already hold a proven v8 Config. Production startup uses
 // loadGatewayConfigV8 so strict parsing always precedes Config decoding.
 func prepareObservabilityV8Startup(c *config.Config) (*observabilityV8Startup, error) {
-	if c == nil || c.ConfigVersion != config.ObservabilityV8ConfigVersion {
+	if c == nil || !config.CurrentSchemaVersion(c.ConfigVersion) {
 		return nil, fmt.Errorf("schema version 8 is required")
 	}
 	sourceName := strings.TrimSpace(c.ConfigFilePath)
@@ -522,6 +527,7 @@ func loadDotEnvIntoOS(path string) {
 	if err != nil {
 		return
 	}
+	managedHost := envvars.ManagedStandalone() || dotEnvManagedSource()
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -536,6 +542,10 @@ func loadDotEnvIntoOS(path string) {
 		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
 			continue
 		}
+		// A managed standalone host skips what the registry ignores there.
+		if managedHost && envvars.ManagedPolicy(k) == envvars.ManagedIgnore {
+			continue
+		}
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
@@ -543,6 +553,14 @@ func loadDotEnvIntoOS(path string) {
 			os.Setenv(k, v)
 		}
 	}
+}
+
+// dotEnvManagedSource reports whether the active config.yaml describes a
+// managed standalone host, for .env loading that runs before the config is
+// loaded.
+func dotEnvManagedSource() bool {
+	raw, err := safefile.ReadRegularFileBounded(config.ConfigPath(), int64(config.ObservabilityV8MaxSourceBytes))
+	return err == nil && config.StandaloneManagedSource(raw)
 }
 
 func dotEnvKeyIsProcessControl(key string) bool {

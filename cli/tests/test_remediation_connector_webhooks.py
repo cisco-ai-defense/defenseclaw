@@ -140,7 +140,7 @@ def test_f0441_write_yaml_is_0600_and_ignores_tmp_symlink(tmp_path):
     sentinel.write_text("SENTINEL", encoding="utf-8")
     os.symlink(sentinel, str(target) + ".tmp")
 
-    _write_yaml(str(target), {"webhooks": [{"name": "x"}]})
+    _write_yaml(str(target), {"config_version": 9, "observability": {}, "gateway": {"api_port": 18971}})
 
     if os.name == "nt":
         assert_owner_only_file(target)
@@ -148,7 +148,7 @@ def test_f0441_write_yaml_is_0600_and_ignores_tmp_symlink(tmp_path):
         mode = stat.S_IMODE(os.stat(target).st_mode)
         assert mode == 0o600, f"expected 0600, got {oct(mode)}"
     assert sentinel.read_text(encoding="utf-8") == "SENTINEL"
-    assert "name: x" in target.read_text(encoding="utf-8")
+    assert "api_port: 18971" in target.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

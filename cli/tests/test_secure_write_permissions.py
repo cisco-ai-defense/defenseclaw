@@ -45,7 +45,7 @@ _ATOMIC_WRITERS = [
         file_permissions,
         lambda path: config_module.write_config_yaml_secure(
             os.fspath(path),
-            {"data_dir": os.fspath(path.parent)},
+            {"config_version": 9, "data_dir": os.fspath(path.parent), "observability": {}},
         ),
     ),
     (
@@ -53,7 +53,7 @@ _ATOMIC_WRITERS = [
         file_permissions,
         lambda path: webhook_writer._write_yaml(
             os.fspath(path),
-            {"webhooks": [{"name": "secure-write"}]},
+            {"config_version": 9, "data_dir": os.fspath(path.parent), "observability": {}},
         ),
     ),
 ]
@@ -215,7 +215,10 @@ def test_atomic_writers_close_and_remove_staging_file_on_failure(
     with pytest.raises(OSError, match=f"injected {failure_stage} failure"):
         write(target)
 
-    _assert_staging_cleanup(record)
+    # The config writer renders the document before it stages a file, so a
+    # serialization failure leaves no staging file to clean up.
+    if record:
+        _assert_staging_cleanup(record)
     assert target.read_text(encoding="utf-8") == "ORIGINAL\n"
 
 
@@ -458,10 +461,12 @@ def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
 
     config_module.write_config_yaml_secure(
         os.fspath(target),
-        {"data_dir": os.fspath(target.parent)},
+        {"config_version": 9, "data_dir": os.fspath(target.parent), "observability": {}},
     )
 
-    assert calls == [(os.fspath(target.parent), 0o700, True)]
+    # The first call creates the directory; the lock's own makedirs only
+    # finds it.
+    assert calls[0] == (os.fspath(target.parent), 0o700, True)
 
 
 def test_config_lock_secures_parent_before_creating_lock(monkeypatch, tmp_path):
@@ -473,7 +478,7 @@ def test_config_lock_secures_parent_before_creating_lock(monkeypatch, tmp_path):
         secured.append(os.path.abspath(os.fspath(path)))
         os.makedirs(path, exist_ok=True)
 
-    monkeypatch.setattr(config_module, "make_private_directory", secure_directory)
+    monkeypatch.setattr(file_permissions, "make_private_directory", secure_directory)
 
     with config_module.locked_config_yaml(os.fspath(config_path)):
         assert (parent / "config.yaml.lock").is_file()

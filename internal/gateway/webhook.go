@@ -38,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/google/uuid"
@@ -161,7 +162,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.Observabili
 	if len(endpoints) == 0 && connEndpointCount == 0 {
 		return nil
 	}
-	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	allowLoopback := envvars.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 	return &WebhookDispatcher{
 		endpoints:          endpoints,
 		connectorEndpoints: connectorEndpoints,
@@ -709,7 +710,7 @@ func validateWebhookURL(rawURL string) error {
 	if host == "" {
 		return fmt.Errorf("empty hostname")
 	}
-	allowLocal := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	allowLocal := envvars.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 
 	hostLower := strings.ToLower(host)
 	if hostLower == "localhost" {

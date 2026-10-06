@@ -67,7 +67,7 @@ class _DataDirCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def config(self, body: str) -> str:
-        text = "config_version: 8\n" + body
+        text = "config_version: 9\n" + body
         _write(self.config_path, text.encode("utf-8"))
         return text
 

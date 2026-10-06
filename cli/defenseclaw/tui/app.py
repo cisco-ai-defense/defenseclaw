@@ -13129,11 +13129,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not self.setup_model.has_changes():
             return SetupPanelAction(True, hint="No config changes to save.")
         saved_entries = self.setup_model.config_diff()
+        restart_keys: list[str] | None = None
         try:
             self.setup_model.apply_changes_to_config()
             save = getattr(self.config, "save", None)
             if callable(save):
-                save()
+                from defenseclaw.config_writer import ACTOR_PREFIX_TUI, current_actor
+
+                result = save(actor=current_actor(ACTOR_PREFIX_TUI), reason=restart_reason)
+                restart_keys = getattr(result, "restart_required", None)
             roster_changed, storage_changed = self._apply_config_snapshot(
                 self.config,
                 external=False,
@@ -13147,10 +13151,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self._schedule_signal_data_refresh()
             self._schedule_active_panel_refresh("config-save")
             # Record the gateway's current start time so the next health poll
-            # can clear the banner once the gateway really restarted.
-            self.setup_model.queue_restart(
-                restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
-            )
+            # can clear the banner once the gateway really restarted. The
+            # writer names the changed keys that need a restart; the gateway
+            # applies every other key from the new config generation.
+            if restart_keys is None or restart_keys:
+                self.setup_model.queue_restart(
+                    restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
+                )
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
@@ -13168,6 +13175,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # "restart queued if gateway is running" (GAP-2433).
         if self.overview_model.gateway_down():
             return SetupPanelAction(True, hint="Config changes saved; they apply when the gateway starts.")
+        if restart_keys is not None and not restart_keys:
+            return SetupPanelAction(True, hint="Config changes saved; the gateway applies them without a restart.")
         return SetupPanelAction(True, hint="Config changes saved. Restart the gateway (G) to apply them.")
 
     def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:

@@ -76,7 +76,7 @@ var configV8ValidateCmd = &cobra.Command{
 	Short: "Validate configuration v8 and emit a machine-readable result",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		compiled, source, gatewayAPIPort, err := compileConfigV8File(configV8ConfigPath, configV8DataDir)
+		loaded, err := loadConfigV8File(configV8ConfigPath, configV8DataDir)
 		if err != nil {
 			failure := configV8ValidationFailure(err)
 			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(failure); encodeErr != nil {
@@ -88,11 +88,11 @@ var configV8ValidateCmd = &cobra.Command{
 		result := configV8WireResponse{
 			WireVersion:       configV8WireVersion,
 			Kind:              "validation",
-			ConfigVersion:     8,
-			Source:            source,
-			DataDir:           compiled.DataDir,
-			GatewayAPIPort:    gatewayAPIPort,
-			PlanDigest:        compiled.Plan.Digest(),
+			ConfigVersion:     loaded.runtime.ConfigVersion,
+			Source:            loaded.source,
+			DataDir:           loaded.compiled.DataDir,
+			GatewayAPIPort:    loaded.gatewayAPIPort,
+			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
 		}
@@ -203,20 +203,20 @@ var configV8EffectiveCmd = &cobra.Command{
 	Short: "Emit the secret-masked effective observability plan as JSON",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		compiled, source, gatewayAPIPort, err := compileConfigV8File(configV8ConfigPath, configV8DataDir)
+		loaded, err := loadConfigV8File(configV8ConfigPath, configV8DataDir)
 		if err != nil {
 			return err
 		}
 		response := configV8WireResponse{
 			WireVersion:       configV8WireVersion,
 			Kind:              "effective",
-			ConfigVersion:     8,
-			Source:            source,
-			DataDir:           compiled.DataDir,
-			GatewayAPIPort:    gatewayAPIPort,
-			PlanDigest:        compiled.Plan.Digest(),
+			ConfigVersion:     loaded.runtime.ConfigVersion,
+			Source:            loaded.source,
+			DataDir:           loaded.compiled.DataDir,
+			GatewayAPIPort:    loaded.gatewayAPIPort,
+			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
-			Effective:         compiled.Plan.EffectiveJSON(),
+			Effective:         loaded.compiled.Plan.EffectiveJSON(),
 		}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)

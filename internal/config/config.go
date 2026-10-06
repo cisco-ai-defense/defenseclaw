@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -1383,7 +1384,7 @@ type FirewallConfig struct {
 // Name is the CLI-visible identifier (“defenseclaw setup webhook
 // enable <name>“ etc.). The runtime dispatcher itself identifies
 // webhooks by URL, but Name is round-tripped through Load/Save so
-// saving the config via Config.Save() or the TUI doesn't silently
+// saving the config through the config writer or the TUI doesn't silently
 // strip the operator's chosen name. “omitempty“ keeps legacy files
 // that never set “name:“ identical after load-save.
 type WebhookConfig struct {
@@ -1768,8 +1769,7 @@ type GuardrailConfig struct {
 	// OTLP) is redacted by emitJudge before it leaves the process.
 	//
 	// Operators who prefer not to store judge bodies can opt out via
-	// `guardrail.retain_judge_bodies: false` in config.yaml or the
-	// DEFENSECLAW_PERSIST_JUDGE=0 environment override. Redaction is
+	// `guardrail.retain_judge_bodies: false` in config.yaml. Redaction is
 	// the safety mechanism for downstream sinks; retention is a
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
@@ -1786,9 +1786,6 @@ type GuardrailConfig struct {
 	//     while bounding worst-case memory to ~64 MiB (each row
 	//     is capped at MaxJudgeRawBytes = 64 KiB).
 	//   - Setting this to 0 falls back to the default at boot.
-	//   - DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE env var overrides
-	//     the config value at sidecar boot for emergency tuning
-	//     without a config push.
 	//
 	// Drops show up as defenseclaw.judge.persist.drops with
 	// reason="queue_full"; a sustained non-zero rate is the cue
@@ -2682,11 +2679,11 @@ type PluginActionsConfig struct {
 }
 
 func Load() (*Config, error) {
-	return LoadFromFileWithRuntimeMigration(ConfigPath())
+	return LoadFromFile(ConfigPath())
 }
 
 func LoadFromFile(configFile string) (*Config, error) {
-	return loadFromFile(configFile, false)
+	return loadFromFile(configFile)
 }
 
 // LoadFromBytes applies the same defaults, migrations, environment bindings,
@@ -2696,14 +2693,14 @@ func LoadFromFile(configFile string) (*Config, error) {
 // and ConfigFilePath. Runtime-file migration is deliberately disabled because
 // a captured snapshot must never cause an ambient-path rewrite.
 func LoadFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, false, true)
+	return loadConfigSource(configFile, append([]byte(nil), raw...), true, true, false, true)
 }
 
 // LoadCandidateFromBytes decodes an exact reload candidate without publishing
 // process-global provenance. The caller must set version.SetContentHash only
 // after the candidate has passed every compile/apply transaction boundary.
 func LoadCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, false, false, true)
+	return loadConfigSource(configFile, append([]byte(nil), raw...), true, false, false, true)
 }
 
 // LoadRuntimeV8FromBytes decodes the non-observability portions of an exact
@@ -2717,7 +2714,7 @@ func LoadRuntimeV8FromBytes(configFile string, raw []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, true, true)
+	candidate, err := loadConfigSource(configFile, append([]byte(nil), raw...), true, true, true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2748,7 +2745,6 @@ func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManag
 	}
 	candidate, err := loadConfigSource(
 		configFile,
-		false,
 		append([]byte(nil), raw...),
 		true,
 		false,
@@ -2775,7 +2771,6 @@ func ResolveObservabilityV8ManagedAIDOptionsForInspection(
 ) (ObservabilityV8ManagedAIDOptions, error) {
 	candidate, err := loadConfigSource(
 		configFile,
-		false,
 		append([]byte(nil), raw...),
 		true,
 		false,
@@ -2873,12 +2868,8 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 }
 
-func LoadFromFileWithRuntimeMigration(configFile string) (*Config, error) {
-	return loadFromFile(configFile, true)
-}
-
-func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
-	return loadConfigSource(configFile, migrateRuntime, nil, false, true, false, true)
+func loadFromFile(configFile string) (*Config, error) {
+	return loadConfigSource(configFile, nil, false, true, false, true)
 }
 
 // LoadManagedFileForLifecycleRecovery loads a managed config like
@@ -2891,12 +2882,11 @@ func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
 // service stopped (GAP-1291). The gateway and every activation keep the
 // strict loaders.
 func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
-	return loadConfigSourceChecked(configFile, false, nil, false, false, false, true, false)
+	return loadConfigSourceChecked(configFile, nil, false, false, false, true, false)
 }
 
 func loadConfigSource(
 	configFile string,
-	migrateRuntime bool,
 	sourceBytes []byte,
 	sourceProvided bool,
 	publishProvenance bool,
@@ -2904,14 +2894,13 @@ func loadConfigSource(
 	enforceManagedTrust bool,
 ) (*Config, error) {
 	return loadConfigSourceChecked(
-		configFile, migrateRuntime, sourceBytes, sourceProvided,
+		configFile, sourceBytes, sourceProvided,
 		publishProvenance, runtimeV8, enforceManagedTrust, true,
 	)
 }
 
 func loadConfigSourceChecked(
 	configFile string,
-	migrateRuntime bool,
 	sourceBytes []byte,
 	sourceProvided bool,
 	publishProvenance bool,
@@ -3299,24 +3288,6 @@ func loadConfigSourceChecked(
 		seedProvenanceOnLoadSource(configFile, &cfg, sourceBytes, sourceProvided)
 	}
 
-	// Managed-enterprise config is an administrator-owned trust boundary while
-	// data_dir is intentionally writable by the lower-privilege service account.
-	// Never let ordinary gateway or root guardian startup promote legacy runtime
-	// state across that boundary. Managed upgrades must migrate config through an
-	// explicit administrator-controlled workflow; config.yaml remains authoritative.
-	if guardrailRuntimeMigrationAllowed(migrateRuntime, cfg.DeploymentMode) {
-		migrated, err := MigrateGuardrailRuntimeFile(configFile, cfg.DataDir)
-		if err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "guardrail_runtime_migration")
-			}
-			return nil, err
-		}
-		if migrated {
-			return loadFromFile(configFile, false)
-		}
-	}
-
 	return &cfg, nil
 }
 
@@ -3466,10 +3437,6 @@ func isLoopbackListenerHost(host string) bool {
 	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 // clearLegacyObservabilityRuntimeConfig makes the general application Config
@@ -3957,7 +3924,7 @@ func (cfg Config) OTelTLSFromFlatConfig() OTelTLSConfig {
 	}
 	if !viper.InConfig("otel.tls.insecure") {
 		switch strings.ToLower(firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
+			envvars.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
 			os.Getenv("OPENCLAW_OTEL_TLS_INSECURE"),
 		)) {
 		case "1", "true", "yes", "on":
@@ -4133,35 +4100,6 @@ func normalizeDeploymentMode(mode string) string {
 	default:
 		return strings.TrimSpace(mode)
 	}
-}
-
-func (c *Config) Save() error {
-	configFile := filepath.Join(c.DataDir, DefaultConfigName)
-
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("config: marshal: %w", err)
-	}
-
-	if err := os.WriteFile(configFile, data, 0o600); err != nil {
-		return err
-	}
-
-	// v7 provenance: every successful config save updates the
-	// content_hash (so downstream events carry a fingerprint of
-	// exactly which config shape produced them) and bumps the
-	// monotonic generation counter (so dashboards can detect churn
-	// without diffing hashes). A failed Save() never reaches this
-	// line — a stale generation would fire spurious "config
-	// changed" alerts. Hash the marshaled YAML bytes directly; they
-	// are already deterministic per (Config struct, yaml.Marshal
-	// impl) and any Load() reading the same file will compute the
-	// same fingerprint, which is the property needed for content
-	// hash stability across save↔load round-trips.
-	version.SetContentHash(data)
-	version.BumpGeneration()
-
-	return nil
 }
 
 func setDefaults(dataDir string, legacyObservability bool) {
@@ -4410,7 +4348,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	// in ~/.defenseclaw/audit.db, which is already covered by the
 	// same filesystem ACLs as the rest of the data directory. Operators
 	// with strict storage or privacy constraints can still opt out with
-	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
+	// `guardrail.retain_judge_bodies: false`.
 	viper.SetDefault("guardrail.retain_judge_bodies", true)
 	// Buffered async persistence queue: 1024 entries is the sweet
 	// spot between memory ceiling and BUSY absorption under burst

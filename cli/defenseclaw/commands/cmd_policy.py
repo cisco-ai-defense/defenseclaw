@@ -1759,7 +1759,9 @@ def _try_rego_compile(rego_dir: str) -> bool:
         # A missing checker must not turn into a clean "Rego compilation: OK"
         # verdict, so the default fails closed. Operators can opt out with
         # DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1.
-        if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
+        from defenseclaw.envvars import lookup
+
+        if (lookup("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA") or "").strip() == "1":
             ux.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
             return True
         ux.err("FAIL: no Rego checker found (neither 'opa' nor 'defenseclaw-gateway').")

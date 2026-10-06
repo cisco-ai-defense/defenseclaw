@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -91,6 +91,13 @@ ALLOWED_SECURITY_IMPACT = frozenset({"none", "low", "medium", "high"})
 # (internal/envvars/registry.go: isTruthy) so doctor and tests agree.
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# Managed-mode policies (the registry's per-entry ``managed`` field).
+# Mirrors internal/envvars/lookup.go.
+MANAGED_ALLOW = "allow"
+MANAGED_IGNORE = "ignore"
+MANAGED_TIGHTEN_ONLY = "tighten_only"
+ALLOWED_MANAGED = frozenset({MANAGED_ALLOW, MANAGED_IGNORE, MANAGED_TIGHTEN_ONLY})
+
 # Variables that carry a value rather than a switch: any non-empty value is
 # active. Mirrors activeWhenNonEmpty in internal/envvars/registry.go.
 _ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS", "DEFENSECLAW_SANDBOX_ID"})
@@ -120,6 +127,8 @@ class EnvVar:
     replacement_hint: str = ""
     deprecated: bool = False
     migration_only: bool = False
+    #: What a managed standalone host does with the variable (MANAGED_*).
+    managed: str = "allow"
 
     def is_active(self, env: dict[str, str] | None = None) -> bool:
         """Return True when this var is set to a value that activates the
@@ -270,6 +279,11 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
             raise ValueError(
                 f"{path}: entry {name}: {field_name} must be a boolean"
             )
+    managed = raw.get("managed")
+    if managed not in ALLOWED_MANAGED:
+        raise ValueError(
+            f"{path}: entry {name}: managed must be one of {sorted(ALLOWED_MANAGED)}, not {managed!r}"
+        )
     deprecated = boolean_fields["deprecated"]
     migration_only = boolean_fields["migration_only"]
     surface_in_doctor = boolean_fields["surface_in_doctor"]
@@ -307,6 +321,7 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
         replacement_hint=str(raw.get("replacement_hint", "")),
         deprecated=deprecated,
         migration_only=migration_only,
+        managed=managed,
     )
 
 
@@ -393,6 +408,60 @@ def active_security_overrides(
         if entry.is_active(env):
             out.append(entry)
     return out
+
+
+def managed_policy(name: str) -> str:
+    """The registry's managed policy for ``name`` (``allow`` when undeclared)."""
+    try:
+        entry = load_registry().get(name)
+    except (OSError, ValueError):
+        return MANAGED_ALLOW
+    return entry.managed if entry is not None else MANAGED_ALLOW
+
+
+def managed_standalone() -> bool:
+    """Whether this host is managed on the standalone enterprise profile.
+
+    Decided by the active config.yaml (or ``DEFENSECLAW_DEPLOYMENT_MODE``),
+    the same test as the config writer's managed gate. Secure Client and
+    per-user hosts are not standalone, so their environment is read raw.
+    """
+    from defenseclaw.config import config_path
+    from defenseclaw.config_writer import standalone_managed
+
+    try:
+        with open(config_path(), "rb") as handle:
+            raw = handle.read(4 * 1024 * 1024)
+    except OSError:
+        raw = b""
+    return standalone_managed(raw)
+
+
+def lookup(name: str, env: Mapping[str, str] | None = None, *, managed: bool | None = None) -> str | None:
+    """``os.environ.get`` under the managed-mode policy.
+
+    On a managed standalone host a variable the registry marks ``ignore``
+    reads as unset; ``tighten_only`` and ``allow`` read as set.
+    """
+    environ = os.environ if env is None else env
+    value = environ.get(name)
+    if value is None:
+        return None
+    if managed_policy(name) == MANAGED_IGNORE and (managed_standalone() if managed is None else managed):
+        return None
+    return value
+
+
+def ignored_in_managed_mode(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of set variables a managed standalone host ignores."""
+    if not managed_standalone():
+        return []
+    environ = os.environ if env is None else env
+    return sorted(
+        entry.name
+        for entry in load_registry().entries
+        if entry.managed == MANAGED_IGNORE and environ.get(entry.name)
+    )
 
 
 def iter_entries() -> Iterable[EnvVar]:

@@ -27,7 +27,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
-	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 func stringSliceContains(values []string, needle string) bool {
@@ -1679,65 +1678,6 @@ func TestGuardrailConfig_EffectiveHost(t *testing.T) {
 				t.Errorf("EffectiveHost() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestConfig_Save(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := DefaultConfig()
-	cfg.DataDir = tmpDir
-
-	if err := cfg.Save(); err != nil {
-		t.Fatalf("Save() returned error: %v", err)
-	}
-
-	configFile := filepath.Join(tmpDir, DefaultConfigName)
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		t.Error("config file was not created")
-	}
-}
-
-// TestConfig_Save_BumpsProvenance pins the v7 contract that every
-// successful Save() updates the process-wide content_hash AND
-// increments the monotonic generation counter. Dashboards rely on
-// generation to detect churn without diffing hashes, and a regression
-// here (e.g. a caller that marshals through a different path and
-// forgets the bump) would cause "config changed" alerts to miss real
-// writes until the next sidecar restart re-seeds from disk.
-func TestConfig_Save_BumpsProvenance(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := DefaultConfig()
-	cfg.DataDir = tmpDir
-
-	before := version.Current()
-
-	if err := cfg.Save(); err != nil {
-		t.Fatalf("Save() returned error: %v", err)
-	}
-	afterFirst := version.Current()
-	if afterFirst.Generation <= before.Generation {
-		t.Errorf("generation did not bump on first Save: before=%d after=%d", before.Generation, afterFirst.Generation)
-	}
-	if afterFirst.ContentHash == "" {
-		t.Errorf("content_hash empty after Save — expected hash of marshaled config")
-	}
-
-	// Mutate the config and save again; both hash and generation
-	// must advance. Pinning this guards the "ContentHash stable
-	// across identical saves, fresh per mutation" invariant.
-	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw connector.
-	// Keep it aligned with schemas/otel/resource.schema.json so this test
-	// doesn't bake a stale legacy mode string.
-	cfg.Claw.Mode = "zeptoclaw"
-	if err := cfg.Save(); err != nil {
-		t.Fatalf("Save() (2) returned error: %v", err)
-	}
-	afterSecond := version.Current()
-	if afterSecond.Generation <= afterFirst.Generation {
-		t.Errorf("generation did not bump on second Save: first=%d second=%d", afterFirst.Generation, afterSecond.Generation)
-	}
-	if afterSecond.ContentHash == afterFirst.ContentHash {
-		t.Errorf("content_hash unchanged after config mutation — hashing is not observing the new bytes")
 	}
 }
 

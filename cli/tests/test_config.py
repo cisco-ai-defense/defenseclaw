@@ -322,17 +322,20 @@ class TestPaths(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX group-read mode has no Windows DACL equivalent")
     def test_secure_write_preserves_group_read_without_write(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
-        path.write_text("config_version: 6\n")
+        path.write_text("config_version: 9\nobservability: {}\n")
         os.chmod(path, 0o640)
-        config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+        config_mod.write_config_yaml_secure(
+            str(path), {"config_version": 9, "observability": {}, "gateway": {"api_port": 18971}}
+        )
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
 
     @unittest.skipIf(os.name == "nt", "fallback covers POSIX platforms without fchmod")
     def test_secure_write_uses_path_chmod_without_fchmod(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
+        document = {"config_version": 9, "observability": {}}
         with patch.object(config_mod.os, "fchmod", None):
-            config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
-        self.assertEqual(config_mod.yaml.safe_load(path.read_text()), {"config_version": 6})
+            config_mod.write_config_yaml_secure(str(path), document)
+        self.assertEqual(config_mod.yaml.safe_load(path.read_text()), document)
 
     def test_load_dotenv_ignores_unreadable_file(self):
         with patch("builtins.open", side_effect=PermissionError("denied")):
@@ -603,6 +606,9 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
 
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = config_mod.load()
+            # Any write validates the whole candidate, so the unknown key
+            # blocks it (an unchanged save writes nothing).
+            cfg.gateway.port = 19998
             with self.assertRaises(V8ConfigError):
                 cfg.save()
 

@@ -676,12 +676,12 @@ def _validate_preflight_values(value: Any, source_name: str, path: str = "$") ->
             _validate_preflight_values(child, source_name, child_path)
         if path == "$":
             version = value.get("config_version")
-            if type(version) is not int or version != 8:
+            if type(version) is not int or version not in (8, 9):
                 raise V8ConfigError(
                     source_name,
                     "$.config_version",
                     "exact-version",
-                    "use the integer config_version: 8 after running defenseclaw upgrade",
+                    "use the integer config_version: 9 after running defenseclaw upgrade",
                 )
         return
     if isinstance(value, list):

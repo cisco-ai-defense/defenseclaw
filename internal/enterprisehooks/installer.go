@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -1054,7 +1055,7 @@ func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 }
 
 func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") || os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
+	if !strings.EqualFold(strings.TrimSpace(mode), "action") || envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
 		return nil
 	}
 	resolution := resolveHookContract(conn.Name(), opts.AgentVersion)

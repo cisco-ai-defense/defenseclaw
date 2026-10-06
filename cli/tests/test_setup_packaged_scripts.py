@@ -102,7 +102,7 @@ def test_canonical_state_validation_refuses_a_config_that_needs_migrating(instal
 
 @pytest.mark.parametrize("name", ["packagedMigrationScript", "packagedMigrationPreflightScript"])
 def test_migration_scripts_report_nothing_to_do_for_a_current_config(install: dict[str, Path], name: str) -> None:
-    _write_config(install, 8)
+    _write_config(install, 9)
 
     result = _run(install, _script(name), "0.8.10", VERSION, str(install["openclaw"]), str(install["data"]), str(install["manifest"]))
 
@@ -124,7 +124,8 @@ def test_migration_preflight_reports_the_pending_0x_import(install: dict[str, Pa
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().splitlines()[-1] == "1"
+    # The 0.8.5 import, then config_version 8 -> 9.
+    assert result.stdout.strip().splitlines()[-1] == "2"
     assert (install["data"] / "config.yaml").read_text(encoding="utf-8") == "config_version: 7\n"
 
 

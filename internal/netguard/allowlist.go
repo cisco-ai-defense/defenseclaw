@@ -6,9 +6,10 @@ package netguard
 import (
 	"net"
 	"net/netip"
-	"os"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 var (
@@ -77,7 +78,7 @@ func ParseAllowedPrivateUpstreams(configIPs []string) []net.IP {
 		add(s)
 	}
 
-	if env := os.Getenv("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"); env != "" {
+	if env := envvars.Getenv("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"); env != "" {
 		for _, s := range strings.Split(env, ",") {
 			add(s)
 		}
