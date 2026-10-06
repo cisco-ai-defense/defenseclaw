@@ -115,7 +115,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 
 | Key | Matches | Spell it as |
 | --- | --- | --- |
-| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. macOS: the group name `id -Gn` prints. |
+| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: the group name `id -Gn` prints. |
 | `users` | The verified user | A uid or SID, the account name, or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
@@ -286,7 +286,8 @@ runs as, so an OpenClaw or ZeptoClaw install appears in
 
 `explain` asks the running gateway, which resolves the user through the OS
 the way it does for a live request. With no `--user` it explains the account
-that runs the command.
+that runs the command. On Windows, name an Entra ID user by SID or as
+`AzureAD\<name>`: the computer cannot look up a UPN.
 
 ```bash
 defenseclaw guardrail profile show contractors

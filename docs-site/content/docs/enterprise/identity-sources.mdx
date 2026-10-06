@@ -82,7 +82,7 @@ record.
 | Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports | Verified |
 | Groups | `initgroups` plus a group lookup through NSS | Verified |
 | Directory type and realm | realmd on the system bus: only root may own its name, and the gateway checks that the owner is uid 0. The realm is the one whose DNS domain is the account's domain or a parent of it, or the only joined realm for a name without a DNS domain. `active_directory` for an Active Directory realm, `ldap` for an IPA realm. Any account may read it, so per-user installs get it too | Verified |
-| UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool. Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
+| UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool. Standalone enterprise only. Without it the principal is `account@REALM`. An Entra ID account of the `aad` or himmelblau module is named by its UPN, which is reported as its UPN and principal on every install | Verified |
 | SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
 | Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` caches are reported by type only | Claimed |
 
@@ -100,7 +100,7 @@ domain that SSSD serves without realmd has no directory type on any install.
 | Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
 | AD UPN | `TranslateNameW`. An account's first lookup waits up to 1.5 seconds for it when a users or groups assignment exists, and otherwise resolves it in the background. An answer is cached for 24 hours and a failed lookup (no domain controller reachable) for 2 minutes; an account still without its UPN is looked up again after 2 minutes | Verified |
 | Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
-| Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local, AD and Entra group SIDs and names. Standalone enterprise only; a per-user install has no group list | Verified |
+| Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local and AD groups, and only the Entra groups that a built-in local group lists (see [Entra groups on Windows](#entra-groups-on-windows)). Standalone enterprise only; a per-user install has no group list | Verified |
 | Remote desktop and logon type | `LsaGetLogonSessionData` for the hook's own logon session | Claimed |
 | Logon session UPN and Kerberos principal | `LsaGetLogonSessionData` (the authentication package is Kerberos, NTLM or CloudAP) | Claimed |
 | SSH session | `SSH_CONNECTION` | Claimed |
@@ -133,7 +133,7 @@ standalone enterprise profile.
 | Account, name, uid or SID | Gateway | Gateway |
 | Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
 | Linux directory type and realm | Gateway, through realmd | Gateway, through realmd |
-| Linux UPN and mail | Not available | Root guardian |
+| Linux UPN and mail | Only the UPN of an Entra (`aad`, himmelblau) account | Root guardian; the UPN of an Entra account from the gateway |
 | Windows groups | Not available | SYSTEM enumerator |
 | Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
 | macOS directory, domain and SSO provider | Not available | Root enumerator |
@@ -154,10 +154,58 @@ machine.
 | Okta exposes users over LDAP and the host uses it through SSSD or `nss_ldap` | The LDAP account: directory `ldap` through `nss_ldap`. Through SSSD you get the domain and groups, but no directory type |
 | Mac with Platform SSO or Okta Device Access and Okta Verify | The device's SSO provider: directory `okta`, source `macos_platform_sso` (standalone enterprise only) |
 | Linux with an Okta agent that creates local accounts | The local account, directory `local`. No Okta NSS module is recognized |
-| Entra-joined or hybrid-joined Windows | Directory `entra_id` with the UPN and tenant ID, and Entra group SIDs (`S-1-12-1-...`) in the token |
+| Entra-joined or hybrid-joined Windows | Directory `entra_id`, source `windows_identity_store`, the UPN as principal and the tenant ID. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists, and only with the standalone enterprise profile ([below](#entra-groups-on-windows)) |
 | Mac with Platform SSO and Company Portal | The device's SSO provider: directory `entra_id`, source `macos_platform_sso` (standalone enterprise only) |
-| Linux with the himmelblau or `aad` NSS module | Directory `entra_id`, source `himmelblau` or `nss_aad` |
+| Linux with the himmelblau or `aad` NSS module | Directory `entra_id`, source `himmelblau` or `nss_aad`, the UPN as principal and its domain. The `aad` module (Entra ID sign-in for Azure Linux VMs) gives the account only its own private group, no Entra groups, so a `groups` assignment cannot name an Entra group there |
 | Entra accounts synced into on-premises AD | The AD account, as above |
+
+### Entra groups on Windows
+
+An Entra-joined computer puts an Entra group's SID into a user's sign-in
+token only when one of the built-in local groups lists that group:
+Administrators, Users, Guests, Power Users, Remote Desktop Users or Remote
+Management Users. Windows evaluates at most 20 Entra groups this way.
+Membership in any other Entra group never reaches the computer, so a `groups`
+assignment or an enrollment `include_groups` or `exclude_groups` entry that
+names such a group matches no one: its members get the default profile, and
+`exclude_groups` excludes none of them.
+
+To use an Entra group:
+
+1. Read the group's SID: the `securityIdentifier` property of the group in
+   Microsoft Graph.
+2. Add the group to the built-in **Users** group on the computers. In Intune,
+   use an Account protection policy (Local user group membership) with the
+   group **Users**, the action **Add (Update)** and the group's SID, or the
+   `LocalUsersAndGroups` policy CSP. Do not use **Add (Replace)**: it replaces
+   the existing members. Users is the least-privileged choice, because every
+   signed-in user is already a member through Authenticated Users.
+3. Have the users sign out and back in. A new sign-in token can take up to
+   4 hours to carry a membership change.
+4. Name the group by its SID in DefenseClaw. The computer cannot resolve the
+   name of an Entra group.
+
+### Entra ID fields, as seen live
+
+These are the attributes per-user installs reported for one Entra ID user,
+`alice@contoso.onmicrosoft.com`, on a live tenant.
+
+| Attribute | Entra-joined Windows 11 | Ubuntu 22.04 with the `aad` module |
+| --- | --- | --- |
+| `user.id`, `defenseclaw.user.id_kind` | The user's `S-1-12-1-...` SID, `windows_sid` | The uid the module assigns, `posix_uid` |
+| `defenseclaw.user.name` | The account name Windows assigns, shown as `AzureAD\<name>` (without `AzureAD\`) | `alice`, the account part of the UPN |
+| `defenseclaw.user.principal` | `alice@contoso.onmicrosoft.com` | `alice@contoso.onmicrosoft.com` |
+| `defenseclaw.user.domain` | `contoso.onmicrosoft.com` | `contoso.onmicrosoft.com` |
+| `defenseclaw.user.directory` | `entra_id` | `entra_id` |
+| `defenseclaw.user.identity.source` | `windows_identity_store` | `nss_aad` |
+| `defenseclaw.user.tenant_id` | The tenant ID | Not reported |
+| `defenseclaw.user.principal.assurance` | `verified` | `verified` |
+| `defenseclaw.user.group_count` | `0`: a per-user install has no group list | `1`: the private group |
+| `defenseclaw.session.kind` | Not reported: a remote desktop session is only claimed | `ssh` with `client.address`, confirmed through logind |
+
+A `users` assignment that names the UPN selected the profile on both. On
+Windows, name an Entra user to `guardrail profile explain --user` by SID or as
+`AzureAD\<name>`: the computer cannot look up a UPN.
 
 ## Limits, stated plainly
 
@@ -181,15 +229,20 @@ machine.
 - **The Kerberos principal and the session can be changed by the user.** They
   are always `claimed`, except an SSH session the gateway confirmed through
   logind or utmp.
-- **Okta and Entra paths are parsed from OS state.** The Entra, Okta, bound-Mac
-  and Platform SSO readers are covered by tests against recorded OS output,
-  not against a live tenant.
+- **Entra ID was tested on a live tenant; the other cloud paths are parsed
+  from OS state.** The Okta, bound-Mac, Platform SSO and himmelblau readers
+  are covered by tests against recorded OS output, not against a live tenant.
 
 What was exercised end to end on real hosts, with a Samba Active Directory
 domain: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9
 and Ubuntu 24.04, per-user and managed; and AD UPN and groups on a
 domain-joined Windows per-user install. Group-based profiles on a managed
-Windows computer were exercised with local groups.
+Windows computer were exercised with local groups. Microsoft Entra ID was
+exercised on a live tenant: per-user installs on an Entra-joined Windows 11
+computer and on Ubuntu 22.04 with Entra ID SSH sign-in (the `aad` module),
+with the fields [above](#entra-id-fields-as-seen-live), and Entra group SIDs in
+the Windows sign-in token with and without a built-in local group listing the
+group. Intune delivery of the local group membership was not tested.
 
 ## What a record carries
 

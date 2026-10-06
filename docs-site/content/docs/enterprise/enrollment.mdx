@@ -387,8 +387,10 @@ Entra ID groups by SID, because the device cannot resolve their names.
 `exclude_groups` wins; when `include_groups` is not empty, only members are
 enrolled. Membership comes from:
 
-- the signed-in user's session token, which lists every group they belong
-  to. The enumerator caches it, so a signed-out user is decided from the
+- the signed-in user's session token, which lists their local and Active
+  Directory groups, and only the Entra ID groups that a built-in local group
+  lists ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)):
+  an entry naming any other Entra group matches no one. The enumerator caches it, so a signed-out user is decided from the
   membership seen at their last sign-in, and a change made while they are
   signed out applies when they next sign in;
 - for local groups, the local account database, which lists direct members
