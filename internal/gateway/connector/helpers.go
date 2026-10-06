@@ -262,39 +262,6 @@ func windowsDevinBashHookCommand(binary string) string {
 	return "'" + strings.ReplaceAll(binary, "'", `'\''`) + "' " + nativeHookFlag + "devin"
 }
 
-// legacyWindowsDevinEncodedPowerShellHookCommandForBinary reconstructs the
-// encoded PowerShell bridge emitted before live 3000.4.25 testing proved that
-// Devin unwraps its script before passing the command to bash. It remains an
-// exact migration/teardown identity and is never generated.
-func legacyWindowsDevinEncodedPowerShellHookCommandForBinary(binary string) string {
-	if strings.TrimSpace(binary) == "" || strings.ContainsAny(binary, "\"\x00\r\n") || !isWindowsAbsolutePath(binary) {
-		return ""
-	}
-	command := legacyStartProcessWindowsNativePowerShellHookCommand("devin", "", "", binary)
-	powershell := windowsSystemPowerShellExe()
-	if !strings.HasPrefix(command, powershell+" ") {
-		return ""
-	}
-	outer := strings.ReplaceAll(powershell, `\`, "/")
-	outer = "'" + strings.ReplaceAll(outer, "'", `'\''`) + "'"
-	return outer + command[len(powershell):]
-}
-
-// legacyWindowsDevinUnquotedPowerShellHookCommandForBinary reconstructs the
-// first awaited bridge shape, whose Windows outer path bash interpreted as
-// backslash escapes. Keep it only so a refresh removes that exact no-fire
-// registration before installing the POSIX-quoted outer command.
-func legacyWindowsDevinUnquotedPowerShellHookCommandForBinary(binary string) string {
-	return legacyStartProcessWindowsNativePowerShellHookCommand("devin", "", "", binary)
-}
-
-// legacyWindowsDevinPowerShellHookCommandForBinary reconstructs the exact
-// command briefly emitted before Devin's Windows bash execution boundary was
-// verified. It remains an ownership identity for migration and teardown only.
-func legacyWindowsDevinPowerShellHookCommandForBinary(binary string) string {
-	return "& " + powershellQuoteLiteral(binary) + " " + nativeHookFlag + "devin"
-}
-
 // defenseclawHookBinary returns the stable native HookRuntime launcher on
 // Windows after the running gateway proves its installer-owned layout, from
 // either the native per-user package or a managed enterprise deployment.
@@ -768,11 +735,11 @@ func windowsCommandLineArgument(argument string) string {
 }
 
 // legacyStartProcessWindowsNativePowerShellHookCommand reconstructs the exact
-// Start-Process -Wait -PassThru bridge emitted before the awaited
-// Process.Start statements (windowsAwaitedHookStatements). It remains owned
-// for repair and teardown, but is never generated.
-func legacyStartProcessWindowsNativePowerShellHookCommand(connector, event, contractID, hookBinary string, extra ...string) string {
-	arguments := nativeHookBridgeArguments(connector, event, contractID, extra)
+// Start-Process -Wait -PassThru bridge 0.8.x released for Codex and Antigravity,
+// before the awaited Process.Start statements (windowsAwaitedHookStatements).
+// It remains owned for repair and teardown, but is never generated.
+func legacyStartProcessWindowsNativePowerShellHookCommand(connector, hookBinary string) string {
+	arguments := nativeHookBridgeArguments(connector, "", "", nil)
 	for i, argument := range arguments {
 		arguments[i] = powershellQuoteLiteral(argument)
 	}
@@ -838,15 +805,6 @@ func legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary string) strin
 	return "& " + powershellQuoteLiteral(hookBinary) + " " + nativeHookFlag + "copilot"
 }
 
-// legacyWindowsCopilotPowerShellHookCommandForEvent reconstructs the
-// event-bound call-operator form emitted before Copilot registrations moved to
-// the synchronous Start-Process launcher. Keep the event finite and built-in:
-// this is an ownership identity for migration/teardown, never a generator.
-func legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary string) string {
-	return legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary) +
-		" --event " + powershellQuoteLiteral(event)
-}
-
 func legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary string) string {
 	return "& " + legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary)
 }
@@ -879,30 +837,6 @@ func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary str
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
 		"& " + powershellQuoteLiteral(hookBinary) + " " + nativeHookFlag + connector,
-		"exit $LASTEXITCODE",
-	}, "; ")
-	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
-}
-
-// legacyWindowsNativePowerShellHookCommandForCodexEvent reconstructs the exact
-// event-bound non-waiting Codex command emitted before WIN-AUD-069. Keep this
-// separate from the current generator: it is accepted only as a
-// byte-exact ownership candidate for a finite built-in event/contract pair so
-// Setup can replace it during repair without claiming arbitrary PowerShell.
-func legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary string) string {
-	arguments := []string{
-		powershellQuoteLiteral("hook"),
-		powershellQuoteLiteral("--connector"),
-		powershellQuoteLiteral("codex"),
-		powershellQuoteLiteral("--event"),
-		powershellQuoteLiteral(event),
-		powershellQuoteLiteral("--hook-contract"),
-		powershellQuoteLiteral(contractID),
-	}
-	script := strings.Join([]string{
-		"$ErrorActionPreference='Stop'",
-		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		"& " + powershellQuoteLiteral(hookBinary) + " " + strings.Join(arguments, " "),
 		"exit $LASTEXITCODE",
 	}, "; ")
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
@@ -1005,9 +939,6 @@ func isDevinBashNativeHookCommand(command string) bool {
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
 		for _, expected := range []string{
 			windowsDevinBashHookCommand(hookBinary),
-			legacyWindowsDevinEncodedPowerShellHookCommandForBinary(hookBinary),
-			legacyWindowsDevinUnquotedPowerShellHookCommandForBinary(hookBinary),
-			legacyWindowsDevinPowerShellHookCommandForBinary(hookBinary),
 		} {
 			if expected != "" && command == expected {
 				return true
@@ -1066,7 +997,7 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range hookBinaries {
 			add(windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
-			add(legacyStartProcessWindowsNativePowerShellHookCommand(connectorName, "", "", hookBinary))
+			add(legacyStartProcessWindowsNativePowerShellHookCommand(connectorName, hookBinary))
 			add(legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
 			add(legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))
 		}
@@ -1075,8 +1006,6 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 		for _, contract := range codexContracts {
 			for _, event := range contract.Events {
 				add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
-				add(legacyStartProcessWindowsNativePowerShellHookCommand("codex", event, contract.ContractID, hookBinary))
-				add(legacyWindowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary))
 			}
 		}
 	}
@@ -1086,7 +1015,6 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 		add(legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary))
 		for _, event := range copilotCurrentHookEvents {
 			add(windowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
-			add(legacyWindowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
 		}
 	}
 	cache.key = key.String()
