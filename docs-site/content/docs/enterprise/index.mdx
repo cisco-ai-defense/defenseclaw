@@ -243,7 +243,9 @@ migration it runs), under the same lock and with the same validation as every
 other config write, so no local tool, API call or environment variable can
 change what the host enforces. This section is about what happens when
 someone tries. Under the Secure Client profile none of it applies: the profile
-keeps its own behavior, and the gateway does not report a policy digest.
+keeps its own behavior, and the gateway does not report a policy digest. The
+model behind it is explained in
+[Configuration: one source of truth](/docs/reference/source-of-truth).
 
 ### Local writers refuse
 

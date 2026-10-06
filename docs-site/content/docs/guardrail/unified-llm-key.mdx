@@ -621,4 +621,4 @@ defenseclaw setup llm \
 - [`cli/defenseclaw/commands/_llm_picker.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/_llm_picker.py) — shared interactive pickers and the inherit preflight.
 - [`internal/configs/embed.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/configs/embed.go) — the Go-side `Provider` schema that `llm_providers.custom` entries map to.
 - [Reference → Keys](/docs/reference/keys) — the full credential table with feature gating and override paths.
-- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — the two scanners that consume the unified key via `inject_llm_env`.
+- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — the two scanners whose LLM judge inherits the unified `llm:` block.

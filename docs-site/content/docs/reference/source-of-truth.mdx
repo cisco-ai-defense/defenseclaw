@@ -205,9 +205,10 @@ list, and a block list does not rewrite a quarantine record.
 Every policy generation has an *effective policy digest*:
 `sha256:` plus the hash of the canonical form of the migrated config, with
 secret values removed, paths under `data_dir` rewritten to a token, defaults
-filled in, and the digests of every pinned asset and composed rule pack. Two
-hosts with the same policy have the same digest, whatever their user names or
-install directories, which is what makes a fleet comparable.
+filled in, and the digests of every pinned asset and composed rule pack.
+Managed hosts of one OS that run the same release and received the same admin
+config report the same digest, which is what makes a fleet comparable. Do not
+compare across operating systems: the config names different paths on each.
 
 The digest and the generation appear in these places:
 
@@ -303,8 +304,8 @@ the [environment variable reference](/docs/reference/env-vars):
 | `ignore` | The value is ignored, in the process environment and in `.env` | Security opt-outs, debug switches, test fixtures, `DEFENSECLAW_REPO`, and `DEFENSECLAW_DEPLOYMENT_MODE` and `DEFENSECLAW_ENTERPRISE_PROFILE` |
 | `tighten_only` | The value is used only if it makes things stricter | `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY` |
 
-A forged `DEFENSECLAW_DEPLOYMENT_MODE` cannot turn a managed host into an
-unmanaged one, and cannot turn an unmanaged host into a managed one. Doctor
+A forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE`
+cannot turn a managed host into an unmanaged one. Doctor
 lists every ignored value it finds, by name only, under its active security
 overrides.
 
