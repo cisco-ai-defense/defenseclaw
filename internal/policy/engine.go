@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,11 @@ func resolveRegoDir(dir string) string {
 	}
 	return dir
 }
+
+// ErrNoModules is returned when the Rego directory holds no .rego file. The
+// managed packages ship none and decide from the config-driven fallback, so
+// the gateway treats it as "no OPA", not as a failed load.
+var ErrNoModules = errors.New("policy: no .rego files found")
 
 func hasRegoFiles(dir string) bool {
 	entries, err := os.ReadDir(dir)
@@ -372,7 +378,7 @@ func readModules(regoDir string, eng *Engine) (map[string]string, error) {
 		modules[base] = string(raw)
 	}
 	if len(modules) == 0 {
-		return nil, fmt.Errorf("policy: no .rego files found in %s", regoDir)
+		return nil, fmt.Errorf("%w in %s", ErrNoModules, regoDir)
 	}
 	return modules, nil
 }

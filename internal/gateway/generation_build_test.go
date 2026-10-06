@@ -123,3 +123,17 @@ func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
 		t.Fatal("the provider CA file is not in the effective digest")
 	}
 }
+
+// A policy directory without Rego is the managed packages' config-driven mode:
+// the generation has no OPA and no error to report (GAP-0021).
+func TestBuildGenerationTreatsMissingRegoAsNoOPA(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		g, err := buildGeneration(context.Background(), generationInputs{cfg: &config.Config{PolicyDir: t.TempDir()}, strictOPA: strict})
+		if err != nil {
+			t.Fatalf("strict=%v empty policy dir: %v, want no error", strict, err)
+		}
+		if g.OPA != nil || g.opaError != "" {
+			t.Fatalf("strict=%v empty policy dir: OPA=%v opaError=%q, want no OPA and no error", strict, g.OPA, g.opaError)
+		}
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -52,7 +53,7 @@ type generationInputs struct {
 	rulePacks *sidecarRulePackCandidate
 	profiles  *guardrailProfileSet
 	// strictOPA makes a Rego module that fails to load a build error. When
-	// false the generation has no OPA and the guardrail falls back.
+	// false (boot) the generation has no OPA and the guardrail falls back.
 	strictOPA bool
 }
 
@@ -102,6 +103,9 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		switch {
 		case err == nil:
 			g.OPA = prepared
+		case errors.Is(err, policy.ErrNoModules):
+			// No Rego in the policy directory is the config-driven mode
+			// (the managed packages ship none), not a failed load.
 		case in.strictOPA:
 			return nil, fmt.Errorf("generation: OPA policy: %w", err)
 		default:
