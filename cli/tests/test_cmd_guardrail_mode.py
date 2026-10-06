@@ -109,11 +109,10 @@ def test_global_switch_restarts_a_running_gateway(app, restarts) -> None:
     assert "fail open" in text.output
     assert len(restarts) == 2
 
-    # Even without a hook fail-mode flip: hook decisions only see the new
-    # mode after a restart.
+    # Without a hook fail-mode flip the gateway reloads the mode hot.
     app.cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode="closed")}
     _, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "restarted" and len(restarts) == 3
+    assert payload["gateway"] == "live" and len(restarts) == 2
 
 
 def test_connector_override_created_on_a_single_install(app, restarts) -> None:
