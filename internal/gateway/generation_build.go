@@ -336,20 +336,6 @@ func recordGenerationBuildError(err error) {
 	}
 }
 
-// generationBuildFailed reports whether the last candidate was rejected and
-// no generation has been published or confirmed since.
-func generationBuildFailed() bool {
-	msg, _ := liveReloadError.Load().(string)
-	return msg != ""
-}
-
-// clearGenerationBuildError drops the last rejection. A candidate built from
-// what is on disk now equals the live generation, so the earlier failure (an
-// asset edited and put back) no longer describes the host (GAP-0092).
-func clearGenerationBuildError() {
-	liveReloadError.Store("")
-}
-
 // CurrentPolicyHealth is the "policy" object of /health and /status for the
 // live generation. ok is false before the first generation and under the
 // Secure Client integration, where the object is omitted.

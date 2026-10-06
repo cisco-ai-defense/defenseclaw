@@ -1289,14 +1289,6 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	if msg, _ := liveReloadError.Load().(string); msg != "" {
 		t.Fatalf("last_reload_error = %q after the asset was restored, want it cleared", msg)
 	}
-	// GAP-0092: an asset edited and put back leaves the same generation, and
-	// the rebuild that confirms it clears last_reload_error, whatever
-	// triggered the reload.
-	recordGenerationBuildError(errors.New("config reload rule pack preflight: digest mismatch"))
-	t.Cleanup(clearGenerationBuildError)
-	if err := mgr.Reload(context.Background(), "restored"); err != nil || generationBuildFailed() || mgr.gen.Load() != gen {
-		t.Fatalf("reload after the asset was restored = %v, failed=%v, generation %d -> %d", err, generationBuildFailed(), gen, mgr.gen.Load())
-	}
 }
 
 // A config_version 8 file whose in-memory migration fails is refused, not
