@@ -225,10 +225,12 @@ regex, CEL typing and admission, and aggregate-cost checks. It does not inject
 synthetic facts or prove that a connector projects the fields an expression
 expects.
 
-Repository contributors should add focused Go fixtures and run:
+Repository contributors should add focused Go fixtures and run the command
+below. The gateway package runs for about ten minutes, longer than the default
+`go test` deadline, so set `-timeout`:
 
 ```bash
-go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
 ```
 
 When the compiled default catalog changes, also run

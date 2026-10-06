@@ -16,8 +16,9 @@ PLUGIN_DIR  := extensions/defenseclaw
 EXTENSION_FINGERPRINT := cli/defenseclaw/_data/plugin/extension-runtime-fingerprint.json
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
-# The race-enabled gateway package can exceed the default test deadline on
-# supported arm64 developer/CI hosts without any individual test hanging.
+# The gateway package can exceed go test's default 10m deadline (race-enabled
+# or not) without any individual test hanging; targets that run all or most
+# of it set this timeout.
 GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
@@ -1063,7 +1064,7 @@ go-test-cov: sync-openclaw-extension
 connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
 
 go-connector-matrix-test: sync-openclaw-extension
-	go test -count=1 \
+	go test -count=1 -timeout $(GO_TEST_TIMEOUT) \
 		./internal/cli \
 		./internal/config \
 		./internal/gateway \

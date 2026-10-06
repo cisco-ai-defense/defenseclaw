@@ -28,6 +28,9 @@ make test-file FILE=test_cmd_plugin
 # One Go package or test
 go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
 
+# The whole gateway package runs past go test's default 10m deadline
+go test ./internal/gateway -count=1 -timeout 30m
+
 # One TypeScript plugin test
 cd extensions/defenseclaw
 npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
