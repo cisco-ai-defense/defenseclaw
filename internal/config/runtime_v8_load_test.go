@@ -292,8 +292,8 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		{version: MaxSupportedConfigVersion},
 		{
 			version: MaxSupportedConfigVersion + 1,
-			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); "+
-				"upgrade DefenseClaw or restore ~/.defenseclaw/previous", MaxSupportedConfigVersion+1),
+			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); %s",
+				MaxSupportedConfigVersion+1, newerConfigAction),
 		},
 	} {
 		err := checkRuntimeConfigVersion(test.version)

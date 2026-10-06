@@ -96,7 +96,7 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 	}
 	future := requireV8YAMLError(t, []byte("config_version: 10\n"), V8YAMLErrorVersionUnsupported)
 	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 10)") ||
-		!strings.Contains(future.Error(), "restore ~/.defenseclaw/previous") {
+		!strings.Contains(future.Error(), "config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous") {
 		t.Fatalf("newer config error = %q, want newer-release guidance", future.Error())
 	}
 }
