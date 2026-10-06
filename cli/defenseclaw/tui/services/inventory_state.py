@@ -1215,6 +1215,18 @@ class InventoryPanelModel:
         return tuple((key, value) for key, value in rows if value)
 
     def detail_info(self) -> InventoryDetailInfo | None:
+        info = self._detail_info()
+        if info is None:
+            return None
+        # At 80x24 the card has room for two or three lines, and they repeated
+        # the row above it (Enabled, AI, User) while Scope, Installed, Last
+        # seen and Sessions stayed hidden (GAP-0098). Fields whose value the
+        # row already shows go last; a cell cut to fit ("…") moves up.
+        rows = self.data_table_rows()
+        shown = set(rows[self.cursor]) if 0 <= self.cursor < len(rows) else set()
+        return replace(info, fields=tuple(sorted(info.fields, key=lambda field: field[1] in shown)))
+
+    def _detail_info(self) -> InventoryDetailInfo | None:
         if self.inventory is None:
             return None
         match self.active_sub:

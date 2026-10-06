@@ -565,7 +565,8 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
 
     # At 80 columns long cells give way while Enabled and AI stay whole, a
-    # remote install is marked, and the detail leads with the state (GAP-0055).
+    # remote install is marked (GAP-0055), and the detail leads with what the
+    # row does not show (GAP-0098).
     remote = InventoryPanelModel()
     remote.set_size(80, 24)
     long_id = "ms-vscode-remote.remote-ssh-edit-nightly"
@@ -579,7 +580,7 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert row[0] == "vscode (ssh)" and row[1].endswith("…") and row[3:] == ("client side", "yes")
     assert sum(len(cell) + 2 for cell in row) <= 72
     remote.set_cursor(0)
-    assert remote.detail_info().fields[:3] == (("Enabled", "client side"), ("AI", "yes"), ("IDE", "vscode (ssh)"))
+    assert [name for name, _ in remote.detail_info().fields] == ["User", "Scope", "Enabled", "AI", "IDE", "Version"]
 
     # One user on Plugins: no User column.
     panel.set_active_subtab("plugins")
