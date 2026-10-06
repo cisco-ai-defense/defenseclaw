@@ -430,16 +430,23 @@ The guardian works only in hidden dot-directories inside each user's home,
 such as `~/.claude`, `~/.codex` and `~/.config`. macOS privacy controls (TCC)
 do not protect those folders, so no profile is needed.
 
-The per-user AI Discovery scan also walks the home for package manifests.
-Without a profile, macOS keeps it out of TCC-protected folders, and it skips
-them.
+The per-user AI Discovery scan also walks the home for package manifests and
+model files. Without Full Disk Access it never opens the folders that make
+macOS ask the employee for permission: Desktop, Documents, Downloads, Movies,
+Music, Pictures, iCloud Drive, other apps' data in `~/Library/Containers` and
+`~/Library/Group Containers`, and Contacts. It skips them without an error,
+so an employee never sees a prompt attributed to `defenseclaw-gateway` and
+the scan stays complete. The other TCC-protected folders answer "operation not
+permitted" and are skipped the same way.
 
 If your organization moves agent configuration into a TCC-protected folder,
 such as Desktop, Documents or iCloud Drive, deploy a PPPC profile that grants
 Full Disk Access (`SystemPolicyAllFiles`) to
 `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. That one binary runs the
 gateway, the guardian (`enterprise hooks watch`) and the enumerator. Identify
-it by its Developer ID code requirement, which needs a signed build.
+it by its Developer ID code requirement, which needs a signed build. With the
+grant, the AI Discovery scan also reads the folders listed above; the gateway
+checks the grant again every ten minutes.
 
 ### AI Discovery Plane C (Endpoint Security)
 
