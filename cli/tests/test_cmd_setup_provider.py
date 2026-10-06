@@ -364,14 +364,19 @@ class TestProviderAddCommand(unittest.TestCase):
             path = os.path.join(d, "custom-providers.json")
             app = self._app(d)
             env = self._env_for(path)
-            for args in (
-                ["add", "--name", "Acme", "--domain", "one.test"],
-                ["add", "--name", "Acme", "--domain", "two.test"],
-                ["remove", "--name", "Acme"],
-            ):
-                result = CliRunner().invoke(provider, args, obj=app, env=env)
-                self.assertEqual(result.exit_code, 0, result.output)
-                self.assertIn("disk and live state match", result.output)
+            with mock.patch(
+                "defenseclaw.commands.cmd_setup_provider.mark_setup_restart_handled"
+            ) as restart_handled:
+                for args in (
+                    ["add", "--name", "Acme", "--domain", "one.test"],
+                    ["add", "--name", "Acme", "--domain", "two.test"],
+                    ["remove", "--name", "Acme"],
+                ):
+                    result = CliRunner().invoke(provider, args, obj=app, env=env)
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    self.assertIn("disk and live state match", result.output)
+            # GAP-0030: the hot reload is the apply; setup must not restart the gateway too.
+            self.assertEqual(restart_handled.call_count, 3)
             self.assertEqual(client_cls.call_count, 3)
             for call in client_cls.call_args_list:
                 self.assertEqual(call.kwargs["host"], "127.0.0.1")
