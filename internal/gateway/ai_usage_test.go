@@ -188,6 +188,13 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(extensions, "extensions.json"), []byte(`[{"identifier":{"id":"example.raw-ai"},"version":"1.0.0","relativeLocation":"example.raw-ai-1.0.0"},{"identifier":{"id":"example.other"},"version":"2.0.0"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	cursorExtensions := filepath.Join(home, ".cursor", "extensions")
+	if err := os.MkdirAll(cursorExtensions, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cursorExtensions, "extensions.json"), []byte(`[{"identifier":{"id":"example.other"},"version":"2.0.0"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	svc := inventory.NewContinuousDiscoveryServiceWithOptions(
 		inventory.AIDiscoveryOptions{
@@ -254,25 +261,27 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	}
 
 	// The IDE plugin list pages through the full inventory, filters to AI
-	// plugins on request, counts the filtered rows (GAP-0096), and carries
-	// paths only as hashes.
+	// plugins on request, counts the filtered rows (GAP-0096), keeps only the
+	// installations holding an AI plugin under ai_only (GAP-0104), and
+	// carries paths only as hashes.
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1", nil))
 	var page struct {
-		Total      int                          `json:"total"`
-		NextCursor string                       `json:"next_cursor"`
-		Counts     inventory.IDEInventoryCounts `json:"counts"`
-		Plugins    []inventory.IDEPlugin        `json:"plugins"`
+		Total         int                          `json:"total"`
+		NextCursor    string                       `json:"next_cursor"`
+		Counts        inventory.IDEInventoryCounts `json:"counts"`
+		Installations []inventory.IDEInstallation  `json:"installations"`
+		Plugins       []inventory.IDEPlugin        `json:"plugins"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != http.StatusOK {
 		t.Fatalf("ide-plugins = %d %s", w.Code, w.Body.String())
 	}
-	if page.Total != 2 || page.Counts.Total != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
+	if page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
 		t.Fatalf("ide-plugins page = %s", w.Body.String())
 	}
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?ai_only=true", nil))
-	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.Total != 1 || page.Counts.Total != 1 || page.Counts.AI != 1 || page.Plugins[0].PluginID != "example.raw-ai" || !page.Plugins[0].IsAI {
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.Total != 1 || page.Counts.Total != 1 || page.Counts.AI != 1 || page.Counts.Installations != 1 || len(page.Installations) != 1 || page.Installations[0].Product != "vscode" || page.Plugins[0].PluginID != "example.raw-ai" || !page.Plugins[0].IsAI {
 		t.Fatalf("ai_only = %s", w.Body.String())
 	}
 }
