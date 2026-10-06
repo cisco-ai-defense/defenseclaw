@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -231,12 +232,33 @@ type Store struct {
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
 
+	// progress receives the one-line notes Init writes while it applies
+	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
+	progress io.Writer
+
 	// findingLifecycleMu serializes the one mutable state projection and its
 	// process-local up/down-counter baselines. SQLite serializes these writers
 	// too, but owning the boundary here also keeps concurrent first scans from
 	// publishing two current-state baselines after a runtime restart/reload.
 	findingLifecycleMu      sync.Mutex
 	findingGaugeInitialized map[string]struct{}
+}
+
+// SetMigrationProgress sends the notes Init writes while it applies
+// migrations ("[audit] applying migration N: ...") to w instead of stderr.
+// The daemon keeps stderr, which is its time-stamped gateway.log; the
+// launcher and one-shot commands pass io.Discard, so an upgrade's installer
+// output does not carry an internal description per migration (GAP-0153).
+// Call it before Init.
+func (s *Store) SetMigrationProgress(w io.Writer) {
+	s.progress = w
+}
+
+func (s *Store) migrationProgress() io.Writer {
+	if s.progress != nil {
+		return s.progress
+	}
+	return os.Stderr
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -1913,7 +1935,7 @@ func (s *Store) Init() error {
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
-		fmt.Fprintf(os.Stderr, "[audit] applying migration %d: %s\n", ver, m.description)
+		fmt.Fprintf(s.migrationProgress(), "[audit] applying migration %d: %s\n", ver, m.description)
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
