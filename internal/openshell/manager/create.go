@@ -543,6 +543,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	rb.add("delete sandbox", func(ctx context.Context) error { return m.deleteCreated(ctx, gw, name) })
 	if _, err := gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
 		m.dropGateway(gw, err)
+		if tmpl.DriverConfig != nil && openshell.IsConflict(err) && strings.Contains(err.Error(), "driver config") {
+			return nil, bindMountsOff(spec, plan != nil, len(delivered.mounts) > 0, err)
+		}
 		return nil, upstream("create sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitReady(ctx, name)
@@ -1186,6 +1189,23 @@ func upstream(op string, err error) error {
 		code = sandboxapi.CodeInvalid
 	}
 	return &sandboxapi.Error{Code: code, Message: "OpenShell: " + op + " failed", Detail: err.Error()}
+}
+
+// bindMountsOff explains a create the gateway refused because its docker
+// driver takes no driver config (bind mounts are off in its gateway.toml):
+// a live run mounts the project folder, and a harness with per-run settings
+// (Claude Code, Codex) gets them as read-only mounts on a --copy run too.
+func bindMountsOff(spec *harness.Spec, project, settings bool, err error) error {
+	var what []string
+	if project {
+		what = append(what, "the project folder")
+	}
+	if settings {
+		what = append(what, "the "+spec.DisplayName+" settings DefenseClaw keeps read-only (on a --copy run too)")
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+		Message: "the local OpenShell gateway does not allow bind mounts, and this sandbox mounts " + strings.Join(what, " and "),
+		Detail:  "enable them with `defenseclaw sandbox doctor --fix` (OpenShell: " + err.Error() + ")"}
 }
 
 // settle waits for OpenShell's first settings poll after a start.

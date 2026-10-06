@@ -338,7 +338,8 @@ type Doctor struct {
 	// WantTelemetry is openshell.upstream_telemetry; nil only reports.
 	WantTelemetry *bool
 	// BindMountsOptional downgrades disabled bind mounts to a warning
-	// (copy-only workdir mode).
+	// (copy-only workdir mode, and no configured harness whose per-run
+	// settings are mounted).
 	BindMountsOptional bool
 	// MaxCPUMillis and MaxMemoryBytes are openshell.admin.max_resources (0:
 	// no maximum). The MicroVM driver gives every sandbox the gateway-wide
@@ -1704,7 +1705,8 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 		if r.BindMountsOptional {
 			mounts.Status = StatusWarn
 		}
-		mounts.Detail = fmt.Sprintf("disabled in %s; only --copy sandboxes work", st.TOMLPath)
+		mounts.Detail = fmt.Sprintf("disabled in %s: no Claude Code or Codex sandbox can start (DefenseClaw mounts their per-run settings read-only), "+
+			"and other harnesses run only on a copy", st.TOMLPath)
 		switch why := errors.Join(blocked, unverified); {
 		case why == nil && r.serviceMissing():
 			// A gateway run another way, which DefenseClaw cannot restart

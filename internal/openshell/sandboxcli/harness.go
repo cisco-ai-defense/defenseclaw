@@ -378,6 +378,22 @@ func (a *App) claudeSetupToken(spec *harness.Spec) string {
 	return "`claude setup-token`"
 }
 
+// mountedSettingsHarnesses are the display names of those of the harnesses
+// names whose per-run DefenseClaw settings a docker sandbox takes as
+// read-only bind mounts (Claude Code, Codex): on a docker gateway without
+// bind mounts none of their sandboxes can start, a --copy run included.
+func mountedSettingsHarnesses(names []string) []string {
+	var out []string
+	for _, h := range names {
+		if s, ok := harness.Get(h); ok {
+			if _, mounted := s.Provider.(connector.SandboxRunConfigProvider); mounted {
+				out = append(out, s.DisplayName)
+			}
+		}
+	}
+	return out
+}
+
 // codexAuthKey reads the API key a `codex login --with-api-key` stored.
 // A ChatGPT login (tokens only) is not shared.
 func (a *App) codexAuthKey() string {

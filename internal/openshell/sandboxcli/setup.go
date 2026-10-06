@@ -292,7 +292,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 		changes = microVMChanges(rep, state, a.Geteuid())
 		copyOnly = true
 	} else if !o.NoMounts && !state.BindMounts.Enabled() {
-		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder)", true, assume)
+		yes, err := a.ask("Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; "+
+			"DefenseClaw mounts only the launch folder and the read-only settings "+strings.Join(mountedSettingsHarnesses(harness.Names()), " and ")+
+			" sandboxes need)", true, assume)
 		if err != nil {
 			return err
 		}
@@ -468,8 +470,12 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) error {
 			"it runs sandboxes in MicroVMs " + once)
 	case microVM:
 		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs " + once)
+	case copyOnly && !state.BindMounts.Enabled() && !changes.EnableBindMounts:
+		a.warn("without bind mounts no " + strings.Join(mountedSettingsHarnesses(harness.Names()), " or ") +
+			" sandbox can start, a `--copy` run included: DefenseClaw mounts their per-run settings read-only. " +
+			"Other harnesses run on a copy; `" + CommandName + " doctor --fix` enables bind mounts")
 	case copyOnly:
-		a.note("without bind mounts every run works on a copy (`--copy`)")
+		a.note("without project mounts every run works on a copy (`--copy`)")
 	}
 
 	// 4. Harnesses and credentials. --harness adds to openshell.harnesses.

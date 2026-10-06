@@ -109,7 +109,7 @@ OpenShell install plan
               starts the openshell-gateway user service (systemd --user)
 Run this plan? [y/N] y
   ✓ OpenShell 0.1.1 installed, gateway running
-Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw only ever mounts the launch folder) [Y/n]
+Allow sandboxes to mount the project folder you launch from? (enables bind mounts on your local OpenShell gateway; DefenseClaw mounts only the launch folder and the read-only settings Claude Code and Codex sandboxes need) [Y/n]
 Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env and restarts the OpenShell gateway; no sandbox runs on it now) [Y/n]
   OpenShell gateway configuration changes
     edit ~/.config/openshell/gateway.toml (a timestamped backup is kept)
@@ -144,7 +144,9 @@ Build the Claude Code image now? (the first build downloads about 3 GB; otherwis
   `~/.config/openshell/gateway.toml`, and turns OpenShell's anonymous usage
   telemetry off in `gateway.env`, each with a timestamped backup, then
   restarts the gateway once. Say no to mounts, or pass `--no-mounts`, and
-  every run works on a copy.
+  no Claude Code or Codex sandbox can start (DefenseClaw mounts their
+  per-run settings read-only, on a `--copy` run too); other harnesses run
+  on a copy.
 - **DefenseClaw's config** gets `openshell.enabled: true` and the harnesses
   you set up in `openshell.harnesses`.
 - **The harness images** are built in Docker, and each is checked to prove
