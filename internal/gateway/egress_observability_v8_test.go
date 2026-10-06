@@ -107,7 +107,17 @@ func TestGatewayEgressV8EmitsGeneratedLogAndMetricWithoutLegacyPath(t *testing.T
 	if err != nil || len(rows) < 2 {
 		t.Fatalf("event rows=%d err=%v emitErr=%v, want generated egress plus bootstrap", len(rows), err, runtime.emitErr)
 	}
-	row := rows[0]
+	var row audit.Event
+	matches := 0
+	for _, candidate := range rows {
+		if candidate.RequestID == "request-egress-1" {
+			row = candidate
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("generated egress rows=%d, want exactly one; rows=%+v", matches, rows)
+	}
 	if row.Action != string(gatewaylog.EventEgress) || !row.Enforced ||
 		row.RequestID != "request-egress-1" {
 		t.Fatalf("generated egress row=%+v", row)

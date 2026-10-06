@@ -285,13 +285,15 @@ function global:Get-Content {
     )
     script = tmp_path / f"resolver-{shell_name.replace('.', '-')}.ps1"
     script.write_text(probe + instrumented, encoding="utf-8")
+    # Cold Windows PowerShell module loading and ACL operations can exceed 30s
+    # on busy runners. The injected throw prevents the first network request.
     completed = subprocess.run(
         [shell, "-NoProfile", "-NonInteractive", "-File", str(script)],
         capture_output=True,
         text=True,
         check=False,
         env=environment,
-        timeout=30,
+        timeout=120,
     )
 
     diagnostic = completed.stdout + completed.stderr

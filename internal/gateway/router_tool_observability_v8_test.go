@@ -20,7 +20,7 @@ import (
 
 func eventRouterToolV8BootstrapRaw(dataDir, endpoint string, traces, metrics bool) []byte {
 	return []byte(fmt.Sprintf(
-		"config_version: 8\ndata_dir: %q\nobservability:\n  metric_policy:\n    export_interval_seconds: 1\n  buckets:\n    tool.activity:\n      collect: {logs: true, traces: %t, metrics: %t}\n    guardrail.evaluation:\n      collect: {logs: true, traces: false, metrics: %t}\n    security.finding:\n      collect: {logs: true, traces: false, metrics: %t}\n  destinations:\n    - name: tool-otlp\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls: {insecure: true}\n      network_safety: {allow_private_networks: true}\n      batch: {max_export_batch_size: 16, scheduled_delay_ms: 10}\n      send: {signals: [traces, metrics], buckets: ['*']}\n",
+		"config_version: 8\ndata_dir: %q\nobservability:\n  metric_policy:\n    export_interval_seconds: 1\n    temporality: delta\n  buckets:\n    tool.activity:\n      collect: {logs: true, traces: %t, metrics: %t}\n    guardrail.evaluation:\n      collect: {logs: true, traces: false, metrics: %t}\n    security.finding:\n      collect: {logs: true, traces: false, metrics: %t}\n  destinations:\n    - name: tool-otlp\n      kind: otlp\n      endpoint: %q\n      protocol: http/protobuf\n      tls: {insecure: true}\n      network_safety: {allow_private_networks: true}\n      batch: {max_export_batch_size: 16, scheduled_delay_ms: 10}\n      send: {signals: [traces, metrics], buckets: ['*']}\n",
 		dataDir, traces, metrics, metrics, metrics, endpoint,
 	))
 }
@@ -114,31 +114,30 @@ func TestEventRouterToolV8PairsConcurrentSameNameCallsOnlyByCallID(t *testing.T)
 	}
 	_, metricRequests := capture.snapshot()
 	deadline := time.Now().Add(3 * time.Second)
+	// Separate delta export windows may each contain one of the calls.
 	for time.Now().Before(deadline) &&
-		eventRouterToolMetricMaximum(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls) < 2 {
+		eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls) < 2 {
 		time.Sleep(10 * time.Millisecond)
 		_, metricRequests = capture.snapshot()
 	}
 	points := hookModelV8MetricPoints(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
-	maximum := eventRouterToolMetricMaximum(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
-	if maximum != 2 {
-		t.Errorf("tool call metric maximum=%v points=%+v want=2", maximum, points)
+	total := eventRouterToolMetricTotal(metricRequests, observability.TelemetryInstrumentDefenseClawToolCalls)
+	if total != 2 {
+		t.Errorf("tool call metric total=%v points=%+v want=2", total, points)
 	}
 	assertEventRouterToolLocalLogs(t, databasePath,
 		[]string{"private-call-one", "private-call-two", "private-result-one", "private-result-two"})
 }
 
-func eventRouterToolMetricMaximum(
+func eventRouterToolMetricTotal(
 	requests []*collectormetricspb.ExportMetricsServiceRequest,
 	name string,
 ) float64 {
-	maximum := float64(0)
+	total := float64(0)
 	for _, point := range hookModelV8MetricPoints(requests, name) {
-		if point.value > maximum {
-			maximum = point.value
-		}
+		total += point.value
 	}
-	return maximum
+	return total
 }
 
 func TestEventRouterToolV8GeneratedLogsBuildAndPersist(t *testing.T) {
