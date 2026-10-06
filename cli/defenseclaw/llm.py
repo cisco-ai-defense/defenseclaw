@@ -662,6 +662,8 @@ _PROVIDER_LABELS = {
     "huggingface": "Hugging Face",
     "vllm": "vLLM",
     "lm_studio": "LM Studio",
+    "apple-fm": "Apple Foundation Models",
+    "apple_fm": "Apple Foundation Models",
 }
 
 
@@ -694,6 +696,22 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     are accepted; an unset model id returns ``(False, ...)`` because
     LiteLLM cannot route a blank model.
     """
+    model = (getattr(llm_config, "model", "") or "").strip()
+    if not model:
+        return (False, "no model configured (set llm.model or pass --model)")
+    provider = (getattr(llm_config, "provider", "") or "").strip().lower()
+    if provider in {"apple-fm", "apple_fm"} or model.lower().startswith(
+        ("apple-fm/", "apple_fm/")
+    ):
+        # LiteLLM cannot reach the on-device model. Returning success
+        # here made doctor and the post-save wizard report a health
+        # pass for a stock gateway that fails closed.
+        return (
+            False,
+            "apple-fm was not probed; LiteLLM does not call the on-device "
+            "model. The gateway does, when built with CGO_ENABLED=1 -tags applefm",
+        )
+
     try:
         import litellm  # noqa: PLC0415
     except ImportError:
@@ -702,11 +720,6 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
             "litellm not installed — repair the managed DefenseClaw "
             "installation; source checkouts: uv sync",
         )
-
-    model = (getattr(llm_config, "model", "") or "").strip()
-    if not model:
-        return (False, "no model configured (set llm.model or pass --model)")
-    provider = (getattr(llm_config, "provider", "") or "").strip().lower()
     if provider and "/" not in model:
         model = f"{provider}/{model}"
     api_key = ""

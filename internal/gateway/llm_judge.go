@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -104,6 +105,10 @@ type LLMJudge struct {
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
+	// unavailable is set when apple-fm was selected and this process
+	// cannot run the on-device bridge. A nil judge would drop the
+	// semantic checks and let judge-first fall back to regex.
+	unavailable error
 	// traceV8Authoritative remains true after a v8 runtime detaches. A nil
 	// runtime during shutdown/reload means "do not start a new span", not
 	// permission to resurrect the legacy v7 path.
@@ -180,6 +185,16 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 	effLLM.APIKeyEnv = ""
 	provider, err := NewProviderForLLMConfig(&effLLM, providers)
 	if err != nil {
+		if errors.Is(err, errAppleFMNotLinked) {
+			fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: apple-fm bridge is not linked (%v); inspections will block\n", err)
+			return &LLMJudge{
+				cfg:          cfg,
+				model:        model,
+				providerName: llm.ProviderPrefix(),
+				rp:           rp,
+				unavailable:  err,
+			}
+		}
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
 		return nil
 	}
@@ -233,6 +248,9 @@ func llmJudgeAllowsEmptyAPIKey(llm config.LLMConfig, providers *configs.Provider
 func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName string) *ScanVerdict {
 	if j == nil {
 		return allowVerdict("llm-judge")
+	}
+	if j.unavailable != nil {
+		return appleFMUnavailableVerdict(j.unavailable)
 	}
 	// Reentrancy is per-context: when the judge's own LLM call loops back
 	// through the proxy (e.g. judge provider base_url points at this
@@ -669,6 +687,20 @@ func InvalidateJudgeVerdictCache() {
 	}
 }
 
+func appleFMUnavailableVerdict(err error) *ScanVerdict {
+	reason := "apple-fm judge is not available"
+	if err != nil {
+		reason = err.Error()
+	}
+	return &ScanVerdict{
+		Action:   "block",
+		Severity: "CRITICAL",
+		Reason:   reason,
+		Findings: []string{"APPLE-FM-UNAVAILABLE"},
+		Scanner:  "llm-judge",
+	}
+}
+
 func judgeGenAISystem(model string) string {
 	if i := strings.Index(model, "/"); i > 0 {
 		return strings.ToLower(model[:i])
@@ -698,15 +730,20 @@ func judgeExtraParams(model string) map[string]any {
 }
 
 func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind string) *ChatRequest {
-	temperature := 0.0
-	return &ChatRequest{
+	req := &ChatRequest{
 		Messages:       messages,
-		MaxTokens:      intPtr(maxTok),
-		Temperature:    &temperature,
 		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
 		ExtraParams:    judgeExtraParams(j.model),
 	}
+	// The pinned Apple FM bridge ignores max tokens and temperature and
+	// the provider rejects a request that sets them.
+	if !isAppleFMProvider(j.providerName, j.model) {
+		temperature := 0.0
+		req.MaxTokens = intPtr(maxTok)
+		req.Temperature = &temperature
+	}
+	return req
 }
 
 func judgeResponseFormat(kind string) json.RawMessage {
@@ -2234,6 +2271,9 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 // Returns an allow verdict if the judge is disabled, not configured, or
 // tool_injection is false.
 func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *ScanVerdict {
+	if j != nil && j.unavailable != nil && j.cfg != nil && j.cfg.ToolInjection {
+		return appleFMUnavailableVerdict(j.unavailable)
+	}
 	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
 	if !eligible {
 		return allowVerdict("llm-judge-tool")

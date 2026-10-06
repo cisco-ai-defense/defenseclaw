@@ -62,6 +62,8 @@ from defenseclaw.registries.ssrf import (
     resolve_and_pin,
 )
 from defenseclaw.scanner._llm_env import (
+    APPLE_FM_SCANNER_SKIP,
+    apple_fm_selected,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
@@ -1284,12 +1286,18 @@ class MCPScannerWrapper:
             if llm_analyzer is not None:
                 selected.append(llm_analyzer)
         elif model:
-            key_name = self._llm.api_key_env or "DEFENSECLAW_LLM_KEY"
-            print(
-                "warning: LLM analyzer skipped: "
-                f"{key_name} is not configured; continuing with local analyzers",
-                file=sys.stderr,
-            )
+            if apple_fm_selected(self._llm, model):
+                print(
+                    f"warning: LLM analyzer skipped: {APPLE_FM_SCANNER_SKIP}",
+                    file=sys.stderr,
+                )
+            else:
+                key_name = self._llm.api_key_env or "DEFENSECLAW_LLM_KEY"
+                print(
+                    "warning: LLM analyzer skipped: "
+                    f"{key_name} is not configured; continuing with local analyzers",
+                    file=sys.stderr,
+                )
         # If the SDK enum exposes neither name, defer to its own default
         # (None = all) rather than handing it an empty list.
         return selected or None

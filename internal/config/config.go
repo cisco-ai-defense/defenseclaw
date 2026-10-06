@@ -890,11 +890,12 @@ func (l LLMConfig) ProviderPrefix() string {
 
 // IsLocalProvider returns true when the resolved provider prefix points
 // at an on-box runtime that doesn't require an API key (ollama, vllm,
-// lm_studio). Local providers let the wizard skip the key prompt and
-// let `defenseclaw doctor` skip the "missing key" warning.
+// lm_studio, apple-fm). Local providers let the wizard skip the key
+// prompt and let `defenseclaw doctor` skip the "missing key" warning.
+// apple-fm is the on-device Apple Foundation Model and has no base URL.
 func (l LLMConfig) IsLocalProvider() bool {
 	switch l.ProviderPrefix() {
-	case "ollama", "vllm", "lm_studio", "lmstudio", "local":
+	case "ollama", "vllm", "lm_studio", "lmstudio", "local", "apple-fm", "apple_fm":
 		return true
 	}
 	if l.BaseURL != "" {
@@ -956,6 +957,8 @@ var recognizedLLMProviders = map[string]struct{}{
 	"lm_studio":     {},
 	"lmstudio":      {},
 	"local":         {},
+	"apple-fm":      {},
+	"apple_fm":      {},
 }
 
 // warnedPrefixes keeps one-shot-per-process warning state.
@@ -977,7 +980,7 @@ func maybeWarnUnknownProvider(prefix, componentPath string) {
 		"expected one of openai/anthropic/azure/gemini/vertex_ai/bedrock/"+
 		"groq/mistral/cohere/ollama/vllm/deepseek/xai/fireworks_ai/"+
 		"perplexity/huggingface/replicate/openrouter/together_ai/cerebras/"+
-		"lm_studio/local. Gateway (Bifrost) and scanners (LiteLLM) may "+
+		"lm_studio/local/apple-fm. Gateway (Bifrost) and scanners (LiteLLM) may "+
 		"disagree on how to route this model",
 		prefix, componentPath)
 }

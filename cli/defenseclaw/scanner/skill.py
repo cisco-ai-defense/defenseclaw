@@ -37,6 +37,8 @@ from defenseclaw.config import (
 )
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner._llm_env import (
+    APPLE_FM_SCANNER_SKIP,
+    apple_fm_selected,
     inject_llm_env,
     litellm_model,
     llm_analyzer_ready,
@@ -271,12 +273,18 @@ class SkillScannerWrapper:
                 if cfg.llm_consensus_runs > 0:
                     build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
             elif effective_model:
-                key_name = llm.api_key_env or "DEFENSECLAW_LLM_KEY"
-                print(
-                    "warning: LLM analyzer skipped: "
-                    f"{key_name} is not configured; continuing with local analyzers",
-                    file=sys.stderr,
-                )
+                if apple_fm_selected(llm, effective_model):
+                    print(
+                        f"warning: LLM analyzer skipped: {APPLE_FM_SCANNER_SKIP}",
+                        file=sys.stderr,
+                    )
+                else:
+                    key_name = llm.api_key_env or "DEFENSECLAW_LLM_KEY"
+                    print(
+                        "warning: LLM analyzer skipped: "
+                        f"{key_name} is not configured; continuing with local analyzers",
+                        file=sys.stderr,
+                    )
             else:
                 _log.info(
                     "skill-scanner: use_llm requested but no model resolved "

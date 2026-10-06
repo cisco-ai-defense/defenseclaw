@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.10
+	github.com/blacktop/go-foundationmodels v0.1.8
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/cel-go v0.30.0
 	github.com/google/uuid v1.6.0

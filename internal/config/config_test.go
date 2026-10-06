@@ -1922,6 +1922,7 @@ func TestRecognizedLLMProvidersLockstep(t *testing.T) {
 		"fireworks_ai", "perplexity", "huggingface", "replicate",
 		"openrouter", "together_ai", "cerebras",
 		"lm_studio", "lmstudio", "local",
+		"apple-fm", "apple_fm",
 	}
 	for _, p := range mustHave {
 		if _, ok := recognizedLLMProviders[p]; !ok {

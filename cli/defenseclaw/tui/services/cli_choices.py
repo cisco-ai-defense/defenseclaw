@@ -90,6 +90,7 @@ WIZARD_LLM_PROVIDERS: tuple[str, ...] = (
     "ollama",
     "vllm",
     "lm_studio",
+    "apple-fm",
 )
 
 # Subset used by the LLM provider override field (``setup llm``). The
@@ -112,6 +113,7 @@ LLM_PROVIDERS: tuple[str, ...] = (
     "ollama",
     "vllm",
     "lm_studio",
+    "apple-fm",
 )
 LLM_OVERRIDE_PROVIDERS: tuple[str, ...] = ("", *LLM_PROVIDERS)
 

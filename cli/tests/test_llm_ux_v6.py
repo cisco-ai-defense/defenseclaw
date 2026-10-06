@@ -221,6 +221,34 @@ class TestInstanceOverlay(unittest.TestCase):
             self.assertEqual(resolved.base_url, "https://llm.internal:8443")
             self.assertEqual(resolved.api_key_env, "ACME_KEY")
 
+    def test_apple_fm_setup_drops_named_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            overlay = {
+                "providers": [
+                    {
+                        "name": "acme-internal",
+                        "base_provider_type": "openai",
+                        "base_url": "https://llm.internal:8443",
+                        "tls": {"insecure_skip_verify": True},
+                    }
+                ]
+            }
+            with open(os.path.join(d, "custom-providers.json"), "w", encoding="utf-8") as f:
+                json.dump(overlay, f)
+            cfg = _make_cfg(d)
+            cfg.llm.instance_name = "acme-internal"
+            cfg.llm.base_url = ""
+            cmd_setup._apply_apple_fm_llm(cfg.llm)
+            cfg.save()
+            resolved = _load_via_env(d).resolve_llm("")
+            self.assertEqual(resolved.provider, "apple-fm")
+            self.assertEqual(resolved.model, "apple-fm/system")
+            self.assertEqual(resolved.instance_name, "")
+            self.assertEqual(resolved.base_url, "")
+            self.assertIsNone(resolved.tls)
+            self.assertEqual(resolved.api_key, "")
+            self.assertEqual(resolved.api_key_env, "")
+
 
 class TestLLMPickerNonInteractive(unittest.TestCase):
     """Every picker enforces the non-interactive contract."""
@@ -757,6 +785,16 @@ class TestLLMPing(unittest.TestCase):
         ok, msg = llm_mod.ping(LLMConfig())
         self.assertFalse(ok)
         self.assertIn("no model", msg)
+
+    def test_ping_does_not_pass_apple_fm_without_a_probe(self) -> None:
+        from defenseclaw import llm as llm_mod
+
+        ok, msg = llm_mod.ping(LLMConfig(provider="apple-fm", model="apple-fm/system"))
+        self.assertFalse(ok)
+        self.assertIn("not probed", msg)
+        ok, msg = llm_mod.ping(LLMConfig(provider="apple_fm", model="apple_fm/system"))
+        self.assertFalse(ok)
+        self.assertIn("not probed", msg)
 
     def test_ping_swallows_litellm_errors(self) -> None:
         """A provider failure must come back as ``(False, msg)``, not

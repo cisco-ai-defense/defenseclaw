@@ -24,7 +24,12 @@ from datetime import datetime, timedelta, timezone
 
 from defenseclaw.config import LLMConfig
 from defenseclaw.models import Finding, ScanResult
-from defenseclaw.scanner._llm_env import litellm_model, llm_analyzer_ready
+from defenseclaw.scanner._llm_env import (
+    APPLE_FM_SCANNER_SKIP,
+    apple_fm_selected,
+    litellm_model,
+    llm_analyzer_ready,
+)
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import (
     PluginScanOptions,
@@ -170,16 +175,22 @@ class PluginScannerWrapper:
             if llm_ready:
                 override["enabled"] = True
             elif model_configured:
-                key_name = (
-                    self._llm.api_key_env
-                    if self._llm and self._llm.api_key_env
-                    else "DEFENSECLAW_LLM_KEY"
-                )
-                print(
-                    "warning: LLM analyzer skipped: "
-                    f"{key_name} is not configured; continuing with local analyzers",
-                    file=sys.stderr,
-                )
+                if apple_fm_selected(readiness_llm):
+                    print(
+                        f"warning: LLM analyzer skipped: {APPLE_FM_SCANNER_SKIP}",
+                        file=sys.stderr,
+                    )
+                else:
+                    key_name = (
+                        self._llm.api_key_env
+                        if self._llm and self._llm.api_key_env
+                        else "DEFENSECLAW_LLM_KEY"
+                    )
+                    print(
+                        "warning: LLM analyzer skipped: "
+                        f"{key_name} is not configured; continuing with local analyzers",
+                        file=sys.stderr,
+                    )
         elif use_llm:
             if llm_ready:
                 override["enabled"] = True
@@ -189,6 +200,12 @@ class PluginScannerWrapper:
                     "scanners.plugin — running static (YARA/heuristic) analysis "
                     "only. Set llm.model or scanners.plugin.llm to enable the "
                     "semantic LLM lane.",
+                    file=sys.stderr,
+                )
+            elif apple_fm_selected(readiness_llm):
+                print(
+                    "warning: --use-llm requested but "
+                    f"{APPLE_FM_SCANNER_SKIP}",
                     file=sys.stderr,
                 )
             else:
