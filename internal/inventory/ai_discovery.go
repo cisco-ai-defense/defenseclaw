@@ -669,12 +669,10 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 	// to the embedded default; unreadable or invalid overrides
 	// degrade to defaults with a stderr diagnostic because this
 	// constructor cannot currently return initialization errors.
-	policyPath := opts.ConfidencePolicyPath
-	if refusal := confidencePolicyRefusal(policyPath, opts.ConfidencePolicyDigest, opts.StandaloneEnterprise); refusal != "" {
-		fmt.Fprintf(os.Stderr, "[ai-discovery] confidence policy %s not applied: %s; the built-in default applies\n", policyPath, refusal)
-		policyPath = ""
+	policy, refusal, err := loadPinnedConfidencePolicy(opts.ConfidencePolicyPath, opts.ConfidencePolicyDigest, opts.StandaloneEnterprise)
+	if refusal != "" {
+		fmt.Fprintf(os.Stderr, "[ai-discovery] confidence policy %s not applied: %s; the built-in default applies\n", opts.ConfidencePolicyPath, refusal)
 	}
-	policy, err := LoadConfidencePolicyFromFile(policyPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ai-discovery] confidence policy degraded to defaults: %v\n", err)
 		if fallback, fallbackErr := LoadDefaultConfidencePolicy(); fallbackErr == nil {
@@ -690,22 +688,52 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 	return svc
 }
 
-// confidencePolicyRefusal is why the confidence policy file at path may not
-// apply under ai_discovery.confidence_policy_digest ("" when it may, or when
-// there is no file and the built-in default applies anyway).
-func confidencePolicyRefusal(path, digest string, required bool) string {
+// loadPinnedConfidencePolicy loads the confidence policy at path under
+// ai_discovery.confidence_policy_digest. The digest is checked on the same
+// bytes that are parsed, so the file cannot change between the check and the
+// load. A refused file (digest mismatch, unpinned on a managed device, or a
+// pinned file that cannot be read) returns the built-in default and the
+// reason. A missing unpinned file is the built-in default with no reason.
+func loadPinnedConfidencePolicy(path, digest string, required bool) (ConfidencePolicy, string, error) {
 	if strings.TrimSpace(path) == "" {
-		return ""
+		policy, err := LoadDefaultConfidencePolicy()
+		return policy, "", err
 	}
-	raw, err := os.ReadFile(path)
+	pinned := strings.ToLower(strings.TrimSpace(digest))
+	raw, err := readConfidencePolicyBytes(path)
 	if err != nil {
-		return ""
+		policy, defaultErr := LoadDefaultConfidencePolicy()
+		switch {
+		case pinned != "":
+			return policy, "the pinned file cannot be read", defaultErr
+		case errors.Is(err, os.ErrNotExist):
+			return policy, "", defaultErr
+		case required:
+			return policy, "the file cannot be read", defaultErr
+		}
+		return ConfidencePolicy{}, "", fmt.Errorf("confidence policy: read %s: %w", path, err)
 	}
-	refusal := pinRefusal(strings.ToLower(strings.TrimSpace(digest)), raw, required)
-	if refusal != "" && strings.TrimSpace(digest) == "" {
-		refusal = "a managed device applies it only when ai_discovery.confidence_policy_digest pins it"
+	if refusal := pinRefusal(pinned, raw, required); refusal != "" {
+		if pinned == "" {
+			refusal = "a managed device applies it only when ai_discovery.confidence_policy_digest pins it"
+		}
+		policy, err := LoadDefaultConfidencePolicy()
+		return policy, refusal, err
 	}
-	return refusal
+	policy, err := LoadConfidencePolicyFromBytes(raw, path)
+	return policy, "", err
+}
+
+// readConfidencePolicyBytes reads at most one byte past the policy size cap,
+// so LoadConfidencePolicyFromBytes reports an oversized file without the
+// whole file being read.
+func readConfidencePolicyBytes(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, confidencePolicyMaxBytes+1))
 }
 
 // buildSignatureSpecificityIndex projects the SignatureID ->

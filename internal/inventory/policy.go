@@ -19,7 +19,6 @@ package inventory
 import (
 	_ "embed"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -198,54 +197,6 @@ func LoadConfidencePolicyFromBytes(raw []byte, source string) (ConfidencePolicy,
 		return ConfidencePolicy{}, err
 	}
 	merged := mergeConfidencePolicy(base, override, source)
-	if err := finalizeConfidencePolicy(&merged); err != nil {
-		return ConfidencePolicy{}, err
-	}
-	return merged, nil
-}
-
-// LoadConfidencePolicyFromFile reads `path` and deep-merges it on
-// top of the embedded default. Missing fields in the override fall
-// back to the default; unknown top-level keys (or unknown detector /
-// penalty names) cause a hard error so a typo never silently breaks
-// scoring.
-func LoadConfidencePolicyFromFile(path string) (ConfidencePolicy, error) {
-	base, err := LoadDefaultConfidencePolicy()
-	if err != nil {
-		return ConfidencePolicy{}, err
-	}
-	if path == "" {
-		return base, nil
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		// Missing override file is not an error -- the default
-		// policy is the operator's intended behavior. Other
-		// stat failures (permission, etc.) are surfaced.
-		if os.IsNotExist(err) {
-			return base, nil
-		}
-		return ConfidencePolicy{}, fmt.Errorf("confidence policy: stat %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return ConfidencePolicy{}, fmt.Errorf("confidence policy: %s is a directory", path)
-	}
-	if info.Size() > confidencePolicyMaxBytes {
-		return ConfidencePolicy{}, fmt.Errorf(
-			"confidence policy: %s exceeds %d bytes", path, confidencePolicyMaxBytes)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return ConfidencePolicy{}, fmt.Errorf("confidence policy: read %s: %w", path, err)
-	}
-	if len(raw) == 0 {
-		return base, nil
-	}
-	override, err := parseConfidencePolicy(raw, path, false)
-	if err != nil {
-		return ConfidencePolicy{}, err
-	}
-	merged := mergeConfidencePolicy(base, override, path)
 	if err := finalizeConfidencePolicy(&merged); err != nil {
 		return ConfidencePolicy{}, err
 	}

@@ -485,6 +485,34 @@ func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
 	}
 }
 
+func TestConfidencePolicyPinnedByDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "confidence.yaml")
+	body := "version: 1\ndetectors:\n  process:\n    identity_lr: 12\n    presence_lr: 75\n"
+	mustWrite(t, path, body)
+	sum := sha256.Sum256([]byte(body))
+	pin := "sha256:" + hex.EncodeToString(sum[:])
+	identityLR := func(digest string, required bool) (float64, string) {
+		policy, refusal, err := loadPinnedConfidencePolicy(path, digest, required)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return policy.Detectors["process"].IdentityLR, refusal
+	}
+	if lr, refusal := identityLR(pin, true); lr != 12 || refusal != "" {
+		t.Fatalf("pinned load = %v %q, want the file applied", lr, refusal)
+	}
+	if lr, refusal := identityLR("sha256:"+strings.Repeat("0", 64), false); lr == 12 || refusal == "" {
+		t.Fatalf("mismatched pin = %v %q, want the built-in default", lr, refusal)
+	}
+	// A pinned file that cannot be read is refused, never loaded later.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if lr, refusal := identityLR(pin, true); lr == 12 || refusal == "" {
+		t.Fatalf("unreadable pinned file = %v %q, want a refusal", lr, refusal)
+	}
+}
+
 func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
 	tmp := t.TempDir()
 	mustWrite(t, filepath.Join(tmp, "signature-packs", "dup.json"), `{
