@@ -130,10 +130,6 @@ function pickVerdictEntrypoint(domain: string): string {
       return 'defenseclaw/admission/verdict';
     case 'guardrail':
       return 'defenseclaw/guardrail/severity';
-    case 'firewall':
-      return 'defenseclaw/firewall/action';
-    case 'audit':
-      return 'defenseclaw/audit/retain';
     default:
       return `defenseclaw/${domain}/verdict`;
   }
@@ -145,10 +141,6 @@ function pickReasonEntrypoint(domain: string): string | null {
       return 'defenseclaw/admission/reason';
     case 'guardrail':
       return 'defenseclaw/guardrail/reason';
-    case 'firewall':
-      return 'defenseclaw/firewall/rule_name';
-    case 'audit':
-      return 'defenseclaw/audit/retain_reason';
     default:
       return null;
   }

@@ -9073,8 +9073,9 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     if getattr(cfg, "_source_config_version", 0) >= CONFIG_VERSION_V9:
         policy_dir = getattr(cfg, "policy_dir", "") or ""
         stale = []
-        # data-sandbox.json stays: `defenseclaw-gateway policy domains` and
-        # `policy evaluate-firewall` still read it.
+        # The 0.8 firewall.rego, audit.rego and data-sandbox.json are not
+        # reported: nothing reads them, and the migration removes the
+        # unmodified copies.
         for base in (os.path.join(policy_dir, "rego"), policy_dir):
             candidate = os.path.join(base, "data.json")
             if policy_dir and os.path.isfile(candidate) and candidate not in stale:
