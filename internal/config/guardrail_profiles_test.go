@@ -4,6 +4,7 @@
 package config
 
 import (
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -136,6 +137,12 @@ func TestDerivedForProfilePrecedence(t *testing.T) {
 	}
 	if _, err := base.DerivedForProfile("missing"); err == nil {
 		t.Error("DerivedForProfile(missing) = nil error, want an error")
+	}
+	// A derived configuration reads the base's profile table: copying it
+	// into every derived configuration made deriving P profiles quadratic
+	// in P (GAP-0118: 2000 profiles took 68 s at every start and reload).
+	if reflect.ValueOf(derived.Guardrail.Profiles).Pointer() != reflect.ValueOf(base.Guardrail.Profiles).Pointer() || len(derived.Guardrail.Profiles) != 1 {
+		t.Error("the derived configuration copied the profile table instead of sharing it")
 	}
 }
 

@@ -651,6 +651,19 @@ done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The downloaded gateway does not report version ${VERSION}"
 
+# When another account's process holds this account's API port, the upgrade
+# only fails at the gateway restart, after the build, the migration and the
+# swap. The staged gateway (a release that has the check) names it first
+# (GAP-0130). A gateway that was not running is not restarted, so it is not checked.
+if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \
+    && "${STAGING}/bin/defenseclaw-gateway" check-api-port --help >/dev/null 2>&1; then
+    if ! port_problem="$("${STAGING}/bin/defenseclaw-gateway" check-api-port 2>&1)"; then
+        rm -rf "${STAGING}"
+        drop_new_uv
+        die "${port_problem#Error: }; nothing was changed"
+    fi
+fi
+
 info "Building the Python environment (a first install can take several minutes)"
 make_venv() {
     local venv="$1"
