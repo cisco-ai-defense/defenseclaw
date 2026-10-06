@@ -1720,6 +1720,13 @@ func buildInitialSidecarJudge(
 	return judge, nil
 }
 
+// generationUnchanged reports a rebuild that matches the live generation: the
+// same effective digest and the same reason (if any) the Rego policy did not
+// load, so a new failure to load it is published, not swallowed.
+func generationUnchanged(live, next *Generation) bool {
+	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError
+}
+
 func (s *Sidecar) applyConfigReloadSnapshot(
 	ctx context.Context,
 	oldCfg, newCfg *config.Config,
@@ -1846,8 +1853,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		recordGenerationBuildError(err)
 		return fmt.Errorf("config reload generation: %w", err)
 	}
-	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets &&
-		previousGen != nil && previousGen.Digest == nextGen.Digest {
+	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
 	}
 	// Rule packs and the judge (which embeds the active pack's judge

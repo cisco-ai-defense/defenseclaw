@@ -16196,14 +16196,14 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     """Auto-restart the defenseclaw-gateway after any ``setup`` subcommand
     that mutates config.yaml.
 
-    Motivation: the running gateway reads ``config.yaml`` at startup
-    only. Before this hook, operators could run e.g.
-    ``defenseclaw setup splunk`` and still see ``telemetry — disabled in
-    config`` from ``defenseclaw doctor`` because the sidecar was
-    reporting its stale in-memory view. We now trigger a restart
-    automatically whenever a setup subcommand actually writes to
-    config.yaml (detected via mtime delta captured in the group
-    callback above).
+    Motivation: the gateway applies a change to most keys from its next
+    config generation, but reads a few (listeners, a connector's hooks)
+    only at startup. Operators could run e.g. ``defenseclaw setup
+    guardrail`` and still see the old behaviour from the running
+    sidecar. We trigger a restart whenever a setup subcommand writes
+    one of those keys to config.yaml (detected from the file's bytes
+    before and after, captured in the group callback above); a hot key
+    needs none.
 
     Skip conditions:
       * ``app.cfg`` isn't loaded (e.g. ``setup --help``, or a recovery

@@ -133,3 +133,18 @@ func TestEffectivePolicyDigestMaterializesDefaults(t *testing.T) {
 		t.Fatal("guardrail.connectors.codex.enabled: true changed the digest")
 	}
 }
+
+// A rebuild with the live digest is unchanged only while the Rego policy
+// fails (or loads) the same way; a new load failure is published (GAP-0043).
+func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {
+	live := &Generation{Digest: "sha256:a", opaError: "no .rego files found"}
+	if !generationUnchanged(live, &Generation{Digest: "sha256:a", opaError: "no .rego files found"}) {
+		t.Fatal("an identical rebuild was not unchanged")
+	}
+	if generationUnchanged(live, &Generation{Digest: "sha256:a", opaError: "parse p0-bad.rego"}) {
+		t.Fatal("a new OPA load failure was swallowed as unchanged")
+	}
+	if generationUnchanged(nil, live) || generationUnchanged(live, &Generation{Digest: "sha256:b", opaError: live.opaError}) {
+		t.Fatal("a different generation was unchanged")
+	}
+}
