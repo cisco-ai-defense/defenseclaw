@@ -495,14 +495,20 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 // missing pack names a source that exists before the first install
 // (GAP-1429: the hint named the vendor folder only an install creates).
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
 	cases := map[string]struct {
 		replace, with, want string
 		packMode            os.FileMode
+		v9                  bool
 	}{
-		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release", 0},
-		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700},
-		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0},
-		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0},
+		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release", 0, false},
+		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700, false},
+		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0, false},
+		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0, false},
+		// A v9 config selects the pack by name; the check follows it.
+		"missing v9 custom pack": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default",
+			"rule_pack: acme\n  custom_packs:\n    acme: {path: /etc/defenseclaw/policies/guardrail/custom, digest: \"" + digest + "\"}",
+			"does not exist; create the pack there", 0, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -518,6 +524,9 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 			}
 			cfg := filepath.Join(t.TempDir(), "config.yaml")
 			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), tc.replace, tc.with, 1)
+			if tc.v9 {
+				raw = strings.Replace(raw, "config_version: 8\n", "config_version: 9\n", 1)
+			}
 			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}

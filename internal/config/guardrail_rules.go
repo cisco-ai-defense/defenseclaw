@@ -119,6 +119,46 @@ func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 	return ""
 }
 
+// ReferencedRulePackDirs maps every rule-pack setting the gateway can load
+// to the directory it resolves to, keyed by the config path an
+// administrator wrote: the global pack, each connector, each guardrail
+// profile and its connectors, and every custom_packs entry. A v8
+// rule_pack_dir is labelled as such; an empty directory selects the
+// embedded packs.
+func (c *Config) ReferencedRulePackDirs() map[string]string {
+	out := map[string]string{}
+	if c == nil {
+		return out
+	}
+	g := &c.Guardrail
+	label := func(prefix string, pc PerConnectorGuardrailConfig) string {
+		if strings.TrimSpace(pc.RulePack) != "" {
+			return prefix + ".rule_pack"
+		}
+		return prefix + ".rule_pack_dir"
+	}
+	out[label("guardrail", PerConnectorGuardrailConfig{RulePack: g.RulePack})] = c.ResolveRulePackDir(g.EffectiveRulePackRef(""))
+	for name, pc := range g.Connectors {
+		out[label("guardrail.connectors."+name, pc)] = c.EffectiveRulePackDirForConnector(name)
+	}
+	for name, profile := range g.Profiles {
+		prefix := "guardrail.profiles." + name
+		own := PerConnectorGuardrailConfig{RulePack: profile.RulePack, RulePackDir: profile.RulePackDir}
+		if ref, ok := rulePackRefOf(own); ok {
+			out[label(prefix, own)] = c.ResolveRulePackDir(ref)
+		}
+		for connector, pc := range profile.Connectors {
+			if ref, ok := rulePackRefOf(pc); ok {
+				out[label(prefix+".connectors."+connector, pc)] = c.ResolveRulePackDir(ref)
+			}
+		}
+	}
+	for name, pack := range g.CustomPacks {
+		out["guardrail.custom_packs."+name+".path"] = strings.TrimSpace(pack.Path)
+	}
+	return out
+}
+
 // EffectiveRulesForConnector returns the guardrail.rules layers that apply
 // to the connector, broadest first: guardrail.rules, the connector's
 // guardrail.connectors entry, then on a profile-derived configuration the

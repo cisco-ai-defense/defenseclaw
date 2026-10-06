@@ -931,16 +931,24 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	if err := check("policy_dir", cfg.PolicyDir); err != nil {
 		return err
 	}
-	if err := check("guardrail.rule_pack_dir", cfg.Guardrail.RulePackDir); err != nil {
-		return err
+	// Every pack the gateway can load: the v9 rule_pack and custom_packs
+	// selections, profile packs and the v8 rule_pack_dir alike.
+	dirs := cfg.ReferencedRulePackDirs()
+	labels := make([]string, 0, len(dirs))
+	for label := range dirs {
+		labels = append(labels, label)
 	}
-	names := make([]string, 0, len(cfg.Guardrail.Connectors))
-	for name := range cfg.Guardrail.Connectors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := check("guardrail.connectors."+name+".rule_pack_dir", cfg.EffectiveRulePackDirForConnector(name)); err != nil {
+	// The global pack first, so a connector that only inherits it is not
+	// the one a refusal names.
+	sort.Slice(labels, func(i, j int) bool {
+		gi, gj := !strings.Contains(strings.TrimPrefix(labels[i], "guardrail."), "."), !strings.Contains(strings.TrimPrefix(labels[j], "guardrail."), ".")
+		if gi != gj {
+			return gi
+		}
+		return labels[i] < labels[j]
+	})
+	for _, label := range labels {
+		if err := check(label, dirs[label]); err != nil {
 			return err
 		}
 	}

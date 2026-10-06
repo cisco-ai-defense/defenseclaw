@@ -65,11 +65,12 @@ type validatedConfig struct {
 	NoProxy                string
 	SelfUpdateDisabled     bool
 	MachinePolicyOwnership map[string]string
-	// RulePacks maps each rule-pack setting (guardrail.rule_pack_dir and
-	// every connector's) to the pack the config resolves it to. An unset
-	// rule_pack_dir follows <policy_dir>/guardrail/default once that folder
-	// exists, which changes no config byte, so the record keeps the resolved
-	// packs and ensure applies (and restarts the gateway) when they change.
+	// RulePacks maps each rule-pack setting (config.ReferencedRulePackDirs:
+	// the global, connector and profile packs and every custom_packs entry)
+	// to the pack the config resolves it to. An unset pack follows
+	// <policy_dir>/guardrail/default once that folder exists, which changes
+	// no config byte, so the record keeps the resolved packs and ensure
+	// applies (and restarts the gateway) when they change.
 	RulePacks map[string]string
 	// Loaded is the runtime config the checks loaded; machine policy is
 	// published from it.
@@ -221,7 +222,7 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 		Loaded:                 cfg,
 	}
 	v.RulePacks = map[string]string{}
-	for label, dir := range effectiveRulePackDirs(cfg) {
+	for label, dir := range cfg.ReferencedRulePackDirs() {
 		if dir = strings.TrimSpace(dir); dir != "" {
 			v.RulePacks[label] = filepath.Clean(dir)
 		}
@@ -244,7 +245,7 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 // rewrite itself: every effective rule pack must be outside data_dir and
 // either ship with the vendor policies or already exist.
 func (e *Env) checkRulePackDirs(cfg *config.Config) error {
-	dirs := effectiveRulePackDirs(cfg)
+	dirs := cfg.ReferencedRulePackDirs()
 	vendor, err := policyassets.Files()
 	if err != nil {
 		return fmt.Errorf("embedded vendor policies: %w", err)
@@ -364,7 +365,10 @@ func accountMayAccess(uid, gid int, mode os.FileMode, account Account, need os.F
 // named guardrail.connectors.amp.rule_pack_dir, which sorts first, for a
 // config that set only guardrail.rule_pack_dir (GAP-1193).
 func rulePackCheckOrder(dirs map[string]string) []string {
-	const global = "guardrail.rule_pack_dir"
+	global := "guardrail.rule_pack_dir"
+	if _, ok := dirs["guardrail.rule_pack"]; ok {
+		global = "guardrail.rule_pack"
+	}
 	globalDir, hasGlobal := dirs[global]
 	globalDir = strings.TrimSpace(globalDir)
 	order := []string{}
@@ -381,16 +385,6 @@ func rulePackCheckOrder(dirs map[string]string) []string {
 		order = append(order, label)
 	}
 	return order
-}
-
-// effectiveRulePackDirs maps each rule-pack setting of cfg to the pack the
-// gateway loads for it.
-func effectiveRulePackDirs(cfg *config.Config) map[string]string {
-	dirs := map[string]string{"guardrail.rule_pack_dir": cfg.Guardrail.RulePackDir}
-	for name := range cfg.Guardrail.Connectors {
-		dirs["guardrail.connectors."+name+".rule_pack_dir"] = cfg.EffectiveRulePackDirForConnector(name)
-	}
-	return dirs
 }
 
 func vendorPolicyDirExists(files []policyassets.File, rel string) bool {
