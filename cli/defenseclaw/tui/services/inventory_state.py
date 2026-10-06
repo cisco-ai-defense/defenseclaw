@@ -627,6 +627,14 @@ class InventoryScopeState:
     hint: str = "(o toggles fast, r reloads)"
 
 
+def _row_key(row: object) -> tuple[str, ...]:
+    """Identity of an inventory row that survives a rescan."""
+
+    if isinstance(row, InventoryIDEPlugin):
+        return (row.key,)
+    return tuple(str(getattr(row, name, "") or "") for name in ("id", "connector", "user", "identity"))
+
+
 class InventoryPanelModel:
     """Go-compatible pure model for inventory scope, filters, cursor and detail."""
 
@@ -808,11 +816,11 @@ class InventoryPanelModel:
         if error is not None:
             self.message = f"Error loading inventory: {error}"
             return
+        selected = self._selected_key()
         self.inventory = snapshot
         self.loaded = snapshot is not None
         self.message = ""
-        self.cursor = 0
-        self.detail_open = False
+        self._reselect(selected)
 
     def apply_json(self, text: str) -> None:
         self.apply_loaded(InventorySnapshot.from_json(text))
@@ -844,9 +852,9 @@ class InventoryPanelModel:
                     for item in identities
                     if isinstance(item, Mapping) and item.get("agent_id")
                 )
+        selected = self._selected_key()
         self.agent_identities = rows
-        if self.active_sub == "agents":
-            self.set_cursor(self.cursor)
+        self._reselect(selected)
 
     def apply_merged(self, results: Sequence[tuple[str, str | None]]) -> None:
         """Merge per-connector ``aibom scan`` payloads into one snapshot.
@@ -868,16 +876,36 @@ class InventoryPanelModel:
             except Exception:  # noqa: BLE001 - a bad payload skips one connector.
                 continue
             snapshots.append((connector, self._tag_snapshot(snap, connector)))
+        selected = self._selected_key()
         self.connector_snapshots = tuple(snapshots)
-        self.cursor = 0
-        self.detail_open = False
         if not snapshots:
             self.inventory = None
             self.loaded = False
+            self._reselect(None)
             return
         self.inventory = self._merge_snapshots([snap for _connector, snap in snapshots])
         self.loaded = True
         self.message = ""
+        self._reselect(selected)
+
+    def _selected_key(self) -> tuple[str, ...] | None:
+        rows = self._current_rows()
+        return _row_key(rows[self.cursor]) if 0 <= self.cursor < len(rows) else None
+
+    def _reselect(self, key: tuple[str, ...] | None) -> None:
+        """Keep the selected row, and its open card, across a reload.
+
+        The 60 s background refresh reloads the inventory with no user action;
+        resetting the cursor and closing the card there lost the row the user
+        was reading (GAP-0106). Only a row that is gone closes the card.
+        """
+
+        keys = [_row_key(row) for row in self._current_rows()]
+        if key is not None and key in keys:
+            self.cursor = keys.index(key)
+            return
+        self.set_cursor(self.cursor)
+        self.detail_open = False
 
     @staticmethod
     def _tag_snapshot(snap: InventorySnapshot, connector: str) -> InventorySnapshot:
@@ -984,27 +1012,28 @@ class InventoryPanelModel:
         self.detail_open = not self.detail_open
 
     def current_list_len(self) -> int:
-        if self.inventory is None:
-            return 0
+        return len(self._current_rows())
+
+    def _current_rows(self) -> Sequence[object]:
         match self.active_sub:
             case "skills":
-                return len(self.filtered_skills())
+                return self.filtered_skills()
             case "plugins":
-                return len(self.filtered_plugins())
+                return self.filtered_plugins()
             case "mcp":
-                return len(self.filtered_mcps())
+                return self.filtered_mcps()
             case "agents":
-                return len(self.filtered_agents())
+                return self.filtered_agents()
             case "tools":
-                return len(self.filtered_tools())
+                return self.filtered_tools()
             case "models":
-                return len(self.filtered_models())
+                return self.filtered_models()
             case "memory":
-                return len(self.filtered_memory())
+                return self.filtered_memory()
             case "ide_plugins":
-                return len(self.filtered_ide_plugins())
+                return self.filtered_ide_plugins()
             case _:
-                return 0
+                return ()
 
     def filtered_skills(self) -> tuple[InventorySkill, ...]:
         if self.inventory is None:

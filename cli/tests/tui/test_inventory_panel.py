@@ -281,6 +281,28 @@ def test_inventory_skill_and_plugin_filters_clamp_cursor_and_detail() -> None:
     assert ("Status", "disabled") in detail.fields
 
 
+def test_inventory_reload_keeps_selected_row_and_open_card() -> None:
+    # GAP-0106: the 60 s background reload must not move the cursor or close
+    # the card; only a row that is gone closes it.
+    panel = InventoryPanelModel()
+    panel.apply_loaded(_inventory())
+    panel.set_active_subtab("skills")
+    panel.set_cursor(2)
+    panel.toggle_detail()
+
+    payload = _inventory_payload()
+    payload["skills"] = payload["skills"][1:]
+    panel.apply_json(json.dumps(payload))
+    assert panel.cursor_at() == 1
+    assert panel.detail_open is True
+    assert panel.detail_info().title == "SKILL: gamma"
+
+    payload["skills"] = payload["skills"][:1]
+    panel.apply_json(json.dumps(payload))
+    assert panel.cursor_at() == 0
+    assert panel.detail_open is False
+
+
 def test_inventory_detail_info_for_all_non_summary_tabs_and_command_intent() -> None:
     panel = InventoryPanelModel()
     panel.apply_loaded(_inventory())
