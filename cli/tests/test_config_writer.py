@@ -101,6 +101,16 @@ def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
     assert "required_pack" not in text
 
 
+def test_a_field_of_an_unlisted_destination_names_the_range(tmp_path, monkeypatch):
+    # GAP-0154: set indexes the destinations written in config.yaml, as get does.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path)
+    before = open(path, encoding="utf-8").read()
+    with pytest.raises(config_writer.ConfigWriteError, match=r"index is out of range \(config.yaml lists 0 destinations\)"):
+        config_writer.apply([Change("observability.destinations[1].enabled", False)], "cli:test", "t", path=path)
+    assert open(path, encoding="utf-8").read() == before
+
+
 def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, monkeypatch):
     import json
 

@@ -244,16 +244,11 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             click.echo(f"(source: {source})", err=True)
             _echo_value(value, fmt)
             return
-    view = _show_data(app, source=False, effective=False, provenance=False)
-    if parts[:2] == ["observability", "destinations"]:
-        # config set indexes the destinations as written in config.yaml; the
-        # resolved plan also lists the generated ones, such as local-sqlite
-        # at index 0 (GAP-0008).
-        written = _show_data(app, source=True, effective=False, provenance=False)
-        if _lookup(written, parts)[0]:
-            view = written
+    view = _key_view(app, parts)
     found, value = _lookup(view, parts)
     if not found:
+        if _is_destination_key(parts):
+            raise click.ClickException(_destination_not_set(key, parts, view))
         sections = _v8_sections() or set(view)
         if parts[0] not in view and parts[0] not in sections:
             available = ", ".join(sorted(sections)) or "none"
@@ -273,6 +268,40 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         elif effective:
             click.echo(f"(source: {config_module.config_path()})", err=True)
     _echo_value(value, fmt)
+
+
+def _is_destination_key(parts: list) -> bool:
+    return parts[:2] == ["observability", "destinations"]
+
+
+def _key_view(app: AppContext, parts: list) -> dict:
+    """The document a key is read from: config.yaml as written for the
+    observability destinations, the resolved defaults for everything else.
+
+    config set indexes the destinations as written in config.yaml; the
+    resolved plan also lists the generated ones, such as local-sqlite at
+    index 0, so reading the plan would answer for indexes set cannot edit
+    (GAP-0008, GAP-0154).
+    """
+    return _show_data(app, source=_is_destination_key(parts), effective=False, provenance=False)
+
+
+def _destination_not_set(key: str, parts: list, written: dict) -> str:
+    listed = _lookup(written, parts[:2])[1]
+    count = len(listed) if isinstance(listed, list) else 0
+    if count == 0:
+        return (
+            f"{key} is not set: config.yaml lists no destinations. Add one with "
+            "'defenseclaw setup observability add'; 'defenseclaw config show --effective' "
+            "shows the generated ones."
+        )
+    if len(parts) > 2 and isinstance(parts[2], int) and parts[2] >= count:
+        noun = "destination" if count == 1 else "destinations"
+        return f"{key} is not set: the index is out of range (config.yaml lists {count} {noun})."
+    return (
+        f"{key} is not set in config.yaml. 'defenseclaw config show --effective' shows the "
+        "value the gateway resolves."
+    )
 
 
 def _written_in_source(app: AppContext, parts: list) -> bool:
@@ -496,9 +525,11 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         return
     # Nothing was removed: a key with a default is already unset, anything
     # else is not a configuration key (a typo must not look like success).
-    view = _show_data(app, source=False, effective=False, provenance=False)
     for key, parts in parsed:
+        view = _key_view(app, parts)
         if not _lookup(view, parts)[0]:
+            if _is_destination_key(parts):
+                raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
     if len(keys) == 1:
         click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")
