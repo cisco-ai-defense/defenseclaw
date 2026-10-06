@@ -467,6 +467,23 @@ func TestMigrateV9ManagedToleratesAnUnreadableAuditDB(t *testing.T) {
 	if notes := strings.Join(result.Record.Notes, "\n"); !strings.Contains(notes, LocalEnforcementEntriesIgnored) {
 		t.Fatalf("notes = %q", notes)
 	}
+
+	// A committing managed migration (Windows ensure) leaves the admin's
+	// data.json in place, so a rollback to the v8 config still finds it.
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\ndata_dir: "+dir+"\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {"MEDIUM": {"install": "block"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath, DataJSONPath: dataJSON, Managed: true}); err != nil {
+		t.Fatalf("MigrateV9 (managed commit): %v", err)
+	}
+	if _, err := os.Stat(dataJSON); err != nil {
+		t.Errorf("the managed migration moved the admin data.json: %v", err)
+	}
 }
 
 // TestMigrateV9ReportsAStricterProxyThreshold: block_at set in config wins,

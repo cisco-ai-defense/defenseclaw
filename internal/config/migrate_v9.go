@@ -439,8 +439,8 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 }
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
-// config (generation +1), the record, the data.json rename, the inline key
-// move and finally the audit.db rows.
+// config (generation +1), the record, the data.json rename (not on a
+// managed host), the inline key move and finally the audit.db rows.
 func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]string, error) {
 	txn, err := cfgtxn.Begin(ctx, m.configPath, 0)
 	if err != nil {
@@ -471,7 +471,9 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		return written, err
 	}
 	written = append(written, m.configPath)
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" {
+	// On a managed host the admin owns policy_dir (as planRegoRefresh
+	// reports): its data.json stays, so a rollback to the v8 config finds it.
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed {
 		if _, statErr := os.Stat(dj); statErr == nil {
 			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
