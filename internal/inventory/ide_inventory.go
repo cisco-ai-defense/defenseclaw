@@ -217,7 +217,7 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 	for _, home := range homes {
 		limits := ideplugins.Limits{FollowSymlinks: !serviceContext}
 		if !serviceContext {
-			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData()
+			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
 		}
 		installs := ideplugins.Scan(home, runtime.GOOS, limits)
 		signals = append(signals, s.ideSignals(installs, index)...)
