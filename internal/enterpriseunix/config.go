@@ -111,6 +111,7 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 		ConfigPath:   e.Layout.ConfigPath,
 		Source:       raw,
 		PolicyDir:    policyDir,
+		DataDir:      e.P(e.Layout.DataDir),
 		DataJSONPath: e.P(filepath.Join(policyDir, "rego", "data.json")),
 		AuditDBPath:  e.P(filepath.Join(e.Layout.DataDir, "audit.db")),
 		Managed:      true,

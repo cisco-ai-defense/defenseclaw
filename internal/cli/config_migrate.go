@@ -124,10 +124,10 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 	policyDir, auditDB := "", ""
 	if cfg, loadErr := config.LoadRuntimeV8File(abs); loadErr == nil {
 		policyDir, auditDB = cfg.PolicyDir, cfg.AuditDB
+		input.DataDir = cfg.DataDir
 		input.Managed = cfg.StandaloneEnterprise()
 	} else {
 		var plain struct {
-			DataDir       string `yaml:"data_dir"`
 			PolicyDir     string `yaml:"policy_dir"`
 			Observability struct {
 				Local struct {
@@ -138,10 +138,8 @@ func configMigrateV9Input(path string) (config.MigrateV9Input, error) {
 		if err := yaml.Unmarshal(raw, &plain); err != nil {
 			return config.MigrateV9Input{}, fmt.Errorf("parse %s: %w", abs, err)
 		}
-		dataDir := strings.TrimSpace(plain.DataDir)
-		if dataDir == "" {
-			dataDir = filepath.Dir(abs)
-		}
+		dataDir := config.MigrationDataDir(abs, raw)
+		input.DataDir = dataDir
 		policyDir = strings.TrimSpace(plain.PolicyDir)
 		if policyDir == "" {
 			policyDir = filepath.Join(dataDir, "policies")

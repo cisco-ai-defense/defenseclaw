@@ -76,6 +76,10 @@ type MigrateV9Input struct {
 	// rule_pack name resolves; any other directory becomes a custom pack.
 	// Empty derives it from DataJSONPath, then from the document.
 	PolicyDir string
+	// DataDir is the resolved data_dir: the moved inline scanner key goes to
+	// its .env and its signature-packs/ are listed. Empty resolves it the way
+	// the config loader does (MigrationDataDir).
+	DataDir string
 	// AuditDBPath is audit.db, whose operator actions rows move into
 	// asset_policy. Empty skips them; managed standalone always skips them
 	// and reports the count as a local_enforcement_entries_ignored warning.
@@ -254,17 +258,14 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	if root == nil || root.Kind != yaml.MappingNode || v9SecureClientDocument(root) {
 		return raw, nil
 	}
-	dataDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "data_dir"))))
-	if dataDir == "" {
-		dataDir = DefaultDataPath()
-	}
+	dataDir := migrationDataDir(configFile, root)
 	policyDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "policy_dir"))))
 	if policyDir == "" {
 		policyDir = filepath.Join(dataDir, "policies")
 	}
 	managedHost := StandaloneManagedSource(raw)
 	in := MigrateV9Input{
-		ConfigPath: configFile, Source: raw, PolicyDir: policyDir,
+		ConfigPath: configFile, Source: raw, PolicyDir: policyDir, DataDir: dataDir,
 		DataJSONPath: filepath.Join(policyDir, "rego", "data.json"),
 		Managed:      managedHost, InMemory: true, RulePackDigest: rulePackDigest,
 	}
@@ -451,7 +452,7 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	}
 	written = append(written, backup)
 	if m.envKey != "" {
-		envPath := filepath.Join(v9DataDir(m.configPath, migrated), ".env")
+		envPath := filepath.Join(m.dataDir(), ".env")
 		if err := appendDotEnvKey(envPath, m.envKey, m.envValue); err != nil {
 			return written, fmt.Errorf("config: move the inline scanner key to %s: %w", envPath, err)
 		}
@@ -492,16 +493,38 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	return written, nil
 }
 
-func v9DataDir(configPath string, raw []byte) string {
-	var plain struct {
-		DataDir string `yaml:"data_dir"`
+// dataDir is the data_dir the runtime uses for this config.
+func (m *v9Migrator) dataDir() string {
+	if dir := strings.TrimSpace(m.in.DataDir); dir != "" {
+		return dir
 	}
-	if yaml.Unmarshal(raw, &plain) == nil && strings.TrimSpace(plain.DataDir) != "" {
+	return migrationDataDir(m.configPath, m.root)
+}
+
+// MigrationDataDir resolves the data_dir of the config at configPath the way
+// the config loader does: the document's data_dir, else the layout data
+// directory of a managed Unix standalone config, else DEFENSECLAW_HOME when
+// configPath is the DEFENSECLAW_CONFIG file, else the config's folder.
+func MigrationDataDir(configPath string, raw []byte) string {
+	var doc yaml.Node
+	_ = yaml.Unmarshal(raw, &doc)
+	return migrationDataDir(configPath, v8DocumentRoot(&doc))
+}
+
+func migrationDataDir(configPath string, root *yaml.Node) string {
+	if dir := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "data_dir"))); dir != "" {
 		// "~/..." is valid v8; it names the home directory, not a folder
 		// relative to the working directory.
-		return expandPath(strings.TrimSpace(plain.DataDir))
+		return expandPath(dir)
 	}
-	return filepath.Dir(configPath)
+	configFile := filepath.Clean(configPath)
+	if layout, ok := standaloneLayoutDataDir(configFile, root); ok {
+		return layout
+	}
+	if env := strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)); env != "" && filepath.Clean(env) == configFile {
+		return DefaultDataPath()
+	}
+	return filepath.Dir(configFile)
 }
 
 // appendDotEnvKey adds key=value to a private .env unless the key is already
@@ -1187,11 +1210,7 @@ func (m *v9Migrator) policyDir() string {
 	if dir := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "policy_dir"))); dir != "" {
 		return dir
 	}
-	dataDir := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(m.root, "data_dir")))
-	if dataDir == "" {
-		dataDir = filepath.Dir(m.configPath)
-	}
-	return filepath.Join(dataDir, "policies")
+	return filepath.Join(m.dataDir(), "policies")
 }
 
 func v9SameDir(a, b string) bool {
@@ -1434,10 +1453,7 @@ func v9NonEmptyLLM(node *yaml.Node) bool {
 // <data_dir>/signature-packs in ai_discovery.signature_packs: v8 loaded that
 // folder implicitly, and since 9 only configured packs load.
 func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
-	dataDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "data_dir"))))
-	if dataDir == "" {
-		dataDir = filepath.Dir(m.configPath)
-	}
+	dataDir := m.dataDir()
 	installed, _ := filepath.Glob(filepath.Join(dataDir, "signature-packs", "*.json"))
 	if len(installed) == 0 {
 		return
