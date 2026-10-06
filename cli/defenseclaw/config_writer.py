@@ -506,10 +506,9 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     return profile == "standalone"
 
 
-def standalone_managed(current: bytes) -> bool:
-    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
-    managed deployment on the standalone profile. Secure Client hosts are
-    not standalone, so their path is unchanged."""
+def _managed_document(current: bytes) -> tuple[bool, dict[str, Any]]:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) say managed
+    enterprise, with the parsed document."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
     try:
@@ -521,7 +520,22 @@ def standalone_managed(current: bytes) -> bool:
     managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
         str(document.get("deployment_mode") or "")
     )
+    return managed, document
+
+
+def standalone_managed(current: bytes) -> bool:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
+    managed deployment on the standalone profile. Secure Client hosts are
+    not standalone, so their path is unchanged."""
+    managed, document = _managed_document(current)
     return managed and _standalone_profile(document)
+
+
+def secure_client_managed(current: bytes) -> bool:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
+    managed device on the Secure Client profile."""
+    managed, document = _managed_document(current)
+    return managed and not _standalone_profile(document)
 
 
 def managed_refuses(current: bytes, actor: str) -> bool:

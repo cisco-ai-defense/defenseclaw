@@ -71,6 +71,9 @@ def use_bundled_litellm_cost_map(environ=None) -> None:
 def main() -> None:
     exempt_instance_metadata_from_proxy()
     use_bundled_litellm_cost_map()
+    from defenseclaw.config import ignore_unmanaged_deployment_pins
+
+    ignore_unmanaged_deployment_pins()
     argv = sys.argv[1:]
     if argv and argv[0] in ("upgrade", "rollback"):
         from defenseclaw.upgrade_shim import run

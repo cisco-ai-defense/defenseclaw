@@ -10441,17 +10441,21 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Security overrides", f"registry load failed: {exc}", r=r)
         return
 
-    # A managed standalone device ignores these; name them, never values.
-    from defenseclaw.envvars import ignored_in_managed_mode
+    # A managed standalone device ignores these, and any host ignores a
+    # Secure-Client-only variable or a deployment pin exported in a user's
+    # shell; name them, never values.
+    from defenseclaw.config import ignored_deployment_pins
+    from defenseclaw.envvars import ignored_in_managed_mode, ignored_off_secure_client
 
-    ignored = set(ignored_in_managed_mode())
+    managed_ignored = set(ignored_in_managed_mode())
+    ignored = managed_ignored | set(ignored_off_secure_client()) | set(ignored_deployment_pins())
     if ignored:
-        _emit(
-            "pass",
-            "Ignored environment overrides",
-            f"this device is managed, so these have no effect: {', '.join(sorted(ignored))}",
-            r=r,
+        why = (
+            "this device is managed, so these have no effect"
+            if managed_ignored
+            else "this host is not managed and takes these settings from config.yaml, so these have no effect"
         )
+        _emit("pass", "Ignored environment overrides", f"{why}: {', '.join(sorted(ignored))}", r=r)
         active = [entry for entry in active if entry.name not in ignored]
 
     private_env_name = "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"
