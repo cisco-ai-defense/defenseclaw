@@ -517,7 +517,7 @@ struct WizardSheet: View {
 /// Sectioned typed config editor (TUI Setup config sections parity): a
 /// section list, kind-aware field controls with validation, a diff-review
 /// save sheet with masked secrets, and a queued-gateway-restart banner.
-/// Writes go through PATCH /config/patch per changed key.
+/// Writes go through the installed runtime's apply_config_field (see applyScript).
 struct ConfigEditorView: View {
     @Environment(AppState.self) private var appState
     @State private var selectedSection: String? = "General"
@@ -900,9 +900,7 @@ struct ConfigEditorView: View {
     /// The TUI's exact save path: apply every changed key through the
     /// installed runtime's own `apply_config_field` (typed coercion, CSV
     /// lists, tristates, judge hook-connector list surgery) and `cfg.save()`.
-    /// Changes travel as JSON on stdin — secrets never touch argv. The
-    /// gateway's /config/patch endpoint is NOT used (POST-only legacy RPC
-    /// that fails against real gateways).
+    /// Changes travel as JSON on stdin — secrets never touch argv.
     private static let applyScript = """
     import json, sys
     from defenseclaw import config as dc_config

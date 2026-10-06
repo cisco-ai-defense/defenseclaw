@@ -391,9 +391,9 @@ def test_guardrail_proxy(t: TestRunner):
 
     # Health check
     try:
-        resp = urllib.request.urlopen(f"http://127.0.0.1:{GUARDRAIL_PORT}/health/liveliness", timeout=5)
+        resp = urllib.request.urlopen(f"http://127.0.0.1:{GUARDRAIL_PORT}/health", timeout=5)
         alive = resp.read().decode()
-        t._record("guardrail: health check", "alive" in alive.lower(), alive)
+        t._record("guardrail: health check", "healthy" in alive.lower(), alive)
     except Exception as e:
         t._record("guardrail: health check", False, "", str(e))
         return
@@ -508,16 +508,6 @@ def test_api_audit_event(t: TestRunner):
         "POST /audit/event",
         "POST", "/audit/event",
         body={"action": "e2e-test-event", "target": "test-target", "details": "e2e audit test"},
-    )
-
-
-def test_api_config(t: TestRunner):
-    print("\n--- API: Config ---")
-    t.api(
-        "POST /config/patch (proxied to OpenClaw gateway)",
-        "POST", "/config/patch",
-        body={"path": "watch.debounce_ms", "value": 500},
-        expect_status=502,  # 502 when OpenClaw gateway proxy fails; 200 on success
     )
 
 
@@ -932,7 +922,6 @@ def main():
         test_api_skills_and_mcps(t)
         test_api_skill_actions(t)
         test_api_audit_event(t)
-        test_api_config(t)
 
         # Phase 3: Gateway log verification
         time.sleep(2)

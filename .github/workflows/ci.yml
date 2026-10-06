@@ -1147,6 +1147,133 @@ jobs:
           if-no-files-found: ignore
           retention-days: 5
 
+  enterprise-upgrade:
+    # Upgrades the latest published release's standalone enterprise package
+    # to this pull request's 9.9.9 snapshot on each platform, through the
+    # lane scripts' --upgrade-from mode: the upgrade keeps the administrator
+    # config intent, secrets and guardian ledger and reports the applied
+    # policy, and on Linux and macOS a failed upgrade rolls back (the root-only
+    # lifecycle test fault). release.yaml runs the same lanes before publish.
+    name: Enterprise Upgrade Lane (${{ matrix.lane }})
+    needs: [changes, enterprise-install-assets]
+    if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' && needs.enterprise-install-assets.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: deb
+            runner: ubuntu-24.04
+            asset: linux-amd64.deb
+          - lane: rpm-el9
+            runner: ubuntu-24.04
+            asset: linux-amd64.rpm
+            image: registry.access.redhat.com/ubi9/ubi-init@sha256:762319bbd0b15a4eff9078eb373b1f426de3e8b5560cf314715c62844b7b0fc8
+          - lane: pkg
+            runner: macos-latest
+            asset: darwin-arm64.pkg
+          - lane: Windows
+            runner: windows-latest
+            asset: setup
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LANE: ${{ matrix.lane }}
+      LANE_ASSET: ${{ matrix.asset }}
+      LANE_IMAGE: ${{ matrix.image }}
+      LINUX_VERSION: ${{ needs.enterprise-install-assets.outputs.linux-version }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.3"
+      - name: Fetch and verify the latest release's enterprise package
+        id: previous
+        shell: bash
+        run: bash scripts/fetch-previous-enterprise-package.sh --asset "$LANE_ASSET" --dir "$RUNNER_TEMP/previous" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.previous.outputs.version != '' && runner.os == 'Linux'
+        with:
+          name: enterprise-install-linux
+          path: ${{ runner.temp }}/enterprise-install
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.previous.outputs.version != '' && runner.os == 'Windows'
+        with:
+          name: enterprise-install-windows
+          path: ${{ runner.temp }}/enterprise-install
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: steps.previous.outputs.version != '' && runner.os == 'macOS'
+        with:
+          go-version-file: go.mod
+      - name: Build the unsigned standalone pkg
+        if: steps.previous.outputs.version != '' && runner.os == 'macOS'
+        shell: bash
+        run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
+      - name: Remove group and other write access from the runner /opt
+        if: steps.previous.outputs.version != '' && matrix.lane == 'deb'
+        shell: bash
+        run: sudo chmod go-w /opt
+      - name: Give the runner Windows log folder its usual owner and access
+        if: steps.previous.outputs.version != '' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $logs = Join-Path $env:windir 'Logs'
+          $account = (Get-LocalUser | Where-Object { $_.SID.Value -like 'S-1-5-21-*-500' }).SID.Value
+          icacls $logs /setowner '*S-1-5-32-544' | Out-Null
+          if ($account) {
+            icacls $logs /inheritance:d | Out-Null
+            icacls $logs /remove:g "*$account" | Out-Null
+          }
+      - name: Upgrade, drill the rollback, converge, verify and remove
+        if: steps.previous.outputs.version != '' && runner.os != 'Windows'
+        shell: bash
+        env:
+          PREVIOUS_PACKAGE: ${{ steps.previous.outputs.package }}
+          PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "$LANE" in
+            pkg) version=9.9.9 ;;
+            *) version=$LINUX_VERSION ;;
+          esac
+          args=(--package "$RUNNER_TEMP/enterprise-install/defenseclaw-enterprise-${version}-${LANE_ASSET}" --version "$version"
+            --upgrade-from "$PREVIOUS_PACKAGE" --previous-version "$PREVIOUS_VERSION" --results "$RUNNER_TEMP/lane-results")
+          if [ "$LANE" = rpm-el9 ]; then
+            bash scripts/test-enterprise-linux-container.sh --image "$LANE_IMAGE" "${args[@]}"
+          else
+            sudo bash scripts/test-enterprise-unix-install.sh "${args[@]}"
+          fi
+      - name: Upgrade, converge, verify and remove the standalone services
+        if: steps.previous.outputs.version != '' && runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          ./scripts/test-enterprise-windows-install.ps1
+          -Setup (Join-Path $env:RUNNER_TEMP 'enterprise-install\DefenseClawSetup-Enterprise-Standalone-x64.exe')
+          -Version 9.9.9 -ResultsRoot (Join-Path $env:RUNNER_TEMP 'lane-results')
+          -UpgradeFrom '${{ steps.previous.outputs.package }}' -PreviousVersion '${{ steps.previous.outputs.version }}'
+      - name: Make the lifecycle results readable
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lane-results" 2>/dev/null || true
+      - name: The upgrade kept the administrator config intent
+        if: steps.previous.outputs.version != ''
+        shell: bash
+        run: >-
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py
+          --before "$RUNNER_TEMP/lane-results/config-v8.yaml"
+          --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml"
+          --record "$RUNNER_TEMP/lane-results/migration-v9.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: enterprise-upgrade-results-${{ matrix.lane }}
+          path: ${{ runner.temp }}/lane-results/
+          if-no-files-found: ignore
+          retention-days: 5
+
   enterprise-required:
     # One required check for the standalone managed-enterprise gates, in the
     # same pattern as Go Test and Python Lint & Test: it runs even when a gate
@@ -1160,6 +1287,7 @@ jobs:
       - enterprise-linux-install
       - enterprise-macos-install
       - enterprise-windows-install
+      - enterprise-upgrade
       - unix-standalone-lifecycle
     if: ${{ always() }}
     runs-on: ubuntu-latest
@@ -1171,13 +1299,14 @@ jobs:
           LINUX_INSTALL: ${{ needs.enterprise-linux-install.result }}
           MACOS_INSTALL: ${{ needs.enterprise-macos-install.result }}
           WINDOWS_INSTALL: ${{ needs.enterprise-windows-install.result }}
+          UPGRADE: ${{ needs.enterprise-upgrade.result }}
           UNIX_LIFECYCLE: ${{ needs.unix-standalone-lifecycle.result }}
           # false when the pull request changes nothing these gates consume.
           ENTERPRISE: ${{ needs.changes.outputs.enterprise }}
         shell: bash
         run: |
           status=0
-          for gate in INSTALL_ASSETS LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UNIX_LIFECYCLE; do
+          for gate in INSTALL_ASSETS LINUX_INSTALL MACOS_INSTALL WINDOWS_INSTALL UPGRADE UNIX_LIFECYCLE; do
             result=${!gate}
             echo "$gate: $result"
             if [ "$ENTERPRISE" = false ] && [ "$result" = skipped ]; then

@@ -18,6 +18,22 @@
 #   6. purges (dpkg -P, or `uninstall --purge`, which must also succeed on a
 #      machine the uninstall already cleared) and checks nothing is left
 #
+# With --upgrade-from it is the enterprise upgrade lane instead: steps 1 and 2
+# install the previous release's package with the same administrator config
+# and record its state, then
+#
+#   a. rollback drill: with the root-only lifecycle test fault in place,
+#      installing this package fails after the services start and rolls back,
+#      and the config and the deployment record stay the previous release's
+#   b. ensure --from-package upgrades to this package: verify passes, the
+#      result reports the applied policy from a newer config generation,
+#      migration-v9.json and config.yaml.v8.bak are written, and the secrets
+#      and the guardian ledger are unchanged
+#
+# and then runs steps 3-6 on the upgraded deployment. It keeps the v8 config,
+# the upgraded config and the migration record in --results for
+# scripts/check_enterprise_upgrade_config.py.
+#
 # Every lifecycle result is saved under --results and checked with
 # scripts/check_enterprise_lifecycle_result.py. For the lifecycle commands the
 # lane runs itself, the process exit status must also be 0 and equal the
@@ -28,12 +44,18 @@
 #
 # Usage:
 #   test-enterprise-unix-install.sh --package FILE --version VERSION [--results DIR]
+#       [--upgrade-from FILE --previous-version VERSION]
 #
 #   --package FILE     defenseclaw-enterprise-<version>-linux-<arch>.deb|.rpm or
 #                      defenseclaw-enterprise-<version>-darwin-arm64.pkg
 #   --version VERSION  the product version the package's binaries report
 #   --results DIR      where to keep the lifecycle results (default: a new
 #                      temporary directory)
+#   --upgrade-from FILE
+#                      the previous release's package of the same kind, already
+#                      verified against its signed checksums.txt
+#   --previous-version VERSION
+#                      the product version of --upgrade-from
 
 set -euo pipefail
 
@@ -43,17 +65,25 @@ checker="$repo/scripts/check_enterprise_lifecycle_result.py"
 package=""
 version=""
 results=""
+upgrade_from=""
+previous_version=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --package) package=${2:?--package needs a value}; shift 2 ;;
         --version) version=${2:?--version needs a value}; shift 2 ;;
         --results) results=${2:?--results needs a value}; shift 2 ;;
-        -h | --help) sed -n '4,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --upgrade-from) upgrade_from=${2:?--upgrade-from needs a value}; shift 2 ;;
+        --previous-version) previous_version=${2:?--previous-version needs a value}; shift 2 ;;
+        -h | --help) sed -n '4,58p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 [ -n "$package" ] && [ -n "$version" ] || {
-    echo "usage: $0 --package FILE --version VERSION [--results DIR]" >&2
+    echo "usage: $0 --package FILE --version VERSION [--results DIR] [--upgrade-from FILE --previous-version VERSION]" >&2
+    exit 2
+}
+[ -z "$upgrade_from" ] || [ -n "$previous_version" ] || {
+    echo "--upgrade-from needs --previous-version" >&2
     exit 2
 }
 
@@ -71,6 +101,11 @@ step() {
 [ "$(id -u)" = 0 ] || die "run as root on a disposable host"
 [ -f "$package" ] || die "$package does not exist"
 package=$(cd "$(dirname "$package")" && pwd)/$(basename "$package")
+if [ -n "$upgrade_from" ]; then
+    [ -f "$upgrade_from" ] || die "$upgrade_from does not exist"
+    upgrade_from=$(cd "$(dirname "$upgrade_from")" && pwd)/$(basename "$upgrade_from")
+    [ "${upgrade_from##*.}" = "${package##*.}" ] || die "--upgrade-from must be a .${package##*.} like --package"
+fi
 # RHEL 8 has only the platform Python; the checker supports 3.6.
 python=$(command -v python3 2>/dev/null || true)
 if [ -z "$python" ] && [ -x /usr/libexec/platform-python ]; then
@@ -117,6 +152,9 @@ fi
 gateway=$install_root/bin/defenseclaw-gateway
 config=$config_dir/config.yaml
 vendor_policy_dir=$install_root/share/policies
+secrets_dir=$config_dir/secrets
+guardian_ledger=$([ "$platform" = linux ] && echo /var/lib/defenseclaw-hook-guardian || echo "$install_root/hook-guardian-state")/protected_targets.json
+test_fault=$lifecycle_dir/.test-fault
 
 results=${results:-$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-install-lane.XXXXXX")}
 mkdir -p "$results"
@@ -301,51 +339,47 @@ detect_value() {
     sh "$detect" --format value "$@" 2>/dev/null
 }
 
-# ---- preflight ---------------------------------------------------------------
-step "preflight: this host has no DefenseClaw deployment"
-[ ! -e "$gateway" ] || die "$gateway already exists; run the lane on a clean host"
-[ ! -e "$lifecycle_dir/deployment.json" ] || die "a deployment record already exists in $lifecycle_dir"
-case "$kind" in
-    deb) ! dpkg-query -W "$linux_package_name" >/dev/null 2>&1 || die "$linux_package_name is already installed" ;;
-    rpm) ! rpm -q "$linux_package_name" >/dev/null 2>&1 || die "$linux_package_name is already installed" ;;
-    pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "$macos_package_id is already installed" ;;
-esac
-[ -z "$(policy_entries)" ] || die "DefenseClaw machine-policy entries already exist: $(policy_entries)"
-echo "package: $package"
-echo "version: $version"
+# install_package FILE: install (or upgrade to) a package; prints nothing and
+# returns the package manager's exit status. The postinstall runs ensure
+# --from-package and leaves its result in last-package-result.json.
+install_package() {
+    case "$kind" in
+        deb) DEBIAN_FRONTEND=noninteractive dpkg -i "$1" ;;
+        rpm) rpm -U "$1" ;;
+        pkg) installer -pkg "$1" -target / ;;
+    esac
+}
 
-# ---- install -----------------------------------------------------------------
-step "install the $kind (postinstall runs ensure --from-package)"
-install_rc=0
-case "$kind" in
-    deb) DEBIAN_FRONTEND=noninteractive dpkg -i "$package" || install_rc=$? ;;
-    rpm) rpm -U "$package" || install_rc=$? ;;
-    pkg) installer -pkg "$package" -target / || install_rc=$? ;;
-esac
-[ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
-cp "$lifecycle_dir/last-package-result.json" "$results/01-package-install.json"
-check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-    --complete
-[ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
-[ -x "$gateway" ] || die "$gateway was not installed"
-[ -f "$config" ] || die "the lifecycle did not write $config"
-case "$kind" in
-    deb)
-        dpkg_status=$(dpkg-query -W -f='${Status}' "$linux_package_name" 2>/dev/null || true)
-        [ "$dpkg_status" = "install ok installed" ] || die "dpkg reports '$dpkg_status' after install"
-        ;;
-    rpm) rpm -q "$linux_package_name" ;;
-    pkg) pkgutil --pkg-info "$macos_package_id" >/dev/null || die "the package receipt $macos_package_id is missing" ;;
-esac
-services_running
-if [ "$platform" = linux ]; then
-    step "the packaged units load on this systemd (systemd-analyze verify)"
-    unit_diagnostics
-fi
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
 
-# ---- reconfigure ---------------------------------------------------------------
-step "ensure with an administrator config that enables Claude Code and Codex"
-cat >"$stage/config.yaml" <<EOF
+# tree_sha DIR: one digest over every file name and content under DIR.
+tree_sha() {
+    local file
+    [ -d "$1" ] || { echo absent; return; }
+    find "$1" -type f | LC_ALL=C sort | while IFS= read -r file; do
+        printf '%s %s\n' "$(sha256_of "$file")" "${file#"$1"}"
+    done | { command -v sha256sum >/dev/null 2>&1 && sha256sum || shasum -a 256; } | cut -d' ' -f1
+}
+
+# json_field FILE KEY...: print a nested field of a JSON file ("" when absent).
+json_field() {
+    "$python" - "$@" <<'PY'
+import json, sys
+node = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+for key in sys.argv[2:]:
+    node = node.get(key) if isinstance(node, dict) else None
+print("" if node is None else node)
+PY
+}
+
+write_admin_config() {
+    cat >"$stage/config.yaml" <<EOF
 config_version: 8
 deployment_mode: managed_enterprise
 data_dir: $data_dir
@@ -363,16 +397,129 @@ guardrail:
     claudecode: {enabled: true}
     codex: {enabled: true}
 EOF
-chmod 0600 "$stage/config.yaml"
-lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
+    chmod 0600 "$stage/config.yaml"
+}
+
+# ---- preflight ---------------------------------------------------------------
+step "preflight: this host has no DefenseClaw deployment"
+[ ! -e "$gateway" ] || die "$gateway already exists; run the lane on a clean host"
+[ ! -e "$lifecycle_dir/deployment.json" ] || die "a deployment record already exists in $lifecycle_dir"
+case "$kind" in
+    deb) ! dpkg-query -W "$linux_package_name" >/dev/null 2>&1 || die "$linux_package_name is already installed" ;;
+    rpm) ! rpm -q "$linux_package_name" >/dev/null 2>&1 || die "$linux_package_name is already installed" ;;
+    pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "$macos_package_id is already installed" ;;
+esac
+[ -z "$(policy_entries)" ] || die "DefenseClaw machine-policy entries already exist: $(policy_entries)"
+echo "package: $package"
+echo "version: $version"
+
+# ---- upgrade lane: previous release ------------------------------------------
+upgrade_lane() {
+    local previous_config_sha previous_secrets_sha previous_ledger_sha previous_generation recorded
+    step "install the previous release's $kind ($previous_version)"
+    install_rc=0
+    install_package "$upgrade_from" || install_rc=$?
+    [ -f "$lifecycle_dir/last-package-result.json" ] || die "the previous postinstall left no lifecycle result (package manager exited $install_rc)"
+    cp "$lifecycle_dir/last-package-result.json" "$results/01-previous-install.json"
+    [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc installing $previous_version"
+    "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
+        --action ensure --installed --version "$previous_version"
+
+    step "apply the v8 administrator config on the previous release"
+    write_admin_config
+    lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
+    check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
+        --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
+    cp "$stage/config.yaml" "$results/config-v8.yaml"
+    lifecycle 03-previous-verify verify
+    check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
+        --allow-warning unprivileged_user_namespaces
+    lifecycle 04-previous-status status
+    previous_config_sha=$(sha256_of "$config")
+    previous_secrets_sha=$(tree_sha "$secrets_dir")
+    previous_ledger_sha=$([ -f "$guardian_ledger" ] && sha256_of "$guardian_ledger" || echo absent)
+    previous_generation=$(json_field "$results/04-previous-status.json" policy config_generation)
+    previous_generation=${previous_generation:-0}
+    echo "previous release: config $previous_config_sha, config generation $previous_generation"
+
+    step "rollback drill: an upgrade that fails after its services start rolls back"
+    printf 'after_services\n' >"$test_fault"
+    chmod 0600 "$test_fault"
+    chown 0:0 "$test_fault"
+    rm -f "$lifecycle_dir/last-package-result.json"
+    install_rc=0
+    install_package "$package" || install_rc=$?
+    rm -f "$test_fault"
+    [ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
+    cp "$lifecycle_dir/last-package-result.json" "$results/05-upgrade-fault.json"
+    "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
+        --action ensure --expect-error lifecycle_test_fault \
+        --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+    [ "$(sha256_of "$config")" = "$previous_config_sha" ] || die "the rolled-back upgrade changed $config"
+    recorded=$(json_field "$lifecycle_dir/deployment.json" product_version)
+    [ "$recorded" = "$previous_version" ] || die "the rolled-back upgrade left the deployment record at '$recorded', want '$previous_version'"
+    echo "rolled back: $config and the deployment record are the previous release's"
+
+    step "upgrade to $version (ensure --from-package)"
+    lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
+    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
+        "${policy_checks[@]}" --policy-applied --config-generation-above "$previous_generation"
+    [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
+    [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
+    [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
+    cp "$config" "$results/config-upgraded.yaml"
+    cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
+    [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
+    [ "$([ -f "$guardian_ledger" ] && sha256_of "$guardian_ledger" || echo absent)" = "$previous_ledger_sha" ] ||
+        die "the upgrade changed the guardian ledger $guardian_ledger"
+    services_running
+}
+
 # Both connectors' machine policy is written, owned by DefenseClaw and locked.
 policy_checks=(--machine-policy claudecode --machine-policy codex
     --machine-policy-enforced claudecode --machine-policy-enforced codex)
-check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
-    --complete "${policy_checks[@]}"
-[ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
-[ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
-echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
+if [ -n "$upgrade_from" ]; then
+    upgrade_lane
+else
+    # ---- install -----------------------------------------------------------------
+    step "install the $kind (postinstall runs ensure --from-package)"
+    install_rc=0
+    case "$kind" in
+        deb) DEBIAN_FRONTEND=noninteractive dpkg -i "$package" || install_rc=$? ;;
+        rpm) rpm -U "$package" || install_rc=$? ;;
+        pkg) installer -pkg "$package" -target / || install_rc=$? ;;
+    esac
+    [ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
+    cp "$lifecycle_dir/last-package-result.json" "$results/01-package-install.json"
+    check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
+        --complete
+    [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
+    [ -x "$gateway" ] || die "$gateway was not installed"
+    [ -f "$config" ] || die "the lifecycle did not write $config"
+    case "$kind" in
+        deb)
+            dpkg_status=$(dpkg-query -W -f='${Status}' "$linux_package_name" 2>/dev/null || true)
+            [ "$dpkg_status" = "install ok installed" ] || die "dpkg reports '$dpkg_status' after install"
+            ;;
+        rpm) rpm -q "$linux_package_name" ;;
+        pkg) pkgutil --pkg-info "$macos_package_id" >/dev/null || die "the package receipt $macos_package_id is missing" ;;
+    esac
+    services_running
+    if [ "$platform" = linux ]; then
+        step "the packaged units load on this systemd (systemd-analyze verify)"
+        unit_diagnostics
+    fi
+
+    # ---- reconfigure ---------------------------------------------------------------
+    step "ensure with an administrator config that enables Claude Code and Codex"
+    write_admin_config
+    lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
+    check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
+        --complete "${policy_checks[@]}"
+    [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
+    [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
+    echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
+fi
 
 # ---- converge ----------------------------------------------------------------
 step "ensure again (must be a no-op)"

@@ -357,7 +357,7 @@ func TestManagedHookSocketServesOnlyAuthorizedHookRoutes(t *testing.T) {
 		map[string]interface{}{"tool": "Bash", "args": map[string]interface{}{"command": "id"}}); status == http.StatusForbidden || status == http.StatusUnauthorized {
 		t.Fatalf("inspect for the enrolled connector refused: %d %s", status, body)
 	}
-	for _, path := range []string{"/status", "/config/patch", "/enforce/allow", "/v1/guardrail/config", "/api/v1/admin/shutdown"} {
+	for _, path := range []string{"/status", "/enforce/allow", "/v1/guardrail/config", "/api/v1/admin/shutdown"} {
 		if status, _ := post(path, map[string]string{"Authorization": "Bearer anything"}, map[string]string{}); status != http.StatusNotFound && status != http.StatusForbidden {
 			t.Fatalf("management route %s reachable on the hook socket: %d", path, status)
 		}

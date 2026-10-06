@@ -195,7 +195,7 @@ func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Load()
+	_, err := LoadFromFile(ConfigPath())
 	if err == nil {
 		t.Fatal("Load() error=nil, want legacy Splunk migration guidance")
 	}
@@ -1154,7 +1154,7 @@ func TestLoadOTelResourceAttributesPreservesDottedKeys(t *testing.T) {
 		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
 	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -1214,7 +1214,7 @@ func TestLoadOTelNamedDestinations(t *testing.T) {
 		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
 	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
@@ -1387,7 +1387,7 @@ func TestLoadMigratesFlatSignalsWithNamedDestinations(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load() error=%v, want flat OTel migration", err)
 	}
@@ -1421,7 +1421,7 @@ otel:
 	if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load() error=%v, want env-backed flat OTel migration", err)
 	}
@@ -1460,7 +1460,7 @@ func TestLoadMigratesEnvironmentBackedLegacyOTelSignalExporters(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cfg, err := Load()
+			cfg, err := LoadFromFile(ConfigPath())
 			if err != nil {
 				t.Fatalf("Load() error=%v", err)
 			}
@@ -1483,15 +1483,6 @@ func TestLoadMigratesEnvironmentBackedLegacyOTelSignalExporters(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestConfig_ClawHomeDir(t *testing.T) {
-	cfg := &Config{
-		Claw: ClawConfig{HomeDir: "/tmp/my-claw"},
-	}
-	if cfg.ClawHomeDir() != "/tmp/my-claw" {
-		t.Errorf("ClawHomeDir() = %q, want /tmp/my-claw", cfg.ClawHomeDir())
 	}
 }
 

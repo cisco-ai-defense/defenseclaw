@@ -3659,11 +3659,6 @@
               "version": 1,
               "name": "default",
               "description": "Default CodeGuard policy — core security patterns",
-              "rule_dirs": [
-                "rules/",
-                "custom/"
-              ],
-              "max_file_size_kb": 256,
               "severity_overrides": {},
               "disabled_rules": [],
               "file_extensions": [
@@ -3684,12 +3679,6 @@
               "version": 1,
               "name": "strict",
               "description": "Strict CodeGuard policy — elevated sensitivity, broad file coverage",
-              "rule_dirs": [
-                "rules/",
-                "custom/",
-                "enterprise/"
-              ],
-              "max_file_size_kb": 512,
               "severity_overrides": {
                 "MEDIUM": "HIGH"
               },
@@ -3749,92 +3738,6 @@
               "disabled_rules": [],
               "max_file_size_kb": 1024,
               "scan_node_modules": true
-            }
-          },
-          "skill-scanner": {
-            "balanced": {
-              "version": 1,
-              "name": "balanced",
-              "description": "Balanced detection — catches real threats, low false-positive rate for development workflows",
-              "thresholds": {
-                "permission_risk": 0.6,
-                "data_access_risk": 0.5,
-                "code_quality_risk": 0.7
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 512
-                },
-                "behavioral": {
-                  "enabled": true,
-                  "trace_depth": 3
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {},
-              "disabled_rules": []
-            },
-            "permissive": {
-              "version": 1,
-              "name": "permissive",
-              "description": "Dev-friendly — only flags critical/high severity findings",
-              "thresholds": {
-                "permission_risk": 0.8,
-                "data_access_risk": 0.8,
-                "code_quality_risk": 0.9
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 256
-                },
-                "behavioral": {
-                  "enabled": false,
-                  "trace_depth": 1
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {
-                "MEDIUM": "LOW",
-                "LOW": "LOW"
-              },
-              "disabled_rules": [
-                "SKILL-INFO-001",
-                "SKILL-INFO-002",
-                "SKILL-STYLE-001"
-              ]
-            },
-            "strict": {
-              "version": 1,
-              "name": "strict",
-              "description": "High-sensitivity detection — flags all potential risks, higher false-positive rate",
-              "thresholds": {
-                "permission_risk": 0.3,
-                "data_access_risk": 0.3,
-                "code_quality_risk": 0.4
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 1024
-                },
-                "behavioral": {
-                  "enabled": true,
-                  "trace_depth": 5
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {
-                "MEDIUM": "HIGH"
-              },
-              "disabled_rules": []
             }
           }
         }
@@ -7647,11 +7550,6 @@
               "version": 1,
               "name": "default",
               "description": "Default CodeGuard policy — core security patterns",
-              "rule_dirs": [
-                "rules/",
-                "custom/"
-              ],
-              "max_file_size_kb": 256,
               "severity_overrides": {},
               "disabled_rules": [],
               "file_extensions": [
@@ -7672,12 +7570,6 @@
               "version": 1,
               "name": "strict",
               "description": "Strict CodeGuard policy — elevated sensitivity, broad file coverage",
-              "rule_dirs": [
-                "rules/",
-                "custom/",
-                "enterprise/"
-              ],
-              "max_file_size_kb": 512,
               "severity_overrides": {
                 "MEDIUM": "HIGH"
               },
@@ -7737,92 +7629,6 @@
               "disabled_rules": [],
               "max_file_size_kb": 1024,
               "scan_node_modules": true
-            }
-          },
-          "skill-scanner": {
-            "balanced": {
-              "version": 1,
-              "name": "balanced",
-              "description": "Balanced detection — catches real threats, low false-positive rate for development workflows",
-              "thresholds": {
-                "permission_risk": 0.6,
-                "data_access_risk": 0.5,
-                "code_quality_risk": 0.7
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 512
-                },
-                "behavioral": {
-                  "enabled": true,
-                  "trace_depth": 3
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {},
-              "disabled_rules": []
-            },
-            "permissive": {
-              "version": 1,
-              "name": "permissive",
-              "description": "Dev-friendly — only flags critical/high severity findings",
-              "thresholds": {
-                "permission_risk": 0.8,
-                "data_access_risk": 0.8,
-                "code_quality_risk": 0.9
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 256
-                },
-                "behavioral": {
-                  "enabled": false,
-                  "trace_depth": 1
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {
-                "MEDIUM": "LOW",
-                "LOW": "LOW"
-              },
-              "disabled_rules": [
-                "SKILL-INFO-001",
-                "SKILL-INFO-002",
-                "SKILL-STYLE-001"
-              ]
-            },
-            "strict": {
-              "version": 1,
-              "name": "strict",
-              "description": "High-sensitivity detection — flags all potential risks, higher false-positive rate",
-              "thresholds": {
-                "permission_risk": 0.3,
-                "data_access_risk": 0.3,
-                "code_quality_risk": 0.4
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 1024
-                },
-                "behavioral": {
-                  "enabled": true,
-                  "trace_depth": 5
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {
-                "MEDIUM": "HIGH"
-              },
-              "disabled_rules": []
             }
           }
         }
@@ -11443,11 +11249,6 @@
               "version": 1,
               "name": "default",
               "description": "Default CodeGuard policy — core security patterns",
-              "rule_dirs": [
-                "rules/",
-                "custom/"
-              ],
-              "max_file_size_kb": 256,
               "severity_overrides": {},
               "disabled_rules": [],
               "file_extensions": [
@@ -11468,12 +11269,6 @@
               "version": 1,
               "name": "strict",
               "description": "Strict CodeGuard policy — elevated sensitivity, broad file coverage",
-              "rule_dirs": [
-                "rules/",
-                "custom/",
-                "enterprise/"
-              ],
-              "max_file_size_kb": 512,
               "severity_overrides": {
                 "MEDIUM": "HIGH"
               },
@@ -11533,92 +11328,6 @@
               "disabled_rules": [],
               "max_file_size_kb": 1024,
               "scan_node_modules": true
-            }
-          },
-          "skill-scanner": {
-            "balanced": {
-              "version": 1,
-              "name": "balanced",
-              "description": "Balanced detection — catches real threats, low false-positive rate for development workflows",
-              "thresholds": {
-                "permission_risk": 0.6,
-                "data_access_risk": 0.5,
-                "code_quality_risk": 0.7
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 512
-                },
-                "behavioral": {
-                  "enabled": true,
-                  "trace_depth": 3
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {},
-              "disabled_rules": []
-            },
-            "permissive": {
-              "version": 1,
-              "name": "permissive",
-              "description": "Dev-friendly — only flags critical/high severity findings",
-              "thresholds": {
-                "permission_risk": 0.8,
-                "data_access_risk": 0.8,
-                "code_quality_risk": 0.9
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 256
-                },
-                "behavioral": {
-                  "enabled": false,
-                  "trace_depth": 1
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {
-                "MEDIUM": "LOW",
-                "LOW": "LOW"
-              },
-              "disabled_rules": [
-                "SKILL-INFO-001",
-                "SKILL-INFO-002",
-                "SKILL-STYLE-001"
-              ]
-            },
-            "strict": {
-              "version": 1,
-              "name": "strict",
-              "description": "High-sensitivity detection — flags all potential risks, higher false-positive rate",
-              "thresholds": {
-                "permission_risk": 0.3,
-                "data_access_risk": 0.3,
-                "code_quality_risk": 0.4
-              },
-              "analyzers": {
-                "static": {
-                  "enabled": true,
-                  "max_file_size_kb": 1024
-                },
-                "behavioral": {
-                  "enabled": true,
-                  "trace_depth": 5
-                },
-                "llm": {
-                  "enabled": false
-                }
-              },
-              "severity_overrides": {
-                "MEDIUM": "HIGH"
-              },
-              "disabled_rules": []
             }
           }
         }

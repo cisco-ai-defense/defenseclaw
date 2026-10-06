@@ -670,28 +670,9 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
-    def patch_config(self, path: str, value: Any) -> dict[str, Any]:
-        resp = self._session.post(
-            f"{self.base_url}/config/patch",
-            json={"path": path, "value": value},
-            timeout=self.timeout,
-            allow_redirects=False,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
     def list_skills(self) -> dict[str, Any]:
         resp = self._session.get(
             f"{self.base_url}/skills",
-            timeout=self.timeout,
-            allow_redirects=False,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_tools_catalog(self) -> dict[str, Any]:
-        resp = self._session.get(
-            f"{self.base_url}/tools/catalog",
             timeout=self.timeout,
             allow_redirects=False,
         )

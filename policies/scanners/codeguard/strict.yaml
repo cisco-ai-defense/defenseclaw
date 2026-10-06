@@ -4,13 +4,6 @@ version: 1
 name: strict
 description: "Strict CodeGuard policy — elevated sensitivity, broad file coverage"
 
-rule_dirs:
-  - rules/
-  - custom/
-  - enterprise/
-
-max_file_size_kb: 512
-
 severity_overrides:
   MEDIUM: HIGH
 

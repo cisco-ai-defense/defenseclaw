@@ -13,7 +13,10 @@ A result passes only without errors and without warnings: `ok` means "no
 errors", and the lifecycle reports a failed guardian target, an unverified hook
 contract or a rejected config as a warning. Pass --allow-warning for each
 warning code the step may report, and --complete to require coverage_complete
-and security_complete.
+and security_complete. A step that must fail (the upgrade gate's rollback
+drill) passes --expect-error for each error code it must report instead.
+--policy-applied and --config-generation-above check the effective policy the
+step reports (the result's optional policy object).
 
 Exit codes: 0 the result matches, 1 it does not, 2 unreadable input or bad
 arguments.
@@ -116,12 +119,22 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
     problems = structural_problems(document)
     if problems:
         return problems
-    if document["ok"] is not True:
-        problems.append("ok is false")
-    if document["errors"]:
-        problems.append(f"{len(document['errors'])} error(s) reported")
-    if document["exit_code"] != 0:
-        problems.append(f"exit_code is {document['exit_code']}")
+    if args.expect_error:
+        if document["ok"] is not False:
+            problems.append("ok is true, want a failed step")
+        if document["exit_code"] == 0:
+            problems.append("exit_code is 0, want a failure")
+        reported = {message["code"] for message in document["errors"]}
+        for code in args.expect_error:
+            if code not in reported:
+                problems.append(f"error {code} was not reported")
+    else:
+        if document["ok"] is not True:
+            problems.append("ok is false")
+        if document["errors"]:
+            problems.append(f"{len(document['errors'])} error(s) reported")
+        if document["exit_code"] != 0:
+            problems.append(f"exit_code is {document['exit_code']}")
     if document["transaction_pending"]:
         problems.append("a transaction is still pending")
     if document["profile"] != "standalone":
@@ -165,6 +178,26 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         if message["code"] not in allowed:
             problems.append(f"unexpected warning {message['code']}")
     problems.extend(machine_policy_problems(document["machine_policy"], args))
+    problems.extend(policy_problems(document.get("policy"), args))
+    return problems
+
+
+def policy_problems(policy: Any, args: argparse.Namespace) -> List[str]:
+    if not args.policy_applied and args.config_generation_above is None:
+        return []
+    if not isinstance(policy, dict):
+        return ["the result reports no policy"]
+    problems = []  # type: List[str]
+    digest = policy.get("effective_digest")
+    generation = policy.get("config_generation")
+    if not isinstance(digest, str) or not digest:
+        problems.append("policy.effective_digest is missing")
+    if not isinstance(generation, int) or isinstance(generation, bool):
+        problems.append("policy.config_generation is not an integer")
+    elif args.config_generation_above is not None and generation <= args.config_generation_above:
+        problems.append(f"policy.config_generation is {generation}, want more than {args.config_generation_above}")
+    if args.policy_applied and policy.get("applied") is not True:
+        problems.append("policy.applied is false")
     return problems
 
 
@@ -222,6 +255,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--security-incomplete",
         action="store_true",
         help="require security_complete to be false (Windows before the live Claude Code policy proof)",
+    )
+    parser.add_argument(
+        "--expect-error",
+        action="append",
+        default=[],
+        metavar="CODE",
+        help="require a failed step (ok false, non-zero exit_code) that reports this error code (repeatable)",
+    )
+    parser.add_argument(
+        "--policy-applied",
+        action="store_true",
+        help="require the result's policy with an effective_digest, a config_generation and applied true",
+    )
+    parser.add_argument(
+        "--config-generation-above",
+        type=int,
+        default=None,
+        metavar="N",
+        help="require policy.config_generation to be greater than N",
     )
     parser.add_argument(
         "--allow-warning",

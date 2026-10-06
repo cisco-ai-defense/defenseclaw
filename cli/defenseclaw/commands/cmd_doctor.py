@@ -8137,7 +8137,7 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     # a /c/<connector> base URL, never through an advertised model name.
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
-    url = f"http://{host}:{cfg.guardrail.port}/health/liveliness"
+    url = f"http://{host}:{cfg.guardrail.port}/health"
     code, _ = _http_probe(url, timeout=5.0)
     if code == 200:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
@@ -8158,7 +8158,7 @@ _INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Fail closed when a proxy connector's :4000 listener is unused.
 
-    Liveness on ``/health/liveliness`` only proves the port is open. OpenClaw
+    Liveness on ``/health`` only proves the port is open. OpenClaw
     2026.6.x can talk to a provider without hopping the interceptor, so doctor
     reads the sidecar's additive ``interception`` document (plugin self-test
     plus last ``X-DC-Target-URL`` hop).
@@ -8396,7 +8396,7 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     connector is hook-enforced. If ANY active connector is a proxy type
     (openclaw/zeptoclaw) — or an unknown connector that may bind the
     listener — this returns ``""`` so :func:`_check_guardrail_proxy` runs
-    the real ``/health/liveliness`` probe. Previously the singular primary
+    the real ``/health`` probe. Previously the singular primary
     decided this alone, so a hook-enforced primary masked a proxy peer that
     genuinely needed port 4000 up and the probe was wrongly skipped.
     """

@@ -234,7 +234,7 @@ func TestGuardrailLevelsRejectedBySchema(t *testing.T) {
 	}
 }
 
-// TestGuardrailLevelsValidatedOnLoad pins that Load() runs the new checks on
+// TestGuardrailLevelsValidatedOnLoad pins that LoadFromFile runs the new checks on
 // a path the v8 schema doesn't cover (a v7 file), so a bad level can't reach
 // the gateway through it either.
 func TestGuardrailLevelsValidatedOnLoad(t *testing.T) {
@@ -246,9 +246,9 @@ func TestGuardrailLevelsValidatedOnLoad(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadFromBytes(path, raw)
+	_, err := LoadFromFile(path)
 	if err == nil || !strings.Contains(err.Error(), "guardrail.block_at: must be one of CRITICAL, HIGH, MEDIUM, LOW") {
-		t.Fatalf("LoadFromBytes = %v, want the guardrail.block_at error", err)
+		t.Fatalf("LoadFromFile = %v, want the guardrail.block_at error", err)
 	}
 }
 

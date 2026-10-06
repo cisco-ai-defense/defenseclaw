@@ -350,7 +350,7 @@ exceptions to rule 1: a direct request is needed to test the gateway boundary.
 Use `curl --unix-socket /run/defenseclaw-hook/hook.sock --config
 <owner-only-request-options> http://localhost/api/v1/<connector>/hook` on
 Linux, the platform hook socket on macOS, or
-`http://127.0.0.1:18970/config/patch` for D2. The owner-only curl options
+`http://127.0.0.1:18970/v1/config/providers/reload` for D2. The owner-only curl options
 file supplies `X-DefenseClaw-Client: <client from the installed hook source>`
 and the scoped bearer; never type or capture the bearer. Save only HTTP
 status, side effect and sanitized audit. These diagnostics supplement the
@@ -1313,7 +1313,7 @@ For B2, during the same admin-controlled stopped-socket window, std1 tries
 protected parent exists first; the attempt must be denied and the file
 absent. Windows has no Unix hook socket (`N/A`). For D2 use the owner-only curl options file
 described in [Rules for every row](#rules-for-every-row) against
-`/config/patch`, then a second user's scoped route. For D4 run C3 and C3b
+`/v1/config/providers/reload`, then a second user's scoped route. For D4 run C3 and C3b
 with only one account's environment changed.
 
 For the remaining A variants, use a separate disposable snapshot for each

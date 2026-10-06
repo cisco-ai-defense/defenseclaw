@@ -187,12 +187,6 @@ func (c *Config) HasConnectorConfigured() bool {
 	return false
 }
 
-// ActiveConnector returns the resolved connector name for external packages
-// that need to stamp connector-scoped telemetry/resource attributes.
-func (c *Config) ActiveConnector() string {
-	return c.activeConnector()
-}
-
 // ActiveConnectors returns the full resolved set of connector names
 // (sorted) for external packages — notably the gateway boot loop and the
 // TUI — that need to enumerate every active connector rather than just
@@ -573,11 +567,6 @@ func (c *Config) InstalledSkillCandidates(skillName string) []string {
 		candidates = append(candidates, filepath.Join(dir, name))
 	}
 	return candidates
-}
-
-// ClawHomeDir returns the resolved home directory for the active claw framework.
-func (c *Config) ClawHomeDir() string {
-	return c.ConnectorHomeDir(c.activeConnector())
 }
 
 // OpenClawConfigCandidates returns the openclaw.json paths whose presence

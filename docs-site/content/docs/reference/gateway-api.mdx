@@ -88,11 +88,6 @@ X-DefenseClaw-Token:   <token>
 X-DC-Auth:             Bearer <token>
 ```
 
-`PATCH /v1/guardrail/config` performs a second, endpoint-local check and accepts
-only `Authorization: Bearer` or `X-DefenseClaw-Token`; `X-DC-Auth` alone is
-rejected there. The endpoint also rejects every patch in
-`managed_enterprise` deployment mode.
-
 Loopback connector hook routes can instead use the matching connector's narrow
 hook token. The Codex token also authorizes `/api/v1/codex/notify`. A
 connector-scoped token on a generic `/api/v1/inspect/*` route is accepted only
@@ -379,6 +374,10 @@ These routes return `503` when no upstream client object is present and `502`
 when an attempted upstream RPC fails, including a disconnected client. They do
 not perform the CLI's filesystem quarantine/restore workflow.
 
+The gateway registers these routes and the three inventory routes below only
+when `openclaw` is an active connector, and never on a standalone enterprise
+deployment; elsewhere they return `404`.
+
 ### Inventory
 
 | Method | Path | Purpose |
@@ -411,7 +410,6 @@ not perform the CLI's filesystem quarantine/restore workflow.
 | `POST` | `/v1/guardrail/event` | Emit canonical telemetry for an already-decided guardrail event. Requires `evaluation_id`, `direction` (`prompt` or `completion`), `action` (`allow`, `alert`, or `block`), and severity (`NONE` through `CRITICAL`); latency/token values must be finite and nonnegative. Returns `{"status":"ok"}`. No production caller is wired in this repository. |
 | `POST` | `/v1/guardrail/evaluate` | Combine caller-supplied, precomputed `local_result` / `cisco_result` values with required `evaluation_id`, `direction`, and `mode`, plus optional model/scanner/content/timing metadata. It does not scan arbitrary content and returns a `GuardrailOutput` with `action`, `severity`, `reason`, and `scanner_sources`. |
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
-| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into the active DefenseClaw config file, validate the full YAML file, and apply it through the central reloader. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. Managed-enterprise deployments reject this API mutation. |
 
 Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
 
@@ -446,11 +444,10 @@ defenseclaw tui                                             # Live dashboard
 
 Audit export includes the legacy `details` text and, when present, first-class `structured` JSON from `audit_events.structured_json`. Connector hook rows use `schema: "defenseclaw.hook.v1"`; older parsers can still read the mirrored `details_json=` token inside `details`.
 
-### Config
+### Guardrail profiles
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/config/patch` | Bridge `{path, value}` to the connected upstream agent gateway's WebSocket `config.patch` RPC. It does not write DefenseClaw's `config.yaml`; an absent client returns `503`, while an RPC/disconnection failure returns `502`. |
 | `GET` | `/api/v1/guardrail/profiles/resolve` | Which guardrail profile a subject (`user`, `connector`, `agent`) resolves to, with the match reason, digest and effective settings. Loopback only, with the gateway token; a hook credential is refused. Backs `defenseclaw guardrail profile explain`. |
 
 ### Runtime control and internal observability bridges

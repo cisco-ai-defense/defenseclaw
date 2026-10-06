@@ -1110,36 +1110,6 @@ func (c *Config) ResolvedDefaultLLMAPIKey() string {
 	return c.ResolveLLM("").ResolvedAPIKey()
 }
 
-// EffectiveInspectLLM returns InspectLLM-shaped settings by delegating to
-// ResolveLLM. DEPRECATED: prefer c.ResolveLLM("scanners.skill") /
-// c.ResolveLLM("scanners.mcp") directly.
-func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
-	base := c.ResolveLLM("")
-	out := c.InspectLLM
-	if out.Model == "" {
-		out.Model = base.Model
-	}
-	if out.Provider == "" {
-		out.Provider = base.Provider
-	}
-	if out.APIKey == "" {
-		out.APIKey = base.APIKey
-	}
-	if out.APIKeyEnv == "" {
-		out.APIKeyEnv = base.APIKeyEnv
-	}
-	if out.BaseURL == "" {
-		out.BaseURL = base.BaseURL
-	}
-	if out.Timeout == 0 {
-		out.Timeout = base.EffectiveTimeout()
-	}
-	if out.MaxRetries == 0 {
-		out.MaxRetries = base.EffectiveMaxRetries()
-	}
-	return out
-}
-
 type OTelConfig struct {
 	Enabled      bool                    `mapstructure:"enabled"      yaml:"enabled"`
 	Traces       OTelTracePolicyConfig   `mapstructure:"traces"       yaml:"traces"`
@@ -1444,20 +1414,6 @@ type AgentHookConfig struct {
 	ScanOnStop                   bool     `mapstructure:"scan_on_stop"                    yaml:"scan_on_stop,omitempty"`
 	ScanPaths                    []string `mapstructure:"scan_paths"                      yaml:"scan_paths,omitempty"`
 	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
-}
-
-// EffectiveFailMode returns the per-connector POLICY-LAYER fail
-// mode for AgentHookConfig, defaulting to "closed" for backward
-// compatibility. NOTE: this is NOT what governs the generated
-// hook scripts; see GuardrailConfig.EffectiveHookFailMode for
-// that. Both fields are named "fail_mode" in YAML — the namespace
-// (top-level connector vs guardrail.hook_fail_mode) is what tells
-// them apart.
-func (c AgentHookConfig) EffectiveFailMode() string {
-	if c.FailMode == "open" {
-		return "open"
-	}
-	return "closed"
 }
 
 // ConnectorHookConfig returns the AgentHookConfig for a named connector.
@@ -2685,29 +2641,8 @@ type PluginActionsConfig struct {
 	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
 }
 
-func Load() (*Config, error) {
-	return LoadFromFile(ConfigPath())
-}
-
 func LoadFromFile(configFile string) (*Config, error) {
-	return loadFromFile(configFile)
-}
-
-// LoadFromBytes applies the same defaults, migrations, environment bindings,
-// compatibility decoding, and validation as LoadFromFile, but decodes the
-// supplied immutable source bytes instead of rereading configFile. configFile
-// remains the source identity for relative defaults, diagnostics, trust checks,
-// and ConfigFilePath. Runtime-file migration is deliberately disabled because
-// a captured snapshot must never cause an ambient-path rewrite.
-func LoadFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, append([]byte(nil), raw...), true, true, false, true)
-}
-
-// LoadCandidateFromBytes decodes an exact reload candidate without publishing
-// process-global provenance. The caller must set version.SetContentHash only
-// after the candidate has passed every compile/apply transaction boundary.
-func LoadCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, append([]byte(nil), raw...), true, false, false, true)
+	return loadConfigSource(configFile, nil, false, true, false, true)
 }
 
 // LoadRuntimeV8FromBytes decodes the non-observability portions of an exact
@@ -2873,10 +2808,6 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 			}
 		}
 	}
-}
-
-func loadFromFile(configFile string) (*Config, error) {
-	return loadConfigSource(configFile, nil, false, true, false, true)
 }
 
 // LoadManagedFileForLifecycleRecovery loads a managed config like
@@ -4405,7 +4336,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	// observe-mode "would have blocked / would have asked" toasts
 	// stay quiet by default and are an explicit opt-in for operators
 	// tuning policy. Keep this in lockstep with
-	// DefaultNotificationsConfig() and cli/defenseclaw/config.py.
+	// cli/defenseclaw/config.py.
 	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
 	viper.SetDefault("notifications.block_enforced", true)
 	viper.SetDefault("notifications.block_would_block", false)
