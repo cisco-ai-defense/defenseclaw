@@ -177,6 +177,13 @@ func (s *ContinuousDiscoveryService) sweepHistoryIfDue(ctx context.Context) bool
 		return true
 	}
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	// The remembered session ids of the agent identity ledger hang off no
+	// scan, so a failed or partial scan prune cannot skip them.
+	if _, err := s.invStore.PruneAgentIdentitySessions(ctx, cutoff); err != nil {
+		if ctx.Err() == nil && w.allowDiagnostic("prune-agent-sessions", now) {
+			fmt.Fprintf(os.Stderr, "[ai-discovery] agent identity session prune failed: %v\n", err)
+		}
+	}
 	pruned, err := s.invStore.PruneScanHistory(ctx, cutoff, inventoryHistorySweepBudget)
 	if err != nil {
 		if ctx.Err() == nil && w.allowDiagnostic("prune", now) {

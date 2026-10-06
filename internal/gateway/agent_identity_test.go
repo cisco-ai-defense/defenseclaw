@@ -183,28 +183,23 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	ctx := context.Background()
 	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
 	facts := agentIdentityFacts{ID: "agt-00000000000000c1", UserID: "4545", Connector: "claudecode", MachineHash: "m"}
+	// Two sessions are open when the gateway restarts (GAP-0139).
 	recorder.observe(facts, "sess-a", true)
+	recorder.observe(facts, "sess-b", true)
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
-	// After the restart: session A resumed, then a new session B.
+	// After the restart both are resumed, one of them twice, and a third starts.
 	recorder.observe(facts, "sess-a", true)
-	recorder.observe(facts, "sess-a", false)
 	recorder.observe(facts, "sess-b", true)
-	stored, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, _ := recorder.snapshot()
-	if rows := mergeAgentIdentityRows(stored, pending, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].SessionsSeen != 2 {
-		t.Fatalf("buffered view = %+v, want 2 sessions", rows)
-	}
+	recorder.observe(facts, "sess-a", false)
+	recorder.observe(facts, "sess-c", true)
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
 	if rows, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{}); err != nil || len(rows) != 1 ||
-		rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "sess-b" {
-		t.Fatalf("stored rows = %+v, err %v; want 2 sessions, last sess-b", rows, err)
+		rows[0].SessionsSeen != 3 || rows[0].LastSessionID != "sess-c" {
+		t.Fatalf("stored rows = %+v, err %v; want 3 sessions, last sess-c", rows, err)
 	}
 
 	dave := withManagedHookPeer(ctx, managedHookPeer{UID: 4646, Name: "dave", Home: t.TempDir()})

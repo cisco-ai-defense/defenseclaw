@@ -559,9 +559,10 @@ settings under `effective`.
 ```
 
 Rows are most recently seen first. The gateway writes new rows to
-`inventory.db` in a batch every 30 seconds, and the route merges the rows it
-has not written yet, so a new agent shows at once. `sessions_seen` counts each
-chat once, also when it resumes after a gateway restart.
+`inventory.db` in a batch every 30 seconds, and the route writes the rows it
+has not written yet before it lists them, so a new agent shows at once.
+`sessions_seen` counts each chat once, however many are open and also when one
+resumes after a gateway restart.
 
 ```json title="GET /api/v1/ai-usage/ide-plugins?ai_only=true (trimmed)"
 {
