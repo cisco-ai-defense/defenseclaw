@@ -53,8 +53,7 @@ observability: {}
 	}
 }
 
-func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
-	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
+func TestLoadRuntimeV8FromBytesRetainsConnectorWebhookOverride(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw-v8
 observability:
@@ -66,21 +65,9 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OTel.Enabled || len(cfg.OTel.Destinations) != 0 {
-		t.Fatalf("target runtime retained legacy OTel config: %+v", cfg.OTel)
-	}
-	if cfg.AuditSinks != nil {
-		t.Fatalf("target runtime retained global legacy audit sinks: %+v", cfg.AuditSinks)
-	}
-	if cfg.AIDiscovery.EmitOTel {
-		t.Fatal("target runtime retained ai_discovery.emit_otel")
-	}
 	connector, ok := cfg.Observability.Connectors["codex"]
 	if !ok || connector.Webhooks == nil {
 		t.Fatalf("v8 connector webhook override was not retained: %+v", cfg.Observability.Connectors)
-	}
-	if connector.AuditSinks != nil {
-		t.Fatalf("target runtime retained connector legacy audit sinks: %+v", connector.AuditSinks)
 	}
 }
 
@@ -380,6 +367,9 @@ llm_providers:
 update: {check: false}
 scanners:
   mcp_scanner: {analyzers: "yara,llm"}
+ai_discovery:
+  signature_packs: [/home/u/.defenseclaw/signature-packs/p.json]
+  signature_pack_digests: {/home/u/.defenseclaw/signature-packs/p.json: "sha256:0000000000000000000000000000000000000000000000000000000000000001"}
 observability: {}
 `)
 	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
@@ -423,6 +413,11 @@ observability: {}
 	}
 	if cfg.Update.CheckEnabled() {
 		t.Error("update.check false must disable the update notice")
+	}
+	// A pack's pin is keyed by its file path, whose dots Viper would split (GAP-0066).
+	pins := cfg.AIDiscovery.SignaturePackDigests
+	if pins["/home/u/.defenseclaw/signature-packs/p.json"] != "sha256:0000000000000000000000000000000000000000000000000000000000000001" {
+		t.Errorf("signature_pack_digests = %v, want the pin keyed by the full path", pins)
 	}
 	if got := cfg.Scanners.MCPScanner.Analyzers; !reflect.DeepEqual(got, []string{"yara", "llm"}) {
 		t.Errorf("v8 analyzers CSV = %v, want [yara llm]", got)

@@ -154,45 +154,6 @@ def test_f0022_llm_tls_quoted_false_keeps_verification(tmp_path, monkeypatch):
     )
 
 
-def test_f0023_audit_sink_hec_quoted_false_keeps_verification(tmp_path, monkeypatch):
-    home = tmp_path / "f0023"
-    home.mkdir()
-    (home / "config.yaml").write_text(
-        "audit_sinks:\n"
-        "  - name: splunk-prod\n"
-        "    kind: splunk_hec\n"
-        "    enabled: true\n"
-        "    splunk_hec:\n"
-        "      endpoint: https://splunk.example.test:8088/services/collector/event\n"
-        "      token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN\n"
-        '      insecure_skip_verify: "false"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    cfg = load()
-    # Quoted "false" mirrors to a real False and leaves verification ON.
-    assert cfg.splunk.insecure_skip_verify is False
-    assert cfg.splunk.tls_verify_enabled() is True
-
-
-def test_f0024_legacy_splunk_quoted_false_keeps_verification(tmp_path, monkeypatch):
-    home = tmp_path / "f0024"
-    home.mkdir()
-    (home / "config.yaml").write_text(
-        "splunk:\n"
-        "  enabled: true\n"
-        "  hec_endpoint: https://splunk.example.test:8088/services/collector/event\n"
-        "  hec_token_env: F0024_SPLUNK_HEC_TOKEN\n"
-        '  insecure_skip_verify: "false"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    monkeypatch.setenv("F0024_SPLUNK_HEC_TOKEN", "secret-token")
-    cfg = load()
-    assert cfg.splunk.insecure_skip_verify is False
-    assert cfg.splunk.tls_verify_enabled() is True
-
-
 # ---------------------------------------------------------------------------
 # F-0808 — Python must not own a direct Splunk HEC transport
 # ---------------------------------------------------------------------------

@@ -637,6 +637,7 @@ _GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 
+
 _GENERATED_HOOK_REGEN_COMMANDS: dict[str, str] = {
     "codex": "defenseclaw setup codex --yes --restart",
     "claudecode": "defenseclaw setup claude-code --yes --restart",
@@ -9034,19 +9035,31 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
         )
         return
     local = _local_policy_digest(cfg)
+    pending = [str(key) for key in policy.get("pending_restart") or []]
+    if local is not None and local.get("effective_digest") != digest and pending:
+        # The gateway announced these keys apply only after a restart, so the
+        # difference is the pending change, not a stale gateway.
+        _emit(
+            "warn",
+            label,
+            f"{applied}; restart the gateway to apply {', '.join(pending)}: `defenseclaw-gateway restart`",
+            r=r,
+            check_id="doctor.policy.restart-pending",
+            reason_code="policy-restart-pending",
+            remediation="Run `defenseclaw-gateway restart`",
+        )
+        return
     if local is not None and local.get("effective_digest") != digest:
         _emit(
             "fail",
             label,
             f"the gateway applies {_short_policy_digest(digest)} but config.yaml and its policy assets compute to "
-            f"{_short_policy_digest(str(local.get('effective_digest')))}",
+            f"{_short_policy_digest(str(local.get('effective_digest')))}; "
+            "run `defenseclaw-gateway restart` to apply them",
             r=r,
             check_id="doctor.policy.stale",
             reason_code="policy-stale",
-            remediation=(
-                "Run `defenseclaw-gateway restart`, or check "
-                "`defenseclaw-gateway status` for a rejected reload"
-            ),
+            remediation="Check `defenseclaw-gateway status` for a rejected reload if a restart does not clear it",
         )
         return
     if config_generation > 0 and policy.get("config_generation_recorded") is False:
@@ -10418,11 +10431,6 @@ _OVERRIDE_TAG_BY_IMPACT = {
 }
 
 
-# Variables only the Secure Client integration still reads. Every other install,
-# including every host this CLI runs on, takes the setting from the config key.
-_SECURE_CLIENT_ONLY_ENV = {"DEFENSECLAW_JUDGE_TRACE": "guardrail.judge.trace"}
-
-
 def _check_security_overrides(cfg, r: _DoctorResult) -> None:
     """Surface DEFENSECLAW_* env vars that weaken security defaults.
 
@@ -10447,29 +10455,22 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Security overrides", f"registry load failed: {exc}", r=r)
         return
 
-    # A managed standalone device ignores these; name them, never values.
-    from defenseclaw.envvars import ignored_in_managed_mode
+    # A managed standalone device ignores these, and any host ignores a
+    # Secure-Client-only variable or a deployment pin exported in a user's
+    # shell; name them, never values.
+    from defenseclaw.config import ignored_deployment_pins
+    from defenseclaw.envvars import ignored_in_managed_mode, ignored_off_secure_client
 
-    ignored = set(ignored_in_managed_mode())
+    managed_ignored = set(ignored_in_managed_mode())
+    ignored = managed_ignored | set(ignored_off_secure_client()) | set(ignored_deployment_pins())
     if ignored:
-        _emit(
-            "pass",
-            "Ignored environment overrides",
-            f"this device is managed, so these have no effect: {', '.join(sorted(ignored))}",
-            r=r,
+        why = (
+            "this device is managed, so these have no effect"
+            if managed_ignored
+            else "this host is not managed and takes these settings from config.yaml, so these have no effect"
         )
+        _emit("pass", "Ignored environment overrides", f"{why}: {', '.join(sorted(ignored))}", r=r)
         active = [entry for entry in active if entry.name not in ignored]
-
-    replaced = [entry for entry in active if entry.name in _SECURE_CLIENT_ONLY_ENV]
-    if replaced:
-        _emit(
-            "pass",
-            "Ignored environment overrides",
-            "no effect on this install, set the config key instead: "
-            + ", ".join(f"{entry.name} (use {_SECURE_CLIENT_ONLY_ENV[entry.name]})" for entry in replaced),
-            r=r,
-        )
-        active = [entry for entry in active if entry.name not in _SECURE_CLIENT_ONLY_ENV]
 
     private_env_name = "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"
     active = [entry for entry in active if entry.name != private_env_name]
@@ -11909,12 +11910,12 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
         ),
         (
             "doctor.connector.hook-scripts.regenerate",
-            "hook scripts",
-            "safe",
-            _fix_hook_scripts_regenerate,
-            ("doctor.connector.hook-scripts.restore-mode",),
-            ("re-render the hook scripts that no longer match config.yaml or the digests setup sealed",),
-            False,
+            "generated hook scripts",
+            "disruptive",
+            _fix_hook_script_drift,
+            ("doctor.gateway.service.reconcile",),
+            ("restart the gateway so it renders the hook scripts setup sealed again, replacing an edited copy",),
+            True,
             False,
         ),
         (
@@ -12718,12 +12719,31 @@ class _UnexpectedRulePackValidatorFailure:
         )
 
 
+def _selected_rule_pack(gc: object, connector: str) -> tuple[str, str]:
+    """The ``guardrail.rule_pack`` name a connector uses and, for a custom pack, its pinned digest.
+
+    Returns ``("", "")`` when the connector selects no pack by name.
+    """
+    resolve = getattr(gc, "effective_rule_pack", None)
+    packs = getattr(gc, "custom_packs", None)
+    try:
+        name = resolve(connector) if callable(resolve) else ""
+    except Exception:  # noqa: BLE001 - doctor must still report the row.
+        name = ""
+    if not isinstance(name, str) or not name:
+        return "", ""
+    custom = packs.get(name) if isinstance(packs, dict) else None
+    digest = getattr(custom, "digest", "")
+    return name, digest.strip() if isinstance(digest, str) else ""
+
+
 def _emit_rule_pack_row(
     path: str,
     kind: str,
     r: _DoctorResult,
     *,
     validation_cache: dict[str, object] | None = None,
+    pack: tuple[str, str] = ("", ""),
 ) -> None:
     """Authoritatively validate a resolved rule pack and emit one doctor row.
 
@@ -12734,7 +12754,9 @@ def _emit_rule_pack_row(
     usable during an incomplete upgrade without claiming enforcement is sound.
     A valid partial overlay with no direct rule-category overrides also WARNs;
     compiled categories remain active, but the row does not claim that the
-    overlay itself enables rules.
+    overlay itself enables rules. *pack* is the selected ``(name, pinned
+    digest)``: a custom pack whose files no longer match its pin FAILs, because
+    the gateway refuses the edit and keeps the pack it loaded before.
     """
     cache_key = _rule_pack_cache_key(path)
     outcome: object
@@ -12798,6 +12820,21 @@ def _emit_rule_pack_row(
         return
 
     summary = outcome.summary or {}
+    pack_name, pinned = pack
+    files_digest = str(summary.get("files_digest", "") or "")
+    if pinned and files_digest and pinned.lower().removeprefix("sha256:") != files_digest.lower():
+        # The gateway refuses a custom pack whose files no longer match the
+        # pin and keeps enforcing the previous one; a green row hid that.
+        _emit(
+            "fail",
+            "Rule pack",
+            f"{kind} {shown_path}: the pack files no longer match guardrail.custom_packs.{pack_name}.digest "
+            f"(pinned {pinned.lower().removeprefix('sha256:')[:12]}, files {files_digest[:12]}); "
+            "the gateway keeps enforcing the pack it loaded before the edit",
+            r=r,
+            remediation=f"defenseclaw guardrail use-pack {shown_path}",
+        )
+        return
     enabled_rule_count = summary.get("enabled_rule_count", 0)
     rule_count = summary.get("rule_count", 0)
     digest = summary.get("digest", "")
@@ -12963,7 +13000,7 @@ def _check_connector_inventory(
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
     # Effective rule pack for this connector (falls back to built-in defaults
-    # when no rule_pack_dir is configured). The offline Go loader validates
+    # when no rule pack is configured). The offline Go loader validates
     # the resolved pack; Python filesystem presence is never treated as proof.
     if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
         try:
@@ -12971,18 +13008,16 @@ def _check_connector_inventory(
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
         if rule_pack_dir:
-            try:
-                pack_name = (gc.effective_rule_pack(connector) or "").strip()
-            except Exception:  # noqa: BLE001
-                pack_name = ""
+            pack = _selected_rule_pack(gc, connector)
             _emit_rule_pack_row(
                 rule_pack_dir,
-                f"configured rule pack '{pack_name}'" if pack_name else "configured rule pack",
+                f'configured rule pack "{pack[0]}"' if pack[0] else "configured rule pack",
                 r,
                 validation_cache=rule_pack_validation_cache,
+                pack=pack,
             )
         else:
-            # No explicit rule_pack_dir → the gateway resolves the built-in
+            # No explicit rule pack → the gateway resolves the built-in
             # default to <data_dir>/policies/guardrail/default and loads packs
             # from there (Go: config.go cfg.Guardrail.RulePackDir fallback +
             # the viper default). Validate THAT resolved path rather than
@@ -13328,16 +13363,20 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
 
     An edited script (an early ``exit 0``) silently disables enforcement and a
     missing token blocks every call, while the other hook rows stay green
-    (GAP-1141, GAP-1138). ``doctor --fix`` re-renders the scripts from
-    config.yaml and restores the token.
+    (GAP-1141, GAP-1138). Both are repaired by rerunning setup.
     """
-    from defenseclaw.hook_integrity import hook_runtime_problems
+    from defenseclaw.hook_integrity import hook_runtime_problems, setup_command
 
     # Token problems are reported once, by the Connector hook credential row,
     # with the repair doctor --fix applies (GAP-1436).
     problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
     if problems:
-        _emit("fail", "Hook runtime files", f"{'; '.join(problems)}; run `defenseclaw doctor --fix`", r=r)
+        _emit(
+            "fail",
+            "Hook runtime files",
+            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`, or `{setup_command(connector)}`",
+            r=r,
+        )
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:
@@ -15351,58 +15390,52 @@ def _fix_hook_script_modes(
     return ("pass", f"restored mode 0700 on {names}")
 
 
-def _hook_script_regen_targets(cfg) -> list[str]:
-    """Active connectors whose generated hook scripts differ from the render
-    setup sealed (an edit, or a copy from another build)."""
+def _drifted_hook_connectors(cfg) -> list[str]:
     from defenseclaw.hook_integrity import hook_runtime_problems
 
-    targets: list[str] = []
-    for connector in _doctor_active_connectors(cfg):
-        script_problems = [
-            problem
-            for problem in hook_runtime_problems(cfg, connector)
-            if not problem.startswith("hook token ") and "is not executable" not in problem
-        ]
-        if script_problems:
-            targets.append(connector)
-    return targets
+    return [
+        connector
+        for connector in _doctor_active_connectors(cfg)
+        if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+    ]
 
 
-def _fix_hook_scripts_regenerate(
+def _fix_hook_script_drift(
     cfg,
     *,
     assume_yes: bool,
     plan_only: bool = False,
 ) -> tuple[str, str]:
-    """Re-render the generated hook scripts from config.yaml (N03).
+    """Render a hand-edited generated hook script again (GAP-0098).
 
-    A script is derived from the config, never read back as input, so a hand
-    edit is replaced by the genuine render and the lock digest is sealed
-    again, as ``defenseclaw setup <connector>`` does for that connector alone.
-    Managed hosts are re-rendered by ``ensure``/``repair``, not by doctor.
+    The script is derived from config.yaml: the gateway renders it, with its
+    digest sealed in hook_contract_lock.json, each time it starts. So the
+    repair is a restart of the verified gateway, which replaces the edited
+    copy, never a chmod that would make it runnable.
     """
-    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
-        return ("skip", "managed hook scripts are re-rendered by 'enterprise <os> repair'")
-    targets = _hook_script_regen_targets(cfg)
-    if not targets:
-        return ("skip", "the generated hook scripts match config.yaml and the digests setup sealed")
-    names = ", ".join(targets)
+    drifted = _drifted_hook_connectors(cfg)
+    if not drifted:
+        return ("skip", "the generated hook scripts match the digests setup sealed")
+    names = ", ".join(drifted)
     if plan_only:
-        return ("plan", f"re-render the hook scripts of {names} from config.yaml")
-    if not assume_yes and not click.confirm(f"    Re-render the hook scripts of {names} from config.yaml?", default=True):
+        return ("plan", f"restart the gateway so it renders the {names} hook script(s) again")
+    if not assume_yes and not click.confirm(
+        f"    Restart the gateway to render the {names} hook script(s) again?", default=True
+    ):
         return ("skip", "declined by user")
-    from defenseclaw.fail_mode import reconcile_connector_registration
-    from defenseclaw.hook_integrity import setup_command
+    trust = _trusted_gateway_listener_for_lifecycle(cfg)
+    if not trust.trusted:
+        return ("fail", f"{trust.detail}; start the gateway with `defenseclaw-gateway start`, then run doctor --fix again")
+    repaired, detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
+    if not repaired:
+        return ("fail", f"could not restart the gateway ({detail}); run `defenseclaw-gateway restart`")
+    left = _drifted_hook_connectors(cfg)
+    if left:
+        from defenseclaw.hook_integrity import setup_command
 
-    failures = []
-    for connector in targets:
-        try:
-            reconcile_connector_registration(cfg, connector)
-        except OSError as exc:
-            failures.append(f"{connector}: {exc} (run `{setup_command(connector)}`)")
-    if failures:
-        return ("fail", "could not re-render the hook scripts: " + "; ".join(failures))
-    return ("pass", f"re-rendered the hook scripts of {names}")
+        commands = ", ".join(f"`{setup_command(c)}`" for c in left)
+        return ("fail", f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}")
+    return ("pass", f"rendered the {names} hook script(s) again")
 
 
 def _fix_acp_guard_pins(

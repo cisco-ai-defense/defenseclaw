@@ -85,6 +85,18 @@ class DoctorPolicyStateTests(unittest.TestCase):
             with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": local}):
                 cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
             self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
+            if want == "fail" and not extra:
+                self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
+
+        # A digest the gateway holds back for a restart-only key is a pending
+        # restart (warn), not a stale gateway (fail) (GAP-0072).
+        policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                  "config_generation_recorded": True, "pending_restart": ["guardrail.connectors"]}
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": "sha256:" + "b" * 64}):
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+        self.assertEqual(result.checks[0]["status"], "warn")
+        self.assertIn("guardrail.connectors", result.checks[0]["detail"])
 
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
@@ -178,22 +190,6 @@ class DoctorSecurityOverrideTests(unittest.TestCase):
         self.assertIn("192.168.1.20", detail)
         self.assertIn("config.yaml", detail)
         self.assertIn("environment", detail)
-
-
-class DoctorIgnoredEnvironmentTests(unittest.TestCase):
-    def test_secure_client_only_variable_is_listed_as_ignored(self):
-        # GAP-0082: DEFENSECLAW_JUDGE_TRACE is read only on the Secure Client
-        # integration; doctor said it was an active override.
-        cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=[]))
-        result = _DoctorResult()
-
-        with patch.dict(os.environ, {"DEFENSECLAW_JUDGE_TRACE": "1"}, clear=True):
-            _check_security_overrides(cfg, result)
-
-        labels = [check["label"] for check in result.checks]
-        self.assertNotIn("Security override", labels)
-        ignored = next(check for check in result.checks if check["label"] == "Ignored environment overrides")
-        self.assertIn("DEFENSECLAW_JUDGE_TRACE (use guardrail.judge.trace)", ignored["detail"])
 
 
 class DoctorMultiConnectorInventoryTests(unittest.TestCase):

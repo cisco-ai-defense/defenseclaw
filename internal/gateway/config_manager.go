@@ -136,6 +136,12 @@ type ConfigManager struct {
 	// a REWRITTEN file, not a deletion.
 	envOverlayApplied atomic.Bool
 
+	// rejected is set (under mu) when the last reload this manager ran was
+	// refused, and cleared by the next one that builds. While it stands the
+	// next reload rebuilds the generation even without a config or asset
+	// diff, since the repair is exactly what the diff cannot see.
+	rejected bool
+
 	current atomic.Value // *config.Config
 	gen     atomic.Uint64
 	mu      sync.Mutex
@@ -599,6 +605,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)
 	if err != nil {
+		m.rejected = true
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "candidate_invalid")
 		if m.health != nil {
@@ -613,7 +620,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(next.ConfigVersion) {
 		m.recordLoadError(ctx, "schema_version")
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 	}
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
 		m.recordLoadError(ctx, "managed_downgrade")
@@ -740,10 +747,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			}
 		}
 	}
+	setPendingRestart(pendingRestart)
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
-	if len(diff.Changed) == 0 && assets {
+	// A standing rejection also forces a rebuild: the repair (an asset
+	// restored, a bad config edit reverted) changes nothing the diff sees,
+	// and without the rebuild the error would stay until some unrelated
+	// change.
+	if len(diff.Changed) == 0 && (assets || m.rejected) {
 		diff.Changed = []string{configDiffAssets}
 	}
 	if len(diff.Changed) == 0 {
@@ -781,11 +793,15 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
 	if errors.Is(applyErr, errGenerationUnchanged) {
-		// The rebuild succeeded and equals the live generation, so an earlier
-		// rejected edit is resolved (a pack restored after a digest
-		// mismatch): clear its last_reload_error and error state, otherwise
-		// they stay until an unrelated config write.
-		liveReloadError.Store("")
+		// The rebuild succeeded and matches the live generation: nothing to
+		// swap, but an earlier rejected edit is resolved (a pack restored
+		// after a digest mismatch), so clear its last_reload_error and error
+		// state; otherwise they stay until an unrelated config write.
+		m.rejected = false
+		clearGenerationBuildError()
+		recordHandEdit(ctx, next, m.path, source.raw)
+		refreshConfigGeneration(source.raw)
+		version.SetContentHash(source.raw)
 		if m.health != nil {
 			state, msg := StateRunning, ""
 			if envOverlayErr != nil {
@@ -801,6 +817,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		return nil
 	}
 	if applyErr != nil {
+		m.rejected = true
 		recordGenerationBuildError(applyErr)
 		m.recordLoadError(ctx, "apply_rejected")
 		if m.health != nil {
@@ -814,6 +831,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		}
 		return applyErr
 	}
+	m.rejected = false
 	gen := m.gen.Add(1)
 	m.current.Store(cloneConfig(next))
 	recordHandEdit(ctx, next, m.path, source.raw)
@@ -920,7 +938,7 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 			raw:        append([]byte(nil), before.raw...),
 		}
 		if !config.CurrentSchemaVersion(next.ConfigVersion) {
-			return nil, configReloadSource{}, fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+			return nil, configReloadSource{}, fmt.Errorf("config reload requires schema v8; run 'defenseclaw migrate' first")
 		}
 		if compiled == nil || compiled.Plan == nil {
 			return nil, configReloadSource{}, fmt.Errorf("config reload v8 compiler returned no effective plan")

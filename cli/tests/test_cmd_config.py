@@ -289,7 +289,7 @@ class ConfigShowTests(unittest.TestCase):
             "guardrail.connectors": {"codex": {"hilt": {"enabled": True}}}
         }
 
-        rendered = cmd_config._config_to_masked_dict(cfg, reveal=False)
+        rendered = cmd_config._config_to_masked_dict(cfg)
         blob = json.dumps(rendered)
 
         self.assertNotIn("_loaded_authoritative_dicts", rendered)

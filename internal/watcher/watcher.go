@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -170,6 +171,11 @@ type InstallWatcher struct {
 	// scannerFor; tests inject a fake to observe scan invocations without
 	// shelling out to the real scanner binaries.
 	scannerFactory func(InstallEvent) scanner.Scanner
+
+	// rulePackSource returns the guardrail rule pack the install-time scan of
+	// a connector's skills applies on top of the skill scanner, or nil when
+	// that connector's scope selects none. Nil applies no overlay.
+	rulePackSource func(connector string) *guardrail.RulePack
 }
 
 // newScanner resolves the scanner for evt via the injectable factory, falling
@@ -212,6 +218,13 @@ func (w *InstallWatcher) SetPolicySource(source func() *policy.Prepared) {
 // admission decision records carry. Call it before Run.
 func (w *InstallWatcher) SetPolicyStamp(stamp func() (observability.Optional[string], observability.Optional[int64])) {
 	w.policyStamp = stamp
+}
+
+// SetRulePackSource binds the live generation's guardrail rule pack for a
+// connector, so a skill is scanned at install with the pack
+// `defenseclaw skill scan` applies to it. Call it before Run.
+func (w *InstallWatcher) SetRulePackSource(source func(connector string) *guardrail.RulePack) {
+	w.rulePackSource = source
 }
 
 // SetConfigSource binds the live config admission decisions read.
@@ -953,8 +966,9 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
 				fmt.Sprintf("type=%s reason=%s", targetType, blockReason), enforcement)
 
-			// Only a file action moves files: block disables the asset and
-			// leaves it in place; quarantine is the action that relocates it.
+			// Only a file action of quarantine moves the files. The block
+			// shorthand (install block, runtime disable, file none) leaves
+			// them where they are.
 			if fileAction == "quarantine" {
 				w.enforceBlockWith(ctx, evt, retainRestored)
 			}
@@ -1010,11 +1024,11 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	// picked up automatically on the next install.
 	switch evt.Type {
 	case InstallSkill:
-		return scanner.NewSkillScannerFromLLM(
+		return w.withRulePackOverlay(scanner.NewSkillScannerFromLLM(
 			w.cfg.Scanners.SkillScanner,
 			w.cfg.ResolveLLM("scanners.skill"),
 			w.cfg.CiscoAIDefense,
-		)
+		), evt)
 	case InstallMCP:
 		return scanner.NewMCPScannerFromLLM(
 			w.cfg.Scanners.MCPScanner,
@@ -1027,6 +1041,17 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	default:
 		return nil
 	}
+}
+
+// withRulePackOverlay adds the connector's guardrail rule pack to a skill
+// scan, as `defenseclaw skill scan` does, so a secret or an injection pattern
+// in a skill's files is found at install and not only by the manual scan
+// (GAP-0065). It returns inner when no pack applies.
+func (w *InstallWatcher) withRulePackOverlay(inner scanner.Scanner, evt InstallEvent) scanner.Scanner {
+	if w.rulePackSource == nil {
+		return inner
+	}
+	return guardrail.NewArtifactOverlay(inner, w.rulePackSource(w.eventConnector(evt)))
 }
 
 // takeActionFor returns whether enforcement actions should be applied for the

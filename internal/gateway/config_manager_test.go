@@ -1017,6 +1017,23 @@ func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {
 	}
 }
 
+// A connector's enabled: true is the unset default, so it is no restart-
+// required change; disabling it is (GAP-0032).
+func TestGuardrailRestartPredicateTreatsEnabledTrueAsTheDefault(t *testing.T) {
+	yes, no := true, false
+	withCodex := func(enabled *bool) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}}
+		return cfg
+	}
+	if guardrailNeedsRestart(withCodex(nil), withCodex(&yes)) {
+		t.Fatal("enabled: true (the default) asked for a restart")
+	}
+	if !guardrailNeedsRestart(withCodex(&yes), withCodex(&no)) {
+		t.Fatal("disabling a connector did not ask for a restart")
+	}
+}
+
 func TestAIDiscoveryRestartPredicateIncludesLiveManagedModeTransitions(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -1246,11 +1263,12 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	var diffs []ConfigDiff
-	unchanged, rejected := false, false
+	unchanged := false
+	var rejected error
 	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
 		diffs = append(diffs, diff)
-		if rejected {
-			return errors.New("custom pack digest mismatch")
+		if rejected != nil {
+			return rejected
 		}
 		if unchanged {
 			return errGenerationUnchanged
@@ -1277,22 +1295,34 @@ func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
 	}
 	// A pack that fails its digest check rejects the rebuild and leaves a
 	// last_reload_error; restoring the pack rebuilds the same generation,
-	// which must clear that error (GAP-0027).
+	// which must clear that error (GAP-0027), and a plain reload after the
+	// repair does too (GAP-0131).
 	t.Cleanup(func() { liveReloadError.Store("") })
-	rejected = true
+	rejected = errors.New("custom pack digest mismatch")
 	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
 		t.Fatal("rejected asset rebuild succeeded")
 	}
-	if msg, _ := liveReloadError.Load().(string); msg == "" {
+	if !hasRejection() {
 		t.Fatal("rejected asset rebuild left no last_reload_error")
 	}
-	rejected = false
-	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil {
-		t.Fatalf("restored asset rebuild: %v", err)
+	rejected = nil
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || hasRejection() {
+		t.Fatalf("restored asset rebuild = %v, last_reload_error still set: %v", err, hasRejection())
 	}
-	if msg, _ := liveReloadError.Load().(string); msg != "" {
-		t.Fatalf("last_reload_error = %q after the asset was restored, want it cleared", msg)
+	rejected = errors.New("custom pack digest mismatch")
+	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
+		t.Fatal("rejected asset rebuild succeeded")
 	}
+	rejected = nil
+	if err := mgr.Reload(context.Background(), "test"); err != nil || mgr.rejected || hasRejection() {
+		t.Fatalf("reload after the repair = %v, rejection still standing (manager %v)", err, mgr.rejected)
+	}
+}
+
+// hasRejection reports a standing policy.last_reload_error.
+func hasRejection() bool {
+	msg, _ := liveReloadError.Load().(string)
+	return msg != ""
 }
 
 // A config_version 8 file whose in-memory migration fails is refused, not

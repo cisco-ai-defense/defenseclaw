@@ -221,9 +221,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		// Resolve the identity-based guardrail profile once, after
-		// authentication, from the route's connector and the verified
-		// subject (never the payload). No-op without profiles. The agent
-		// identity is folded in by enrichAgentHookContext.
+		// authentication, from the route's connector, the verified subject
+		// and the agent identity derived from both (never the payload).
+		// No-op without profiles.
 		r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), connectorName))
 
 		// Run installs the same ordinary API ceiling globally. Keep the hook
@@ -1237,7 +1237,6 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
-	ctx = refreshGuardrailProfileForAgent(ctx)
 	// Refresh the audit correlation envelope with payload-derived
 	// correlation. CorrelationMiddleware snapshots the envelope
 	// from the HTTP headers BEFORE this handler runs; for hook

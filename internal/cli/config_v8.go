@@ -119,10 +119,7 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var schemaError *config.V8SchemaError
 	var semanticError *config.V8SemanticError
 	var secretError *config.V8SecretReferenceError
-	var deploymentModeEnvError *config.DeploymentModeEnvError
 	switch {
-	case errors.As(err, &deploymentModeEnvError):
-		result.Reason = "[deployment_mode_env_invalid] " + deploymentModeEnvError.Diagnostic()
 	case errors.As(err, &secretError):
 		result.Path = "$." + secretError.Path
 		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"

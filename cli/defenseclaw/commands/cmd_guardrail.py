@@ -220,6 +220,21 @@ def _resolve_member_connector(app, requested: str) -> str | None:
     return None
 
 
+def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None:
+    """Re-verify the agent executables an enable is about to set up.
+
+    Windows (and OpenHands on macOS) admit a connector only against a freshly
+    verified agent executable. ``guardrail disable`` removes the connector's
+    proof and the short-lived selection from the last setup has expired, so an
+    enable that only restarted the gateway left it refusing the connector as
+    "agent version not probed" (GAP-0069). A no-op on other hosts. Runs before
+    the config is saved, so a failed check changes nothing.
+    """
+    from defenseclaw.commands import cmd_setup
+
+    cmd_setup._record_windows_setup_agent_selections(app.cfg.data_dir, list(connectors))
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -307,6 +322,9 @@ def _toggle_connector_guardrail(
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
+    if enable and restart:
+        _verify_agents_before_enable(app, [key])
+
     # Mutate the per-connector entry, preserving its other policy fields.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -334,6 +352,9 @@ def _toggle_connector_guardrail(
             app.cfg.gateway.port,
             connector=key,
             teardown=not enable,
+            # Report "setup complete" only once the gateway admitted the
+            # connector (GAP-0069).
+            wait_for_connector_ready=enable,
         )
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
@@ -1088,6 +1109,9 @@ def enable_cmd(
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
+    if restart and _set_up:
+        _verify_agents_before_enable(app, _set_up)
+
     gc.enabled = True
     try:
         app.cfg.save()
@@ -1107,6 +1131,9 @@ def enable_cmd(
             connector=connector,
             connectors=_actives,
             **({"summary_exclude": frozenset(_kept_off)} if _kept_off else {}),
+            # With every active connector being set up, report "setup
+            # complete" only once the gateway admitted them (GAP-0069).
+            wait_for_connector_ready=bool(_set_up) and not _kept_off,
         )
         if len(_set_up) > 1:
             ux.ok(

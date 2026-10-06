@@ -297,7 +297,6 @@ def test_source_gateway_claim_allows_rebuild_but_rejects_installed_tampering(
         "extensions/defenseclaw/package.json",
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
-        "internal/config/config.go",
         "internal/config/observability_v8_types.go",
         "release/source-install-identity.json",
     ):

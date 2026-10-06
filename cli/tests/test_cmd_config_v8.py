@@ -128,7 +128,7 @@ def test_v8_source_view_uses_masked_source_not_go_effective(tmp_path: Path) -> N
     inspect.assert_not_called()
 
 
-def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) -> None:
+def test_v8_effective_view_is_go_owned(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
     effective = {
@@ -143,12 +143,9 @@ def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) ->
             cmd_config.config_cmd,
             ["show", "--effective", "--section", "observability", "--format", "json"],
         )
-        reveal = CliRunner().invoke(cmd_config.config_cmd, ["show", "--effective", "--reveal"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"observability": effective}
-    assert reveal.exit_code == 2
-    assert "--reveal works only for pre-v8 configurations" in reveal.output
 
 
 def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monkeypatch) -> None:
@@ -174,6 +171,10 @@ def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monke
     scan = run("get", "admission.skill.scan_on_install")
     assert scan.exit_code == 0 and "true" in scan.output and "null" not in scan.output
     assert run("get", "admission", "--effective").exit_code == 0
+    # A section config.yaml leaves out resolves its defaults, not empty values (GAP-0085).
+    update = run("get", "update", "--effective")
+    assert update.exit_code == 0 and "channel: stable" in update.output and "check: true" in update.output
+    assert "null" not in update.output and "''" not in update.output
 
     typo = run("unset", "guardrail.blockat")
     assert typo.exit_code == 1 and "not a configuration key" in typo.output

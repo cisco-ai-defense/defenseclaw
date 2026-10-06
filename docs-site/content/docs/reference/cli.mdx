@@ -1004,7 +1004,9 @@ The first line names the config generation and the first 12 characters of the
 new file's SHA-256; the second is the effective policy digest the gateway will
 report once it applies the change. Setting a key to the value it already has
 changes nothing and says so (`guardrail.block_at already has that value
-(generation 7).`). `config unset` of a key that is not set says its default
+(generation 7).`). `VALUE` is read as `config.yaml` is: only `true` and `false`
+are booleans, so `off`, `on`, `yes` and `no` are text and
+`defenseclaw config set ai_discovery.ide_inventory off` sets that enum value. `config unset` of a key that is not set says its default
 already applies, and exits `1` for a key that does not exist, such as a
 misspelled one.
 

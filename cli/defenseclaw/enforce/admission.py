@@ -54,6 +54,10 @@ class CompiledAdmission:
     scanner_overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = field(default_factory=dict)
     first_party_allow: dict[str, list[str]] = field(default_factory=dict)
     source: str = "builtin"
+    # Where each field came from ("config:admission.<layer>.<field>" or
+    # "builtin"), for ``config get --effective``; ``source`` stays the label
+    # of the actions.
+    field_sources: dict[str, str] = field(default_factory=dict)
 
 
 ADMISSION_SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -268,10 +272,15 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     defaults = getattr(adm, "defaults", None)
     own = getattr(adm, target_type, None)
 
+    layers = ((target_type, own), ("defaults", defaults))
+    sources: dict[str, str] = {}
+
     def first_bool(name: str, fallback: bool) -> bool:
-        for layer in (own, defaults):
+        sources[name] = "builtin"
+        for label, layer in layers:
             value = getattr(layer, name, None) if layer is not None else None
             if value is not None:
+                sources[name] = f"config:admission.{label}.{name}"
                 return bool(value)
         return fallback
 
@@ -300,15 +309,19 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     elif "defaults" in used:
         source = "config:admission.defaults.actions"
 
+    sources["actions"] = source
     overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}
-    for layer in (defaults, own):
+    sources["scanner_overrides"] = "builtin"
+    for label, layer in reversed(layers):
         for scanner, raw in (getattr(layer, "scanner_overrides", None) or {}).items() if layer is not None else ():
             compiled = _compile_action_map(raw)
             if compiled:
                 overrides.setdefault(str(scanner).strip(), {}).update(compiled)
+                sources["scanner_overrides"] = f"config:admission.{label}.scanner_overrides"
 
     first_party = dict(out.first_party_allow)
-    for layer_name, layer in ((target_type, own), ("defaults", defaults)):
+    sources["first_party_allow_list"] = "builtin"
+    for label, layer in layers:
         entries = getattr(layer, "first_party_allow_list", None) if layer is not None else None
         # An explicit empty list allows nothing first party (Go firstParty
         # treats a non-nil empty list the same way); None inherits.
@@ -317,8 +330,7 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
                 str(getattr(e, "name", "")): list(getattr(e, "source_path_contains", []) or [])
                 for e in entries
             }
-            if source == out.source:
-                source = f"config:admission.{layer_name}.first_party_allow_list"
+            sources["first_party_allow_list"] = f"config:admission.{label}.first_party_allow_list"
             break
     return CompiledAdmission(
         scan_on_install=scan_on_install,
@@ -327,6 +339,7 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         scanner_overrides=overrides,
         first_party_allow=first_party,
         source=source,
+        field_sources=sources,
     )
 
 

@@ -22,6 +22,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from defenseclaw.config_writer import restart_required
 from defenseclaw.tui.services.setup_state import ConfigDiffEntry
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -55,6 +56,15 @@ class ConfigDiffModalModel:
     @property
     def has_changes(self) -> bool:
         return bool(self.entries)
+
+    @property
+    def save_label(self) -> str:
+        """The save button's text: a restart is offered only when a changed
+        key is one the gateway reads once at start (everything else applies
+        from the new config generation)."""
+        if restart_required([entry.key for entry in self.entries]):
+            return "Save and queue restart"
+        return "Save"
 
     def result(self) -> ConfigDiffResult:
         return ConfigDiffResult(save=True, queue_restart_reason=self.restart_reason)
@@ -146,8 +156,8 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
         with Vertical(id="config-diff-dialog"):
             yield Static("Review Config Changes", id="config-diff-title")
             # Render EVERY change inside a bounded scroll region: an operator
-            # confirming "Save" must be able to inspect
-            # changes 9..N, which the old 8-entry truncation hid.
+            # confirming the save must be able to inspect changes 9..N, which
+            # the old 8-entry truncation hid.
             with VerticalScroll(id="config-diff-scroll"):
                 yield Static(
                     self.model.preview_text(max_entries=len(self.model.entries)),
@@ -157,7 +167,7 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
             with Horizontal(id="config-diff-buttons"):
                 yield Button("Cancel", id="config-diff-cancel", variant="default")
                 yield Button(
-                    "Save",
+                    self.model.save_label,
                     id="config-diff-save",
                     variant="success",
                     disabled=not self.model.has_changes,

@@ -23,12 +23,9 @@ import (
 // integration, whose /health is unchanged.
 func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	policyDir := repoPolicyDir(t)
-	build := func(dataDir, token, blockAt string, edits ...func(*config.Config)) *Generation {
+	build := func(dataDir, token, blockAt string) *Generation {
 		t.Helper()
 		cfg := &config.Config{PolicyDir: policyDir, DataDir: dataDir}
-		for _, edit := range edits {
-			edit(cfg)
-		}
 		cfg.Gateway.Token = token
 		cfg.AIDiscovery.ConfidencePolicyPath = filepath.Join(dataDir, "confidence.yaml")
 		cfg.Guardrail.RulePack = "default"
@@ -52,14 +49,6 @@ func TestEffectivePolicyDigestAndHealth(t *testing.T) {
 	}
 	if strict := build("/home/alice/.defenseclaw", "token-a", "HIGH"); strict.Digest == alice.Digest {
 		t.Fatal("guardrail.block_at did not change the effective digest")
-	}
-	// Unset keeps the built-in first-party plugin, [] clears it: different
-	// enforcement, so a different digest (GAP-0028).
-	cleared := build("/home/alice/.defenseclaw", "token-a", "", func(cfg *config.Config) {
-		cfg.Admission.Plugin.FirstPartyAllowList = []config.AdmissionFirstParty{}
-	})
-	if cleared.Digest == alice.Digest {
-		t.Fatal("an empty admission.plugin.first_party_allow_list left the effective digest unchanged")
 	}
 
 	prev := liveGeneration.Load()
@@ -110,5 +99,52 @@ func TestEffectivePolicyDigestCoversObservability(t *testing.T) {
 	alicePath := build("/home/alice/.defenseclaw", "  local:\n    path: /home/alice/.defenseclaw/audit.db\n")
 	if alicePath != build("/home/bob/.defenseclaw", "  local:\n    path: /home/bob/.defenseclaw/audit.db\n") {
 		t.Fatal("a store path under data_dir differs between users")
+	}
+}
+
+// The digest follows the enforced policy, not how config.yaml wrote it: an
+// emptied first_party_allow_list changes it (YAML omits an empty list), and a
+// value equal to its default digests like the unset key (GAP-0015, GAP-0032).
+func TestEffectivePolicyDigestMaterializesDefaults(t *testing.T) {
+	yes := true
+	build := func(edit func(*config.Config)) string {
+		t.Helper()
+		cfg := &config.Config{DataDir: "/home/alice/.defenseclaw"}
+		edit(cfg)
+		g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, raw: []byte("config_version: 9\n")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g.Digest
+	}
+	base := build(func(*config.Config) {})
+	if got := build(func(c *config.Config) { c.Admission.Plugin.FirstPartyAllowList = []config.AdmissionFirstParty{} }); got == base {
+		t.Fatal("an emptied admission.plugin.first_party_allow_list left the digest unchanged")
+	}
+	if got := build(func(c *config.Config) { c.Admission.MCP.ScanOnInstall = &yes }); got != base {
+		t.Fatal("admission.mcp.scan_on_install: true (the default) changed the digest")
+	}
+	withCodex := func(enabled *bool) string {
+		return build(func(c *config.Config) {
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}}
+		})
+	}
+	if withCodex(&yes) != withCodex(nil) {
+		t.Fatal("guardrail.connectors.codex.enabled: true changed the digest")
+	}
+}
+
+// A rebuild with the live digest is unchanged only while the Rego policy
+// fails (or loads) the same way; a new load failure is published (GAP-0043).
+func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {
+	live := &Generation{Digest: "sha256:a", opaError: "no .rego files found"}
+	if !generationUnchanged(live, &Generation{Digest: "sha256:a", opaError: "no .rego files found"}) {
+		t.Fatal("an identical rebuild was not unchanged")
+	}
+	if generationUnchanged(live, &Generation{Digest: "sha256:a", opaError: "parse p0-bad.rego"}) {
+		t.Fatal("a new OPA load failure was swallowed as unchanged")
+	}
+	if generationUnchanged(nil, live) || generationUnchanged(live, &Generation{Digest: "sha256:b", opaError: live.opaError}) {
+		t.Fatal("a different generation was unchanged")
 	}
 }

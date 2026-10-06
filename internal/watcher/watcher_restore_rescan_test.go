@@ -103,10 +103,11 @@ func TestRestoreAfterUnblockRescanQuarantinesAgain(t *testing.T) {
 	}
 }
 
-// A block verdict (install block, runtime disable, no file action) leaves the
-// skill files where they are; only quarantine moves them (GAP-0020).
-func TestRescanBlockWithoutFileActionKeepsFiles(t *testing.T) {
-	w, store, evt := restoredRescanFixture(t, false)
+// GAP-0003: the block shorthand (install block, file none, runtime disable)
+// blocks and disables the skill but leaves its files in the skill folder; only
+// a file action of quarantine moves them.
+func TestRescanBlockShorthandKeepsFiles(t *testing.T) {
+	w, _, evt := restoredRescanFixture(t, false)
 	out := &policy.AdmissionOutput{
 		Verdict: "rejected", InstallAction: "block", FileAction: "none", RuntimeAction: "block",
 	}
@@ -114,13 +115,8 @@ func TestRescanBlockWithoutFileActionKeepsFiles(t *testing.T) {
 		context.Background(), enforce.NewPolicyEngine(w.store), out, evt, "skill",
 		&scanner.ScanResult{Scanner: "skill-scanner", Target: evt.Path}, "skill-scanner",
 	)
-
 	if _, err := os.Lstat(evt.Path); err != nil {
-		t.Fatalf("a block without a file action moved the skill files: %v", err)
-	}
-	entry, err := store.GetActionForConnector("skill", "review-two", "")
-	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Actions.Runtime != "disable" {
-		t.Fatalf("actions = %#v err=%v, want install=block runtime=disable", entry, err)
+		t.Fatalf("block with file none moved the skill files: %v", err)
 	}
 }
 

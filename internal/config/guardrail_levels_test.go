@@ -234,15 +234,15 @@ func TestGuardrailLevelsRejectedBySchema(t *testing.T) {
 	}
 }
 
-// TestGuardrailLevelsValidatedOnLoad pins that LoadFromFile runs the new checks on
-// a path the v8 schema doesn't cover (a v7 file), so a bad level can't reach
-// the gateway through it either.
+// TestGuardrailLevelsValidatedOnLoad pins that LoadFromFile runs the level
+// checks on a path the schema compiler does not cover (the Windows lifecycle
+// readers), so a bad level cannot reach the gateway through it either.
 func TestGuardrailLevelsValidatedOnLoad(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(home, ".defenseclaw"))
 	path := filepath.Join(home, DefaultConfigName)
-	raw := []byte("config_version: 7\ndata_dir: " + home + "\nguardrail:\n  block_at: severe\n")
+	raw := []byte("config_version: 9\ndata_dir: " + home + "\nguardrail:\n  block_at: severe\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}

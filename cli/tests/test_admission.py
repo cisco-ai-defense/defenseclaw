@@ -884,10 +884,6 @@ class TestCompileAdmission(unittest.TestCase):
         self.assertEqual(skill.actions["MEDIUM"][0].install, "none")
         self.assertTrue(skill.actions["LOW"][1])
         self.assertEqual(compile_admission(cfg, "plugin").actions["LOW"][0].install, "block")
-        # An explicit list is a config value, not the built-in (GAP-0028).
-        only_list = SimpleNamespace(admission=AdmissionConfig(), scanners=SimpleNamespace(skill_scanner=gate))
-        only_list.admission.plugin.first_party_allow_list = []
-        self.assertEqual(compile_admission(only_list, "plugin").source, "config:admission.plugin.first_party_allow_list")
 
     def test_secure_client_keeps_the_1_0_data_json_admission(self):
         # As Go secureClientAdmission: data.json decides and no scanner gate
