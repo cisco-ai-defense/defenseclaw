@@ -281,7 +281,10 @@ var currentIDEOwner = func() ideOwner {
 	return ideOwner{id: u.Uid, name: useridentity.BareAccountName(u.Username)}
 }
 
-func programFilesDirs() []string {
+// programFilesDirs lists the Program Files roots of the machine-wide IDE
+// scan; replaceable in tests, which must not read the host's real
+// Visual Studio installations.
+var programFilesDirs = func() []string {
 	var out []string
 	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)"} {
 		if dir := strings.TrimSpace(os.Getenv(env)); dir != "" {

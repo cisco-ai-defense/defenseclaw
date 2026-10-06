@@ -38,6 +38,7 @@ func writeVSCodeExtensions(t *testing.T, home string, ids ...string) {
 // owner, flags AI plugins from the catalog, records the list in
 // inventory.db, and reports plugins that disappear as removed.
 func TestIDEInventoryAttributesPluginsToProfileOwners(t *testing.T) {
+	withoutMachineIDEs(t)
 	root := t.TempDir()
 	alice := filepath.Join(root, "Users", "alice")
 	bob := filepath.Join(root, "Users", "bob")
@@ -206,4 +207,13 @@ func TestInventoryStoreMigratesV3ToV4(t *testing.T) {
 		t.Fatalf("ide rows after prune = %d, %v", left, err)
 	}
 	_ = os.Remove(path)
+}
+
+// withoutMachineIDEs keeps a test's scan off the host's machine-wide IDE
+// installations (a Windows runner ships Visual Studio).
+func withoutMachineIDEs(t *testing.T) {
+	t.Helper()
+	previous := programFilesDirs
+	programFilesDirs = func() []string { return nil }
+	t.Cleanup(func() { programFilesDirs = previous })
 }
