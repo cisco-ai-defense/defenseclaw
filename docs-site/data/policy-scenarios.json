@@ -208,17 +208,6 @@
       }
     },
     {
-      "id": "skill-actions-high",
-      "title": "HIGH severity skill verdict",
-      "domain": "skill_actions",
-      "description": "Skill flagged HIGH. Default policy: runtime=disable, file=quarantine, install=block.",
-      "expectedVerdict": "block",
-      "input": {
-        "severity": "HIGH",
-        "target_type": "skill"
-      }
-    },
-    {
       "id": "correlator-lethal-trifecta",
       "title": "Lethal trifecta promotion (Willison)",
       "domain": "guardrail",
