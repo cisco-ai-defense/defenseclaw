@@ -3646,6 +3646,37 @@ func TestAPIPolicyEvaluateFallback(t *testing.T) {
 	}
 }
 
+// A block scoped to one connector reaches /policy/evaluate when the caller names it.
+func TestAPIPolicyEvaluateHonoursConnectorScopedBlocks(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger, scannerCfg: &config.Config{}}
+	runtime, _ := newProxyGeneratedTraceRuntime(t)
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+	denyAsset(api.scannerCfg, "plugin", "scoped-plugin", "openclaw", "malicious")
+
+	verdict := func(connector string) string {
+		body := []byte(`{"domain":"admission","input":{"target_type":"plugin","target_name":"scoped-plugin","path":"/tmp/p"` +
+			connector + `}}`)
+		w := httptest.NewRecorder()
+		api.handlePolicyEvaluate(w, httptest.NewRequest(http.MethodPost, "/policy/evaluate", bytes.NewReader(body)))
+		var resp struct {
+			Data struct {
+				Verdict string `json:"verdict"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(w.Result().Body).Decode(&resp); err != nil {
+			t.Fatalf("decode policy response: %v", err)
+		}
+		return resp.Data.Verdict
+	}
+	if got := verdict(`,"connector":"openclaw"`); got != "blocked" {
+		t.Errorf("verdict for the scoped connector = %q, want blocked", got)
+	}
+	if got := verdict(`,"connector":"codex"`); got == "blocked" {
+		t.Errorf("verdict for another connector = %q, want it not blocked", got)
+	}
+}
+
 func TestAPIPolicyEvaluate_OTelMetrics_BlockedVerdict(t *testing.T) {
 	api, capture := newGuardrailEventV8TestAPI(t)
 
