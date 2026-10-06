@@ -3,7 +3,11 @@
 
 package useridentity
 
-import "strings"
+import (
+	"strings"
+
+	"golang.org/x/text/unicode/norm"
+)
 
 // Principal and UPN rules.
 //
@@ -55,10 +59,35 @@ func NormalizeUPN(upn string) string {
 	return strings.ToLower(upn)
 }
 
-// PrincipalsEqual compares two principals or UPNs case-insensitively.
+// PrincipalsEqual compares two principals or UPNs case-insensitively and
+// without regard to Unicode normalization form (EqualFold).
 func PrincipalsEqual(a, b string) bool {
 	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
-	return a != "" && strings.EqualFold(a, b)
+	return a != "" && EqualFold(a, b)
+}
+
+// EqualFold reports whether a and b are equal without regard to case or
+// Unicode normalization form. A name typed or pasted with a combining accent
+// (e plus U+0301) is the name a directory holds precomposed (U+00E9), and an
+// assignment spelled either way must match it (GAP-0154). Plain ASCII names
+// take the allocation-free path.
+func EqualFold(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	if isASCII(a) && isASCII(b) {
+		return false
+	}
+	return strings.EqualFold(norm.NFC.String(a), norm.NFC.String(b))
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // RealmOf returns the upper-cased realm of a principal, or "".

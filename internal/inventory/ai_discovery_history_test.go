@@ -5,6 +5,7 @@ package inventory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -51,6 +52,19 @@ func TestSweepHistoryCadenceAndWindow(t *testing.T) {
 	}
 	recordHistoryScan(t, st, "latest", start.Add(-time.Hour), 1, "")
 	scans := func() int { return countRows(t, st, `SELECT COUNT(*) FROM ai_scans`) }
+	// The identity ledger follows the same window by last_seen.
+	var ledger []AgentIdentityRecord
+	for _, age := range []time.Duration{40 * 24 * time.Hour, 10 * 24 * time.Hour, time.Hour} {
+		seen := start.Add(-age)
+		ledger = append(ledger, AgentIdentityRecord{
+			AgentID: fmt.Sprintf("agt-%016x", int64(age)), UserID: "1001", Connector: "codex",
+			MachineHash: "m1", FirstSeen: seen, LastSeen: seen, SessionsSeen: 1,
+		})
+	}
+	if err := st.UpsertAgentIdentities(context.Background(), ledger); err != nil {
+		t.Fatal(err)
+	}
+	agents := func() int { return countRows(t, st, `SELECT COUNT(*) FROM agent_identities`) }
 	ctx := context.Background()
 	svc.historySweep.markStarted(start)
 
@@ -68,15 +82,15 @@ func TestSweepHistoryCadenceAndWindow(t *testing.T) {
 		t.Fatal("sweep ran before the interval elapsed")
 	}
 	now = now.Add(time.Minute)
-	if !svc.sweepHistoryIfDue(ctx) || scans() != 3 {
-		t.Fatalf("30-day sweep left %d scans, want 3", scans())
+	if !svc.sweepHistoryIfDue(ctx) || scans() != 3 || agents() != 2 {
+		t.Fatalf("30-day sweep left %d scans and %d agent identities, want 3 and 2", scans(), agents())
 	}
 
 	// A reload that narrows the window applies on the next due sweep.
 	svc.SetHistoryRetentionDays(config.ObservabilityV8DefaultRetentionDays)
 	now = now.Add(inventoryHistorySweepInterval)
-	if !svc.sweepHistoryIfDue(ctx) || scans() != 1 {
-		t.Fatalf("7-day sweep left %d scans, want only the latest", scans())
+	if !svc.sweepHistoryIfDue(ctx) || scans() != 1 || agents() != 1 {
+		t.Fatalf("7-day sweep left %d scans and %d agent identities, want only the latest", scans(), agents())
 	}
 
 	// Never concurrent with itself.

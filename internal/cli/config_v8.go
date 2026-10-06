@@ -119,12 +119,7 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var schemaError *config.V8SchemaError
 	var semanticError *config.V8SemanticError
 	var secretError *config.V8SecretReferenceError
-	var scannerError *config.ScannerSettingsError
 	switch {
-	case errors.As(err, &scannerError):
-		// Fixed text and key paths only: it names the key, never a value.
-		result.Path = configV8DiagnosticPath("$." + scannerError.Path)
-		result.Reason = configV8DiagnosticReason("config_semantic_invalid", scannerError.Message, "", "")
 	case errors.As(err, &secretError):
 		result.Path = "$." + secretError.Path
 		result.Reason = "[secret_reference_unresolved] required environment-backed secret is unavailable"

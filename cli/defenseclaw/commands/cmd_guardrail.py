@@ -28,8 +28,8 @@ This command surfaces the common policy levers directly:
   defenseclaw guardrail enable         # turn on + connector setup
   defenseclaw guardrail disable        # turn off + connector teardown
   defenseclaw guardrail mode           # observe (log only) vs action (enforce)
-  defenseclaw guardrail block-at       # lowest severity prompts, completions and tool calls are blocked at
-  defenseclaw guardrail alert-at       # lowest severity they raise an alert at
+  defenseclaw guardrail block-at       # lowest severity the guardrail blocks at
+  defenseclaw guardrail alert-at       # lowest severity the guardrail raises an alert at
   defenseclaw guardrail fail-mode      # open vs closed on hook failures
   defenseclaw guardrail hilt           # human-in-the-loop prompting
   defenseclaw guardrail block-message  # message shown when an action is blocked
@@ -232,6 +232,21 @@ def _resolve_member_connector(app, requested: str) -> str | None:
     return None
 
 
+def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None:
+    """Re-verify the agent executables an enable is about to set up.
+
+    Windows (and OpenHands on macOS) admit a connector only against a freshly
+    verified agent executable. ``guardrail disable`` removes the connector's
+    proof and the short-lived selection from the last setup has expired, so an
+    enable that only restarted the gateway left it refusing the connector as
+    "agent version not probed" (GAP-0069). A no-op on other hosts. Runs before
+    the config is saved, so a failed check changes nothing.
+    """
+    from defenseclaw.commands import cmd_setup
+
+    cmd_setup._record_windows_setup_agent_selections(app.cfg.data_dir, list(connectors))
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -319,6 +334,9 @@ def _toggle_connector_guardrail(
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
+    if enable and restart:
+        _verify_agents_before_enable(app, [key])
+
     # Mutate the per-connector entry, preserving its other policy fields.
     from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -346,6 +364,9 @@ def _toggle_connector_guardrail(
             app.cfg.gateway.port,
             connector=key,
             teardown=not enable,
+            # Report "setup complete" only once the gateway admitted the
+            # connector (GAP-0069).
+            wait_for_connector_ready=enable,
         )
         ux.ok(f"{label} connector {action} complete", indent="  ")
         click.echo()
@@ -371,7 +392,7 @@ def guardrail() -> None:
       enable/disable flip enforcement on/off
       mode           observe (log only) vs action (enforce)
       block-at       lowest severity prompts, completions and tool calls are blocked at
-      alert-at       lowest severity they raise an alert at
+      alert-at       lowest severity prompts, completions and tool calls raise an alert at
       fail-mode      open vs closed when a hook fails
       hilt           human-in-the-loop prompting
       block-message  message shown when an action is blocked
@@ -609,6 +630,11 @@ def profile_status_text(cfg, result: dict) -> str:
     user = str(result.get("user") or "this account")
     if result.get("error"):
         count = len(getattr(cfg.guardrail, "profiles", {}) or {})
+        if result.get("timed_out"):
+            return (
+                f"unknown for {user}: the gateway is running but did not answer in time; "
+                f"the directory lookup may be slow ({count} profile(s) configured)"
+            )
         return f"unknown for {user}: the gateway did not answer ({count} profile(s) configured)"
     name = str(result.get("profile") or "")
     if not name:
@@ -851,6 +877,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         ux.warn("connector limitation: " + limit_row, indent="  ")
     if profile is not None:
         ux.echo(f"  • {ux._style('profile:', fg='bright_black', bold=True)}    {profile_status_text(app.cfg, profile)}")
+        for note in profile.get("warnings") or []:
+            ux.warn(str(note), indent="    ")
+        if (profile.get("directory") or {}).get("message"):
+            ux.warn(str(profile["directory"]["message"]), indent="    ")
         if profile.get("profile") or profile.get("overrides"):
             ux.subhead(
                 "The table shows guardrail.*; the profile settings above decide for you. "
@@ -1100,6 +1130,9 @@ def enable_cmd(
         click.echo(f"  {ux.dim('Cancelled.')}")
         raise SystemExit(1)
 
+    if restart and _set_up:
+        _verify_agents_before_enable(app, _set_up)
+
     gc.enabled = True
     try:
         app.cfg.save()
@@ -1119,6 +1152,9 @@ def enable_cmd(
             connector=connector,
             connectors=_actives,
             **({"summary_exclude": frozenset(_kept_off)} if _kept_off else {}),
+            # With every active connector being set up, report "setup
+            # complete" only once the gateway admitted them (GAP-0069).
+            wait_for_connector_ready=bool(_set_up) and not _kept_off,
         )
         if len(_set_up) > 1:
             ux.ok(
@@ -3169,6 +3205,8 @@ def _log_guardrail_action(app: AppContext, action: str, details: str) -> None:
 # restart the gateway.
 
 _RULE_PACK_NAME = re.compile(r"[^a-z0-9_-]+")
+#: A rule id as the shipped packs spell it: ``SEC-AWS-KEY``, ``exec.remote_ip_download_execute_same_artifact``.
+_RULE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 def _cli_actor() -> str:
@@ -3231,13 +3269,16 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
         )
     except config_writer.ManagedConfigWriteError:
+        from defenseclaw.enforce.asset_lists import audit_managed_refusal
+
+        audit_managed_refusal("guardrail-config", getattr(changes[0], "path", "") or "guardrail", f"command={reason}")
         fail(
             3,
             "This device is managed: change the guardrail in the admin config (MDM or management plane). "
             "Nothing was changed.",
         )
     except config_writer.ConfigWriteError as exc:
-        fail(1, f"Failed to save config: {exc}")
+        fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
     return None
 
 
@@ -3319,7 +3360,8 @@ def use_pack_cmd(
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
 
-    PACK is a built-in preset (default, strict, permissive), the name of a
+    PACK is a built-in preset (default, strict, permissive), a key of
+    ``guardrail.custom_packs`` (a pack you already registered), the name of a
     pack under ``<policy_dir>/guardrail/``, or a directory path (``./NAME``
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
@@ -3429,9 +3471,23 @@ def use_pack_cmd(
 
     # Resolve PACK -> (name, directory, kind).
     raw = (pack or "").strip()
+    registered = (getattr(gc, "custom_packs", None) or {}).get(raw)
     if raw in policy_catalog.RULE_PACK_PRESETS:
         path = policy_catalog.preset_pack_dir(app.cfg, raw)
         pack_name, kind = raw, "preset"
+    elif registered is not None:
+        # A pack already registered under guardrail.custom_packs: select it by
+        # name, keeping its pinned digest (an edited pack is refused below).
+        path = policy_catalog.normalize_pack_path(str(getattr(registered, "path", "") or ""))
+        pack_name, kind = raw, "registered"
+        if not os.path.isdir(path):
+            _finish(
+                ok=False,
+                exit_code=1,
+                pack_name=raw,
+                path=path,
+                message=f"Rule pack {raw!r} is registered at {path}, which isn't a directory. Nothing was changed.",
+            )
     else:
         candidate = policy_catalog.normalize_pack_path(raw)
         # A bare name is the installed pack of that name even when the current
@@ -3500,11 +3556,25 @@ def use_pack_cmd(
                 )
             # The pin covers the pack's own files, not the embedded defaults.
             digest = str((result.summary or {}).get("files_digest", "") or "")
+            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
+            if kind == "registered" and digest.lower() != pinned:
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=(
+                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
+                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
+                        f"sha256:{digest}. Nothing was changed."
+                    ),
+                )
 
     _preflight_config_write(app)
     changes: list = []
     name = pack_name
-    if kind != "preset":
+    if kind == "custom":
         name = _RULE_PACK_NAME.sub("-", pack_name.lower()).strip("-_")[:64] or "custom"
         if name in policy_catalog.RULE_PACK_PRESETS:
             name = f"custom-{name}"
@@ -3749,8 +3819,9 @@ def rule_group() -> None:
       disable   guardrail.rules.disable += ID
       severity  guardrail.rules.severity_overrides[ID] = SEVERITY
 
-    An ID the scope's rule pack doesn't have is refused by the gateway when
-    it reloads (the previous configuration keeps running).
+    IDs are case-sensitive, as the pack spells them. An ID the scope's rule
+    pack doesn't have is refused by the gateway when it reloads (the previous
+    configuration keeps running).
     """
 
 
@@ -3770,9 +3841,9 @@ def _change_rule_lists(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
-    rule_id = rule_id.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", rule_id):
-        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, _ and -). Nothing was changed.")
+    rule_id = rule_id.strip()
+    if not _RULE_ID.fullmatch(rule_id):
+        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
     connector_key = None
     if connector:
@@ -3852,16 +3923,18 @@ def rule_severity_cmd(
             ux.err(message, indent="  ")
         raise SystemExit(exit_code)
 
-    rule_id = rule_id.strip().upper()
-    if not re.fullmatch(r"[A-Z0-9][A-Z0-9_-]{0,127}", rule_id):
-        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, _ and -). Nothing was changed.")
+    rule_id = rule_id.strip()
+    if not _RULE_ID.fullmatch(rule_id):
+        _fail(1, f"{rule_id!r} isn't a rule ID (letters, digits, ., _ and -). Nothing was changed.")
     profile_name = _resolve_profile(app, profile, _fail)
     connector_key = normalize_connector(connector) if connector else None
     if connector and not profile_name:
         connector_key, problem = _resolve_scope_connector(app, connector)
         if problem:
             _fail(1, problem)
-    key = f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides.{rule_id}"
+    # A dotted ID (exec.remote_ip_...) is one key, not a path of keys.
+    overrides = config_writer.parse_path(f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides")
+    key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     change = config_writer.Change(key, unset=True) if level == "DEFAULT" else config_writer.Change(key, level)
     _preflight_config_write(app)
@@ -4027,9 +4100,11 @@ def mode_cmd(
     pack and port are never touched. A connector without its own fail mode
     fails open in observe mode and uses the global hook fail mode
     (``guardrail fail-mode``) in action mode; the command says when that
-    changes. The running gateway applies a mode change on its next reload;
-    only a change of a hook's fail mode restarts it (``--no-restart`` to
-    skip; a stopped gateway is never started).
+    changes. The running gateway applies a mode change on its next reload.
+    A changed hook fail mode is re-rendered into the hook scripts of Claude
+    Code, Codex, Amp and OpenCode in place; the other hook connectors need a
+    gateway restart (``--no-restart`` to skip; a stopped gateway is never
+    started).
     """
     from defenseclaw import policy_catalog
 
@@ -4186,8 +4261,7 @@ def mode_cmd(
     fail_after = {c: gc.effective_hook_fail_mode(c) for c in affected}
     fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
     if fail_flips:
-        # Only hook connectors bake a fail mode into their registration; the
-        # gateway re-bakes it when it restarts.
+        # Only hook connectors bake a fail mode into their registration.
         from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
 
         fail_flips = {c: fm for c, fm in fail_flips.items() if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS}
@@ -4200,9 +4274,18 @@ def mode_cmd(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
     # Decisions read the gateway's live configuration generation, so a mode
-    # change reloads hot; only a hook fail mode setup bakes into a hook
-    # needs a restart to re-bake it.
-    outcome = _apply_to_running_gateway(app, needs_restart=bool(fail_flips), restart=restart, quiet=json_out)
+    # change reloads hot. A hook fail mode that flipped is baked into the hook
+    # script: connectors with a runtime registration are re-rendered in place,
+    # as ``guardrail fail-mode`` does, and only the rest (or a failed
+    # re-render) restart the gateway so it re-bakes them.
+    needs_restart = {c for c in fail_flips if normalize_connector(c) not in _RUNTIME_FAIL_MODE_CONNECTORS}
+    if fail_flips and gc.enabled:
+        for c in set(fail_flips) - needs_restart:
+            try:
+                reconcile_connector_registration(app.cfg, c)
+            except OSError:
+                needs_restart.add(c)
+    outcome = _apply_to_running_gateway(app, needs_restart=bool(needs_restart), restart=restart, quiet=json_out)
 
     plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
     if connector_key is None:
@@ -4552,6 +4635,31 @@ def _assignment_json(assignment) -> dict:
     return {"profile": assignment.profile, "match": match}
 
 
+def _gateway_profile_warnings(app: AppContext) -> list[str]:
+    """What the running gateway warns about the configured assignments.
+
+    Empty when the gateway is not running: ``profile list`` works from the
+    config file alone and only adds what the gateway can see (a group the
+    host no longer knows).
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=5,
+        )
+        try:
+            result = client.guardrail_profile_resolve()
+        finally:
+            client.close()
+    except Exception:  # noqa: BLE001 - no gateway, no extra warnings.
+        return []
+    return [str(note) for note in result.get("warnings") or []]
+
+
 @profile_group.command("list")
 @click.option("--json", "json_out", is_flag=True, help="Print the profiles as JSON.")
 @pass_ctx
@@ -4564,6 +4672,9 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         "assignments": [_assignment_json(a) for a in gc.profile_assignments],
         "default_profile": gc.default_profile,
     }
+    warnings = _gateway_profile_warnings(app) if gc.profile_assignments else []
+    if warnings:
+        payload["warnings"] = warnings
     if json_out:
         click.echo(json.dumps(payload, indent=2))
         return
@@ -4590,6 +4701,8 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         ux.echo(f"      {index}. {assignment.profile} ← {match}")
     default = gc.default_profile or ux.dim("none (guardrail.* applies)")
     ux.echo(f"  • {ux._style('default:', fg='bright_black', bold=True)} {default}")
+    for note in warnings:
+        ux.warn(note, indent="  ")
     click.echo()
 
 
@@ -4628,6 +4741,18 @@ def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
     click.echo()
 
 
+def _age_text(seconds) -> str:
+    """A short age such as ``45s`` or ``7m``."""
+    seconds = int(seconds or 0)
+    return f"{seconds}s" if seconds < 60 else f"{seconds // 60}m"
+
+
+# How long explain waits for the gateway. The gateway looks the user up in the
+# directory before it answers, and that lookup is bounded at 20 s (and the
+# account lookup before it at 10 s), so the client waits longer than both.
+PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
+
+
 @profile_group.command("explain")
 @click.option("--user", "user", default="", help="Account name, uid or SID to resolve (default: you).")
 @click.option("--connector", "connector", default="", help="Connector the request would come from.")
@@ -4644,6 +4769,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     """
     import getpass
 
+    import requests
+
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
     if not user:
@@ -4659,12 +4786,20 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             host=gateway_api_client_host(app.cfg),
             port=app.cfg.gateway.api_port,
             token=app.cfg.gateway.resolved_token(),
-            timeout=5,
+            timeout=PROFILE_EXPLAIN_TIMEOUT_SECONDS,
         )
         try:
             result = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
         finally:
             client.close()
+    except requests.exceptions.ReadTimeout:
+        # The gateway took the connection and is still resolving the user: it
+        # is running, so "start it" would send the operator the wrong way.
+        ux.err(
+            f"The gateway did not answer within {PROFILE_EXPLAIN_TIMEOUT_SECONDS:g} s; "
+            f"the directory lookup for {user or 'this account'} may be slow (SSSD or the domain controller). Try again."
+        )
+        raise SystemExit(1) from None
     except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
         ux.err(f"Could not ask the gateway: {exc}")
         ux.subhead("Start it with: defenseclaw-gateway start", indent="  ")
@@ -4678,7 +4813,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     subject = result.get("subject") or {}
     if subject:
         who = subject.get("upn") or subject.get("principal") or subject.get("user_name") or user
-        click.echo(f"  user:    {who} ({int(subject.get('group_count') or 0)} group(s))")
+        groups = "groups unknown" if result.get("lookup_error") else f"{int(subject.get('group_count') or 0)} group(s)"
+        click.echo(f"  user:    {who} ({groups})")
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
     if result.get("match"):
@@ -4688,8 +4824,21 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         click.echo(f"  match:   {reason}")
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
+    cache = result.get("cache") or {}
+    if cache:
+        age = int(cache.get("age_seconds") or 0)
+        lifetime = age + int(cache.get("refresh_after_seconds") or 0)
+        click.echo(
+            f"  cache:   requests use directory facts {_age_text(age)} old "
+            f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')}); "
+            f"the gateway refreshes them after {_age_text(lifetime)}"
+        )
     if result.get("lookup_error"):
         ux.warn(f"user lookup failed: {result['lookup_error']}")
+    for note in result.get("warnings") or []:
+        ux.warn(str(note))
+    if (result.get("directory") or {}).get("message"):
+        ux.warn(str(result["directory"]["message"]))
     effective = result.get("effective") or {}
     if effective:
         scope = result.get("connector") or "global"

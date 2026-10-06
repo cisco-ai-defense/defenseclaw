@@ -160,8 +160,11 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 	}
 	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
 	// A status that found another run in progress checked nothing, so
-	// repair is not the next step (GAP-2246).
+	// repair is not the next step (GAP-2246). Nor is it for a gateway whose
+	// config the installed binary refuses: repair applies the same config
+	// again, and the config_refused error above names the fix.
 	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") &&
+		!lifecycleResultHasError(result, "config_refused") &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
 		target := "them"
 		if len(result.Errors) == 1 {

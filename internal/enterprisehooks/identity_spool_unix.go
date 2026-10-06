@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -39,6 +38,14 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // before it is renamed into place, so the gateway never reads a partial or
 // unreadable record. An account whose lookups fail keeps no record; the
 // gateway then reports only what it resolves itself.
+//
+// The record of an account missing from accounts is removed only once it is
+// older than IdentitySpoolMaxAge, when the gateway ignores it anyway. A pass
+// that could not decide an account (the enumerator drops AD accounts whose
+// home owner does not resolve while the domain controller is unreachable)
+// would otherwise delete the UPN and directory facts of every such account,
+// and the gateway would report them without those until the next pass
+// (GAP-0145).
 func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error, logf func(string, ...any)) error {
 	if dir == "" {
 		return nil
@@ -55,7 +62,6 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 	}
 	keep := map[string]bool{}
-	realms := readRealmList(ctx)
 	for _, account := range accounts {
 		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
@@ -63,7 +69,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		name := strconv.Itoa(account.UID) + ".json"
 		keep[name] = true
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
-		record, err := collectIdentitySpoolRecord(lookupCtx, account, realms, time.Now().UTC())
+		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
@@ -77,30 +83,13 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		return nil
 	}
 	for _, entry := range entries {
-		if !keep[entry.Name()] {
-			_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
-		}
-	}
-	return nil
-}
-
-// trustedIdentityTool returns the first root-owned, non-writable candidate.
-func trustedIdentityTool(candidates ...string) string {
-	for _, candidate := range candidates {
-		info, err := os.Lstat(candidate)
-		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
+		if keep[entry.Name()] {
 			continue
 		}
-		return candidate
+		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) < IdentitySpoolMaxAge {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
-	return ""
-}
-
-// boundedOutput trims command output to a sane size.
-func boundedOutput(data []byte) string {
-	const limit = 64 << 10
-	if len(data) > limit {
-		data = data[:limit]
-	}
-	return strings.ToValidUTF8(string(data), "")
+	return nil
 }

@@ -14,23 +14,27 @@ package unixidentity
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// Directory facts for a Linux account, resolved through NSS only.
+// Directory facts for a Linux account, resolved through NSS and realmd.
 //
 // The backend that owns an account is found by asking each directory
 // service named on the passwd line of nsswitch.conf for the uid with
 // `getent -s <service>`; the first that answers owns it, and an account no
 // directory service knows is local. The domain comes from the
 // fully-qualified name SSSD (alice@corp.example.com) or winbind
-// (CORP\alice) reports, and groups from initgroups plus one group lookup for
-// all of their ids. UPN and mail need SSSD InfoPipe, which only root may
-// call, so the root guardian adds them (enterprisehooks identity spool).
+// (CORP\alice) reports, and groups from initgroups plus group lookups for
+// all of their ids. The realm and directory type of an SSSD or winbind
+// account come from realmd, which any account may ask (realm_linux.go).
+// UPN and mail need SSSD InfoPipe, which only root may call, so the root
+// guardian adds them (enterprisehooks identity spool).
 
 // directoryService describes one NSS passwd service DefenseClaw recognises.
 type directoryService struct {
@@ -40,7 +44,7 @@ type directoryService struct {
 
 // directoryServices are the NSS passwd services that name a directory. The
 // sss service serves AD, IPA and plain LDAP domains alike, so its directory
-// is left for the guardian's realm facts to decide.
+// comes from the realm that serves the account's domain.
 var directoryServices = map[string]directoryService{
 	"sss":        {source: useridentity.SourceSSSD},
 	"winbind":    {directory: useridentity.DirectoryActiveDirectory, source: useridentity.SourceWinbind},
@@ -55,6 +59,17 @@ var directoryServices = map[string]directoryService{
 // applies as default_lookup_failed) instead of facts with some of its
 // groups missing, which would select a profile on part of its membership.
 const maxDirectoryGroups = 2048
+
+// A cold SSSD answers every group id with a directory query of its own
+// (about 30 ms), so one getent call for a few hundred ids outlasts the
+// seconds a single command gets, and its failure used to leave the ids as
+// numbers that no assignment matches (GAP-0138). The ids are named
+// groupQueryBatch at a time, groupQueryParallel batches at once, and a batch
+// that fails fails the lookup.
+const (
+	groupQueryBatch    = 64
+	groupQueryParallel = 4
+)
 
 // DirectoryFactsForUID resolves the verified directory facts of uid. The
 // caller has verified the uid (peer credentials or a per-user credential);
@@ -108,11 +123,14 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 		return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
 	}
 	facts.Groups = groups
+	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
+		applyRealm(&facts, account.Name, hostRealms(r.context()))
+	}
 	return facts, nil
 }
 
-// groupNames names the account's groups with one getent group call for all
-// of their ids. An id no group answers for is kept as its number.
+// groupNames names the account's groups with getent group calls of
+// groupQueryBatch ids each. An id no group answers for is kept as its number.
 func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	ids, err := r.GroupIDs(account)
 	if err != nil {
@@ -121,6 +139,45 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	if len(ids) > maxDirectoryGroups {
 		return nil, fmt.Errorf("in %d groups, more than the %d DefenseClaw names", len(ids), maxDirectoryGroups)
 	}
+	var (
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		names = make(map[int]string, len(ids))
+		first error
+		slots = make(chan struct{}, groupQueryParallel)
+	)
+	for start := 0; start < len(ids); start += groupQueryBatch {
+		batch := ids[start:min(start+groupQueryBatch, len(ids))]
+		slots <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			found, queryErr := r.groupBatchNames(batch)
+			mu.Lock()
+			defer mu.Unlock()
+			if queryErr != nil && first == nil {
+				first = queryErr
+			}
+			maps.Copy(names, found)
+		}()
+	}
+	wg.Wait()
+	if first != nil {
+		return nil, first
+	}
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if name := names[id]; name != "" {
+			out = append(out, name)
+		} else {
+			out = append(out, strconv.Itoa(id))
+		}
+	}
+	return out, nil
+}
+
+// groupBatchNames asks one getent group call for the names of ids.
+func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 	keys := make([]string, 0, len(ids))
 	for _, id := range ids {
 		keys = append(keys, strconv.Itoa(id))
@@ -133,21 +190,13 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	if result.exitCode != getentExitOK && result.exitCode != getentExitNotFound {
 		return nil, fmt.Errorf("getent group exited %d", result.exitCode)
 	}
-	names := map[int]string{}
+	names := make(map[int]string, len(ids))
 	for _, line := range nonEmptyLines(string(result.stdout)) {
 		if gid, name, ok := parseGroupName(line); ok {
 			names[gid] = name
 		}
 	}
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if name := names[id]; name != "" {
-			out = append(out, name)
-		} else {
-			out = append(out, strconv.Itoa(id))
-		}
-	}
-	return out, nil
+	return names, nil
 }
 
 // ParseNSSwitchPasswdServices lists the services on the passwd line of an

@@ -184,67 +184,75 @@ func (c MCPScannerConfig) EffectiveAnalyzers() []string {
 	return names
 }
 
-// ScannerSettingsError is a cross-field scanner rule that failed. Path is the
-// key the rule is about (for example scanners.mcp_scanner.judge_source), so a
-// validator can name it. Error() keeps the "config: ..." text.
-type ScannerSettingsError struct {
-	Path    string
-	Message string
-}
-
-func (e *ScannerSettingsError) Error() string { return "config: " + e.Message }
-
-func scannerSettingsError(path, format string, args ...any) error {
-	return &ScannerSettingsError{Path: path, Message: fmt.Sprintf(format, args...)}
+// scannersInvalid is a cross-field scanner violation as a safe diagnostic:
+// the key it is about, what is wrong and what is allowed. A bare error here
+// read only "configuration could not be compiled safely" at $ (GAP-0128).
+func scannersInvalid(key, summary, expected string) error {
+	return &V8SemanticError{
+		Path:     "$." + key,
+		Summary:  summary,
+		Expected: expected,
+		Action:   "correct the value, then run again",
+	}
 }
 
 // Validate checks the cross-field scanner rules the schema cannot express.
+// Every refusal is a *V8SemanticError naming the key.
 func (s ScannersConfig) Validate() error {
 	skill := s.SkillScanner
+	const skillKey = "scanners.skill_scanner"
 	if policy := strings.TrimSpace(skill.Policy); policy == SkillScannerPolicyCustom {
 		if strings.TrimSpace(skill.PolicyFile.Path) == "" || strings.TrimSpace(skill.PolicyFile.Digest) == "" {
-			return scannerSettingsError("scanners.skill_scanner.policy_file",
-				"scanners.skill_scanner.policy custom needs policy_file.path and policy_file.digest")
+			return scannersInvalid(skillKey+".policy_file",
+				"policy: custom needs policy_file.path and policy_file.digest",
+				"scanners.skill_scanner.policy_file with a path and a sha256:<hex> digest, or another policy")
 		}
 	} else if !skill.PolicyFile.IsZero() {
-		return scannerSettingsError("scanners.skill_scanner.policy_file",
-			"scanners.skill_scanner.policy_file is only used with policy: custom")
+		return scannersInvalid(skillKey+".policy_file",
+			"policy_file is only used with policy: custom",
+			"no policy_file, or scanners.skill_scanner.policy: custom")
 	}
-	for field, value := range map[string]string{
-		"fail_on_severity": skill.FailOnSeverity, "review_queue_min": skill.ReviewQueueMin,
+	for _, field := range []struct{ name, value string }{
+		{"fail_on_severity", skill.FailOnSeverity}, {"review_queue_min", skill.ReviewQueueMin},
 	} {
-		if v := strings.ToUpper(strings.TrimSpace(value)); v != "" {
+		if v := strings.ToUpper(strings.TrimSpace(field.value)); v != "" {
 			if _, ok := scannerSeverityRank[v]; !ok {
-				return scannerSettingsError("scanners.skill_scanner."+field,
-					"scanners.skill_scanner.%s must be CRITICAL, HIGH, MEDIUM, LOW or INFO", field)
+				return scannersInvalid(skillKey+"."+field.name,
+					field.name+" is not a severity",
+					"CRITICAL, HIGH, MEDIUM, LOW or INFO")
 			}
 		}
 	}
 	if scannerSeverityRank[skill.EffectiveReviewQueueMin()] > scannerSeverityRank[skill.EffectiveFailOnSeverity()] {
-		return scannerSettingsError("scanners.skill_scanner.review_queue_min",
-			"scanners.skill_scanner.review_queue_min must not be above fail_on_severity")
+		return scannersInvalid(skillKey+".review_queue_min",
+			"review_queue_min "+skill.EffectiveReviewQueueMin()+" is above fail_on_severity "+skill.EffectiveFailOnSeverity(),
+			"review_queue_min at or below fail_on_severity")
 	}
 	for _, judge := range []struct {
 		path, source string
 		llm          LLMConfig
 	}{
-		{"scanners.skill_scanner", skill.JudgeSource, skill.LLM},
+		{skillKey, skill.JudgeSource, skill.LLM},
 		{"scanners.mcp_scanner", s.MCPScanner.JudgeSource, s.MCPScanner.LLM},
 	} {
 		switch strings.TrimSpace(judge.source) {
 		case "":
 		case ScannerJudgeInherit:
 			if llmBlockSet(judge.llm) {
-				return scannerSettingsError(judge.path+".judge_source",
-					"%s.judge_source inherit uses the top-level llm block; empty %s.llm or set judge_source: override", judge.path, judge.path)
+				return scannersInvalid(judge.path+".llm",
+					"judge_source: inherit uses the top-level llm block, but "+judge.path+".llm is set",
+					"an empty "+judge.path+".llm, or judge_source: override")
 			}
 		case ScannerJudgeOverride:
 			if strings.TrimSpace(judge.llm.Model) == "" {
-				return scannerSettingsError(judge.path+".judge_source",
-					"%s.judge_source override needs %s.llm.model", judge.path, judge.path)
+				return scannersInvalid(judge.path+".llm.model",
+					"judge_source: override needs a model",
+					judge.path+".llm.model set")
 			}
 		default:
-			return scannerSettingsError(judge.path+".judge_source", "%s.judge_source must be inherit or override", judge.path)
+			return scannersInvalid(judge.path+".judge_source",
+				"judge_source is not recognised",
+				"inherit or override")
 		}
 	}
 	return nil

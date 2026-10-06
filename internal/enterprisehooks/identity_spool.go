@@ -43,6 +43,11 @@ const IdentitySpoolDirName = "identity"
 // IdentitySpoolRecordVersion is the record schema version.
 const IdentitySpoolRecordVersion = 1
 
+// IdentitySpoolMaxAge is how long the gateway trusts a record (four times the
+// 15 minute identity cache lifetime) and how long the guardian keeps the
+// record of an account it no longer lists.
+const IdentitySpoolMaxAge = time.Hour
+
 // maxIdentitySpoolRecordBytes bounds one record.
 const maxIdentitySpoolRecordBytes = 256 << 10
 
@@ -158,86 +163,6 @@ func validIdentitySpoolKey(key string) bool {
 		}
 	}
 	return true
-}
-
-// RealmEntry is one realm `realm list` reports.
-type RealmEntry struct {
-	Domain         string
-	Realm          string
-	ServerSoftware string
-	ClientSoftware string
-	Configured     string
-}
-
-// ParseRealmList parses `realm list` output: an unindented domain line
-// followed by indented "key: value" lines.
-func ParseRealmList(output string) []RealmEntry {
-	var entries []RealmEntry
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if line[0] != ' ' && line[0] != '\t' {
-			entries = append(entries, RealmEntry{Domain: strings.TrimSpace(line)})
-			continue
-		}
-		if len(entries) == 0 {
-			continue
-		}
-		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
-		if !found {
-			continue
-		}
-		entry := &entries[len(entries)-1]
-		value = strings.TrimSpace(value)
-		switch strings.TrimSpace(key) {
-		case "realm-name":
-			entry.Realm = value
-		case "domain-name":
-			entry.Domain = value
-		case "server-software":
-			entry.ServerSoftware = value
-		case "client-software":
-			entry.ClientSoftware = value
-		case "configured":
-			entry.Configured = value
-		}
-	}
-	return entries
-}
-
-// applyRealm fills the realm, domain and directory of facts from the realm
-// the account's domain belongs to (or the only joined realm).
-func applyRealm(facts *useridentity.DirectoryFacts, realms []RealmEntry) {
-	var match *RealmEntry
-	for i := range realms {
-		if realms[i].Configured == "no" {
-			continue
-		}
-		if facts.Domain != "" && strings.EqualFold(realms[i].Domain, facts.Domain) {
-			match = &realms[i]
-			break
-		}
-		if match == nil {
-			match = &realms[i]
-		}
-	}
-	if match == nil {
-		return
-	}
-	if facts.Domain == "" {
-		facts.Domain = strings.ToLower(match.Domain)
-	}
-	if facts.Realm == "" && match.Realm != "" {
-		facts.Realm = strings.ToUpper(match.Realm)
-	}
-	switch strings.ToLower(match.ServerSoftware) {
-	case "active-directory":
-		facts.Directory = useridentity.DirectoryActiveDirectory
-	case "ipa":
-		facts.Directory = useridentity.DirectoryLDAP
-	}
 }
 
 // writeIdentitySpoolFile replaces dir/name atomically with its final mode

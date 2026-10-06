@@ -24,6 +24,25 @@ def test_windows_einval_on_a_closed_stdout_counts_as_a_closed_pipe(monkeypatch):
     assert main_mod._output_pipe_closed(OSError(errno.EINVAL, "Invalid argument"))
 
 
+def test_the_cli_never_creates_an_audit_db_in_the_managed_config_folder(monkeypatch, tmp_path):
+    # GAP-0062: DEFENSECLAW_HOME pointed at the managed folder made the CLI
+    # create audit.db there (and narrow the folder's mode).
+    from types import SimpleNamespace
+
+    from defenseclaw import upgrade_shim
+
+    managed = tmp_path / "etc" / "defenseclaw"
+    managed.mkdir(parents=True)
+    descriptor = managed / "managed-runtime.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: str(descriptor))
+    assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(managed / "audit.db"))) == ":memory:"
+    own = str(tmp_path / "home" / "audit.db")
+    assert main_mod._cli_audit_db(SimpleNamespace(audit_db=own)) == own
+    monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: None)
+    assert main_mod._cli_audit_db(SimpleNamespace(audit_db=str(managed / "audit.db"))) == str(managed / "audit.db")
+
+
 def test_other_einval_errors_are_not_hidden(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     assert not main_mod._output_pipe_closed(OSError(errno.EINVAL, "Invalid argument"))

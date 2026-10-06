@@ -108,6 +108,7 @@ const (
 	codePayload             = "payload_invalid"
 	codePackageOwned        = "package_owned_binaries"
 	codeConfig              = "config_invalid"
+	codeConfigRefused       = "config_refused"
 	codeAccount             = "service_account"
 	codeApply               = "apply_failed"
 	codeActivate            = "activation_failed"
@@ -144,6 +145,9 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// serviceAccountKept is set when an uninstall could not delete the
+	// service account (macOS can deny the directory-record delete).
+	serviceAccountKept bool
 	// gatewayKeptRunning is set when the gateway applied a config change
 	// itself (hotConfigApply) and was not restarted.
 	gatewayKeptRunning bool
@@ -735,12 +739,16 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err := env.checkRulePacksReadable(v9, account); err != nil {
 			return nil, &codedError{code: codeConfig, err: err}
 		}
-		if fromInstalled && config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
+		if fromInstalled && record != nil && record.ProductVersion == p.version &&
+			config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
 			// Configuration management put back the v8 file this host
 			// already migrated. Rewriting it again would fight that tool on
 			// every run, so its bytes stay, as for any in-place edit (the
 			// gateway migrates a v8 file in memory), and only the v9 checks
-			// apply.
+			// apply. This is only for a run that keeps the version: after a
+			// rollback the earlier release put the v8 file back and recorded
+			// its own version, so the upgrade migrates it again and replaces
+			// the stale migration record (GAP-0113).
 			v9.Raw, v9.SHA = validated.Raw, validated.SHA
 		} else {
 			v9.Migration = &configMigration{
@@ -751,6 +759,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 			fromInstalled = false
 		}
 		validated = v9
+	}
+	if err := env.checkCandidateAssets(validated); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
 	}
 	p.configFromInstalled = fromInstalled
 	p.config = validated
@@ -1029,7 +1040,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			l.restoreNewerConfig(record, newerConfig)
 		}
 		if err != nil {
-			r.AddError(codeRollbackFailed, err.Error())
+			message := err.Error()
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				message += "; the restored deployment's gateway refuses the configuration the same way: " + refusal
+			}
+			r.AddError(codeRollbackFailed, message)
 		} else {
 			r.AddWarning(codeRolledBack, "restored the previous deployment")
 		}
@@ -1120,6 +1135,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 					err = fmt.Errorf("%w; %s", err, held)
 				}
 			}
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
+			}
 			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
 				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
 					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
@@ -1194,6 +1212,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
+	l.clearSupersededFailures()
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}
@@ -2038,8 +2057,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
 		if !l.opts.KeepServiceAccount {
+			// By now the services, the binaries (this CLI included) and the
+			// deployment record are gone, so failing the uninstall here would
+			// leave a command that cannot be rerun. The account is a leftover
+			// to delete by hand.
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
-				errs = append(errs, err)
+				l.serviceAccountKept = true
+				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
+					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
 			}
 		}
 	}
@@ -2069,6 +2094,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
+// serviceAccountDeleteCommand is how an administrator deletes the service
+// account by hand after an uninstall could not.
+func serviceAccountDeleteCommand(goos, name string) string {
+	if goos == "darwin" {
+		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+	}
+	return "`sudo userdel " + name + "`"
+}
+
 // uninstallSummary says what a completed uninstall removed and kept, like
 // the change list of ensure and repair. A bare "uninstall: done" did not
 // tell the administrator what happened to the machine state or to the
@@ -2094,6 +2128,8 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 	case l.opts.KeepServiceAccount:
 		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	case l.serviceAccountKept:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}

@@ -323,6 +323,79 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 	}
 }
 
+// failModeBakedConnector keeps its registration independent of the hook fail
+// mode, like the real hook connectors: the mode lives in the generated script,
+// so a stale mode leaves the registration present.
+type failModeBakedConnector struct{ runtimePolicyCaptureConnector }
+
+func (c *failModeBakedConnector) Setup(_ context.Context, opts connector.SetupOpts) error {
+	c.mu.Lock()
+	c.setupCalls++
+	c.mu.Unlock()
+	return os.WriteFile(c.configPath, fmt.Appendf(nil, "{\"command\":\"managed-hook\",\"failMode\":%q}\n", opts.HookFailMode), 0o600)
+}
+
+func (*failModeBakedConnector) HookConfigReferenceNeedles(connector.SetupOpts) []string {
+	return []string{"managed-hook"}
+}
+
+// TestHookConfigGuardRefreshPolicyRerendersStaleFailMode pins GAP-0029:
+// guardrail.mode action implies the global (closed) hook fail mode, and the
+// rendered hooks follow it without a restart; nothing re-renders when the
+// effective fail mode is unchanged.
+func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "hooks.json")
+	conn := &failModeBakedConnector{runtimePolicyCaptureConnector{
+		stubConnector: stubConnector{name: "baked-mode"},
+		configPath:    configPath,
+	}}
+	cached := connector.SetupOpts{DataDir: root, HookFailMode: "open"}
+	if err := conn.Setup(context.Background(), cached); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	if !guard.Start(ctx, conn, cached) {
+		t.Fatal("hook registration guard did not start")
+	}
+	defer guard.Stop()
+	sidecar := &Sidecar{}
+	sidecar.bindHookRuntimePolicyResolver(guard)
+	setupCalls := func() int {
+		conn.mu.Lock()
+		defer conn.mu.Unlock()
+		return conn.setupCalls
+	}
+
+	live := config.DefaultConfig()
+	live.DataDir = root
+	live.Guardrail.Mode = "observe"
+	live.Guardrail.HookFailMode = "closed"
+	sidecar.publishConfig(live)
+	before := setupCalls()
+	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before {
+		t.Fatalf("observe mode (fail open, as rendered): err=%v, Setup calls %d -> %d, want none", err, before, setupCalls())
+	}
+
+	action := cloneConfig(live)
+	action.Guardrail.Mode = "action"
+	sidecar.publishConfig(action)
+	if err := guard.RefreshPolicy(ctx); err != nil {
+		t.Fatalf("refresh after guardrail.mode action: %v", err)
+	}
+	if setupCalls() != before+1 {
+		t.Fatalf("Setup calls = %d, want %d (one re-render)", setupCalls(), before+1)
+	}
+	if body, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(body), `"failMode":"closed"`) {
+		t.Fatalf("rendered hooks = %q (%v), want fail mode closed", body, err)
+	}
+	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before+1 {
+		t.Fatalf("second refresh: err=%v, Setup calls %d, want %d", err, setupCalls(), before+1)
+	}
+}
+
 func TestHookConfigGuard_ContinuesAfterWatcherReplacement(t *testing.T) {
 	conn, opts, cfgPath := installedCursorConnector(t)
 

@@ -55,7 +55,8 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !p.authenticateRequest(w, r) {
+	r, ok := p.authenticateRequest(r)
+	if !ok {
 		// authenticateRequest only emits the auth-failure audit event;
 		// it does not write a status. Emitting the 401 here ensures the
 		// TS reporter (and operators) get an actionable response rather

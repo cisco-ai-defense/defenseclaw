@@ -17,6 +17,8 @@
 package config
 
 import (
+	"errors"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -38,14 +40,19 @@ func RegisterCandidateAssetCheck(check func(*Config) error) { candidateAssetChec
 // CheckCandidateAssets refuses a decoded candidate whose asset references
 // the gateway would refuse when it builds the generation: a rule_pack that
 // is neither built in nor a custom_packs key, a custom pack whose digest
-// does not match, an unknown rule ID in guardrail.rules, or a protection
-// pack that does not exist. Writers run it before they commit, so a bad
+// does not match, an unknown rule ID in guardrail.rules, a protection pack
+// that does not exist, or an enabled webhook whose URL the gateway would
+// refuse to deliver to. Writers run it before they commit, so a bad
 // reference never reaches config.yaml and blocks every later hot reload.
 func CheckCandidateAssets(cfg *Config) error {
 	if candidateAssetCheck == nil || cfg == nil {
 		return nil
 	}
 	if err := candidateAssetCheck(cfg); err != nil {
+		var semantic *V8SemanticError
+		if errors.As(err, &semantic) {
+			return err // the check named its own field
+		}
 		return &V8SemanticError{
 			Path:     "$.guardrail",
 			Summary:  err.Error(),
@@ -74,7 +81,9 @@ func ValidateCandidateAssets(configFile string, raw []byte) error {
 // for configFile before any writer installs them: the strict YAML and JSON
 // Schema pass, the observability compiler and the runtime decode (which
 // includes the guardrail profile checks). It reads nothing but raw; an
-// editing writer also runs ValidateCandidateAssets.
+// editing writer also runs ValidateCandidateAssets. The only thing it reads
+// besides raw is the data directory's .env, which environment-backed secret
+// references resolve from, as they do for `config validate` and the gateway.
 func ValidateCandidate(configFile string, raw []byte) error {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
@@ -84,6 +93,10 @@ func ValidateCandidate(configFile string, raw []byte) error {
 	if value, ok := document.Plain["data_dir"].(string); ok && strings.TrimSpace(value) != "" {
 		dataDir = strings.TrimSpace(value)
 	}
+	// A destination key that `defenseclaw keys set` stored in .env resolves
+	// here too. Without this the 8 -> 9 migration check refused, as "not
+	// set", the config of a user who had followed its remedy (GAP-0173).
+	LoadDotEnv(filepath.Join(expandPath(dataDir), ".env"))
 	if _, err := ParseCompileObservabilityV8(configFile, raw, ObservabilityV8CompileOptions{DefaultDataDir: dataDir}); err != nil {
 		return err
 	}

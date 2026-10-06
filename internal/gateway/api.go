@@ -266,6 +266,8 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookChildThreads                  map[string]hookChildThread
+	hookChildThreadOrder              []string
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState
@@ -724,9 +726,10 @@ func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
 // cooldown filters. The redacted reason alone did not say which rule fired
 // (GAP-1351), so the details also carry rule=<ids> and the generic payload
 // names the rules the way the agent message does ("rule ID: Title", titles
-// only from the compiled-in catalog or a loaded rule pack). A managed
-// deployment keeps the historical payload.
-func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
+// only from the compiled-in catalog or a loaded rule pack). The payload also
+// names the account, agent identity and profile of the request (GAP-0144). A
+// managed deployment keeps the historical payload.
+func (a *APIServer) dispatchHookBlockWebhook(ctx context.Context, connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
 	if a == nil || a.webhookSource == nil {
 		return
 	}
@@ -751,8 +754,9 @@ func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent,
 		if ids := webhookRuleIDs(ruleIDs); ids != "" {
 			event.Details = fmt.Sprintf("connector=%s event=%s rule=%s reason=%s", connectorName, hookEvent, ids, reason)
 		}
+		event.Structured = map[string]any{webhookAttributionKey: webhookAttributionFor(ctx)}
 		if rules := agentMatchedRules(reason); rules != "" {
-			event.Structured = map[string]any{webhookRuleKey: rules}
+			event.Structured[webhookRuleKey] = rules
 		}
 	}
 	webhooks.Dispatch(event)
@@ -3376,7 +3380,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+			// Only the gateway's account can read the ACP token that signed the
+			// request, so it is the verified subject; identity headers the
+			// caller sent stay claims.
+			authenticated = authenticated.WithContext(
+				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(authenticated.Context())),
+			)
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
 		}
@@ -3504,7 +3513,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
 			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+				r = authenticated.WithContext(a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(authenticated.Context())))
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -251,19 +250,6 @@ func TestConfigV8ValidateNamesTheFieldAndWhatItTakes(t *testing.T) {
 		if strings.Contains(failure.Reason, c.value) {
 			t.Fatalf("the failure names the rejected value %s: %+v", c.value, failure)
 		}
-	}
-}
-
-// A cross-field scanner rule names its key instead of failing at "$".
-func TestConfigV8ValidationFailureNamesTheScannerKey(t *testing.T) {
-	var scanners config.ScannersConfig
-	scanners.MCPScanner.JudgeSource = config.ScannerJudgeInherit
-	scanners.MCPScanner.LLM.Model = "some-model"
-	failure := configV8ValidationFailure(fmt.Errorf("candidate: %w", scanners.Validate()))
-	if failure.Path != "$.scanners.mcp_scanner.judge_source" ||
-		!strings.Contains(failure.Reason, "judge_source inherit uses the top-level llm block") ||
-		strings.Contains(failure.Reason, "some-model") {
-		t.Fatalf("scanner rule failure = %+v", failure)
 	}
 }
 

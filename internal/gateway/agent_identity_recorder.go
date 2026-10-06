@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,9 +51,9 @@ var sharedAgentIdentities = &agentIdentityRecorder{
 }
 
 // observe records one hook of an agent identity. newSession is true when the
-// hook started a session the registry had not seen; the registry is in
-// memory, so the batch keeps the first session it counted for the upsert to
-// recognize a session resumed after a restart.
+// hook started a session the registry had not seen. The registry is in
+// memory, so a session resumed after a restart is new to it again; the batch
+// names the sessions it counted and the store counts each id once.
 func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID string, newSession bool) {
 	if r == nil || facts.ID == "" {
 		return
@@ -76,11 +77,8 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 		rec.UserName = facts.UserName
 	}
 	sessionID = strings.TrimSpace(sessionID)
-	if newSession && sessionID != "" && sessionID != rec.LastSessionID {
-		if rec.SessionsSeen == 0 {
-			rec.FirstSessionID = sessionID
-		}
-		rec.SessionsSeen++
+	if newSession {
+		rec.NoteSession(sessionID)
 	}
 	if sessionID != "" {
 		rec.LastSessionID = sessionID
@@ -123,10 +121,10 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
 		if old.FirstSeen.Before(cur.FirstSeen) {
 			cur.FirstSeen = old.FirstSeen
 		}
-		if old.SessionsSeen > 0 {
-			cur.FirstSessionID = old.FirstSessionID
+		for _, sessionID := range old.SessionIDs {
+			cur.NoteSession(sessionID)
 		}
-		cur.SessionsSeen += old.SessionsSeen
+		cur.SessionsSeen += max(old.SessionsSeen-int64(len(old.SessionIDs)), 0)
 		if cur.UserName == "" {
 			cur.UserName = old.UserName
 		}
@@ -263,9 +261,17 @@ type agentIdentityRow struct {
 	InstallHint string `json:"install_hint,omitempty"`
 }
 
-// handleAgentIdentities serves GET /api/v1/agents/identities?user=&connector=:
-// the stored agent identities plus the ones buffered since the last flush,
-// most recently seen first.
+// agentIdentitiesPageLimit is the default and largest page of GET
+// /api/v1/agents/identities.
+const agentIdentitiesPageLimit = 1000
+
+// handleAgentIdentities serves GET
+// /api/v1/agents/identities?user=&connector=&limit=&cursor=: the stored agent
+// identities, most recently seen first, a page at a time. It writes the ones
+// buffered since the last flush first, so a new agent shows at once and the
+// store, which knows which sessions it has counted, counts each once; rows
+// that could not be written are merged in. total counts every matching row;
+// next_cursor is the cursor of the next page, empty on the last one.
 func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -275,27 +281,127 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "identities": []agentIdentityRow{}})
 		return
 	}
-	filter := inventory.AgentIdentityFilter{
-		User:      strings.TrimSpace(r.URL.Query().Get("user")),
-		Connector: strings.ToLower(strings.TrimSpace(r.URL.Query().Get("connector"))),
+	q := r.URL.Query()
+	limit := agentIdentitiesPageLimit
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = min(n, agentIdentitiesPageLimit)
 	}
-	var stored []inventory.AgentIdentityRecord
-	persisted := false
+	offset := 0
+	if raw := strings.TrimSpace(q.Get("cursor")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
+			return
+		}
+		// Past every row anyway; the bound keeps offset+limit from overflowing.
+		offset = min(n, 1<<30)
+	}
+	filter := inventory.AgentIdentityFilter{
+		User:      strings.TrimSpace(q.Get("user")),
+		Connector: strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+	}
+	// Write the buffered rows first, so one count of sessions serves the
+	// listing. A failed write leaves them buffered and merged below.
 	if store := sharedAgentIdentities.store(); store != nil {
-		rows, err := store.ListAgentIdentities(r.Context(), filter)
-		if err != nil {
+		if err := sharedAgentIdentities.flush(r.Context(), store); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] agent identity flush failed: %v\n", err)
+		}
+	}
+	pending, hints := sharedAgentIdentities.snapshot()
+	var stored []inventory.AgentIdentityRecord
+	start, total, persisted := 0, 0, false
+	if store := sharedAgentIdentities.store(); store != nil {
+		var err error
+		if stored, start, total, err = storedAgentIdentityWindow(r.Context(), store, filter, offset, limit, pending); err != nil {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
 			return
 		}
-		stored, persisted = rows, true
+		persisted = true
+	} else {
+		for _, rec := range pending {
+			if agentIdentityMatches(rec, filter) {
+				total++
+			}
+		}
 	}
-	pending, hints := sharedAgentIdentities.snapshot()
+	// rows begins at merged row start.
 	rows := mergeAgentIdentityRows(stored, pending, hints, filter)
-	a.writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "persisted": persisted, "identities": rows})
+	from := offset - start
+	page := rows[min(from, len(rows)):min(from+limit, len(rows))]
+	next := ""
+	if offset+limit < total {
+		next = strconv.Itoa(offset + limit)
+	}
+	nameAgentIdentityRows(page)
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": true, "persisted": persisted, "identities": page, "total": total, "next_cursor": next,
+	})
 }
 
-// mergeAgentIdentityRows overlays the buffered rows on the stored ones, the
-// way the next flush will write them, and names each row's account.
+// storedAgentIdentityWindow reads the stored rows that merged rows offset
+// to offset+limit come from, the merged row the first of them is, and how
+// many rows match after the merge. With nothing buffered the store pages.
+// A buffered sighting only moves an identity up, so otherwise those are the
+// first offset+limit stored rows plus the stored rows of the buffered
+// identities further down.
+func storedAgentIdentityWindow(
+	ctx context.Context,
+	store *inventory.InventoryStore,
+	filter inventory.AgentIdentityFilter,
+	offset, limit int,
+	pending map[string]inventory.AgentIdentityRecord,
+) ([]inventory.AgentIdentityRecord, int, int, error) {
+	buffered := false
+	for _, rec := range pending {
+		buffered = buffered || agentIdentityMatches(rec, filter)
+	}
+	window := filter
+	if !buffered {
+		window.Offset, window.Limit = offset, limit
+		stored, total, err := store.ListAgentIdentities(ctx, window)
+		return stored, offset, total, err
+	}
+	window.Limit = offset + limit
+	stored, total, err := store.ListAgentIdentities(ctx, window)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	inWindow := make(map[string]bool, len(stored))
+	for _, rec := range stored {
+		inWindow[rec.AgentID] = true
+	}
+	var below []string
+	for id, rec := range pending {
+		if !inWindow[id] && agentIdentityMatches(rec, filter) {
+			below = append(below, id)
+		}
+	}
+	if len(below) == 0 {
+		return stored, 0, total, nil
+	}
+	further, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{AgentIDs: below})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	// A buffered identity adds to the total unless its stored row already
+	// matched.
+	total += len(below)
+	for _, rec := range further {
+		if agentIdentityMatches(rec, filter) {
+			total--
+		}
+	}
+	return append(stored, further...), 0, total, nil
+}
+
+// mergeAgentIdentityRows overlays the rows still buffered on the stored ones
+// (all of them when there is no store, the unwritten ones after a failed
+// flush), most recently seen first.
 func mergeAgentIdentityRows(
 	stored []inventory.AgentIdentityRecord,
 	pending map[string]inventory.AgentIdentityRecord,
@@ -320,12 +426,7 @@ func mergeAgentIdentityRows(
 			order = append(order, id)
 			continue
 		}
-		// The way the upsert counts: a buffered session that resumes the
-		// stored last session is not a new one.
 		rec.SessionsSeen += buffered.SessionsSeen
-		if buffered.SessionsSeen > 0 && buffered.FirstSessionID != "" && buffered.FirstSessionID == rec.LastSessionID {
-			rec.SessionsSeen--
-		}
 		if buffered.LastSeen.After(rec.LastSeen) {
 			rec.LastSeen = buffered.LastSeen
 			if buffered.LastSessionID != "" {
@@ -339,23 +440,9 @@ func mergeAgentIdentityRows(
 			rec.UserName = buffered.UserName
 		}
 	}
-	// Each account is named as the host names its uid or SID now, the way a
-	// new hook call would record it, so a row an older build stored with
-	// another spelling (a bare SSSD name, DOMAIN\user) reads like the rest
-	// (GAP-0103). A row whose account no longer resolves keeps its name.
-	names := map[string]string{}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
-		rec := byID[id]
-		name, ok := names[rec.UserID]
-		if !ok {
-			name = sanitizeLLMEventUser(userScopedIdentityName(rec.UserID))
-			names[rec.UserID] = name
-		}
-		if name != "" {
-			rec.UserName = name
-		}
-		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *rec, InstallHint: hints[id]})
+		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *byID[id], InstallHint: hints[id]})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if !rows[i].LastSeen.Equal(rows[j].LastSeen) {
@@ -364,6 +451,25 @@ func mergeAgentIdentityRows(
 		return rows[i].AgentID < rows[j].AgentID
 	})
 	return rows
+}
+
+// nameAgentIdentityRows names each row's account as the host names its uid
+// or SID now, the way a new hook call would record it, so a row an older
+// build stored with another spelling (a bare SSSD name, DOMAIN\user) reads
+// like the rest (GAP-0103). A row whose account no longer resolves keeps its
+// name.
+func nameAgentIdentityRows(rows []agentIdentityRow) {
+	names := map[string]string{}
+	for i := range rows {
+		name, ok := names[rows[i].UserID]
+		if !ok {
+			name = sanitizeLLMEventUser(userScopedIdentityName(rows[i].UserID))
+			names[rows[i].UserID] = name
+		}
+		if name != "" {
+			rows[i].UserName = name
+		}
+	}
 }
 
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {

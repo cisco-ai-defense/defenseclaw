@@ -257,18 +257,20 @@ def test_exact_v8_rejects_legacy_fields(legacy: str) -> None:
     assert "run defenseclaw upgrade" in str(captured.value)
 
 
-def test_a_misspelled_admission_key_is_named_and_v9_errors_say_v9() -> None:
-    with pytest.raises(V8ConfigError) as typo:
-        load_validate_v8("config_version: 9\nadmission:\n  skil: {}\n")
-    assert "at $.admission" in str(typo.value) and "unsupported field skil" in str(typo.value)
-
-    with pytest.raises(V8ConfigError) as legacy:
-        load_validate_v8("config_version: 8\nadmission:\n  skil: {}\n")
-    assert "unsupported field skil" in str(legacy.value) and "defenseclaw upgrade" in str(legacy.value)
-
-    with pytest.raises(V8ConfigError) as wrong_type:
+def test_v9_schema_refusals_say_v9() -> None:
+    with pytest.raises(V8ConfigError) as captured:
         load_validate_v8("config_version: 9\nobservability: 5\n")
-    assert "v8" not in str(wrong_type.value)
+
+    assert "v8" not in str(captured.value)
+
+
+def test_v9_unknown_key_is_named_and_does_not_point_at_upgrade() -> None:
+    with pytest.raises(V8ConfigError) as captured:
+        load_validate_v8("config_version: 9\nguardrail: {no_such_key: 1}\n")
+
+    assert captured.value.keyword == "additionalProperties"
+    assert "$.guardrail.no_such_key" in str(captured.value)
+    assert "upgrade" not in str(captured.value)
 
 
 @pytest.mark.parametrize(
@@ -629,7 +631,7 @@ observability:
     rendered = str(captured.value)
     assert canary not in rendered
     assert "redacted.yaml" in rendered
-    assert captured.value.path == "$.observability"
+    assert captured.value.path == "$.observability.unknown_field"
 
 
 def test_semantic_diagnostics_do_not_render_resource_credentials() -> None:

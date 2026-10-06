@@ -441,7 +441,11 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
 
     @patch(
         "defenseclaw.fail_mode.connector_fail_mode_report",
-        return_value={"effective": "open", "provenance": "process-env"},
+        return_value={
+            "effective": "open",
+            "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
+        },
     )
     def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
         cfg = self._cfg()
@@ -454,7 +458,8 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(len(mode_rows), 1)
         self.assertEqual(
             mode_rows[0]["detail"],
-            "action; fail-mode=open; provenance=process-env",
+            "action; fail-mode=open (observe mode keeps hooks fail-open; "
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
@@ -1678,6 +1683,28 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         self.assertEqual(rp["status"], "pass")
         self.assertIn("11/12 rules enabled", rp["detail"])
         validate.assert_called_once_with(os.getcwd())
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_custom_pack_edited_after_pinning_fails_and_names_the_v9_key(self, validate):
+        validate.return_value = self._valid()  # files_digest is "b" * 64
+        cfg = self._cfg(rule_pack_dir="/packs/mine")
+        cfg.guardrail.effective_rule_pack.return_value = "mine"
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "c" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn('configured rule pack "mine"', rp["detail"])
+        self.assertIn("guardrail.custom_packs.mine.digest", rp["detail"])
+        self.assertNotIn("rule_pack_dir", rp["detail"])
+        self.assertIn("guardrail use-pack", rp["remediation"])
+
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "b" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        self.assertEqual(next(c for c in r.checks if c["label"] == "Rule pack")["status"], "pass")
 
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",

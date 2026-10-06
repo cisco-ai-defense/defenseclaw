@@ -166,6 +166,17 @@ replaced: binaries, Python environment, and the configuration and data as they
 were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
+Each install shows only its own audit events, so after a rollback the
+events the other install recorded are not in `defenseclaw-gateway audit export`.
+Read them from the install you left, with the newer build's gateway:
+
+```bash
+~/.defenseclaw/previous/bin/defenseclaw-gateway audit export \
+  --db ~/.defenseclaw/previous/data/audit.db
+```
+
+After a roll forward, use `defenseclaw-gateway audit export --db` the same way
+(on Windows, `previous\data\audit.db`).
 One previous install is kept, and rolling back needs no network. Reinstalling
 the same version does not replace the rollback copy. Running it again rolls
 forward (its header then reads `Rolling forward to DefenseClaw <version>`).
@@ -195,6 +206,12 @@ is still starting. If the previous gateway does not start again after a failed
 upgrade, the installer says so (`Your previous install is back, but its gateway
 is not running`): agent hooks are not guarded until `defenseclaw-gateway start`
 succeeds.
+
+On a host where several accounts run their own gateways, the installer checks
+the running gateway's API port before it builds or changes anything. When
+another account's process holds that port, it stops there with nothing changed
+and prints the `defenseclaw setup gateway --api-port <free port>` command that
+moves this account's gateway. Run it, then upgrade again.
 
 If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the

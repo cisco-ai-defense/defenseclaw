@@ -101,11 +101,18 @@ def test_protection_list_reads_config(env) -> None:
 def test_rule_and_suppress_wrappers(env) -> None:
     app, _root, writes = env
     app.cfg.guardrail.rules = GuardrailRulesConfig(enable=["SEC-AWS-KEY"])
-    assert _run(app, "rule", "disable", "sec-aws-key").exit_code == 0
+    assert _run(app, "rule", "disable", "SEC-AWS-KEY").exit_code == 0
     assert writes[-1][0] == [
         config_writer.Change("guardrail.rules.disable", ["SEC-AWS-KEY"]),
         config_writer.Change("guardrail.rules.enable", unset=True),
     ]
+    # The newer packs spell their IDs in lower case with dots: kept as typed, one key.
+    assert _run(app, "rule", "severity", "impact.cloud_s3_data_delete", "HIGH").exit_code == 0
+    assert writes[-1][0] == [
+        config_writer.Change('guardrail.rules.severity_overrides["impact.cloud_s3_data_delete"]', "HIGH")
+    ]
+    assert _run(app, "rule", "disable", "exec.remote_ip_download_execute_same_artifact").exit_code == 0
+    assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", ["exec.remote_ip_download_execute_same_artifact"])]
     result = _run(app, "suppress", "add", "SUPP-BUILD", "--finding", "JUDGE-PII-IP", "--reason", "build farm")
     assert result.exit_code == 0, result.output
     assert writes[-1][0] == [
@@ -145,6 +152,11 @@ def test_managed_device_refuses_with_exit_3(env, monkeypatch) -> None:
     result = CliRunner().invoke(cmd_guardrail.guardrail, ["protection", "enable", DB], obj=app)
     assert result.exit_code == 3
     assert "managed" in result.output
+    app.logger.log_action.assert_called_once_with(
+        "guardrail-config",
+        "guardrail.rules.protections",
+        f"outcome=refused reason=managed_device command=guardrail protection enable {DB}",
+    )
 
 
 def test_preflight_names_the_managed_refusal_not_admin_elevation(env, monkeypatch, capsys) -> None:

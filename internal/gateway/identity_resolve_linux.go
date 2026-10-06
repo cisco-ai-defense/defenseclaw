@@ -15,8 +15,12 @@ import (
 )
 
 // peerDirectoryLookupTimeout bounds one background resolution (the getent
-// calls), well beyond the hot-path budget a waiting request uses.
-const peerDirectoryLookupTimeout = 10 * time.Second
+// calls), well beyond the hot-path budget a waiting request uses. A cold SSSD
+// names a group in about 30 ms, so an account in 400 groups needs up to twelve
+// seconds when SSSD answers one lookup at a time; a lookup that still runs
+// out fails as a whole and is retried (GAP-0138). `guardrail profile
+// explain` waits for this lookup, so its client timeout stays above it.
+const peerDirectoryLookupTimeout = 20 * time.Second
 
 // resolvePeerDirectoryFacts resolves a verified uid's facts through NSS and
 // merges the guardian's identity spool record for it.

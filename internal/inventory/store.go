@@ -465,7 +465,8 @@ var inventoryMigrations = []invMigration{
 		// and the agent identity ledger. ide_installations and
 		// ide_plugins hang off ai_scans like ai_signals, so retention
 		// pruning (PruneScanHistory) bounds them through ON DELETE
-		// CASCADE. agent_identities is one row per agent, not per scan.
+		// CASCADE. agent_identities is one row per agent, not per scan;
+		// PruneAgentIdentities bounds it by last_seen.
 		description: "v4: signal accounts, IDE inventory, agent identities",
 		apply: func(ex invDBExecer) error {
 			stmts := []string{
@@ -510,7 +511,7 @@ var inventoryMigrations = []invMigration{
 				`CREATE INDEX IF NOT EXISTS idx_ide_plugins_user_id ON ide_plugins(user_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_ide_plugins_plugin_id ON ide_plugins(plugin_id)`,
 				`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
-				`CREATE INDEX IF NOT EXISTS idx_agent_identities_user_id ON agent_identities(user_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_agent_identities_last_seen ON agent_identities(last_seen DESC, agent_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
 			}
 			for _, q := range stmts {

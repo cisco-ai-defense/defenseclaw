@@ -30,9 +30,10 @@ DefenseClaw 1.0.x writes, still loads: the gateway migrates it in memory.
 keeps the old file as `config.yaml.v8.bak`. See
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) for what moved
 and how to check it, and [Upgrade DefenseClaw](/docs/get-started/upgrade) for
-the upgrade and rollback flow. Version 7 files are converted by the 1.0
-upgrade. The gateway never rewrites a legacy file at startup and does not run
-the v7 and v8 observability formats in parallel.
+the upgrade and rollback flow. A file from a released 0.8.x install that is
+older than version 8 is converted once, by `defenseclaw upgrade` or
+`defenseclaw migrate`, with the original kept as a backup; any command that
+meets such a file stops with that instruction instead of reading it.
 
 <Callout title="Native Windows uses the packaged layout">
 The file tree below describes a source or POSIX installation. The native
@@ -409,7 +410,7 @@ guardrail:
       digest: sha256:<64 hex digits>
   rules:                       # layered on the selected pack in memory; no files are written
     protections: []            # built-in use-case packs, for example database-destruction-protection
-    enable: []                 # rule IDs, upper case
+    enable: []                 # rule IDs, as the pack spells them (SEC-AWS-KEY, exec.remote_ip_download_execute_same_artifact)
     disable: []
     severity_overrides: {}     # RULE-ID: CRITICAL | HIGH | MEDIUM | LOW | INFO
     suppressions: []           # {id, finding_pattern, entity_pattern, reason}
@@ -578,7 +579,7 @@ concept pages explain how they combine: [Rules](/docs/policies/rules) and
 | `guardrail.rule_pack` | `default` | The rule pack: `default`, `strict`, `permissive`, or a name from `guardrail.custom_packs`. Lower case letters, digits, `_` and `-`, up to 64 characters. `defenseclaw guardrail use-pack NAME` writes it. |
 | `guardrail.custom_packs.<name>` | none | A rule-pack directory pinned by digest: `path` and `digest` (`sha256:` plus 64 hex digits, printed by `defenseclaw guardrail validate-pack`). If the directory no longer hashes to the digest, the change does not build into a generation and the previous policy keeps running. At most 64 packs. |
 | `guardrail.rules.protections` | `[]` | Built-in use-case packs layered on the selected pack, such as `database-destruction-protection`. `defenseclaw guardrail protection list` shows them. |
-| `guardrail.rules.enable`, `guardrail.rules.disable` | `[]` | Rule IDs (upper case) to switch on or off. An unknown ID fails validation. |
+| `guardrail.rules.enable`, `guardrail.rules.disable` | `[]` | Rule IDs to switch on or off, spelled and cased exactly as the pack has them (`SEC-AWS-KEY`, `exec.remote_ip_download_execute_same_artifact`). An unknown ID fails validation. |
 | `guardrail.rules.severity_overrides` | `{}` | Rule ID to `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`. |
 | `guardrail.rules.suppressions` | `[]` | `{id, finding_pattern, entity_pattern, reason}` entries appended to the pack's suppressions. IDs are unique across the pack and the config. |
 | `guardrail.rules.sensitive_tools` | `[]` | `{name, result_inspection, judge_result, min_entities_for_alert}` entries merged into the pack's sensitive tools by name. |
@@ -1381,9 +1382,9 @@ touches one prints the command, and the gateway keeps that key's running value
 until you restart it:
 
 ```text
-Set guardrail.hook_fail_mode (config generation 5, sha256 b0eecf44591d).
+Set guardrail.hook_self_heal (config generation 5, sha256 b0eecf44591d).
 Effective policy digest: sha256:4254f65d36b3d7af4e4704a12570e2a4a1e0e5a4063a58d27a18953f5376a8f2
-Restart the gateway to apply guardrail.hook_fail_mode: defenseclaw-gateway restart
+Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway restart
 ```
 
 | Restart-required key | Why |
@@ -1391,12 +1392,12 @@ Restart the gateway to apply guardrail.hook_fail_mode: defenseclaw-gateway resta
 | `data_dir`, `observability.local.path`, `observability.local.judge_bodies_path` | Storage identity: the files the process opened at start |
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
-| `guardrail.hook_fail_mode`, `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled`, `guardrail.connectors.<connector>.hook_fail_mode` | Hook settings that setup bakes into the installed hooks |
+| `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled` | The hook guard and which connectors have hooks installed |
 | `claw`, `agent`, `routing` | Paths, identity and the model router, captured at start |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
-Every other key is hot, including `guardrail.mode`, thresholds, rule packs and
+Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and
 rules, `admission`, `asset_policy`, `scanners`, `llm_providers`,
 `observability.destinations` and `update`. The effective policy digest, which
 is the sha256 of the migrated config (secrets dropped) plus the digests of the

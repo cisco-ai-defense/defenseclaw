@@ -273,7 +273,6 @@ which hands off to the latest `install.sh`. It does not need to run again.
     (`scripts/check_enterprise_upgrade_config.py` checks 8 to 9, and the lane
     scripts install a version 8 config on the previous release).
 
-  Do not touch Go's `CurrentConfigVersion` (7), the legacy decoder.
   `defenseclaw migrate --check` does not validate these steps, so test that a
   migrated file loads in both loaders.
 - **Audit database changes** are forward-only migrations the gateway applies

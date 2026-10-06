@@ -154,8 +154,8 @@ func (s *ContinuousDiscoveryService) startHistoryRetention(ctx context.Context) 
 	}
 }
 
-// sweepHistoryIfDue prunes scan history older than the retention window and
-// compacts the file when a sweep is due. It never runs concurrently with
+// sweepHistoryIfDue prunes scan history and agent identities older than the
+// retention window and compacts the file when a sweep is due. It never runs concurrently with
 // itself and only reports failures to stderr: history is additive, so a
 // failed sweep must never fail or block scanning. Returns whether a sweep
 // ran.
@@ -177,6 +177,21 @@ func (s *ContinuousDiscoveryService) sweepHistoryIfDue(ctx context.Context) bool
 		return true
 	}
 	cutoff := now.Add(-time.Duration(days) * 24 * time.Hour)
+	// The identity ledger is small and not tied to a scan, so it is pruned
+	// first and a failed or partial scan prune cannot skip it.
+	if agents, err := s.invStore.PruneAgentIdentities(ctx, cutoff); err != nil {
+		if ctx.Err() == nil && w.allowDiagnostic("prune-agents", now) {
+			fmt.Fprintf(os.Stderr, "[ai-discovery] agent identity prune failed: %v\n", err)
+		}
+	} else if agents > 0 {
+		fmt.Fprintf(os.Stderr, "[ai-discovery] inventory history: pruned %d agent identities not seen for %d days\n", agents, days)
+	}
+	// So are the session ids the ledger remembers it counted.
+	if _, err := s.invStore.PruneAgentIdentitySessions(ctx, cutoff); err != nil {
+		if ctx.Err() == nil && w.allowDiagnostic("prune-agent-sessions", now) {
+			fmt.Fprintf(os.Stderr, "[ai-discovery] agent identity session prune failed: %v\n", err)
+		}
+	}
 	pruned, err := s.invStore.PruneScanHistory(ctx, cutoff, inventoryHistorySweepBudget)
 	if err != nil {
 		if ctx.Err() == nil && w.allowDiagnostic("prune", now) {

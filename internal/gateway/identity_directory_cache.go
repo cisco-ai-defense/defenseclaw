@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -29,12 +31,36 @@ import (
 // the first lookup is in flight or after it failed. A lookup slower than
 // that selects the default profile with match default_lookup_failed; the
 // budget stays well inside the hook request timeout.
+//
+// The first failure of a key's lookup, and its recovery, are logged once
+// (logf) with the resolver's own reason, so an account that cannot resolve at
+// all (in more groups than DefenseClaw names, a directory that never answers)
+// leaves a line in the gateway log instead of only a default_lookup_failed on
+// every record (GAP-0124).
+//
+// Facts whose refreshes keep failing are not served forever: past maxAge
+// (identityDirectoryMaxAge for directory facts, four times the TTL) they are
+// dropped, and the account is a failed lookup (default_lookup_failed) until a
+// lookup succeeds. Without the bound a user removed from the directory kept the
+// profile of the group they had left, and a user added to one stayed on the
+// default, for as long as the outage lasted (GAP-0145). health reports how many
+// accounts are failing and how stale their facts are, for doctor and status.
+//
+// A resolver can call its own answer incomplete (an AD account whose UPN a
+// slow domain controller has not given yet). That answer is served, but is
+// refreshed after identityDirectoryIncompleteTTL, not after the full TTL.
 
 const (
 	identityDirectoryTTL    = 15 * time.Minute
 	identityDirectoryBudget = 2 * time.Second
 	identityDirectoryRetry  = 15 * time.Second
 	identityDirectoryMax    = 4096
+	// identityDirectoryIncompleteTTL is how long an incomplete answer lasts.
+	identityDirectoryIncompleteTTL = 2 * time.Minute
+	// identityDirectoryMaxAge is the age past which directory facts are no
+	// longer served, even when their refresh keeps failing. It is also how long
+	// the guardian's identity spool record is trusted (identitySpoolMaxAge).
+	identityDirectoryMaxAge = 4 * identityDirectoryTTL
 )
 
 // identityDirectoryCache caches directory facts per uid or SID.
@@ -45,6 +71,13 @@ type identityDirectoryCache = identityCache[useridentity.DirectoryFacts]
 type identityCache[T any] struct {
 	resolve func(key string) (T, error)
 	now     func() time.Time
+	// incomplete, when set, marks an answer to refresh after
+	// identityDirectoryIncompleteTTL.
+	incomplete func(T) bool
+	// logf, when set, reports a key's first failure and its recovery.
+	logf func(format string, args ...any)
+	// maxAge, when set, is the age past which facts are no longer served.
+	maxAge time.Duration
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
@@ -56,10 +89,21 @@ type identityCacheEntry[T any] struct {
 	fetchedAt   time.Time
 	nextAttempt time.Time
 	inflight    chan struct{}
+	// failedSince is when the key's lookup began failing (zero while it
+	// succeeds) and lastErr the reason last logged for it.
+	failedSince time.Time
+	lastErr     string
+	// lastFailedAt is when a lookup of the key last failed.
+	lastFailedAt time.Time
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
-	return newIdentityCache(resolve)
+	cache := newIdentityCache(resolve)
+	cache.maxAge = identityDirectoryMaxAge
+	cache.logf = func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
+	}
+	return cache
 }
 
 func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] {
@@ -85,7 +129,17 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		entry = &identityCacheEntry[T]{}
 		c.entries[key] = entry
 	}
-	stale := !entry.ok || now.Sub(entry.fetchedAt) >= identityDirectoryTTL
+	age := now.Sub(entry.fetchedAt)
+	if entry.ok && c.maxAge > 0 && age >= c.maxAge {
+		var none T
+		entry.facts, entry.ok = none, false
+		if c.logf != nil {
+			c.logf("directory facts for %s are %s old and no longer used; the account gets the default guardrail profile "+
+				"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
+		}
+	}
+	stale := !entry.ok || age >= identityDirectoryTTL ||
+		(age >= identityDirectoryIncompleteTTL && c.incomplete != nil && c.incomplete(entry.facts))
 	if stale && entry.inflight == nil && !now.Before(entry.nextAttempt) {
 		c.refreshLocked(key, entry)
 	}
@@ -111,6 +165,22 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return entry.facts, entry.ok
 }
 
+// peek returns key's cached facts and when they were fetched, without
+// starting a lookup or waiting for one.
+func (c *identityCache[T]) peek(key string) (T, time.Time, bool) {
+	var zero T
+	if c == nil {
+		return zero, time.Time{}, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || !entry.ok {
+		return zero, time.Time{}, false
+	}
+	return entry.facts, entry.fetchedAt, true
+}
+
 func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T]) {
 	done := make(chan struct{})
 	entry.inflight = done
@@ -123,9 +193,45 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
 		entry.inflight = nil
+		note := c.noteResultLocked(key, entry, err, now)
 		c.mu.Unlock()
+		if note != "" && c.logf != nil {
+			c.logf("%s", note)
+		}
 		close(done)
 	}()
+}
+
+// noteResultLocked records a lookup's outcome on entry and returns the line to
+// log: the first failure of the key (or a failure with another reason), and
+// its recovery. A key that keeps failing for the same reason logs nothing more.
+func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, now time.Time) string {
+	if err == nil {
+		if entry.failedSince.IsZero() {
+			return ""
+		}
+		down := now.Sub(entry.failedSince).Round(time.Second)
+		entry.failedSince, entry.lastErr = time.Time{}, ""
+		return fmt.Sprintf("directory lookup for %s works again after %s", key, down)
+	}
+	entry.lastFailedAt = now
+	reason := err.Error()
+	if len(reason) > 300 {
+		reason = reason[:300] + "..."
+	}
+	if !entry.failedSince.IsZero() && entry.lastErr == reason {
+		return ""
+	}
+	if entry.failedSince.IsZero() {
+		entry.failedSince = now
+	}
+	entry.lastErr = reason
+	keeps := "the account gets the default guardrail profile (default_lookup_failed) until a lookup succeeds"
+	if entry.ok && c.maxAge > 0 {
+		keeps = fmt.Sprintf("the account keeps its last facts for at most %s, then gets the default guardrail "+
+			"profile (default_lookup_failed) until a lookup succeeds", c.maxAge)
+	}
+	return fmt.Sprintf("directory lookup for %s failed: %s; %s", key, reason, keeps)
 }
 
 // evictLocked drops the oldest settled entry.
@@ -143,4 +249,44 @@ func (c *identityCache[T]) evictLocked() {
 	if oldestKey != "" {
 		delete(c.entries, oldestKey)
 	}
+}
+
+// identityCacheHealth summarises the lookups that failed in the last TTL.
+type identityCacheHealth struct {
+	// Failing counts accounts whose latest lookup failed within the TTL;
+	// Since is the earliest of their first failures and LastError the reason
+	// recorded for that one.
+	Failing   int
+	Since     time.Time
+	LastError string
+	// Stale counts the failing accounts still served facts older than the TTL,
+	// and OldestAge is the age of the oldest of them.
+	Stale     int
+	OldestAge time.Duration
+}
+
+// health reports the failing accounts. An idle account whose last failure is
+// older than the TTL is not counted: nothing retries it until it is used.
+func (c *identityCache[T]) health() identityCacheHealth {
+	var h identityCacheHealth
+	if c == nil {
+		return h
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for _, entry := range c.entries {
+		if entry.failedSince.IsZero() || now.Sub(entry.lastFailedAt) >= identityDirectoryTTL {
+			continue
+		}
+		h.Failing++
+		if h.Since.IsZero() || entry.failedSince.Before(h.Since) {
+			h.Since, h.LastError = entry.failedSince, entry.lastErr
+		}
+		if age := now.Sub(entry.fetchedAt); entry.ok && age >= identityDirectoryTTL {
+			h.Stale++
+			h.OldestAge = max(h.OldestAge, age)
+		}
+	}
+	return h
 }

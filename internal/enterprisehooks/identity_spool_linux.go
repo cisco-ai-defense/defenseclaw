@@ -15,8 +15,8 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -25,23 +25,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// On Linux the guardian adds what only root can read to the NSS facts the
-// gateway resolves itself: the userPrincipalName from SSSD InfoPipe
-// (org.freedesktop.sssd.infopipe GetUserAttr, which sssd-ifp answers for
-// root only) and the realm's directory type from `realm list`. Without
-// InfoPipe the principal falls back to sAMAccountName@REALM, recorded as
-// upn_source=derived.
+// On Linux the guardian adds what only root can read to the NSS and realmd
+// facts the gateway resolves itself: the userPrincipalName from SSSD
+// InfoPipe (org.freedesktop.sssd.infopipe GetUserAttr, which sssd-ifp
+// answers for root only). Without InfoPipe the principal is
+// sAMAccountName@REALM, recorded as upn_source=derived.
 
 const (
 	infoPipeService   = "org.freedesktop.sssd.infopipe"
 	infoPipePath      = "/org/freedesktop/sssd/infopipe"
 	infoPipeGetAttr   = "org.freedesktop.sssd.infopipe.GetUserAttr"
 	infoPipeUPNAttr   = "userPrincipalName"
-	realmListTimeout  = 15 * time.Second
+	infoPipeUsers     = "/org/freedesktop/sssd/infopipe/Users"
+	infoPipeFindUser  = "org.freedesktop.sssd.infopipe.Users.FindByName"
+	infoPipeUserIface = "org.freedesktop.sssd.infopipe.Users.User"
+	infoPipeDomIface  = "org.freedesktop.sssd.infopipe.Domains"
+	dbusPropertiesGet = "org.freedesktop.DBus.Properties.Get"
 	infoPipeCallLimit = 5 * time.Second
 )
 
-func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, realms []RealmEntry, now time.Time) (IdentitySpoolRecord, error) {
+func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	resolver, err := unixidentity.NewNSSResolver(ctx)
 	if err != nil {
 		return IdentitySpoolRecord{}, err
@@ -59,12 +62,18 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		record.Facts = facts
 		return record, nil
 	}
-	applyRealm(&facts, realms)
-	bare, _ := useridentity.SplitQualifiedName(nss.Name)
-	if facts.Principal == "" && facts.Realm != "" {
-		facts.Principal = useridentity.NormalizePrincipal(bare + "@" + facts.Realm)
-	}
 	if facts.Source == useridentity.SourceSSSD {
+		if facts.Directory == "" {
+			// A domain realmd did not join, such as a plain LDAP directory
+			// or a cloud directory's LDAP interface: its SSSD id provider
+			// names the directory type.
+			callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
+			provider, providerErr := infoPipeDomainProvider(callCtx, nss.Name)
+			cancel()
+			if providerErr == nil {
+				facts.Directory = sssdProviderDirectory(provider)
+			}
+		}
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
 		upn, upnErr := infoPipeUPN(callCtx, nss.Name)
 		cancel()
@@ -109,20 +118,47 @@ func infoPipeUPN(ctx context.Context, name string) (string, error) {
 	return "", errors.New("unexpected InfoPipe userPrincipalName type")
 }
 
-// readRealmList runs `realm list` once per pass. A host without realmd, or
-// one joined some other way, reports no realms.
-func readRealmList(ctx context.Context) []RealmEntry {
-	tool := trustedIdentityTool("/usr/sbin/realm", "/usr/bin/realm", "/sbin/realm")
-	if tool == "" {
-		return nil
-	}
-	runCtx, cancel := context.WithTimeout(ctx, realmListTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, tool, "list")
-	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
-	out, err := cmd.Output()
+// infoPipeDomainProvider returns the id provider ("ldap", "ad", "ipa", ...)
+// of the SSSD domain that serves the account name.
+func infoPipeDomainProvider(ctx context.Context, name string) (string, error) {
+	conn, err := dbus.ConnectSystemBus(dbus.WithContext(ctx))
 	if err != nil {
-		return nil
+		return "", err
 	}
-	return ParseRealmList(boundedOutput(out))
+	defer conn.Close()
+	var user dbus.ObjectPath
+	if err := conn.Object(infoPipeService, infoPipeUsers).CallWithContext(ctx, infoPipeFindUser, 0, name).Store(&user); err != nil {
+		return "", err
+	}
+	var domain dbus.Variant
+	if err := conn.Object(infoPipeService, user).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeUserIface, "domain").Store(&domain); err != nil {
+		return "", err
+	}
+	domainPath, ok := domain.Value().(dbus.ObjectPath)
+	if !ok || !domainPath.IsValid() {
+		return "", errors.New("unexpected InfoPipe user domain")
+	}
+	var provider dbus.Variant
+	if err := conn.Object(infoPipeService, domainPath).CallWithContext(ctx, dbusPropertiesGet, 0, infoPipeDomIface, "provider").Store(&provider); err != nil {
+		return "", err
+	}
+	value, ok := provider.Value().(string)
+	if !ok {
+		return "", errors.New("unexpected InfoPipe domain provider type")
+	}
+	return value, nil
+}
+
+// sssdProviderDirectory maps the id provider of an SSSD domain to the
+// directory type: ad is Active Directory; ldap and ipa are LDAP directories,
+// the type an IPA realm gets from realmd too. Other providers (proxy, files)
+// name no directory and leave the type unset.
+func sssdProviderDirectory(provider string) useridentity.Directory {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "ad":
+		return useridentity.DirectoryActiveDirectory
+	case "ldap", "ipa":
+		return useridentity.DirectoryLDAP
+	}
+	return ""
 }

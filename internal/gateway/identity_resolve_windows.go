@@ -14,7 +14,7 @@ import (
 )
 
 // Windows: the gateway resolves a verified SID itself (LookupAccountSid,
-// the identity store, the join state, a background TranslateNameW) and takes
+// the identity store, the join state, TranslateNameW) and takes
 // the account's groups from the SYSTEM enumerator's identity spool record,
 // which carries the token-group cache resolved to names; the gateway's
 // service account cannot read that cache directly.
@@ -29,15 +29,43 @@ func windowsDirectoryFacts(sid string, block bool) (useridentity.DirectoryFacts,
 	if !strings.HasPrefix(sid, "S-1-") {
 		return useridentity.DirectoryFacts{}, false
 	}
-	windowsDirectoriesOnce.Do(func() {
-		windowsDirectories = newIdentityDirectoryCache(resolveWindowsDirectoryFacts)
-	})
-	return windowsDirectories.get(sid, block)
+	return peerDirectoryCache().get(sid, block)
 }
 
-func resolveWindowsDirectoryFacts(sid string) (useridentity.DirectoryFacts, error) {
+// peerDirectoryCache is the cache the hook path reads directory facts from,
+// created on first use.
+func peerDirectoryCache() *identityDirectoryCache {
+	windowsDirectoriesOnce.Do(func() {
+		windowsDirectories = newIdentityDirectoryCache(func(sid string) (useridentity.DirectoryFacts, error) {
+			wait := time.Duration(0)
+			if identityLookupBlocking.Load() {
+				wait = windowsUPNWait
+			}
+			return resolveWindowsDirectoryFacts(sid, wait)
+		})
+		windowsDirectories.incomplete = adWithoutUPN
+	})
+	return windowsDirectories
+}
+
+// windowsUPNWait is how long a lookup waits for an AD account's UPN when a
+// users or groups assignment needs the facts on every request. TranslateNameW
+// may contact a domain controller; the wait stays under the identity lookup
+// budget the first request spends, so that request still gets the account's
+// UPN rather than a record without it that stays cached.
+const windowsUPNWait = 1500 * time.Millisecond
+
+// adWithoutUPN marks facts the cache must refresh soon: an AD account whose
+// UPN was not available yet (a slow or unreachable domain controller).
+func adWithoutUPN(facts useridentity.DirectoryFacts) bool {
+	return facts.Directory == useridentity.DirectoryActiveDirectory && facts.UPN == ""
+}
+
+// resolveWindowsDirectoryFacts resolves a SID's facts, waiting at most
+// upnWait for the AD UPN.
+func resolveWindowsDirectoryFacts(sid string, upnWait time.Duration) (useridentity.DirectoryFacts, error) {
 	now := time.Now().UTC()
-	facts := useridentity.WindowsDirectoryFacts(sid)
+	facts := useridentity.WindowsDirectoryFacts(sid, upnWait)
 	if record, ok := readIdentitySpoolFacts(sid, now); ok {
 		facts = mergeSpoolFacts(facts, record.Facts)
 	}

@@ -74,6 +74,10 @@ ACTOR_PREFIX_API = "api:"
 ACTOR_PREFIX_SANDBOX = "sandbox:"
 ACTOR_PREFIX_HAND_EDIT = "hand-edit:"
 
+#: The runtime descriptor the enterprise lifecycle writes next to the managed
+#: config.yaml. The folder that holds it is the lifecycle's, not the writer's.
+MANAGED_RUNTIME_DESCRIPTOR = "managed-runtime.json"
+
 #: Shown when a local writer is refused on a managed (standalone) device.
 MANAGED_REFUSAL = (
     "This device is managed: change config.yaml in the admin config "
@@ -83,7 +87,7 @@ MANAGED_REFUSAL = (
 # Keys a running gateway applies only after a restart: the process-level
 # keys, plus what its reload still treats as restart-required (claw, agent
 # and routing, read once at start; the guardrail listener and enablement;
-# the hook settings setup bakes into the hooks). "*" matches one segment. Everything
+# the hook self-heal settings). "*" matches one segment. Everything
 # else is hot. Mirrors internal/config/configwrite restartKeys.
 RESTART_KEYS = (
     "data_dir",
@@ -96,11 +100,9 @@ RESTART_KEYS = (
     "guardrail.connector",
     "guardrail.scanner_mode",
     "guardrail.retain_judge_bodies",
-    "guardrail.hook_fail_mode",
     "guardrail.hook_self_heal",
     "guardrail.hook_self_heal_debounce_ms",
     "guardrail.connectors.*.enabled",
-    "guardrail.connectors.*.hook_fail_mode",
     "claw",
     "agent",
     "routing",
@@ -201,8 +203,20 @@ def current_actor(prefix: str = ACTOR_PREFIX_CLI) -> str:
     return prefix + (name or "unknown")
 
 
-def restart_required(changed: list[str]) -> list[str]:
-    """Return the paths in ``changed`` that need a gateway restart."""
+def _connector_enabled(raw: bytes, name: str) -> bool:
+    """Whether config bytes enable the guardrail connector ``name`` (unset is enabled)."""
+    try:
+        document = yaml.safe_load(raw.decode("utf-8")) if raw.strip() else {}
+        connectors = document["guardrail"]["connectors"]
+        return connectors[name]["enabled"] is not False
+    except (UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError):
+        return True
+
+
+def restart_required(changed: list[str], before: bytes | None = None, after: bytes | None = None) -> list[str]:
+    """Return the paths in ``changed`` that need a gateway restart. With the
+    document bytes before and after, a connector ``enabled`` that resolves to
+    the same value (``true`` against unset) is not a change."""
     out = []
     for path in changed:
         try:
@@ -215,6 +229,15 @@ def restart_required(changed: list[str]) -> list[str]:
         for key in RESTART_KEYS:
             parts = key.split(".")
             if all(k in ("*", p) for k, p in zip(parts, segs)):
+                if (
+                    before is not None
+                    and after is not None
+                    and len(segs) == 4
+                    and segs[:2] == ["guardrail", "connectors"]
+                    and segs[3] == "enabled"
+                    and _connector_enabled(before, segs[2]) == _connector_enabled(after, segs[2])
+                ):
+                    break
                 out.append(path)
                 break
     return out
@@ -315,7 +338,11 @@ def hold_lock(path: str | os.PathLike[str], *, timeout_s: float | None = DEFAULT
         finally:
             held[target] -= 1
         return
-    file_permissions.make_private_directory(os.path.dirname(target) or ".")
+    directory = os.path.dirname(target) or "."
+    # The managed config folder is root-owned 0755 on purpose (every user's
+    # hook reads it); a refused or lifecycle write must not tighten it.
+    if not os.path.isfile(os.path.join(directory, MANAGED_RUNTIME_DESCRIPTOR)):
+        file_permissions.make_private_directory(directory)
     stack = ExitStack()
     try:
         stack.enter_context(locked_file_update(target, timeout_seconds=timeout_s))
@@ -364,7 +391,7 @@ def _transact(
                 os.unlink(target)
             raise
     _refresh_derived_files(target, candidate)
-    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed, current, candidate))
 
 
 def _undo_failed_commit(target: str, candidate: bytes, previous: bytes, mode: int, existed: bool) -> None:
@@ -537,10 +564,21 @@ def _standalone_profile(document: dict[str, Any]) -> bool:
     return profile == "standalone"
 
 
-def standalone_managed(current: bytes) -> bool:
-    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
-    managed deployment on the standalone profile. Secure Client hosts are
-    not standalone, so their path is unchanged."""
+def machine_managed_standalone() -> bool:
+    """Whether this computer is a managed standalone host: the enterprise
+    lifecycle published its runtime descriptor (Linux, macOS) or the Windows
+    marker with the standalone profile. Any account's CLI sees it, so a
+    standard user's per-user config cannot opt out of the managed gate.
+    Secure Client hosts publish neither, so their path is unchanged."""
+    from defenseclaw.upgrade_shim import managed_deployment
+
+    deployment = managed_deployment()
+    return bool(deployment) and (os.name != "nt" or str(deployment).strip().lower() == "standalone")
+
+
+def _managed_document(current: bytes) -> tuple[bool, dict[str, Any]]:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) say managed
+    enterprise, with the parsed document."""
     from defenseclaw.config import DEPLOYMENT_MODE_ENV, _is_managed_enterprise_mode
 
     try:
@@ -552,7 +590,26 @@ def standalone_managed(current: bytes) -> bool:
     managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
         str(document.get("deployment_mode") or "")
     )
+    return managed, document
+
+
+def standalone_managed(current: bytes) -> bool:
+    """Whether this computer, config bytes or ``DEFENSECLAW_DEPLOYMENT_MODE``
+    describe a managed deployment on the standalone profile. Secure Client
+    hosts are not standalone, so their path is unchanged."""
+    if machine_managed_standalone():
+        return True
+    managed, document = _managed_document(current)
     return managed and _standalone_profile(document)
+
+
+def secure_client_managed(current: bytes) -> bool:
+    """Whether config bytes (or ``DEFENSECLAW_DEPLOYMENT_MODE``) describe a
+    managed device on the Secure Client profile."""
+    if machine_managed_standalone():
+        return False
+    managed, document = _managed_document(current)
+    return managed and not _standalone_profile(document)
 
 
 def managed_refuses(current: bytes, actor: str) -> bool:
@@ -613,6 +670,52 @@ def validate_candidate(target: str, candidate: bytes) -> None:
             os.unlink(staged)
         except OSError:
             pass
+
+
+_REASON_CODE = re.compile(r"^\[(?P<code>[A-Za-z0-9_-]+)\]\s*(?P<text>.*)$", re.S)
+_RULE_PACK_PREFIX = re.compile(r'^config rule pack (?:"[^"]*"|\S+): ')
+_SCHEMA_WORDS = (
+    ("correct the field using the canonical v8 schema and reference", "check the value and its documented format"),
+    ("use the value type documented by the canonical v8 schema", "use the value type the reference documents"),
+)
+
+
+def plain_error(exc: BaseException) -> str:
+    """A refused change in plain words: the key and what to do about it.
+
+    The validators report a JSON path, a bracketed error code and pointers to
+    "the canonical v8 schema"; none of that helps someone who typed
+    ``config set``. The Go decision stands; this only says it plainly (the
+    same wording ``config validate`` uses for the schema errors).
+    """
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    cause = exc.__cause__ if isinstance(exc.__cause__, (ConfigInspectError, V8ConfigError)) else exc
+    if isinstance(cause, ConfigInspectError) and cause.field_path and cause.reason:
+        path, reason = cause.field_path, cause.reason
+    elif isinstance(cause, V8ConfigError):
+        path, reason = cause.path, f"[{cause.keyword}] {cause.corrective_action}"
+    else:
+        return str(exc)
+    for internal, plain in _SCHEMA_WORDS:
+        reason = reason.replace(internal, plain)
+    name = path.split(" (line", 1)[0].strip()
+    name = name[2:] if name.startswith("$.") else ("config.yaml" if name == "$" else name)
+    match = _REASON_CODE.match(reason.strip())
+    code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+    parts = [part.strip() for part in text.split("; ") if part.strip()]
+    if code == "config_semantic_invalid" and parts:
+        detail = _RULE_PACK_PREFIX.sub("", parts[0])
+        sentence = detail if detail.startswith(name) else f"{name}: {detail}"
+        actions = [part for part in parts[1:] if not part.startswith("expected ")]
+        return sentence + "." + "".join(f" {part[:1].upper()}{part[1:]}." for part in actions)
+    if code == "pattern":
+        hint = " (sha256: followed by 64 hex digits)" if name.endswith("digest") else ""
+        return f"{name} is not in the expected format{hint}."
+    from defenseclaw.commands.cmd_config import _plain_v8_issue
+
+    return _plain_v8_issue(None, path, reason)
 
 
 def _data_dir_for(target: str, candidate: bytes) -> str:

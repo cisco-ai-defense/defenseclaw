@@ -168,6 +168,33 @@ func guardrailCustomizations(layers []config.GuardrailRulesConfig) []guardrail.C
 	return out
 }
 
+// installScanRulePack is the composed pack the install-time scan of a
+// connector's skills applies on top of the skill scanner, the gateway's side
+// of the rule-pack overlay of `defenseclaw skill scan`. It is nil when the
+// connector's scope selects no pack and no guardrail.rules, so a default
+// install scans as before. The pack comes from the live generation, which
+// composed it with every guardrail.rules layer.
+func installScanRulePack(connector string) *guardrail.RulePack {
+	g := currentGeneration()
+	// Secure Client: Cisco AI Defense decides and local regex detection is off.
+	if g == nil || g.Config == nil || ManagedEnterpriseActive() {
+		return nil
+	}
+	selects := func(connector string) bool {
+		ref := g.Config.EffectiveRulePackRefForConnector(connector)
+		return ref.Name != "" || ref.Dir != "" || len(g.Config.EffectiveRulesForConnector(connector)) > 0
+	}
+	if connector = canonicalConnectorRulePackKey(connector); connector != "" && selects(connector) {
+		if pack := g.RulePacks["conn:"+connector]; pack != nil {
+			return pack
+		}
+	}
+	if selects("") {
+		return g.RulePacks["global"]
+	}
+	return nil
+}
+
 // applicationProtectionRulePackScope is the global application_protection
 // pack override, when one is set. It can apply to a connector discovered
 // after publication, so a reload validates it on its own.

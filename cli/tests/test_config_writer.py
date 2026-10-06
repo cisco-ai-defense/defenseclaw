@@ -65,13 +65,15 @@ def test_apply_keeps_comments_validates_and_advances_generation(tmp_path, monkey
     assert config_writer.restart_required(
         [
             "guardrail.hook_fail_mode",
+            "guardrail.hook_self_heal",
             "guardrail.connectors.codex.enabled",
+            "guardrail.connectors.codex.hook_fail_mode",
             "guardrail.block_at",
             "gateway.watcher.enabled",
             "application_protection.connectors.codex.guardrail.block_at",
             "cisco_ai_defense.endpoint",
         ]
-    ) == ["guardrail.hook_fail_mode", "guardrail.connectors.codex.enabled"]
+    ) == ["guardrail.hook_self_heal", "guardrail.connectors.codex.enabled"]
 
 
 def test_unset_removes_a_dependent_pair_in_one_write(tmp_path, monkeypatch):
@@ -112,12 +114,54 @@ def test_every_write_re_renders_custom_providers_from_llm_providers(tmp_path, mo
 
 def test_writer_refuses_local_actors_on_a_standalone_managed_device(tmp_path, monkeypatch):
     path = _config(tmp_path)
+    (tmp_path / config_writer.MANAGED_RUNTIME_DESCRIPTOR).write_text("{}")
+    tmp_path.chmod(0o755)
     monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
     monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "standalone")
     with pytest.raises(config_writer.ManagedConfigWriteError):
         config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
     with pytest.raises(FileNotFoundError):
         config_writer.read_generation_state(path)
+    # A refusal leaves the lifecycle's folder as it was: every user's hook reads it.
+    if os.name != "nt":
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+
+
+def test_machine_marker_makes_a_standard_users_writers_managed(tmp_path, monkeypatch):
+    # A standard user's per-user config says nothing about the host: the
+    # machine marker the enterprise lifecycle publishes decides.
+    from defenseclaw import upgrade_shim
+    from defenseclaw.config import default_config
+    from defenseclaw.enforce import asset_lists
+
+    path = _config(tmp_path)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "standalone")
+    with pytest.raises(config_writer.ManagedConfigWriteError):
+        config_writer.apply([Change("guardrail.mode", "action")], "cli:test", "t", path=path)
+    with pytest.raises(asset_lists.ManagedDeviceError):
+        asset_lists.refuse_if_managed(default_config(), target_type="skill", op=asset_lists.OP_BLOCK, name="x")
+    config_writer.apply([Change("guardrail.mode", "action")], config_writer.ACTOR_LIFECYCLE, "t", path=path)
+
+
+def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
+    # `config` skips the startup load, so the refusal opens its own logger.
+    from unittest.mock import MagicMock
+
+    import click
+    from defenseclaw import config as config_module
+    from defenseclaw import logger as logger_module
+    from defenseclaw.context import AppContext
+    from defenseclaw.enforce import asset_lists
+
+    audit = MagicMock()
+    monkeypatch.setattr(config_module, "load", lambda: object())
+    monkeypatch.setattr(logger_module.Logger, "from_config", staticmethod(lambda _cfg: audit))
+    with click.Context(click.Command("set"), obj=AppContext()):
+        asset_lists.audit_managed_refusal("config-update", "guardrail.mode", "verb=set")
+    audit.log_action.assert_called_once_with(
+        "config-update", "guardrail.mode", "outcome=refused reason=managed_device verb=set"
+    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory modes")
@@ -187,6 +231,28 @@ def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, m
     assert [rule.name for rule in on_disk] == ["evil-a", "evil-b"]
 
 
+def test_plain_error_names_the_key_without_the_validator_internals():
+    """GAP-0050: a refused change says the key and the fix, not the JSON path, the bracketed code or the schema."""
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    reason = (
+        '[config_semantic_invalid] config rule pack "/home/u/marker": guardrail.rules.enable: unknown rule NOPE-X; '
+        "expected rule packs, custom pack digests and rule IDs the gateway can load; fix the reference, then retry"
+    )
+    inspected = ConfigInspectError(f"candidate field=$.guardrail; reason={reason}", field_path="$.guardrail", reason=reason)
+    rejected = config_writer.ConfigWriteError(f"config.yaml change rejected: {inspected}")
+    rejected.__cause__ = inspected
+    assert config_writer.plain_error(rejected) == "guardrail.rules.enable: unknown rule NOPE-X. Fix the reference, then retry."
+
+    pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the canonical v8 schema and reference")
+    assert config_writer.plain_error(pattern) == (
+        "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
+    )
+    other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the canonical v8 schema")
+    assert "canonical v8 schema" not in config_writer.plain_error(other)
+
+
 def test_only_the_writer_writes_config_yaml():
     """Spec section 3 guard: config.yaml is written through config_writer
     (which takes config.yaml.lock, validates and records the generation).
@@ -219,3 +285,43 @@ def test_only_the_writer_writes_config_yaml():
         if match:
             offenders.append(f"{rel}: {match.group(0)}")
     assert not offenders, "config.yaml written outside config_writer: " + "; ".join(offenders)
+
+
+def test_a_stray_deployment_pin_is_ignored_for_a_per_user_config(tmp_path, monkeypatch):
+    # GAP-0091: DEFENSECLAW_DEPLOYMENT_MODE exported in a user's shell made
+    # the CLI refuse as a managed device (or fail on an invalid mode).
+    from defenseclaw import config as config_module
+    from defenseclaw import envvars
+
+    home = tmp_path / "home"
+    machine = tmp_path / "machine"
+    for directory in (home / ".defenseclaw", machine):
+        directory.mkdir(parents=True)
+    monkeypatch.setattr(config_module, "_home", lambda: home)
+    monkeypatch.setattr(config_module, "_ignored_deployment_pins", [])
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home / ".defenseclaw"))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_JUDGE_TRACE", "1")
+
+    for pin in ("managed_enterprise", "oss"):
+        monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", pin)
+        assert config_module.ignore_unmanaged_deployment_pins() == ["DEFENSECLAW_DEPLOYMENT_MODE"]
+        assert "DEFENSECLAW_DEPLOYMENT_MODE" not in os.environ
+    assert config_module.ignored_deployment_pins() == ["DEFENSECLAW_DEPLOYMENT_MODE"]
+    assert envvars.ignored_off_secure_client() == ["DEFENSECLAW_JUDGE_TRACE"]
+
+    # A machine-owned config (outside any home) keeps its pin.
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(machine / "config.yaml"))
+    monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+    assert config_module.ignore_unmanaged_deployment_pins() == []
+    assert os.environ["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
+
+
+def test_a_connector_enabled_equal_to_its_default_needs_no_restart(tmp_path, monkeypatch):
+    # GAP-0032: enabled: true is the unset default, so flipping between them is no change.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "guardrail:\n  connectors:\n    codex: {mode: observe}\n")
+    on = config_writer.apply([Change("guardrail.connectors.codex.enabled", True)], "cli:test", "t", path=path)
+    assert on.changed and on.restart_required == []
+    off = config_writer.apply([Change("guardrail.connectors.codex.enabled", False)], "cli:test", "t", path=path)
+    assert off.restart_required == ["guardrail.connectors.codex.enabled"]

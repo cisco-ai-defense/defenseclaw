@@ -5,7 +5,10 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,9 +28,10 @@ import (
 
 // attachVerifiedSubject records the authenticated end user of a request,
 // with their directory facts from the in-memory cache, and confirms the
-// hook's claimed login session for a POSIX uid. Callers are the three
-// authentication points; nothing a caller sent can reach it.
-func (a *APIServer) attachVerifiedSubject(ctx context.Context, userID, userName, source string) context.Context {
+// hook's claimed login session for a POSIX uid. Callers are the
+// authentication points; nothing a caller sent can reach it. emitter
+// carries the identity.observed record and may be nil.
+func attachVerifiedSubject(ctx context.Context, emitter sidecarRuntimeEmitter, userID, userName, source string) context.Context {
 	if ctx == nil || userID == "" || !identityFactsEnabled.Load() {
 		return ctx
 	}
@@ -57,16 +61,27 @@ func (a *APIServer) attachVerifiedSubject(ctx context.Context, userID, userName,
 			}
 		}
 	}
-	a.observeIdentity(ctx, subject, session)
+	observeIdentity(ctx, emitter, subject, session)
 	return ctx
 }
 
 // attachProcessOwnerSubject verifies the caller of a per-user gateway as the
 // gateway's own account: the gateway runs as its user, and only that account
-// can read the hook token the request presented. A service-account gateway
-// (any managed install) and sandbox traffic never take this path.
+// can read the hook, ACP or gateway token the request presented. A
+// service-account gateway (any managed install) and sandbox traffic never
+// take this path.
 func (a *APIServer) attachProcessOwnerSubject(ctx context.Context) context.Context {
-	if ctx == nil || !identityFactsEnabled.Load() || gatewayRunsAsServiceAccount() || a.userScopedCredentialsRequired() {
+	if a.userScopedCredentialsRequired() {
+		return ctx
+	}
+	return attachProcessOwner(ctx, a.observabilityV8RuntimeEmitter())
+}
+
+// attachProcessOwner is attachProcessOwnerSubject for listeners that do not
+// know the enterprise profile, such as the LLM proxy; a standalone gateway
+// runs as a service account, which gatewayRunsAsServiceAccount covers.
+func attachProcessOwner(ctx context.Context, emitter sidecarRuntimeEmitter) context.Context {
+	if ctx == nil || !identityFactsEnabled.Load() || gatewayRunsAsServiceAccount() {
 		return ctx
 	}
 	if _, sandboxed := sandboxauth.FromContext(ctx); sandboxed {
@@ -79,40 +94,57 @@ func (a *APIServer) attachProcessOwnerSubject(ctx context.Context) context.Conte
 	if id == "" {
 		return ctx
 	}
-	return a.attachVerifiedSubject(ctx, id, name, subjectSourceProcessOwner)
+	return attachVerifiedSubject(ctx, emitter, id, name, subjectSourceProcessOwner)
 }
 
 // identityObservedState remembers when each user's identity.observed record
-// was last emitted, so the low-rate record goes out once per user per
-// identity cache lifetime.
+// was last emitted and for which facts, so the low-rate record goes out once
+// per user per identity cache lifetime, and again as soon as a request
+// carries changed facts (a group added or removed in the directory).
 var identityObservedState = struct {
 	sync.Mutex
-	last map[string]time.Time
-}{last: map[string]time.Time{}}
+	last map[string]identityObservedMark
+}{last: map[string]identityObservedMark{}}
+
+type identityObservedMark struct {
+	at          time.Time
+	fingerprint string
+}
 
 const identityObservedMaxUsers = 4096
 
-func identityObservedDue(userID string, now time.Time) bool {
+func identityObservedDue(userID string, facts useridentity.DirectoryFacts, now time.Time) bool {
+	fingerprint := identityFactsFingerprint(facts)
 	identityObservedState.Lock()
 	defer identityObservedState.Unlock()
-	if last, ok := identityObservedState.last[userID]; ok && now.Sub(last) < identityDirectoryTTL {
+	if last, ok := identityObservedState.last[userID]; ok && last.fingerprint == fingerprint && now.Sub(last.at) < identityDirectoryTTL {
 		return false
 	}
 	if len(identityObservedState.last) >= identityObservedMaxUsers {
-		identityObservedState.last = map[string]time.Time{}
+		identityObservedState.last = map[string]identityObservedMark{}
 	}
-	identityObservedState.last[userID] = now
+	identityObservedState.last[userID] = identityObservedMark{at: now, fingerprint: fingerprint}
 	return true
+}
+
+// identityFactsFingerprint digests the directory facts an identity.observed
+// record reports or derives from, groups in sorted order.
+func identityFactsFingerprint(facts useridentity.DirectoryFacts) string {
+	groups := append([]string(nil), facts.Groups...)
+	sort.Strings(groups)
+	digest := sha256.New()
+	for _, part := range append([]string{facts.Principal, facts.UPN, facts.Domain, facts.Realm,
+		string(facts.Directory), facts.TenantID, facts.Source}, groups...) {
+		digest.Write([]byte(part))
+		digest.Write([]byte{0})
+	}
+	return hex.EncodeToString(digest.Sum(nil)[:12])
 }
 
 // observeIdentity emits identity.observed for a verified subject whose
 // directory facts resolved. It carries the group count, never the names.
-func (a *APIServer) observeIdentity(ctx context.Context, subject VerifiedSubject, session useridentity.SessionFacts) {
-	if subject.Directory.Empty() || !identityObservedDue(subject.UserID, time.Now()) {
-		return
-	}
-	emitter := a.observabilityV8RuntimeEmitter()
-	if emitter == nil {
+func observeIdentity(ctx context.Context, emitter sidecarRuntimeEmitter, subject VerifiedSubject, session useridentity.SessionFacts) {
+	if emitter == nil || subject.Directory.Empty() || !identityObservedDue(subject.UserID, subject.Directory, time.Now()) {
 		return
 	}
 	// identity.observed belongs to the gateway activity producer's

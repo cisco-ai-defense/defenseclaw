@@ -53,7 +53,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_validate_v8
+from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_config_value, load_validate_v8
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -76,7 +76,6 @@ _V8_VERSION_LINE = re.compile(
     rb"(?:[89]|['\"][89]['\"])\s*(?:#.*)?$"
 )
 _MAX_VERSION_PROBE_BYTES = 4 * 1024 * 1024 + 1
-_V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "path", "migrate"})
 
 
 @click.group("config")
@@ -84,23 +83,19 @@ _V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "
 def config_cmd(ctx: click.Context) -> None:
     """Inspect and validate DefenseClaw configuration."""
 
-    # The root command deliberately lets config recovery/inspection run while
-    # a v7 source still exists.  Keep that exemption narrow and future-proof:
-    # a newly-added mutating subcommand must never silently write the legacy
-    # document just because the top-level ``config`` group bypasses runtime
-    # initialization.
+    # The root command lets this group run while a pre-v8 source still exists,
+    # so ``validate`` can explain a file the root preflight would only refuse,
+    # and ``reference`` reads no file. Every other subcommand needs a
+    # current-schema source and stops with the one instruction.
     subcommand = ctx.invoked_subcommand
     path = config_module.config_path()
     if (
         subcommand
-        and subcommand not in _V7_READ_ONLY_SUBCOMMANDS
+        and subcommand not in {"validate", "reference"}
         and path.exists()
         and not _looks_like_v8_config(str(path))
     ):
-        raise click.ClickException(
-            "configuration schema v8 is required for config changes; "
-            "run 'defenseclaw migrate' first"
-        )
+        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
 
 
 # ---------------------------------------------------------------------------
@@ -170,14 +165,6 @@ def config_validate(quiet: bool) -> None:
     default=None,
     help="Show one top-level section, for example asset_policy, guardrail or observability.",
 )
-@click.option(
-    "--reveal",
-    is_flag=True,
-    # Hidden: it works only for pre-v8 configurations, and every 1.0
-    # config is v8 (secrets there are always masked).
-    hidden=True,
-    help="Pre-v8 configurations only: show partly masked secret values instead of '***'.",
-)
 @pass_ctx
 def config_show(
     app: AppContext,
@@ -186,7 +173,6 @@ def config_show(
     effective: bool,
     provenance: bool,
     section: str | None,
-    reveal: bool,
 ) -> None:
     """Show the configuration with secrets masked.
 
@@ -196,7 +182,7 @@ def config_show(
     config.yaml sets. Read one value with 'defenseclaw config get KEY', for
     example asset_policy.enabled.
     """
-    data = _show_data(app, source=source, effective=effective, provenance=provenance, reveal=reveal)
+    data = _show_data(app, source=source, effective=effective, provenance=provenance)
     if section:
         view = "effective" if (effective or provenance) else ("source" if source else "full")
         data = _select_section(data, section, view=view)
@@ -251,27 +237,27 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
         parts = list(parse_path(key.strip()))
     except ValueError as exc:
         raise click.UsageError(str(exc)) from exc
-    if effective or (parts[0] == "admission" and not _written_in_source(app, parts)):
+    if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts):
+        raise click.ClickException(
+            f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
+            "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
+        )
+    if effective or (parts[0] in ("admission", "update") and not _written_in_source(app, parts)):
         resolved = _effective_value(app, parts)
         if resolved is not None:
             value, source = resolved
             click.echo(f"(source: {source})", err=True)
             _echo_value(value, fmt)
             return
-    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    view = _show_data(app, source=False, effective=False, provenance=False)
     if parts[:2] == ["observability", "destinations"]:
         # config set indexes the destinations as written in config.yaml; the
         # resolved plan also lists the generated ones, such as local-sqlite
         # at index 0 (GAP-0008).
-        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+        written = _show_data(app, source=True, effective=False, provenance=False)
         if _lookup(written, parts)[0]:
             view = written
     found, value = _lookup(view, parts)
-    if not found and parts[:2] == ["admission", "defaults"]:
-        raise click.ClickException(
-            f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
-            "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
-        )
     if not found:
         sections = _v8_sections() or set(view)
         if parts[0] not in view and parts[0] not in sections:
@@ -285,8 +271,8 @@ def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
             f"{key} is not set and has no default. "
             f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
         )
-    if parts[0] != "observability" and _looks_like_v8_config(str(config_module.config_path())):
-        written = _show_data(app, source=True, effective=False, provenance=False, reveal=False)
+    if parts[0] != "observability":
+        written = _show_data(app, source=True, effective=False, provenance=False)
         if not _lookup(written, parts)[0]:
             click.echo(f"(default: config.yaml does not set {key})", err=True)
         elif effective:
@@ -298,7 +284,7 @@ def _written_in_source(app: AppContext, parts: list) -> bool:
     """Whether config.yaml itself sets the key (a v8 or later source only)."""
     if not _looks_like_v8_config(str(config_module.config_path())):
         return True
-    return _lookup(_show_data(app, source=True, effective=False, provenance=False, reveal=False), parts)[0]
+    return _lookup(_show_data(app, source=True, effective=False, provenance=False), parts)[0]
 
 
 def _echo_value(value: object, fmt: str) -> None:
@@ -342,19 +328,48 @@ def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | 
         if which == "alert_at" and levels.alert_clamped:
             label += " (clamped to block_at)"
         return value, label
+    if parts[0] == "update" and len(parts) <= 2:
+        data, sources = _update_view(cfg)
+        if len(parts) == 1:
+            return data, _whole_source(sources)
+        return (data[parts[1]], sources[parts[1]]) if parts[1] in data else None
     if parts[0] == "admission" and (len(parts) == 1 or parts[1] in _ADMISSION_TYPES):
         if len(parts) == 1:
             views = {name: _admission_view(cfg, name) for name in _ADMISSION_TYPES}
             return (
                 {name: data for name, (data, _) in views.items()},
-                ", ".join(f"{name}={source}" for name, (_, source) in views.items()),
+                ", ".join(f"{name}={_whole_source(sources)}" for name, (_, sources) in views.items()),
             )
-        data, source = _admission_view(cfg, parts[1])
+        data, sources = _admission_view(cfg, parts[1])
         found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
         if not found:
             return None
-        return value, source
+        return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
     return None
+
+
+def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
+    """``update:`` with its defaults resolved (the update notice on, the stable
+    channel, the official release feed), and where each value comes from."""
+    from defenseclaw.upgrade_shim import OFFICIAL_SOURCE
+
+    written = getattr(cfg, "update", None)
+    check = getattr(written, "check", None)
+    channel = str(getattr(written, "channel", "") or "")
+    source = str(getattr(written, "source", "") or "")
+    data = {"check": True if check is None else bool(check), "channel": channel or "stable", "source": source or OFFICIAL_SOURCE}
+    sources = {
+        name: f"config:update.{name}" if is_set else "builtin"
+        for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
+    }
+    return data, sources
+
+
+def _whole_source(sources: dict[str, str]) -> str:
+    """The source of a whole asset type: every field that config.yaml or the
+    scanner gate sets, else builtin."""
+    labels = list(dict.fromkeys(label for label in sources.values() if label != "builtin"))
+    return ", ".join(labels) or "builtin"
 
 
 _ADMISSION_FIELDS = (
@@ -375,8 +390,9 @@ def _admission_layer_key(parts: list) -> bool:
     return len(parts) == 2 or parts[2] in _ADMISSION_FIELDS
 
 
-def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
-    """The admission policy of one asset type as the gateway enforces it, and its source."""
+def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]]:
+    """The admission policy of one asset type as the gateway enforces it, and
+    where each field comes from."""
     from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
 
     compiled = compile_admission(cfg, target_type)
@@ -397,7 +413,7 @@ def _admission_view(cfg: object, target_type: str) -> tuple[dict, str]:
             for name, paths in compiled.first_party_allow.items()
         ],
     }
-    return data, compiled.source
+    return data, compiled.field_sources or {"actions": compiled.source}
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +447,7 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     except config_writer.ConfigConflictError as exc:
         raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
     except (config_writer.ConfigWriteError, V8ConfigError, ValueError) as exc:
-        raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
+        raise click.ClickException(f"config.yaml was not changed: {config_writer.plain_error(exc)}") from exc
     if not result.changed:
         if verb != "unset":
             click.echo(f"{key} already has that value (generation {result.generation}).")
@@ -468,14 +484,15 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
 
     KEY is a dotted path with [i] list indexes, for example
     guardrail.block_at or asset_policy.skill.denied[0].name. VALUE is a YAML
-    scalar (true, 3, HIGH) or, with --json, any JSON value. The change is
+    scalar (true, 3, HIGH, off: only true and false are booleans) or, with
+    --json, any JSON value. The change is
     validated before it is written; on a managed device it is refused (exit 3).
     """
     from defenseclaw.config_writer import Change, parse_path
 
     try:
         parse_path(key)
-        parsed = json.loads(value) if as_json else yaml.safe_load(value)
+        parsed = json.loads(value) if as_json else load_config_value(value)
     except (ValueError, yaml.YAMLError) as exc:
         raise click.UsageError(str(exc)) from exc
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
@@ -502,7 +519,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         return
     # Nothing was removed: a key with a default is already unset, anything
     # else is not a configuration key (a typo must not look like success).
-    view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+    view = _show_data(app, source=False, effective=False, provenance=False)
     for key, parts in parsed:
         if not _admission_layer_key(parts) and not _lookup(view, parts)[0]:
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
@@ -609,38 +626,62 @@ def _v8_defaults(app: AppContext) -> dict:
         props = node["properties"]
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
-    pruned = _prune(_config_to_masked_dict(cfg, reveal=False), schema)
-    if not isinstance(pruned, dict):
-        return {}
-    update = pruned.get("update")
-    if isinstance(update, dict):
-        # Unset means the update notice is on and the stable channel.
-        if update.get("check") is None:
-            update["check"] = True
-        if not update.get("channel"):
-            update["channel"] = "stable"
-    return pruned
+    pruned = _prune(_config_to_masked_dict(cfg), schema)
+    _show_effective_scanner_settings(pruned, cfg)  # type: ignore[arg-type]
+    return pruned  # type: ignore[return-value]
 
 
-def _resolve_admission(app: AppContext, view: dict, written: dict) -> None:
-    """Replace the admission placeholders with the policy the gateway enforces.
+#: scanners.skill_scanner keys that config_version 9 no longer reads: they are
+#: migration input, so a v9 source does not list them as settings.
+_SKILL_SCANNER_V8_KEYS = ("binary", "use_virustotal", "use_aidefense", "virustotal_api_key", "virustotal_api_key_env")
 
-    The dataclass dump shows an unset admission key as null or {}, which reads
-    as "no policy". Each asset type shows its resolved policy; admission.defaults
-    is shown only when config.yaml sets it, because it is an optional layer
-    under the three types with no value of its own.
-    """
-    if not isinstance(view.get("admission"), dict):
+
+def _show_effective_scanner_settings(masked: dict, cfg: object) -> None:
+    """Fill the scanner keys a blank value stands for with what the gateway
+    runs with (the severity gate and the judge source), and leave out the
+    migration-only keys of a v9 source."""
+    from defenseclaw.enforce.admission import _DEFAULT_FAIL_ON_SEVERITY, _DEFAULT_REVIEW_QUEUE_MIN
+
+    scanners = masked.get("scanners")
+    if not isinstance(scanners, dict):
         return
+    for name in ("skill_scanner", "mcp_scanner"):
+        block = scanners.get(name)
+        if not isinstance(block, dict):
+            continue
+        if not block.get("judge_source"):
+            llm = block.get("llm")
+            block["judge_source"] = "override" if isinstance(llm, dict) and any(llm.values()) else "inherit"
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        skill["fail_on_severity"] = skill.get("fail_on_severity") or _DEFAULT_FAIL_ON_SEVERITY
+        skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
+        if getattr(cfg, "_source_config_version", 0) >= config_module.CONFIG_VERSION_V9:
+            for key in _SKILL_SCANNER_V8_KEYS:
+                skill.pop(key, None)
+
+
+def _resolve_defaults(app: AppContext, view: dict, written: dict) -> None:
+    """Replace the placeholders of admission and update with what the gateway runs with.
+
+    The dataclass dump shows an unset admission or update key as null or {}, which
+    reads as "no policy". Each asset type shows its resolved policy, and update shows
+    the notice and channel it runs with. admission.defaults is shown only when
+    config.yaml sets it: it is an optional layer under the three types and has no
+    value of its own.
+    """
     try:
         cfg = app.cfg if app.cfg is not None else config_module.load()
     except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
         cfg = config_module.default_config()
-    layer = written.get("admission") if isinstance(written.get("admission"), dict) else {}
-    resolved = {key: value for key, value in layer.items() if key not in _ADMISSION_TYPES}
-    for name in _ADMISSION_TYPES:
-        resolved[name] = _admission_view(cfg, name)[0]
-    view["admission"] = resolved
+    if isinstance(view.get("admission"), dict):
+        layer = written.get("admission") if isinstance(written.get("admission"), dict) else {}
+        resolved = {key: value for key, value in layer.items() if key not in _ADMISSION_TYPES}
+        for name in _ADMISSION_TYPES:
+            resolved[name] = _admission_view(cfg, name)[0]
+        view["admission"] = resolved
+    if isinstance(view.get("update"), dict):
+        view["update"] = _update_view(cfg)[0]
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -653,7 +694,7 @@ def _merge_defaults(written: dict, defaults: dict) -> dict:
     return merged
 
 
-def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bool, reveal: bool) -> dict:
+def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bool) -> dict:
     """Return the masked view 'config show' and 'config get' print."""
     if source and effective:
         raise click.UsageError("--source and --effective are mutually exclusive")
@@ -661,20 +702,13 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
         raise click.UsageError("--provenance annotates the effective view and cannot be combined with --source")
 
     cfg_path = str(config_module.config_path())
-    if not _looks_like_v8_config(cfg_path):
-        if provenance:
-            raise click.UsageError("--provenance requires a configuration v8 effective plan")
-        # Preserve the pre-v8 view for installations that have not upgraded.
-        cfg = app.cfg if app.cfg is not None else config_module.load()
-        legacy = _config_to_masked_dict(cfg, reveal=reveal)
-        if effective:
-            return {"observability": legacy.get("observability")}
-        return legacy
-
-    if reveal:
-        raise click.UsageError(
-            "--reveal works only for pre-v8 configurations; this config is v8, which always masks secret values"
-        )
+    if not os.path.isfile(cfg_path):
+        # No config.yaml yet: show the defaults the CLI would run with.
+        if source or effective or provenance:
+            raise click.ClickException(
+                "config.yaml does not exist yet; run 'defenseclaw init' or 'defenseclaw quickstart'"
+            )
+        return _v8_defaults(app)
     resolved_only = effective or provenance
     masked: dict = {}
     if not resolved_only:
@@ -689,7 +723,7 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
             return masked
         written = masked
         masked = _merge_defaults(written, _v8_defaults(app))
-        _resolve_admission(app, masked, written)
+        _resolve_defaults(app, masked, written)
     try:
         result = inspect_v8_config("effective", config_path=cfg_path)
     except ConfigInspectError as exc:
@@ -808,7 +842,7 @@ def config_path(app: AppContext) -> None:
     cfg_path = str(config_module.config_path())
     if app.cfg is not None:
         cfg = app.cfg
-    elif _looks_like_v8_config(cfg_path):
+    elif os.path.isfile(cfg_path):
         cfg = _v8_config_path_view(cfg_path)
     else:
         cfg = config_module.load()
@@ -1135,11 +1169,11 @@ def _looks_like_v8_config(path: str) -> bool:
 
 
 def _v8_config_path_view(path: str):
-    """Build the legacy path-display shape from a masked v8 source.
+    """Build the path-display shape from a masked v8 source.
 
-    ``config path`` is a recovery command and must not send an exact-v8 file
-    through the v7 loader. Only non-secret filesystem fields used by the view
-    are projected; observability policy remains owned by the Go compiler.
+    ``config path`` is a recovery command and must work while the source does
+    not fully load. Only non-secret filesystem fields used by the view are
+    projected; observability policy remains owned by the Go compiler.
     """
 
     try:
@@ -1174,10 +1208,8 @@ def _v8_config_path_view(path: str):
 # ---------------------------------------------------------------------------
 
 
-def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
+def _config_to_masked_dict(cfg) -> dict:
     """Convert a Config dataclass tree into a dict with secrets masked."""
-    from defenseclaw.credentials import mask
-
     def _convert(value):
         if is_dataclass(value):
             return {f.name: _convert(getattr(value, f.name)) for f in fields(value) if not f.name.startswith("_")}
@@ -1200,11 +1232,11 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
             in_webhook = key_hint.lower() == "webhooks"
             for k, v in list(node.items()):
                 if _is_secret_field(k) and isinstance(v, str) and v:
-                    node[k] = mask(v) if reveal else "***"
+                    node[k] = "***"
                 elif in_headers and isinstance(v, str) and v:
-                    node[k] = mask(v) if reveal else "***"
+                    node[k] = "***"
                 elif in_webhook and k.lower() == "url" and isinstance(v, str) and v:
-                    node[k] = v if reveal else redact_webhook_url(v)
+                    node[k] = redact_webhook_url(v)
                 else:
                     _walk(v, k)
         elif isinstance(node, list):

@@ -163,10 +163,9 @@ def test_config_path_pads_labels_and_hides_openclaw_without_openclaw(tmp_path: P
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_config_show_hides_reveal_and_reference_section_is_optional() -> None:
+def test_config_reference_section_is_optional() -> None:
     # GAP-1116
-    show = config_cmd.commands["show"]
-    assert next(p for p in show.params if p.name == "reveal").hidden
+    assert "reveal" not in {p.name for p in config_cmd.commands["show"].params}
     section = next(p for p in config_cmd.commands["reference"].params if p.name == "section")
     assert not section.required and section.default == "observability"
 

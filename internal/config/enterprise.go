@@ -637,22 +637,14 @@ func standaloneCredentialsDir(configFile string, document *yaml.Node) string {
 }
 
 // standaloneLayoutDataDirForSource applies standaloneLayoutDataDir to the
-// source the loader is about to read: sourceBytes when provided, else the
-// file. A read or parse error returns false; the loader reports it itself.
-func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte, sourceProvided bool) (string, bool) {
+// source bytes the loader is about to decode. A parse error returns false;
+// the loader reports it itself.
+func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte) (string, bool) {
 	if _, ok := standaloneUnixLayoutForConfig(configFile); !ok {
 		return "", false
 	}
-	raw := sourceBytes
-	if !sourceProvided {
-		data, err := os.ReadFile(configFile)
-		if err != nil {
-			return "", false
-		}
-		raw = data
-	}
 	var document yaml.Node
-	if err := yaml.Unmarshal(raw, &document); err != nil {
+	if err := yaml.Unmarshal(sourceBytes, &document); err != nil {
 		return "", false
 	}
 	return standaloneLayoutDataDir(configFile, &document)
@@ -954,20 +946,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	// Every pack the gateway can load: the v9 rule_pack and custom_packs
 	// selections, profile packs and the v8 rule_pack_dir alike.
 	dirs := cfg.ReferencedRulePackDirs()
-	labels := make([]string, 0, len(dirs))
-	for label := range dirs {
-		labels = append(labels, label)
-	}
-	// The global pack first, so a connector that only inherits it is not
-	// the one a refusal names.
-	sort.Slice(labels, func(i, j int) bool {
-		gi, gj := !strings.Contains(strings.TrimPrefix(labels[i], "guardrail."), "."), !strings.Contains(strings.TrimPrefix(labels[j], "guardrail."), ".")
-		if gi != gj {
-			return gi
-		}
-		return labels[i] < labels[j]
-	})
-	for _, label := range labels {
+	for _, label := range RulePackCheckOrder(dirs) {
 		if err := check(label, dirs[label]); err != nil {
 			return err
 		}

@@ -14,24 +14,30 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rule-pack overlay scanner — honors ``guardrail.rule_pack_dir`` at scan time.
+"""Rule-pack overlay scanner — honors the configured ``guardrail.rule_pack`` at scan time.
 
-**Finding R4.** The Go gateway loads a rule pack from ``guardrail.rule_pack_dir``
-(``internal/guardrail/rulepack.go::LoadRulePack``) and applies its regex rules
-to LLM traffic at runtime. The install-time Python scanners (skill / mcp /
-plugin) historically ignored that directory, so a custom or ``strict`` rule pack
-never influenced what ``defenseclaw skill|mcp|plugin scan`` flagged. This module
-closes that gap: when an operator has configured a rule pack, the SAME pack's
-detection rules are applied to the artifact text the scanners inspect, so
-scan-time triage lines up with what the gateway would catch on traffic.
+**Finding R4.** The Go gateway loads a rule pack (``guardrail.rule_pack``, or a
+``custom_packs`` entry; ``internal/guardrail/rulepack.go::LoadRulePack``) and
+applies its regex rules to LLM traffic at runtime. The install-time Python
+scanners (skill / mcp / plugin) historically ignored that pack, so a custom or
+``strict`` rule pack never influenced what ``defenseclaw skill|mcp|plugin scan``
+flagged. This module closes that gap: when an operator has configured a rule
+pack, the SAME pack's detection rules are applied to the artifact text the
+scanners inspect, so scan-time triage lines up with what the gateway would
+catch on traffic. The gateway's install watcher applies the same pack to a
+skill with ``internal/guardrail/artifact_scan.go``; keep the two selections in
+step (GAP-0065).
 
 Faithful-but-bounded scope choices (documented for the integrator who sequences
 this against the scanner-flip — see session notes):
 
-* We honor the **configured** ``effective_rule_pack_dir(connector)``. When it is
-  unset (the built-in default, ``""``) we add NO overlay, so default-install
+* We honor the **configured** ``effective_rule_pack_dir(connector)`` and the
+  ``guardrail.rules`` layers of its scope (``protections``, ``enable``,
+  ``disable`` and ``severity_overrides``, applied as the gateway composes them;
+  ``suppressions`` and ``sensitive_tools`` describe traffic). When there is
+  neither (the built-in default, ``""``) we add NO overlay, so default-install
   scans are unchanged and gain no false positives. The gateway's compiled-in
-  baseline is unaffected; "honor rule_pack_dir" means honor it *when set*.
+  baseline is unaffected; "honor the rule pack" means honor it *when set*.
 * We apply ``rules/*.yaml`` (precise, severity-carrying regex rules) plus the
   regex pattern families in ``rules/local-patterns.yaml``
   (``injection_regexes``, ``pii_data_regexes``). The raw substring phrase lists
@@ -58,9 +64,10 @@ import logging
 import os
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import yaml
 
@@ -402,13 +409,27 @@ def _read_text(path: str) -> str | None:
         return None
 
 
-def load_rule_pack(dir_path: str) -> RulePack:
-    """Load and compile a rule pack from *dir_path*.
+@dataclass(frozen=True)
+class RulesLayer:
+    """One ``guardrail.rules`` block, reduced to what changes file rules."""
+
+    protections: tuple[str, ...] = ()
+    enable: tuple[str, ...] = ()
+    disable: tuple[str, ...] = ()
+    severity_overrides: tuple[tuple[str, str], ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.protections or self.enable or self.disable or self.severity_overrides)
+
+
+def load_rule_pack(dir_path: str, layers: Sequence[RulesLayer] = ()) -> RulePack:
+    """Load and compile a rule pack from *dir_path*, with *layers* applied.
 
     Mirrors the Go loader's graceful degradation: a missing directory, missing
     files, or an unparseable / wrong-version YAML yields an empty (or partial)
     pack rather than raising. An invalid regex is logged and skipped, matching
-    ``rulepack.go::checkPattern``.
+    ``rulepack.go::checkPattern``. *layers* are the ``guardrail.rules`` blocks
+    of the scope, applied in order as ``guardrail.Compose`` does.
     """
     pack = RulePack(source_dir=dir_path)
     if not dir_path or not os.path.isdir(dir_path):
@@ -418,6 +439,7 @@ def load_rule_pack(dir_path: str) -> RulePack:
     if not os.path.isdir(rules_dir):
         return pack
 
+    files: list[tuple[str, dict]] = []
     for entry in sorted(os.listdir(rules_dir)):
         if not entry.endswith(".yaml"):
             continue
@@ -431,12 +453,54 @@ def load_rule_pack(dir_path: str) -> RulePack:
         if not isinstance(raw, dict) or raw.get("version") != 1:
             _log.debug("rule-pack: skip %s (missing/unsupported version)", full)
             continue
-        if entry == "local-patterns.yaml":
+        files.append((entry, raw))
+
+    rule_files = [(name, raw) for name, raw in files if name != "local-patterns.yaml"]
+    for layer in layers:
+        rule_files = _apply_rules_layer(rule_files, layer)
+    for name, raw in rule_files:
+        _compile_rules_file(raw, pack)
+    for name, raw in files:
+        if name == "local-patterns.yaml":
             _compile_local_patterns(raw, pack)
-        else:
-            _compile_rules_file(raw, pack)
 
     return pack
+
+
+def _apply_rules_layer(files: list[tuple[str, dict]], layer: RulesLayer) -> list[tuple[str, dict]]:
+    """``guardrail.Compose`` for one layer: protections, enable, disable, severity overrides."""
+    from defenseclaw import policy_catalog
+
+    # Work on copies: the parsed files are only this call's.
+    files = [(name, {**raw, "rules": [dict(rule) for rule in raw.get("rules") or [] if isinstance(rule, dict)]})
+             for name, raw in files]
+    for protection in layer.protections:
+        incoming = policy_catalog.load_rule_files(policy_catalog.protection_pack_dir(protection))
+        ids = {
+            str(rule.get("id", "")).strip()
+            for _, raw in incoming
+            for rule in raw.get("rules") or []
+            if isinstance(rule, dict)
+        }
+        for _, raw in files:
+            raw["rules"] = [rule for rule in raw["rules"] if str(rule.get("id", "")).strip() not in ids]
+        for name, raw in incoming:
+            added = [dict(rule) for rule in raw.get("rules") or [] if isinstance(rule, dict)]
+            target = next((existing for existing_name, existing in files if existing_name == name), None)
+            if target is None:
+                files.append((name, {**raw, "rules": added}))
+            else:
+                target["rules"].extend(added)
+    switches = {**{rid: True for rid in layer.enable}, **{rid: False for rid in layer.disable}}
+    overrides = dict(layer.severity_overrides)
+    for _, raw in files:
+        for rule in raw["rules"]:
+            rule_id = str(rule.get("id", "")).strip()
+            if rule_id in switches:
+                rule["enabled"] = switches[rule_id]
+            if rule_id in overrides:
+                rule["severity"] = overrides[rule_id]
+    return files
 
 
 def _compile_rules_file(raw: dict, pack: RulePack) -> None:
@@ -553,6 +617,58 @@ def _resolve_dir(cfg, connector: str | None) -> str:
     return gc.effective_rule_pack_dir(connector or "") or ""
 
 
+def _layer_of(block: Any) -> RulesLayer:
+    """The file-relevant part of a ``guardrail.rules`` block (tolerates duck-typed configs)."""
+
+    def names(value: Any) -> tuple[str, ...]:
+        if not isinstance(value, (list, tuple)):
+            return ()
+        return tuple(text for item in value if (text := str(item).strip()))
+
+    overrides = getattr(block, "severity_overrides", None)
+    return RulesLayer(
+        protections=names(getattr(block, "protections", None)),
+        enable=names(getattr(block, "enable", None)),
+        disable=names(getattr(block, "disable", None)),
+        severity_overrides=(
+            tuple(sorted((str(rid).strip(), str(sev).strip().upper()) for rid, sev in overrides.items()))
+            if isinstance(overrides, dict)
+            else ()
+        ),
+    )
+
+
+def _rule_layers(cfg, connector: str | None) -> tuple[RulesLayer, ...]:
+    """The ``guardrail.rules`` layers of *connector*'s scope that change file rules.
+
+    The global block comes first, then the connector's own (profile scopes
+    apply to users, which a scan has none of).
+    """
+    gc = getattr(cfg, "guardrail", None)
+    if gc is None:
+        return ()
+    blocks = [getattr(gc, "rules", None)]
+    override = getattr(gc, "_connector_override", None)
+    if connector and callable(override):
+        try:
+            blocks.append(getattr(override(connector), "rules", None))
+        except Exception:  # pragma: no cover - defensive
+            pass
+    return tuple(layer for layer in map(_layer_of, blocks) if layer)
+
+
+def _resolve_pack(cfg, connector: str | None) -> tuple[str, tuple[RulesLayer, ...]]:
+    """The pack directory and ``guardrail.rules`` layers a scan applies; ``("", ())`` for none."""
+    layers = _rule_layers(cfg, connector)
+    dir_path = _resolve_dir(cfg, connector)
+    if not dir_path and layers:
+        # guardrail.rules alone act on the default pack, as in the gateway.
+        from defenseclaw import policy_catalog
+
+        dir_path = policy_catalog.preset_pack_dir(cfg, "default")
+    return dir_path, layers
+
+
 def _active_connector(cfg, connector: str | None) -> str | None:
     if connector:
         return connector
@@ -573,14 +689,14 @@ def overlay_findings(
 ) -> list[Finding]:
     """Load the effective rule pack and return findings for *path* and/or *text*.
 
-    Returns ``[]`` when no rule pack is configured (the field is unset) or the
+    Returns ``[]`` when no rule pack or ``guardrail.rules`` is configured or the
     pack is empty — callers can extend their result findings unconditionally.
     """
     resolved = _active_connector(cfg, connector)
-    dir_path = _resolve_dir(cfg, resolved)
+    dir_path, layers = _resolve_pack(cfg, resolved)
     if not dir_path:
         return []
-    pack = load_rule_pack(dir_path)
+    pack = load_rule_pack(dir_path, layers)
     if pack.is_empty():
         return []
     findings: list[Finding] = []
@@ -688,25 +804,27 @@ def maybe_wrap(
     *,
     pack_cache: RulePackOverlayCache | None = None,
 ):
-    """Wrap *inner* with the rule-pack overlay iff a rule pack is configured.
+    """Wrap *inner* with the rule-pack overlay iff a rule pack or ``guardrail.rules`` is configured.
 
-    Returns *inner* unchanged when no pack is set (or it is empty), so the common
-    no-rule-pack path has zero behavior change and pays no extra disk reads.
+    Returns *inner* unchanged when neither is set (or the pack is empty), so the
+    common no-rule-pack path has zero behavior change and pays no extra disk reads.
     Fan-out callers can provide a per-operation *pack_cache*: it de-duplicates
     identical effective directories while preserving an explicit connector
     lookup, so one peer's pack can never bleed into another peer's scan.
     """
     resolved = _active_connector(cfg, connector)
-    dir_path = _resolve_dir(cfg, resolved)
+    dir_path, layers = _resolve_pack(cfg, resolved)
     if not dir_path:
         return inner
     cache_key = os.path.normcase(
         os.path.realpath(os.path.abspath(os.path.expanduser(dir_path)))
     )
+    if layers:
+        cache_key += f"#{layers!r}"
     if pack_cache is not None and cache_key in pack_cache:
         pack = pack_cache[cache_key]
     else:
-        pack = load_rule_pack(dir_path)
+        pack = load_rule_pack(dir_path, layers)
         if pack_cache is not None:
             pack_cache[cache_key] = pack
     if pack.is_empty():

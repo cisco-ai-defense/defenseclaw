@@ -14,7 +14,9 @@ import (
 // identitySpoolMaxAge bounds how old a guardian identity record may be. The
 // guardian rewrites records every identity cache lifetime; a record several
 // lifetimes old belongs to a guardian that stopped, and its UPN may be stale.
-const identitySpoolMaxAge = 4 * identityDirectoryTTL
+// The guardian keeps the record of an account it did not list for as long
+// (enterprisehooks.IdentitySpoolMaxAge).
+const identitySpoolMaxAge = identityDirectoryMaxAge
 
 // identitySpoolDir is the guardian identity spool the gateway reads, or ""
 // when it runs without a guardian (any profile but standalone).
@@ -43,8 +45,9 @@ func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.Identity
 
 // mergeSpoolFacts overlays the guardian's root-resolved facts on the facts
 // the gateway resolved itself for the same verified account. The spool wins
-// for what only root can read (UPN, principal, realm, directory type); the
-// gateway's own answer wins for groups, which it resolved just now.
+// for the UPN and principal, which only root can read, and for the realm and
+// directory type it resolved with them; the gateway's own answer wins for
+// groups, which it resolved just now.
 func mergeSpoolFacts(own, spool useridentity.DirectoryFacts) useridentity.DirectoryFacts {
 	merged := own
 	if spool.UPN != "" {

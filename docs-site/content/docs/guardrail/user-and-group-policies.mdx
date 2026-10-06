@@ -118,7 +118,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 | --- | --- | --- |
 | `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. macOS: the group name `id -Gn` prints. |
 | `users` | The verified user | A uid or SID, the account name, or the principal or UPN (`alice@CORP.EXAMPLE.COM`). |
-| `connectors` | The connector the request comes from | `codex`, `claudecode`, `cursor` and the others. |
+| `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
 
 How the keys combine:
@@ -128,13 +128,19 @@ How the keys combine:
   means "in group a or b, **and** using Codex".
 - **First match wins.** Put the narrowest assignment first (an agent or a user
   and connector), the broad group assignments after it.
-- **Case does not matter.** Groups, account names, principals and UPNs compare
-  without regard to case, so `alice@CORP.EXAMPLE.COM` and
-  `alice@corp.example.com` are the same user.
+- **Case and accents' encoding do not matter.** Groups, account names,
+  principals and UPNs compare without regard to case, so
+  `alice@CORP.EXAMPLE.COM` and `alice@corp.example.com` are the same user. They
+  also compare as the same text whether an accented letter is typed
+  precomposed (`é`) or as a letter plus a combining accent, as some editors and
+  copy-paste sources produce it.
 - **An account name is not unique.** It is the name without its domain, so
   `alice` matches a local account `alice` and a directory account
-  `alice@corp.example.com` alike. Use the principal, the uid or the SID to
-  tell two people of the same short name apart.
+  `alice@corp.example.com` alike, for requests and for `guardrail profile
+  explain` (both build the user the same way). Use the principal, the uid or
+  the SID to tell two people of the same short name apart. When a bare name
+  selects a directory account, `explain`, `status` and `doctor` warn and name
+  the principal to write instead.
 - **Nothing matches: the default.** A request that no assignment selects gets
   `guardrail.default_profile`. An empty default keeps the global `guardrail.*`
   settings.
@@ -147,6 +153,18 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --json | jq 
 
 The `subject` lists the user ID, the principal and the groups exactly as the
 gateway sees them, so the name in your assignment is the name that matches.
+
+Assign by the name `id -Gn` prints, and check the assignments again after a
+group is renamed or deleted in the directory: an assignment that names the old
+name selects nobody, and the users of that group fall through to the next
+assignment or the default. The gateway looks the groups of your assignments up
+in the operating system, and a group it definitely does not find is a warning in
+`guardrail profile explain`, `guardrail profile list`, `guardrail status` and
+`doctor`, and a line in the gateway log at start and at every reload
+(`[guardrail] assignment 1: group "..." is not known to this host`). A lookup
+that fails or times out says nothing. On Windows the SID of a group survives a
+rename, so it is the spelling to use there; on Linux and macOS a group is
+matched by its name.
 
 ### The match reason
 
@@ -168,7 +186,9 @@ than one key, the reason names the most specific key, in the order
 
 The subject of a profile decision is the user the kernel or a per-user
 credential proved, with the directory facts the gateway resolved for that
-user from the operating system. **Identity headers, hook payloads and claimed
+user from the operating system. An agent in a sandbox counts as the user who
+started the sandbox, with the same facts and refresh as that user's other
+agents. **Identity headers, hook payloads and claimed
 facts never reach the matcher.** A user who forges a header, sets
 `KRB5CCNAME`, edits a local file or overrides a config directory cannot move
 to a weaker profile.
@@ -184,13 +204,33 @@ What follows when the identity is missing:
   (`default_lookup_failed`) and the lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
-  than 2,048 groups, has no facts rather than part of its membership.
-- **Group changes take time.** The gateway caches a user's directory facts for
-  15 minutes and refreshes them in the background. A user added to a group
-  gets the group's profile within that time. On Windows the groups are those
-  of the sign-in token, so the user must also sign out and back in. While the
-  directory does not answer, the gateway keeps using a user's last facts until
-  a lookup succeeds again.
+  than 2,048 groups, has no facts rather than part of its membership. On
+  Linux the group names are looked up 64 at a time, so an account in several
+  hundred groups resolves in one background lookup even when SSSD starts cold.
+  Facts that still hold a group as a bare number (no group answered for that
+  id) are served but refreshed after two minutes, not 15. The gateway log
+  names the account and the reason once when its lookup starts failing (`[identity]
+  directory lookup for 1201 failed: ... in 3000 groups, more than the 2048 ...`)
+  and once when it works again, and `guardrail profile explain` shows the same
+  reason as a lookup error instead of a profile.
+- **Group changes take time.** SSSD caches the account first (90 minutes by
+  default). The gateway then caches a user's directory facts for 15 minutes
+  from the user's first request and refreshes them in the background; the first
+  request after that still uses the old facts while the refresh runs. A user
+  added to a group gets the group's profile after all three. `guardrail profile
+  explain` asks the operating system directly, so it already shows the new
+  profile; its `cache:` line and a warning give the age of the facts requests
+  still use. Restart the gateway to drop its cache at once. On Windows the
+  groups are those of the sign-in token, so the user must also sign out and
+  back in. While the directory does not answer, the gateway keeps using a
+  user's last facts, for at most an hour (four times the cache lifetime). After
+  that the user has no facts and gets the default profile
+  (`default_lookup_failed`) until a lookup succeeds, so a user removed from a
+  group does not keep its profile for the whole outage. `defenseclaw doctor`,
+  `guardrail status` and `guardrail profile explain` warn while lookups are
+  failing, with the number of accounts, the first failure and the reason; the
+  gateway log has one line when an account's lookups start to fail and one when
+  they work again.
 
 Because an unverified or failed lookup always lands on the default profile,
 **set a strict `default_profile`**. A lenient default means a lookup failure
@@ -272,6 +312,13 @@ Copy the `agt-` ID into an `agents` assignment. The ID names one connector
 install for one user on one machine and stays the same across sessions,
 restarts and upgrades. See [Agent identity](/docs/enterprise/identity-and-authentication#agent-identity).
 
+The pin applies to every decision the gateway makes for that install: its
+hooks, its `/api/v1/inspect` calls and, for OpenClaw and ZeptoClaw, its LLM
+traffic through the guardrail proxy. The proxy attributes each request to the
+connector it serves and to that connector's install for the user the gateway
+runs as, so an OpenClaw or ZeptoClaw install appears in
+`defenseclaw agent identities` after its first proxied request.
+
 ## Try it and read the result
 
 ### Ask the gateway
@@ -300,7 +347,7 @@ with the subject and the effective settings. `guardrail status`, `status` and
 
 ### Read the decision record
 
-Every hook decision carries the profile and the reason:
+Every hook and LLM proxy decision carries the profile and the reason:
 
 | Attribute | Meaning |
 | --- | --- |

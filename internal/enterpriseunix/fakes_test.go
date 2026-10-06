@@ -219,12 +219,22 @@ type fakeRunner struct {
 	versions map[string]string // gateway path -> version
 	calls    []string
 	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
+	// replies answer a command by filepath.Base(name) and its joined args.
+	replies map[string]fakeReply
+}
+
+type fakeReply struct {
+	result CommandResult
+	err    error
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
 	r.mu.Unlock()
+	if reply, ok := r.replies[filepath.Base(name)+" "+strings.Join(args, " ")]; ok {
+		return reply.result, reply.err
+	}
 	if len(args) == 1 && args[0] == "--version-json" {
 		version, ok := r.versions[name]
 		if !ok {

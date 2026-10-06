@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -170,6 +171,11 @@ type InstallWatcher struct {
 	// scannerFor; tests inject a fake to observe scan invocations without
 	// shelling out to the real scanner binaries.
 	scannerFactory func(InstallEvent) scanner.Scanner
+
+	// rulePackSource returns the guardrail rule pack the install-time scan of
+	// a connector's skills applies on top of the skill scanner, or nil when
+	// that connector's scope selects none. Nil applies no overlay.
+	rulePackSource func(connector string) *guardrail.RulePack
 }
 
 // newScanner resolves the scanner for evt via the injectable factory, falling
@@ -212,6 +218,13 @@ func (w *InstallWatcher) SetPolicySource(source func() *policy.Prepared) {
 // admission decision records carry. Call it before Run.
 func (w *InstallWatcher) SetPolicyStamp(stamp func() (observability.Optional[string], observability.Optional[int64])) {
 	w.policyStamp = stamp
+}
+
+// SetRulePackSource binds the live generation's guardrail rule pack for a
+// connector, so a skill is scanned at install with the pack
+// `defenseclaw skill scan` applies to it. Call it before Run.
+func (w *InstallWatcher) SetRulePackSource(source func(connector string) *guardrail.RulePack) {
+	w.rulePackSource = source
 }
 
 // SetConfigSource binds the live config admission decisions read.
@@ -953,7 +966,10 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
 				fmt.Sprintf("type=%s reason=%s", targetType, blockReason), enforcement)
 
-			if fileAction == "quarantine" || runtimeAction == "block" {
+			// Only a file action of quarantine moves the files. The block
+			// shorthand (install block, runtime disable, file none) leaves
+			// them where they are.
+			if fileAction == "quarantine" {
 				w.enforceBlockWith(ctx, evt, retainRestored)
 			}
 		}
@@ -1008,11 +1024,11 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	// picked up automatically on the next install.
 	switch evt.Type {
 	case InstallSkill:
-		return scanner.NewSkillScannerFromLLM(
+		return w.withRulePackOverlay(scanner.NewSkillScannerFromLLM(
 			w.cfg.Scanners.SkillScanner,
 			w.cfg.ResolveLLM("scanners.skill"),
 			w.cfg.CiscoAIDefense,
-		)
+		), evt)
 	case InstallMCP:
 		return scanner.NewMCPScannerFromLLM(
 			w.cfg.Scanners.MCPScanner,
@@ -1025,6 +1041,17 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 	default:
 		return nil
 	}
+}
+
+// withRulePackOverlay adds the connector's guardrail rule pack to a skill
+// scan, as `defenseclaw skill scan` does, so a secret or an injection pattern
+// in a skill's files is found at install and not only by the manual scan
+// (GAP-0065). It returns inner when no pack applies.
+func (w *InstallWatcher) withRulePackOverlay(inner scanner.Scanner, evt InstallEvent) scanner.Scanner {
+	if w.rulePackSource == nil {
+		return inner
+	}
+	return guardrail.NewArtifactOverlay(inner, w.rulePackSource(w.eventConnector(evt)))
 }
 
 // takeActionFor returns whether enforcement actions should be applied for the
@@ -1070,7 +1097,7 @@ func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) 
 
 func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEvent, honorRestore bool) {
 	if w == nil || w.cfg == nil || w.store == nil {
-		w.emitQuarantineFailure(ctx, evt.Path, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
+		w.emitQuarantineFailure(ctx, evt, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
 		return
 	}
 	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
@@ -1090,7 +1117,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		physicalName, connector, evt.Path,
 	)
 	if err != nil {
-		w.emitQuarantineFailure(ctx, evt.Path, err)
+		w.emitQuarantineFailure(ctx, evt, err)
 		return
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
@@ -1114,7 +1141,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		Connectors: []string{connector, ""},
 	})
 	if err != nil {
-		w.emitQuarantineFailure(ctx, evt.Path, err)
+		w.emitQuarantineFailure(ctx, evt, err)
 		return
 	}
 	if record.State == audit.QuarantineStateRestoring &&
@@ -1132,7 +1159,7 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		if _, statErr := os.Lstat(plan.QuarantinePath); os.IsNotExist(statErr) {
 			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
 		}
-		w.emitQuarantineFailure(ctx, evt.Path, err)
+		w.emitQuarantineFailure(ctx, evt, err)
 		return
 	}
 	if err := w.store.UpdateQuarantineRecordState(
@@ -1328,11 +1355,22 @@ func watcherPathAtOrBelow(path, root string) bool {
 		!strings.HasPrefix(relative, ".."+string(filepath.Separator)))
 }
 
-func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, path string, err error) {
+// emitQuarantineFailure reports an asset the verdict blocked but the watcher
+// could not move: it stays in place, so besides the log line and the metric
+// the audit log records an enforcement failure the administrator can find
+// (GAP-0133).
+func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
+		_ = w.logger.LogEventCtx(ctx, audit.Event{
+			Action:   string(audit.ActionWatcherBlock),
+			Target:   evt.Path,
+			Actor:    "defenseclaw",
+			Details:  fmt.Sprintf("type=%s quarantine failed, the blocked asset stays in place: %v", evt.Type, err),
+			Severity: "HIGH",
+		})
 	}
-	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", path, err)
+	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)
 }
 
 func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {

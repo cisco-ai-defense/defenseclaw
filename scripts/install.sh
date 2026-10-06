@@ -532,10 +532,16 @@ if [[ "${ROLLBACK}" == true ]]; then
         info "Run 'defenseclaw rollback' again to return to ${current:-the other install}."
     fi
     # The swap keeps the install just left, with its data, in previous/.
+    # Each install shows only its own audit window, so say how to read the
+    # other one (GAP-0126). The newer build's gateway reads either log.
     if [[ -z "${current}" ]] || version_lt "${back_to}" "${current}"; then
         info "Data written since the upgrade is kept in ${PREVIOUS} and comes back if you roll forward."
+        [[ -f "${PREVIOUS}/data/audit.db" && -x "${PREVIOUS}/bin/defenseclaw-gateway" ]] \
+            && info "Its audit events: ${PREVIOUS}/bin/defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     else
         info "Data written while ${current} ran is kept in ${PREVIOUS} and comes back if you roll back again."
+        [[ -f "${PREVIOUS}/data/audit.db" ]] \
+            && info "Its audit events: defenseclaw-gateway audit export --db ${PREVIOUS}/data/audit.db"
     fi
     exit "${rollback_rc}"
 fi
@@ -650,6 +656,19 @@ for binary in ${MANAGED_BINARIES}; do
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The downloaded gateway does not report version ${VERSION}"
+
+# When another account's process holds this account's API port, the upgrade
+# only fails at the gateway restart, after the build, the migration and the
+# swap. The staged gateway (a release that has the check) names it first
+# (GAP-0130). A gateway that was not running is not restarted, so it is not checked.
+if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \
+    && "${STAGING}/bin/defenseclaw-gateway" check-api-port --help >/dev/null 2>&1; then
+    if ! port_problem="$("${STAGING}/bin/defenseclaw-gateway" check-api-port 2>&1)"; then
+        rm -rf "${STAGING}"
+        drop_new_uv
+        die "${port_problem#Error: }; nothing was changed"
+    fi
+fi
 
 info "Building the Python environment (a first install can take several minutes)"
 make_venv() {
