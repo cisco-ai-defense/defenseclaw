@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -20,7 +21,102 @@ import (
 var (
 	enterpriseWindowsReparseChainCheck = winpath.RejectReparseChain
 	enterpriseWindowsProtectionWriter  = setEnterpriseWindowsManagedProtection
+	enterpriseWindowsManagedPathOwner  = enterpriseWindowsPathOwner
+	enterpriseWindowsGatewaySID        = enterpriseWindowsGatewayServiceSID
 )
+
+// repairEnterpriseHookManagedRuntimePlatform repairs only the gateway's
+// service-writable runtime directory. AVC owns the shared Cisco tree above it
+// and can re-apply that product's ACL template after DefenseClaw installation;
+// the LocalSystem guardian is the only component allowed to restore the
+// DefenseClaw leaf contract before a virtual-account gateway starts.
+//
+// The fast path is validation-only, so a healthy runtime does not generate a
+// filesystem/ACL event on every guardian reconcile. Repair is allowed only
+// when the current object is a real directory with a trusted owner. A
+// user-owned or reparse-point path remains a hard failure; it is never adopted.
+func repairEnterpriseHookManagedRuntimePlatform(path, serviceAccount string) error {
+	if strings.TrimSpace(serviceAccount) == "" {
+		return nil
+	}
+
+	// Healthy installations must remain no-write.
+	if err := managed.ValidateTrustedServiceRuntimeDir(
+		path,
+		"managed data_dir",
+		serviceAccount,
+	); err == nil {
+		return nil
+	}
+
+	// Never follow or adopt a junction, symlink, mount point, or other reparse
+	// chain when applying privileged ACLs.
+	if err := enterpriseWindowsReparseChainCheck(path); err != nil {
+		return fmt.Errorf("refusing unsafe managed data_dir: %w", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect managed data_dir: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("managed data_dir is not a directory")
+	}
+
+	owner, err := enterpriseWindowsManagedPathOwner(path)
+	if err != nil {
+		return fmt.Errorf("inspect managed data_dir owner: %w", err)
+	}
+
+	serviceSID, err := enterpriseWindowsGatewaySID()
+	if err != nil {
+		return err
+	}
+
+	if !enterpriseWindowsRuntimeRepairOwnerTrusted(owner, serviceSID) {
+		ownerSID := "<nil>"
+		if owner != nil {
+			ownerSID = owner.String()
+		}
+		return fmt.Errorf("managed data_dir owner is not trusted: %s", ownerSID)
+	}
+
+	// Go through the shared runtime-protection helper so the owner/restore
+	// privilege is held for the write. A directory owned by TrustedInstaller or
+	// by the gateway service SID cannot have its owner and primary group reset
+	// without it, and ACL drift that stripped WRITE_OWNER would otherwise fail
+	// the open itself.
+	if err := setEnterpriseWindowsRuntimeProtection(path, owner, serviceSID, true); err != nil {
+		return fmt.Errorf("repair managed data_dir ACL: %w", err)
+	}
+
+	return nil
+}
+
+// enterpriseWindowsRuntimeRepairOwnerTrusted reports whether a drifted managed
+// runtime directory may be repaired in place. Only installer-owned objects
+// (LocalSystem, Administrators, TrustedInstaller) and the gateway's own service
+// SID qualify; a user-owned directory is never adopted, because repairing it
+// would hand a protected ACL to whoever won the race to create it.
+func enterpriseWindowsRuntimeRepairOwnerTrusted(
+	owner, serviceSID *windows.SID,
+) bool {
+	if owner == nil || !owner.IsValid() {
+		return false
+	}
+
+	trustedInstaller, _ := windows.StringToSid(
+		"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+	)
+
+	if owner.IsWellKnown(windows.WinLocalSystemSid) ||
+		owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
+		(trustedInstaller != nil && owner.Equals(trustedInstaller)) {
+		return true
+	}
+
+	return serviceSID != nil && owner.Equals(serviceSID)
+}
 
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
 	path, err := connector.HookAPITokenFilePath(dataDir, connectorName)
