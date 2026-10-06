@@ -15,7 +15,6 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strconv"
 	"time"
 
@@ -25,23 +24,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// On Linux the guardian adds what only root can read to the NSS facts the
-// gateway resolves itself: the userPrincipalName from SSSD InfoPipe
-// (org.freedesktop.sssd.infopipe GetUserAttr, which sssd-ifp answers for
-// root only) and the realm's directory type from `realm list`. Without
-// InfoPipe the principal falls back to sAMAccountName@REALM, recorded as
-// upn_source=derived.
+// On Linux the guardian adds what only root can read to the NSS and realmd
+// facts the gateway resolves itself: the userPrincipalName from SSSD
+// InfoPipe (org.freedesktop.sssd.infopipe GetUserAttr, which sssd-ifp
+// answers for root only). Without InfoPipe the principal is
+// sAMAccountName@REALM, recorded as upn_source=derived.
 
 const (
 	infoPipeService   = "org.freedesktop.sssd.infopipe"
 	infoPipePath      = "/org/freedesktop/sssd/infopipe"
 	infoPipeGetAttr   = "org.freedesktop.sssd.infopipe.GetUserAttr"
 	infoPipeUPNAttr   = "userPrincipalName"
-	realmListTimeout  = 15 * time.Second
 	infoPipeCallLimit = 5 * time.Second
 )
 
-func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, realms []RealmEntry, now time.Time) (IdentitySpoolRecord, error) {
+func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	resolver, err := unixidentity.NewNSSResolver(ctx)
 	if err != nil {
 		return IdentitySpoolRecord{}, err
@@ -58,11 +55,6 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 	if facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceWinbind {
 		record.Facts = facts
 		return record, nil
-	}
-	applyRealm(&facts, realms)
-	bare, _ := useridentity.SplitQualifiedName(nss.Name)
-	if facts.Principal == "" && facts.Realm != "" {
-		facts.Principal = useridentity.NormalizePrincipal(bare + "@" + facts.Realm)
 	}
 	if facts.Source == useridentity.SourceSSSD {
 		callCtx, cancel := context.WithTimeout(ctx, infoPipeCallLimit)
@@ -107,22 +99,4 @@ func infoPipeUPN(ctx context.Context, name string) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("unexpected InfoPipe userPrincipalName type")
-}
-
-// readRealmList runs `realm list` once per pass. A host without realmd, or
-// one joined some other way, reports no realms.
-func readRealmList(ctx context.Context) []RealmEntry {
-	tool := trustedIdentityTool("/usr/sbin/realm", "/usr/bin/realm", "/sbin/realm")
-	if tool == "" {
-		return nil
-	}
-	runCtx, cancel := context.WithTimeout(ctx, realmListTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, tool, "list")
-	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C"}
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	return ParseRealmList(boundedOutput(out))
 }

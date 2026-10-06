@@ -23,7 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// Directory facts for a Linux account, resolved through NSS only.
+// Directory facts for a Linux account, resolved through NSS and realmd.
 //
 // The backend that owns an account is found by asking each directory
 // service named on the passwd line of nsswitch.conf for the uid with
@@ -31,8 +31,10 @@ import (
 // directory service knows is local. The domain comes from the
 // fully-qualified name SSSD (alice@corp.example.com) or winbind
 // (CORP\alice) reports, and groups from initgroups plus group lookups for
-// all of their ids. UPN and mail need SSSD InfoPipe, which only root may
-// call, so the root guardian adds them (enterprisehooks identity spool).
+// all of their ids. The realm and directory type of an SSSD or winbind
+// account come from realmd, which any account may ask (realm_linux.go).
+// UPN and mail need SSSD InfoPipe, which only root may call, so the root
+// guardian adds them (enterprisehooks identity spool).
 
 // directoryService describes one NSS passwd service DefenseClaw recognises.
 type directoryService struct {
@@ -42,7 +44,7 @@ type directoryService struct {
 
 // directoryServices are the NSS passwd services that name a directory. The
 // sss service serves AD, IPA and plain LDAP domains alike, so its directory
-// is left for the guardian's realm facts to decide.
+// comes from the realm that serves the account's domain.
 var directoryServices = map[string]directoryService{
 	"sss":        {source: useridentity.SourceSSSD},
 	"winbind":    {directory: useridentity.DirectoryActiveDirectory, source: useridentity.SourceWinbind},
@@ -121,6 +123,9 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 		return useridentity.DirectoryFacts{}, fmt.Errorf("unixidentity: groups of %s: %w", account.Name, err)
 	}
 	facts.Groups = groups
+	if facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceWinbind {
+		applyRealm(&facts, account.Name, hostRealms(r.context()))
+	}
 	return facts, nil
 }
 

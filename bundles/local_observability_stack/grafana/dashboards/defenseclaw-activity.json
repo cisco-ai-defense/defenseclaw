@@ -957,10 +957,8 @@
         "displayMode": "gradient",
         "orientation": "horizontal",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+          "calcs": [],
+          "values": true
         },
         "showUnfilled": true,
         "valueMode": "color"
@@ -1929,10 +1927,8 @@
         "displayMode": "gradient",
         "orientation": "horizontal",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+          "calcs": [],
+          "values": true
         },
         "showUnfilled": true,
         "valueMode": "color"
@@ -1979,10 +1975,8 @@
       "options": {
         "pieType": "donut",
         "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+          "calcs": [],
+          "values": true
         },
         "legend": {
           "displayMode": "table",

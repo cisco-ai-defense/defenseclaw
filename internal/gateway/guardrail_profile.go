@@ -98,7 +98,7 @@ var (
 	}
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
-	profileAgentSource = agentIdentityFromContext
+	profileAgentSource = requestAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -313,30 +313,38 @@ type profileRouteConnectorKey struct{}
 // connector the server-side route serves (never a payload value). It is a
 // no-op when no profiles are configured.
 func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConnector string) context.Context {
-	set := a.guardrailProfileSet()
+	return withGuardrailProfile(ctx, a.guardrailProfileSet(), routeConnector)
+}
+
+// withGuardrailProfile is withGuardrailProfileDecision for set. The LLM
+// proxy, which has no APIServer, calls it with the live set and the
+// connector it serves (GuardrailProxy.withProxyAgent).
+func withGuardrailProfile(ctx context.Context, set *guardrailProfileSet, routeConnector string) context.Context {
 	if set == nil {
 		return ctx
 	}
 	if routeConnector = config.NormalizeConnectorName(routeConnector); routeConnector != "" {
 		ctx = context.WithValue(ctx, profileRouteConnectorKey{}, routeConnector)
 	}
-	resolved := resolveGuardrailProfileFor(ctx, set)
-	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolved)
+	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, set))
 }
 
-// refreshGuardrailProfileForAgent re-resolves the request's profile once the
-// hook path has put the verified agent identity on ctx
-// (enrichAgentHookContext). withGuardrailProfileDecision runs before that
-// identity exists, so an agents assignment could never match it.
-func refreshGuardrailProfileForAgent(ctx context.Context) context.Context {
-	resolved := resolvedGuardrailProfileFrom(ctx)
-	if resolved == nil {
-		return ctx
+// requestAgentIdentity is the agent identity an agents assignment matches
+// for ctx: the one the hook path, ACP or the LLM proxy put on ctx, else the
+// one the hook path derives for the connector the request authenticated for
+// or reached (profileRequestConnector) and its verified user. The derivation
+// covers the inspect endpoints, which carry no agent identity, and the
+// resolution at authentication, before the hook path has derived one.
+func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
+	if id, verified = agentIdentityFromContext(ctx); id != "" {
+		return id, verified
 	}
-	if _, verified := profileAgentSource(ctx); !verified {
-		return ctx
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" {
+		return "", false
 	}
-	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, resolved.set))
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	return facts.ID, facts.Verified
 }
 
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
@@ -826,7 +834,8 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 }
 
 // profileProxyOverride returns the mode and block message the guardrail
-// proxy applies for ctx. It applies only to a request with a verified
+// proxy applies for ctx, whose profile withProxyAgent resolved for the
+// proxy's connector and agent. It applies only to a request with a verified
 // user-scoped identity; without one the proxy keeps its own settings.
 func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
 	set := liveGuardrailProfiles.Load()

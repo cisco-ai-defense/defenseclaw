@@ -18,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -63,7 +62,6 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 	}
 	keep := map[string]bool{}
-	realms := readRealmList(ctx)
 	for _, account := range accounts {
 		if account.UID <= 0 || keep[strconv.Itoa(account.UID)+".json"] {
 			continue
@@ -71,7 +69,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		name := strconv.Itoa(account.UID) + ".json"
 		keep[name] = true
 		lookupCtx, cancel := context.WithTimeout(ctx, identitySpoolLookupTimeout)
-		record, err := collectIdentitySpoolRecord(lookupCtx, account, realms, time.Now().UTC())
+		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
 			err = writeIdentitySpoolFile(dir, name, record, setOwnership)
@@ -94,25 +92,4 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
 	return nil
-}
-
-// trustedIdentityTool returns the first root-owned, non-writable candidate.
-func trustedIdentityTool(candidates ...string) string {
-	for _, candidate := range candidates {
-		info, err := os.Lstat(candidate)
-		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
-			continue
-		}
-		return candidate
-	}
-	return ""
-}
-
-// boundedOutput trims command output to a sane size.
-func boundedOutput(data []byte) string {
-	const limit = 64 << 10
-	if len(data) > limit {
-		data = data[:limit]
-	}
-	return strings.ToValidUTF8(string(data), "")
 }
