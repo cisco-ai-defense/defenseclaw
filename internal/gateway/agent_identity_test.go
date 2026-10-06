@@ -26,6 +26,17 @@ func agentIdentityTestSetup(t *testing.T) {
 	InstallSharedAgentRegistry("", "")
 }
 
+// GAP-0097: an agent identity records the account as the host names it, so
+// an SSSD account keeps its qualified name for the admin views.
+func TestHookAgentIdentityKeepsQualifiedAccountName(t *testing.T) {
+	agentIdentityTestSetup(t)
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4545, Name: "dcad-alice@dclab.test", Home: t.TempDir()})
+	facts := resolveHookAgentIdentity(peer, agentHookRequest{ConnectorName: "codex"})
+	if facts.ID == "" || facts.UserName != "dcad-alice@dclab.test" {
+		t.Fatalf("agent identity = %q user %q, want the qualified account name", facts.ID, facts.UserName)
+	}
+}
+
 // The agent identity comes from verified facts only: forged identity headers
 // and a claimed config dir in the payload change neither it nor the session
 // instance, which is keyed by (agent identity, session) and survives a
