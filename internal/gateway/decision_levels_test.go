@@ -182,8 +182,12 @@ func TestGuardrailLevelActions(t *testing.T) {
 		}
 	}
 	high := []RuleFinding{{RuleID: "levels-content", Severity: "HIGH"}}
-	if got := buildVerdictWithConfig(high, "completion", cfg, false).Action; got != guardrailActionBlock {
+	if got := buildVerdictWithConfig(high, "completion", cfg, "", false).Action; got != guardrailActionBlock {
 		t.Errorf("completion verdict with block_at HIGH = %q, want block", got)
+	}
+	// A hook verdict takes the requesting connector's levels.
+	if got := buildVerdictWithConfig(high, "completion", cfg, "codex", false).Action; got != guardrailActionAlert {
+		t.Errorf("codex completion verdict with its block_at CRITICAL = %q, want alert", got)
 	}
 
 	hilt := &config.Config{}

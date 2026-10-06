@@ -405,18 +405,25 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 
 // buildVerdict converts rule findings into a ToolInspectVerdict.
 func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerdict {
-	return buildVerdictWithConfig(ruleFindings, direction, nil, false)
+	return buildVerdictWithConfig(ruleFindings, direction, nil, "", false)
 }
 
+// buildVerdict maps the findings with the levels of the connector the hook
+// request authenticated as (one threshold model). Under the Secure Client
+// integration content keeps the global posture levels, as before.
 func (a *APIServer) buildVerdict(ctx context.Context, ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
 	cfg := (*config.Config)(nil)
 	if a != nil {
 		cfg = a.decisionConfig(ctx)
 	}
-	return buildVerdictWithConfig(ruleFindings, direction, cfg, confirmable)
+	connector := profileRequestConnector(ctx)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		connector = ""
+	}
+	return buildVerdictWithConfig(ruleFindings, direction, cfg, connector, confirmable)
 }
 
-func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, confirmable bool) *ToolInspectVerdict {
+func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, connector string, confirmable bool) *ToolInspectVerdict {
 	if len(ruleFindings) == 0 {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
@@ -424,9 +431,7 @@ func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *c
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	action := guardrailContentActionForFindings(
-		cfg, "", ruleFindings, confirmable,
-	)
+	action := guardrailContentActionForFindings(cfg, connector, ruleFindings, confirmable)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {

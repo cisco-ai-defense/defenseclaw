@@ -36,7 +36,7 @@ func TestBuildVerdict_AllDetectionOnlyAllows(t *testing.T) {
 		RuleID: "CMD-PYTHON-C", Title: "generic interpreter execution",
 		Severity: "LOW", enforcement: findingEnforcementDetectionOnly,
 	}
-	verdict := buildVerdictWithConfig([]RuleFinding{finding}, "tool_call", cfg, true)
+	verdict := buildVerdictWithConfig([]RuleFinding{finding}, "tool_call", cfg, "", true)
 	if verdict.Action != guardrailActionAllow || verdict.Severity != "LOW" ||
 		len(verdict.DetailedFindings) != 1 ||
 		verdict.DetailedFindings[0].contributesToEnforcement() {
