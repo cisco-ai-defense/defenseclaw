@@ -140,26 +140,38 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
-def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
-    """Return whether the nested command is ``guardrail validate-pack``.
+def _guardrail_child(ctx: click.Context) -> str:
+    """The exact ``guardrail`` subcommand token, or "" for anything else.
 
     Click exposes only the top-level ``guardrail`` name while the root callback
     is running. Use that parsed name as the trust anchor, then locate its exact
     argv token so root-option and ``--`` prefixes do not change the result. The
-    next token must be the exact nested command; intervening options or a
-    different subcommand do not receive the config-independent bypass.
+    next token must be the nested command; intervening options or a different
+    subcommand do not receive a bypass.
     """
     if ctx.invoked_subcommand != "guardrail":
-        return False
+        return ""
     argv = sys.argv[1:]
     try:
         guardrail_index = argv.index("guardrail")
     except ValueError:
-        return False
-    return (
-        guardrail_index + 1 < len(argv)
-        and argv[guardrail_index + 1] == "validate-pack"
-    )
+        return ""
+    return argv[guardrail_index + 1] if guardrail_index + 1 < len(argv) else ""
+
+
+def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail validate-pack``."""
+    return _guardrail_child(ctx) == "validate-pack"
+
+
+def _is_pack_repin(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail use-pack``.
+
+    It re-pins an edited custom pack, so it must run while config.yaml still
+    carries the stale digest. It loads the config but skips the pre-command
+    validation; the writer validates the candidate it saves.
+    """
+    return _guardrail_child(ctx) == "use-pack"
 
 
 def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
@@ -343,7 +355,7 @@ def cli(ctx: click.Context) -> None:
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
     # doesn't lock them out of the tools that would fix it.
-    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup":
+    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup" and not _is_pack_repin(ctx):
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
@@ -363,7 +375,8 @@ def cli(ctx: click.Context) -> None:
             elif status_continues:
                 ux.echo(
                     "  A gateway that is already running keeps the config it started with; "
-                    "its status follows. Fix the problem above, then run: defenseclaw-gateway restart",
+                    "its status follows. Fix the problem above; the gateway applies the corrected "
+                    "config.yaml on its next reload.",
                     err=True,
                 )
             else:
