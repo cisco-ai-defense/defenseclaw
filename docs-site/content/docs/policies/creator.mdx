@@ -140,10 +140,11 @@ writes it into `config.yaml`:
 defenseclaw policy activate my-policy
 ```
 
-`policy activate` switches the OPA policy only. The rule pack the creator wrote to
+`policy activate` copies the admission policy and guardrail levels into `config.yaml`; it does not
+change the rule pack. The rule pack the creator wrote to
 `~/.defenseclaw/policies/guardrail/my-policy/` (rules, suppressions, sensitive tools and judges)
-isn't enforced until you validate it and switch to it. `use-pack` restarts a running gateway so
-it loads the pack:
+isn't enforced until you validate it and switch to it. `use-pack` pins the pack's digest in
+`config.yaml`, and a running gateway loads the pack on its next reload without a restart:
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-policy
@@ -159,12 +160,16 @@ throwaway home first with [Verify a policy locally](/docs/policies/verify-locall
 
 ## What lives behind each Playground section
 
+The **Backed by** column names the keys in the exported policy file. `policy activate` copies them into
+`config.yaml` (for example `guardrail.block_threshold` becomes `guardrail.block_at`); see
+[Policies, Layer 1](/docs/policies#layer-1--admission-policy-and-the-opa-engine) for the mapping.
+
 | Section          | Backed by                                                                                                                              |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
 | Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-type `scanner_overrides.<type>.<sev>`; activation writes them to `admission.defaults`, `admission.skill` and `admission.<type>.actions`. |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
-| Guardrail        | `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
+| Guardrail        | `guardrail.block_threshold` / `alert_threshold` (activation writes `guardrail.block_at` / `alert_at`), `guardrail.hilt`, Cisco trust level. Activation copies only the levels and the trust level. The `patterns` and `severity_mappings` it still exports are not read by the gateway since `config_version: 9`; editing them changes nothing. |
 | Rule pack        | Per-file regex rules and CEL candidate expressions, including `tool_call_only` scoping (`policies/guardrail/<pack>/rules/<filename>.yaml`). |
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |

@@ -369,14 +369,20 @@ carries it:
 | Metadata key | Value | Spans |
 | --- | --- | --- |
 | `user.id`, `defenseclaw.user.name` | The account's uid or SID and name | Agent, model and tool |
-| `defenseclaw.user.principal`, `defenseclaw.user.domain` | The directory principal and domain, for example `alice@CORP.EXAMPLE.COM` and `corp.example.com`. The principal is sent only with `ai_discovery.include_user_principal` | Agent, model and tool |
+| `defenseclaw.user.principal` | The directory principal, for example `alice@CORP.EXAMPLE.COM`. Sent only with `ai_discovery.include_user_principal` | Agent, model and tool |
+| `defenseclaw.user.domain`, `defenseclaw.user.directory` | The domain, for example `corp.example.com`, and the directory type (`active_directory`, `local`, ...) | Agent, model and tool |
+| `defenseclaw.user.identity.source`, `defenseclaw.user.principal.assurance` | The OS facility that resolved the facts, and `verified` or `claimed` | Agent, model and tool |
 | `defenseclaw.agent.identity.id` | The stable agent identity (`agt-`) | Agent, model and tool |
-| `defenseclaw.guardrail.profile.name` | The guardrail profile that decided | Model and tool |
+| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The guardrail profile that decided, its policy digest, why it was chosen, and the matching group | Model, tool and guardrail |
 
-Filter on `defenseclaw.agent.identity.id` to see one agent across all its
-sessions, or on `defenseclaw.guardrail.profile.name` to review one profile's
-decisions. The principal is an identifier, so redaction profiles keep it; see
-[Identity and authentication](/docs/enterprise/identity-and-authentication).
+The session kind, client address and Kerberos principal are not sent to
+Galileo. Filter on `defenseclaw.agent.identity.id` to see one agent across all
+its sessions, on `defenseclaw.guardrail.profile.name` to review one profile's
+decisions, or on `defenseclaw.user.principal.assurance` to separate verified
+from claimed attribution. Principals and the other identity keys are
+identifiers, so redaction profiles keep them; see
+[How DefenseClaw knows who a user is](/docs/enterprise/identity-sources) and
+[Privacy controls](/docs/enterprise/identity-and-authentication#turn-off-the-principal-or-the-ide-inventory).
 
 Decisions that do not belong to a tool call, such as a blocked prompt, produce
 an `apply_guardrail` span with the same status, event, and attributes. Galileo

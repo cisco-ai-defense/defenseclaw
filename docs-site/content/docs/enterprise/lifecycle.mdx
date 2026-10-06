@@ -121,6 +121,15 @@ sudo installer -pkg "./defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -targ
 sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
 ```
 
+### The config after an upgrade
+
+The administrator config is the policy; an upgrade keeps its intent. A
+`config_version: 8` config that the previous release installed is migrated to
+`config_version: 9` by the first `ensure` of the new release, on every OS. See
+[What `ensure` does with the config](#what-ensure-does-with-the-config)
+for the files it writes and
+[Roll back](#roll-back) for going back to a release that reads version 8.
+
 ### Per-user credentials after an upgrade
 
 An upgrade from a release in which every user of a connector shared one hook
@@ -242,6 +251,89 @@ the gateway restarts. See [Network proxy](/docs/enterprise/configuration#network
 
 The profile cannot change in place. To move between Secure Client and
 standalone, uninstall one and install the other.
+
+### What `ensure` does with the config
+
+The lifecycle is the only writer of `config.yaml` on a managed host.
+Nothing else changes the file: the local config tools refuse, as
+[Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host)
+lists. `ensure` is the action an MDM runs; `install`, `upgrade` and `repair`
+apply a config the same way. In order, on Linux and macOS:
+
+1. **Validate before anything changes.** It reads the `--config` file, or the
+   installed config, and checks the schema, the runtime load, the fixed
+   layout, the rule packs and every protected credential the file names. A
+   failure is `config_invalid` and the installed config stays.
+2. **Migrate a version 8 config.** A `config_version: 8` administrator config,
+   whether yours or one an earlier release installed, is migrated to version 9
+   in memory by the same library as `defenseclaw-gateway config migrate`. The
+   migrated file is validated again and installed in place of the version 8
+   bytes. No `defenseclaw` CLI is needed on the host. A plain administrator
+   config migrates with no conflict; the release's
+   [upgrade gate](/docs/enterprise/rollout#step-6-plan-upgrades-and-rollback)
+   asserts it for the previous release's config.
+3. **Write under the writer lock.** It takes `config.yaml.lock`, the lock every
+   config writer shares, writes the files that changed, and then records the
+   config in `config.generation.json` with the actor `lifecycle` and the reason
+   `enterprise ensure` (or the action that ran). It records a generation when
+   the config changed, and when no recorded generation matches the file.
+4. **Keep the evidence of a migration.** When it migrated a version 8 file, it
+   keeps the source as `config.yaml.v8.bak` (root-only) and writes
+   `migration-v9.json` next to the config. The record lists every `moved`
+   value, every `conflicts` entry (`kept`, `lost`, `reason`) and the audit
+   rows it did not import (`actions_rows_ignored`). An inline scanner key in
+   the version 8 file moves to the service `.env`. A `rego/data.json` left in
+   the policy folder is read for the migration and ignored from version 9 on;
+   `ensure` leaves the file where it is, so remove it. If your configuration
+   management puts the same version 8 file back, `ensure` leaves its bytes in
+   place and the gateway migrates it in memory, so a managed file does not
+   fight the lifecycle on every run.
+5. **Regenerate what is derived.** Service definitions, the runtime
+   descriptor and DefenseClaw's machine-policy entries are written from the
+   config and never read back; the guardian renders each user's hook scripts
+   and registrations from it within a minute. Anything that drifted is
+   rewritten, whoever changed it.
+6. **Report the policy.** The result carries the effective policy digest and
+   the config generation (`policy`), and `policy-state.json` records them once
+   the gateway reports the same digest. See
+   [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+
+If any step fails, including the checks after the services start, the
+transaction rolls back, and the generation file and the migration files go
+back with it. On Windows the Setup transaction migrates a version 8 config,
+keeps the same two files and records the generation with the actor
+`lifecycle`, but its result reports no `policy` object in this release.
+
+The result's `changes` list says what was written, for example
+`migrated /etc/defenseclaw/config.yaml to config_version 9 (N values moved, 0 conflicts; the v8 file is kept as /etc/defenseclaw/config.yaml.v8.bak, the --config a rollback to a config_version 8 release needs)`.
+When the host holds local block or allow entries in `audit.db`, the run adds
+the warning `local_enforcement_entries_ignored` (see
+[Troubleshooting](/docs/enterprise/troubleshooting#warnings)).
+
+### Edits made on the host
+
+On Linux and macOS `config.yaml` is root-owned (`0640`, group of the service
+account), so a standard user cannot edit it. An administrator's in-place edit
+is handled like a push from the MDM:
+
+- **A valid edit** is applied by the apply trigger's `ensure --reason path`
+  and recorded as the next generation. The gateway may already have reloaded
+  it; the digest in the result shows what it runs.
+- **A rejected edit** (validation fails, or the services do not come up
+  healthy) is reverted. The lifecycle keeps a root-only copy of the last
+  applied config as `committed-config.yaml` in the lifecycle directory
+  (`/var/lib/defenseclaw-enterprise` on Linux, `/opt/cisco/defenseclaw/lifecycle`
+  on macOS), puts it back in place of the edit, and keeps the edit as
+  `rejected-config.yaml` next to it. `status` warns and `verify` fails with
+  `config_rejected` until `config.yaml` is written again.
+- **A derived file** (a service definition, a machine-policy entry, a hook
+  script) is not read back. The next `ensure` or `repair`, or the guardian's
+  next pass, rewrites it from the config, and `verify` fails on the drift
+  until then.
+
+On Windows nothing watches the installed config, and `ensure` compares only
+the file you supply, so do not edit the installed copy in place; run Setup
+`/ensure` with the new file as shown above.
 
 ## Rotate the AI Defense key
 

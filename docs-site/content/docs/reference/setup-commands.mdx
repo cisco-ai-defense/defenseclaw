@@ -15,7 +15,9 @@ keywords:
 `defenseclaw setup` is the main family of operator commands that takes
 DefenseClaw from "binary on disk" to "actively defending an agent". Mutating
 commands update only the configuration or owned integration surface they
-manage; restart, prompting, and audit behavior is command-specific. The
+manage; restart, prompting, and audit behavior is command-specific. Every
+command that changes a setting writes it to `config.yaml` through the same
+config writer, and a running gateway applies a valid change itself. The
 top-level `keys`, `registry`, and `sandbox` groups are included here because
 they are part of the same operator workflow.
 
@@ -138,6 +140,30 @@ and the Sandbox wizard in the macOS app; the TUI Sandboxes panel (key 7) shows l
 0.0.x install from Linux hosts. The [sandbox guide](/docs/sandboxes/guide)
 covers setup, runs and legacy cleanup.
 
+## Change one setting without a wizard
+
+You do not need a `setup` command to change a single value. These commands edit
+one thing in `config.yaml` and nothing else; each checks the result before it
+writes and prints the new config generation. The gateway applies the change on
+its own, except for a short list of
+[restart-required keys](/docs/reference/cli#restart-required-keys), which the
+command names when you set them.
+
+| To change | Run |
+| --- | --- |
+| Any key | [`defenseclaw config set KEY VALUE`](/docs/reference/cli#config-set-and-config-unset), and `config unset KEY` to return to the default |
+| What blocks and what alerts | `defenseclaw guardrail block-at LEVEL` and `alert-at LEVEL`, with `--connector X` for one connector ([Thresholds](/docs/policies/thresholds)) |
+| The rule pack, one rule, a suppression | `defenseclaw guardrail use-pack`, `guardrail rule enable\|disable\|severity` and `guardrail suppress add\|remove` ([Rules](/docs/policies/rules)) |
+| A skill, MCP server, plugin or tool block or allow list | `defenseclaw skill\|mcp\|plugin\|tool block\|allow\|unblock NAME` ([Admission](/docs/policies/admission)) |
+| A custom LLM endpoint | `defenseclaw setup provider add`, which writes `llm_providers`; `custom-providers.json` is derived from it and rewritten for you |
+| The LLM that judges and scans | `defenseclaw setup llm` |
+| Scanner analyzers and policy | `defenseclaw setup skill-scanner` and `setup mcp-scanner` |
+| A version 8 file to version 9 | `defenseclaw migrate`, or `defenseclaw config migrate` ([Migrate to version 9](/docs/reference/migrate-v9)) |
+
+On a managed standalone device these commands are refused with exit `3`: the
+administrator owns `config.yaml`. See
+[Managed devices](/docs/reference/cli#managed-devices-and-exit-code-3).
+
 ## Deployment and policy references
 
 These pages explain operator policy and deployment architecture in more depth
@@ -185,12 +211,15 @@ the interactive and scripted form of each.
 | [`setup local-observability`](/docs/observability/local-observability) | no | subcommands | `up` is the default; `down` stops the stack and keeps its data; `reset` also deletes the data. `status`, `logs`, `url` and `env` read state. |
 | [`setup redaction`](/docs/observability/redaction) | yes (bare command) | subcommands + flags | The simple flow leads into **Show advanced settings?** for buckets, profiles, destinations and routes. |
 | [`setup skill-scanner`](/docs/scanning/skill-scanner) / [`setup mcp-scanner`](/docs/scanning/mcp-scanner) | yes | `--non-interactive` + flags | The skill scanner SDK is a hard dependency; the MCP scanner SDK is installed on Python 3.11 and newer. |
+| [`config set`](/docs/reference/cli#config-set-and-config-unset) / `config unset` | no | always | Takes `--json` for list and object values and `--expect-sha256` to refuse a change when `config.yaml` moved. |
+| `skill` / `mcp` / `plugin` / `tool` `block`, `allow`, `unblock` | no | always | Write `asset_policy` in `config.yaml`; no gateway call is needed. |
+| `migrate` / `config migrate` | no | always | `--check` or `--dry-run` previews; `config migrate --ack` marks the migration record as read. |
 | `sandbox setup` | yes (default) | `--non-interactive`, or `--yes` to take every default | One-time setup for OpenShell sandboxes on Linux, or on a Mac with Apple silicon. See the [sandbox guide](/docs/sandboxes/guide). |
 | `sandbox legacy-cleanup` | yes (prints the plan, then asks once) | `--yes`; `--dry-run` prints the plan only | Linux-only removal of the retired standalone sandbox. |
 | `doctor` | only with `--fix` | `--fix --yes` | A plain run is read-only and never prompts. |
 | `alerts` | no | `--limit`, `--connector`, `--show <n>`, `--json`; `acknowledge` / `dismiss` subcommands | A snapshot of recent alerts, not a live tail. |
 | `tui` | full-screen dashboard | none | Interactive only. |
-| `defenseclaw-gateway` | no | `--host`, `--port` | Run bare for the foreground daemon; `start`, `stop` and `restart` manage the background daemon. `setup guardrail --restart` restarts it for you. |
+| `defenseclaw-gateway` | no | `--host`, `--port` | Run bare for the foreground daemon; `start`, `stop` and `restart` manage the background daemon. Most `setup` commands restart a running gateway when they finish (`setup guardrail` takes `--restart` / `--no-restart`), and a valid change to `config.yaml` applies without a restart. |
 
 <Callout title="Redaction is its own workflow">
 `defenseclaw setup redaction` edits the v8 bucket, profile, destination and
@@ -210,19 +239,26 @@ Setup and auxiliary configuration commands write files under
 
 ```
 ~/.defenseclaw/
-  config.yaml             # canonical configuration (edited by commands that own config)
+  config.yaml             # the source of truth: every setting you choose lives here
+  config.generation.json  # evidence: generation, SHA-256, actor and time of the last write
+  config.yaml.lock        # lock shared by the CLI, the TUI and the gateway
+  config.yaml.v8.bak      # kept by the version 9 migration
+  migration-v9.json       # evidence: every value the migration moved
   .env                    # secret values: never committed, never logged
   audit.db                # SQLite audit store (configuration changes land here too)
   picked_connector        # last connector picked by install.sh or connector setup
-  custom-providers.json   # custom LLM providers (setup provider add)
-  hooks/                  # connector hook scripts, written when the gateway starts
-  policies/               # rule packs and admission policies
+  custom-providers.json   # derived from llm_providers; rewritten for you, never edit it
+  hooks/                  # derived: connector hook scripts, rendered when the gateway starts
+  policies/               # rule packs (guardrail/) and Rego modules (rego/); admission lives in config.yaml
   registries/<id>/        # cached manifest + scanner verdicts for each registry source
   semantic-router/        # generated router config (setup routing)
   gateway.jsonl           # optional: only when an explicit kind: jsonl destination uses this path
 ```
 
-The list covers the common files, not every one. See
-[Configuration](/docs/reference/configuration) for the full layout.
+Only `config.yaml` (with the policy assets it names by digest) is something
+you edit. Derived files are regenerated from it and never read back, so a hand
+edit of one is ignored and `defenseclaw doctor` reports the drift; evidence
+files record what was applied. The list covers the common files, not every one.
+See [Configuration](/docs/reference/configuration) for the full layout.
 
 Next steps: [`defenseclaw setup guardrail`](/docs/guardrail) is the right starting point if you have not run it yet. Already running? `defenseclaw keys set DEFENSECLAW_LLM_KEY` is the most common follow-up — it unlocks the LLM judge and the LLM-backed scanners. The full guided workflow lives at [Unified LLM key](/docs/guardrail/unified-llm-key).

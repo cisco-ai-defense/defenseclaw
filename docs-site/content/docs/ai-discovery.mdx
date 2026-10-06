@@ -33,9 +33,10 @@ The TUI's **AI Discovery** panel (press `V`, above) shows the same inventory thi
   <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
   <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
   <Card title="Runtime planes" description="defenseclaw agent discovery runtime. Three in-gateway planes that observe what actually ran: inference compute, per-process egress, and agent actions." />
+  <Card title="IDE plugin inventory" href="#ide-plugin-inventory" description="defenseclaw agent ide-plugins. Every extension and plugin in VS Code and its forks, JetBrains, Visual Studio, Zed, Eclipse and Neovim, per user, with enabled state and an AI flag." />
 </Cards>
 
-The five are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then enable the runtime planes to find out which of the inventory was ever actually used.
+The six are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then read the IDE plugin inventory per user, then enable the runtime planes to find out which of the inventory was ever actually used.
 
 ## Run it now: 30-second tour
 
@@ -225,7 +226,7 @@ ai_discovery:
   lookup_model_provenance_online: false
 ```
 
-Enable it by editing that value to `true`, interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
+Enable it with `defenseclaw config set ai_discovery.lookup_model_provenance_online true` (the gateway applies an `ai_discovery` change without a restart), interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
 
 ### Model lifecycle and bounded scans
 
@@ -246,7 +247,7 @@ the intended state explicit:
 defenseclaw agent discovery enable --restart --scan
 ```
 
-Toggles `ai_discovery.*` in `~/.defenseclaw/config.yaml`, restarts the gateway, and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning.
+Sets `ai_discovery.enabled` and the other `ai_discovery.*` settings you pass in `~/.defenseclaw/config.yaml`, restarts the gateway (the default; `--no-restart` skips it), and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning. The gateway also applies any `ai_discovery` change made with `defenseclaw config set` by itself, so a single setting needs no restart.
   </Tab>
   <Tab value="Status">
 ```bash
@@ -271,7 +272,7 @@ the companion managed endpoint inventory. No restart needed.
 defenseclaw agent discovery disable
 ```
 
-Stops the scanner and clears the `ai_discovery.*` block. Existing audit events are preserved.
+Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_discovery.*` settings stay in the file, so `enable` brings the same configuration back. Existing audit events are preserved.
   </Tab>
 </Tabs>
 
@@ -341,75 +342,6 @@ account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 such as the profile root that `scan_roots: ["~"]` names, are skipped
 without failing the scan.
 
-### IDE plugin inventory
-
-Every full scan also lists each IDE installation in the scanned homes and
-every extension or plugin it has, AI or not, with its enabled state. AI
-plugins are flagged from the signature catalog. Nothing is executed: the scan
-reads small, bounded metadata files only.
-
-| IDE family | Products | Plugin list | Enabled state from |
-| --- | --- | --- | --- |
-| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop, Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including profiles) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
-| VS Code remote servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers | The server's `extensions` folder | `client_side_unknown`: the client keeps that state |
-| JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside, Android Studio, and JetBrains remote development | Each plugin's `META-INF/plugin.xml` | `disabled_plugins.txt`; enabled when not listed |
-| Visual Studio (Windows) | Visual Studio, per edition | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`) |
-| Zed | Zed | `extensions/installed/*/extension.toml` | Always enabled |
-| Eclipse | Eclipse | `bundles.info`, best effort | Enabled |
-| Vim and Neovim | Vim, Neovim | `lazy-lock.json` and `pack/*/{start,opt}` | `start` is enabled and `opt` is disabled; lazy.nvim and plugin folders are `unknown` |
-
-The enabled state is one of `enabled`, `disabled`, `client_side_unknown` or
-`unknown`. Connector plugins (Claude Code, Codex, OpenCode, Amp, Copilot CLI,
-Hermes and the others) stay in the AIBOM `plugins` category, stamped with
-their user.
-
-Each row carries its user: the home's owner, or on a managed host the account
-the guardian scanned. The standalone enterprise per-user scans include the
-IDE inventory on Linux and macOS; on Windows the gateway reads each enrolled
-profile's IDE folders, and Visual Studio installs under Program Files. A
-managed Windows gateway does not read VS Code-family remote servers,
-`%LOCALAPPDATA%\JetBrains` or Android Studio folders in a profile. A
-per-user install inventories only its own user's home.
-
-Set the scope with `ai_discovery.ide_inventory`:
-
-| Value | Effect |
-| --- | --- |
-| `all` (default) | Every plugin, AI or not |
-| `ai_only` | Only plugins flagged as AI |
-| `off` | No IDE inventory; AI editor-extension signals still appear in `agent usage` |
-
-Read the inventory with the CLI, the API, AIBOM or the TUI:
-
-```bash
-defenseclaw agent ide-plugins
-defenseclaw agent ide-plugins --user alice --ai-only
-defenseclaw agent ide-plugins --ide cursor --json
-defenseclaw aibom scan --only ide_plugins
-```
-
-A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
-or macOS host, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux
-ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
-enterprise macos ide-plugins`) prints the managed gateway's inventory as
-JSON, with the same `--user`, `--ide`, `--ai-only` and `--cursor` filters.
-On a managed Windows computer, `defenseclaw.exe enterprise windows
-ide-plugins` does the same from an elevated prompt.
-
-- `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's plugins,
-  filtered by `user` (account name or ID), `ide` (product or family) and
-  `ai_only`, a page at a time (`limit`, at most 1000, and `cursor` from the
-  previous page's `next_cursor`). Paths appear only as hashes. `total` and
-  `counts` (plugins, AI, disabled, users, installations and per-IDE) describe
-  the rows the filters select across all pages, and with `ai_only` the
-  `installations` list keeps only the installations that hold an AI plugin;
-  `GET /api/v1/ai-usage` carries the same counts for the whole machine.
-- AIBOM reports the list in its `ide_plugins` category.
-- The TUI shows it under Inventory → **IDE plugins**.
-- Each change is exported as an `ide.plugin.discovered`, `ide.plugin.changed`
-  or `ide.plugin.removed` record, and the `defenseclaw.inventory.ide_plugins`
-  gauge counts plugins per IDE, AI flag and enabled state.
-
 ### Tunable knobs
 
 `agent discovery enable` accepts a wide tunable surface so you can scope the scan to your environment:
@@ -445,6 +377,168 @@ defenseclaw agent signatures enable codex
 in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are useful when
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
+
+## IDE plugin inventory
+
+Beyond the AI agents on a host, DefenseClaw lists **every extension and plugin
+in every IDE**, AI or not, with its enabled state, for each user. AI plugins
+are flagged from the signature catalog, so "who has Copilot, Claude Code or
+Continue installed, and is it switched on?" is one command. The inventory is
+part of the continuous scan and refreshes with every full scan (every five
+minutes by default). Nothing is executed: the scan reads small, bounded
+metadata files only.
+
+```text
+$ defenseclaw agent ide-plugins --user alice
+User   IDE              Plugin                                            Version   Enabled      AI
+alice  cursor           anthropic.claude-code (Claude Code for VS Code)   2.1.0     yes          yes
+alice  intellij-idea    com.github.copilot (GitHub Copilot)               1.5.40    yes          yes
+alice  vscode           eamodio.gitlens (GitLens)                         17.0.0    no
+alice  vscode           github.copilot (GitHub Copilot)                   1.250.0   yes          yes
+alice  vscode           ms-python.python (Python)                         2026.1.0  yes
+alice  vscode (ssh)     github.copilot (GitHub Copilot)                   1.250.0   client side  yes
+alice  zed              html                                              0.2.1     yes
+7 plugin(s) shown; 7 in total, 3 AI, 1 disabled, 1 user(s)
+```
+
+| Where to read it | What you get |
+| --- | --- |
+| [`defenseclaw agent ide-plugins`](#read-the-inventory) | The table above, or `--json` |
+| `GET /api/v1/ai-usage/ide-plugins` | The full rows, filtered and paged |
+| `defenseclaw aibom scan --only ide_plugins` | The `ide_plugins` category of the bill of materials |
+| TUI: Inventory (`6`) → **IDE plugins** | The same rows, with a detail card |
+| Grafana **AI Agent Usage & Detection** → IDE plugins | Counts by IDE, AI against other, disabled, per user |
+| `ide.plugin.*` records and the `defenseclaw.inventory.ide_plugins` gauge | The change stream and the current counts, in your telemetry |
+
+### Which IDEs
+
+| IDE family | Products | Plugin list | Enabled state from |
+| --- | --- | --- | --- |
+| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop, Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
+| VS Code Remote-SSH servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers, on the host you connect to | The server's `extensions` folder, shown as `vscode (ssh)`, `cursor (ssh)` and so on | `client_side_unknown`, shown as `client side`: the IDE on your laptop keeps that state |
+| JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside and Android Studio, plus JetBrains remote development (shown as `(remote dev)`) | Each plugin's `META-INF/plugin.xml` in the plugin folders and bundled JARs | `disabled_plugins.txt`: enabled when not listed |
+| Visual Studio (Windows) | Visual Studio per instance, including the experimental hive: the user's extensions under `%LOCALAPPDATA%\Microsoft\VisualStudio`, and the machine-wide ones under Program Files | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`); `unknown` while Visual Studio is running and holds the hive locked |
+| Zed | Zed | `extensions/installed/*/extension.toml` | Always enabled |
+| Eclipse | Per-user Eclipse installs (Oomph under `~/eclipse`, p2 user configurations under `~/.eclipse`), best effort | `bundles.info`, without the platform bundles every Eclipse ships | Enabled |
+| Vim and Neovim | Vim, Neovim | `lazy-lock.json`, native packages in `pack/*/{start,opt}` and vim-plug's `plugged` folder | `start` is enabled and `opt` is disabled; lazy.nvim and vim-plug plugins are `unknown` because they do not record it |
+
+Connector plugins (Claude Code, Codex, OpenCode, Amp, Copilot CLI, Hermes and
+the others) are not IDE plugins. They stay in the AIBOM `plugins` category,
+stamped with their user.
+
+The enabled state of a row is one of `enabled`, `disabled`,
+`client_side_unknown` or `unknown`, and the row records where it came from
+(`state_vscdb`, `disabled_plugins_txt`, `privateregistry`, `remote_server`,
+`default` and so on), which the TUI detail card shows as **Enabled from**.
+
+### Whose plugins
+
+Each row carries the user it belongs to: the home's owner, or on a managed
+host the account the guardian or the gateway scanned. One user can never
+appear in another user's rows: a planted extension folder changes only its own
+owner's inventory.
+
+| Install | Who scans | Whose homes |
+| --- | --- | --- |
+| Per-user (OSS) | The user's own gateway | That user's home only |
+| Standalone enterprise, Linux and macOS | The hook guardian, as each enrolled user | Each enrolled user's home. It does not follow links out of the home |
+| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each profile in the ProfileList; Visual Studio installs under Program Files are machine-wide |
+
+A managed Windows gateway does not read VS Code-family Remote-SSH servers,
+`%LOCALAPPDATA%\JetBrains` or Android Studio folders in a profile, because
+they are rare on a desktop and large.
+
+### What is collected, and what is not
+
+Collected for each plugin: the plugin ID, display name and publisher, the
+version, the enabled state and where it came from, the scope (`user`,
+`remote` or `machine`), the AI flag and the signature that matched, the
+install and last-seen times, the owning user, and a hash of the plugin's path.
+For each IDE installation: the product, channel, version, whether it is a
+remote server, and a hash of its path.
+
+Not collected: the contents or source of any extension, settings, tokens or
+credentials, workspace and project files, chat or editor history, or the
+extension's own data. The only database read is the one key
+`extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
+and immutable with a 2-second limit. Paths leave the host only as hashes.
+
+Every scan is bounded per home: at most 4,096 plugins, 16,384 files and 64 MiB
+of metadata, and 1 MiB per file. A home that exceeds a bound is reported as a
+partial installation rather than read further.
+
+### Privacy and scope
+
+Plugin lists can reveal personal tooling. `ai_discovery.ide_inventory` sets the
+scope, and the default is the full list:
+
+| Value | Effect |
+| --- | --- |
+| `all` (default) | Every plugin, AI or not |
+| `ai_only` | Only plugins flagged as AI |
+| `off` | No IDE inventory; AI editor-extension signals still appear in `agent usage` |
+
+```yaml title="~/.defenseclaw/config.yaml"
+ai_discovery:
+  ide_inventory: ai_only    # all | ai_only | off
+```
+
+A running gateway applies the change on its next reload, and the inventory
+follows at the next full scan. On a managed host, edit the
+[machine configuration](/docs/enterprise/configuration#where-the-config-lives).
+When the scope is `off`, `defenseclaw agent ide-plugins` says so and exports
+nothing. The AI flag follows the [signature packs](#signature-packs), so a new
+AI extension is flagged after a signature update. See also
+[Identity and authentication](/docs/enterprise/identity-and-authentication#turn-off-the-principal-or-the-ide-inventory).
+
+### Read the inventory
+
+```bash
+defenseclaw agent ide-plugins
+defenseclaw agent ide-plugins --user alice --ai-only
+defenseclaw agent ide-plugins --ide cursor --json
+defenseclaw aibom scan --only ide_plugins
+```
+
+`--ide` takes a product (`vscode`, `cursor`, `pycharm`) or a family
+(`jetbrains`). The footer line reports the counts of the rows that the filters
+select. Without AI discovery enabled, the command tells you to run
+`defenseclaw agent discovery enable`.
+
+A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
+or macOS host, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux
+ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
+enterprise macos ide-plugins`) prints the managed gateway's inventory as
+JSON, with the `--user`, `--ide`, `--ai-only` and `--cursor` filters. On a
+managed Windows computer, `defenseclaw.exe enterprise windows ide-plugins`
+does the same from an elevated prompt. These commands print the counts of the
+whole machine next to the filtered rows.
+
+- **API.** `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's
+  plugins, filtered by `user` (account name or ID), `ide` (product or family)
+  and `ai_only`, a page at a time (`limit`, at most 1000, and `cursor` from the
+  previous page's `next_cursor`). `total` and `counts` (plugins, AI, disabled,
+  users, installations and per-IDE) describe the rows the filters select
+  across all pages, and with `ai_only` the `installations` list keeps only the
+  installations that hold an AI plugin. `GET /api/v1/ai-usage` carries the
+  same counts for the whole machine. See the
+  [gateway API](/docs/reference/gateway-api#identity-profiles-and-ide-inventory).
+- **AIBOM.** The `ide_plugins` category lists the same rows. `--only` can
+  leave it out or select it alone.
+- **TUI.** Inventory (`6`) → **IDE plugins** lists IDE, Plugin, Version,
+  Enabled and AI, with a User column when more than one user is present.
+  `Enter` opens a detail card with the version, publisher, where the enabled
+  state came from, the scope, the matched AI signature and the times;
+  `PageUp` and `PageDown` scroll it. See the [TUI guide](/docs/tui#ide-plugins).
+- **Grafana.** The **AI Agent Usage & Detection** board has an IDE plugins
+  section: plugins installed, AI plugins and disabled plugins as counters,
+  plugins by IDE, AI against other plugins by IDE, plugins by enabled state,
+  and a per-user table. The `$user` box narrows the Loki panels to one user.
+  See [Grafana dashboards](/docs/observability/grafana-dashboards).
+- **Telemetry.** Each change is exported as an `ide.plugin.discovered`,
+  `ide.plugin.changed` or `ide.plugin.removed` record, and the
+  `defenseclaw.inventory.ide_plugins` gauge counts plugins per IDE, AI flag
+  and enabled state.
 
 ## Operator CLI
 
@@ -697,6 +791,9 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     directory, refuses unsafe permissions unless `--force`, and persists it
     under `ai_discovery.trusted_binary_prefixes` in `config.yaml`; built-in
     defaults cannot be removed.
+  </Step>
+  <Step>
+    **IDE inventory is bounded and scoped.** The IDE scan reads small metadata files only (never extension contents, settings or credentials), hashes every path, and runs per user so rows stay with the account that owns them. `ai_discovery.ide_inventory` narrows it to AI plugins or turns it off. See [IDE plugin inventory](#privacy-and-scope).
   </Step>
   <Step>
     **HMAC-stamped events.** Continuous-discovery events are signed with a per-installation HMAC (`PayloadHMAC` on the gateway envelope). Tampering downstream of the gateway is detectable.
@@ -1158,7 +1255,8 @@ inventory verdict including `unobserved`.
 ## Use it alongside Registry
 
 Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
-tells you *what's allowed*. The runtime planes tell you *what actually ran*.
+tells you *what's approved*, and the [block and allow lists](/docs/policies/admission)
+say what is never or always allowed. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
 
@@ -1170,10 +1268,13 @@ A common production pattern:
     Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
   </Step>
   <Step>
-    Flip on registry-required mode: `defenseclaw registry require --type skill --enabled`. Now anything *new* that discovery finds — but the registry doesn't recognise — is admission-blocked by default.
+    Flip on registry-required mode with enforcement: `defenseclaw registry require --type skill --enabled --enforce`. `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`; without it the requirement is recorded but nothing is blocked. Now a new skill that the registry doesn't list is blocked by the install watcher when it appears.
   </Step>
   <Step>
     Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
+  </Step>
+  <Step>
+    Keep a short list of names you never want, whatever a catalog says: `defenseclaw skill block <name>` or `defenseclaw mcp block <name>`. These write `asset_policy` `denied` rules, which apply even when asset policy is off. See [Admission and the block/allow list](/docs/policies/admission).
   </Step>
 </Steps>
 

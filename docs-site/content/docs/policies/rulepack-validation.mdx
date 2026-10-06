@@ -19,16 +19,12 @@ defenseclaw guardrail validate-pack /path/to/rule-pack
 <Callout type="info" title="Enterprise deployments">
 Enterprise packages ship no `defenseclaw` CLI, so the `defenseclaw` commands
 on this page are not available on a managed host. There, validate with
-`defenseclaw-gateway rulepack validate --dir <pack>` and apply the pack
-through the managed config, as
+`defenseclaw-gateway rulepack validate --dir <pack>`, which prints the digest to
+pin, and apply the pack through the managed config, as
 [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs) shows.
 </Callout>
 
-A valid pack exits `0` and prints component counts, a content digest of the
-loaded pack and a files digest of the pack's own files. The files digest is
-the value `guardrail.custom_packs.<name>.digest` pins (as `sha256:<hex>`); it
-leaves out the defaults a pack inherits for missing components, so a release
-that changes those defaults does not break the pin. A
+A valid pack exits `0` and prints component counts plus a content digest. A
 pack that the helper successfully checks and finds invalid exits `1` with a
 bounded diagnostic that identifies the component path, error code, and reason.
 If the authoritative helper is missing, cannot run, times out, or returns an
@@ -41,8 +37,7 @@ A valid copy of the bundled default pack prints:
 Rule pack valid: "/home/you/.defenseclaw/policies/guardrail/default"
   rules: 239/243 enabled across 7 files
   components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-  digest: c447c505a65bf39ecaf5b58f685cb9f7746c63a640cf722191b4b92817f3b5d9
-  files digest: 5f0d3a…  (the guardrail.custom_packs pin)
+  digest: 46ece6be297f9c9b221524923b4baf2035c810503ddfa1b83a1024ee3c55c6e0
 ```
 
 `judges=4` counts the compiled-in exfil judge as well as the three judge files.
@@ -64,9 +59,8 @@ defenseclaw guardrail validate-pack /path/to/rule-pack --json
 {
   "kind": "validation",
   "summary": {
-    "digest": "c447c505…",
+    "digest": "46ece6be…",
     "enabled_rule_count": 239,
-    "files_digest": "5f0d3a…",
     "judge_category_count": 23,
     "judge_count": 4,
     "local_pattern_count": 11,
@@ -166,11 +160,13 @@ never treats directory presence as proof that the pack is valid.
 
 Validation is a preflight; it does not change the running gateway. Switch to
 the validated pack with `defenseclaw guardrail use-pack`, which validates the
-pack again and then writes the global or one connector's `rule_pack` (a
-custom directory is also pinned as a `guardrail.custom_packs` entry with its
-files digest). An invalid pack changes nothing. The running gateway loads the new
-pack on its next reload, validating it with the same strict validator; if it
-is refused, the previous configuration keeps running.
+pack again and then writes the global or one connector's `rule_pack`. A custom
+directory is also pinned as a `guardrail.custom_packs` entry with the digest
+that `validate-pack` printed (`sha256:` plus the 64 hex characters). An invalid
+pack changes nothing. The running gateway loads the new pack on its next
+reload, without a restart, validating it with the same strict validator and
+checking the pinned digest; if it is refused, the previous configuration keeps
+running.
 
 ```bash
 defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/my-org
@@ -184,14 +180,17 @@ A global switch removes every per-connector override and lists the ones it
 removed. `--connector X` changes only that connector; `use-pack --clear
 --connector X` puts it back on the global pack. If the validator is
 unavailable, built-in presets are applied with a warning, while custom packs
-are refused (exit `2`) unless you pass `--no-validate`.
+are refused (exit `2`), because the digest cannot be pinned without a
+validation.
 
-DefenseClaw does not watch rule-pack files for live changes. Editing a file in
-the active directory does not update an already running gateway, and
-`defenseclaw-gateway policy reload` reloads OPA policy rather than guardrail
-rule packs. Validate the finished directory, then switch to it with `use-pack`
-(which restarts a running gateway) or restart the gateway yourself after
-editing the active pack in place.
+The gateway watches pack directories. Editing a file of a pinned pack in place
+changes its digest, so the gateway rejects the change and keeps enforcing the
+previous generation until you pin the new digest. `doctor` fails the **Policy**
+row and the gateway `/health` output shows `policy.last_reload_error` until
+then. [Rules and custom packs](/docs/policies/rules#change-a-pinned-pack) shows
+both ways to apply an edit on purpose. The pinned digest does not cover the
+optional `defenseclaw-pack.json` posture file; it sets the pack's default
+[block and alert levels](/docs/policies/thresholds#rule-pack-default-posture).
 
 ## Safe editing loop
 
@@ -199,7 +198,7 @@ editing the active pack in place.
 2. Make one focused component change.
 3. Run `defenseclaw guardrail validate-pack PATH`.
 4. Run your rule fixtures or representative scans.
-5. Run `defenseclaw guardrail use-pack PATH` (or restart the gateway after editing the active pack in place), then run `defenseclaw doctor`.
+5. Run `defenseclaw guardrail use-pack PATH` to pin and apply the new directory (or pin the edited digest of the active pack with `defenseclaw config set guardrail.custom_packs.NAME.digest sha256:...`), then run `defenseclaw doctor`.
 
 Do not use Python regular-expression behavior as a substitute for validation.
 Rule patterns are enforced by the Go gateway, so the gateway validator is the

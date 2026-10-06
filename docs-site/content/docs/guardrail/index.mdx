@@ -182,7 +182,7 @@ Telemetry redaction is configured per destination with `defenseclaw setup redact
 
 <Cards>
   <Card title="observe" description="Log findings to the audit DB and sinks. Block nothing. Run this for at least a week before promoting." />
-  <Card title="action" description="Apply the selected policy thresholds. In the default balanced profile, CRITICAL blocks, HIGH alerts or confirms with HITL, and MEDIUM alerts." />
+  <Card title="action" description="Apply the block and alert levels (guardrail.block_at and alert_at, else the rule pack's). In the default balanced profile, CRITICAL blocks, HIGH alerts or confirms with HITL, and MEDIUM alerts." href="/docs/policies/thresholds" />
 </Cards>
 
 ## Connector resolution
@@ -354,11 +354,11 @@ The table follows `defenseclaw setup guardrail --help`.
     },
     "--rule-pack": {
       type: "default|strict|permissive",
-      description: "Bundled rule-pack profile. Picks the directory under ~/.defenseclaw/policies/guardrail/.",
+      description: "Bundled rule-pack profile. Writes guardrail.rule_pack (guardrail.connectors.<name>.rule_pack for a multi-connector peer).",
     },
     "--rule-pack-dir": {
       type: "path",
-      description: "Custom rule-pack directory, instead of --rule-pack. Scoped to the connector when --connector names a multi-connector peer, otherwise global. Pass an empty string to clear it.",
+      description: "Path of a built-in pack folder (default, strict or permissive under ~/.defenseclaw/policies/guardrail/), instead of --rule-pack; pass an empty string to clear the setting. A custom directory is refused with a pointer to defenseclaw guardrail use-pack, which pins it by digest.",
     },
     "--judge-model": {
       type: "string",
@@ -555,8 +555,11 @@ Which commands prompt and which are flag-only is listed in the
 
 <Cards>
   <Card title="Quick aliases" href="/docs/guardrail/aliases" description="defenseclaw setup claude-code, setup codex, setup cursor, ..." />
+  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Give a directory group, a user, a connector or one agent its own guardrail profile, and see which profile decided." />
   <Card title="Multi-connector" href="/docs/guardrail/multi-connector" description="One gateway enforcing several hook connectors through guardrail.connectors. Choose Add at the prompt." />
   <Card title="Changing connectors" href="/docs/guardrail/switching-connectors" description="Add, reconfigure, replace or remove connector wiring with the setup aliases." />
   <Card title="Disabling" href="/docs/guardrail/disabling" description="--disable rolls everything back, including agent-side hook entries." />
   <Card title="HITL" href="/docs/hitl" description="Per-connector native ask events and non-pausing fallbacks." />
+  <Card title="Thresholds" href="/docs/policies/thresholds" description="block_at and alert_at: scopes, precedence, the rule pack's default, and how to read and set them." />
+  <Card title="Rules and custom packs" href="/docs/policies/rules" description="Choose a rule pack, pin your own by digest, and tune rules, suppressions and protection packs with guardrail.rules." />
 </Cards>

@@ -22,6 +22,10 @@ and invalid-response failures.
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
 
+On a managed standalone host both variables are *tighten-only*: a value that
+makes hooks stricter is honored, and one that would loosen the administrator's
+posture is ignored. See [Environment variables](/docs/reference/env-vars).
+
 <Callout type="warning" title="Older transport-only descriptions are stale">
 The effective hook fail mode now covers connection refusal, timeout, gateway
 5xx, missing authentication, unauthorized/malformed responses, and a missing
@@ -107,10 +111,22 @@ Omitting `--connector` writes the broad posture. On a multi-connector install,
 a broad write reconciles active connector overrides so an old per-connector
 value cannot silently keep one peer on the prior mode.
 
-The command restarts the gateway and reconciles native hook state by default.
-`--no-restart` persists desired state but can leave the running generation on
-the prior value. `guardrail status` reports configured and runtime values so
-that drift is visible.
+The fail mode is written to `guardrail.hook_fail_mode` (or the connector's own
+`hook_fail_mode`) in `config.yaml`, and it is also baked into the generated hook
+scripts: each carries a `# defenseclaw-derived: sha256=... fail_mode=closed`
+header. The scripts are derived files, so the command restarts the gateway by
+default to render them again and reconcile native hook state. A gateway
+restart is the one step a running gateway cannot do by hot reload for this
+key; it is on the list of
+[restart-required keys](/docs/reference/cli#restart-required-keys).
+`--no-restart` saves the value but leaves the running hooks on the prior mode
+until the next restart. `guardrail status` reports configured and runtime
+values so that drift is visible, and `defenseclaw doctor` warns with `stale
+generated script (... bakes hook fail mode open; config.yaml says closed)` and
+names the command that renders the scripts again.
+
+On a managed standalone host the administrator's config sets the fail mode;
+change it there.
 
 A connector turned off with `guardrail disable --connector X` has no hooks, so
 it has no fail mode: `guardrail status` shows `-` in its Fail column and

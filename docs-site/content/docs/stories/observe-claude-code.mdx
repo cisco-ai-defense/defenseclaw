@@ -78,7 +78,7 @@ grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/com
 The `CMD-RM-RF` rule is CRITICAL and matches `/` plus protected top-level
 prefixes such as `/etc`, `/var`, `/home`, `/usr`, and `/opt`. It deliberately
 does not flag every `rm -rf` command or arbitrary home subdirectory. The three
-bundled packs currently carry the same command-rule boundary; their policy
+bundled packs currently carry the same command-rule boundary; their default
 thresholds and other configuration differ.
 
 </Step>
@@ -185,6 +185,12 @@ defenseclaw guardrail validate-pack ~/my-guardrail-pack
 defenseclaw guardrail use-pack ~/my-guardrail-pack --connector claudecode
 ```
 
+`use-pack` records the copied pack's digest as
+`guardrail.custom_packs.my-guardrail-pack`. If you edit the pack afterwards, the
+gateway keeps enforcing the previous policy and `defenseclaw doctor` shows the
+Policy row as failed, until you pin the new digest. Take it from
+`defenseclaw guardrail validate-pack ~/my-guardrail-pack` and run
+`defenseclaw config set guardrail.custom_packs.my-guardrail-pack.digest sha256:<digest>`.
 The rule schema has no per-path allow-list field, and CRITICAL findings cannot
 be approved through HITL.
 

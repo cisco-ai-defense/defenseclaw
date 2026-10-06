@@ -21,6 +21,13 @@ enrolled user's agent config and repairs it. See
 Only agents you select in the config are protected; see
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 
+DefenseClaw's entries are derived from the config
+(`guardrail.connectors` and `enterprise.machine_policy`), never read back as
+policy. A change to one of its entries in a vendor file is rewritten by the
+next `ensure`, `repair` or `reconcile`, and `verify` reports the drift until
+then. Change the config, not the vendor file, to change what DefenseClaw
+publishes.
+
 ## Routes by connector
 
 | Connector | Linux and macOS | Windows |

@@ -2022,6 +2022,7 @@ class TestWebhookConfig(unittest.TestCase):
 
 
 class TestPolicyDirDefault(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the managed standalone layout is a POSIX layout")
     def test_managed_standalone_layout_defaults_to_the_vendor_policy_folder(self):
         # Go resolves an omitted policy_dir there to the root-owned vendor
         # folder the gateway loads; Python reads the same tree.

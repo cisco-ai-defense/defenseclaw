@@ -100,8 +100,8 @@ defenseclaw setup rotate-token --yes
 credential, each with its own new value. It stops the gateway, saves the new
 values, updates each agent's hook or plugin, and starts the gateway again. If
 a step fails after the gateway stopped, it puts the previous values and
-gateway back. It refuses `--no-restart`, and it does not rewrite a token that
-you supply through your own environment variable.
+gateway back. Rotation always includes the gateway restart, and it does not
+rewrite a token that you supply through your own environment variable.
 
 Each connector still gets its own credential, separate from the gateway
 token; rotation never prints them or lets one connector use another's. After
@@ -201,8 +201,10 @@ What happens when something fails depends on where it fails:
 
 A malformed `config.yaml` stops the gateway from starting instead of loading
 part of it. A disabled connector is removed from what the gateway runs. A
-change saved with `--no-restart` shows as a difference between saved and
-running settings until the gateway restarts.
+setting that needs a gateway restart, such as a port or a connector's hook
+fail mode, shows as a difference between saved and running settings until the
+gateway restarts. Other changes to `config.yaml` apply to the running gateway
+without a restart.
 
 ## Machine-wide hooks are enterprise only
 

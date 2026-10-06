@@ -445,6 +445,7 @@ def test_private_atomic_write_accepts_system_controller_parent_but_keeps_private
     assert list(parent.iterdir()) == [target]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows creates the directory with a private DACL, not a mode")
 def test_shared_atomic_writer_requests_owner_only_mode_for_new_directory(
     monkeypatch,
     tmp_path,

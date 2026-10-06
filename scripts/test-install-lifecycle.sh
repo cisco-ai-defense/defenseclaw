@@ -224,6 +224,9 @@ lane_fresh() {
     must init_and_start || return 1
     assert_healthy
     log "re-run the same version (repair)"
+    # init writes the schema the config was created with; bring it to this release first, as an upgrade would,
+    # so the repair is compared with a config that has nothing left to migrate.
+    must "${HOME}/.local/bin/defenseclaw" migrate >/dev/null || return 1
     local before
     before="$(shasum -a 256 "${DC_HOME}/config.yaml" | awk '{print $1}')"
     must install_candidate "${ASSETS}" || return 1

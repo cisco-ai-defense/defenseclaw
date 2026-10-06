@@ -1,0 +1,219 @@
+---
+title: How DefenseClaw knows who a user is
+description: DefenseClaw learns who ran an agent from the operating system alone, with no Active Directory, Okta or Entra integration. What it reads on Linux, Windows and macOS, what is verified and what is only claimed, how Okta and Entra users appear, and the limits.
+keywords:
+  - DefenseClaw identity sources
+  - no identity provider integration
+  - verified vs claimed identity
+  - SSSD NSS Kerberos
+  - Okta Entra ID attribution
+  - Windows token groups
+  - macOS Open Directory
+---
+
+DefenseClaw ties each agent action to a person without integrating with your
+identity provider. It makes **no calls to Active Directory, Okta or Entra**,
+and it needs **no credentials, tokens, service accounts or app
+registrations**. It reads what the operating system already knows about the
+account that is running the agent, and it says how far each fact can be
+trusted.
+
+This page is the reference for what is read, where, and how much to trust it.
+For the supported identity types and the task guides, see
+[Identity and authentication](/docs/enterprise/identity-and-authentication).
+
+## What it never does
+
+- It never contacts an identity provider, a domain controller or a directory
+  API of its own. A lookup is a call to the host's own account database
+  (`getent`, SSSD, the Windows token and registry, Open Directory).
+- It holds no identity credentials: no passwords, tokens, tickets or keys. The
+  Kerberos ticket is never read, only the principal name in the ticket cache
+  header, and `klist` is never run.
+- It adds no sign-in step and changes no identity setting on the host.
+
+## Verified and claimed
+
+Every fact has an assurance level, recorded as
+`defenseclaw.user.principal.assurance`.
+
+| Assurance | Who vouches for it | Used for |
+| --- | --- | --- |
+| `verified` | The kernel proved the uid or SID (peer credentials, or a per-user credential), and the gateway or the root enumerator read the facts from the OS account database for that uid or SID. | Attribution, and **selecting a guardrail profile**. |
+| `claimed` | The hook, which runs as the user and can be changed by the user: the Kerberos principal in the ticket cache, the SSH variables, the Windows logon session. | Attribution only. Never selects a profile. |
+
+<Flow
+  direction="TB"
+  caption="Two paths into one audit record. The kernel and the account database vouch for the verified path. The hook runs as the user, so what it reports is claimed and never reaches the profile matcher. On a per-user install the gateway runs as the user and the kernel check is the per-user credential."
+>
+  <Zone id="os" label="Z1 · Operating system (root)" tone="trusted">
+    <Node id="k" kind="datastore">{`Kernel and account database\nvouch for the uid or SID`}</Node>
+  </Zone>
+  <Zone id="gw" label="Z2 · Gateway (service or user)" tone="privileged">
+    <Node id="g" kind="gateway">{`Gateway\nresolves the facts itself`}</Node>
+    <Node id="m" kind="policy">{`Profile matcher\nverified facts only`}</Node>
+  </Zone>
+  <Zone id="ss" label="Z3 · User session (user)" tone="untrusted">
+    <Node id="h" kind="connector">{`Hook\nreports session facts`}</Node>
+  </Zone>
+  <Node id="r" kind="datastore">{`Audit record\nassurance: verified or claimed`}</Node>
+  <Edge from="k" to="g" label="proves uid, answers lookups" />
+  <Edge from="h" to="g" label="claims" variant="dashed" />
+  <Edge from="g" to="m" label="verified only" />
+  <Edge from="g" to="r" label="records both" />
+  <Edge from="m" to="r" label="profile, reason" />
+</Flow>
+
+A record carries `verified` facts whenever the gateway resolved some. Claimed
+facts fill in only what nothing verified. When the gateway resolved no
+directory facts at all, the record falls back to the principal the hook
+reported, with `defenseclaw.user.principal.assurance` `claimed` and
+`defenseclaw.user.identity.source` `hook_reported`. Profiles ignore such a
+record.
+
+## What each OS tells us and where we read it
+
+### Linux
+
+| What the OS knows | Where DefenseClaw reads it | Assurance |
+| --- | --- | --- |
+| Which user made the request | The kernel's peer credentials on the hook socket, or the per-user credential on a per-user install | Verified |
+| Account name and the backend that owns it | NSS through `getent passwd`; each service on the `passwd` line of `nsswitch.conf` is asked for the uid in turn (`sss`, `winbind`, `ldap`, `himmelblau`, `aad`), and an account no directory service knows is `local` | Verified |
+| Domain | The fully qualified name SSSD (`alice@corp.example.com`) or winbind (`CORP\alice`) reports | Verified |
+| Groups | `initgroups` plus a group lookup through NSS | Verified |
+| UPN and mail | SSSD InfoPipe (`GetUserAttr` for `userPrincipalName` and `mail`), read by the root hook guardian and handed to the gateway through a root-owned spool; the directory type from `realm list` (`active_directory` for an Active Directory realm, `ldap` for an IPA realm). Standalone enterprise only. Without it the principal is `account@REALM` | Verified |
+| SSH or local session | The hook claims its logind session (`XDG_SESSION_ID`) and terminal; the gateway asks systemd-logind `GetSession` and accepts it only when the session's user is the verified uid, or confirms the terminal in `/run/utmp`. The gateway cannot read `/proc/<pid>` under its sandbox, so it uses logind or utmp | Verified when confirmed, otherwise claimed from `SSH_CONNECTION` |
+| Kerberos principal | The default principal of the credential cache, read directly from a `FILE:` or `DIR:` cache header or over the KCM socket. `KEYRING:` and `API:` caches are reported by type only | Claimed |
+
+The NSS lookups run on every Linux install. The root guardian adds the
+InfoPipe and `realm list` facts on the standalone enterprise profile only. An
+SSSD account on a per-user install therefore has its domain and groups but no
+`defenseclaw.user.directory`, because SSSD serves AD, IPA and plain LDAP
+domains alike and only `realm list` tells which one. A plain LDAP domain
+that SSSD serves without realmd has no directory type on any install.
+
+### Windows
+
+| What the OS knows | Where DefenseClaw reads it | Assurance |
+| --- | --- | --- |
+| Which user made the request | The kernel-verified SID of the caller on a managed host, or the account of the per-user credential on a per-user install | Verified |
+| Account name and domain | `LookupAccountSid`. The domain is reported in lower case | Verified |
+| AD UPN | `TranslateNameW`, resolved in the background and cached for 24 hours | Verified |
+| Entra UPN, provider and tenant | `HKLM\SOFTWARE\Microsoft\IdentityStore\Cache\<SID>` and the `CloudDomainJoin\JoinInfo` join state, for Entra-joined and hybrid-joined computers | Verified |
+| Groups | The SYSTEM enumerator's cache of each user's sign-in token groups: local, AD and Entra group SIDs and names. Standalone enterprise only; a per-user install has no group list | Verified |
+| Remote desktop and logon type | `LsaGetLogonSessionData` for the hook's own logon session | Claimed |
+| Logon session UPN and Kerberos principal | `LsaGetLogonSessionData` (the authentication package is Kerberos, NTLM or CloudAP) | Claimed |
+| SSH session | `SSH_CONNECTION` | Claimed |
+
+Windows groups follow the sign-in token. A user added to or removed from a
+group gets the new profile only after signing out and back in, and then within
+the 15-minute cache.
+
+### macOS
+
+| What the OS knows | Where DefenseClaw reads it | Assurance |
+| --- | --- | --- |
+| Which user made the request | The kernel's peer credentials, or the per-user credential | Verified |
+| Account name and groups | Open Directory, through the account database. Every install reports directory `local` and source `macos_opendirectory` | Verified |
+| Kerberos principal and AD mobile account | `dscl /Search` `AuthenticationAuthority`. Standalone enterprise only | Verified |
+| AD domain | `dsconfigad -show`. Standalone enterprise only | Verified |
+| Device SSO provider (Entra or Okta) | `app-sso platform -s`: Microsoft Company Portal for Entra ID, an Okta Verify bundle for Okta. Standalone enterprise only | Verified |
+| The user's Platform SSO login | Not read | None |
+| Kerberos principal of the session | A `FILE:` cache named by `KRB5CCNAME` or `krb5.conf`. The default `API:` cache cannot be read | Claimed |
+| SSH session | `SSH_CONNECTION` | Claimed |
+
+A per-user Mac install knows the account and its groups, not the directory it
+may be bound to: the bound-Mac facts come from the root enumerator of the
+standalone enterprise profile.
+
+## Which install resolves what
+
+| Fact | Per-user (OSS) | Standalone enterprise |
+| --- | --- | --- |
+| Account, name, uid or SID | Gateway | Gateway |
+| Linux groups, domain, source | Gateway, through NSS | Gateway, through NSS |
+| Linux UPN, mail, directory type | Not available | Root guardian |
+| Windows groups | Not available | SYSTEM enumerator |
+| Windows AD UPN, Entra UPN and tenant | Gateway | Gateway |
+| macOS directory, domain and SSO provider | Not available | Root enumerator |
+| Session and Kerberos principal | Hook, claimed (Linux SSH confirmed by the gateway) | Hook, claimed (Linux SSH confirmed by the gateway) |
+
+Under the Secure Client profile none of these facts are collected and the
+records stay as they were.
+
+## How Okta and Entra users appear
+
+DefenseClaw does not know what Okta or Entra are. It sees the accounts the OS
+sees, so the way a user appears depends on how the directory reaches the
+machine.
+
+| Your setup | What DefenseClaw reports |
+| --- | --- |
+| Okta provisions users into AD, and the machine is AD-joined (SSSD, winbind, Windows domain or an AD-bound Mac) | The AD account: directory `active_directory`, the AD UPN, groups and domain |
+| Okta exposes users over LDAP and the host uses it through SSSD or `nss_ldap` | The LDAP account: directory `ldap` through `nss_ldap`. Through SSSD you get the domain and groups, but no directory type |
+| Mac with Platform SSO or Okta Device Access and Okta Verify | The device's SSO provider: directory `okta`, source `macos_platform_sso` (standalone enterprise only) |
+| Linux with an Okta agent that creates local accounts | The local account, directory `local`. No Okta NSS module is recognized |
+| Entra-joined or hybrid-joined Windows | Directory `entra_id` with the UPN and tenant ID, and Entra group SIDs (`S-1-12-1-...`) in the token |
+| Mac with Platform SSO and Company Portal | The device's SSO provider: directory `entra_id`, source `macos_platform_sso` (standalone enterprise only) |
+| Linux with the himmelblau or `aad` NSS module | Directory `entra_id`, source `himmelblau` or `nss_aad` |
+| Entra accounts synced into on-premises AD | The AD account, as above |
+
+## Limits, stated plainly
+
+- **Attribution, not authentication.** DefenseClaw does not sign anyone in and
+  proves nothing to another system. Do not use these fields to grant access.
+- **Policy selection by facts the OS vouches for.** Only `verified` facts
+  choose a [guardrail profile](/docs/guardrail/user-and-group-policies).
+  Headers, payloads and claimed facts never do.
+- **Local accounts have no directory groups.** A local account has only the
+  groups its OS account database lists, no domain and no UPN.
+- **Group changes take time.** The gateway caches a user's directory facts for
+  15 minutes and refreshes them in the background. A Windows user must also
+  sign out and back in.
+- **A first lookup can be slow.** A cold SSSD or Active Directory answer can
+  take seconds. The first request waits up to two seconds, then the default
+  profile applies for 15 seconds until the lookup is retried.
+- **Some facts need the enterprise profile.** The UPN and directory type on
+  Linux, the group list on Windows and the bound-Mac facts on macOS are read
+  with privilege by the root guardian or enumerator, which a per-user install
+  does not have.
+- **The Kerberos principal and the session can be changed by the user.** They
+  are always `claimed`, except an SSH session the gateway confirmed through
+  logind or utmp.
+- **Okta and Entra paths are parsed from OS state.** The Entra, Okta, bound-Mac
+  and Platform SSO readers are covered by tests against recorded OS output,
+  not against a live tenant.
+
+What was exercised end to end on real hosts, with a Samba Active Directory
+domain: local accounts on all three OSes; AD over Kerberos with SSSD on RHEL 9
+and Ubuntu 24.04, per-user and managed; and AD UPN and groups on a
+domain-joined Windows per-user install. Group-based profiles on a managed
+Windows computer were exercised with local groups.
+
+## What a record carries
+
+| Attribute | Meaning |
+| --- | --- |
+| `user.id`, `defenseclaw.user.id_kind` | The uid or SID, and `posix_uid` or `windows_sid` |
+| `defenseclaw.user.name` | The OS account name |
+| `defenseclaw.user.principal` | The UPN or Kerberos principal. Sent only with `ai_discovery.include_user_principal` |
+| `defenseclaw.user.domain` | The domain or realm, in lower case |
+| `defenseclaw.user.directory` | `local`, `ldap`, `active_directory`, `entra_id`, `okta` or `other` |
+| `defenseclaw.user.tenant_id` | The cloud tenant, for an Entra-joined Windows account |
+| `defenseclaw.user.identity.source` | `nss_files`, `sssd`, `sssd_infopipe`, `winbind`, `nss_ldap`, `himmelblau`, `nss_aad`, `windows_lsa`, `windows_identity_store`, `macos_opendirectory`, `macos_platform_sso` or `hook_reported` |
+| `defenseclaw.user.principal.assurance` | `verified` or `claimed` |
+| `defenseclaw.session.kind`, `client.address` | `local`, `ssh`, `rdp` or `console`, and the client address, reported when the session has the same assurance as the directory facts |
+| `defenseclaw.session.kerberos_principal` | The ticket cache's principal, always claimed. Sent only with `ai_discovery.include_user_principal` |
+
+A low-rate `identity.observed` record, once per user per cache lifetime,
+carries `defenseclaw.user.group_count` and never group names. See
+[End-user identity](/docs/observability/end-user-identity) for the full
+attribute list and how to join records.
+
+## Next steps
+
+<Cards>
+  <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Supported identity types, agent identity, and the task guides." />
+  <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write profiles and assignments, and read the audit record." />
+  <Card title="End-user identity" href="/docs/observability/end-user-identity" description="Every identity attribute and how to join records." />
+</Cards>
