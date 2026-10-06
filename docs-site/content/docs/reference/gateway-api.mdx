@@ -398,10 +398,7 @@ deployment; elsewhere they return `404`.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/policy/evaluate` | Debug the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, scan_result?}}`. DefenseClaw injects its current allow/block lists and returns `{ok: true, data: <AdmissionOutput>}`; arbitrary OPA domains/input are rejected. |
-| `POST` | `/policy/evaluate/firewall` | Evaluate the firewall sub-policy in isolation. |
-| `POST` | `/policy/evaluate/audit` | Evaluate the audit sub-policy. |
-| `POST` | `/policy/evaluate/skill-actions` | Evaluate the `skill_actions` sub-policy by severity. |
-| `POST` | `/policy/reload` | Atomically reload `.rego` modules plus optional `data.json` from configured `policy_dir` (or its `rego` child), invalidate the judge cache, and return `{"status":"reloaded","policy_dir":"..."}`. |
+| `POST` | `/policy/reload` | Rebuild the configuration generation now: the `.rego` modules under `policy_dir` (or its `rego` child) and the rule packs, which the gateway also watches. Invalidates the judge cache and returns `{"status":"reloaded","policy_dir":"..."}`. |
 
 ### Guardrail control plane
 
