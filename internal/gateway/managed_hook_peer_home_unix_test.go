@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 type fakePeerHomeResolver struct {
@@ -139,5 +140,16 @@ func TestManagedHookPeerNameResolvesDirectoryUsers(t *testing.T) {
 	}, nil, func() (managedHookLedger, error) { return managedHookLedger{}, nil })
 	if decision := authorizer.decide(peer, "claudecode", ""); !decision.Allow || !decision.Exempt {
 		t.Fatalf("exempt directory user by name: %+v, want an exempt allow", decision)
+	}
+}
+
+// TestUnnamedGroupMakesDirectoryFactsIncomplete pins GAP-0138: a group that
+// is still a number was not named by the directory (a cold or offline
+// SSSD), so the facts refresh after the incomplete lifetime, not 15 minutes.
+func TestUnnamedGroupMakesDirectoryFactsIncomplete(t *testing.T) {
+	named := useridentity.DirectoryFacts{Groups: []string{"dc-ml-team@dclab.test", "domain users@dclab.test"}}
+	unnamed := useridentity.DirectoryFacts{Groups: []string{"dc-ml-team@dclab.test", "94400513"}}
+	if hasUnnamedGroup(named) || !hasUnnamedGroup(unnamed) {
+		t.Fatalf("hasUnnamedGroup(named) = %t, (unnamed) = %t; want false, true", hasUnnamedGroup(named), hasUnnamedGroup(unnamed))
 	}
 }

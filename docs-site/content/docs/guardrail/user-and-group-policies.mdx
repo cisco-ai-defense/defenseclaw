@@ -183,7 +183,11 @@ What follows when the identity is missing:
   (`default_lookup_failed`) and the lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
-  than 2,048 groups, has no facts rather than part of its membership.
+  than 2,048 groups, has no facts rather than part of its membership. On
+  Linux the group names are looked up 64 at a time, so an account in several
+  hundred groups resolves in one background lookup even when SSSD starts cold.
+  Facts that still hold a group as a bare number (no group answered for that
+  id) are served but refreshed after two minutes, not 15.
 - **Group changes take time.** The gateway caches a user's directory facts for
   15 minutes and refreshes them in the background. A user added to a group
   gets the group's profile within that time. On Windows the groups are those
