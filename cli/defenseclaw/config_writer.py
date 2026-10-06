@@ -201,8 +201,20 @@ def current_actor(prefix: str = ACTOR_PREFIX_CLI) -> str:
     return prefix + (name or "unknown")
 
 
-def restart_required(changed: list[str]) -> list[str]:
-    """Return the paths in ``changed`` that need a gateway restart."""
+def _connector_enabled(raw: bytes, name: str) -> bool:
+    """Whether config bytes enable the guardrail connector ``name`` (unset is enabled)."""
+    try:
+        document = yaml.safe_load(raw.decode("utf-8")) if raw.strip() else {}
+        connectors = document["guardrail"]["connectors"]
+        return connectors[name]["enabled"] is not False
+    except (UnicodeDecodeError, yaml.YAMLError, KeyError, TypeError):
+        return True
+
+
+def restart_required(changed: list[str], before: bytes | None = None, after: bytes | None = None) -> list[str]:
+    """Return the paths in ``changed`` that need a gateway restart. With the
+    document bytes before and after, a connector ``enabled`` that resolves to
+    the same value (``true`` against unset) is not a change."""
     out = []
     for path in changed:
         try:
@@ -215,6 +227,15 @@ def restart_required(changed: list[str]) -> list[str]:
         for key in RESTART_KEYS:
             parts = key.split(".")
             if all(k in ("*", p) for k, p in zip(parts, segs)):
+                if (
+                    before is not None
+                    and after is not None
+                    and len(segs) == 4
+                    and segs[:2] == ["guardrail", "connectors"]
+                    and segs[3] == "enabled"
+                    and _connector_enabled(before, segs[2]) == _connector_enabled(after, segs[2])
+                ):
+                    break
                 out.append(path)
                 break
     return out
@@ -350,7 +371,7 @@ def _transact(
                 os.unlink(target)
             raise
     _refresh_derived_files(target, candidate)
-    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed, current, candidate))
 
 
 def _refresh_derived_files(target: str, candidate: bytes) -> None:

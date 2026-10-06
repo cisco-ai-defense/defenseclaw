@@ -215,3 +215,13 @@ def test_a_stray_deployment_pin_is_ignored_for_a_per_user_config(tmp_path, monke
     monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
     assert config_module.ignore_unmanaged_deployment_pins() == []
     assert os.environ["DEFENSECLAW_DEPLOYMENT_MODE"] == "managed_enterprise"
+
+
+def test_a_connector_enabled_equal_to_its_default_needs_no_restart(tmp_path, monkeypatch):
+    # GAP-0032: enabled: true is the unset default, so flipping between them is no change.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    path = _config(tmp_path, "guardrail:\n  connectors:\n    codex: {mode: observe}\n")
+    on = config_writer.apply([Change("guardrail.connectors.codex.enabled", True)], "cli:test", "t", path=path)
+    assert on.changed and on.restart_required == []
+    off = config_writer.apply([Change("guardrail.connectors.codex.enabled", False)], "cli:test", "t", path=path)
+    assert off.restart_required == ["guardrail.connectors.codex.enabled"]

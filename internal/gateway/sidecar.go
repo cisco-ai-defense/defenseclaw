@@ -2161,7 +2161,9 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailConfig) map[string]config.PerConnectorGuardrailConfig {
 	out := make(map[string]config.PerConnectorGuardrailConfig, len(connectors))
 	for name, pc := range connectors {
-		out[name] = config.PerConnectorGuardrailConfig{Enabled: pc.Enabled, HookFailMode: pc.HookFailMode}
+		// An unset enabled is enabled, so enabled: true is not a change.
+		enabled := pc.Enabled == nil || *pc.Enabled
+		out[name] = config.PerConnectorGuardrailConfig{Enabled: &enabled, HookFailMode: pc.HookFailMode}
 	}
 	return out
 }

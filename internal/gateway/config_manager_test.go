@@ -1013,6 +1013,23 @@ func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {
 	}
 }
 
+// A connector's enabled: true is the unset default, so it is no restart-
+// required change; disabling it is (GAP-0032).
+func TestGuardrailRestartPredicateTreatsEnabledTrueAsTheDefault(t *testing.T) {
+	yes, no := true, false
+	withCodex := func(enabled *bool) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}}
+		return cfg
+	}
+	if guardrailNeedsRestart(withCodex(nil), withCodex(&yes)) {
+		t.Fatal("enabled: true (the default) asked for a restart")
+	}
+	if !guardrailNeedsRestart(withCodex(&yes), withCodex(&no)) {
+		t.Fatal("disabling a connector did not ask for a restart")
+	}
+}
+
 func TestAIDiscoveryRestartPredicateIncludesLiveManagedModeTransitions(t *testing.T) {
 	for _, test := range []struct {
 		name string
