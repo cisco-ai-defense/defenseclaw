@@ -542,7 +542,20 @@
             }
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Principal"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "not collected"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "showHeader": true,
@@ -770,7 +783,20 @@
             }
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Matched group"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "showHeader": true,
