@@ -30,7 +30,7 @@ set -eu
 dc_handoff() {
     # DEFENSECLAW_REPO only changes where the release is downloaded from; the
     # signature is always checked against the official release identity.
-    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 tag tmp expected major
+    local repo="${DEFENSECLAW_REPO:-cisco-ai-defense/defenseclaw}" yes="" plan=0 tag tmp expected major stamped
     local signer='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -105,6 +105,15 @@ dc_handoff() {
     if [ -z "${expected}" ] || [ "${expected}" != "$( (sha256sum "${tmp}/install.sh" 2>/dev/null || shasum -a 256 "${tmp}/install.sh") | awk '{print $1}')" ]; then
         echo "  ✗ install.sh does not match checksums.txt; nothing was changed" >&2
         return 1
+    fi
+    if [ "${tag}" != "local" ]; then
+        # Every release is signed by the same identity, so the signature alone
+        # would let a mirror serve another (older) release under this tag.
+        stamped="$(sed -n 's/^readonly DC_VERSION="\(.*\)"$/\1/p' "${tmp}/install.sh" | head -1)"
+        if [ "${stamped#v}" != "${tag#v}" ]; then
+            echo "  ✗ the installer served for ${tag} is release ${stamped:-unknown}; nothing was changed" >&2
+            return 1
+        fi
     fi
     if [ "${plan}" = 1 ]; then
         echo "  → would upgrade to DefenseClaw ${tag} by running its install.sh"

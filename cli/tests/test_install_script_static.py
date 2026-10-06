@@ -271,8 +271,9 @@ def test_handoff_plan_changes_nothing(tmp_path: Path) -> None:
 
 
 def test_handoff_checks_a_fork_against_the_official_release_identity(tmp_path: Path) -> None:
-    # DEFENSECLAW_REPO moves the downloads, never the trust root.
-    release = _release(tmp_path, "#!/bin/bash\necho ran\n")
+    # DEFENSECLAW_REPO moves the downloads, never the trust root. A validly
+    # signed installer of another release served under the tag is refused.
+    release = _release(tmp_path, '#!/bin/bash\nreadonly DC_VERSION="1.0.0"\necho ran\n')
     fake = tmp_path / "fakebin"
     fake.mkdir()
     (fake / "curl").write_text(
@@ -288,10 +289,18 @@ def test_handoff_checks_a_fork_against_the_official_release_identity(tmp_path: P
     for tool in ("curl", "cosign"):
         (fake / tool).chmod(0o755)
 
-    result = _run(
-        [str(HANDOFF_SH), "--plan"], tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO="fork/defenseclaw",
-    )
+    def handoff() -> subprocess.CompletedProcess[str]:
+        return _run(
+            [str(HANDOFF_SH), "--plan"], tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO="fork/defenseclaw",
+        )
 
+    result = handoff()
+    assert result.returncode == 1 and "is release 1.0.0" in result.stderr, result.stderr
+
+    script = '#!/bin/bash\nreadonly DC_VERSION="1.0.1"\necho ran\n'
+    (release / "install.sh").write_text(script, encoding="utf-8")
+    (release / "checksums.txt").write_text(f"{hashlib.sha256(script.encode()).hexdigest()}  install.sh\n", encoding="utf-8")
+    result = handoff()
     assert result.returncode == 0, result.stderr
     signer = r"^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
     assert f"--certificate-identity-regexp {signer}" in (tmp_path / "cosign.args").read_text(encoding="utf-8")
