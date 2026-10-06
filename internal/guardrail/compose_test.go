@@ -57,4 +57,14 @@ func TestComposeAppliesRulesLayersInOrder(t *testing.T) {
 		!strings.Contains(err.Error(), "unknown rule SEC-NOPE") {
 		t.Fatalf("unknown rule = %v", err)
 	}
+	// Disabling every rule of a file drops the file instead of failing
+	// validation as an empty category (GAP-0025).
+	base.RuleFiles = append(base.RuleFiles, &RulesFileYAML{
+		Version: 1, Category: "pii", SourcePath: "/packs/default/rules/pii.yaml",
+		Rules: []RuleDefYAML{{ID: "PII-A", Pattern: "p+", Title: "P", Severity: "LOW", Confidence: 0.9, Tags: []string{"t"}}},
+	})
+	dropped, err := Compose(base, protections, Customization{Disable: []string{"SEC-A", "SEC-B"}})
+	if err != nil || len(dropped.RuleFiles) != 1 || dropped.findRule("PII-A") == nil {
+		t.Fatalf("disabling every rule of one file = %v, files %d, want the file dropped and the pack valid", err, len(dropped.RuleFiles))
+	}
 }

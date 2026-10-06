@@ -168,7 +168,7 @@ func inspectCopilot(opts Options, state *State) error {
 	}
 	for _, group := range groups {
 		if ownedPerEvent[group.Event] != 1 {
-			state.conflict("Copilot event %s has %d DefenseClaw policy hooks, want exactly one", group.Event, ownedPerEvent[group.Event])
+			state.entryConflict("Copilot event %s has %d DefenseClaw policy hooks, want exactly one", group.Event, ownedPerEvent[group.Event])
 		}
 	}
 	state.detail("Copilot has no managed-only lock: user (~/.copilot), repository (.github/hooks) and Claude-format hooks still run and can return modifiedArgs; the foreign-hook guard applies")

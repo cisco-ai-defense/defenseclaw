@@ -42,12 +42,12 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 	const computed = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
 	h := newTestHost(t, "linux")
 	h.env.Runner = &policyDigestRunner{fakeRunner: h.runner, digest: computed}
-	reported := computed
+	reported, reloadError := computed, ""
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		if !h.healthy || !h.services.isActive(unitGateway) {
 			return 0, nil, errors.New("connection refused")
 		}
-		return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + reported + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+		return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + reported + `","last_reload_error":"` + reloadError + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
 	}
 	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
 	requireOK(t, r)
@@ -62,6 +62,14 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 	r = h.run(Options{Action: ActionRepair})
 	if r.Policy == nil || r.Policy.Applied || r.Policy.GatewayReportedDigest != reported || !hasWarning(r, codePolicyNotApplied) {
 		t.Fatalf("repair with a stale gateway: policy = %+v, warnings = %+v", r.Policy, r.Warnings)
+	}
+
+	// A reload the gateway rejected leaves the digests equal, but the policy
+	// is not applied, and status says so without a change action (GAP-0044).
+	reported, reloadError = computed, "pack digest mismatch"
+	r = h.run(Options{Action: ActionStatus})
+	if r.Policy == nil || r.Policy.Applied || r.Policy.LastReloadError != reloadError || !hasWarning(r, codePolicyReloadRejected) {
+		t.Fatalf("status with a rejected reload: policy = %+v, warnings = %+v", r.Policy, r.Warnings)
 	}
 
 	raw, err := os.ReadFile(h.env.deploymentPath())
