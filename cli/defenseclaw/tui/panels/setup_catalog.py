@@ -31,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from defenseclaw.fail_mode import _UPSTREAM_FAIL_OPEN_CONNECTORS
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard
 from defenseclaw.tui.services.setup_state import (
     ConfigSection,
@@ -317,6 +318,36 @@ def _destinations(observability: Any) -> list[Any] | None:
     ]
 
 
+def _fail_mode_text(cfg: Any) -> str:
+    """What the active connectors' hooks do when the guardrail can't answer.
+
+    The effective value per connector (observe mode and agents that fail open
+    upstream stay open, as in ``defenseclaw status``), not the raw global
+    ``guardrail.hook_fail_mode`` (GAP-0152). A mixed set reads "fail closed,
+    1 open".
+    """
+
+    global_mode = _text(cfg, "guardrail.hook_fail_mode") or "closed"
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_hook_fail_mode", None)
+    modes: list[str] = []
+    for name in active_connector_names(cfg):
+        if name.lower() in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+            modes.append("open")
+        elif callable(resolver):
+            try:
+                modes.append(str(resolver(name) or global_mode).strip().lower())
+            except Exception:  # noqa: BLE001 - a config quirk must not break the Status column.
+                modes.append(global_mode)
+        else:
+            modes.append(global_mode)
+    if not modes:
+        return f"fail {global_mode}"
+    lead = "open" if modes.count("open") > modes.count("closed") else "closed"
+    other = "closed" if lead == "open" else "open"
+    rest = modes.count(other)
+    return f"fail {lead}, {rest} {other}" if rest else f"fail {lead}"
+
+
 def _connector_status(cfg: Any, owned: bool) -> TaskStatus:
     names = active_connector_names(cfg)
     if not names:
@@ -479,7 +510,7 @@ def task_status(
     if wizard == SetupWizard.GUARDRAIL_ACTIONS:
         if not guardrail_on:
             return TaskStatus("off", "guardrail off")
-        return TaskStatus("ok", f"fail {_text(cfg, 'guardrail.hook_fail_mode') or 'closed'}")
+        return TaskStatus("ok", _fail_mode_text(cfg))
     if wizard in {SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER}:
         if problems:
             return TaskStatus("attention", "not configured")
