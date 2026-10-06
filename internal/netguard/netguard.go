@@ -32,11 +32,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
@@ -94,7 +94,7 @@ var extraReservedCIDRs = func() []string {
 // cgnatAllowed mirrors the gateway-side check; broken out so the
 // init-time decision is auditable from a single call site.
 func cgnatAllowed() bool {
-	return os.Getenv("DEFENSECLAW_ALLOW_CGNAT") == "1"
+	return envvars.Getenv("DEFENSECLAW_ALLOW_CGNAT") == "1"
 }
 
 var parsedExtraReserved []*net.IPNet

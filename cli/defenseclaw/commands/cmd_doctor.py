@@ -10169,11 +10169,24 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Security overrides", f"registry load failed: {exc}", r=r)
         return
 
+    # A managed standalone device ignores these; name them, never values.
+    from defenseclaw.envvars import ignored_in_managed_mode
+
+    ignored = set(ignored_in_managed_mode())
+    if ignored:
+        _emit(
+            "pass",
+            "Ignored environment overrides",
+            f"this device is managed, so these have no effect: {', '.join(sorted(ignored))}",
+            r=r,
+        )
+        active = [entry for entry in active if entry.name not in ignored]
+
     private_env_name = "DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"
     active = [entry for entry in active if entry.name != private_env_name]
     configured = getattr(getattr(cfg, "guardrail", None), "allow_private_upstreams", [])
     config_entries = configured if isinstance(configured, (list, tuple)) else []
-    env_entries = os.environ.get(private_env_name, "").split(",")
+    env_entries = [] if private_env_name in ignored else os.environ.get(private_env_name, "").split(",")
     private_entries: list[str] = []
     sources: list[str] = []
     for source, values in (("config.yaml", config_entries), ("environment", env_entries)):

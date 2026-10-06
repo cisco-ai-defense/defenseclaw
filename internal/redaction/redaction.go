@@ -59,11 +59,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // revealEnvVar is the single environment variable that opts logs into
@@ -115,7 +116,7 @@ const compactRuleIDMaxBytes = 11
 // only consulted inside the redaction helpers, which themselves are
 // only called when something is actually about to be logged.
 func Reveal() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(revealEnvVar))) {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv(revealEnvVar))) {
 	case "1", "true", "yes", "on":
 		return true
 	}

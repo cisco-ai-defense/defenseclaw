@@ -326,6 +326,24 @@ class CodebaseCoverageTests(unittest.TestCase):
         ]
         self.fail("\n".join(msg_lines))
 
+    def test_managed_ignored_opt_outs_are_read_through_lookup(self) -> None:
+        """A security opt-out a managed device ignores is read with
+        ``envvars.lookup``, so the managed-mode policy applies to it."""
+        names = [
+            re.escape(e.name)
+            for e in self.registry.entries
+            if e.category == "security_opt_out" and e.managed == "ignore"
+        ]
+        direct = re.compile(r'os\.(?:environ\.get|getenv)\(\s*"(?:' + "|".join(names) + r')"')
+        offenders = []
+        for path in (_REPO_ROOT / "cli" / "defenseclaw").rglob("*.py"):
+            rel = path.relative_to(_REPO_ROOT).as_posix()
+            if rel.endswith("observability/v8_migration.py"):
+                continue  # the 0.x migration reads the retired values once
+            if direct.search(path.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(rel)
+        self.assertEqual(offenders, [], "read these opt-outs with defenseclaw.envvars.lookup")
+
     def test_test_only_entries_are_explicitly_scoped(self) -> None:
         expected = {
             "DEFENSECLAW_TEST_COMMAND",

@@ -41,7 +41,7 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths, credential_provenance, legacy_connector
+from defenseclaw import connector_paths, credential_provenance, envvars, legacy_connector
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -6540,6 +6540,12 @@ def _load_dotenv_into_os(data_dir: str) -> None:
             if dotenv_key_is_process_control(key):
                 _log.warning("config: ignored unsafe process-control key %s from %s", key, env_path)
                 continue
+            # A managed standalone host skips what the registry ignores there.
+            if envvars.managed_policy(key) == envvars.MANAGED_IGNORE:
+                if managed_host is None:
+                    managed_host = envvars.managed_standalone()
+                if managed_host:
+                    continue
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                 value = value[1:-1]
             if key and key not in seen_keys:

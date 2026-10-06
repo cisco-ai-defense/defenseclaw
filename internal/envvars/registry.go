@@ -76,6 +76,25 @@ var AllowedSecurityImpact = map[string]struct{}{
 	ImpactHigh:   {},
 }
 
+// Managed-mode policies (the registry's per-entry managed field).
+const (
+	// ManagedAllow reads the variable as set.
+	ManagedAllow = "allow"
+	// ManagedIgnore treats the variable as unset on a managed standalone
+	// host, from the process environment and from .env.
+	ManagedIgnore = "ignore"
+	// ManagedTightenOnly passes the value through; its reader honours it
+	// only when it makes the setting stricter.
+	ManagedTightenOnly = "tighten_only"
+)
+
+// AllowedManaged is the set of valid managed strings.
+var AllowedManaged = map[string]struct{}{
+	ManagedAllow:       {},
+	ManagedIgnore:      {},
+	ManagedTightenOnly: {},
+}
+
 // truthyValues matches cli/defenseclaw/envvars.py _TRUTHY.
 var truthyValues = map[string]struct{}{
 	"1":    {},
@@ -105,6 +124,9 @@ type EnvVar struct {
 	ReplacementHint string     `json:"replacement_hint,omitempty"`
 	Deprecated      bool       `json:"deprecated,omitempty"`
 	MigrationOnly   bool       `json:"migration_only,omitempty"`
+	// Managed is what a managed standalone host does with the variable:
+	// ManagedAllow, ManagedIgnore or ManagedTightenOnly.
+	Managed string `json:"managed"`
 }
 
 // IsActive returns true when the var is set to a value that activates
@@ -301,6 +323,9 @@ func validateEntry(idx int, e EnvVar) error {
 	}
 	if e.Since == "" {
 		return fmt.Errorf("registry.json: entry %q: since is required", e.Name)
+	}
+	if _, ok := AllowedManaged[e.Managed]; !ok {
+		return fmt.Errorf("registry.json: entry %q: managed must be allow, ignore or tighten_only, not %q", e.Name, e.Managed)
 	}
 	if e.MigrationOnly && !e.Deprecated {
 		return fmt.Errorf("registry.json: entry %q: migration_only requires deprecated=true", e.Name)

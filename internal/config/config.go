@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -3925,7 +3926,7 @@ func (cfg Config) OTelTLSFromFlatConfig() OTelTLSConfig {
 	}
 	if !viper.InConfig("otel.tls.insecure") {
 		switch strings.ToLower(firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
+			envvars.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
 			os.Getenv("OPENCLAW_OTEL_TLS_INSECURE"),
 		)) {
 		case "1", "true", "yes", "on":

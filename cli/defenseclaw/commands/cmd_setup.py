@@ -51,7 +51,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
+from defenseclaw import connector_paths, envvars, platform_support, terminal_checkbox, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
@@ -5398,7 +5398,7 @@ def _check_connector_version_supported_for_setup(
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
     action_mode = (mode or "").strip().lower() == "action"
-    allow_drift = os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
+    allow_drift = envvars.lookup("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
     try:
         disc = agent_discovery.discover_agents(
             use_cache=False,

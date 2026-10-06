@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -3651,10 +3652,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		return refuseAdmission(err)
 	}
-	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
-	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return refuseUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason))
 	}
 	if contractResolution.UntestedVersion {
@@ -3667,7 +3668,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			// Generated hook drift is repairable by Setup below and must not block
 			// an explicit setup/restart from refreshing an existing connector.
 			// Only an upstream agent-version/contract change requires the action-mode override.
-			if connector.HookContractCompatibilityDrifted(previous, current) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			if connector.HookContractCompatibilityDrifted(previous, current) && actionMode && envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 				if err := hookContractDriftAdmission(conn.Name(), previous, current); err != nil {
 					return refuseAdmission(err)
 				}
@@ -5625,12 +5626,12 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&
-		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		!actionMode && !strictUnknownVersion &&
-		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version %q is not covered by a known hook contract; continuing in observe mode: %s\n", conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
 	if contractResolution.UntestedVersion {
@@ -5638,7 +5639,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
-		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return markUnverified(fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason))
 	}
 	if previous := previousLock; previous.Connector != "" {
@@ -5649,7 +5650,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		// only when the agent version or selected contract changed.
 		if connector.HookContractCompatibilityDrifted(previous, current) &&
 			actionMode &&
-			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			envvars.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 			if err := hookContractDriftAdmission(conn.Name(), previous, current); err != nil {
 				return err
 			}

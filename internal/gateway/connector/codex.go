@@ -33,6 +33,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -622,7 +623,7 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		// restores the legacy "trust any loopback" behavior for
 		// single-user dev hosts that haven't recorded a provider
 		// snapshot yet.
-		if strings.TrimSpace(os.Getenv("DEFENSECLAW_CODEX_LOOPBACK_TRUST")) == "1" {
+		if strings.TrimSpace(envvars.Getenv("DEFENSECLAW_CODEX_LOOPBACK_TRUST")) == "1" {
 			AcceptLoopbackWithWarning(r, c.gatewayToken, "codex",
 				"DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 — trusting loopback /c/codex/* requests without proof of credential possession",
 				&c.loopbackWarn)
