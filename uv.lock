@@ -18,6 +18,7 @@ overrides = [
     { name = "importlib-metadata", specifier = ">=8.7.1,<8.8" },
     { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "litellm", specifier = ">=1.91.5,<1.92.0" },
+    { name = "multidict", specifier = ">=6.9.1" },
     { name = "openai", specifier = "==2.30.0" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pygments", specifier = ">=2.20,<3" },
