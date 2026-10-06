@@ -1132,7 +1132,7 @@ swap_in() {
     fi
     if [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
         info "Migrating config and data"
-        local args=(migrate --yes)
+        local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
         DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
         # The previous version's agent discovery is absent or stale. Refresh
