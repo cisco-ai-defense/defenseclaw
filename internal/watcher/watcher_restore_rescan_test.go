@@ -103,6 +103,23 @@ func TestRestoreAfterUnblockRescanQuarantinesAgain(t *testing.T) {
 	}
 }
 
+// GAP-0003: the block shorthand (install block, file none, runtime disable)
+// blocks and disables the skill but leaves its files in the skill folder; only
+// a file action of quarantine moves them.
+func TestRescanBlockShorthandKeepsFiles(t *testing.T) {
+	w, _, evt := restoredRescanFixture(t, false)
+	out := &policy.AdmissionOutput{
+		Verdict: "rejected", InstallAction: "block", FileAction: "none", RuntimeAction: "block",
+	}
+	w.applyPostScanEnforcement(
+		context.Background(), enforce.NewPolicyEngine(w.store), out, evt, "skill",
+		&scanner.ScanResult{Scanner: "skill-scanner", Target: evt.Path}, "skill-scanner",
+	)
+	if _, err := os.Lstat(evt.Path); err != nil {
+		t.Fatalf("block with file none moved the skill files: %v", err)
+	}
+}
+
 // A restore that kept the install block still keeps the restored files, and
 // the record no longer claims they are quarantined.
 func TestRestoreWhileBlockedRescanKeepsFilesNotQuarantined(t *testing.T) {
