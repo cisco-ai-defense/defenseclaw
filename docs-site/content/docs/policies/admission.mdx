@@ -1,0 +1,635 @@
+---
+title: Admission and the block/allow list
+description: How DefenseClaw decides whether a skill, MCP server or plugin may be installed and run. The admission block sets what each scan finding does, and asset_policy holds the only block and allow lists. Both live in config.yaml.
+keywords:
+  - DefenseClaw admission
+  - admission config
+  - asset_policy
+  - block list
+  - allow list
+  - defenseclaw skill block
+  - defenseclaw mcp block
+  - first_party_allow_list
+  - scan_on_install
+  - scanner_overrides
+  - quarantine
+---
+
+Admission is the check DefenseClaw runs when a skill, an MCP server or a plugin
+appears on a machine, or when you install one with the CLI. It answers one
+question: may this asset be installed and run? Two sections of `config.yaml`
+(`config_version: 9`) answer it, and nothing else does:
+
+- `admission:` says what a scan finding does. For each asset type it maps a
+  severity to an action: block it, quarantine it, warn, or allow it.
+- `asset_policy:` holds the block list and the allow list. A name you deny is
+  blocked without a scan. A name you allow skips the scan.
+
+This is one case of the rule that `config.yaml` is the only admin intent (see
+[Configuration: one source of truth](/docs/reference/source-of-truth)). The
+older homes of this policy are read once, by the version 9 migration, and are
+then ignored (Secure Client devices keep the 1.0 behavior):
+`policies/rego/data.json`, the `skill_actions`, `mcp_actions` and
+`plugin_actions` keys, and the operator rows of the audit database's `actions`
+table. [Upgrading from config_version 8](#upgrading-from-config_version-8)
+says exactly what moves. Quarantine, disable and the scan-verdict blocks are
+[runtime state](#what-stays-runtime-state), never policy.
+
+## How a verdict is reached
+
+<Flow
+  direction="TB"
+  caption="The admission check for one asset. The two lists are asset_policy rules and are checked first: a denied rule wins over an allowed one at the same scope. The first-party list belongs to admission and skips the scan only while allow_list_bypass_scan is true. With no scan result yet, scan_on_install decides between a scan and an immediate allow."
+>
+  <Node id="asset" kind="agent">{`A skill, MCP server\nor plugin appears`}</Node>
+  <Node id="lists" kind="decision">{`On a list?\nasset_policy rules`}</Node>
+  <Node id="blocked" kind="generic">{`Blocked\ndenied rule matched`}</Node>
+  <Node id="allowed" kind="generic">{`Allowed\nscan skipped`}</Node>
+  <Node id="first" kind="decision">{`First party?\nadmission list`}</Node>
+  <Node id="scan" kind="policy">{`Scan, then apply\nthe severity action`}</Node>
+  <Node id="out" kind="generic">{`Clean, warning,\nallowed or rejected`}</Node>
+  <Edge from="asset" to="lists" label="checks" />
+  <Edge from="lists" to="blocked" label="denied rule" />
+  <Edge from="lists" to="allowed" label="allowed rule" />
+  <Edge from="lists" to="first" label="no rule" />
+  <Edge from="first" to="allowed" label="matches" />
+  <Edge from="first" to="scan" label="no match" />
+  <Edge from="scan" to="out" label="decides" />
+</Flow>
+
+The check ends in one of six verdicts:
+
+| Verdict | When | What happens |
+| --- | --- | --- |
+| `blocked` | A `denied` rule in `asset_policy` matches. | The install is refused before any scan. The install watcher quarantines the files of a skill or plugin that appeared anyway. Tool calls to a blocked MCP server are refused. |
+| `allowed` | An `allowed` rule matches; or a first-party entry matches while `allow_list_bypass_scan` is true; or there is no scan result and `scan_on_install` is false; or the finding's action is `allow`. | Nothing is enforced. |
+| `scan` | Nothing decided yet and `scan_on_install` is true. | The asset is scanned, then checked again with the scan result. |
+| `clean` | The scan found nothing. | Nothing is enforced. |
+| `warning` | The scan found something and the action is `warn`. | The finding is recorded as an install warning. The asset stays. |
+| `rejected` | The scan found something and the action blocks, or the scanner failed. | The action's install, file and runtime parts apply. A scanner that errors or exits non-zero is rejected, with install block, file quarantine and runtime disable: admission fails closed. |
+
+Precedence, first match wins:
+
+1. `asset_policy` `denied`: `blocked`. It beats every allow, including the
+   first-party list.
+2. `asset_policy` `allowed`: `allowed`, no scan.
+3. `admission` `first_party_allow_list`, while `allow_list_bypass_scan` is
+   true: `allowed`, no scan.
+4. No scan result and `scan_on_install: false`: `allowed`. With
+   `scan_on_install: true`: `scan`.
+5. The scan result: the action for the worst severity, or the scanner-specific
+   action when `scanner_overrides` has one.
+
+Where it runs: the gateway's install watcher checks a skill, plugin or MCP
+server when it appears in a watched directory, and the `defenseclaw` install
+and scan commands run the same check. The watcher applies a `rejected` verdict
+only while `gateway.watcher.skill.take_action` (or `plugin` / `mcp`) is true,
+which is the default; with it false, the verdict is recorded and nothing else
+happens.
+
+## The admission block
+
+`admission:` has one block per asset type: `skill`, `mcp` and `plugin`. There
+is also a `defaults` block. Each asset type inherits `defaults` field by field:
+a field you leave out of `skill` falls back to `defaults`, then to the built-in
+value.
+
+There is no `admission.tool`. Nothing installs a tool, so there is nothing to
+scan; tools have [name lists only](#tool-lists).
+
+```yaml
+admission:
+  defaults:
+    scan_on_install: true
+    allow_list_bypass_scan: true
+  skill:
+    actions:
+      critical: quarantine
+      high: quarantine
+      medium: warn
+      low: allow
+      info: allow
+    scanner_overrides:
+      skill-scanner:
+        medium: block
+    first_party_allow_list:
+      - name: acme-review
+        source_path_contains: [".acme/skills/acme-review"]
+        reason: first-party Acme skill
+  mcp:
+    actions:
+      high: block
+      medium:
+        install: none
+        file: none
+        runtime: disable
+  plugin:
+    allow_list_bypass_scan: false
+```
+
+<TypeTable
+  type={{
+    "scan_on_install": {
+      type: "boolean",
+      description: "Scan an asset that has no scan result yet. When false, such an asset is allowed without a scan.",
+      default: "true",
+    },
+    "allow_list_bypass_scan": {
+      type: "boolean",
+      description: "Let a first_party_allow_list match skip the scan. It does not affect asset_policy allowed rules, which always skip the scan.",
+      default: "true",
+    },
+    "actions.<severity>": {
+      type: "action",
+      description: "What a finding of this severity does: critical, high, medium, low or info. A shorthand (block, quarantine, warn, allow) or an install/file/runtime mapping.",
+    },
+    "scanner_overrides.<scanner>.<severity>": {
+      type: "action",
+      description: "The same, for findings from one scanner. It wins over actions for that scanner. Scanner keys: skill-scanner, mcp-scanner, plugin-scanner, codeguard, clawshield-injection, clawshield-malware, clawshield-pii, clawshield-secrets, clawshield-vuln. VirusTotal and the other analyzers run inside the skill scanner, so their findings use the skill-scanner key.",
+    },
+    "first_party_allow_list": {
+      type: "list",
+      description: "Assets that skip the scan: each entry has a name, source_path_contains (at least one path) and an optional reason. A list you set replaces the built-in one for that type; an empty list trusts nothing.",
+    },
+  }}
+/>
+
+### Actions
+
+An action is a shorthand or the exact triple it stands for. Use the triple
+only when no shorthand fits.
+
+| Shorthand | `install` | `file` | `runtime` | Verdict |
+| --- | --- | --- | --- | --- |
+| `block` | `block` | `none` | `disable` | `rejected` |
+| `quarantine` | `block` | `quarantine` | `disable` | `rejected` |
+| `warn` | `none` | `none` | `enable` | `warning` |
+| `allow` | `none` | `none` | `enable` | `allowed` |
+
+In a triple, `install` is `block`, `allow` or `none`; `file` is `none` or
+`quarantine`; `runtime` is `disable` or `enable`. A finding is `rejected`
+whenever `install` is `block` or `runtime` is `disable`. `warn` and `allow` do
+the same thing to the asset; they differ only in the verdict they record. A
+severity that no layer covers fails closed, as a block.
+
+Quarantine moves the files of a skill or plugin into DefenseClaw's quarantine
+area. An MCP server has no files to move, so for MCP `block` and `quarantine`
+both mean: refuse its tool calls.
+
+### What applies if you set nothing
+
+Each severity resolves on its own, first match wins:
+
+1. `admission.<type>.actions`
+2. For skills only, the scanner gate (below)
+3. `admission.defaults.actions`
+4. The built-in action
+
+| Severity | Skill (default gate) | MCP server | Plugin |
+| --- | --- | --- | --- |
+| `critical` | `quarantine` | `quarantine` | `quarantine` |
+| `high` | `quarantine` | `quarantine` | `quarantine` |
+| `medium` | `warn` | `quarantine` | `warn` |
+| `low` | `allow` | install `none`, file `none`, runtime `disable` | `warn` |
+| `info` | `allow` | `warn` | `warn` |
+
+The built-in first-party entries are `codeguard` for skills, `defenseclaw` for
+plugins, and none for MCP servers.
+
+### The scanner gate
+
+A skill's actions derive from the skill scanner's own gate unless
+`admission.skill.actions` sets them. `scanners.skill_scanner.fail_on_severity`
+(default `HIGH`) and `scanners.skill_scanner.review_queue_min` (default
+`MEDIUM`) give the rule: a finding at or above the gate quarantines, a finding
+from the review minimum up to the gate warns, and anything lower is allowed.
+Raising the gate in one place therefore changes what a skill scan does without
+touching `admission:`.
+
+```bash
+defenseclaw config set scanners.skill_scanner.fail_on_severity CRITICAL
+defenseclaw config set scanners.skill_scanner.review_queue_min LOW
+defenseclaw config get admission.skill.actions --effective
+```
+
+```text
+Set scanners.skill_scanner.fail_on_severity (config generation 6, sha256 295115627558).
+Effective policy digest: sha256:37484d42a2a3b4428f4b592f5a33bdf27bfad89a8b81005534bc0e388bdef510
+Set scanners.skill_scanner.review_queue_min (config generation 7, sha256 db97f7544649).
+Effective policy digest: sha256:8247599d5d5d1b6a8b8dc84a1b9ff4c88669c653805559fa6889daf91a315f9f
+(source: derived:scanners.skill_scanner)
+critical: quarantine
+high: warn
+info: allow
+low: warn
+medium: warn
+```
+
+<Callout title="The gate shadows admission.defaults for skills">
+Only skills have a scanner gate, and it sits between `admission.skill` and
+`admission.defaults`. So `admission.defaults.actions` never changes a skill's
+actions: set `admission.skill.actions` for that. MCP servers and plugins have
+no gate, so they do follow `admission.defaults.actions`.
+</Callout>
+
+A severity you set under `admission.skill.actions` wins for that severity only;
+the others keep deriving from the gate:
+
+```bash
+defenseclaw config set admission.skill.actions.medium block
+defenseclaw config get admission.skill.actions --effective
+```
+
+```text
+Set admission.skill.actions.medium (config generation 4, sha256 621b671d0367).
+Effective policy digest: sha256:995422aed39baf2e53ad6ac0f3b8e0a489696ea70e21009a04422d210c748fea
+(source: config:admission.skill.actions)
+critical: quarantine
+high: quarantine
+info: allow
+low: allow
+medium: block
+```
+
+The generation numbers and digests in these examples differ on your machine.
+The `(source: ...)` line goes to stderr and prints first; it names the
+highest-priority layer that set any of the severities: `builtin`,
+`derived:scanners.skill_scanner`, `config:admission.<type>.actions` or
+`config:admission.defaults.actions`.
+
+### Scanner overrides
+
+`scanner_overrides` changes the action for one scanner's findings. The key is
+the name of the scanner that produced the result, not an asset type. This
+blocks a skill whose worst finding is MEDIUM when the skill scanner found it,
+and leaves the action for findings from other scanners alone:
+
+```bash
+defenseclaw config set admission.skill.scanner_overrides.skill-scanner.medium block
+```
+
+### First-party assets
+
+A first-party entry trusts an asset by name and location. It matches when the
+asset's name equals `name` and its path contains one of the
+`source_path_contains` values as whole path components, ignoring case and
+using either slash. A look-alike never matches:
+
+| Asset path | Marker `.acme/skills/acme-review` | Verdict |
+| --- | --- | --- |
+| `/home/alice/.acme/skills/acme-review` | matches | `allowed`, scan skipped |
+| `/home/alice/.acme/skills/acme-review-evil` | no: a different last component | `scan` |
+| `/home/alice/.acme-evil/skills/acme-review` | no: a different first component | `scan` |
+| `/Users/alice/.ACME/Skills/acme-review/SKILL.md` | matches (case does not matter) | `allowed`, scan skipped |
+
+```bash
+defenseclaw config set admission.skill.first_party_allow_list --json '[{"name":"acme-review","source_path_contains":[".acme/skills/acme-review"],"reason":"first-party Acme skill"}]'
+```
+
+The list you set replaces the built-in one for that asset type, so list
+`codeguard` again if you still want it trusted. `--json '[]'` trusts no asset.
+The `reason` is a note for people and is not evaluated. Turn first-party
+trust off for one type with `allow_list_bypass_scan: false`; the entries then
+stay in the file but every asset is scanned.
+
+### Check what applies
+
+Read the compiled result for one type, with the layer it came from:
+
+```bash
+defenseclaw config get admission.skill --effective
+```
+
+```text
+(source: derived:scanners.skill_scanner)
+actions:
+  critical: quarantine
+  high: quarantine
+  info: allow
+  low: allow
+  medium: warn
+allow_list_bypass_scan: true
+first_party_allow_list:
+- name: codeguard
+  source_path_contains:
+  - .openclaw/workspace/skills/codeguard
+  - .openclaw/skills/codeguard
+  - .zeptoclaw/skills/codeguard
+  - .claude/skills/codeguard
+scan_on_install: true
+scanner_overrides: {}
+```
+
+Dry-run one asset through the running policy with the gateway CLI. This asset
+is on the block list, so it never reaches a scan:
+
+```bash
+defenseclaw-gateway policy evaluate --target-type skill --target-name risky-skill
+```
+
+```text
+{
+  "verdict": "blocked",
+  "reason": "skill 'risky-skill' is on the block list",
+  "file_action": "none",
+  "install_action": "none",
+  "runtime_action": "allow"
+}
+```
+
+Add `--severity` and `--findings` to simulate a scan result:
+
+```bash
+defenseclaw-gateway policy evaluate --target-type skill --target-name new-skill --severity HIGH --findings 3
+```
+
+```text
+{
+  "verdict": "rejected",
+  "reason": "max severity HIGH triggers block per policy",
+  "file_action": "quarantine",
+  "install_action": "block",
+  "runtime_action": "block"
+}
+```
+
+In the output, `runtime_action` uses the policy engine's spelling, `block` or
+`allow`, for the config's `disable` or `enable`. The dry run has no connector
+and uses the path `/dry-run`, so rules scoped to a connector and allow rules
+pinned to a path do not match in it. `defenseclaw-gateway policy show` prints
+the whole compiled admission policy.
+
+## The block/allow list
+
+`asset_policy` is the only block list and the only allow list. For each of
+`skill`, `mcp` and `plugin`, `asset_policy.<type>.denied` and
+`asset_policy.<type>.allowed` hold the rules:
+
+```yaml
+asset_policy:
+  skill:
+    denied:
+      - name: risky-skill
+        reason: unvetted vendor skill
+    allowed:
+      - name: vetted-skill
+        reason: reviewed by security
+        source_path_contains: ["/opt/acme/skills/vetted-skill"]
+  mcp:
+    denied:
+      - name: evil-mcp
+        connector: claudecode
+        reason: exfiltrates data
+      - url: https://mcp.example.net/v1
+        reason: unknown vendor
+  tool:
+    denied:
+      - name: delete_file
+        connector: claudecode
+        reason: destructive
+    allowed:
+      - name: read_file
+        reason: vetted
+```
+
+<TypeTable
+  type={{
+    "name": {
+      type: "string",
+      description: "The asset's name. Matched exactly, ignoring case.",
+    },
+    "connector": {
+      type: "string",
+      description: "Limit the rule to one connector, for example claudecode. Empty means every connector. Aliases such as claude-code and claude_code count as the same connector.",
+    },
+    "reason": {
+      type: "string",
+      description: "A note shown in listings and audit events.",
+    },
+    "url, command, args_prefix, transport": {
+      type: "string",
+      description: "MCP servers only. Match a server by where it points or how it starts, with or without a name. Every field you give must match. command compares the program's base name; args_prefix compares the first arguments exactly.",
+    },
+    "source_path_contains": {
+      type: "list",
+      description: "Pin the rule to a path. See path pins below.",
+    },
+  }}
+/>
+
+A rule needs at least one of these fields to match anything. There are no
+wildcards or regular expressions, because this list gates code and tool
+execution.
+
+### Which rule wins
+
+1. A rule scoped to the asset's connector is checked before an unscoped one. A
+   connector-scoped allow therefore overrides a global deny for that connector.
+2. At the same scope, `denied` is checked before `allowed`.
+3. The first matching rule decides.
+
+### Path pins
+
+`source_path_contains` ties a rule to one on-disk copy. An `allowed` rule only
+matches when its pin appears in the asset's path as whole path components, so
+an allow for `/opt/acme/skills/vetted-skill` never covers
+`/opt/acme/skills/vetted-skill-v2`, and an allow with a pin never matches an
+asset that comes with no path. A `denied` rule with a pin is looser: its text matches as a
+case-insensitive substring of the path, and it matches nothing when no path is
+presented. The CLI writes a pin when you allow an installed skill or plugin,
+and never writes one on a block, so a block follows the name wherever the
+asset is installed.
+
+### enabled and mode
+
+The explicit lists always apply, whatever `asset_policy.enabled` and
+`asset_policy.mode` say. Those two keys (`enabled: false` and `mode: observe`
+by default) govern only the other asset policy rules: a `default: deny` for a
+type, `registry_required`, and runtime detection. With `mode: observe` such a
+rule records that it would have blocked and lets the asset through; with
+`mode: action` it blocks. See [Registries](/docs/scanning/registries) for the
+approved-catalog rules.
+
+### Tool lists
+
+`asset_policy.tool.denied` and `asset_policy.tool.allowed` hold rules with a
+`name`, an optional `connector` and a `reason`. Tool names match
+case-sensitively. For a tool call from connector C, the order is: denied for C,
+allowed for C, denied for any connector, allowed for any connector, then the
+normal guardrail checks. An allow skips the rule, pattern and judge checks, but
+a tool that writes files still goes through CodeGuard.
+
+## Change the lists
+
+| Writer | Use it for |
+| --- | --- |
+| `defenseclaw skill`, `mcp`, `plugin`, `tool` `block`, `allow`, `unblock` | The everyday way. Each command edits the list and the gateway applies it. |
+| `defenseclaw config set asset_policy...` | Anything the commands do not cover: URL or command rules, path pins, bulk edits. |
+| REST `POST` and `DELETE /enforce/block`, `POST /enforce/allow` | Scripts and other tools. See [Gateway API](/docs/reference/gateway-api#block-and-allow-lists). |
+| Editing `config.yaml` by hand | Works. The gateway applies a valid change within seconds and rejects an invalid one. `config set` checks the change before it writes. |
+
+Every writer goes through the one config writer, and the gateway applies the
+change without a restart. A change takes effect on the next decision; there is
+nothing to reload.
+
+```bash
+defenseclaw skill block risky-skill --reason "unvetted vendor skill"
+defenseclaw mcp block evil-mcp --connector claudecode --reason "exfiltrates data"
+defenseclaw plugin block shady-plugin --reason "unsigned"
+defenseclaw tool block delete_file --connector claudecode --reason "destructive"
+defenseclaw tool allow read_file --reason "vetted"
+defenseclaw tool list
+```
+
+```text
+[skill] Blocked 'risky-skill' (every connector).
+[mcp] Blocked 'evil-mcp' (claudecode).
+  Note: 'evil-mcp' is not configured on claudecode. Configured MCP servers: none.
+  The block applies if a server with this name or URL is added later.
+  Check the name with: defenseclaw mcp list --connector claudecode
+[plugin] Blocked 'shady-plugin' (every connector).
+[tool] 'delete_file' added to block list (connector 'claudecode')
+[tool] 'read_file' (covers connector=claudecode) added to allow list
+Tools (connector=claudecode)
+TOOL         STATUS   SCOPE      REASON                                    UPDATED
+----------------------------------------------------------------------------------
+delete_file  block    connector  destructive                               2026-10-06 18:19
+read_file    allow    global     vetted                                    2026-10-06 18:19
+```
+
+- Without `--connector`, a block or allow covers every connector. With
+  `--connector`, it covers that one. `skill allow` and `plugin allow` on an
+  installed copy write a rule scoped to the connector that has the copy and
+  pinned to its path.
+- `skill allow` and `plugin allow` remove the name from the block list as well.
+- `unblock` removes the block or allow rule for the name and clears its runtime
+  state, so its scan verdict decides again: the CLI says the asset is scanned
+  on the next check. It never restores files; use `restore` for that.
+- A block does not touch an asset that is already running. Use `disable` or
+  `quarantine` for that.
+- With the gateway stopped, the commands still write `config.yaml` and warn
+  that no audit event was recorded. The gateway applies the list when it starts.
+
+Over REST, state-changing calls need the `X-DefenseClaw-Client` header and a
+JSON content type, besides the gateway token:
+
+```bash
+curl -s -X POST http://127.0.0.1:18970/enforce/block \
+  -H "Authorization: Bearer $DEFENSECLAW_GATEWAY_TOKEN" \
+  -H "X-DefenseClaw-Client: cli" \
+  -H "Content-Type: application/json" \
+  -d '{"target_type":"skill","target_name":"curl-skill","reason":"blocked from a script"}'
+```
+
+```text
+{"effective_policy_digest":"sha256:8e6d614e5be0460109785e8e0d532aa980ab41dd87babf936d2675c4726f0c4b","generation":17,"status":"blocked"}
+```
+
+### Managed devices
+
+On a managed standalone device the admin config is the only source. Every
+writer refuses, and the attempt is recorded in the audit log:
+
+```text
+Error: This device is managed: add it to asset_policy in the admin config (MDM or management plane)
+```
+
+The CLI exits with code 3, and `defenseclaw config set` refuses with the
+message `error: This device is managed: change config.yaml in the admin config
+(MDM or management plane), not on the device`, also exit 3. REST answers `403`
+with `{"error":"managed_device","detail":"policy changes are made in the
+management plane"}`. Put the same `asset_policy` rules in the admin config. See
+[the enterprise guide](/docs/enterprise) for how that config reaches devices.
+Reading the lists (`GET /enforce/blocked` and `/enforce/allowed`) works
+everywhere.
+
+Secure Client devices are unchanged: they keep reading the 1.0 admission policy
+and keep their operator entries in the audit database. See
+[Secure Client](/docs/enterprise/secure-client).
+
+### Users and groups
+
+Admission and the block/allow lists belong to the device. A rule can be scoped
+to a connector, but not to a user or a group. Guardrail profiles are what you
+target at users and groups, and they carry guardrail settings (mode, thresholds,
+human approval, rule pack), not admission. See
+[Guardrail profiles at scale](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale).
+
+## What stays runtime state
+
+Some enforcement results are records of what happened on one machine, not
+intent. They stay in the `actions` table of `audit.db`, the enforcement
+journal, and are never read as policy:
+
+- quarantine and restore of a skill's or plugin's files (`quarantine`, `restore`)
+- runtime disable and enable (`disable`, `enable`)
+- the install block that a scan verdict records (its reason starts with
+  `auto-block`, `post-scan:` or similar)
+
+The journal is not part of the effective policy digest, and `config.yaml`
+never lists it. `unblock` also clears the journal's install block for the
+name, so a later `restore` does not leave the asset blocked.
+
+## Upgrading from config_version 8
+
+`defenseclaw config migrate` (and `defenseclaw upgrade`, which runs it) moves
+the old admission inputs into `config.yaml`. `--dry-run` shows what would move
+and writes nothing. The migration keeps `config.yaml.v8.bak` and writes
+`migration-v9.json`. Until you run it, the version 9 gateway reads a version 8
+file in memory, with the old inputs still applying; after it, those keys are
+rejected in a version 9 file.
+
+| Old input | Becomes |
+| --- | --- |
+| `policies/rego/data.json` `config.scan_on_install` and `allow_list_bypass_scan` | `admission.defaults.*`, written only when the value was off |
+| `data.json` `actions` and the per-type `scanner_overrides` | `admission.<type>.actions`, a full five-severity table, written only for a type that differs from the built-in |
+| `data.json` `first_party_allow_list` | `admission.<type>.first_party_allow_list`, written only when it differs from the built-in |
+| `skill_actions`, `mcp_actions`, `plugin_actions` | Removed. They never changed an outcome for the severities `data.json` covered. A value you had customised away from what `data.json` enforced is listed as a conflict in `migration-v9.json`. |
+| `watch.allow_list_bypass_scan` | Removed. Nothing read it. |
+| Operator rows of the audit `actions` table | `asset_policy.<type>.denied` and `allowed` |
+| `data.json` itself | Renamed `data.json.migrated-v9` |
+
+An operator row is an `actions` row whose `install` field is `block` or
+`allow`, unless its reason is a scan verdict (it starts with `auto-block`,
+`post-scan:`, `post-install scan:`, `scan:` or `scan clean or within policy`).
+Each moved row becomes a rule with its name, connector and reason. An allow
+also keeps its `source_path` as a `source_path_contains` pin; a block does not.
+A tool row named `@connector/tool` becomes a rule for `tool` on that connector,
+and a row named `source/tool` drops the source. After the config is written,
+the migration clears the `install` field of every moved row, and deletes a row
+that has nothing else in it. Quarantine and disable state, scan-verdict blocks
+and rows of an unknown type stay in the table.
+
+A dry run on a version 8 home whose `actions` table holds five operator rows
+(`a1` to `a5`) and three journal rows (`a6` to `a8`: a scan-verdict block, a
+quarantine and a watcher auto-block):
+
+```bash
+defenseclaw config migrate --dry-run
+```
+
+```text
+Would move 6 values into config.yaml; 0 conflicts.
+  scanners.skill_scanner.policy -> scanners.skill_scanner.policy
+  actions:a1 -> asset_policy.skill.denied
+  actions:a2 -> asset_policy.skill.allowed
+  actions:a3 -> asset_policy.mcp.denied
+  actions:a4 -> asset_policy.tool.denied
+  actions:a5 -> asset_policy.tool.denied
+```
+
+On a managed standalone device nothing moves. The migration only counts the
+local rows, ignores them, and reports a `local_enforcement_entries_ignored`
+warning with the count; the admin config is the policy. On a Secure Client
+device they stay in the table, unchanged.
+
+## Related
+
+<Cards>
+  <Card title="Thresholds" href="/docs/policies/thresholds" description="block_at and alert_at: when a guardrail finding blocks a prompt or tool call." />
+  <Card title="Rules and rule packs" href="/docs/policies/rules" description="guardrail.rules, rule packs and custom packs pinned by digest." />
+  <Card title="Registries" href="/docs/scanning/registries" description="Approved catalogs, deny-by-default and registry_required." />
+  <Card title="Skill scanner" href="/docs/scanning/skill-scanner" description="The scanner behind skill findings and its fail_on_severity gate." />
+  <Card title="Gateway API" href="/docs/reference/gateway-api" description="The /enforce and /policy routes." />
+  <Card title="Configuration reference" href="/docs/reference/configuration" description="Every key of config.yaml." />
+</Cards>

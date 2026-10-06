@@ -225,7 +225,7 @@ ai_discovery:
   lookup_model_provenance_online: false
 ```
 
-Enable it by editing that value to `true`, interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
+Enable it with `defenseclaw config set ai_discovery.lookup_model_provenance_online true` (the gateway applies an `ai_discovery` change without a restart), interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
 
 ### Model lifecycle and bounded scans
 
@@ -246,7 +246,7 @@ the intended state explicit:
 defenseclaw agent discovery enable --restart --scan
 ```
 
-Toggles `ai_discovery.*` in `~/.defenseclaw/config.yaml`, restarts the gateway, and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning.
+Sets `ai_discovery.enabled` and the other `ai_discovery.*` settings you pass in `~/.defenseclaw/config.yaml`, restarts the gateway (the default; `--no-restart` skips it), and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning. The gateway also applies any `ai_discovery` change made with `defenseclaw config set` by itself, so a single setting needs no restart.
   </Tab>
   <Tab value="Status">
 ```bash
@@ -271,7 +271,7 @@ the companion managed endpoint inventory. No restart needed.
 defenseclaw agent discovery disable
 ```
 
-Stops the scanner and clears the `ai_discovery.*` block. Existing audit events are preserved.
+Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_discovery.*` settings stay in the file, so `enable` brings the same configuration back. Existing audit events are preserved.
   </Tab>
 </Tabs>
 
@@ -1158,7 +1158,8 @@ inventory verdict including `unobserved`.
 ## Use it alongside Registry
 
 Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
-tells you *what's allowed*. The runtime planes tell you *what actually ran*.
+tells you *what's approved*, and the [block and allow lists](/docs/policies/admission)
+say what is never or always allowed. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
 
@@ -1170,10 +1171,13 @@ A common production pattern:
     Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
   </Step>
   <Step>
-    Flip on registry-required mode: `defenseclaw registry require --type skill --enabled`. Now anything *new* that discovery finds — but the registry doesn't recognise — is admission-blocked by default.
+    Flip on registry-required mode with enforcement: `defenseclaw registry require --type skill --enabled --enforce`. `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`; without it the requirement is recorded but nothing is blocked. Now a new skill that the registry doesn't list is blocked by the install watcher when it appears.
   </Step>
   <Step>
     Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
+  </Step>
+  <Step>
+    Keep a short list of names you never want, whatever a catalog says: `defenseclaw skill block <name>` or `defenseclaw mcp block <name>`. These write `asset_policy` `denied` rules, which apply even when asset policy is off. See [Admission and the block/allow list](/docs/policies/admission).
   </Step>
 </Steps>
 

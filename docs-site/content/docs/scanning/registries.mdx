@@ -13,6 +13,12 @@ keywords:
 
 A **registry source** is a fetchable manifest of skills and/or MCP servers that DefenseClaw ingests on demand. Public catalogs (clawhub, smithery, skills.sh), internal HTTPS YAMLs / JSONs, git repos, and on-disk YAMLs are all supported. Synced entries flow through the existing skill / MCP scanners; clean ones land in `asset_policy.{skill,mcp}.registry` so a later admission decision can say "approved by registry:`<id>`" instead of "approved by an unattributed rule someone wrote in 2024."
 
+A registry is the approved catalog. It is not the block list or the allow list.
+Those are the `denied` and `allowed` rules of `asset_policy`, described in
+[Admission and the block/allow list](/docs/policies/admission), and they always
+apply: a name on the `denied` list stays blocked even when a catalog lists it,
+and a name on the `allowed` list skips the scan.
+
 <Callout title="Why registries matter">
 Without a registry, every new skill / MCP that lands on disk is admission-evaluated against ad-hoc operator-authored rules. With one or more registries, the catalog drives admission: clean entries get auto-promoted, everything else is held for review, and toggling `registry_required` flips the asset class to deny-by-default for anything the catalog hasn't blessed.
 </Callout>
@@ -205,8 +211,10 @@ defenseclaw registry require --type skill --enabled
 defenseclaw registry require --type mcp   --enabled --enforce
 ```
 
-The requirement is enforced only while asset policy is on:
-`asset_policy.enabled: true` and `asset_policy.mode: action`. A per-user
+`registry_required` is an asset policy rule, so unlike the `denied` and
+`allowed` lists it follows `enabled` and `mode`. The requirement is enforced
+only while asset policy is on: `asset_policy.enabled: true` and
+`asset_policy.mode: action`. A per-user
 install starts with `enabled: false` and `mode: observe`, so `require` alone
 blocks nothing and the CLI says so. Add `--enforce` to turn both on in the same
 save, or set them in the TUI config editor (Setup → `c` → Asset Policy). In
@@ -257,26 +265,29 @@ This is a real `file` source with two stdio MCP entries, synced without
 `--scan-stdio`, so both entries are still `pending`:
 
 ```text title="defenseclaw registry list"
-  Registry sources
-  ----------------
-  ID                       KIND         CONTENT  ON  ENTRIES            LAST SYNC              URL
-  ------------------------ ------------ -------- --- ------------------ ---------------------- --------------------------------
-  corp-mcp                 file         mcp      yes 2 (0/0/0)          2026-10-03T04:25:28Z   /tmp/corp-mcp.yaml
 
-  ENTRIES column: total (clean/warning/blocked)
+  Registry sources
+  ────────────────
+  ID                       KIND         CONTENT  ON  ENTRIES            LAST SYNC              URL
+  ------------------------ ------------ -------- --- ------------------ ---------------------- ------------------
+  corp-mcp                 file         mcp      yes 2 (0/0/0/0/0)      2026-10-06T18:27:26Z   /tmp/corp-mcp.yaml
+
+  ENTRIES column: total (clean/warning/blocked/error/rejected)
 ```
 
 ```text title="defenseclaw registry entries corp-mcp --status pending"
+
   Entries for corp-mcp
-  --------------------
+  ────────────────────
   NAME                             TYPE   STATUS     SEV      A/R
   -------------------------------- ------ ---------- -------- ---
   context7                         mcp    pending    -        --
   filesystem                       mcp    pending    -        --
 ```
 
-`ENTRIES` reads total, then clean, warning and blocked counts; a dash means the
-source was never synced. `A/R` shows whether you approved or rejected an entry.
+`ENTRIES` reads the total, then the clean, warning, blocked, error and
+rejected counts; a dash means the source was never synced. `A/R` shows whether
+you approved or rejected an entry.
 
 ```bash
 defenseclaw registry list                              # one row per source, with cached counts
@@ -299,9 +310,9 @@ runs DefenseClaw, for example in that user's crontab (`crontab -e`):
 0 * * * * defenseclaw registry sync --all
 ```
 
-Keep the gateway running: `registry sync` records an audit event and exits with
-an error when the gateway is unavailable. Use the full path to `defenseclaw` if
-cron's `PATH` does not include it.
+Keep the gateway running: with it stopped, `registry sync` still fetches, scans
+and promotes, but it warns that the audit event was not recorded. Use the full
+path to `defenseclaw` if cron's `PATH` does not include it.
 
 ## Common gotchas
 
@@ -349,4 +360,5 @@ from the checkout. Use Python 3.11 or newer when MCP scanning is required.
 - [`cli/defenseclaw/registries/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/cli/defenseclaw/registries) — adapters, manifest schema, sync engine, promotion rules.
 - [Reference → CLI](/docs/reference/cli) — full CLI catalog.
 - [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — what the scanners look at when verdicts get computed.
-- [Policies](/docs/policies) — how `asset_policy` decisions blend with repo policies and the LLM judge.
+- [Admission and the block/allow list](/docs/policies/admission) — the `denied` and `allowed` lists and the admission actions that sit beside a registry.
+- [Policies](/docs/policies) — how the policy layers fit together.
