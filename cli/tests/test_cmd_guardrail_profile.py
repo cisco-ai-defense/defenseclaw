@@ -107,6 +107,41 @@ def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     assert f"; except pin for Codex agent {agent_id} (by agent)" in status.output
 
 
+def _explain(monkeypatch, result, *args):
+    """Run ``guardrail profile explain`` against a gateway that answers *result*."""
+    from defenseclaw.gateway import OrchestratorClient
+
+    def resolve(self, *, user="", connector="", agent=""):
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(OrchestratorClient, "guardrail_profile_resolve", resolve)
+    app = AppContext()
+    app.cfg = default_config()
+    app.logger = MagicMock()
+    return CliRunner().invoke(
+        cmd_guardrail.guardrail, ["profile", "explain", "--user", "alice", *args], obj=app, catch_exceptions=False
+    )
+
+
+def test_explain_names_a_failed_lookup_instead_of_a_group_count(monkeypatch):
+    """GAP-0124: no group count for an account whose directory lookup failed."""
+    result = _explain(
+        monkeypatch,
+        {
+            "profiles_configured": True,
+            "profile": "watch",
+            "match": "default_lookup_failed",
+            "subject": {"user_name": "alice@corp.example.com", "group_count": 0},
+            "lookup_error": "in 3000 groups, more than the 2048 DefenseClaw names",
+        },
+    )
+    assert "(groups unknown)" in result.output
+    assert "user lookup failed: in 3000 groups" in result.output
+    assert "0 group(s)" not in result.output
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

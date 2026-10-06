@@ -187,7 +187,11 @@ What follows when the identity is missing:
   Linux the group names are looked up 64 at a time, so an account in several
   hundred groups resolves in one background lookup even when SSSD starts cold.
   Facts that still hold a group as a bare number (no group answered for that
-  id) are served but refreshed after two minutes, not 15.
+  id) are served but refreshed after two minutes, not 15. The gateway log
+  names the account and the reason once when its lookup starts failing (`[identity]
+  directory lookup for 1201 failed: ... in 3000 groups, more than the 2048 ...`)
+  and once when it works again, and `guardrail profile explain` shows the same
+  reason as a lookup error instead of a profile.
 - **Group changes take time.** The gateway caches a user's directory facts for
   15 minutes and refreshes them in the background. A user added to a group
   gets the group's profile within that time. On Windows the groups are those

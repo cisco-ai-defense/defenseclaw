@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -351,5 +352,22 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 	groups := localAccountGroups(account)
 	if len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
 		t.Fatalf("localAccountGroups = %v (count %d), want one entry per gid %v", groups, identityGroupCount(groups), gids)
+	}
+}
+
+// TestExplainReportsAFailedDirectoryLookup pins GAP-0124: when the directory
+// lookup of an account fails, explain says so, as a request gets
+// default_lookup_failed; it must not answer from the OS account database
+// with a profile no request receives.
+func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
+	prevAccount, prevFacts := profileExplainAccount, profileExplainDirectoryFacts
+	t.Cleanup(func() { profileExplainAccount, profileExplainDirectoryFacts = prevAccount, prevFacts })
+	profileExplainAccount = func(string) (string, string, bool) { return "94401116", "dcad-manygroups@dclab.test", true }
+	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
+		return useridentity.DirectoryFacts{}, errors.New("in 3000 groups, more than the 2048 DefenseClaw names")
+	}
+	subject, err := lookupDirectoryProfileSubject("dcad-manygroups")
+	if err != nil || !subject.LookupFailed || !strings.Contains(subject.LookupError, "3000 groups") || len(subject.Groups) != 0 {
+		t.Fatalf("subject = %+v, %v; want a failed lookup that names its reason and has no groups", subject, err)
 	}
 }

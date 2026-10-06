@@ -4,6 +4,10 @@
 package gateway
 
 import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,4 +71,43 @@ func TestIdentityDirectoryCacheRefreshesIncompleteFacts(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("incomplete facts were not refreshed after identityDirectoryIncompleteTTL")
+}
+
+// TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce pins GAP-0124: an
+// account whose lookup cannot finish (in more groups than are named, a
+// directory that never answers) leaves one line with the reason in the
+// gateway log, not one per retry, and one when it works again.
+func TestIdentityDirectoryCacheLogsFailureAndRecoveryOnce(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	fail := true
+	cache := newIdentityDirectoryCache(func(string) (useridentity.DirectoryFacts, error) {
+		if fail {
+			return useridentity.DirectoryFacts{}, errors.New("in 3000 groups, more than the 2048 DefenseClaw names")
+		}
+		return useridentity.DirectoryFacts{Principal: "dcad-manygroups@DCLAB.TEST", ResolvedAt: now}, nil
+	})
+	var mu sync.Mutex
+	var lines []string
+	cache.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	cache.now = func() time.Time { return now }
+	for range 3 {
+		if _, ok := cache.get("94401116", true); ok {
+			t.Fatal("a failing lookup answered")
+		}
+		now = now.Add(identityDirectoryRetry)
+	}
+	fail = false
+	if _, ok := cache.get("94401116", true); !ok {
+		t.Fatal("the lookup did not recover")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 2 || !strings.Contains(lines[0], "94401116 failed: in 3000 groups") ||
+		!strings.Contains(lines[1], "works again after 45s") {
+		t.Fatalf("log lines = %q, want one failure with its reason and one recovery", lines)
+	}
 }

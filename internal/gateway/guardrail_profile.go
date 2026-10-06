@@ -59,6 +59,9 @@ type profileSubject struct {
 	// like an unverified one, and the default reason is
 	// default_lookup_failed.
 	LookupFailed bool
+	// LookupError is why the lookup failed, when `explain` knows (the live
+	// path only records default_lookup_failed).
+	LookupError string
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
@@ -469,7 +472,17 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return lookupLocalProfileSubject(name)
 	}
 	facts, err := profileExplainDirectoryFacts(id)
-	if err != nil || facts.ResolvedAt.IsZero() {
+	if err != nil {
+		// The lookup the hook path would run failed, so a request from this
+		// account gets default_lookup_failed. Answering from the OS account
+		// database instead would explain a profile no request receives, and
+		// hide why (GAP-0124).
+		return profileSubject{
+			UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
+			LookupFailed: true, LookupError: err.Error(),
+		}, nil
+	}
+	if facts.ResolvedAt.IsZero() {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
 			return local, nil
 		}
@@ -965,6 +978,8 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		if err != nil {
 			found = profileSubject{UserName: user, LookupFailed: true}
 			out["lookup_error"] = err.Error()
+		} else if found.LookupError != "" {
+			out["lookup_error"] = found.LookupError
 		}
 		subject, source = &found, profileSubjectLookup
 		out["subject"] = map[string]any{

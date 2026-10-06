@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -30,6 +32,12 @@ import (
 // that selects the default profile with match default_lookup_failed; the
 // budget stays well inside the hook request timeout.
 //
+// The first failure of a key's lookup, and its recovery, are logged once
+// (logf) with the resolver's own reason, so an account that cannot resolve at
+// all (in more groups than DefenseClaw names, a directory that never answers)
+// leaves a line in the gateway log instead of only a default_lookup_failed on
+// every record (GAP-0124).
+//
 // A resolver can call its own answer incomplete (an AD account whose UPN a
 // slow domain controller has not given yet). That answer is served, but is
 // refreshed after identityDirectoryIncompleteTTL, not after the full TTL.
@@ -54,6 +62,8 @@ type identityCache[T any] struct {
 	// incomplete, when set, marks an answer to refresh after
 	// identityDirectoryIncompleteTTL.
 	incomplete func(T) bool
+	// logf, when set, reports a key's first failure and its recovery.
+	logf func(format string, args ...any)
 
 	mu      sync.Mutex
 	entries map[string]*identityCacheEntry[T]
@@ -65,10 +75,18 @@ type identityCacheEntry[T any] struct {
 	fetchedAt   time.Time
 	nextAttempt time.Time
 	inflight    chan struct{}
+	// failedSince is when the key's lookup began failing (zero while it
+	// succeeds) and lastErr the reason last logged for it.
+	failedSince time.Time
+	lastErr     string
 }
 
 func newIdentityDirectoryCache(resolve func(string) (useridentity.DirectoryFacts, error)) *identityDirectoryCache {
-	return newIdentityCache(resolve)
+	cache := newIdentityCache(resolve)
+	cache.logf = func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "[identity] "+format+"\n", args...)
+	}
+	return cache
 }
 
 func newIdentityCache[T any](resolve func(string) (T, error)) *identityCache[T] {
@@ -134,9 +152,40 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
 		entry.inflight = nil
+		note := c.noteResultLocked(key, entry, err, now)
 		c.mu.Unlock()
+		if note != "" && c.logf != nil {
+			c.logf("%s", note)
+		}
 		close(done)
 	}()
+}
+
+// noteResultLocked records a lookup's outcome on entry and returns the line to
+// log: the first failure of the key (or a failure with another reason), and
+// its recovery. A key that keeps failing for the same reason logs nothing more.
+func (c *identityCache[T]) noteResultLocked(key string, entry *identityCacheEntry[T], err error, now time.Time) string {
+	if err == nil {
+		if entry.failedSince.IsZero() {
+			return ""
+		}
+		down := now.Sub(entry.failedSince).Round(time.Second)
+		entry.failedSince, entry.lastErr = time.Time{}, ""
+		return fmt.Sprintf("directory lookup for %s works again after %s", key, down)
+	}
+	reason := err.Error()
+	if len(reason) > 300 {
+		reason = reason[:300] + "..."
+	}
+	if !entry.failedSince.IsZero() && entry.lastErr == reason {
+		return ""
+	}
+	if entry.failedSince.IsZero() {
+		entry.failedSince = now
+	}
+	entry.lastErr = reason
+	return fmt.Sprintf("directory lookup for %s failed: %s; the account keeps its last facts, or without any gets "+
+		"the default guardrail profile (default_lookup_failed), until a lookup succeeds", key, reason)
 }
 
 // evictLocked drops the oldest settled entry.
