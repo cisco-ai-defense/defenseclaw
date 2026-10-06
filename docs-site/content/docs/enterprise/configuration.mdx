@@ -198,7 +198,7 @@ standard DefenseClaw key; the pages linked below describe it.
 | Rules and rule packs | `guardrail.rules`, `guardrail.rule_pack`, `guardrail.custom_packs` | [Rules](/docs/policies/rules) and [Custom rule packs](#custom-rule-packs) below |
 | Block and allow lists | `asset_policy.skill`, `.mcp`, `.plugin` and `.tool`, with `denied` and `allowed` rules | The only block and allow list. [Admission](/docs/policies/admission) |
 | Admission of skills, MCP servers and plugins | `admission.skill`, `.mcp`, `.plugin` and `.defaults` | Scan on install and the action per severity. [Admission](/docs/policies/admission) |
-| Policy per user or group | `guardrail.profiles`, `guardrail.profile_assignments` and `guardrail.default_profile` | [Guardrail profiles at scale](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale) |
+| Policy per user or group | `guardrail.profiles`, `guardrail.profile_assignments` and `guardrail.default_profile` | [Guardrail profiles at scale](/docs/guardrail/user-and-group-policies) |
 | Release source | `update.source` (an `https://` URL), `update.check`, `update.channel` | Changes where bytes are fetched, never who must have signed them. [Where releases come from](/docs/enterprise/rollout#where-releases-come-from) |
 
 For example, to block a skill and raise the blocking level of one agent:

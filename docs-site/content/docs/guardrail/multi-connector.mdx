@@ -124,7 +124,7 @@ The fields you can override per connector mirror the global guardrail knobs:
 | `block_at` | Lowest severity that blocks: `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. | global `guardrail.block_at`, then the rule pack's level |
 | `alert_at` | Lowest severity that alerts, same values; never above the block level. | global `guardrail.alert_at`, then the rule pack's level |
 
-A [guardrail profile](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale) selected for a user or group outranks these connector values; [Thresholds](/docs/policies/thresholds) gives the full order.
+A [guardrail profile](/docs/guardrail/user-and-group-policies) selected for a user or group outranks these connector values; [Thresholds](/docs/policies/thresholds) gives the full order.
 
 Set any of these with the per-connector CLI:
 

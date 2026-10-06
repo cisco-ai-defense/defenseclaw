@@ -235,7 +235,7 @@ A running gateway says so instead: `The running gateway applies it on its next r
 3. Profile: `guardrail.profiles.<profile>.rules`
 4. Profile connector: `guardrail.profiles.<profile>.connectors.<connector>.rules`
 
-Each layer is applied on top of the result of the one before it, so a narrower scope wins a conflict. If the global layer disables a rule, a connector layer can `enable` it again for that connector; a profile layer can then change its severity for the people it selects. A connector that does not use a profile gets layers 1 and 2. A request from a user a profile selects gets all four that apply. [User- and group-based policies](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale) explains how assignments choose the profile.
+Each layer is applied on top of the result of the one before it, so a narrower scope wins a conflict. If the global layer disables a rule, a connector layer can `enable` it again for that connector; a profile layer can then change its severity for the people it selects. A connector that does not use a profile gets layers 1 and 2. A request from a user a profile selects gets all four that apply. [User- and group-based policies](/docs/guardrail/user-and-group-policies) explains how assignments choose the profile.
 
 ```yaml title="~/.defenseclaw/config.yaml"
 guardrail:

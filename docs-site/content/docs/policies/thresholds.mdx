@@ -81,7 +81,7 @@ From most to least specific:
 
 Application protection overlays (`application_protection.connectors.<connector>.guardrail`) can override some other guardrail fields, such as the mode, HITL and the rule pack, for connectors you have not set up by hand. They cannot carry `block_at` or `alert_at`: a config that sets either under `application_protection` is refused. For the thresholds that tier is therefore always empty, and the order reads profile connector > profile > guardrail.connectors > application protection (empty) > global > rule-pack default.
 
-Note that a profile's own level outranks `guardrail.connectors.<connector>`: a subject a profile selects gets the profile's `block_at` even on a connector that has its own, unless the profile sets that connector too. Profiles are how you give different people different levels; see [User- and group-based policies](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale) for how assignments pick a profile.
+Note that a profile's own level outranks `guardrail.connectors.<connector>`: a subject a profile selects gets the profile's `block_at` even on a connector that has its own, unless the profile sets that connector too. Profiles are how you give different people different levels; see [User- and group-based policies](/docs/guardrail/user-and-group-policies) for how assignments pick a profile.
 
 All four scopes in one file:
 
@@ -216,5 +216,5 @@ When Cisco Secure Client integration is active, the gateway keeps the rule pack'
 - [Rules and custom packs](/docs/policies/rules): `guardrail.rule_pack`, `custom_packs` and `guardrail.rules`
 - [Defaults](/docs/policies/defaults): what each shipped preset and pack sets
 - [HITL](/docs/hitl): the confirm band below the block level
-- [Guardrail profiles at scale](/docs/enterprise/identity-and-authentication#guardrail-profiles-at-scale): assign profiles by user, group, connector or agent
+- [User- and group-based policies](/docs/guardrail/user-and-group-policies): assign profiles by user, group, connector or agent
 - [Reference: Configuration](/docs/reference/configuration): every key
