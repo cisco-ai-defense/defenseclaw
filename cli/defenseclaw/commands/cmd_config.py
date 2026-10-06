@@ -374,7 +374,7 @@ def _write_config_change(app: AppContext, change: object, expect_sha256: str | N
     except config_writer.ConfigConflictError as exc:
         raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
     except (config_writer.ConfigWriteError, V8ConfigError, ValueError) as exc:
-        raise click.ClickException(f"config.yaml was not changed: {exc}") from exc
+        raise click.ClickException(f"config.yaml was not changed: {config_writer.plain_error(exc)}") from exc
     key = getattr(change, "path", "")
     if not result.changed:
         click.echo(f"{key} already has that value (generation {result.generation}).")

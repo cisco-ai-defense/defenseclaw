@@ -124,3 +124,25 @@ def test_operator_block_from_a_stale_config_keeps_a_concurrent_block(tmp_path, m
 
     on_disk = config_module.load(data_dir=str(tmp_path)).asset_policy.skill.denied
     assert [rule.name for rule in on_disk] == ["evil-a", "evil-b"]
+
+
+def test_plain_error_names_the_key_without_the_validator_internals():
+    """GAP-0050: a refused change says the key and the fix, not the JSON path, the bracketed code or the schema."""
+    from defenseclaw.config_inspect import ConfigInspectError
+    from defenseclaw.observability.v8_config import V8ConfigError
+
+    reason = (
+        '[config_semantic_invalid] config rule pack "/home/u/marker": guardrail.rules.enable: unknown rule NOPE-X; '
+        "expected rule packs, custom pack digests and rule IDs the gateway can load; fix the reference, then retry"
+    )
+    inspected = ConfigInspectError(f"candidate field=$.guardrail; reason={reason}", field_path="$.guardrail", reason=reason)
+    rejected = config_writer.ConfigWriteError(f"config.yaml change rejected: {inspected}")
+    rejected.__cause__ = inspected
+    assert config_writer.plain_error(rejected) == "guardrail.rules.enable: unknown rule NOPE-X. Fix the reference, then retry."
+
+    pattern = V8ConfigError("config.yaml", "$.guardrail.custom_packs.bad.digest", "pattern", "correct the field using the canonical v8 schema and reference")
+    assert config_writer.plain_error(pattern) == (
+        "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
+    )
+    other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the canonical v8 schema")
+    assert "canonical v8 schema" not in config_writer.plain_error(other)

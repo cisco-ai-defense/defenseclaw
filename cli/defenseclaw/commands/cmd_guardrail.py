@@ -3224,7 +3224,7 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             "Nothing was changed.",
         )
     except config_writer.ConfigWriteError as exc:
-        fail(1, f"Failed to save config: {exc}")
+        fail(1, f"Failed to save config: {config_writer.plain_error(exc)}")
     return None
 
 
