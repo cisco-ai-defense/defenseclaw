@@ -18,6 +18,44 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
+// A 0.8.10 database ends at migration 29 and has no tool-chain tables. Init
+// must bring it to the current chain shape: that is the only released path
+// into the chain state.
+func TestToolChainStateIsCreatedWhenUpgradingFrom0810(t *testing.T) {
+	const released0810Migrations = 29
+	if migrations[released0810Migrations-1].description !=
+		"runtime assets: add durable connector session provenance state" {
+		t.Fatal("migration 29 is no longer the last 0.8.10 migration")
+	}
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.db.Exec(`CREATE TABLE schema_version (
+		version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < released0810Migrations; i++ {
+		if err := store.applyMigration(i+1, migrations[i]); err != nil {
+			t.Fatalf("0.8.10 migration %d: %v", i+1, err)
+		}
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("upgrade from 0.8.10: %v", err)
+	}
+	if version, err := store.SchemaVersion(); err != nil || version != len(migrations) {
+		t.Fatalf("schema version=%d want=%d err=%v", version, len(migrations), err)
+	}
+	for _, column := range []string{
+		"sql_value_source_table_class", "sql_value_source_resource_digest", "returned_credential_source",
+	} {
+		if ok, err := store.hasColumn("guardrail_chain_pending_actions", column); err != nil || !ok {
+			t.Fatalf("pending chain state lacks %s: ok=%v err=%v", column, ok, err)
+		}
+	}
+}
+
 func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 	const toolChainMigrationIndex = 29
 	if len(migrations) <= toolChainMigrationIndex ||
