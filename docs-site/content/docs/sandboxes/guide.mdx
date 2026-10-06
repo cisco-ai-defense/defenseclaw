@@ -382,7 +382,7 @@ it copies anything, and the first start of an image says it takes longer:
 | `Protected` | Git internals that are read-only inside, so the agent cannot plant a hook or a config setting that would run on your machine the next time you use git. |
 | `Not visible` | Nothing else on your machine is in the sandbox. |
 | `Context` | Extra reference folders you added with `--context`, read-only. |
-| `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. |
+| `Model` | The model credential the sandbox uses, and the only hosts it works at. The sandbox holds a placeholder that OpenShell swaps for the real value on requests to those hosts. With no credential found, this line says so and you log in inside the sandbox. The line under it says how those hosts are reached: OpenShell opens them to the harness's own program directly, around DefenseClaw's egress proxy, so the proxy's blocklist and upload checks do not see that traffic. For a harness that runs on an interpreter (an npm build of a Node harness, or a Python harness such as Hermes or OpenHands), that program is its `node` or `python`, so a script the agent runs with it can reach the model hosts too, with the real credential swapped in. The hooks still check the tool call that runs the script. |
 | `Secret` | Each `--credential` or `--github-write` binding and the host it works at. |
 | `Host` | Ports on your machine you listed with `--host-port` that the policy accepts, for example `localhost:5432 (opens when you approve the sandbox's first connection)`. Refused ports appear as warnings instead. |
 | `Uploads` | Shown when [the large-upload block](/docs/sandboxes/policy-packs#large-upload-alert-threshold) is on (`openshell.egress.block_large_uploads`, a pack's, or your organization's `openshell.admin.block_large_uploads`): `an upload of more than 25 MiB to a host the sandbox has not contacted before is cut, except to hosts you allowed or unblocked, where your organization lets you (the large-upload block)`. Uploads to hosts you unblocked, or that you allowed (`openshell.egress.allow` or a custom pack's `egress.allow`), are only reported, unless `openshell.admin.allow_unblock: false` drops your allow entries and refuses unblocks; the curated hosts a built-in pack allows (the balanced pack's GitHub and package registries) are not exempt. With your organization's `openshell.admin.egress_allow_only` list every host the sandbox may reach is on it and exempt, so the line reads `an upload of more than 25 MiB is reported, not cut: …`. |
@@ -504,7 +504,13 @@ DefenseClaw's egress proxy, which allows any site by name except:
 - ports other than 80 and 443 (`openshell.egress.ports` sets the list).
 
 The model provider's hosts are reached directly through OpenShell, so the
-real credential is only ever added outside the sandbox. To let sandboxes
+real credential is only ever added outside the sandbox. That channel goes
+around the egress proxy: OpenShell opens the model hosts to the harness's own
+program only, which for an npm or Python harness is its `node` or `python`
+interpreter, so a script the agent runs with that interpreter reaches them
+too (the hooks still judge the tool call that runs it). A `--credential`
+binding's host is opened the same way, to every program in the sandbox. The
+banner says so under its `Model` line. To let sandboxes
 reach an intranet host, such as a package mirror, add its exact name or
 address to `openshell.egress.allow` in `config.yaml`.
 

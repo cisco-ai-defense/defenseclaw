@@ -345,7 +345,10 @@ never reaches the main listener.
    |                    raw relay to 127.0.0.1:18972, the proxy decides
    |
    |-- LLM API -----> provider host, for example api.anthropic.com:443
-   |                    (NO_PROXY) provider rule swaps the key placeholder
+   |                    (NO_PROXY) provider rule swaps the key placeholder;
+   |                    open to the harness's network binaries only (for an
+   |                    npm or Python harness its node/python interpreter,
+   |                    which runs any script), around the egress proxy
    |
    '-- anything else: denied by OpenShell, which files a draft proposal
 ```

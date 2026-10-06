@@ -73,6 +73,7 @@ func TestRunMountSessionKeepsChanges(t *testing.T) {
 		"Hidden    .env",
 		"Protected .git/hooks .git/config (read-only)",
 		"Model     sonnet · ANTHROPIC_API_KEY → api.anthropic.com only",
+		"          "+modelChannelNote,
 		"Secret    STRIPE_API_KEY → api.stripe.com only",
 		"MCP       github ✓ · linear ✓",
 		notice,

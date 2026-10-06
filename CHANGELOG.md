@@ -1202,6 +1202,11 @@ deleted.
   sandbox's `hooks.on_silence` / `hooks.silence_after` show the setting;
   with `pack` locked, a run cannot switch to a pack that alerts or waits
   longer. The threshold was a fixed 10 minutes and silence only alerted.
+- **The banner says how the model hosts are reached.** A new line under
+  `Model` states that OpenShell opens them to the harness's own program
+  directly, around the egress proxy, and that for an npm or Python harness
+  that program is its `node` or `python`, so a script it runs reaches them
+  too. The sandbox guide and the network page say the same.
 
 ### Legacy OpenShell standalone sandbox removed
 

@@ -1486,6 +1486,15 @@ func joinNonEmpty(sep string, parts ...string) string {
 	return strings.Join(kept, sep)
 }
 
+// modelChannelNote is the banner line under a model credential: OpenShell's
+// provider rule for it opens the model hosts to the harness's network
+// binaries (harness.ProbeSpec.NetworkBinaries) directly, not through
+// DefenseClaw's egress proxy, and a harness that runs on an interpreter (an
+// npm build's node, a Python harness's python) has that interpreter as its
+// network binary, which runs any script.
+const modelChannelNote = "opened to the harness's own program directly, around DefenseClaw's egress proxy; " +
+	"for an npm or Python harness that is its node or python, so a script it runs reaches them too"
+
 // banner prints the plan's launch banner.
 func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	name := firstNonEmpty(sb.HarnessName, sb.Harness)
@@ -1513,6 +1522,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	switch {
 	case b.llm.Credential != nil:
 		row("Model", joinNonEmpty(" · ", model, b.llm.Source+" → "+strings.Join(b.llm.Hosts, ", ")+" only (the sandbox sees a placeholder)"))
+		row("", modelChannelNote)
 	case b.llm.Note != "":
 		row("Model", joinNonEmpty(" · ", model, b.llm.Note))
 	case model != "":

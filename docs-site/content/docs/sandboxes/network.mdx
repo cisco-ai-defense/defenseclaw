@@ -20,7 +20,12 @@ watches all three:
   `HTTP_PROXY`. The proxy decides and logs every site.
 - **Model calls** go to the harness's model provider directly through
   OpenShell, which adds the real credential outside the sandbox. The sandbox
-  only ever holds a placeholder.
+  only ever holds a placeholder. This channel bypasses the egress proxy:
+  OpenShell opens the model hosts to the harness's own program only, and
+  for an npm or Python harness that program is its `node` or `python`
+  interpreter, so a script the agent runs with it reaches the model hosts
+  too. OpenShell still logs those connections, and the hooks judge the tool
+  call that starts the script.
 - **Anything else**, such as a client that ignores the proxy settings, is
   refused by OpenShell, which files a connection request. DefenseClaw
   decides most of those on its own and asks you about the rest.
