@@ -6,7 +6,9 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,6 +167,65 @@ func TestEnsureInventoryListACEGrantsTheFolderOnly(t *testing.T) {
 		}
 		if found != want {
 			t.Fatalf("service ACE on %s = %v, want %v", path, found, want)
+		}
+	}
+}
+
+// GAP-0156: the IDE grants reach a Remote-SSH server build's package.json
+// and a %LOCALAPPDATA%\JetBrains product's plugins, but not the caches beside
+// them, and nothing through a junction below the profile.
+func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	write := func(path string) string {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	jar := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\plugins\ai\lib\ai.jar`))
+	pkg := write(filepath.Join(home, `.vscode-server\cli\servers\Stable-0a1b\server\package.json`))
+	caches := write(filepath.Join(home, `AppData\Local\JetBrains\IntelliJIdea2025.2\caches\content.dat`))
+	linked := write(filepath.Join(outside, `AndroidStudio2025.1\plugins\x.jar`))
+	google := filepath.Join(home, `AppData\Local\Google`)
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", google, outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	hasACE := func(path string) bool {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	for pass, want := range []inventoryDACLResult{inventoryDACLGranted, inventoryDACLAlreadyPresent} {
+		for _, g := range inventoryDACLIDEGrants(home) {
+			result, err := g.ensure(filepath.Join(home, g.dir), sid)
+			if g.dir == `AppData\Local\Google` {
+				if !errors.Is(err, errInventoryDACLLink) {
+					t.Fatalf("grant on the junction = %v, %v; want refused", result, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", g.dir, err)
+			}
+			if result != inventoryDACLSkippedMissing && result != want {
+				t.Fatalf("pass %d %s = %v, want %v", pass, g.dir, result, want)
+			}
+		}
+	}
+	for path, want := range map[string]bool{jar: true, pkg: true, caches: false, filepath.Dir(caches): false, linked: false, outside: false} {
+		if got := hasACE(path); got != want {
+			t.Errorf("service ACE on %s = %v, want %v", path, got, want)
 		}
 	}
 }
