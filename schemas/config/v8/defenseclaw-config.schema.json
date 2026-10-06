@@ -4735,6 +4735,17 @@
                   "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
                 }
               }
+            },
+            "llm": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Standalone profile: the protected credential (enterprise secret set) that carries the API key of the llm: block for the LLM judge and the scanners' LLM analyzers.",
+              "properties": {
+                "credential": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+                }
+              }
             }
           }
         },
