@@ -2611,49 +2611,6 @@ class RoutingConfig:
 
 
 @dataclass
-class TrainingCategoryConfig:
-    """A single training category entry inside ``training.categories[]``.
-
-    Mirrors the Go-side ``PipelineConfig`` fields that are per-category.
-    ``min_traces``, ``eval_threshold``, and ``auto_trigger`` correspond to
-    the Go ``PipelineConfig.MinTraces``, ``PipelineConfig.EvalThreshold``,
-    and the automatic-run gate respectively.
-    """
-
-    name: str = ""
-    algorithm: str = ""
-    base_model: str = ""
-    group_size: int = 0
-    max_gen_length: int = 0
-    kl_coef: float = 0.0
-    lora_rank: int = 0
-    reward_funcs: list[str] = field(default_factory=list)
-    min_traces: int = 0
-    eval_threshold: float = 0.0
-    auto_trigger: bool = False
-
-
-@dataclass
-class TrainingConfig:
-    """GRPO training pipeline configuration (``training:``).
-
-    Mirrors the ``training`` block in the v8 config schema. The Go gateway
-    owns the actual training loop; this dataclass carries the operator's
-    pipeline settings so the Python CLI can dispatch ``training run`` with
-    the correct parameters.
-    """
-
-    enabled: bool = False
-    backend: str = ""
-    models_dir: str = ""
-    llama_server_port: int = 0
-    training_timeout_hours: int = 0
-    trace_retention_days: int = 0
-    base_models: list[str] = field(default_factory=list)
-    categories: list[TrainingCategoryConfig] = field(default_factory=list)
-
-
-@dataclass
 class PrivacyConfig:
     """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
 
@@ -3017,7 +2974,6 @@ class Config:
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
     routing: RoutingConfig = field(default_factory=RoutingConfig)
-    training: TrainingConfig = field(default_factory=TrainingConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -3768,7 +3724,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             d.pop("registries", None)
     _serialize_openshell(d)
     _serialize_routing(d)
-    _serialize_training(d)
     return d
 
 
@@ -3822,41 +3777,6 @@ def _serialize_routing(d: dict[str, Any]) -> None:
     for name in nested_fields:
         if not routing.get(name):
             routing.pop(name, None)
-
-
-def _serialize_training(d: dict[str, Any]) -> None:
-    """Compact the ``training:`` block, omitting it when at zero value.
-
-    Mirrors Go's ``yaml:",omitempty"`` so configs that never opt in stay
-    byte-identical after a load/save round-trip.
-    """
-    training = d.get("training")
-    if not isinstance(training, dict):
-        return
-    has_value = any(
-        (
-            training.get("enabled"),
-            training.get("backend"),
-            training.get("models_dir"),
-            training.get("llama_server_port"),
-            training.get("training_timeout_hours"),
-            training.get("trace_retention_days"),
-            training.get("base_models"),
-            training.get("categories"),
-        )
-    )
-    if not has_value:
-        d.pop("training", None)
-        return
-    # Drop zero-value scalars for minimal YAML.
-    for name in ("backend", "models_dir"):
-        if not training.get(name):
-            training.pop(name, None)
-    for name in ("llama_server_port", "training_timeout_hours", "trace_retention_days"):
-        if not training.get(name):
-            training.pop(name, None)
-    if not training.get("base_models"):
-        training.pop("base_models", None)
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
@@ -5863,7 +5783,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         application_protection=_merge_application_protection(raw.get("application_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
         routing=_merge_routing(raw.get("routing")),
-        training=_merge_training(raw.get("training")),
     )
     if not os.path.isabs(cfg.gateway.device_key_file):
         resolved_device_key = _resolve_relative_gateway_device_key_file(
@@ -6131,46 +6050,6 @@ def _merge_routing(raw: dict[str, Any] | None) -> RoutingConfig:
         models=mapping_list("models"),
         signals=mapping("signals"),
         decisions=mapping_list("decisions"),
-    )
-
-
-def _merge_training(raw: dict[str, Any] | None) -> TrainingConfig:
-    """Build a :class:`TrainingConfig` from the YAML ``training:`` block."""
-    if not isinstance(raw, dict):
-        return TrainingConfig()
-
-    categories: list[TrainingCategoryConfig] = []
-    for entry in raw.get("categories") or []:
-        if not isinstance(entry, dict):
-            continue
-        categories.append(
-            TrainingCategoryConfig(
-                name=str(entry.get("name", "") or ""),
-                algorithm=str(entry.get("algorithm", "") or ""),
-                base_model=str(entry.get("base_model", "") or ""),
-                group_size=_as_int(entry.get("group_size", 0), 0),
-                max_gen_length=_as_int(entry.get("max_gen_length", 0), 0),
-                kl_coef=float(entry.get("kl_coef", 0.0) or 0.0),
-                lora_rank=_as_int(entry.get("lora_rank", 0), 0),
-                reward_funcs=[str(r) for r in (entry.get("reward_funcs") or []) if r],
-                min_traces=_as_int(entry.get("min_traces", 0), 0),
-                eval_threshold=float(entry.get("eval_threshold", 0.0) or 0.0),
-                auto_trigger=_coerce_bool(entry.get("auto_trigger", False)),
-            )
-        )
-
-    base_models_raw = raw.get("base_models") or []
-    base_models = [str(m) for m in base_models_raw if m] if isinstance(base_models_raw, list) else []
-
-    return TrainingConfig(
-        enabled=_coerce_bool(raw.get("enabled", False)),
-        backend=str(raw.get("backend", "") or ""),
-        models_dir=str(raw.get("models_dir", "") or ""),
-        llama_server_port=_as_int(raw.get("llama_server_port", 0), 0),
-        training_timeout_hours=_as_int(raw.get("training_timeout_hours", 0), 0),
-        trace_retention_days=_as_int(raw.get("trace_retention_days", 0), 0),
-        base_models=base_models,
-        categories=categories,
     )
 
 
