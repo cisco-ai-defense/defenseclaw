@@ -596,6 +596,11 @@ def profile_status_text(cfg, result: dict) -> str:
     user = str(result.get("user") or "this account")
     if result.get("error"):
         count = len(getattr(cfg.guardrail, "profiles", {}) or {})
+        if result.get("timed_out"):
+            return (
+                f"unknown for {user}: the gateway is running but did not answer in time; "
+                f"the directory lookup may be slow ({count} profile(s) configured)"
+            )
         return f"unknown for {user}: the gateway did not answer ({count} profile(s) configured)"
     name = str(result.get("profile") or "")
     if not name:
@@ -4467,6 +4472,12 @@ def profile_show_cmd(app: AppContext, name: str, json_out: bool) -> None:
     click.echo()
 
 
+# How long explain waits for the gateway. The gateway looks the user up in the
+# directory before it answers, and that lookup is bounded at 20 s (and the
+# account lookup before it at 10 s), so the client waits longer than both.
+PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
+
+
 @profile_group.command("explain")
 @click.option("--user", "user", default="", help="Account name, uid or SID to resolve (default: you).")
 @click.option("--connector", "connector", default="", help="Connector the request would come from.")
@@ -4483,6 +4494,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     """
     import getpass
 
+    import requests
+
     from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
     if not user:
@@ -4498,12 +4511,20 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             host=gateway_api_client_host(app.cfg),
             port=app.cfg.gateway.api_port,
             token=app.cfg.gateway.resolved_token(),
-            timeout=5,
+            timeout=PROFILE_EXPLAIN_TIMEOUT_SECONDS,
         )
         try:
             result = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
         finally:
             client.close()
+    except requests.exceptions.ReadTimeout:
+        # The gateway took the connection and is still resolving the user: it
+        # is running, so "start it" would send the operator the wrong way.
+        ux.err(
+            f"The gateway did not answer within {PROFILE_EXPLAIN_TIMEOUT_SECONDS:g} s; "
+            f"the directory lookup for {user or 'this account'} may be slow (SSSD or the domain controller). Try again."
+        )
+        raise SystemExit(1) from None
     except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
         ux.err(f"Could not ask the gateway: {exc}")
         ux.subhead("Start it with: defenseclaw-gateway start", indent="  ")

@@ -401,6 +401,7 @@ none of these facts.
 | A user's new group has no effect | The gateway caches directory facts for 15 minutes. Wait, or restart the gateway to drop the cache. |
 | A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
 | `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |
+| `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` means the gateway is not running. |
 
 ## IDE plugin inventory
 

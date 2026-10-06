@@ -142,6 +142,28 @@ def test_explain_names_a_failed_lookup_instead_of_a_group_count(monkeypatch):
     assert "0 group(s)" not in result.output
 
 
+def test_explain_blames_a_slow_directory_not_a_stopped_gateway(monkeypatch):
+    """GAP-0140: a read timeout is a running gateway still resolving the user."""
+    import requests
+
+    slow = _explain(monkeypatch, requests.exceptions.ReadTimeout("Read timed out. (read timeout=35)"))
+    assert slow.exit_code == 1
+    assert "did not answer within 35 s" in slow.output
+    assert "directory lookup for alice may be slow" in slow.output
+    assert "Start it with" not in slow.output
+
+    stopped = _explain(monkeypatch, requests.exceptions.ConnectionError("Connection refused"))
+    assert stopped.exit_code == 1
+    assert "Could not ask the gateway" in stopped.output
+    assert "Start it with: defenseclaw-gateway start" in stopped.output
+
+    # guardrail status and doctor say the same for their shorter wait.
+    cfg = default_config()
+    cfg.guardrail.profiles = {"strict": GuardrailProfile(mode="action")}
+    text = cmd_guardrail.profile_status_text(cfg, {"user": "alice", "error": "timed out", "timed_out": True})
+    assert "running but did not answer in time" in text
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
