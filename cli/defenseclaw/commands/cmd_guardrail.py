@@ -3306,7 +3306,8 @@ def use_pack_cmd(
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
 
-    PACK is a built-in preset (default, strict, permissive), the name of a
+    PACK is a built-in preset (default, strict, permissive), a key of
+    ``guardrail.custom_packs`` (a pack you already registered), the name of a
     pack under ``<policy_dir>/guardrail/``, or a directory path (``./NAME``
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
@@ -3416,9 +3417,23 @@ def use_pack_cmd(
 
     # Resolve PACK -> (name, directory, kind).
     raw = (pack or "").strip()
+    registered = (getattr(gc, "custom_packs", None) or {}).get(raw)
     if raw in policy_catalog.RULE_PACK_PRESETS:
         path = policy_catalog.preset_pack_dir(app.cfg, raw)
         pack_name, kind = raw, "preset"
+    elif registered is not None:
+        # A pack already registered under guardrail.custom_packs: select it by
+        # name, keeping its pinned digest (an edited pack is refused below).
+        path = policy_catalog.normalize_pack_path(str(getattr(registered, "path", "") or ""))
+        pack_name, kind = raw, "registered"
+        if not os.path.isdir(path):
+            _finish(
+                ok=False,
+                exit_code=1,
+                pack_name=raw,
+                path=path,
+                message=f"Rule pack {raw!r} is registered at {path}, which isn't a directory. Nothing was changed.",
+            )
     else:
         candidate = policy_catalog.normalize_pack_path(raw)
         # A bare name is the installed pack of that name even when the current
@@ -3486,11 +3501,25 @@ def use_pack_cmd(
                     message=f"Rule pack {path} is invalid{detail}. Nothing was changed.",
                 )
             digest = str((result.summary or {}).get("digest", "") or "")
+            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
+            if kind == "registered" and digest.lower() != pinned:
+                _finish(
+                    ok=False,
+                    exit_code=1,
+                    pack_name=pack_name,
+                    path=path,
+                    validation=validation,
+                    message=(
+                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
+                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
+                        f"sha256:{digest}. Nothing was changed."
+                    ),
+                )
 
     _preflight_config_write(app)
     changes: list = []
     name = pack_name
-    if kind != "preset":
+    if kind == "custom":
         name = _RULE_PACK_NAME.sub("-", pack_name.lower()).strip("-_")[:64] or "custom"
         if name in policy_catalog.RULE_PACK_PRESETS:
             name = f"custom-{name}"
