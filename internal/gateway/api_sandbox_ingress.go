@@ -912,7 +912,7 @@ func (a *APIServer) attachSandboxHostSubject(ctx context.Context, binding sandbo
 	if ownerID, _ := localProcessUser(); hostID == "" || hostID != ownerID {
 		return ctx
 	}
-	return a.attachVerifiedSubject(ctx, hostID, hostName, subjectSourceProcessOwner)
+	return attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), hostID, hostName, subjectSourceProcessOwner)
 }
 
 func writeSandboxIngressError(w http.ResponseWriter, status int, message string) {
