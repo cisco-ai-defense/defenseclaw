@@ -1169,8 +1169,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// make every later reload fail as restart-required (GAP-2422).
 		"registries": {},
 		// Sandbox settings are read per launch, and the sandbox listeners
-		// rebind in-process (apiNeedsRestart). Only the legacy standalone
-		// mode behind the bind shim needs a fresh process (below).
+		// rebind in-process (apiNeedsRestart).
 		"openshell": {},
 		// applyConfigReload rebuilds the discovery service and restarts the
 		// discovery and runtime-plane workers in-process (aiRestart). Keeping

@@ -1599,20 +1599,8 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
 }
 
 // ---------------------------------------------------------------------------
-// custom-providers.json
+// The retired openshell-sandbox (0.0.x) standalone integration
 
-// ProvidersOverlayFile is the operator provider overlay in data_dir. From
-// config_version 9 on it is derived from llm_providers (spec section 6).
-const ProvidersOverlayFile = "custom-providers.json"
-
-// migrateCustomProviders folds a legacy operator overlay (one without
-// _derived_from) into llm_providers, so config.yaml is the one provider
-// list: the gateway and the Python readers then see the same providers.
-// An inline CA bundle moves to <data_dir>/provider-ca/<name>.pem. The
-// in-memory load leaves it alone (the gateway still merges a legacy overlay
-// itself), as does a managed host, whose provider list is the admin's. An
-// overlay that uses request_overrides, which config can not hold, stays a
-// live input and is reported.
 // migrateRetiredStandaloneSandbox resets what the retired openshell-sandbox
 // (0.0.x) standalone integration left in a 0.8.x config. That integration
 // recorded openshell.mode: standalone and the sandbox user's home
@@ -1650,6 +1638,21 @@ func (m *v9Migrator) migrateRetiredStandaloneSandbox(root *yaml.Node) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// custom-providers.json
+
+// ProvidersOverlayFile is the operator provider overlay in data_dir. From
+// config_version 9 on it is derived from llm_providers (spec section 6).
+const ProvidersOverlayFile = "custom-providers.json"
+
+// migrateCustomProviders folds a legacy operator overlay (one without
+// _derived_from) into llm_providers, so config.yaml is the one provider
+// list: the gateway and the Python readers then see the same providers.
+// An inline CA bundle moves to <data_dir>/provider-ca/<name>.pem. The
+// in-memory load leaves it alone (the gateway still merges a legacy overlay
+// itself), as does a managed host, whose provider list is the admin's. An
+// overlay that uses request_overrides, which config can not hold, stays a
+// live input and is reported.
 func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	if m.in.InMemory {
 		return

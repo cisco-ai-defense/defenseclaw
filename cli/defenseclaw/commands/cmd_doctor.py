@@ -3061,8 +3061,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 elif normalized_state == "degraded":
                     # Up but needs operator action (the sandbox subsystem
-                    # with a failed listener or manager), so warn rather
-                    # than fail.
+                    # with a failed listener, manager or OpenShell
+                    # gateway), so warn rather than fail.
                     last_error = info.get("last_error")
                     reason = last_error.strip() if isinstance(last_error, str) else ""
                     if sub == "sandbox" and reason.startswith("openshell:"):

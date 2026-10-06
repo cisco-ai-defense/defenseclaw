@@ -1275,9 +1275,10 @@ deleted.
   `install-openshell-sandbox.sh` stub point there. A
   `defenseclaw sandbox legacy-cleanup` command was in unreleased 1.0 builds
   only and is gone.
-- Config: the `openshell:` legacy sub-keys `binary`, `policy_dir`, `mode`,
-  `version`, `sandbox_home`, `auto_pair`, and `host_networking` stay
-  accepted by the v8 schema and are ignored.
+- Config: the `openshell:` legacy sub-keys `policy_dir`, `version`,
+  `auto_pair`, and `host_networking` stay accepted by the v8 schema and are
+  ignored; `mode` and `sandbox_home` are removed by the `config_version` 9
+  migration.
 - **Breaking:** telemetry and audit: removes the `metric.defenseclaw.openshell.exit`
   metric family (instrument `defenseclaw.openshell.exit`) and its
   `defenseclaw.metric.command` attribute, and retires the `init-sandbox` audit
