@@ -134,6 +134,22 @@ func TestHookAgentIdentityIgnoresClaimsAndKeysInstances(t *testing.T) {
 		t.Fatalf("sub-agent instance = %q", got)
 	}
 
+	// Codex names the sub-agent on every hook of it, not only on its start
+	// and stop, so a tool call of the sub-agent has the sub-agent's instance
+	// too (GAP-0137).
+	codexMain := agentHookRequest{
+		ConnectorName: "codex", SessionID: "sess-codex", HookEventName: "PreToolUse",
+		Payload: map[string]interface{}{},
+	}
+	codexSub := codexMain
+	codexSub.AgentID = "thread-sub"
+	codexSub.Payload = map[string]interface{}{"agent_id": "thread-sub"}
+	mainInstance := agentIdentityForGenericHook(alice, codexMain).AgentInstanceID
+	if got := agentIdentityForGenericHook(alice, codexSub).AgentInstanceID; got == mainInstance ||
+		got != agentidentity.SubagentInstanceID(mainInstance, "thread-sub") {
+		t.Fatalf("codex sub-agent tool call instance = %q, main %q", got, mainInstance)
+	}
+
 	rec := httptest.NewRecorder()
 	(&APIServer{}).handleAgentIdentities(rec, httptest.NewRequest(http.MethodGet, "/api/v1/agents/identities?user=alice&connector=claudecode", nil))
 	var body struct {
@@ -170,28 +186,23 @@ func TestAgentIdentitySessionsSurviveRestartAndSkipDoctorProbe(t *testing.T) {
 	ctx := context.Background()
 	recorder := &agentIdentityRecorder{pending: map[string]*inventory.AgentIdentityRecord{}, hints: map[string]string{}}
 	facts := agentIdentityFacts{ID: "agt-00000000000000c1", UserID: "4545", Connector: "claudecode", MachineHash: "m"}
+	// Two sessions are open when the gateway restarts (GAP-0139).
 	recorder.observe(facts, "sess-a", true)
+	recorder.observe(facts, "sess-b", true)
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
-	// After the restart: session A resumed, then a new session B.
+	// After the restart both are resumed, one of them twice, and a third starts.
 	recorder.observe(facts, "sess-a", true)
-	recorder.observe(facts, "sess-a", false)
 	recorder.observe(facts, "sess-b", true)
-	stored, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pending, _ := recorder.snapshot()
-	if rows := mergeAgentIdentityRows(stored, pending, nil, inventory.AgentIdentityFilter{}); len(rows) != 1 || rows[0].SessionsSeen != 2 {
-		t.Fatalf("buffered view = %+v, want 2 sessions", rows)
-	}
+	recorder.observe(facts, "sess-a", false)
+	recorder.observe(facts, "sess-c", true)
 	if err := recorder.flush(ctx, store); err != nil {
 		t.Fatal(err)
 	}
 	if rows, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{}); err != nil || len(rows) != 1 ||
-		rows[0].SessionsSeen != 2 || rows[0].LastSessionID != "sess-b" {
-		t.Fatalf("stored rows = %+v, err %v; want 2 sessions, last sess-b", rows, err)
+		rows[0].SessionsSeen != 3 || rows[0].LastSessionID != "sess-c" {
+		t.Fatalf("stored rows = %+v, err %v; want 3 sessions, last sess-c", rows, err)
 	}
 
 	dave := withManagedHookPeer(ctx, managedHookPeer{UID: 4646, Name: "dave", Home: t.TempDir()})

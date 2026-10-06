@@ -51,9 +51,9 @@ var sharedAgentIdentities = &agentIdentityRecorder{
 }
 
 // observe records one hook of an agent identity. newSession is true when the
-// hook started a session the registry had not seen; the registry is in
-// memory, so the batch keeps the first session it counted for the upsert to
-// recognize a session resumed after a restart.
+// hook started a session the registry had not seen. The registry is in
+// memory, so a session resumed after a restart is new to it again; the batch
+// names the sessions it counted and the store counts each id once.
 func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID string, newSession bool) {
 	if r == nil || facts.ID == "" {
 		return
@@ -77,11 +77,8 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 		rec.UserName = facts.UserName
 	}
 	sessionID = strings.TrimSpace(sessionID)
-	if newSession && sessionID != "" && sessionID != rec.LastSessionID {
-		if rec.SessionsSeen == 0 {
-			rec.FirstSessionID = sessionID
-		}
-		rec.SessionsSeen++
+	if newSession {
+		rec.NoteSession(sessionID)
 	}
 	if sessionID != "" {
 		rec.LastSessionID = sessionID
@@ -124,10 +121,10 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
 		if old.FirstSeen.Before(cur.FirstSeen) {
 			cur.FirstSeen = old.FirstSeen
 		}
-		if old.SessionsSeen > 0 {
-			cur.FirstSessionID = old.FirstSessionID
+		for _, sessionID := range old.SessionIDs {
+			cur.NoteSession(sessionID)
 		}
-		cur.SessionsSeen += old.SessionsSeen
+		cur.SessionsSeen += max(old.SessionsSeen-int64(len(old.SessionIDs)), 0)
 		if cur.UserName == "" {
 			cur.UserName = old.UserName
 		}
@@ -270,9 +267,11 @@ const agentIdentitiesPageLimit = 1000
 
 // handleAgentIdentities serves GET
 // /api/v1/agents/identities?user=&connector=&limit=&cursor=: the stored agent
-// identities plus the ones buffered since the last flush, most recently seen
-// first, a page at a time. total counts every matching row; next_cursor is
-// the cursor of the next page, empty on the last one.
+// identities, most recently seen first, a page at a time. It writes the ones
+// buffered since the last flush first, so a new agent shows at once and the
+// store, which knows which sessions it has counted, counts each once; rows
+// that could not be written are merged in. total counts every matching row;
+// next_cursor is the cursor of the next page, empty on the last one.
 func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -305,6 +304,13 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	filter := inventory.AgentIdentityFilter{
 		User:      strings.TrimSpace(q.Get("user")),
 		Connector: strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+	}
+	// Write the buffered rows first, so one count of sessions serves the
+	// listing. A failed write leaves them buffered and merged below.
+	if store := sharedAgentIdentities.store(); store != nil {
+		if err := sharedAgentIdentities.flush(r.Context(), store); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] agent identity flush failed: %v\n", err)
+		}
 	}
 	pending, hints := sharedAgentIdentities.snapshot()
 	var stored []inventory.AgentIdentityRecord
@@ -393,8 +399,9 @@ func storedAgentIdentityWindow(
 	return append(stored, further...), 0, total, nil
 }
 
-// mergeAgentIdentityRows overlays the buffered rows on the stored ones, the
-// way the next flush will write them, most recently seen first.
+// mergeAgentIdentityRows overlays the rows still buffered on the stored ones
+// (all of them when there is no store, the unwritten ones after a failed
+// flush), most recently seen first.
 func mergeAgentIdentityRows(
 	stored []inventory.AgentIdentityRecord,
 	pending map[string]inventory.AgentIdentityRecord,
@@ -419,12 +426,7 @@ func mergeAgentIdentityRows(
 			order = append(order, id)
 			continue
 		}
-		// The way the upsert counts: a buffered session that resumes the
-		// stored last session is not a new one.
 		rec.SessionsSeen += buffered.SessionsSeen
-		if buffered.SessionsSeen > 0 && buffered.FirstSessionID != "" && buffered.FirstSessionID == rec.LastSessionID {
-			rec.SessionsSeen--
-		}
 		if buffered.LastSeen.After(rec.LastSeen) {
 			rec.LastSeen = buffered.LastSeen
 			if buffered.LastSessionID != "" {

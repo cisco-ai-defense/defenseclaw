@@ -9,6 +9,7 @@ import (
 	"container/heap"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -35,6 +36,7 @@ var (
 	auditExportUntil           string
 	auditExportNewest          bool
 	auditExportForce           bool
+	auditExportDB              string
 )
 
 var auditCmd = &cobra.Command{
@@ -118,9 +120,15 @@ On a Windows host with a standalone managed deployment, run it from an
 elevated Administrator prompt (or as LocalSystem): it then reads the managed
 deployment's configuration and audit log.
 
+--db reads another audit database instead of the configured one, with no
+configuration needed. After defenseclaw rollback, the install you left keeps
+its audit log in ~/.defenseclaw/previous/data/audit.db (previous\data\audit.db
+on Windows), and this reads it; each install shows only its own window.
+
 Examples:
   defenseclaw-gateway audit export --since 30m
-  defenseclaw-gateway audit export --connector claudecode --limit 50 --newest`,
+  defenseclaw-gateway audit export --connector claudecode --limit 50 --newest
+  defenseclaw-gateway audit export --db ~/.defenseclaw/previous/data/audit.db`,
 	// Export only reads audit.db. It loads the configuration without opening
 	// the audit store: the store opens read-write and, on a managed host,
 	// only as the gateway service, so an administrator could never export.
@@ -137,6 +145,17 @@ Examples:
 // managed runtime file check the other audit commands apply before the
 // export reads it.
 func auditExportPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	if auditExportDB != "" {
+		// A database named by path needs no configuration: the other
+		// install after a rollback may have written one this build does not
+		// load (GAP-0126). A managed deployment's administrator reads the
+		// managed store through the checks below, never a path of their
+		// choosing.
+		if _, admin := managedStandaloneAdminCaller(nil); admin {
+			return errors.New("audit export --db is not available on a managed deployment; run it without --db to export the managed audit log")
+		}
+		return nil
+	}
 	if err := prepareManagedAuditExportEnvironment(); err != nil {
 		return err
 	}
@@ -173,6 +192,7 @@ func init() {
 	auditExportCmd.Flags().BoolVar(&auditExportNewest, "newest", false, "With --limit, keep the newest matching rows instead of the oldest (still written oldest first)")
 	auditExportCmd.Flags().BoolVar(&auditExportForce, "force", false, "Overwrite the --output file if it already exists")
 	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
+	auditExportCmd.Flags().StringVar(&auditExportDB, "db", "", "Read this audit database instead of the configured one, for example the install a rollback left in ~/.defenseclaw/previous/data/audit.db")
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)
@@ -203,8 +223,14 @@ func isKnownAuditAction(s string) bool {
 }
 
 func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
-	if cfg == nil {
-		return fmt.Errorf("audit export: config not loaded")
+	auditPath := auditExportDB
+	if auditPath == "" {
+		if cfg == nil {
+			return fmt.Errorf("audit export: config not loaded")
+		}
+		auditPath = cfg.AuditDB
+	} else if info, statErr := os.Stat(auditPath); statErr != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("audit export: --db %s is not an audit database file", auditPath)
 	}
 	// A bad --since/--until is a usage error (exit 2, GAP-2110), checked
 	// before the database is opened or an -o file is created.
@@ -215,7 +241,7 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 	version.SetBinaryVersion(appVersion)
 	prov := version.Current()
 
-	db, err := audit.OpenReadOnlyDB(cfg.AuditDB)
+	db, err := audit.OpenReadOnlyDB(auditPath)
 	if err != nil {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
