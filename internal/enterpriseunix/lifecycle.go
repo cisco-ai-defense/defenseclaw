@@ -969,9 +969,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		snapPaths = append(snapPaths, adopting.removeFiles...)
 	}
 	snapPaths = append(snapPaths, filepath.Join(env.Layout.LifecycleDir, deploymentFileName))
-	// The writer's generation record and the migration evidence go back
-	// with the config on a rollback.
-	snapPaths = append(snapPaths, configwrite.GenerationPath(env.Layout.ConfigPath))
+	// The migration evidence goes back with the config on a rollback. An
+	// existing generation record does not: the counter never goes back, and
+	// the rollback records the restored config as a new generation. One this
+	// transaction creates goes away with the config it names.
+	if generation := configwrite.GenerationPath(env.Layout.ConfigPath); !exists(env.P(generation)) {
+		snapPaths = append(snapPaths, generation)
+	}
 	if p.config.Migration != nil {
 		snapPaths = append(snapPaths, env.Layout.ConfigPath+config.ConfigV8BackupSuffix, config.MigrationRecordPath(env.Layout.ConfigPath))
 		if p.config.Migration.EnvKey != "" {
@@ -1590,6 +1594,9 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	if beforeStart != nil {
 		beforeStart()
 	}
+	if err := l.recordRestoredGeneration(ctx); err != nil {
+		l.result.AddWarning(codeRolledBack, "could not record the restored config.yaml in "+configwrite.GenerationFileName+": "+err.Error())
+	}
 	reloadErr := env.Services.Reload(ctx)
 	var startErrs []error
 	for _, name := range previouslyEnabled {
@@ -1616,6 +1623,39 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 	}
 	return restoreErr == nil, errors.Join(restoreErr, reloadErr, errors.Join(disableErrs...), errors.Join(startErrs...))
+}
+
+// recordRestoredGeneration records the config.yaml a rollback put back as a
+// new config generation (actor lifecycle). The transaction may already have
+// recorded, and the gateway reported, a generation for the config it
+// installed; a monotonic counter keeps that number for that config only.
+// Nothing is recorded when there is no config or no generation record, or
+// when the record already names the restored bytes.
+func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
+	env := l.env
+	configPath := env.P(env.Layout.ConfigPath)
+	statePath := env.P(configwrite.GenerationPath(env.Layout.ConfigPath))
+	uid, gid, mode, err := statOwnerMode(statePath)
+	if err != nil {
+		return nil
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return nil
+	}
+	_, err = configwrite.Locked(ctx, configPath, configwrite.Options{
+		Actor: configwrite.ActorLifecycle, Reason: "enterprise " + l.opts.Action + " rollback",
+	}, func() (bool, error) {
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			return false, err
+		}
+		state, stateErr := configwrite.ReadGenerationState(configPath)
+		return stateErr != nil || state.ConfigSHA256 != configwrite.SHA256Hex(raw), nil
+	})
+	if err != nil {
+		return err
+	}
+	return env.fixMetadata(statePath, mode.Perm(), fileOwner{UID: uid, GID: gid})
 }
 
 // recoverInterrupted rolls back a transaction a previous run left pending,
