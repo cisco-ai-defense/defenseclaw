@@ -412,8 +412,9 @@ func decodeV8GeneratedMetric(
 	}
 	switch descriptor.ValueType {
 	case "int64":
-		value, parseErr := strconv.ParseInt(string(number), 10, 64)
-		if parseErr != nil {
+		// A round value such as a 5 ms GC pause on Windows is "5e6" here.
+		value, ok := observability.ExactInt64(number)
+		if !ok {
 			return V8MetricNumber{}, nil, errors.New("telemetry: generated int64 metric value is invalid")
 		}
 		return V8MetricNumber{valueType: "int64", int64: value}, attributes, nil

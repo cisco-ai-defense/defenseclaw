@@ -596,6 +596,7 @@ jobs:
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
               "aiohttp": ">=3.14.3,<4",
+              "multidict": ">=6.9.1,<7",
               "pyjwt": ">=2.15.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
@@ -1201,73 +1202,12 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - run: uv sync
       - run: uv pip install pip pip-audit
-      # TODO: Remove --ignore-vuln CVE-2026-4539 once pygments >= 2.19.3 is released
-      # CVE-2026-4539: Low severity ReDoS in AdlLexer (local attack vector only)
-      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip version is
-      # released. No fix version available as of 2026-04-24. pip is only used
-      # by pip-audit itself, not by DefenseClaw at runtime.
-      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip is released.
-      # CVE-2026-3219: pip's interpretation conflict with concatenated tar/ZIP
-      # archives. Medium severity; impacts only attacker-supplied package
-      # archives. We install exclusively from PyPI via uv with locked hashes
-      # (uv.lock), so this attack surface is not exposed in CI or runtime.
-      #
-      # TODO: Remove --ignore-vuln PYSEC-2026-196 once the CI base image ships
-      # pip >= 26.1.2. Same rationale as CVE-2026-3219: pip is only used by
-      # pip-audit here, not by DefenseClaw at runtime, and we install
-      # exclusively from PyPI via uv with locked hashes (uv.lock).
-      #
-      # TODO: Remove --ignore-vuln PYSEC-2026-2132 once
-      # cisco-ai-mcp-scanner's litellm dependency no longer pins click==8.1.8.
-      # The advisory affects click.edit(), which DefenseClaw does not call;
-      # requiring the fixed Click 8.3.3 currently makes wheel installation
-      # unsatisfiable because litellm==1.83.7 requires Click 8.1.8 exactly.
-      #
-      # Previously ignored, now fixed by bumping cisco-ai-skill-scanner to
-      # >=2.0.11 + overriding starlette>=1.0.1 and python-dotenv>=1.2.2 in
-      # pyproject.toml:
-      #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
-      #   - CVE-2026-28684 (python-dotenv arbitrary file read)
-      # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265), pyjwt>=2.15.0
-      # (PYSEC-2026-175/177/178/179, CVE-2026-101917, CVE-2026-102265..102274,
-      # CVE-2026-101918) and urllib3>=2.8.0 (CVE-2026-97687/97688/97689) are
-      # likewise pinned in pyproject.toml.
       # Use OSV for the vulnerability database so an outage in PyPI's
       # package-metadata JSON API does not turn the audit red before
-      # pip-audit can evaluate the installed environment.
-      # TODO: Remove starlette ignores once cisco-ai-skill-scanner pins
-      # starlette >= 1.3.1. Starlette is only used by the skill-scanner
-      # plugin's local dev server, not by DefenseClaw's gateway at runtime.
-      # TODO: Remove aiohttp ignores once aiohttp >= 3.14.1 is pinned in
-      # pyproject.toml. aiohttp is a transitive dep of the skill-scanner;
-      # DefenseClaw's gateway is pure Go and does not use aiohttp at runtime.
-      # TODO: Remove python-multipart ignores once >= 0.0.31 is available
-      # and pinned. Same skill-scanner transitive; not in the gateway.
-      - run: >
-          uv run pip-audit --vulnerability-service osv
-          --ignore-vuln CVE-2026-4539
-          --ignore-vuln CVE-2026-3219
-          --ignore-vuln PYSEC-2026-196
-          --ignore-vuln PYSEC-2026-2132
-          --ignore-vuln CVE-2026-48818
-          --ignore-vuln CVE-2026-48817
-          --ignore-vuln CVE-2026-54283
-          --ignore-vuln CVE-2026-54282
-          --ignore-vuln CVE-2026-54279
-          --ignore-vuln CVE-2026-54273
-          --ignore-vuln CVE-2026-54275
-          --ignore-vuln CVE-2026-54277
-          --ignore-vuln CVE-2026-54280
-          --ignore-vuln CVE-2026-54278
-          --ignore-vuln CVE-2026-54276
-          --ignore-vuln CVE-2026-54274
-          --ignore-vuln CVE-2026-53539
-          --ignore-vuln CVE-2026-53538
-          --ignore-vuln CVE-2026-53540
-          --ignore-vuln CVE-2026-53537
-          --ignore-vuln GHSA-537c-gmf6-5ccf
-          --ignore-vuln GHSA-6v7p-g79w-8964
-          --ignore-vuln GHSA-4xgf-cpjx-pc3j
+      # pip-audit can evaluate the installed environment. Fix advisories by
+      # raising the floor in pyproject.toml (dependencies and tool.uv
+      # override-dependencies) instead of ignoring them here.
+      - run: uv run pip-audit --vulnerability-service osv
 
   ts-build-test:
     name: TypeScript Build & Test

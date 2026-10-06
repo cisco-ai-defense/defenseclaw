@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from collections.abc import Callable
 from types import SimpleNamespace
 
 from defenseclaw.config import RegistrySource
@@ -236,6 +237,22 @@ async def settle_panel(app: DefenseClawTUI, pilot: Pilot, *, timeout: float = 10
             raise AssertionError(f"{panel}: the deferred panel render did not finish in {timeout}s")
         await pilot.pause(0.01)
     await pilot.pause()
+
+
+async def settle_layout(pilot: Pilot, done: Callable[[], bool], *, timeout: float = 5.0) -> None:
+    """Let the app handle its pending events until ``done()`` holds.
+
+    A resize lands over several refreshes (the screen, then each pane's own
+    Resize, then the re-render it triggers), so a fixed pause could assert
+    between two of them on a slow runner. The timeout only bounds a failure;
+    it stays under the panels' 15 s refresh tick so that cannot mask one.
+    """
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not done():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"the layout did not settle in {timeout}s")
+        await pilot.pause()
 
 
 def screen_text(app: DefenseClawTUI) -> str:
