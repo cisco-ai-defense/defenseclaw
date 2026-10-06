@@ -1058,25 +1058,6 @@ func transactionChildEnvForHomes(
 	)
 }
 
-func transactionChildEnvForAllHomes(
-	transaction setupTransaction,
-	codexHome, claudeConfigDir, openCodeConfigDir string,
-) []string {
-	return transactionChildEnvForConnectorHomes(
-		transaction,
-		codexHome,
-		claudeConfigDir,
-		transaction.CopilotHome,
-		transaction.CursorHome,
-		transaction.DevinConfigDir,
-		transaction.DevinExecutable,
-		transaction.AntigravityConfigDir,
-		openCodeConfigDir,
-		transaction.OmnigentConfigHome,
-		transaction.HermesHome,
-	)
-}
-
 func transactionChildEnvForConnectorHomes(
 	transaction setupTransaction,
 	codexHome, claudeConfigDir, copilotHome, cursorHome, devinConfigDir, devinExecutable, antigravityConfigDir, openCodeConfigDir, omnigentConfigHome, hermesHome string,

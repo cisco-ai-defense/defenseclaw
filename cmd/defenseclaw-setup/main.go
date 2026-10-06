@@ -1311,10 +1311,6 @@ func readBoundedNativeStateFile(path string, limit int64) ([]byte, bool, error) 
 	return data, true, nil
 }
 
-func runConnectorLifecycle(gatewayPath, dataRoot, connectorName, action string) error {
-	return runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action, managedChildEnv(dataRoot))
-}
-
 func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action string, env []string) error {
 	if !pathExists(gatewayPath) {
 		return fmt.Errorf("connector %s %s requires the selected trusted gateway binary", connectorName, action)
@@ -2166,10 +2162,6 @@ result = migrate(
     gateway_binary=os.environ.get("DEFENSECLAW_GATEWAY_BIN") or None,
 )
 print(len(result.applied))`
-
-func runPackagedMigrations(root, dataRoot, fromVersion, toVersion string) error {
-	return runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion, managedChildEnv(dataRoot))
-}
 
 func runPackagedMigrationsWithEnv(root, dataRoot, fromVersion, toVersion string, env []string) error {
 	openClawRoot, err := defaultOpenClawRoot()

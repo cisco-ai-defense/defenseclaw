@@ -753,10 +753,6 @@ func legacyStartProcessWindowsNativePowerShellHookCommand(connector, hookBinary 
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
-func windowsCopilotPowerShellHookCommand() string {
-	return windowsCopilotPowerShellHookCommandForBinary(defenseclawHookBinary())
-}
-
 func windowsCopilotPowerShellAdapterCommand(hookScript string) string {
 	trimmed := strings.TrimSpace(hookScript)
 	if strings.HasPrefix(trimmed, "& '") && strings.HasSuffix(trimmed, "'") {

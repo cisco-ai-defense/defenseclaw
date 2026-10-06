@@ -5022,16 +5022,6 @@ func ensureJSONObject(obj map[string]interface{}, key string) map[string]interfa
 	return child
 }
 
-func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) {
-			return list
-		}
-	}
-	return append(list, entry)
-}
-
 func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
