@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -28,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -517,32 +517,31 @@ func (a *App) adminAllows(entry string) error {
 	return nil
 }
 
-// patchConfig writes keys to config.yaml, keeping the file valid.
+// patchConfig writes keys to config.yaml through the single config writer,
+// which validates the change before anything is written.
 func (a *App) patchConfig(updates map[string]any) error {
 	a.defaults()
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
 		return errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")
 	}
-	path := a.ConfigPath
-	before, err := os.ReadFile(path)
-	existed := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read %s: %w", path, err)
+	keys := make([]string, 0, len(updates))
+	for key := range updates {
+		keys = append(keys, key)
 	}
-	mode := os.FileMode(0o600)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
+	sort.Strings(keys)
+	changes := make([]configwrite.Change, 0, len(keys))
+	for _, key := range keys {
+		changes = append(changes, configwrite.Change{Path: key, Value: updates[key]})
 	}
-	if err := config.PatchYAMLFile(path, updates); err != nil {
-		return err
+	_, err := configwrite.Apply(context.Background(), a.ConfigPath, changes, configwrite.Options{
+		Actor:  configwrite.CurrentActor(configwrite.ActorPrefixCLI),
+		Reason: "defenseclaw-gateway sandbox",
+	})
+	if errors.Is(err, configwrite.ErrManaged) {
+		return errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")
 	}
-	if _, err := config.LoadRuntimeV8File(path); err != nil {
-		if existed {
-			_ = config.WriteFileAtomic(path, before, mode)
-		} else {
-			_ = os.Remove(path)
-		}
-		return fmt.Errorf("the change would make %s invalid (it was not written): %w", path, err)
+	if err != nil {
+		return fmt.Errorf("%s was not changed: %w", a.ConfigPath, err)
 	}
 	return nil
 }
