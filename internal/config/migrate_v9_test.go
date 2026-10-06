@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -442,5 +443,94 @@ func TestMigrateV9ReportsAStricterProxyThreshold(t *testing.T) {
 	if !strings.Contains(string(result.Migrated), "block_at: HIGH") || len(result.Record.Conflicts) != 1 ||
 		result.Record.Conflicts[0].To != "guardrail.block_at" || !strings.HasSuffix(result.Record.Conflicts[0].Lost, ":MEDIUM") {
 		t.Fatalf("conflicts = %+v\n%s", result.Record.Conflicts, result.Migrated)
+	}
+}
+
+// TestMigrateV9DropsTheKeysTheRuntimeNoLongerHas: a 0.8.10-shaped v8 file with
+// every key only an upgrade still understands (the three *_actions maps,
+// update_check and the privacy: section) migrates to its v9 equivalent or is
+// reported as dropped, and the same keys in a v9 file are plain unknown keys.
+// The 0.x environment inputs (DEFENSECLAW_PERSIST_JUDGE,
+// DEFENSECLAW_DISABLE_REDACTION) are read by the 0.x conversion in
+// cli/defenseclaw/observability/v8_migration.py, which has its own tests.
+func TestMigrateV9DropsTheKeysTheRuntimeNoLongerHas(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + dir + `
+update_check: false
+privacy:
+  disable_redaction: true
+skill_actions:
+  high: {file: none, runtime: enable, install: block}
+mcp_actions:
+  critical: {file: none, runtime: enable, install: none}
+  medium: {file: none, runtime: enable, install: block}
+plugin_actions:
+  critical: {file: quarantine, runtime: disable, install: block}
+observability: {}
+`
+	dataJSON := filepath.Join(dir, "data.json")
+	if err := os.WriteFile(dataJSON, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath: configPath, Source: []byte(source), DataJSONPath: dataJSON, DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(result.Migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(result.Record.Notes, "\n")
+	var wantConflicts []string
+	for _, row := range []struct {
+		key       string
+		moved     string   // v9 key that carries the value, "" when dropped
+		removed   string   // entry in the report's removed list, "" when moved
+		conflicts []string // customised levels that data.json overrode
+		note      string
+	}{
+		{key: "skill_actions", removed: "skill_actions", conflicts: []string{"admission.skill.actions.high"}},
+		{key: "mcp_actions", removed: "mcp_actions",
+			conflicts: []string{"admission.mcp.actions.critical", "admission.mcp.actions.medium"}},
+		// Equal to what data.json enforced: nothing to report beyond the drop.
+		{key: "plugin_actions", removed: "plugin_actions"},
+		{key: "update_check", moved: "update.check"},
+		{key: "privacy", removed: "privacy.disable_redaction", note: "privacy.disable_redaction"},
+	} {
+		if _, kept := doc[row.key]; kept {
+			t.Errorf("%s is still in the migrated config", row.key)
+		}
+		if row.removed != "" && !slices.Contains(result.Record.Removed, row.removed) {
+			t.Errorf("%s: removed = %v, want %s", row.key, result.Record.Removed, row.removed)
+		}
+		if row.moved != "" && !slices.ContainsFunc(result.Record.Moved, func(m MigrationMove) bool {
+			return m.From == row.key && m.To == row.moved
+		}) {
+			t.Errorf("%s: moved = %+v, want %s", row.key, result.Record.Moved, row.moved)
+		}
+		if row.note != "" && !strings.Contains(notes, row.note) {
+			t.Errorf("%s: notes = %q", row.key, notes)
+		}
+		wantConflicts = append(wantConflicts, row.conflicts...)
+
+		// In a v9 file the key has no special handling: it is an unknown key.
+		v9 := "config_version: 9\n" + row.key + ": {}\nobservability: {}\n"
+		if err := ValidateCandidate(configPath, []byte(v9)); err == nil || !strings.Contains(err.Error(), row.key) {
+			t.Errorf("%s in a v9 file: got %v, want an unknown-key error naming it", row.key, err)
+		}
+	}
+	if update, _ := doc["update"].(map[string]any); update["check"] != false {
+		t.Errorf("update = %v, want check: false", doc["update"])
+	}
+	var gotConflicts []string
+	for _, c := range result.Record.Conflicts {
+		gotConflicts = append(gotConflicts, c.To)
+	}
+	if !slices.Equal(gotConflicts, wantConflicts) {
+		t.Errorf("conflicts = %v, want %v", gotConflicts, wantConflicts)
 	}
 }

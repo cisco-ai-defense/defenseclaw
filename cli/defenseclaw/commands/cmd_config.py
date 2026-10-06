@@ -446,9 +446,9 @@ def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
     """Migrate config.yaml to config_version 9 (or acknowledge the migration).
 
     Moves the admission policy in policies/rego/data.json, the *_actions
-    keys, rule_pack_dir, the v8 scanner keys, update_check and the operator
-    block/allow entries of audit.db into config.yaml. Keeps
-    config.yaml.v8.bak and writes migration-v9.json.
+    keys, rule_pack_dir, the v8 scanner keys, update_check, a leftover
+    privacy section and the operator block/allow entries of audit.db into
+    config.yaml. Keeps config.yaml.v8.bak and writes migration-v9.json.
     """
     from defenseclaw.config_inspect import migrate_config_v9
 

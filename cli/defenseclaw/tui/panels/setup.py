@@ -4941,7 +4941,7 @@ def _build_guardrail_setup_args(
             judge_dirty = judge_dirty or field.value != field.default
             continue
         if field.kind == "bool":
-            if field.flag in {"--human-approval", "--disable-redaction"}:
+            if field.flag == "--human-approval":
                 if field.value == "yes" and field.flag:
                     base.append(field.flag)
                 elif field.value == "no" and field.no_flag:

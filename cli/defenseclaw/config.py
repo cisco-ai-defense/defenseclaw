@@ -1829,82 +1829,6 @@ class SeverityAction:
 
 
 @dataclass
-class SkillActionsConfig:
-    critical: SeverityAction = field(default_factory=SeverityAction)
-    high: SeverityAction = field(default_factory=SeverityAction)
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_disable(self, severity: str) -> bool:
-        return self.for_severity(severity).runtime == "disable"
-
-    def should_quarantine(self, severity: str) -> bool:
-        return self.for_severity(severity).file == "quarantine"
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
-class MCPActionsConfig:
-    critical: SeverityAction = field(
-        default_factory=lambda: SeverityAction(file="none", runtime="enable", install="block"),
-    )
-    high: SeverityAction = field(
-        default_factory=lambda: SeverityAction(file="none", runtime="enable", install="block"),
-    )
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
-class PluginActionsConfig:
-    critical: SeverityAction = field(default_factory=SeverityAction)
-    high: SeverityAction = field(default_factory=SeverityAction)
-    medium: SeverityAction = field(default_factory=SeverityAction)
-    low: SeverityAction = field(default_factory=SeverityAction)
-    info: SeverityAction = field(default_factory=SeverityAction)
-
-    def for_severity(self, severity: str) -> SeverityAction:
-        return {
-            "CRITICAL": self.critical,
-            "HIGH": self.high,
-            "MEDIUM": self.medium,
-            "LOW": self.low,
-        }.get(severity.upper(), self.info)
-
-    def should_disable(self, severity: str) -> bool:
-        return self.for_severity(severity).runtime == "disable"
-
-    def should_quarantine(self, severity: str) -> bool:
-        return self.for_severity(severity).file == "quarantine"
-
-    def should_install_block(self, severity: str) -> bool:
-        return self.for_severity(severity).install == "block"
-
-
-@dataclass
 class AssetRuntimeDetectionConfig:
     enabled: bool = True
     terminal_commands: bool = True
@@ -3009,16 +2933,6 @@ class RoutingConfig:
 
 
 @dataclass
-class PrivacyConfig:
-    """Reserved, empty ``privacy:`` section. Mirrors internal/config.PrivacyConfig.
-
-    Redaction is configured by ``observability.redaction_profiles``; the v7
-    ``disable_redaction`` switch is rejected by the v8 loader and read only by
-    the 0.x migration.
-    """
-
-
-@dataclass
 class AIRuntimeConfig:
     """AI Discovery runtime planes -- what actually ran.
 
@@ -3342,10 +3256,7 @@ class Config:
     splunk: SplunkConfig = field(default_factory=SplunkConfig)
     otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
-    skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
-    mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
-    plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
-    # config_version 9: admission replaces data.json and the *_actions keys.
+    # config_version 9: admission replaces data.json.
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
@@ -3354,7 +3265,6 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
-    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -3364,7 +3274,7 @@ class Config:
     # dict-shaped authoritative paths.
     _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     # Exact source version observed by load(). Ordinary saves of an already-v8
-    # document must never serialize the legacy audit_db/otel/privacy model over
+    # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -3922,16 +3832,10 @@ def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> No
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
     Setup commands that still set a v8 field (``rule_pack_dir``, the v8
-    scanner toggles, ``update_check``) would otherwise write a key
-    config_version 9 rejects. This maps them the way the Go migration does;
-    it goes away as each caller moves to the v9 key. The ``*_actions`` maps
-    are dropped: nothing edits them since 9 (the admission actions are
-    ``admission.<type>.actions``).
+    scanner toggles) would otherwise write a key config_version 9 rejects.
+    This maps them the way the Go migration does; it goes away as each caller
+    moves to the v9 key.
     """
-    for key in ("skill_actions", "mcp_actions", "plugin_actions", "update_check"):
-        value = merged.pop(key, None)
-        if key == "update_check" and isinstance(value, bool):
-            merged.setdefault("update", {})["check"] = value
     watch = merged.get("watch")
     if isinstance(watch, dict):
         watch.pop("allow_list_bypass_scan", None)
@@ -4620,7 +4524,7 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
 )
 
 _V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
-    {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
+    {"audit_db", "audit_sinks", "otel", "splunk", "observability"}
 )
 _V8_MISSING = object()
 
@@ -5021,42 +4925,6 @@ def _serialize_application_protection(cfg: Config, block: Any) -> None:
                 entry.pop("asset_policy", None)
 
 
-def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
-    if not raw:
-        return SeverityAction()
-    return SeverityAction(
-        file=raw.get("file", "none"),
-        runtime=raw.get("runtime", "enable"),
-        install=raw.get("install", "none"),
-    )
-
-
-def _merge_skill_actions(raw: dict[str, Any] | None) -> SkillActionsConfig:
-    defaults = SkillActionsConfig()
-    if not raw:
-        return defaults
-    return SkillActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
-
-
-def _merge_mcp_actions(raw: dict[str, Any] | None) -> MCPActionsConfig:
-    defaults = MCPActionsConfig()
-    if not raw:
-        return defaults
-    return MCPActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
-
-
 def _merge_inspect_llm(raw: dict[str, Any] | None) -> InspectLLMConfig:
     if not raw:
         return InspectLLMConfig()
@@ -5288,19 +5156,6 @@ def _derive_instance_name_from_base_url(cfg: Config) -> None:
     _maybe_apply(cfg.scanners.skill_scanner.llm)
     _maybe_apply(cfg.scanners.mcp_scanner.llm)
     _maybe_apply(cfg.scanners.plugin_llm)
-
-
-def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
-    defaults = PluginActionsConfig()
-    if not raw:
-        return defaults
-    return PluginActionsConfig(
-        critical=_merge_severity_action(raw.get("critical")) if "critical" in raw else defaults.critical,
-        high=_merge_severity_action(raw.get("high")) if "high" in raw else defaults.high,
-        medium=_merge_severity_action(raw.get("medium")) if "medium" in raw else defaults.medium,
-        low=_merge_severity_action(raw.get("low")) if "low" in raw else defaults.low,
-        info=_merge_severity_action(raw.get("info")) if "info" in raw else defaults.info,
-    )
 
 
 def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
@@ -6803,9 +6658,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
             watchdog=_merge_gateway_watchdog(gw_raw.get("watchdog")),
         ),
-        skill_actions=_merge_skill_actions(raw.get("skill_actions")),
-        mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
-        plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
         asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),

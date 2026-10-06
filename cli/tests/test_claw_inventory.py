@@ -38,9 +38,6 @@ from defenseclaw import connector_paths
 from defenseclaw.config import (
     ClawConfig,
     Config,
-    MCPActionsConfig,
-    PluginActionsConfig,
-    SeverityAction,
 )
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
@@ -2065,19 +2062,13 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_inventory_uses_per_target_fallback_actions_when_policy_missing(self):
+    def test_inventory_uses_builtin_admission_when_policy_missing(self):
         import uuid
         from datetime import datetime, timezone
 
         tmp = tempfile.mkdtemp(prefix="dc-inventory-fallback-")
         cfg = Config(
             policy_dir=os.path.join(tmp, "missing-policy"),
-            plugin_actions=PluginActionsConfig(
-                high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-            ),
-            mcp_actions=MCPActionsConfig(
-                high=SeverityAction(file="none", runtime="enable", install="block"),
-            ),
         )
 
         now = datetime.now(timezone.utc)
@@ -2179,9 +2170,6 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         try:
             cfg = Config(
                 policy_dir=os.path.join(tmp, "missing-policy"),
-                mcp_actions=MCPActionsConfig(
-                    high=SeverityAction(file="none", runtime="enable", install="block"),
-                ),
             )
 
             now = datetime.now(timezone.utc)

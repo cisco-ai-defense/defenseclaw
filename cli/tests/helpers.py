@@ -38,7 +38,6 @@ from defenseclaw.config import (
     MCPScannerConfig,
     OpenShellConfig,
     ScannersConfig,
-    SkillActionsConfig,
     SkillScannerConfig,
     default_config,
     prepare_fresh_v8_config,
@@ -268,7 +267,6 @@ def make_temp_config(tmp_dir: str | None = None) -> Config:
     )
     cfg.openshell = OpenShellConfig()
     cfg.gateway = GatewayConfig(host="127.0.0.1", api_port=18970)
-    cfg.skill_actions = SkillActionsConfig()
     return cfg
 
 

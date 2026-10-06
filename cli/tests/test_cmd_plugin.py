@@ -2762,13 +2762,8 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient.disable_plugin")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_action_strict_config_quarantines_critical(self, mock_fetch, mock_scan, mock_disable):
+    def test_install_action_critical_records_the_install_block(self, mock_fetch, mock_scan, mock_disable):
         """--action on CRITICAL quarantines and records the scan block."""
-        from defenseclaw.config import PluginActionsConfig, SeverityAction
-        self.app.cfg.plugin_actions = PluginActionsConfig(
-            critical=SeverityAction(file="quarantine", runtime="disable", install="block"),
-            high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("strict-danger-pkg")
         mock_fetch.return_value = src

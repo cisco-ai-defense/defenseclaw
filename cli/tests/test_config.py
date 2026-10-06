@@ -51,9 +51,7 @@ from defenseclaw.config import (
     PerConnectorAssetPolicy,
     PerConnectorAssetTypePolicy,
     PerConnectorGuardrailConfig,
-    PluginActionsConfig,
     SeverityAction,
-    SkillActionsConfig,
     SkillScannerConfig,
     WatchConfig,
     WebhookConfig,
@@ -67,9 +65,6 @@ from defenseclaw.config import (
     _merge_inspect_llm,
     _merge_mcp_scanner,
     _merge_openshell,
-    _merge_plugin_actions,
-    _merge_severity_action,
-    _merge_skill_actions,
     _merge_webhooks,
     config_path,
     default_config,
@@ -371,41 +366,6 @@ class TestSeverityAction(unittest.TestCase):
         self.assertEqual(sa.install, "none")
 
 
-class TestSkillActionsConfig(unittest.TestCase):
-    def test_for_severity_known(self):
-        cfg = SkillActionsConfig()
-        self.assertEqual(cfg.for_severity("CRITICAL").install, "none")
-        self.assertEqual(cfg.for_severity("HIGH").runtime, "enable")
-        self.assertEqual(cfg.for_severity("MEDIUM").runtime, "enable")
-        self.assertEqual(cfg.for_severity("LOW").file, "none")
-
-    def test_for_severity_unknown_falls_to_info(self):
-        cfg = SkillActionsConfig()
-        action = cfg.for_severity("UNKNOWN")
-        self.assertEqual(action.runtime, "enable")
-        self.assertEqual(action.install, "none")
-
-    def test_for_severity_case_insensitive(self):
-        cfg = SkillActionsConfig()
-        self.assertEqual(cfg.for_severity("critical").install, "none")
-
-    def test_should_disable(self):
-        cfg = SkillActionsConfig()
-        self.assertFalse(cfg.should_disable("CRITICAL"))
-        self.assertFalse(cfg.should_disable("HIGH"))
-        self.assertFalse(cfg.should_disable("MEDIUM"))
-
-    def test_should_quarantine(self):
-        cfg = SkillActionsConfig()
-        self.assertFalse(cfg.should_quarantine("CRITICAL"))
-        self.assertFalse(cfg.should_quarantine("LOW"))
-
-    def test_should_install_block(self):
-        cfg = SkillActionsConfig()
-        self.assertFalse(cfg.should_install_block("HIGH"))
-        self.assertFalse(cfg.should_install_block("INFO"))
-
-
 class TestAIDiscoveryConfig(unittest.TestCase):
     def test_default_config_enables_ai_discovery_for_new_installs(self):
         cfg = default_config()
@@ -614,46 +574,6 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
 
 
 class TestMergeFunctions(unittest.TestCase):
-    def test_merge_severity_action_none(self):
-        sa = _merge_severity_action(None)
-        self.assertEqual(sa.file, "none")
-
-    def test_merge_severity_action_partial(self):
-        sa = _merge_severity_action({"file": "quarantine"})
-        self.assertEqual(sa.file, "quarantine")
-        self.assertEqual(sa.runtime, "enable")
-
-    def test_merge_skill_actions_none(self):
-        sa = _merge_skill_actions(None)
-        self.assertEqual(sa.critical.install, "none")
-
-    def test_merge_skill_actions_override(self):
-        sa = _merge_skill_actions({"critical": {"file": "quarantine", "runtime": "disable", "install": "block"}})
-        self.assertEqual(sa.critical.install, "block")
-        self.assertEqual(sa.high.install, "none")
-
-    def test_merge_plugin_actions_none(self):
-        pa = _merge_plugin_actions(None)
-        self.assertEqual(pa.critical.file, "none")
-        self.assertEqual(pa.critical.runtime, "enable")
-        self.assertEqual(pa.critical.install, "none")
-        self.assertEqual(pa.medium.file, "none")
-        self.assertEqual(pa.medium.runtime, "enable")
-
-    def test_merge_plugin_actions_override(self):
-        pa = _merge_plugin_actions({"high": {"file": "quarantine", "runtime": "disable", "install": "block"}})
-        self.assertEqual(pa.high.install, "block")
-        self.assertEqual(pa.high.file, "quarantine")
-        self.assertEqual(pa.critical.install, "none")
-
-    def test_plugin_actions_for_severity(self):
-        pa = PluginActionsConfig()
-        self.assertEqual(pa.for_severity("CRITICAL").install, "none")
-        self.assertFalse(pa.should_disable("HIGH"))
-        self.assertFalse(pa.should_quarantine("CRITICAL"))
-        self.assertFalse(pa.should_install_block("LOW"))
-        self.assertEqual(pa.for_severity("BOGUS").runtime, "enable")
-
     def test_merge_gateway_watcher_none(self):
         gw = _merge_gateway_watcher(None)
         self.assertTrue(gw.enabled)
