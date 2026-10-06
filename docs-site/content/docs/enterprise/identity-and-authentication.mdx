@@ -107,8 +107,10 @@ What differs between platforms and installs, as exercised on real hosts:
 - **macOS per-user and enterprise.** A per-user install reports the account
   and its groups as verified, directory `local`, source `macos_opendirectory`.
   The directory, domain and SSO provider of a bound Mac need the enterprise
-  root enumerator. The Kerberos principal (a `FILE:` cache only) and the SSH
-  session are claimed.
+  root enumerator. The session's Kerberos principal and the SSH session are
+  claimed. The principal comes from the default `API:` cache, which the hook
+  reads with macOS's own `/usr/bin/klist --json` at most once per 5 minutes,
+  or from a `FILE:` cache that `KRB5CCNAME` or `krb5.conf` names.
 - **Okta is never an Okta lookup.** On Linux and Windows an Okta user is
   whatever AD or LDAP account Okta syncs to. The `okta` directory value comes
   only from a Mac's Platform SSO or Okta Device Access provider.
@@ -391,7 +393,7 @@ none of these facts.
 | No UPN, the principal reads `account@REALM` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
 | No `defenseclaw.user.directory` for an SSSD account | Expected on a per-user Linux install, and for an SSSD domain that is not managed by realmd. SSSD does not say which directory serves the account; only the standalone enterprise guardian reads it from `realm list`. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
-| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM change within 5 minutes). A `KEYRING:` or macOS `API:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. |
+| No Kerberos principal, or an old one | The principal is read from the credential cache as a claim. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |

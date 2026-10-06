@@ -7,9 +7,11 @@ package useridentity
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -25,6 +27,12 @@ const (
 	kcmCallTimeout = 2 * time.Second
 	krb5ConfPath   = "/etc/krb5.conf"
 	maxKrb5Conf    = 256 << 10
+	// macOS's own Heimdal klist reads the API: cache; it answers in about
+	// 15 ms and gets the same bound as a KCM call.
+	macOSKlistPath = "/usr/bin/klist"
+	klistTimeout   = kcmCallTimeout
+	maxKlistOutput = 64 << 10
+	klistWaitDelay = 100 * time.Millisecond
 )
 
 func currentSessionFactsHeader(now time.Time) string {
@@ -44,7 +52,7 @@ func currentSessionFactsHeader(now time.Time) string {
 	}
 	facts := SessionFromSSHEnv(os.Getenv)
 	principal, ccType, settled := readDefaultPrincipal(kind, residual)
-	if principal == "" && ((ccType != CCacheKeyring && ccType != CCacheAPI) || platformDefault) {
+	if principal == "" && (ccType != CCacheKeyring || platformDefault) {
 		// No readable cache: report no type rather than the default name's.
 		ccType = ""
 	}
@@ -56,8 +64,9 @@ func currentSessionFactsHeader(now time.Time) string {
 	if cachePath != "" {
 		written := now
 		if !settled {
-			// A KCM read that failed in transit is not the session's
-			// answer: it is reused for sessionFactsRetryAfter, not the TTL.
+			// A KCM read that failed in transit, or a klist that timed out,
+			// is not the session's answer: it is reused for
+			// sessionFactsRetryAfter, not the TTL.
 			written = now.Add(sessionFactsRetryAfter - SessionFactsCacheTTL)
 		}
 		_ = writeSessionFactsCache(cachePath, key, envKey, header, written)
@@ -67,9 +76,9 @@ func currentSessionFactsHeader(now time.Time) string {
 
 // ccacheNameFromEnv is KRB5CCNAME, else the krb5.conf default_ccache_name,
 // else the platform default (API: on macOS, FILE:/tmp/krb5cc_<uid>
-// elsewhere); platformDefault reports the last case. KEYRING: and API:
-// caches cannot be read, so their type is reported only when the user or
-// the administrator named them.
+// elsewhere); platformDefault reports the last case. A KEYRING: cache
+// cannot be read, so its type is reported only when the user or the
+// administrator named it.
 func ccacheNameFromEnv(getenv func(string) string) (name string, platformDefault bool) {
 	if name := strings.TrimSpace(getenv("KRB5CCNAME")); name != "" {
 		return name, false
@@ -183,7 +192,8 @@ func ccacheModTime(kind, residual string) string {
 
 // readDefaultPrincipal reads the default principal of the named cache. It
 // returns the cache type even when the principal cannot be read; settled is
-// false when a KCM read failed in transit and may answer on a retry.
+// false when a KCM read failed in transit or klist timed out, and may answer
+// on a retry.
 func readDefaultPrincipal(kind, residual string) (principal, ccType string, settled bool) {
 	switch kind {
 	case CCacheFile:
@@ -196,9 +206,59 @@ func readDefaultPrincipal(kind, residual string) (principal, ccType string, sett
 	case CCacheKeyring:
 		return "", CCacheKeyring, true
 	case CCacheAPI:
-		return "", CCacheAPI, true
+		principal, settled = readAPIPrincipal(residual)
+		return principal, CCacheAPI, settled
 	}
 	return "", "", true
+}
+
+// readAPIPrincipal asks macOS's klist for the default principal of the API:
+// cache, or of the named one. It runs as the hook's user with a bare
+// environment, so it reads only that user's caches; a missing cache, no
+// ticket or an older klist without --json settles on no principal, and only
+// a timeout does not. Other systems have no API: cache.
+func readAPIPrincipal(cacheName string) (principal string, settled bool) {
+	if runtime.GOOS != "darwin" {
+		return "", true
+	}
+	args := []string{"--json"}
+	if cacheName != "" {
+		args = append(args, "--cache="+CCacheAPI+":"+cacheName)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), klistTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, macOSKlistPath, args...)
+	env := []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+	if home, err := os.UserHomeDir(); err == nil {
+		env = append(env, "HOME="+home)
+	}
+	cmd.Env = env
+	out := &cappedBuffer{limit: maxKlistOutput}
+	cmd.Stdout = out
+	cmd.WaitDelay = klistWaitDelay
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return "", false
+	}
+	if err != nil {
+		return "", true
+	}
+	return parseKlistJSONPrincipal(out.data), true
+}
+
+// cappedBuffer keeps the first limit bytes written to it and drops the rest,
+// so a cache with many tickets cannot make the hook buffer without bound.
+// It has no ReadFrom, so io.Copy goes through Write.
+type cappedBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.limit - len(c.data); room > 0 {
+		c.data = append(c.data, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
 }
 
 func readFileCCachePrincipal(path string) string {

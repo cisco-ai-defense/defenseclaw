@@ -24,22 +24,25 @@ import (
 // resolves through the same function.
 func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) {
 	now := time.Now().UTC()
-	record, haveRecord := readIdentitySpoolFacts(key, now)
 	account, err := osuser.LookupId(key)
 	if err != nil {
-		if haveRecord {
-			return mergeSpoolFacts(useridentity.DirectoryFacts{}, record.Facts), nil
-		}
+		return useridentity.DirectoryFacts{}, err
+	}
+	// Groups that could not be listed fail the lookup: facts cached as
+	// resolved without them would select the default profile as "default"
+	// for 15 minutes instead of "default_lookup_failed".
+	groups, err := accountGroups(account)
+	if err != nil {
 		return useridentity.DirectoryFacts{}, err
 	}
 	own := useridentity.DirectoryFacts{
 		Directory:  useridentity.DirectoryLocal,
 		Source:     useridentity.SourceMacOSOpenDirectory,
-		Groups:     localAccountGroups(account),
+		Groups:     groups,
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
 	}
-	if haveRecord {
+	if record, ok := readIdentitySpoolFacts(key, now); ok {
 		return mergeSpoolFacts(own, record.Facts), nil
 	}
 	return own, nil

@@ -269,7 +269,7 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 	for index, step := range steps {
 		identity.Phase = step.phase
 		if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
-			Sandbox: identity, Trigger: step.trigger, ExitCode: step.exitCode,
+			Sandbox: identity, Trigger: step.trigger, ExitCode: step.exitCode, UserID: "1005", UserName: "dcr-sbx",
 		}); err != nil {
 			t.Fatalf("step %d (%s): %v", index, step.phase, err)
 		}
@@ -293,6 +293,8 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 			"defenseclaw.sandbox.phase.previous":    optional(step.previous),
 			"defenseclaw.sandbox.lifecycle.trigger": string(step.trigger),
 			"defenseclaw.sandbox.exit_code":         exit,
+			"user.id":                               "1005",
+			"defenseclaw.user.name":                 "dcr-sbx",
 		})
 		active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
 		last := active[len(active)-1]

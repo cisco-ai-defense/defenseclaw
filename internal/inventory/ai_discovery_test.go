@@ -1087,9 +1087,8 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 // processes. It ingests the guardian's per-user scans instead: each signal
 // belongs to the account the guardian's record names (not to anything the
 // scan reported), identical files of two users stay distinct, and the
-// gateway's own process detector is reported as covered, not failed. A v2
-// record's IDE inventory is attributed the same way; a v1 record (a
-// guardian from before the IDE inventory) is still read.
+// gateway's own process detector is reported as covered, not failed. A
+// record's IDE inventory is attributed the same way.
 func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	withoutMachineIDEs(t)
 	tmp := t.TempDir()
@@ -1117,11 +1116,11 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	}
 	spool := filepath.Join(tmp, "spool")
 	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
-		version, userReport := UserScanRecordVersion, report
+		userReport := report
 		if uid == 1002 {
-			version, userReport.IDEInventory = 1, nil
+			userReport.IDEInventory = nil
 		}
-		data, err := json.Marshal(UserScanRecord{Version: version, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
 		if err != nil {
 			t.Fatal(err)
 		}
