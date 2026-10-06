@@ -363,6 +363,14 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", ""))
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")))
 
+    def test_activate_compares_thresholds_with_the_selected_pack(self):
+        # The permissive pack alerts at HIGH; the default preset alerts at
+        # MEDIUM, so activating it must write alert_at (block CRITICAL matches).
+        self.app.cfg.guardrail.rule_pack = "permissive"
+        result = self.invoke(["activate", "default", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", "MEDIUM"))
+
 
 class TestPolicyLifecycle(PolicyCommandTestBase):
     def test_create_show_activate_delete(self):

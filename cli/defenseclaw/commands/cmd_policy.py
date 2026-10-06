@@ -675,7 +675,6 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
 
 
 _RANK_NAMES = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
-_DEFAULT_BLOCK_RANK, _DEFAULT_ALERT_RANK = 4, 2
 
 
 def _admission_triple(raw: dict) -> dict:
@@ -737,14 +736,18 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
 
 def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, imported lazily
     """A named policy's guardrail thresholds and Cisco trust level as config
-    keys. A threshold equal to the default (block CRITICAL, alert MEDIUM) is
-    left unset so the rule pack's posture default applies."""
+    keys. A threshold equal to the configured rule pack's posture default is
+    left unset so that default applies; any other is written, so the preset's
+    levels hold whichever pack is selected (as the v9 migration compares)."""
+    from defenseclaw.policy_catalog import _PROFILE_RANKS, global_pack, pack_profile
+
     guardrail = data.get("guardrail") or {}
     if not isinstance(guardrail, dict):
         return
+    pack_block, pack_alert = _PROFILE_RANKS[pack_profile(global_pack(cfg).path)]
     for key, attr, default in (
-        ("block_threshold", "block_at", _DEFAULT_BLOCK_RANK),
-        ("alert_threshold", "alert_at", _DEFAULT_ALERT_RANK),
+        ("block_threshold", "block_at", pack_block),
+        ("alert_threshold", "alert_at", pack_alert),
     ):
         if key in guardrail:
             rank = int(guardrail[key])
