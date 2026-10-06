@@ -108,6 +108,7 @@ const (
 	codePayload             = "payload_invalid"
 	codePackageOwned        = "package_owned_binaries"
 	codeConfig              = "config_invalid"
+	codeConfigRefused       = "config_refused"
 	codeAccount             = "service_account"
 	codeApply               = "apply_failed"
 	codeActivate            = "activation_failed"
@@ -1032,7 +1033,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			l.restoreNewerConfig(record, newerConfig)
 		}
 		if err != nil {
-			r.AddError(codeRollbackFailed, err.Error())
+			message := err.Error()
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				message += "; the restored deployment's gateway is refused the same way: " + refusal
+			}
+			r.AddError(codeRollbackFailed, message)
 		} else {
 			r.AddWarning(codeRolledBack, "restored the previous deployment")
 		}
@@ -1123,6 +1128,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 					err = fmt.Errorf("%w; %s", err, held)
 				}
 			}
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
+			}
 			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
 				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
 					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
@@ -1197,6 +1205,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
+	l.clearSupersededPackageFailure()
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}
