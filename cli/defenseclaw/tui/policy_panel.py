@@ -592,8 +592,7 @@ class PolicyPanelMixin:
             LevelPickerScreen(
                 f"{what} at: tool calls for {_level_scope_words(model, row)}",
                 choices,
-                subtitle="Tool calls in action mode. The policy's levels for LLM traffic through the guardrail "
-                "proxy are separate (Policies view).",
+                subtitle="Prompts, completions, tool calls and proxy LLM traffic of this scope, in action mode.",
                 previews=previews,
             )
         )
@@ -609,7 +608,8 @@ class PolicyPanelMixin:
         await self._run_policy_intent(level_intent(kind, chosen, model.command_connector(row)))
 
     async def _policy_threshold_flow(self, kind: str, name: str) -> None:
-        """``b`` / ``a`` on Policies: the policy's LLM-traffic level → ``policy edit guardrail``."""
+        """``b`` / ``a`` on Policies: the policy's level → ``policy edit guardrail``
+        (live for the active policy, a saved draft for another)."""
         model = self.policy_model
         policy = model.policy_named(name)
         what = "Block" if kind == "block" else "Alert"
@@ -621,9 +621,10 @@ class PolicyPanelMixin:
         previews = {choice.value: policy_threshold_preview(policy, kind, choice.value) for choice in choices}
         chosen = await self.push_screen_wait(  # type: ignore[attr-defined]
             LevelPickerScreen(
-                f"{what} at: LLM traffic (guardrail proxy), {policy.name} policy",
+                f"{what} at: {policy.name} policy",
                 choices,
-                subtitle="Tool calls take their levels from each scope instead (Posture view).",
+                subtitle="The active policy's level applies to every guardrail surface unless a connector "
+                "sets its own (Posture view).",
                 previews=previews,
             )
         )
@@ -636,7 +637,7 @@ class PolicyPanelMixin:
         if confirmed is None:
             self._set_status(f"{what} level unchanged.")  # type: ignore[attr-defined]
             return
-        await self._run_policy_intent(threshold_intent(kind, chosen, policy.name))
+        await self._run_policy_intent(threshold_intent(kind, chosen, _edited_policy(policy)))
 
     async def _hilt_flow(self, connector: str) -> None:
         model = self.policy_model
@@ -867,7 +868,7 @@ def mode_change_modal(model: PoliciesPanelModel, row: Any, new: str) -> Conseque
 
 
 def policy_threshold_preview(policy: Any, kind: str, level: str) -> str:
-    """Picker preview for a policy's level: what LLM traffic gets at each severity."""
+    """Picker preview for a policy's level: what each severity gets."""
     block = str(getattr(policy, "block_at", "") or "CRITICAL")
     alert = str(getattr(policy, "alert_at", "") or "MEDIUM+")
     if kind == "block":
@@ -875,33 +876,43 @@ def policy_threshold_preview(policy: Any, kind: str, level: str) -> str:
     else:
         alert = level
     traffic = " · ".join(f"{sev} {action}" for sev, action in severity_actions(block, alert, "off"))
-    return f"LLM traffic: {traffic}"
+    return f"At each severity: {traffic}"
+
+
+def _edited_policy(policy: Any) -> str:
+    """The ``-p`` name a policy level edit takes: none for the active policy,
+    whose levels are the live global ones."""
+    return "" if getattr(policy, "active", False) else str(getattr(policy, "name", "") or "")
 
 
 def policy_threshold_modal(kind: str, level: str, policy: Any) -> ConsequenceModalModel:
-    """A named policy's block or alert level for LLM traffic through the guardrail proxy.
+    """A named policy's block or alert level.
 
-    Red with a second press when it catches fewer severities on the active
-    policy; editing another one only saves it until it is activated.
+    The active policy's level is the live global level (one threshold model);
+    red with a second press when it catches fewer severities. Editing another
+    policy only saves it until it is activated.
     """
     name = str(getattr(policy, "name", "") or "active")
     active = bool(getattr(policy, "active", False))
     old = str(getattr(policy, "block_at" if kind == "block" else "alert_at", "") or "-")
     weaker = active and threshold_weakens(old, level)
-    intent = threshold_intent(kind, level, name)
+    intent = threshold_intent(kind, level, _edited_policy(policy))
     what = "Block" if kind == "block" else "Alert"
     verb = "blocks" if kind == "block" else "alerts on"
-    details = [
-        "LLM traffic through the guardrail proxy only; tool calls keep each scope's levels (Posture view).",
-    ]
-    if not active:
+    details = []
+    if active:
+        details.append(
+            f"Sets guardrail.{kind}_at: prompts, completions, tool calls and proxy traffic use it "
+            "unless a connector sets its own (Posture view)."
+        )
+    else:
         details.append(f"The {name} policy isn't active, so nothing changes until you activate it (Enter).")
-    if getattr(policy, "builtin", False) and not getattr(policy, "edited", False):
+    if not active and getattr(policy, "builtin", False) and not getattr(policy, "edited", False):
         details.append(f"The built-in {name} policy is copied to your policy folder first.")
     details.append(_run_line(intent, "; the gateway reloads the policy." if active else ""))
     consequence = f"This weakens protection: the policy {verb} {level} instead of {old}." if weaker else ""
     return _modal(
-        f"{what} LLM traffic at {level} in the {name} policy?",
+        f"{what} at {level} in the {name} policy?",
         f"{old} → {level}",
         details,
         consequence,

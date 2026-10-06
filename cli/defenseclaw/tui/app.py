@@ -1892,12 +1892,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         (
                             "policies-block",
                             "Block at",
-                            "Pick the block level: the scope's tool calls, or the policy's LLM traffic (b)",
+                            "Pick the block level of the scope, or of the policy (b)",
                         ),
                         (
                             "policies-alert",
                             "Alert at",
-                            "Pick the alert level: the scope's tool calls, or the policy's LLM traffic (a)",
+                            "Pick the alert level of the scope, or of the policy (a)",
                         ),
                         ("policies-approval", "Approval", "Pick when the scope asks a human first (h)"),
                         ("policies-rule-pack", "Rule pack", "Switch the scope's rule pack (p)"),
