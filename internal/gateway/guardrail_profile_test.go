@@ -369,9 +369,9 @@ func TestLocalAccountGroupsCountEachGroupOnce(t *testing.T) {
 	if err != nil || len(gids) == 0 {
 		t.Skip("no groups for the current account")
 	}
-	groups := localAccountGroups(account)
-	if len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
-		t.Fatalf("localAccountGroups = %v (count %d), want one entry per gid %v", groups, identityGroupCount(groups), gids)
+	groups, err := accountGroups(account)
+	if err != nil || len(groups) != len(gids) || identityGroupCount(groups) != int64(len(gids)) {
+		t.Fatalf("accountGroups = %v (count %d), err %v; want one entry per gid %v", groups, identityGroupCount(groups), err, gids)
 	}
 }
 
@@ -389,6 +389,22 @@ func TestExplainReportsAFailedDirectoryLookup(t *testing.T) {
 	subject, err := lookupDirectoryProfileSubject("dcad-manygroups")
 	if err != nil || !subject.LookupFailed || !strings.Contains(subject.LookupError, "3000 groups") || len(subject.Groups) != 0 {
 		t.Fatalf("subject = %+v, %v; want a failed lookup that names its reason and has no groups", subject, err)
+	}
+}
+
+// TestExplainReportsGroupsThatCannotBeListed pins GAP-0201: an account whose
+// groups the OS database cannot list is a failed lookup in explain too, with
+// the reason, not an account with no groups that gets the plain default.
+func TestExplainReportsGroupsThatCannotBeListed(t *testing.T) {
+	prev := accountGroupIDs
+	t.Cleanup(func() { accountGroupIDs = prev })
+	accountGroupIDs = func(*osuser.User) ([]string, error) {
+		return nil, errors.New("user: list groups for dcad-manygroups failed")
+	}
+	subject := localProfileSubject(&osuser.User{Uid: "94401116", Username: "dcad-manygroups"})
+	decision := (&guardrailProfileSet{}).match(&subject, profileSubjectLookup, "", "")
+	if !subject.LookupFailed || !strings.Contains(subject.LookupError, "list groups") || decision.Match != profileMatchDefaultLookupFailed {
+		t.Fatalf("subject = %+v, match %q; want a failed lookup that names its reason", subject, decision.Match)
 	}
 }
 
