@@ -11891,6 +11891,16 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             False,
         ),
         (
+            "doctor.connector.hook-scripts.regenerate",
+            "generated hook scripts",
+            "disruptive",
+            _fix_hook_script_drift,
+            ("doctor.gateway.service.reconcile",),
+            ("restart the gateway so it renders the hook scripts setup sealed again, replacing an edited copy",),
+            True,
+            False,
+        ),
+        (
             "doctor.acp.guard.repin",
             "ACP guard pins",
             "safe",
@@ -13304,7 +13314,12 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     # with the repair doctor --fix applies (GAP-1436).
     problems = [problem for problem in hook_runtime_problems(cfg, connector) if not problem.startswith("hook token ")]
     if problems:
-        _emit("fail", "Hook runtime files", f"{'; '.join(problems)}; run `{setup_command(connector)}`", r=r)
+        _emit(
+            "fail",
+            "Hook runtime files",
+            f"{'; '.join(problems)}; run `defenseclaw doctor --fix`, or `{setup_command(connector)}`",
+            r=r,
+        )
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:
@@ -15316,6 +15331,54 @@ def _fix_hook_script_modes(
     except OSError as exc:
         return ("fail", f"could not restore the hook script mode: {exc}")
     return ("pass", f"restored mode 0700 on {names}")
+
+
+def _drifted_hook_connectors(cfg) -> list[str]:
+    from defenseclaw.hook_integrity import hook_runtime_problems
+
+    return [
+        connector
+        for connector in _doctor_active_connectors(cfg)
+        if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+    ]
+
+
+def _fix_hook_script_drift(
+    cfg,
+    *,
+    assume_yes: bool,
+    plan_only: bool = False,
+) -> tuple[str, str]:
+    """Render a hand-edited generated hook script again (GAP-0098).
+
+    The script is derived from config.yaml: the gateway renders it, with its
+    digest sealed in hook_contract_lock.json, each time it starts. So the
+    repair is a restart of the verified gateway, which replaces the edited
+    copy, never a chmod that would make it runnable.
+    """
+    drifted = _drifted_hook_connectors(cfg)
+    if not drifted:
+        return ("skip", "the generated hook scripts match the digests setup sealed")
+    names = ", ".join(drifted)
+    if plan_only:
+        return ("plan", f"restart the gateway so it renders the {names} hook script(s) again")
+    if not assume_yes and not click.confirm(
+        f"    Restart the gateway to render the {names} hook script(s) again?", default=True
+    ):
+        return ("skip", "declined by user")
+    trust = _trusted_gateway_listener_for_lifecycle(cfg)
+    if not trust.trusted:
+        return ("fail", f"{trust.detail}; start the gateway with `defenseclaw-gateway start`, then run doctor --fix again")
+    repaired, detail = _repair_gateway_lifecycle(cfg, start_if_stopped=False)
+    if not repaired:
+        return ("fail", f"could not restart the gateway ({detail}); run `defenseclaw-gateway restart`")
+    left = _drifted_hook_connectors(cfg)
+    if left:
+        from defenseclaw.hook_integrity import setup_command
+
+        commands = ", ".join(f"`{setup_command(c)}`" for c in left)
+        return ("fail", f"the gateway restarted but {', '.join(left)} still differs from setup's render; run {commands}")
+    return ("pass", f"rendered the {names} hook script(s) again")
 
 
 def _fix_acp_guard_pins(
