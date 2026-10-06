@@ -380,7 +380,7 @@ PY
 
 write_admin_config() {
     cat >"$stage/config.yaml" <<EOF
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: $data_dir
 policy_dir: $vendor_policy_dir
@@ -392,7 +392,7 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-  rule_pack_dir: $vendor_policy_dir/guardrail/default
+  rule_pack: default
   connectors:
     claudecode: {enabled: true}
     codex: {enabled: true}
