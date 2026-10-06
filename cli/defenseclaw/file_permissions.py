@@ -25,6 +25,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -345,12 +346,41 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
     move_file_ex = kernel32.MoveFileExW
     move_file_ex.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
     move_file_ex.restype = wintypes.BOOL
-    if not move_file_ex(
-        _windows_extended_path(source_path),
-        _windows_extended_path(target_path),
-        movefile_replace_existing | movefile_write_through,
-    ):
-        raise ctypes.WinError(ctypes.get_last_error())
+    code = _move_retrying_sharing_errors(
+        lambda: bool(
+            move_file_ex(
+                _windows_extended_path(source_path),
+                _windows_extended_path(target_path),
+                movefile_replace_existing | movefile_write_through,
+            )
+        ),
+        ctypes.get_last_error,
+    )
+    if code:
+        raise ctypes.WinError(code)
+
+
+# ERROR_ACCESS_DENIED and ERROR_SHARING_VIOLATION: a reader that opened the
+# target without FILE_SHARE_DELETE (another DefenseClaw process, an indexer,
+# antivirus) makes MoveFileExW fail for a moment.
+_TRANSIENT_MOVE_ERRORS = frozenset({5, 32})
+
+
+def _move_retrying_sharing_errors(
+    move: Callable[[], bool], last_error: Callable[[], int], sleep: Callable[[float], None] = time.sleep
+) -> int:
+    """Run *move* until it succeeds (0) or fails with a non-transient error
+    or eight times (that error code), backing off as the Go writer does."""
+    delay = 0.01
+    for attempt in range(1, 9):
+        if move():
+            return 0
+        code = last_error()
+        if code not in _TRANSIENT_MOVE_ERRORS or attempt == 8:
+            return code
+        sleep(delay)
+        delay = min(delay * 2, 0.08)
+    return 0
 
 
 def delete_file_durable(path: str | os.PathLike[str]) -> None:

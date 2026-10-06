@@ -1890,3 +1890,15 @@ def test_private_atomic_write_holds_parent_against_directory_swap(tmp_path):
     assert swap_refused is True
     assert target.read_bytes() == b"synthetic fixture"
     assert not moved.exists()
+
+
+def test_windows_replace_retries_transient_sharing_errors() -> None:
+    # MoveFileExW fails for a moment while another reader holds the target
+    # open; the writer retries as the Go writer does, but not other errors.
+    results = iter([False, False, True])
+    codes = iter([32, 5])
+    sleeps: list[float] = []
+    assert file_permissions._move_retrying_sharing_errors(lambda: next(results), lambda: next(codes), sleeps.append) == 0
+    assert sleeps == [0.01, 0.02]
+    assert file_permissions._move_retrying_sharing_errors(lambda: False, lambda: 2, sleeps.append) == 2
+    assert len(sleeps) == 2
