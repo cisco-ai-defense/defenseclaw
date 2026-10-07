@@ -347,6 +347,9 @@ _IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
 def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
     """IDE cell: the product, plus where it runs for a remote install."""
     product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    version = str(item.get("ide_version") or "")
+    if version:
+        product = f"{product} {version}"
     kind = str(item.get("remote_kind") or "")
     if kind:
         return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
@@ -359,7 +362,7 @@ def ide_plugin_enabled_label(value: object) -> str:
     return _IDE_PLUGIN_ENABLED_LABELS.get(text, text)
 
 
-def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
+def ide_plugin_rows(plugins: list[Any], versions: Mapping[str, str] | None = None) -> list[list[str]]:
     """User | IDE | Plugin | Version | Enabled | AI cells, sorted for reading."""
     rows: list[list[str]] = []
     for item in plugins:
@@ -371,7 +374,7 @@ def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
             plugin = f"{plugin} ({name})" if plugin else name
         rows.append([
             str(item.get("user") or item.get("user_id") or "-"),
-            ide_plugin_ide_label(item),
+            ide_plugin_ide_label({**item, "ide_version": (versions or {}).get(str(item.get("install_id") or ""), "")}),
             plugin or "-",
             str(item.get("version") or "-"),
             ide_plugin_enabled_label(item.get("enabled")),
@@ -451,7 +454,9 @@ def ide_plugins(
         )
         return
     plugins = payload.get("plugins") or []
-    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [])
+    versions = {str(inst.get("install_id") or ""): str(inst.get("version") or "")
+                for inst in payload.get("installations") or [] if isinstance(inst, Mapping)}
+    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [], versions)
     if not rows:
         filtered = bool(user or ide or ai_only)
         click.echo("No IDE plugins match these filters." if filtered else "No IDE plugins found yet.")

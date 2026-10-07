@@ -264,6 +264,7 @@ class InventoryIDEPlugin:
     user: str = ""
     ide_family: str = ""
     ide_product: str = ""
+    ide_version: str = ""
     display_name: str = ""
     publisher: str = ""
     version: str = ""
@@ -284,6 +285,7 @@ class InventoryIDEPlugin:
             user=_user_of(raw),
             ide_family=str(raw.get("ide_family") or ""),
             ide_product=str(raw.get("ide_product") or ""),
+            ide_version=str(raw.get("ide_version") or ""),
             display_name=str(raw.get("display_name") or ""),
             publisher=str(raw.get("publisher") or ""),
             version=str(raw.get("version") or ""),
@@ -314,6 +316,8 @@ class InventoryIDEPlugin:
     @property
     def ide_label(self) -> str:
         product = self.ide_product or self.ide_family
+        if self.ide_version:
+            product = f"{product} {self.ide_version}"
         return f"{product} ({self.location})" if self.location else product
 
     @property
@@ -1423,6 +1427,7 @@ class InventoryPanelModel:
                     ("AI", "yes" if ide.is_ai else "no"),
                     ("IDE", ide.ide_label),
                     ("Version", ide.version),
+                    ("IDE version", ide.ide_version),
                     ("User", ide.user),
                     ("Name", ide.display_name),
                     ("Publisher", ide.publisher),
