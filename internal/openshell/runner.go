@@ -22,6 +22,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,7 +70,7 @@ type ExecRunner struct {
 const defaultCommandTimeout = 2 * time.Minute
 
 func (c Command) environ() []string {
-	env := Environ(os.Environ())
+	env := withRuntimeDir(Environ(os.Environ()), userRuntimeDir)
 	if len(c.Unset) > 0 {
 		kept := env[:0]
 		for _, kv := range env {
@@ -87,6 +89,35 @@ func (c Command) environ() []string {
 		env = kept
 	}
 	return append(env, c.Env...)
+}
+
+// withRuntimeDir sets XDG_RUNTIME_DIR to runtimeDir() where env has none:
+// a login shell from `su -l` or `sudo -iu` leaves it unset although the
+// user manager runs (linger, or another session), and `systemctl --user`
+// then fails with "Failed to connect to bus: No medium found".
+func withRuntimeDir(env []string, runtimeDir func() string) []string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "XDG_RUNTIME_DIR="); ok && v != "" {
+			return env
+		}
+	}
+	if dir := runtimeDir(); dir != "" {
+		return append(env, "XDG_RUNTIME_DIR="+dir)
+	}
+	return env
+}
+
+// userRuntimeDir is the caller's systemd runtime directory, /run/user/UID,
+// when it exists and is the caller's ("" off Linux).
+func userRuntimeDir() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	dir := "/run/user/" + strconv.Itoa(os.Geteuid())
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || !ownedByCaller(info) {
+		return ""
+	}
+	return dir
 }
 
 // Output implements Runner.
