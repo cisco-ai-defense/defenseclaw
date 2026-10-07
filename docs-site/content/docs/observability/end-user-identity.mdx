@@ -150,9 +150,10 @@ connector evidence leaves the field absent.
 <Callout type="warn" title="Email is preserved as plaintext">
 `defenseclaw.user.email` is a sensitive, high-cardinality identifier. When the
 option is enabled, it may be sent as plaintext to configured destinations,
-including the managed AI Defense destination. V8 redaction profiles preserve
-identifier fields and cannot redact this address. Keep the default off unless
-the destination and your privacy policy explicitly allow it.
+including the managed AI Defense destination. Only the `strict` profile (and a
+custom profile that extends it) removes this address; `none`, `sensitive` and
+`content` keep it. Keep the default off unless the destination and your privacy
+policy explicitly allow it.
 </Callout>
 
 For Codex and Claude Code, join a hook event to the latest `ai.discovery` row
@@ -174,8 +175,12 @@ ai_discovery:
   include_user_principal: true
 ```
 
-Like the email, the principal is an identifier, so v8 redaction profiles keep
-it. Enable it only when every selected destination may receive it.
+The option applies to the whole gateway. The `strict` redaction profile (and a
+custom profile that extends it) removes the principal, the Kerberos principal, the
+client address, the tenant ID and the email from what a destination receives;
+`none`, `sensitive` and `content` keep them. To send principals to a trusted local
+Loki but not to a SaaS destination such as Galileo, turn the option on and select
+`strict` for the destination that must not receive them.
 
 The option governs the two principal attributes only. On a Linux host that
 joined a directory with SSSD fully qualified names

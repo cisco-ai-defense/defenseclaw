@@ -466,8 +466,9 @@ What stays on in either case: `user.id`, the account name, the domain, the
 directory type, the assurance, the session kind and the client address. There
 is no separate switch for them, so choose destinations accordingly. The
 principal, the Kerberos principal, the client address and the tenant ID are
-marked sensitive; like `user.id` they are identifiers that v8 redaction
-profiles preserve so records still join. See
+marked sensitive. Unlike `user.id`, nothing joins records on them, so the `strict`
+redaction profile (and a custom profile that extends it) removes them from what a
+destination receives, while `none`, `sensitive` and `content` keep them. See
 [Redaction](/docs/observability/redaction). The `identity.observed` record
 carries a group count, never group names. The Secure Client profile collects
 none of these facts.
