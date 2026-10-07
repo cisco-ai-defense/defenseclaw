@@ -163,12 +163,12 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 			default:
 				continue
 			}
+			if !ok {
+				continue // cache folders and jars without a plugin descriptor are not plugins
+			}
 			id := clean(meta.ID)
 			if id == "" {
 				id = clean(meta.Name)
-			}
-			if !ok || id == "" {
-				id = clean(strings.TrimSuffix(name, ".jar"))
 			}
 			if id == "" || seen[id] {
 				continue
