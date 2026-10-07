@@ -2925,6 +2925,8 @@ class AIDiscoveryConfig:
     process_interval_s: int = 60
     scan_roots: list[str] = field(default_factory=lambda: ["~"])
     signature_packs: list[str] = field(default_factory=list)
+    # sha256 pin of each signature pack by path; a pack that does not match is not loaded.
+    signature_pack_digests: dict[str, str] = field(default_factory=dict)
     allow_workspace_signatures: bool = False
     disabled_signature_ids: list[str] = field(default_factory=list)
     include_shell_history: bool = True
@@ -6356,6 +6358,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
         scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
         signature_packs=list(raw.get("signature_packs", []) or []),
+        signature_pack_digests={str(k): str(v) for k, v in (raw.get("signature_pack_digests") or {}).items()},
         allow_workspace_signatures=bool(raw.get("allow_workspace_signatures", False)),
         disabled_signature_ids=list(raw.get("disabled_signature_ids", []) or []),
         include_shell_history=bool(raw.get("include_shell_history", True)),

@@ -9061,6 +9061,36 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     _emit("pass", label, f"{applied} (applied by the gateway)", r=r)
 
 
+def _check_signature_packs(cfg, r: _DoctorResult) -> None:
+    """A signature pack that fails its pin is not loaded, and discovery is
+    blind to the agents it describes: name it with both digests."""
+    discovery = getattr(cfg, "ai_discovery", None)
+    if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
+        return
+    from defenseclaw.inventory import ai_signatures
+
+    total, refused = ai_signatures.refused_packs(cfg)
+    if not refused:
+        _emit("pass", "Signature packs", f"{total} loaded", r=r)
+        return
+    detail = "; ".join(
+        f"{pack.path}: " + (f"digest {pack.digest} is not the pinned {pack.pinned}" if pack.pinned else pack.reason)
+        for pack in refused
+    )
+    _emit(
+        "warn",
+        "Signature packs",
+        f"{len(refused)} of {total} not loaded ({detail})",
+        r=r,
+        check_id="doctor.discovery.signature-pack-refused",
+        reason_code="signature-pack-refused",
+        remediation=(
+            "Restore the pinned pack, or pin the file you trust in ai_discovery.signature_pack_digests "
+            "with `defenseclaw config set`"
+        ),
+    )
+
+
 def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     """Retired policy inputs and the config_version 9 migration record."""
     from defenseclaw.config import CONFIG_VERSION_V9, config_path_for_data_dir
@@ -10861,6 +10891,7 @@ def doctor(
         _check_guardrail_profile(cfg, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
+    _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):

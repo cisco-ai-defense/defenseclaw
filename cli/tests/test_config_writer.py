@@ -252,6 +252,10 @@ def test_plain_error_names_the_key_without_the_validator_internals():
     assert config_writer.plain_error(pattern) == (
         "guardrail.custom_packs.bad.digest is not in the expected format (sha256: followed by 64 hex digits)."
     )
+    block_at = V8ConfigError("config.yaml", "$.guardrail.block_at", "pattern", "use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)")
+    assert config_writer.plain_error(block_at) == (
+        "guardrail.block_at is not in the expected format. Use one of CRITICAL, HIGH, MEDIUM, LOW in any case (empty inherits)."
+    )
     other = V8ConfigError("config.yaml", "$.gateway.api_port", "type", "use the value type documented by the configuration schema")
     assert "configuration schema" not in config_writer.plain_error(other)
 

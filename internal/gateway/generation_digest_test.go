@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -146,5 +147,32 @@ func TestGenerationUnchangedComparesTheOPAFailure(t *testing.T) {
 	}
 	if generationUnchanged(nil, live) || generationUnchanged(live, &Generation{Digest: "sha256:b", opaError: live.opaError}) {
 		t.Fatal("a different generation was unchanged")
+	}
+}
+
+// A signature pack edited on disk rebuilds AI discovery, which loads its catalog
+// once: under a pin it no longer matches, the pack is refused at once instead of
+// at the next config change (GAP-0177).
+func TestSignaturePacksChangedFollowsTheFileNotTheConfig(t *testing.T) {
+	pack := filepath.Join(t.TempDir(), "pack.json")
+	if err := os.WriteFile(pack, []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.AIDiscovery.Enabled = true
+	cfg.AIDiscovery.SignaturePacks = []string{pack}
+	live := &Generation{Components: assetDigestComponents(cfg)}
+	if signaturePacksChanged(live, cfg) {
+		t.Fatal("an untouched pack rebuilt discovery")
+	}
+	if err := os.WriteFile(pack, []byte(`{"version":1,"signatures":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !signaturePacksChanged(live, cfg) {
+		t.Fatal("an edited pack did not rebuild discovery")
+	}
+	cfg.AIDiscovery.Enabled = false
+	if signaturePacksChanged(live, cfg) {
+		t.Fatal("a disabled discovery service was rebuilt for a pack edit")
 	}
 }
