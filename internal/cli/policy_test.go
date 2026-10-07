@@ -274,6 +274,39 @@ func TestPolicyReloadRemainsPathIndependent(t *testing.T) {
 	}
 }
 
+// A Secure Client host keeps the policy reload output of main (issue #1092):
+// the HTTP status and body of a refused reload, not the GAP-0160 sentence.
+func TestSecureClientPolicyReloadKeepsTheOutputOfMain(t *testing.T) {
+	ownGatewayListener(t)
+	const token = "reload-fixture-value"
+	const body = `{"error":"reload failed: policy: read data.json: open /p/data.json: no such file or directory","status":"failed"}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	host, portText, err := net.SplitHostPort(server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	setPolicyPathTestConfig(t, &config.Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     config.EnterpriseConfig{Profile: "secure_client"},
+		Gateway:        config.GatewayConfig{APIBind: host, APIPort: port, Token: token},
+	})
+	err = policyReloadCmd.RunE(policyReloadCmd, nil)
+	if want := "reload failed (HTTP 500): " + body; err == nil || err.Error() != want {
+		t.Fatalf("Secure Client reload error = %v, want %q", err, want)
+	}
+}
+
 // TestPolicyReloadErrorIsPlain pins GAP-0160: a failed rebuild shows words, not
 // the HTTP status, the JSON body or the internal stage names. GAP-0183: so does a
 // successful one.

@@ -389,6 +389,9 @@ var policyReloadCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		body, _ := io.ReadAll(resp.Body)
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return printSecureClientPolicyReload(resp.StatusCode, body)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return policyReloadError(resp.StatusCode, body)
 		}
@@ -396,6 +399,23 @@ var policyReloadCmd = &cobra.Command{
 		fmt.Println(policyReloadMessage(body))
 		return nil
 	},
+}
+
+// printSecureClientPolicyReload is the policy reload output of main, which a
+// Secure Client host keeps (issue #1092): a refused reload shows the HTTP
+// status and the body, a successful one the indented JSON answer.
+func printSecureClientPolicyReload(status int, body []byte) error {
+	if status != http.StatusOK {
+		return fmt.Errorf("reload failed (HTTP %d): %s", status, string(body))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err == nil {
+		out, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(out))
+	} else {
+		fmt.Println(string(body))
+	}
+	return nil
 }
 
 // policyReloadMessage says a successful /policy/reload in one sentence, naming
