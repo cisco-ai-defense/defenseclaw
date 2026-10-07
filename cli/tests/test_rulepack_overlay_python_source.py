@@ -101,9 +101,9 @@ class TestPythonSourceOverlay(unittest.TestCase):
         self.assertEqual(hits.get("T-MEMORY"), "writer.py:4")
 
     def test_non_python_text_is_unchanged(self):
-        hits = self._scan("notes.md", _SOURCE)
-        self.assertEqual(hits.get("T-MEMORY"), "notes.md:1")
-        self.assertEqual(hits.get("T-KEY"), "notes.md:1")
+        hits = self._scan("notes.sh", _SOURCE)
+        self.assertEqual(hits.get("T-MEMORY"), "notes.sh:1")
+        self.assertEqual(hits.get("T-KEY"), "notes.sh:1")
 
     def test_prefilter_keeps_ignorecase_matches(self):
         # U+0130 and U+0131 match "i" under re.IGNORECASE; the literal
@@ -112,6 +112,23 @@ class TestPythonSourceOverlay(unittest.TestCase):
             ids = [f.id for f in self.pack.scan_text(text)]
             self.assertIn("T-IGNORE", ids, text)
         self.assertEqual(self.pack.scan_text("ignore the previous run"), [])
+
+
+class TestArtifactDocsAndCommandLines(unittest.TestCase):
+    def test_doc_mentions_and_cross_line_commands_do_not_fire(self):
+        # GAP-0364: a JSON example's rm -rf joined a "/" lines below into a
+        # CRITICAL CMD-RM-RF, and docs explaining MEMORY.md were COG-MEMORY.
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")
+        pack = rulepack.load_rule_pack(os.path.normpath(root))
+
+        def ids(text, location):
+            return {f.rule_id for f in pack.scan_text(text, location=location)}
+
+        example = '{ "input": { "command": "rm -rf /workspace/reports" },\n  "note": "paths under / are protected" }\n'
+        self.assertNotIn("CMD-RM-RF", ids(example, "shared/tools.md"))
+        self.assertIn("CMD-RM-RF", ids("cleanup:\n\trm -rf /\n", "Makefile"))
+        self.assertNotIn("COG-MEMORY", ids("The memory tool keeps notes in MEMORY.md.\n", "shared/memory.md"))
+        self.assertIn("COG-MEMORY", ids("Write what you learn to MEMORY.md.\n", "SKILL.md"))
 
 
 class TestWindowedSearch(unittest.TestCase):

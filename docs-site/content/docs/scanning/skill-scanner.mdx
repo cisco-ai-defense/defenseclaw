@@ -624,6 +624,18 @@ Without `--connector`, policy and runtime commands apply to matching configured 
 
 Every action is audited (`skill-block`, `skill-quarantine`, etc.) so the trail is intact even when the manual override contradicts the watcher.
 
+### A skill you trust that the scanner quarantines
+
+Some published skills run helper code the scanner's rules flag, for example `os.system` with string formatting, `subprocess` calls, `shell=True` or a long-running loop (several skills in `anthropics/skills` do). Those findings come from cisco-ai-skill-scanner itself. Once you have reviewed the skill, allow that copy and bring it back:
+
+```bash
+defenseclaw skill allow docx --connector claudecode --reason "reviewed: helper scripts are expected"
+defenseclaw skill restore docx --connector claudecode
+defenseclaw config get asset_policy.skill.allowed      # the entry and the path it is pinned to
+```
+
+The allow entry is pinned to the path of that copy (`source_path_contains`), so a skill with the same name in another folder is still scanned and blocked. Do not lower `admission.skill.actions` or turn the scanner off to get one skill through.
+
 ## See also
 
 - [MCP scanner](/docs/scanning/mcp-scanner) — sibling scanner for MCP servers, same admission pattern via `admission.mcp`
