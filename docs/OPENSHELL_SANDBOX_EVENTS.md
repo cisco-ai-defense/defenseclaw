@@ -166,12 +166,14 @@ held back. Model calls are not paced.
 
 | Family | From | Carries | Outcome |
 | --- | --- | --- | --- |
-| `log.sandbox.process` | `PROC:LAUNCH`, `PROC:TERMINATE` | `defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`openshell`; `sampled` is the opt-in process tree's), `.pid`, `.executable`, `.command_line` (start only), `.exit_code` (exit only) | `attempted` for a start, `completed` for exit code 0, `failed` otherwise |
+| `log.sandbox.process` | `PROC:LAUNCH`, `PROC:TERMINATE` | `defenseclaw.sandbox.process.event` (`start`, `exit`), `.source` (`ocsf`), `.pid`, `.executable`, `.command_line` (start only), `.exit_code` (exit only) | `attempted` for a start, `completed` for exit code 0, `failed` otherwise |
 | `log.sandbox.ssh` | `SSH:*` (`sandbox connect`, `exec`, uploads and pulls) | `defenseclaw.sandbox.ssh.activity` (`LISTEN`, `OPEN`, ...), `.auth`, the peer address as `client.address` | `allowed`, `blocked` (OpenShell denied it) or `completed` |
 | `log.sandbox.inference` | `API:INFERENCE` | `gen_ai.provider.name`, `gen_ai.request.model`, `defenseclaw.sandbox.inference.status`, `.latency_ms`, `.operation`; never model content | `failed` for a status other than `Success`, else `completed` (the status is optional) |
 
 The command line is the agent's argument vector, so it is content class: each
-destination's redaction profile governs whether it leaves the host.
+destination's redaction profile governs whether it leaves the host. Before
+that, the manager replaces the values of arguments that name secrets and
+keeps at most 1,024 bytes of it, as for the process tree.
 
 ### Approvals
 
@@ -280,11 +282,19 @@ process, which names no parent), `.name` (comm), `.executable`,
 `.command_line` (the first 16 arguments, joined, the values of arguments that
 name secrets replaced, at most 1,024 bytes), `.working_directory`,
 `.exit_code` (when OpenShell reported it) and `.lineage` (the names of up to
-32 ancestors, the parent first). The executable, command line, working
-folder and lineage are content: each destination's redaction profile governs
-them. At most 200 records at once and 10 a second per sandbox; the daemon log
-says how many it held back. A process that starts and ends between two
-samples, and that OpenShell does not report, has no record.
+32 ancestors, the parent first). The command line, working folder and
+lineage are content and the executable a path: each destination's redaction
+profile governs them. Like the other sandbox records they carry the binding,
+the launching host user and the session the hooks last named. At most 200
+records at once and 10 a second per sandbox; the daemon log says how many it
+held back. A process that starts and ends between two samples, and that
+OpenShell does not report, has no record. An OpenShell launch makes both a
+`log.sandbox.process` record (what ran) and, with the tree on, a
+`log.sandbox.process_tree` start (the tree's membership, with the parent and
+lineage once a sample saw them).
+
+With the tree on, `sandbox destinations` and its API name the lineage of the
+process that made each connection (`lineage`, the process first).
 
 ### AI discovery inside a sandbox
 
@@ -362,9 +372,10 @@ record:
   records the session as `gen_ai.conversation.id`, only when they are
   registered identifiers (trimmed, at most 256 bytes); any other value is
   omitted.
-- An actor's or process's executable is cut to 1024 bytes and its process
+- An actor's or process's executable is cut to 4096 bytes and its process
   ID kept only in 1 to 4194304; an executable that is not UTF-8 is omitted.
-  A process command line is cut to 4096 bytes. SSH and inference tokens
+  A process command line is cut to 4096 bytes (the manager sends at most
+  1,024). SSH and inference tokens
   (activity, auth, status, operation, model) that are not identifiers are
   omitted, and an SSH peer that is not an IP address is.
 

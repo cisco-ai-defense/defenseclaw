@@ -10795,6 +10795,14 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.sandbox.process.lineage
     requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: gen_ai.conversation.id
+    requirement_level: recommended
 - id: log.sandbox.process
   type: log
   brief: Canonical sandbox.process log identity; one record per process start or exit observed in a sandbox, bounded per sandbox.

@@ -22,10 +22,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// Events and sources of a sandbox's process tree
-// (defenseclaw.sandbox.process.event and .source).
+// Events and sources of a sandbox process (defenseclaw.sandbox.process.event
+// and .source), shared by log.sandbox.process and log.sandbox.process_tree.
 const (
 	SandboxProcessStart = "start"
 	SandboxProcessExit  = "exit"
@@ -36,9 +37,7 @@ const (
 
 // Bounds of a process record, as the registry declares them.
 const (
-	maxSandboxProcessPID       = 4194304
 	maxSandboxProcessName      = 64
-	maxSandboxProcessCmdline   = 1024
 	maxSandboxProcessLineage   = 32
 	maxSandboxProcessLineageID = 64
 )
@@ -64,8 +63,13 @@ type SandboxProcessEvent struct {
 	// reported, nil when unknown.
 	ExitCode *int
 	// Lineage names the process's ancestors, its parent first.
-	Lineage   []string
-	Timestamp time.Time
+	Lineage []string
+	// UserID and UserName are the host account that launched the sandbox,
+	// ConversationID the harness session its hooks last named (the
+	// manager's telemetry stamps both).
+	UserID, UserName string
+	ConversationID   string
+	Timestamp        time.Time
 }
 
 // RecordSandboxProcess emits log.sandbox.process_tree for one process of a
@@ -84,13 +88,10 @@ func (recorder *SandboxRecorder) RecordSandboxProcess(ctx context.Context, input
 	if input.Source != "" && input.Source != SandboxProcessSourceSample && input.Source != SandboxProcessSourceOCSF {
 		return fmt.Errorf("audit: sandbox process source %q is not registered", input.Source)
 	}
-	if input.PID <= 0 || input.PID > maxSandboxProcessPID {
+	if input.PID <= 0 || input.PID > maxSandboxPID {
 		return fmt.Errorf("audit: sandbox process id %d is out of range", input.PID)
 	}
-	parent := observability.Absent[int64]()
-	if input.ParentPID > 0 && input.ParentPID <= maxSandboxProcessPID {
-		parent = observability.Present(int64(input.ParentPID))
-	}
+	parent := optionalSandboxPID(input.ParentPID)
 	exitCode := observability.Absent[int64]()
 	if input.ExitCode != nil {
 		exitCode = observability.Present(int64(*input.ExitCode))
@@ -109,6 +110,7 @@ func (recorder *SandboxRecorder) RecordSandboxProcess(ctx context.Context, input
 	}
 	fields := sandboxV8FieldsFor(identity)
 	event := recorder.newEvent(ctx, ActionSandboxProcess, identity, identity.Name, "INFO", input.Timestamp)
+	conversationID, _ := sandboxAgentCorrelation(event, input.ConversationID)
 	log := sandboxV8Log{
 		action: ActionSandboxProcess, event: event, bucket: observability.BucketAgentLifecycle,
 		eventName: observability.TelemetryEventSandboxProcessTree, phase: "process",
@@ -122,16 +124,21 @@ func (recorder *SandboxRecorder) RecordSandboxProcess(ctx context.Context, input
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
+				DefenseClawSandboxBindingID:               fields.bindingID,
 				DefenseClawSandboxProcessEvent:            input.Event,
 				DefenseClawSandboxProcessPid:              int64(input.PID),
 				DefenseClawSandboxProcessSource:           optionalSandboxEnum(input.Source),
 				DefenseClawSandboxProcessParentPid:        parent,
 				DefenseClawSandboxProcessName:             optionalSandboxText(input.Name, maxSandboxProcessName),
 				DefenseClawSandboxProcessExecutable:       optionalSandboxText(input.Executable, maxSandboxPathBytes),
-				DefenseClawSandboxProcessCommandLine:      optionalSandboxText(input.CommandLine, maxSandboxProcessCmdline),
+				DefenseClawSandboxProcessCommandLine:      optionalSandboxText(input.CommandLine, maxSandboxCommandLineBytes),
 				DefenseClawSandboxProcessWorkingDirectory: optionalSandboxText(input.WorkingDirectory, maxSandboxPathBytes),
 				DefenseClawSandboxProcessExitCode:         exitCode,
 				DefenseClawSandboxProcessLineage:          lineage,
+				UserID:                                    optionalNetworkIdentifier(input.UserID),
+				DefenseClawUserIDKind:                     optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
+				DefenseClawUserName:                       optionalNetworkIdentifier(input.UserName),
+				GenAIConversationID:                       conversationID,
 			})
 		},
 	}

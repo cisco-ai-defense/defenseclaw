@@ -182,6 +182,12 @@ func (g *telemetryGuard) RecordSandboxActivity(ctx context.Context, e audit.Sand
 }
 
 func (g *telemetryGuard) RecordSandboxProcess(ctx context.Context, e audit.SandboxProcessEvent) error {
+	if e.UserID == "" {
+		e.UserID, e.UserName = g.userID, g.userName
+	}
+	if e.ConversationID == "" {
+		e.ConversationID = g.session(e.Sandbox.Name)
+	}
 	return g.done(ctx, "process tree", e.Sandbox.Name, g.next.RecordSandboxProcess(ctx, e))
 }
 

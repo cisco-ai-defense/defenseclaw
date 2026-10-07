@@ -281,6 +281,13 @@ func TestDestinationsNameTheProcessTreesLineage(t *testing.T) {
 	if _, ok := e.m.sampleProcesses(context.Background(), e.boxOf("linbox")); !ok {
 		t.Fatal("no sample")
 	}
+	// Its process records carry the binding and the launching user, like
+	// every sandbox record.
+	binding := e.binding("linbox").ID
+	recs := where(&e.tel.mu, &e.tel.processes, func(ev audit.SandboxProcessEvent) bool { return ev.Sandbox.Name == "linbox" })
+	if len(recs) != 3 || recs[0].Sandbox.BindingID != binding || recs[0].UserID != "1000" || recs[0].UserName != "dev" {
+		t.Fatalf("process records = %+v", recs)
+	}
 	e.ocsf("linbox", "NET:OPEN [INFO] ALLOWED /usr/bin/curl(77) -> example.org:443/tcp [policy:allow_example engine:opa]", time.Now())
 	row, ok := destinationKinds(t, e, "linbox")["example.org"]
 	if !ok {

@@ -28,11 +28,13 @@ import (
 func TestSandboxProcessFamily(t *testing.T) {
 	harness := newSandboxHarness(t)
 	identity := testSandboxIdentity()
+	identity.BindingID = "sb_3f9a7c21d04e5b6a8c9d0e1f2a3b4c5d"
 	code := 3
 	_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxProcessEvent{
 		Sandbox: identity, Event: SandboxProcessExit, Source: SandboxProcessSourceSample, PID: 42, ParentPID: 1,
 		Executable: "/usr/bin/node", Name: "node", CommandLine: "node cli.js", WorkingDirectory: "/sandbox/work/myapp",
 		ExitCode: &code, Lineage: []string{"bash", "claude"},
+		UserID: "1000", UserName: "dev", ConversationID: "hook-session-7",
 	})
 	if record.EventName() != observability.EventName(observability.TelemetryEventSandboxProcessTree) ||
 		record.Bucket() != observability.BucketAgentLifecycle || record.Mandatory() {
@@ -44,6 +46,8 @@ func TestSandboxProcessFamily(t *testing.T) {
 		"defenseclaw.sandbox.process.event": "exit", "defenseclaw.sandbox.process.source": "sample",
 		"defenseclaw.sandbox.process.pid": int64(42), "defenseclaw.sandbox.process.parent_pid": int64(1),
 		"defenseclaw.sandbox.process.name": "node", "defenseclaw.sandbox.process.exit_code": int64(3),
+		"defenseclaw.sandbox.binding.id": identity.BindingID, "user.id": "1000", "defenseclaw.user.name": "dev",
+		"gen_ai.conversation.id": "hook-session-7",
 	})
 }
 
@@ -67,7 +71,7 @@ func TestSandboxProcessRecordBoundsItsInput(t *testing.T) {
 		{Sandbox: identity, Event: "spawn", PID: 7},
 		{Sandbox: identity, Event: SandboxProcessStart, Source: "guess", PID: 7},
 		{Sandbox: identity, Event: SandboxProcessStart, PID: 0},
-		{Sandbox: identity, Event: SandboxProcessStart, PID: maxSandboxProcessPID + 1},
+		{Sandbox: identity, Event: SandboxProcessStart, PID: maxSandboxPID + 1},
 		{Sandbox: SandboxIdentity{}, Event: SandboxProcessStart, PID: 7},
 	} {
 		runtime, recorder := harness.bind(t, router.AdmissionOrdinary)

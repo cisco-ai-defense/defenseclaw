@@ -202,7 +202,7 @@ func TestOCSFActivityRecords(t *testing.T) {
 	e.fakeClock(at)
 	e.live(sandboxapi.CreateRequest{Name: "actbox"})
 	for _, line := range []string{
-		"PROC:LAUNCH [INFO] python3(42) [cmd:python3 /work/app/main.py dccert-block-marker]",
+		"PROC:LAUNCH [INFO] python3(42) [cmd:python3 /work/app/main.py dccert-block-marker --password dccertvalue]",
 		"PROC:TERMINATE [INFO] python3(42) [exit:3]",
 		"SSH:OPEN [INFO] ALLOWED 10.42.0.1:48201 [auth:NSSH1]",
 		"API:INFERENCE [INFO] Success claude-haiku via anthropic 812ms [messages:create]",
@@ -219,8 +219,10 @@ func TestOCSFActivityRecords(t *testing.T) {
 	if i := acts[5]; i.Kind != audit.SandboxActivityInference || i.Model != "claude-haiku" || i.Status != "" {
 		t.Fatalf("inference without a status = %+v", i)
 	}
+	// The command line is redacted as the process tree's is.
 	if p := acts[0]; p.Kind != audit.SandboxActivityProcess || p.ProcessEvent != audit.SandboxProcessStart || p.PID != 42 ||
-		p.Executable != "python3" || p.CommandLine != "python3 /work/app/main.py dccert-block-marker" || p.UserName != "dev" {
+		p.Executable != "python3" || !strings.HasPrefix(p.CommandLine, "python3 /work/app/main.py dccert-block-marker --password ") ||
+		strings.Contains(p.CommandLine, "dccertvalue") || p.UserName != "dev" {
 		t.Fatalf("launch = %+v", p)
 	}
 	if p := acts[1]; p.ProcessEvent != audit.SandboxProcessExit || p.ExitCode == nil || *p.ExitCode != 3 {

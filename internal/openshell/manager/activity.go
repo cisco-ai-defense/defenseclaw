@@ -59,9 +59,15 @@ func (m *Manager) processEvent(ctx context.Context, id audit.SandboxIdentity, r 
 	if !m.procGate.take(id.Name, m.now()) {
 		return
 	}
+	// The command line the process tree keeps: values that name secrets
+	// replaced, at most maxCmdlineBytes.
+	var cmdline string
+	if r.CmdLine != "" {
+		cmdline = processCmdline(strings.Fields(r.CmdLine))
+	}
 	m.tel.RecordSandboxActivity(ctx, audit.SandboxActivityEvent{
 		Sandbox: id, Kind: audit.SandboxActivityProcess, ProcessEvent: event, ProcessSource: audit.SandboxProcessSourceOCSF,
-		PID: ocsfPID(r), Executable: r.Binary, CommandLine: r.CmdLine, ExitCode: r.ExitCode, Timestamp: at,
+		PID: ocsfPID(r), Executable: r.Binary, CommandLine: cmdline, ExitCode: r.ExitCode, Timestamp: at,
 	})
 }
 

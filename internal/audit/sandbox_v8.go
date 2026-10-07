@@ -651,7 +651,6 @@ const (
 	maxSandboxNetworkTargetBytes = 256 // defenseclaw.network.target_ref
 	maxSandboxPolicyTargetBytes  = 1024
 	maxSandboxBindingIDBytes     = 128
-	maxSandboxExecutableBytes    = 1024
 	maxSandboxCommandLineBytes   = 4096
 	maxSandboxActivityTokenBytes = 64
 	maxSandboxOperationBytes     = 128
@@ -854,7 +853,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 	if input.End != "" {
 		duration = observability.Present(input.Duration.Milliseconds())
 	}
-	actorPID, actorExe := optionalSandboxPID(input.PID), optionalSandboxText(input.Executable, maxSandboxExecutableBytes)
+	actorPID, actorExe := optionalSandboxPID(input.PID), optionalSandboxText(input.Executable, maxSandboxPathBytes)
 	log := sandboxV8Log{
 		action: ActionSandboxEgress, event: event, bucket: observability.BucketNetworkEgress,
 		eventName: eventName, phase: "policy", outcome: outcome, mandatory: input.Blocked,
@@ -1476,7 +1475,7 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 					DefenseClawSandboxProcessEvent:       input.ProcessEvent,
 					DefenseClawSandboxProcessSource:      observability.Present(source),
 					DefenseClawSandboxProcessPid:         optionalSandboxPID(input.PID),
-					DefenseClawSandboxProcessExecutable:  optionalSandboxText(input.Executable, maxSandboxExecutableBytes),
+					DefenseClawSandboxProcessExecutable:  optionalSandboxText(input.Executable, maxSandboxPathBytes),
 					DefenseClawSandboxProcessCommandLine: commandLine,
 					DefenseClawSandboxProcessExitCode:    exitCode,
 					UserID:                               userID, DefenseClawUserIDKind: userKind, DefenseClawUserName: userName,
