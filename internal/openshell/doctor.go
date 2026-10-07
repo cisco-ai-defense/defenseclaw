@@ -557,6 +557,9 @@ type doctorRun struct {
 	startedDone bool
 	// startedApprox is set when started came from ps (to the second).
 	startedApprox bool
+	// portHeld is set when something else holds the gateway's port while
+	// its service is stopped (checkService).
+	portHeld bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -1074,6 +1077,7 @@ func (r *doctorRun) checkService(ctx context.Context) {
 			// would only restart over and over.
 			c.Detail += "; " + held
 			c.Fix = r.portHeldFix(other)
+			r.portHeld = true
 		}
 	case !st.Enabled:
 		c.Status, c.Detail = StatusWarn, st.Unit+" runs but does not start at login"
@@ -1579,6 +1583,8 @@ func (r *doctorRun) checkRegistration() {
 func (r *doctorRun) registrationFix() *Fix {
 	add := r.addCommand().String()
 	switch {
+	case r.portHeld:
+		return &Fix{Summary: "nothing to register while this account's gateway cannot run (see Gateway service)"}
 	case r.service != nil && r.service.Installed && !r.service.Active:
 		return &Fix{Summary: "start the gateway first (Gateway service): it writes the client certificates a registration takes; " +
 			"`defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}

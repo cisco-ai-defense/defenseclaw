@@ -112,9 +112,15 @@ func TestDoctorStartsAndRegistersAFirstGateway(t *testing.T) {
 		f := newHost(t)
 		f.busy["127.0.0.1:17670"] = true
 		f.doctor.PortHolder = func(string, int) (daemon.PortHolder, error) { return daemon.PortHolder{UID: 4242}, nil }
-		svc := expectCheck(t, f.run(), "gateway-service", openshell.StatusFail, "127.0.0.1:17670, the gateway's port, is held by a process of another account (uid 4242")
+		r := f.run()
+		svc := expectCheck(t, r, "gateway-service", openshell.StatusFail, "127.0.0.1:17670, the gateway's port, is held by a process of another account (uid 4242")
 		if svc.Fix == nil || svc.Fix.Apply != nil || !strings.Contains(svc.Fix.Summary, "one OpenShell gateway runs on a machine") {
 			t.Fatalf("service fix = %+v", svc.Fix)
+		}
+		// Nor does the registration send the user to a doctor --fix that
+		// cannot start the gateway.
+		if reg := r.Get("gateway-registration"); reg == nil || reg.Fix == nil || strings.Contains(reg.Fix.Summary, "doctor --fix") {
+			t.Fatalf("registration = %+v", reg)
 		}
 	})
 }
