@@ -750,6 +750,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
+	meta = a.applyCopilotSubagentLineage(meta, req.Payload)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)

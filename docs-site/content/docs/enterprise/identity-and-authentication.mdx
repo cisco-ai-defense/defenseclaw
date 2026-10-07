@@ -186,6 +186,14 @@ parent, also when the gateway restarted after the sub-agent started. Codex 0.160
 runs a spawned agent as a session of its own and sends no `SubagentStart`; the
 gateway links that session to the agent that created it, so it is a sub-agent
 at depth one with the parent session named, under the `ais-` of its own session.
+Copilot CLI also runs a task sub-agent, such as `explore`, as a session of its
+own, and that session's hooks name only the session. Its `subagentStart`
+arrives first, in the parent's session, and its `subagentStop` names the child
+session. The gateway links the session's first hook to the agent of the open
+`subagentStart` and does not count the session as a chat. When the same user
+has open sub-agent starts under two different chats, the gateway cannot tell
+which chat a new session belongs to. The link then waits for `subagentStop`,
+and the hooks before it stay at depth zero.
 
 A sub-agent has no `agt-` of its own: it runs in its parent's install, so it
 shares the parent's `agt-` and has its own `ais-`. The lineage attributes link

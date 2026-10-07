@@ -255,6 +255,7 @@ type APIServer struct {
 	hookSpawnIntentOrder              []string
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
+	copilotSubagents                  []copilotPendingSubagent
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState

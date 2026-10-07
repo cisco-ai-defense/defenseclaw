@@ -131,6 +131,46 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 	}
 }
 
+// GAP-0371: Copilot CLI runs a task sub-agent in a session of its own whose
+// hooks name only that session. subagentStart comes first, in the parent's
+// session, and subagentStop names the child session as agentId. The child's
+// hooks are a sub-agent of the parent at depth one, and agent identities
+// counts the parent chat only.
+func TestCopilotSubagentSessionLinksToItsParent(t *testing.T) {
+	api := &APIServer{}
+	const parentSession = "6b5c0000-0000-4000-8000-000000000371"
+	const childSession = "e5aa4dff-407b-41c3-9ea8-2250e0de8e02"
+	const identity = "agt-00000000000003c1"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "copilot", parentSession, "root")
+	seen := map[string]bool{}
+	emit := func(req agentHookRequest) {
+		req.ConnectorName = "copilot"
+		if !seen[req.SessionID] { // the hook path counts a session it has not seen
+			sharedAgentIdentities.observe(agentIdentityFacts{ID: identity, UserID: "4371", Connector: "copilot"}, req.SessionID, true)
+			seen[req.SessionID] = true
+		}
+		api.emitAgentHookLLMEvent(ctx, req, nil)
+	}
+	emit(agentHookRequest{HookEventName: "sessionStart", SessionID: parentSession, Payload: map[string]any{"source": "new"}})
+	emit(agentHookRequest{HookEventName: "preToolUse", SessionID: parentSession, ToolName: "task", Payload: map[string]any{}})
+	emit(agentHookRequest{HookEventName: "subagentStart", SessionID: parentSession, AgentName: "explore",
+		Payload: map[string]any{"agentName": "explore"}})
+	emit(agentHookRequest{HookEventName: "preToolUse", SessionID: childSession, ToolName: "bash", Payload: map[string]any{}})
+	emit(agentHookRequest{HookEventName: "subagentStop", SessionID: parentSession, AgentID: childSession, AgentType: "explore",
+		Payload: map[string]any{"agentId": childSession, "agentType": "explore"}})
+
+	child, ok := api.hookLifecycleSnapshot("copilot", childSession, agentNodeID(identity, "copilot", childSession, "root"))
+	if !ok || child.AgentDepth != 1 || child.ParentAgentID != parentAgent || child.ParentSessionID != parentSession ||
+		child.RootSessionID != parentSession {
+		t.Fatalf("Copilot sub-agent session lineage = %+v (retained %v), want depth 1 under %s", child, ok, parentAgent)
+	}
+	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 1 ||
+		pending[identity].LastSessionID != parentSession {
+		t.Fatalf("agent identity counted %+v, want the parent chat only", pending[identity])
+	}
+}
+
 func hookSpawnIntentCount(api *APIServer) int {
 	api.llmPromptMu.Lock()
 	defer api.llmPromptMu.Unlock()
