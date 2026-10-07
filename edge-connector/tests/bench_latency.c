@@ -11,6 +11,7 @@
 
 #include "defenseclaw.h"
 #include "platform.h"
+#include "sha256.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -27,7 +28,7 @@ static void bench_local_decision(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, "test-tool", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0x42, 32);
+    dclaw_sha256((const uint8_t *)"test-tool", strlen("test-tool"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_READ_FS;
     req.session_id = 1;
 
@@ -58,7 +59,7 @@ static void bench_cache_hit(void) {
     s->clock.time_trusted = true;
 
     uint8_t hash[32];
-    memset(hash, 0x42, 32);
+    dclaw_sha256((const uint8_t *)"cached-tool", strlen("cached-tool"), hash);
     dclaw_cache_store(hash, DCLAW_ACTION_ALLOW, DCLAW_SEV_INFO);
 
     dclaw_tool_request_t req;
@@ -86,7 +87,7 @@ static void bench_sequence_check(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, "seq-test", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0x99, 32);
+    dclaw_sha256((const uint8_t *)"seq-test", strlen("seq-test"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_NET_FETCH;
 
     uint64_t start = clock_ns();

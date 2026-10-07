@@ -74,6 +74,19 @@ func createTable(db *sql.DB) error {
 		return fmt.Errorf("create index: %w", err)
 	}
 
+	// Per-device HMAC signing keys (32 bytes each, hex-encoded in storage).
+	// Each device gets a unique random key generated at registration time.
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS device_keys (
+			device_id  INTEGER PRIMARY KEY,
+			key_hex    TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create device_keys table: %w", err)
+	}
+
 	return nil
 }
 
@@ -159,6 +172,44 @@ func (s *SQLiteStore) DeleteDevice(tenantID, fleetID uint16, deviceID uint32) er
 		return fmt.Errorf("delete device %d: %w", fullID, err)
 	}
 	return nil
+}
+
+// SaveDeviceKey persists a per-device HMAC signing key (32 bytes).
+// The key is stored hex-encoded. Upsert semantics: replaces existing key.
+func (s *SQLiteStore) SaveDeviceKey(deviceID uint64, key []byte) error {
+	if len(key) != 32 {
+		return fmt.Errorf("device key must be exactly 32 bytes, got %d", len(key))
+	}
+	keyHex := hex.EncodeToString(key)
+	_, err := s.db.Exec(`
+		INSERT INTO device_keys (device_id, key_hex, created_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(device_id) DO UPDATE SET
+			key_hex    = excluded.key_hex,
+			created_at = excluded.created_at
+	`, deviceID, keyHex, time.Now().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("save device key %d: %w", deviceID, err)
+	}
+	return nil
+}
+
+// LoadDeviceKey retrieves the per-device HMAC signing key.
+// Returns nil, nil if no key is stored for the device.
+func (s *SQLiteStore) LoadDeviceKey(deviceID uint64) ([]byte, error) {
+	var keyHex string
+	err := s.db.QueryRow(`SELECT key_hex FROM device_keys WHERE device_id = ?`, deviceID).Scan(&keyHex)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load device key %d: %w", deviceID, err)
+	}
+	key, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return nil, fmt.Errorf("decode device key hex for %d: %w", deviceID, err)
+	}
+	return key, nil
 }
 
 // Close closes the underlying database connection.

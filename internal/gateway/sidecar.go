@@ -6874,6 +6874,23 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[sidecar] fleet load from store: %v\n", err)
 		} else if n > 0 {
 			fmt.Fprintf(os.Stderr, "[sidecar] fleet loaded %d devices from store\n", n)
+			// Initialize Prometheus metrics from restored device state so
+			// gauges reflect reality immediately after a gateway restart
+			// instead of showing 0 until the next heartbeat cycle.
+			devices := fleetMgr.ListDevices()
+			for _, d := range devices {
+				switch d.Status {
+				case fleetmanager.StatusOnline:
+					fleet.GlobalMetrics.DevicesOnline.Add(1)
+				case fleetmanager.StatusOffline:
+					fleet.GlobalMetrics.DevicesOffline.Add(1)
+				case fleetmanager.StatusDegraded:
+					fleet.GlobalMetrics.DevicesDegraded.Add(1)
+				case fleetmanager.StatusLockdown:
+					fleet.GlobalMetrics.DevicesLockdown.Add(1)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet metrics initialized from %d restored devices\n", len(devices))
 		}
 	}
 	fleetCache := fleetverdict.NewCache(4096, func(h [32]byte) (fleetverdict.Action, uint8) {

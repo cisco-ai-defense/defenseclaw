@@ -102,8 +102,8 @@ int main(void) {
 
     /* Initialize MQTT and attempt initial connection */
 #if DCLAW_MQTT_ENABLED
-    dclaw_mqtt_init();
-    dclaw_mqtt_connect();
+    (void)dclaw_mqtt_init();
+    (void)dclaw_mqtt_connect();
 #endif
 
     /* Create the IPC Unix domain socket */
@@ -209,7 +209,7 @@ int main(void) {
                 dclaw_tool_request_t req;
                 if (msg_len > 0 && dclaw_ipc_parse_request(base, msg_len, &req) == 0) {
                     dclaw_verdict_t verdict = dclaw_evaluate(&req);
-                    write_verdict_response(client_fds[i], &verdict, req.request_id);
+                    (void)write_verdict_response(client_fds[i], &verdict, req.request_id);
                 } else if (msg_len > 0) {
                     /* Malformed request — send error response */
                     const char *err =
@@ -258,7 +258,7 @@ int main(void) {
             hal_ipc_socket_close(client_fds[i]);
     }
     hal_ipc_socket_close(server_fd);
-    unlink(DCLAW_IPC_SOCKET_PATH);
+    (void)unlink(DCLAW_IPC_SOCKET_PATH);
 
     dclaw_shutdown();
     fprintf(stderr, "edge-connector: shutdown complete\n");

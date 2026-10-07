@@ -1,6 +1,10 @@
 #include "defenseclaw.h"
 #include "platform.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /*
  * Verdict request/response protocol handler.
@@ -130,17 +134,77 @@ static size_t  s_device_key_len = 0;
 static bool    s_device_key_loaded = false;
 static bool    s_device_key_provisioned = false;
 
+/*
+ * Parse a hex-encoded string into a byte buffer.
+ * Returns 0 on success, -1 on invalid input.
+ */
+static int hex_decode(const char *hex, uint8_t *out, size_t out_len) {
+    size_t hex_len = strlen(hex);
+    if (hex_len != out_len * 2) return -1;
+    for (size_t i = 0; i < out_len; i++) {
+        unsigned int byte_val;
+        char buf[3] = { hex[i*2], hex[i*2+1], '\0' };
+        if (sscanf(buf, "%02x", &byte_val) != 1) return -1;
+        out[i] = (uint8_t)byte_val;
+    }
+    return 0;
+}
+
+/*
+ * Try to load the device key from a file path (raw 32 bytes).
+ * Returns 0 on success.
+ */
+static int load_key_from_file(const char *path, uint8_t *key, size_t *key_len) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, key, 32);
+    close(fd);
+    if (n != 32) return -1;
+    *key_len = 32;
+    return 0;
+}
+
 static const uint8_t *get_device_key(size_t *out_key_len) {
     if (!s_device_key_loaded) {
         s_device_key_len = 0;
         s_device_key_provisioned = false;
-        if (hal_load_device_key(s_device_key, &s_device_key_len, sizeof(s_device_key)) != 0) {
+
+        bool loaded = false;
+
+        /* Priority 1: DCLAW_DEVICE_KEY environment variable (hex-encoded, 64 chars = 32 bytes) */
+        const char *env_key = getenv("DCLAW_DEVICE_KEY");
+        if (env_key && env_key[0] != '\0') {
+            if (hex_decode(env_key, s_device_key, 32) == 0) {
+                s_device_key_len = 32;
+                loaded = true;
+            } else {
+                fprintf(stderr, "[DCLAW] WARNING: DCLAW_DEVICE_KEY set but invalid (need 64 hex chars)\n");
+            }
+        }
+
+        /* Priority 2: /etc/defenseclaw/device.key (raw 32-byte binary) */
+        if (!loaded) {
+            if (load_key_from_file("/etc/defenseclaw/device.key", s_device_key, &s_device_key_len) == 0) {
+                loaded = true;
+            }
+        }
+
+        /* Priority 3: HAL secure element (existing path: /etc/edge-connector/device.key) */
+        if (!loaded) {
+            if (hal_load_device_key(s_device_key, &s_device_key_len, sizeof(s_device_key)) == 0) {
+                loaded = true;
+            }
+        }
+
+        if (!loaded) {
             /* Fallback: 32-byte zero key (Comment 32 fix).
              * Must match the Go side (bridge.go) which uses make([]byte, 32). */
             memset(s_device_key, 0, sizeof(s_device_key));
             s_device_key_len = 32;
-        } else {
-            /* Check that the loaded key is not all zeros */
+        }
+
+        /* Check that the loaded key is not all zeros */
+        if (loaded) {
             bool all_zero = true;
             for (size_t i = 0; i < s_device_key_len; i++) {
                 if (s_device_key[i] != 0) { all_zero = false; break; }
@@ -149,6 +213,7 @@ static const uint8_t *get_device_key(size_t *out_key_len) {
                 s_device_key_provisioned = true;
             }
         }
+
         s_device_key_loaded = true;
     }
     *out_key_len = s_device_key_len;

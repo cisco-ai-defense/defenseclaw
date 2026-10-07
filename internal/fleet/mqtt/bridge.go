@@ -24,8 +24,54 @@ type DeviceKeyProvider interface {
 	KeyForDevice(deviceID uint32) []byte
 }
 
+// DeviceKeyLookup is the interface that DeviceKeyStore providers must implement
+// for per-device key resolution. Matches fleet.DeviceKeyStore.
+type DeviceKeyLookup interface {
+	LoadDeviceKey(deviceID uint64) ([]byte, error)
+}
+
+// storeBackedKeyProvider resolves per-device keys from the DeviceKeyStore.
+// Falls back to the fleet-wide DCLAW_DEVICE_KEY env var or zero key
+// when no per-device key is found (for backward compatibility during rollout).
+type storeBackedKeyProvider struct {
+	store       DeviceKeyLookup
+	fallbackKey []byte
+}
+
+func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
+	fallback := make([]byte, 32)
+	raw := os.Getenv("DCLAW_DEVICE_KEY")
+	if raw != "" {
+		decoded, err := hex.DecodeString(raw)
+		if err == nil && len(decoded) == 32 {
+			fallback = decoded
+		} else {
+			log.Printf("[mqtt-bridge] WARNING: DCLAW_DEVICE_KEY is set but invalid (want 64 hex chars / 32 bytes), falling back to zero key")
+		}
+	}
+	return &storeBackedKeyProvider{store: store, fallbackKey: fallback}
+}
+
+func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint32) []byte {
+	if p.store != nil {
+		// deviceID in the store is the full composite 64-bit ID, but in the bridge
+		// context we receive the raw 32-bit device_id. The caller (bridge) should
+		// compose the full ID before calling. However, for backward compatibility
+		// we also try the raw 32-bit ID.
+		key, err := p.store.LoadDeviceKey(uint64(deviceID))
+		if err != nil {
+			log.Printf("[mqtt-bridge] error loading key for device %d: %v", deviceID, err)
+		}
+		if key != nil {
+			return key
+		}
+	}
+	return p.fallbackKey
+}
+
 // envDeviceKeyProvider reads DCLAW_DEVICE_KEY from the environment.
 // Falls back to a 32-byte zero key when the env var is unset (dev mode).
+// Deprecated: Use storeBackedKeyProvider for per-device key support.
 type envDeviceKeyProvider struct {
 	key []byte
 }
@@ -99,6 +145,13 @@ func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache)
 		logger:      log.Default(),
 		stopped:     make(chan struct{}),
 	}
+}
+
+// SetDeviceKeyStore configures per-device key resolution via a persistent store.
+// When set, the bridge looks up a unique 32-byte key for each device before
+// falling back to the fleet-wide DCLAW_DEVICE_KEY environment variable.
+func (b *Bridge) SetDeviceKeyStore(store DeviceKeyLookup) {
+	b.keyProvider = newStoreBackedKeyProvider(store)
 }
 
 // SetKeyProvider overrides the default device key provider.
@@ -209,6 +262,7 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		SessionCount:   hw.SessionCount,
 		AuditHeadHMAC:  hw.AuditHeadHMAC,
 		Flags:          hw.Flags,
+		Capabilities:   hw.Capabilities,
 	}
 
 	b.fleet.ProcessHeartbeat(parts.TenantID, parts.FleetID, parts.DeviceID, hb)
@@ -277,7 +331,7 @@ func (b *Bridge) handleRegistration(msg Message) {
 		"mqtt-registered",
 		fmt.Sprintf("%d", hw.FWVersion),
 		hw.PolicyVersion,
-		hw.CacheHitPct, // capabilities byte mapped from wire
+		hw.Capabilities,
 	)
 
 	if regErr != nil && regErr != manager.ErrDeviceExists {
@@ -334,7 +388,10 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// The device key is resolved via the DeviceKeyProvider (defaults to
 	// DCLAW_DEVICE_KEY env var; zero key in dev mode).
 	sessionID := fmt.Sprintf("%d", parts.DeviceID)
-	deviceKey := b.keyProvider.KeyForDevice(parts.DeviceID)
+	// Look up the per-device key using the full composite ID so that the
+	// store-backed provider can find keys stored during registration.
+	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+	deviceKey := b.keyProvider.KeyForDevice(uint32(fullDeviceID))
 	resp.HMACTag = computeVerdictHMAC(deviceKey, sessionID, vr.RequestID, resp.Action, vr.ToolHash)
 
 	// Publish the response to the device's verdict/resp topic

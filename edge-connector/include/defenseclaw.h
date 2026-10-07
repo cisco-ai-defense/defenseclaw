@@ -48,6 +48,7 @@ typedef enum {
     DCLAW_REASON_RETROACTIVE    = 0x0B,
     DCLAW_REASON_CONTENT_BLOCK  = 0x0C,
     DCLAW_REASON_SSRF_BLOCK     = 0x0D,
+    DCLAW_REASON_HASH_MISMATCH  = 0x0E,
 } dclaw_reason_t;
 
 typedef enum {
@@ -248,6 +249,38 @@ typedef struct {
     bool     block_all_active;  /* P1-6: global BLOCK_ALL / LOCKDOWN flag */
 } dclaw_emergency_state_t;
 
+/* === Runtime Policy Tables === */
+
+/* Maximum counts for runtime policy table entries.
+ * Sized to keep dclaw_state_t within the profile RAM budgets
+ * (STANDARD < 25KB, EDGE < 40KB). */
+#define DCLAW_RT_MAX_DENY_HASHES    32
+#define DCLAW_RT_MAX_DEST_ALLOWLIST 32
+#define DCLAW_RT_MAX_DEST_LEN       64
+#define DCLAW_RT_MAX_SEVERITY_RULES 8
+#define DCLAW_RT_MAX_SEQUENCE_RULES 16
+
+typedef struct {
+    /* Deny hash list (sorted for binary search) */
+    uint8_t  deny_hashes[DCLAW_RT_MAX_DENY_HASHES][32];
+    size_t   deny_hashes_count;
+
+    /* Destination allowlist (NUL-terminated strings, max 64 chars each) */
+    char     dest_allowlist[DCLAW_RT_MAX_DEST_ALLOWLIST][DCLAW_RT_MAX_DEST_LEN];
+    size_t   dest_allowlist_count;
+
+    /* Severity rules */
+    struct { uint8_t severity; uint8_t action; } severity_rules[DCLAW_RT_MAX_SEVERITY_RULES];
+    size_t   severity_rules_count;
+
+    /* Capability sequence rules */
+    struct { uint8_t seq[4]; uint8_t seq_len; uint8_t action; } sequence_rules[DCLAW_RT_MAX_SEQUENCE_RULES];
+    size_t   sequence_rules_count;
+
+    /* Set to true once runtime tables have been loaded from flash */
+    bool     loaded;
+} dclaw_policy_table_t;
+
 /* === Global Agent State === */
 
 typedef struct {
@@ -264,6 +297,7 @@ typedef struct {
     dclaw_canary_state_t    canary;
     dclaw_emergency_state_t emergency;
     dclaw_ipc_peer_t        ipc_peer;
+    dclaw_policy_table_t    rt_policy; /* Runtime-modifiable policy tables */
     /* Evaluation counters for heartbeat reporting */
     uint32_t eval_allowed_count;
     uint32_t eval_denied_count;
@@ -285,6 +319,8 @@ int dclaw_flush_audit(void);
 int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature);
 int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
+void dclaw_policy_tables_init(void);
+int dclaw_policy_reload_from_flash(void);
 int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
 void dclaw_get_health(uint8_t *out_heartbeat, size_t *out_len, size_t buf_size);
 void dclaw_shutdown(void);

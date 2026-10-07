@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -199,29 +200,30 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("read compiled policy: %w", err)
 	}
 
-	// P1-3 fix: The Python compiler outputs [header(8) + payload(N) + dev_stub(33)].
-	// The 33-byte dev stub is: 32 bytes of padding with a 0xED marker at byte -33,
-	// and the last byte is the first byte of SHA-256 of the payload. The C-side OTA
+	// P1-3 fix: The Python compiler outputs [header(8) + payload(N) + dev_stub(64)].
+	// The dev stub is produced by sign_blob() in policy_compiler.py:
+	//   sig = b'\xED' + hashlib.sha256(blob).digest()[:63]
+	// where blob = header + payload.  That yields exactly 64 bytes (0xED marker
+	// followed by the first 63 bytes of SHA-256(header+payload)).  The C-side OTA
 	// receiver expects [header(8) + payload(N) + signature(64)], so we must strip
-	// the dev stub before Sign() appends the real 64-byte signature.
+	// the dev stub before Sign() appends the real 64-byte HMAC signature.
 	//
-	// Detection: last 33 bytes exist, blob[-33] == 0xED, and blob[-1] matches
-	// the first byte of SHA-256(payload).
-	if len(blob) > HeaderSize+33 {
-		stubStart := len(blob) - 33
+	// Detection: blob has at least HeaderSize + 64 bytes, the byte at
+	// blob[len(blob)-64] == 0xED, and the 32 bytes blob[len(blob)-63:][:32]
+	// match SHA-256(header+payload)[:32].
+	const devStubSize = 64
+	if len(blob) >= HeaderSize+devStubSize {
+		stubStart := len(blob) - devStubSize
 		if blob[stubStart] == 0xED {
-			// Verify: last byte should be first byte of SHA-256(payload)
-			hdr, hdrErr := ParseHeader(blob)
-			if hdrErr == nil {
-				payloadEnd := HeaderSize + int(hdr.PayloadLen)
-				if payloadEnd <= stubStart {
-					payload := blob[HeaderSize:payloadEnd]
-					h := sha256Sum(payload)
-					if h[0] == blob[len(blob)-1] {
-						s.logger.Printf("[policy] stripping 33-byte dev stub from compiler output (marker=0xED, checksum=0x%02x)", h[0])
-						blob = blob[:stubStart]
-					}
-				}
+			// Verify: bytes [stubStart+1 : stubStart+33] should equal
+			// SHA-256(blob[:stubStart])[:32] — matching the compiler's
+			// hashlib.sha256(blob).digest()[:63] where the first 32
+			// bytes are the most significant half.
+			unsigned := blob[:stubStart]
+			h := sha256Sum(unsigned)
+			if bytes.Equal(blob[stubStart+1:stubStart+33], h[:32]) {
+				s.logger.Printf("[policy] stripping 64-byte dev stub from compiler output (marker=0xED, sha256 prefix match)")
+				blob = blob[:stubStart]
 			}
 		}
 	}
@@ -236,15 +238,41 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 }
 
 // Sign creates a signed policy blob by appending an HMAC-SHA256 signature
-// to the raw policy binary. The signed format matches the C-side 64-byte
-// signature field (dclaw_policy_header_t):
+// to the raw policy binary. The signed format matches what the C-side
+// mqtt_client.c OTA handler expects:
 //
-//	[0:N]     policy blob (header + payload)
-//	[N:N+32]  HMAC-SHA256 signature
-//	[N+32:N+64] zero padding (Ed25519 slot reserved by the C struct)
+//	Total signed blob layout:
+//	  [0:8]         header  (dclaw_policy_header_t, big-endian)
+//	  [8:8+N]       payload (N = header.payload_len)
+//	  [8+N:8+N+64]  signature field (64 bytes)
+//
+//	Signature field breakdown:
+//	  [0:32]  HMAC-SHA256(key, header+payload)
+//	  [32:64] zero padding (reserved for Ed25519 slot)
+//
+//	C-side split (mqtt_client.c line ~547):
+//	  blob_len  = total - 64
+//	  signature = blob + blob_len
+//	  dclaw_apply_policy(blob, blob_len, signature)
+//
+//	C-side verify (ota_receiver.c):
+//	  HMAC-SHA256(ota_key, blob[0:blob_len]) compared to signature[0:32]
 func (s *Service) Sign(policyBin []byte) ([]byte, error) {
 	if len(policyBin) < HeaderSize {
 		return nil, errors.New("policy binary too short to sign")
+	}
+
+	// Validate that header.payload_len matches the actual payload size.
+	// Without this check, a malformed blob could pass signing but be
+	// rejected by the C-side apply_policy length validation.
+	hdr, err := ParseHeader(policyBin)
+	if err != nil {
+		return nil, fmt.Errorf("parse header before signing: %w", err)
+	}
+	expectedBlobLen := HeaderSize + int(hdr.PayloadLen)
+	if expectedBlobLen != len(policyBin) {
+		return nil, fmt.Errorf("header.payload_len (%d) does not match blob size (%d): expected blob_len=%d",
+			hdr.PayloadLen, len(policyBin), expectedBlobLen)
 	}
 
 	sig, err := s.signer.Sign(policyBin)

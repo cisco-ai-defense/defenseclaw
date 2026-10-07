@@ -56,6 +56,7 @@ type Heartbeat struct {
 	SessionCount   uint8
 	AuditHeadHMAC  uint64
 	Flags          uint8
+	Capabilities   uint8
 }
 
 // AlertType defines fleet alert categories.
@@ -247,7 +248,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			HWProfile:     "auto-discovered",
 			FWVersion:     fmt.Sprintf("%d", hb.FWVersion),
 			PolicyVersion: hb.PolicyVersion,
-			Capabilities:  0,
+			Capabilities:  hb.Capabilities,
 			Status:        StatusOnline,
 			RegisteredAt:  time.Now(),
 			LastHeartbeat: time.Now(),
@@ -275,6 +276,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	dev.PolicyVersion = hb.PolicyVersion
 	dev.FWVersion = fmt.Sprintf("%d", hb.FWVersion)
 	dev.Flags = hb.Flags
+	dev.Capabilities = hb.Capabilities
 	dev.DeniedTotal += uint64(hb.DeniedCount)
 	dev.AllowedTotal += uint64(hb.AllowedCount)
 
@@ -449,6 +451,7 @@ func ParseHeartbeat(data []byte) (*Heartbeat, error) {
 		SessionCount:   data[21],
 		AuditHeadHMAC:  binary.BigEndian.Uint64(data[22:30]),
 		Flags:          data[30],
+		Capabilities:   data[31],
 	}
 	return hb, nil
 }

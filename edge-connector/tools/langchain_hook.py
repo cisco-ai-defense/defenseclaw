@@ -77,94 +77,102 @@ def set_connector(connector: EdgeConnector) -> None:
 
 
 # ---------------------------------------------------------------------------
-# EdgeConnectorToolWrapper — proper BaseTool subclass wrapping any LangChain tool
+# EdgeConnectorTool — concrete BaseTool subclass wrapping any LangChain tool
+# via composition (not dynamic class creation).
 # ---------------------------------------------------------------------------
-def _make_wrapper_class(tool: Any, connector: Optional["EdgeConnector"] = None) -> Any:
-    """Build a ``BaseTool`` subclass that delegates to *tool* via the Edge Connector.
+class _EdgeConnectorArgsSchema:
+    """Lazy-built Pydantic model that mirrors the wrapped tool's args_schema."""
 
-    We dynamically construct the class so that ``args_schema`` is declared as a
-    Pydantic **class variable** (``ClassVar``-style) rather than a ``@property``,
-    which would collide with Pydantic's descriptor protocol and raise TypeError.
+    @staticmethod
+    def for_tool(tool: Any) -> Optional[Type]:
+        """Return the wrapped tool's args_schema, or build a permissive one."""
+        schema = getattr(tool, "args_schema", None)
+        if schema is not None:
+            return schema
+        # Build a minimal schema that accepts arbitrary keyword arguments
+        if _BaseModel is None:
+            return None
+        return type(
+            f"{tool.name}_Schema",
+            (_BaseModel,),
+            {
+                "__annotations__": {"input": str},
+                "__module__": __name__,
+            },
+        )
+
+
+def _build_edge_connector_tool(
+    tool: Any,
+    connector: Optional["EdgeConnector"] = None,
+) -> Any:
+    """Build a concrete ``BaseTool`` instance wrapping *tool* via composition.
+
+    Uses a proper class definition with ``__module__`` set explicitly,
+    avoiding the ``KeyError('__module__')`` that dynamic ``type()``
+    construction triggers in some Pydantic v2 configurations.
     """
     _import_langchain()
 
-    wrapped_tool = tool
-    wrapped_connector = connector
+    class EdgeConnectorTool(_BaseTool):
+        """BaseTool that delegates to a wrapped tool via the Edge Connector."""
 
-    schema = getattr(wrapped_tool, "args_schema", None)
+        name: str = tool.name
+        description: str = tool.description
+        args_schema: Optional[Type] = _EdgeConnectorArgsSchema.for_tool(tool)
 
-    # Build the class dict.  ``args_schema`` must be a plain class attribute
-    # (a Type[BaseModel] or None) — NOT a property — so that Pydantic
-    # model_fields / schema generation works correctly.
-    #
-    # Pydantic v2 requires fields inherited from base classes to be
-    # re-declared with proper type annotations.  Using plain assignment
-    # (``name = "foo"``) triggers:
-    #   PydanticUserError: Field 'name' defined on a base class was
-    #   overridden by a non-annotated attribute.
-    #
-    # We solve this by declaring ``__annotations__`` so Pydantic sees
-    # ``name`` and ``description`` as annotated ``str`` fields with
-    # defaults provided via ``Field(default=...)``.
-    try:
-        from pydantic import Field as PydanticField
-    except ImportError:
-        PydanticField = None
+        # Store the wrapped tool and connector as private attributes so
+        # Pydantic does not attempt to validate them as model fields.
+        _wrapped_tool: Any = None
+        _wrapped_connector: Any = None
 
-    ns: Dict[str, Any] = {}
-    annotations: Dict[str, Any] = {}
+        class Config:
+            arbitrary_types_allowed = True
 
-    if PydanticField is not None:
-        ns["name"] = PydanticField(default=wrapped_tool.name)
-        ns["description"] = PydanticField(default=wrapped_tool.description)
-    else:
-        ns["name"] = wrapped_tool.name
-        ns["description"] = wrapped_tool.description
-    annotations["name"] = str
-    annotations["description"] = str
+        def __init__(self, **kwargs: Any):
+            super().__init__(**kwargs)
+            # Use object.__setattr__ to bypass Pydantic's frozen-model
+            # protection on private attributes.
+            object.__setattr__(self, "_wrapped_tool", tool)
+            object.__setattr__(self, "_wrapped_connector", connector)
 
-    if schema is not None:
-        ns["args_schema"] = schema
-
-    ns["__annotations__"] = annotations
-
-    def _run(self: Any, *args: Any, **kwargs: Any) -> str:  # noqa: N805
-        ec = wrapped_connector or get_connector(fail_open=False)
-        arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
-        verdict_result = ec.evaluate(
-            tool_name=wrapped_tool.name,
-            arguments=arguments,
-        )
-        if verdict_result.blocked:
-            msg = (
-                f"[EdgeConnector] Tool '{wrapped_tool.name}' blocked: "
-                f"{verdict_result.reason}"
+        def _run(self, *args: Any, **kwargs: Any) -> str:
+            ec = self._wrapped_connector or get_connector(fail_open=False)
+            arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
+            verdict_result = ec.evaluate(
+                tool_name=self._wrapped_tool.name,
+                arguments=arguments,
             )
-            logger.warning(msg)
-            return msg
-        return wrapped_tool.run(*args, **kwargs)
+            if verdict_result.blocked:
+                msg = (
+                    f"[EdgeConnector] Tool '{self._wrapped_tool.name}' blocked: "
+                    f"{verdict_result.reason}"
+                )
+                logger.warning(msg)
+                return msg
+            return self._wrapped_tool.run(*args, **kwargs)
 
-    async def _arun(self: Any, *args: Any, **kwargs: Any) -> str:  # noqa: N805
-        ec = wrapped_connector or get_connector(fail_open=False)
-        arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
-        verdict_result = ec.evaluate(
-            tool_name=wrapped_tool.name,
-            arguments=arguments,
-        )
-        if verdict_result.blocked:
-            msg = (
-                f"[EdgeConnector] Tool '{wrapped_tool.name}' blocked: "
-                f"{verdict_result.reason}"
+        async def _arun(self, *args: Any, **kwargs: Any) -> str:
+            ec = self._wrapped_connector or get_connector(fail_open=False)
+            arguments = kwargs if kwargs else ({"input": args[0]} if args else {})
+            verdict_result = ec.evaluate(
+                tool_name=self._wrapped_tool.name,
+                arguments=arguments,
             )
-            logger.warning(msg)
-            return msg
-        return wrapped_tool.run(*args, **kwargs)
+            if verdict_result.blocked:
+                msg = (
+                    f"[EdgeConnector] Tool '{self._wrapped_tool.name}' blocked: "
+                    f"{verdict_result.reason}"
+                )
+                logger.warning(msg)
+                return msg
+            return self._wrapped_tool.run(*args, **kwargs)
 
-    ns["_run"] = _run
-    ns["_arun"] = _arun
+    # Set __module__ explicitly to prevent KeyError in Pydantic introspection.
+    EdgeConnectorTool.__module__ = __name__
+    EdgeConnectorTool.__qualname__ = f"EdgeConnectorTool[{tool.name}]"
 
-    cls = type(f"EdgeConnectorWrapped_{wrapped_tool.name}", (_BaseTool,), ns)
-    return cls
+    return EdgeConnectorTool
 
 
 class EdgeConnectorToolWrapper:
@@ -190,7 +198,7 @@ class EdgeConnectorToolWrapper:
 
     def as_tool(self) -> Any:
         """Return a LangChain ``BaseTool`` wrapping the original tool."""
-        cls = _make_wrapper_class(self._tool, self._connector)
+        cls = _build_edge_connector_tool(self._tool, self._connector)
         return cls()
 
     # Convenience: let callers use wrap() as a shortcut

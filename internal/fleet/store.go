@@ -21,3 +21,14 @@ type DeviceStore interface {
 	// DeleteDevice removes a device from storage.
 	DeleteDevice(tenantID, fleetID uint16, deviceID uint32) error
 }
+
+// DeviceKeyStore is the persistence interface for per-device HMAC signing keys.
+// Implementations persist unique 32-byte keys generated at device registration.
+type DeviceKeyStore interface {
+	// SaveDeviceKey persists a 32-byte per-device signing key.
+	SaveDeviceKey(deviceID uint64, key []byte) error
+
+	// LoadDeviceKey retrieves the signing key for a device.
+	// Returns nil, nil if no key exists.
+	LoadDeviceKey(deviceID uint64) ([]byte, error)
+}

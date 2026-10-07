@@ -179,8 +179,8 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     if (!s->clock.time_trusted) flags |= 0x02; /* POLICY_STALE (no time = stale) */
     buf[pos++] = flags;
 
-    /* reserved (1 byte) */
-    buf[pos++] = 0;
+    /* capabilities (1 byte) — device capability bitmap */
+    buf[pos++] = s->device.capabilities;
 
     *out_len = 32;
     return 0;

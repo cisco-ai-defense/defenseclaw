@@ -128,7 +128,7 @@ def edge_connector(
         "  make -j$(nproc)\n"
         "  sudo make install\n"
         "\n"
-        "Fleet Manager (Go):\n"
+        "Gateway (includes fleet manager):\n"
         "\n"
         "  go build -o defenseclaw ./cmd/defenseclaw\n"
     )

@@ -167,8 +167,87 @@ def _configure_remote_env(
         ux.warn("Could not write env file. Configure manually on the device.")
 
 
+def _find_service_file() -> Path | None:
+    """Locate the systemd unit file relative to the edge-connector source."""
+    source = _find_edge_connector_source()
+    if source is None:
+        return None
+    candidate = source / "packaging" / "edge-connector.service"
+    return candidate if candidate.is_file() else None
+
+
+def _install_systemd_unit(target: str, user: str) -> bool:
+    """Install the systemd unit file and enable/start the service on the remote device."""
+    service_file = _find_service_file()
+    if service_file is None:
+        ux.warn("Systemd unit file not found; skipping service installation.")
+        return False
+
+    ux.echo()
+    ux.section("Installing systemd service")
+
+    # Copy the unit file to the remote device
+    remote_unit = "/etc/systemd/system/edge-connector.service"
+    result = subprocess.run(
+        ["scp", "-o", "StrictHostKeyChecking=accept-new",
+         str(service_file), f"{user}@{target}:/tmp/edge-connector.service"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        ux.err(f"Failed to copy unit file: {result.stderr.strip()}")
+        return False
+
+    install_cmd = (
+        f"sudo mv /tmp/edge-connector.service {remote_unit} && "
+        f"sudo chmod 644 {remote_unit} && "
+        "sudo systemctl daemon-reload && "
+        "sudo systemctl enable edge-connector && "
+        "sudo systemctl start edge-connector"
+    )
+    result = subprocess.run(
+        _ssh_cmd(target, user, install_cmd),
+        text=True,
+    )
+    if result.returncode != 0:
+        ux.err("Failed to install/start systemd service. Check the output above.")
+        return False
+
+    ux.ok("edge-connector.service installed, enabled, and started")
+    return True
+
+
+def _install_local_systemd_unit() -> bool:
+    """Install the systemd unit file and enable/start the service locally."""
+    service_file = _find_service_file()
+    if service_file is None:
+        ux.warn("Systemd unit file not found; skipping service installation.")
+        return False
+
+    ux.echo()
+    ux.section("Installing systemd service (local)")
+    target_path = Path("/etc/systemd/system/edge-connector.service")
+    try:
+        _run(["sudo", "cp", str(service_file), str(target_path)])
+        _run(["sudo", "chmod", "644", str(target_path)])
+        _run(["sudo", "systemctl", "daemon-reload"])
+        _run(["sudo", "systemctl", "enable", "edge-connector"])
+        _run(["sudo", "systemctl", "start", "edge-connector"])
+    except subprocess.CalledProcessError:
+        ux.err("Failed to install/start systemd service locally.")
+        return False
+    ux.ok("edge-connector.service installed, enabled, and started")
+    return True
+
+
 def _start_remote_daemon(target: str, user: str) -> None:
-    """Print instructions to start the edge-connector daemon on the remote device."""
+    """Install the systemd unit and start the service on the remote device.
+
+    Falls back to printing manual instructions if the unit file is missing
+    or the install fails.
+    """
+    if _install_systemd_unit(target, user):
+        return
+
     ux.echo()
     ux.section("Starting edge-connector daemon")
     ux.echo("  Start the daemon manually on the device:")
@@ -279,6 +358,9 @@ def edge_install(
 
         if not _build_local(source, profile):
             raise SystemExit(1)
+
+        # Try to install the systemd service locally
+        _install_local_systemd_unit()
 
         ux.echo()
         ux.section("Done")

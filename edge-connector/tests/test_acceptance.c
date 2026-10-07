@@ -7,6 +7,7 @@
 #include "content_scanner.h"
 #include "platform.h"
 #include "hmac_sha256.h"
+#include "sha256.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -46,7 +47,7 @@ static uint64_t clock_ns(void) {
 static void test_ac01(void) {
     dclaw_tool_request_t req1 = {0};
     strncpy(req1.tool_name, "curl", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req1.tool_hash, 0x11, 32);
+    dclaw_sha256((const uint8_t *)"curl", 4, req1.tool_hash);
     req1.cap_flags = DCLAW_CAP_NET_FETCH;
     req1.session_id = 100;
     strncpy(req1.destination, "api.openai.com", DCLAW_DESTINATION_MAX - 1);
@@ -54,7 +55,7 @@ static void test_ac01(void) {
 
     dclaw_tool_request_t req2 = {0};
     strncpy(req2.tool_name, "bash", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req2.tool_hash, 0x22, 32);
+    dclaw_sha256((const uint8_t *)"bash", 4, req2.tool_hash);
     req2.cap_flags = DCLAW_CAP_EXEC_SHELL;
     req2.session_id = 100;
 
@@ -74,7 +75,7 @@ static void test_ac01(void) {
 static void test_ac02(void) {
     dclaw_tool_request_t req = {0};
     strncpy(req.tool_name, "unknown-tool", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0xDE, 32);
+    dclaw_sha256((const uint8_t *)"unknown-tool", strlen("unknown-tool"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_ACTUATE; /* sync_block cap */
     req.session_id = 200;
 
@@ -92,7 +93,7 @@ static void test_ac03(void) {
 
     dclaw_tool_request_t req = {0};
     strncpy(req.tool_name, "dangerous", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0xBB, 32);
+    dclaw_sha256((const uint8_t *)"dangerous", strlen("dangerous"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_ACTUATE;
     req.session_id = 300;
     dclaw_evaluate(&req); /* will BLOCK → immediate flash write */
@@ -198,7 +199,7 @@ static void test_ac08(void) {
 static void test_ac09(void) {
     dclaw_tool_request_t req = {0};
     strncpy(req.tool_name, "sensor", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0x77, 32);
+    dclaw_sha256((const uint8_t *)"sensor", strlen("sensor"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_SENSOR_READ;
     req.session_id = 400;
 
@@ -347,7 +348,7 @@ static void test_ac17_backward_compat(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, "read_sensor", DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0xDD, 32);
+    dclaw_sha256((const uint8_t *)"read_sensor", strlen("read_sensor"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_SENSOR_READ;
     req.session_id = 200;
     /* content is NULL, direction is 0 — Phase 1 behavior */

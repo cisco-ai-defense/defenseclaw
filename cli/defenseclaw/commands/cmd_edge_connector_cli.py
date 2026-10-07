@@ -243,7 +243,10 @@ def decommission(app: AppContext, device_id: int, tenant_id: int, fleet_id: int,
 
 
 @edge_connector_group.command("decommission-batch")
-@click.option("--ids", required=True, help="Comma-separated device IDs to decommission (format: tenant:fleet:device or just device_id).")
+@click.option(
+    "--ids", required=True,
+    help="Comma-separated device IDs (format: tenant:fleet:device or just device_id).",
+)
 @click.option("--tenant-id", default=1, type=int, help="Default tenant ID when using plain device IDs (default 1).")
 @click.option("--fleet-id", default=1, type=int, help="Default fleet ID when using plain device IDs (default 1).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip confirmation prompt.")

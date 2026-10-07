@@ -104,7 +104,7 @@ func ParseTopic(topic string) (*TopicParts, error) {
 //	[21]    session_count   uint8
 //	[22:30] audit_head_hmac uint64
 //	[30]    flags           uint8
-//	[31]    reserved        uint8
+//	[31]    capabilities    uint8  (device capability bitmap)
 type HeartbeatWire struct {
 	DeviceID       uint32
 	UptimeSec      uint32
@@ -118,6 +118,7 @@ type HeartbeatWire struct {
 	SessionCount   uint8
 	AuditHeadHMAC  uint64
 	Flags          uint8
+	Capabilities   uint8
 }
 
 // DecodeHeartbeat decodes a 32-byte heartbeat payload from an edge device.
@@ -139,6 +140,7 @@ func DecodeHeartbeat(data []byte) (*HeartbeatWire, error) {
 		SessionCount:   data[21],
 		AuditHeadHMAC:  binary.BigEndian.Uint64(data[22:30]),
 		Flags:          data[30],
+		Capabilities:   data[31],
 	}, nil
 }
 

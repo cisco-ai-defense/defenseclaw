@@ -101,6 +101,14 @@ def _wait_for_broker(host: str, port: int, retries: int = 6) -> bool:
 def _setup_docker(port: int) -> dict | bool:
     """Pull and start eclipse-mosquitto in Docker with password auth.
 
+    Follows a strict ordering to avoid the race where the password file
+    does not exist when the broker starts:
+      1. Create ~/.defenseclaw/mqtt/ directory
+      2. Write mosquitto.conf with listener + password_file + persistence
+      3. Generate the password file using a throwaway container
+      4. Start the long-lived broker container mounting the config dir
+      5. Verify MQTT CONNACK with generated credentials
+
     Returns a dict with mqtt_user/mqtt_pass on success, or False on failure.
     """
     docker = shutil.which("docker")
@@ -120,24 +128,31 @@ def _setup_docker(port: int) -> dict | bool:
         capture_output=True, text=True,
     )
     if result.returncode == 0:
-        ux.warn(f"Container '{_CONTAINER_NAME}' already exists. Restarting it.")
+        ux.warn(f"Container '{_CONTAINER_NAME}' already exists. Removing it.")
         subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
 
-    # Generate MQTT credentials for fleet use
-    mqtt_user = "dclaw"
-    mqtt_pass = secrets.token_urlsafe(24)
-
-    # P0-3 fix: Create the config directory with BOTH mosquitto.conf AND the
-    # password file BEFORE starting the container. Previously, the container
-    # started with password_file referencing a file that didn't exist yet,
-    # causing Mosquitto to fail on startup.
+    # Step 1: Create config directory
     conf_dir = Path.home() / ".defenseclaw" / "mqtt"
     os.makedirs(conf_dir, exist_ok=True)
+    ux.ok(f"Config directory: {conf_dir}")
+
+    # Step 2: Write mosquitto.conf with persistence enabled
     conf_file = conf_dir / "mosquitto.conf"
-    conf_file.write_text(_MOSQUITTO_CONF)
-    passwd_file = conf_dir / "passwd"
-    # Create an empty passwd file so the mount target exists
-    passwd_file.touch()
+    mosquitto_conf = (
+        "# DefenseClaw MQTT broker configuration\n"
+        f"listener {port}\n"
+        "allow_anonymous false\n"
+        "password_file /mosquitto/config/passwd\n"
+        "persistence true\n"
+        "persistence_location /mosquitto/data/\n"
+        "log_dest stdout\n"
+    )
+    conf_file.write_text(mosquitto_conf)
+    ux.ok("mosquitto.conf written")
+
+    # Step 3: Generate credentials and password file using a throwaway container
+    mqtt_user = "dclaw"
+    mqtt_pass = secrets.token_urlsafe(24)
 
     ux.echo(f"  Pulling {_MOSQUITTO_IMAGE}...")
     pull = subprocess.run(
@@ -149,34 +164,30 @@ def _setup_docker(port: int) -> dict | bool:
         return False
     ux.ok(f"Image {_MOSQUITTO_IMAGE} ready")
 
-    # P0-3 fix: Generate the hashed password file using a throwaway container
-    # BEFORE starting the long-lived broker container. This ensures the
-    # password_file referenced by mosquitto.conf exists when Mosquitto reads it.
     ux.echo("  Generating MQTT password file...")
     passwd_result = subprocess.run(
         [
             "docker", "run", "--rm",
-            "-v", f"{conf_dir}:/tmp/mqttconf",
+            "-v", f"{conf_dir}:/mosquitto/config",
             _MOSQUITTO_IMAGE,
             "mosquitto_passwd", "-b", "-c",
-            "/tmp/mqttconf/passwd", mqtt_user, mqtt_pass,
+            "/mosquitto/config/passwd", mqtt_user, mqtt_pass,
         ],
         capture_output=True, text=True,
     )
     if passwd_result.returncode != 0:
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False
-    else:
-        ux.ok(f"MQTT user '{mqtt_user}' password file generated")
+    ux.ok(f"MQTT user '{mqtt_user}' password file generated")
 
+    # Step 4: Start the broker container mounting the entire config directory
     ux.echo("  Starting container...")
     run_result = subprocess.run(
         [
             "docker", "run", "-d",
             "--name", _CONTAINER_NAME,
             "-p", f"{port}:1883",
-            "-v", f"{conf_file}:/mosquitto/config/mosquitto.conf",
-            "-v", f"{passwd_file}:/mosquitto/config/passwd",
+            "-v", f"{conf_dir}:/mosquitto/config",
             "--restart", "unless-stopped",
             _MOSQUITTO_IMAGE,
         ],

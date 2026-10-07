@@ -336,6 +336,28 @@ func auditPlatformHealthV8Occurrence(event Event) (sinkHealthV8Occurrence, bool)
 		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "HIGH"
 		occurrence.subsystem, occurrence.healthState = "judge_bodies", "degraded"
 		occurrence.errorCode = observability.Present("worker_still_running")
+
+	// Fleet (Edge Connector) platform-health actions. These need explicit
+	// routing so the generated fleet families (log.fleet.device.heartbeat,
+	// log.fleet.device.offline, log.fleet.alert) receive well-formed
+	// platform-health records instead of falling through to the compatibility
+	// adapter, which cannot supply the required family-specific fields.
+	case ActionFleetDeviceHeartbeat:
+		occurrence.family, occurrence.phase = sinkHealthV8Ready, "heartbeat"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+	case ActionFleetDeviceOffline:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "heartbeat"
+		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "WARN"
+		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
+		occurrence.errorCode = observability.Present("device_offline")
+	case ActionFleetAlert:
+		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "alert"
+		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, event.Severity
+		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
+		occurrence.errorCode = observability.Present("fleet_alert")
+
 	default:
 		return sinkHealthV8Occurrence{}, false
 	}

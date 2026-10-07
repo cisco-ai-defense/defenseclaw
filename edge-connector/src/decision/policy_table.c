@@ -1,11 +1,14 @@
 #include "defenseclaw.h"
 #include "platform.h"
 #include <string.h>
+#include <stdio.h>
 
 /* Policy tables are compiled into generated/policy_tables.h by the policy compiler.
  * For Phase 1 bootstrap, we use a minimal default policy. */
 
 #include "policy_tables.h"
+
+extern dclaw_state_t *dclaw_get_state(void);
 
 /* === Trusted tool-name-to-capability mapping (Comment 18 fix) ===
  *
@@ -112,12 +115,64 @@ static int compare_hash(const uint8_t *a, const uint8_t *b) {
     return memcmp(a, b, 32);
 }
 
+/*
+ * dclaw_policy_tables_init — populate runtime tables from compiled-in defaults.
+ * Called once during dclaw_init(). After OTA, dclaw_policy_reload_from_flash()
+ * overwrites these with the flash-resident policy.
+ */
+void dclaw_policy_tables_init(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_policy_table_t *rt = &s->rt_policy;
+    memset(rt, 0, sizeof(*rt));
+
+    /* Copy compiled-in deny hashes */
+    rt->deny_hashes_count = deny_hashes_count;
+    if (rt->deny_hashes_count > DCLAW_RT_MAX_DENY_HASHES)
+        rt->deny_hashes_count = DCLAW_RT_MAX_DENY_HASHES;
+    for (size_t i = 0; i < rt->deny_hashes_count; i++) {
+        memcpy(rt->deny_hashes[i], deny_hashes[i], 32);
+    }
+
+    /* Copy compiled-in destination allowlist */
+    rt->dest_allowlist_count = dest_allowlist_count;
+    if (rt->dest_allowlist_count > DCLAW_RT_MAX_DEST_ALLOWLIST)
+        rt->dest_allowlist_count = DCLAW_RT_MAX_DEST_ALLOWLIST;
+    for (size_t i = 0; i < rt->dest_allowlist_count; i++) {
+        strncpy(rt->dest_allowlist[i], dest_allowlist[i], DCLAW_RT_MAX_DEST_LEN - 1);
+        rt->dest_allowlist[i][DCLAW_RT_MAX_DEST_LEN - 1] = '\0';
+    }
+
+    /* Copy compiled-in severity rules */
+    rt->severity_rules_count = severity_rules_count;
+    if (rt->severity_rules_count > DCLAW_RT_MAX_SEVERITY_RULES)
+        rt->severity_rules_count = DCLAW_RT_MAX_SEVERITY_RULES;
+    for (size_t i = 0; i < rt->severity_rules_count; i++) {
+        rt->severity_rules[i].severity = severity_rules[i].severity;
+        rt->severity_rules[i].action = severity_rules[i].action;
+    }
+
+    /* Copy compiled-in sequence rules */
+    rt->sequence_rules_count = sequence_rules_count;
+    if (rt->sequence_rules_count > DCLAW_RT_MAX_SEQUENCE_RULES)
+        rt->sequence_rules_count = DCLAW_RT_MAX_SEQUENCE_RULES;
+    for (size_t i = 0; i < rt->sequence_rules_count; i++) {
+        memcpy(rt->sequence_rules[i].seq, sequence_rules[i].seq, 4);
+        rt->sequence_rules[i].seq_len = sequence_rules[i].seq_len;
+        rt->sequence_rules[i].action = sequence_rules[i].action;
+    }
+
+    rt->loaded = false; /* compiled-in defaults, not from flash */
+}
+
 dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash) {
-    /* Binary search over sorted deny_hashes table */
-    int lo = 0, hi = (int)deny_hashes_count - 1;
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_policy_table_t *rt = &s->rt_policy;
+
+    /* Binary search over sorted deny_hashes table (runtime copy) */
+    int lo = 0, hi = (int)rt->deny_hashes_count - 1;
     while (lo <= hi) {
         int mid = (lo + hi) / 2;
-        int cmp = compare_hash(tool_hash, deny_hashes[mid]);
+        int cmp = compare_hash(tool_hash, rt->deny_hashes[mid]);
         if (cmp == 0) return DCLAW_ACTION_BLOCK;
         if (cmp < 0) hi = mid - 1;
         else lo = mid + 1;
@@ -126,14 +181,17 @@ dclaw_action_t dclaw_policy_check_hash(const uint8_t *tool_hash) {
 }
 
 dclaw_action_t dclaw_policy_check_destination(const char *host) {
-    /* Linear scan over destination allowlist (small, ≤256 entries) */
-    for (size_t i = 0; i < dest_allowlist_count; i++) {
-        if (strcmp(host, dest_allowlist[i]) == 0) {
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_policy_table_t *rt = &s->rt_policy;
+
+    /* Linear scan over destination allowlist (runtime copy, small ≤256 entries) */
+    for (size_t i = 0; i < rt->dest_allowlist_count; i++) {
+        if (strcmp(host, rt->dest_allowlist[i]) == 0) {
             return DCLAW_ACTION_ALLOW;
         }
         /* Wildcard prefix match: *.example.com */
-        if (dest_allowlist[i][0] == '*' && dest_allowlist[i][1] == '.') {
-            const char *suffix = &dest_allowlist[i][1];
+        if (rt->dest_allowlist[i][0] == '*' && rt->dest_allowlist[i][1] == '.') {
+            const char *suffix = &rt->dest_allowlist[i][1];
             size_t suffix_len = strlen(suffix);
             size_t host_len = strlen(host);
             if (host_len >= suffix_len &&
@@ -146,9 +204,12 @@ dclaw_action_t dclaw_policy_check_destination(const char *host) {
 }
 
 dclaw_action_t dclaw_policy_check_severity(dclaw_severity_t sev) {
-    for (size_t i = 0; i < severity_rules_count; i++) {
-        if (severity_rules[i].severity == (uint8_t)sev) {
-            return (dclaw_action_t)severity_rules[i].action;
+    dclaw_state_t *s = dclaw_get_state();
+    dclaw_policy_table_t *rt = &s->rt_policy;
+
+    for (size_t i = 0; i < rt->severity_rules_count; i++) {
+        if (rt->severity_rules[i].severity == (uint8_t)sev) {
+            return (dclaw_action_t)rt->severity_rules[i].action;
         }
     }
     return DCLAW_ACTION_ALLOW;

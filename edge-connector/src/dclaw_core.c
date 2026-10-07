@@ -2,6 +2,7 @@
 #include "platform.h"
 #include "policy_tables.h"
 #include "content_scanner.h"
+#include "sha256.h"
 #include <string.h>
 
 #if DCLAW_MQTT_ENABLED
@@ -29,6 +30,7 @@ extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
 extern int dclaw_ipc_validate_request(const dclaw_tool_request_t *req);
 extern int dclaw_config_load_brokers(void);
 extern void dclaw_canary_record_block(void);
+extern void dclaw_policy_tables_init(void);
 
 dclaw_state_t *dclaw_get_state(void) {
     return &g_state;
@@ -42,6 +44,7 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.clock.time_trusted = false;
     g_state.next_request_id = 1;
     g_state.initialized = true;
+    dclaw_policy_tables_init();
     dclaw_config_load_brokers();
 
     uint64_t now = hal_tick_ms();
@@ -149,6 +152,24 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         g_state.eval_denied_count++;
         dclaw_canary_record_block();
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
+    }
+
+    /* Step 1a: Hash-to-name binding — verify that the submitted tool_hash
+     * is the SHA-256 of the submitted tool_name. An attacker could submit
+     * exec_shell's hash with sensor_read as the name to bypass capability
+     * lookup (which is based on name) while the cache/verdict uses the hash.
+     * This check binds them together: if they don't match, BLOCK. */
+    if (req->tool_name[0] != '\0') {
+        uint8_t computed_hash[DCLAW_SHA256_DIGEST_SIZE];
+        size_t name_len = strlen(req->tool_name);
+        dclaw_sha256((const uint8_t *)req->tool_name, name_len, computed_hash);
+        if (memcmp(computed_hash, req->tool_hash, DCLAW_SHA256_DIGEST_SIZE) != 0) {
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_MISMATCH,
+                              target_hash, req->session_id);
+            g_state.eval_denied_count++;
+            dclaw_canary_record_block();
+            return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_MISMATCH, DCLAW_VERDICT_SYNC);
+        }
     }
 
     /* Step 1b: Override caller-provided cap_flags with trusted policy lookup.

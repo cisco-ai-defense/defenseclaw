@@ -1,0 +1,13 @@
+[Unit]
+Description=DefenseClaw Edge Connector
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/edge-connector
+EnvironmentFile=-/etc/defenseclaw/edge-connector.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

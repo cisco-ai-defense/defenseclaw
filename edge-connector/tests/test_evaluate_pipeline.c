@@ -1,5 +1,6 @@
 #include "defenseclaw.h"
 #include "platform.h"
+#include "sha256.h"
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
@@ -10,7 +11,8 @@ static dclaw_tool_request_t make_request(const char *name, uint8_t caps, const c
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, name, DCLAW_TOOL_NAME_MAX - 1);
-    memset(req.tool_hash, 0x42, 32);
+    /* Compute correct SHA-256 of the tool name to satisfy hash-to-name binding */
+    dclaw_sha256((const uint8_t *)name, strlen(name), req.tool_hash);
     req.cap_flags = caps;
     req.session_id = 1;
     if (dest) strncpy(req.destination, dest, DCLAW_DESTINATION_MAX - 1);
@@ -93,7 +95,7 @@ static void test_content_scan_blocks_secret_in_pipeline(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, "read_data", DCLAW_TOOL_NAME_MAX);
-    memset(req.tool_hash, 0xAA, 32);
+    dclaw_sha256((const uint8_t *)"read_data", strlen("read_data"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_READ_FS;
     req.session_id = 99;
     req.content = "api_key = sk-proj-abcdefghijklmnopqrstuvwxyz1234567890";
@@ -109,7 +111,7 @@ static void test_ssrf_blocks_private_ip_in_pipeline(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, "fetch_url", DCLAW_TOOL_NAME_MAX);
-    memset(req.tool_hash, 0xBB, 32);
+    dclaw_sha256((const uint8_t *)"fetch_url", strlen("fetch_url"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_NET_FETCH;
     req.session_id = 100;
     strncpy(req.destination, "169.254.169.254", DCLAW_DESTINATION_MAX);
@@ -124,7 +126,7 @@ static void test_no_content_field_backward_compat(void) {
     dclaw_tool_request_t req;
     memset(&req, 0, sizeof(req));
     strncpy(req.tool_name, "read_sensor", DCLAW_TOOL_NAME_MAX);
-    memset(req.tool_hash, 0xCC, 32);
+    dclaw_sha256((const uint8_t *)"read_sensor", strlen("read_sensor"), req.tool_hash);
     req.cap_flags = DCLAW_CAP_SENSOR_READ;
     req.session_id = 101;
     /* content is NULL, content_len is 0 — Phase 1 behavior */
@@ -133,6 +135,23 @@ static void test_no_content_field_backward_compat(void) {
     /* Should NOT be CONTENT_BLOCK — should proceed to later stages */
     assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
     printf("  PASS: no content field = backward compatible (no content block)\n");
+}
+
+static void test_hash_mismatch_blocks(void) {
+    /* Submit exec_shell's name but with sensor_read's hash — should be blocked
+     * by the hash-to-name binding check before capability lookup. */
+    dclaw_tool_request_t req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.tool_name, "exec_shell", DCLAW_TOOL_NAME_MAX);
+    /* Use a different tool's hash to simulate the attack */
+    dclaw_sha256((const uint8_t *)"sensor_read", strlen("sensor_read"), req.tool_hash);
+    req.cap_flags = DCLAW_CAP_SENSOR_READ; /* attacker tries benign cap */
+    req.session_id = 200;
+
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    assert(v.reason == DCLAW_REASON_HASH_MISMATCH);
+    printf("  PASS: hash-name mismatch -> BLOCK with HASH_MISMATCH\n");
 }
 
 int main(void) {
@@ -151,7 +170,8 @@ int main(void) {
     test_content_scan_blocks_secret_in_pipeline();
     test_ssrf_blocks_private_ip_in_pipeline();
     test_no_content_field_backward_compat();
-    printf("  ALL PASSED (10 tests)\n");
+    test_hash_mismatch_blocks();
+    printf("  ALL PASSED (11 tests)\n");
 
     dclaw_shutdown();
     return 0;

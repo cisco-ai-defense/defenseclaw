@@ -382,6 +382,36 @@ docker run -d --name mosquitto -p 1883:1883 \
 `allow_anonymous true` is acceptable for quick-start testing only. For production, configure a `password_file` or use an authentication plugin. See the Mosquitto documentation for details.
 </Callout>
 
+**Authenticated setup (recommended for production):**
+
+```bash
+# Create a password file with a broker user
+mosquitto_passwd -c /mosquitto/config/passwd dclaw
+# (enter password when prompted)
+
+# Create a config that requires authentication
+cat > mosquitto.conf <<'EOF'
+listener 1883 0.0.0.0
+allow_anonymous false
+password_file /mosquitto/config/passwd
+EOF
+
+docker run -d --name mosquitto -p 1883:1883 \
+  -v ./mosquitto.conf:/mosquitto/config/mosquitto.conf \
+  -v ./passwd:/mosquitto/config/passwd \
+  eclipse-mosquitto:2
+```
+
+Set the broker credentials on both sides:
+
+```bash
+# Gateway (Go fleet server)
+export DCLAW_MQTT_BROKER_URL=tcp://dclaw:yourpassword@broker-host:1883
+
+# Edge devices (C edge connector)
+export DCLAW_BROKER_URL=mqtt://dclaw:yourpassword@broker-host:1883
+```
+
 <Callout type="warn">
 TLS is not yet implemented in the Edge Connector. Use plaintext MQTT on a trusted network for now. mTLS support is planned for Phase 2.
 </Callout>

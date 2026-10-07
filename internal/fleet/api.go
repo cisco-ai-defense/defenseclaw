@@ -4,6 +4,7 @@ package fleet
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -41,6 +42,7 @@ type API struct {
 	policy     *policy.Service
 	mqttClient mqtt.Client
 	audit      AuditEmitter
+	keyStore   DeviceKeyStore
 	mux        *http.ServeMux
 }
 
@@ -79,6 +81,15 @@ func WithMQTTClient(client mqtt.Client) APIOption {
 func WithAuditEmitter(e AuditEmitter) APIOption {
 	return func(a *API) {
 		a.audit = e
+	}
+}
+
+// WithDeviceKeyStore attaches a per-device key store so that device
+// registration generates and persists unique 32-byte HMAC signing keys.
+// The key is returned in the registration response for operator provisioning.
+func WithDeviceKeyStore(ks DeviceKeyStore) APIOption {
+	return func(a *API) {
+		a.keyStore = ks
 	}
 }
 
@@ -217,12 +228,38 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate and persist a per-device HMAC signing key (32 random bytes).
+	// The key is returned in the response so the operator can provision it
+	// on the device (via DCLAW_DEVICE_KEY env var or /etc/defenseclaw/device.key).
+	var deviceKeyHex string
+	if a.keyStore != nil {
+		deviceKey := make([]byte, 32)
+		if _, err := rand.Read(deviceKey); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to generate device key: " + err.Error(),
+			})
+			return
+		}
+		if err := a.keyStore.SaveDeviceKey(dev.DeviceID, deviceKey); err != nil {
+			log.Printf("[fleet-api] WARNING: failed to save device key for %d: %v", dev.DeviceID, err)
+		} else {
+			deviceKeyHex = hex.EncodeToString(deviceKey)
+		}
+	}
+
 	a.emitAudit("fleet.device.registered",
 		fmt.Sprintf("%d", dev.DeviceID),
 		fmt.Sprintf("tenant=%d fleet=%d hw=%s fw=%s policy_v=%d",
 			req.TenantID, req.FleetID, req.HWProfile, req.FWVersion, req.PolicyVersion))
 
-	writeJSON(w, http.StatusCreated, dev)
+	// Include the device key in the registration response when a key store
+	// is configured. The operator must provision this key on the device.
+	// This is the ONLY time the key is returned — it is not retrievable later.
+	resp := map[string]any{
+		"device":     dev,
+		"device_key": deviceKeyHex, // empty string when no key store
+	}
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (a *API) getDevice(w http.ResponseWriter, r *http.Request) {
