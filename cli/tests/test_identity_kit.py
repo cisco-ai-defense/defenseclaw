@@ -77,16 +77,15 @@ def test_kit_files_are_ascii_with_unix_line_endings() -> None:
     assert checked >= 5
 
 
-def test_example_configs_give_every_connector_a_key() -> None:
-    # The config loader drops an empty entry such as `claudecode: {}`, and then the enterprise
-    # enumerator enrolls nobody for that connector.
-    yaml = pytest.importorskip("yaml")
-    examples = sorted(path for directory in KIT_DIRS for path in directory.glob("*.example.yaml"))
-    assert len(examples) >= 3
-    for path in examples:
-        guardrail = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("guardrail") or {}
-        empty = [name for name, entry in (guardrail.get("connectors") or {}).items() if not entry]
-        assert not empty, f"{path.relative_to(ROOT)}: give {empty} a key, such as enabled: true"
+def test_kit_does_not_say_an_empty_connector_entry_is_dropped() -> None:
+    # GAP-0305: the config loaders keep an empty entry such as `claudecode: {}` and enable that
+    # agent (GAP-0221), so the starter configs and their guides must not say it is dropped.
+    guides = ROOT / "docs-site" / "content" / "docs" / "enterprise"
+    paths = sorted(path for directory in KIT_DIRS for path in directory.glob("*.example.yaml"))
+    assert len(paths) >= 3
+    for path in [*paths, guides / "identity-okta.mdx", guides / "identity-entra-id.mdx"]:
+        text = " ".join(path.read_text(encoding="utf-8").replace("#", " ").split())
+        assert not re.search(r"\{\}`? is dropped", text), path.relative_to(ROOT)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux") or not shutil.which("bash"), reason="a Linux host script")
