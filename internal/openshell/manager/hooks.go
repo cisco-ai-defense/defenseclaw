@@ -84,11 +84,13 @@ func (m *Manager) ObserveIngress(b sandboxauth.Binding, route sandboxauth.Route)
 	case sandboxauth.RouteNotify:
 		box.hooks.lastNotify = now
 	case sandboxauth.RouteOTLP:
-		// Not a sign of work for the reachability check: the Codex TUI
-		// exports OTLP from its start, before the first prompt that fires
-		// its hooks. A model call is (watch.go).
+		// Not a sign of work, for the reachability check or for the
+		// hook-silence check: the Codex TUI exports OTLP from its start,
+		// before the first prompt that fires its hooks, and again every few
+		// minutes while it sits idle at its prompt. A model call is (watch.go).
+		// Counting it raised a HIGH hook_silence finding for a session
+		// that was only idle for 10 minutes (GAP-0214).
 		box.hooks.lastOTLP = now
-		box.activeAt = now
 	}
 	name := box.rec.Name
 	m.mu.Unlock()
@@ -504,8 +506,9 @@ func hookLabel(s string, limit int) string {
 
 // checkHookSilence raises a hook_silence finding for a ready sandbox whose
 // harness was active (OCSF process or network events of the harness's own
-// binaries, its connections to the egress proxy among them, native OTLP)
-// more than HookSilence after its last hook request, or after it became
+// binaries, its connections to the egress proxy among them; not its
+// periodic native OTLP export) more than HookSilence after its last hook
+// request, or after it became
 // ready when no hook ever arrived. A tampered or disabled hook
 // registration looks exactly like that; user-tier connectors, whose hook
 // config the agent can edit, rely on it.

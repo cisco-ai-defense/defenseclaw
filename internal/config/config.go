@@ -2985,6 +2985,8 @@ func loadConfigSourceChecked(
 		if err := restoreRuntimeV8GuardrailConnectors(&cfg, sourceBytes); err != nil {
 			return nil, err
 		}
+	} else if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
+		restoreEmptyGuardrailConnectors(&cfg)
 	}
 	cfg.ConfigFilePath = configFile
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
@@ -3278,6 +3280,32 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
 	}
 	cfg.Guardrail.Connectors = source.Guardrail.Connectors
 	return nil
+}
+
+// restoreEmptyGuardrailConnectors keeps the guardrail.connectors entries
+// Viper drops while unmarshalling because their value is empty (codex: {} or
+// a bare codex:). A listed connector with an empty value is enabled with the
+// defaults, as the runtime loader above and the Python CLI read it; without
+// this the Windows guardian, enumerator and Setup enrolled no one for the
+// documented enterprise configs (GAP-0221). The Secure Client profile keeps
+// the loader of main, which drops them.
+func restoreEmptyGuardrailConnectors(cfg *Config) {
+	listed, ok := viper.Get("guardrail.connectors").(map[string]any)
+	if !ok {
+		return
+	}
+	for name, value := range listed {
+		if body, isMap := value.(map[string]any); value != nil && (!isMap || len(body) != 0) {
+			continue
+		}
+		if _, present := cfg.Guardrail.Connectors[name]; present {
+			continue
+		}
+		if cfg.Guardrail.Connectors == nil {
+			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{}
+		}
+		cfg.Guardrail.Connectors[name] = PerConnectorGuardrailConfig{}
+	}
 }
 
 // validateManagedEnterpriseListenerBindings keeps every inbound enterprise
