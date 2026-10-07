@@ -346,15 +346,25 @@ var policyReloadCmd = &cobra.Command{
 			return policyReloadError(resp.StatusCode, body)
 		}
 
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err == nil {
-			out, _ := json.MarshalIndent(result, "", "  ")
-			fmt.Println(string(out))
-		} else {
-			fmt.Println(string(body))
-		}
+		fmt.Println(policyReloadMessage(body))
 		return nil
 	},
+}
+
+// policyReloadMessage says a successful /policy/reload in one sentence, naming
+// the generation and digest that are enforcing now when the gateway reports them.
+func policyReloadMessage(body []byte) string {
+	var result struct {
+		Generation uint64 `json:"generation"`
+		Digest     string `json:"digest"`
+	}
+	if json.Unmarshal(body, &result) != nil || result.Generation == 0 {
+		return "Policy reloaded."
+	}
+	if result.Digest == "" {
+		return fmt.Sprintf("Policy reloaded (generation %d).", result.Generation)
+	}
+	return fmt.Sprintf("Policy reloaded (generation %d, digest %s).", result.Generation, result.Digest)
 }
 
 // customPackPinMismatch matches the rebuild error for a custom rule pack whose
