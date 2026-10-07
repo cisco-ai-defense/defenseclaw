@@ -40,6 +40,25 @@ func checkCandidateAssets(cfg *config.Config) error {
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return nil
 	}
+	if err := CheckRulePacks(cfg); err != nil {
+		return err
+	}
+	if err := inventory.CheckSignaturePackPins(cfg); err != nil {
+		return err
+	}
+	return checkCandidateWebhooks(cfg)
+}
+
+// CheckRulePacks builds every rule pack cfg selects (globally, per connector
+// and per guardrail profile) as the generation build at gateway start does,
+// custom_packs digest pins included. The Windows standalone lifecycle runs it
+// on the config an upgrade keeps before it stops the services, so a pin the
+// new gateway refuses fails the upgrade at once, not after the readiness
+// wait (GAP-0188).
+func CheckRulePacks(cfg *config.Config) error {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
 	type scoped struct {
 		cfg   *config.Config
 		label string
@@ -71,10 +90,7 @@ func checkCandidateAssets(cfg *config.Config) error {
 			}
 		}
 	}
-	if err := inventory.CheckSignaturePackPins(cfg); err != nil {
-		return err
-	}
-	return checkCandidateWebhooks(cfg)
+	return nil
 }
 
 // checkCandidateWebhooks refuses an enabled webhook whose URL the dispatcher

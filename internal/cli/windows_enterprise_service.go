@@ -422,10 +422,15 @@ func runWindowsEnterpriseLifecycle(
 		}
 		opts.payloadPins = pins
 	}
-	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure") {
+	if windowsEnterpriseStandalone(opts) && (action == "install" || action == "ensure" || action == "upgrade") {
 		if err := windowsEnterpriseStandaloneConfigPreflight(opts.configPath); err != nil {
 			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script,
 				fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err))
+		}
+	}
+	if windowsEnterpriseStandalone(opts) && action == "upgrade" && windowsEnterpriseKeepsInstalledConfig(opts) {
+		if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+			return writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
 		}
 	}
 	opts.resolvedInstaller = script
