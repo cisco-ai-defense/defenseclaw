@@ -695,20 +695,27 @@ def _snapshot_with_plane_c(backend: dict[str, Any] | None) -> dict[str, Any]:
     return payload
 
 
-def test_status_names_the_kernel_sensor_and_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_status_names_the_kernel_sensor_controls_and_your_policies(monkeypatch: pytest.MonkeyPatch) -> None:
     backend = {
         "kind": "tetragon", "version": "1.7.1", "mode": "enforce", "events_lost": 0, "loss_known": True,
         "kernel_floor": {
             "mode": "enforce", "enforced_users": 2, "enrolled_users": 3, "burn_in_users": 1,
-            "paused_until": "14:05",
+            "paused_until": "14:05", "approval": "approved", "next_ready_hours": 216,
         },
+        "customer_policies": [{"name": "10-file-sensitive", "mode": "enforce", "state": "enabled", "forwarded": 12}],
+        "customer_events": {"seen": 40, "forwarded": 12, "dropped": 0, "container": 1},
     }
     client = _StubClient(_snapshot_with_plane_c(backend))
     monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
     result = _invoke("status")
     assert result.exit_code == 0, result.output
-    assert "kernel sensor: Tetragon 1.7.1, enforce, 0 events lost" in result.output
-    assert "kernel floor: enforce for 2 of 3 users (1 in burn-in); paused until 14:05" in result.output
+    assert "kernel sensor: Tetragon v1.7.1, enforce, 0 events lost" in result.output
+    assert "kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days; paused until 14:05" in result.output
+    assert (
+        "your Tetragon policies: 1 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)"
+        in result.output
+    )
+    assert "kernel floor" not in result.output
 
     as_json = _invoke("status", "--json")
     planes = json.loads(as_json.output)["planes"]
@@ -721,8 +728,11 @@ def test_status_says_why_tetragon_is_not_used(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(cmd_agent, "_usage_client", lambda *a, **k: client)
     result = _invoke("status")
     assert result.exit_code == 0, result.output
-    assert "kernel sensor: cn_proc and fanotify (Tetragon not used: tetragon_tcp_api)" in result.output
-    assert "kernel floor" not in result.output
+    assert (
+        "kernel sensor: cn_proc and fanotify (Tetragon not used: its API listens on TCP instead of a local socket)"
+        in result.output
+    )
+    assert "kernel controls" not in result.output and "your Tetragon policies" not in result.output
 
 
 def test_status_without_a_backend_prints_no_kernel_line(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -735,11 +745,16 @@ def test_status_without_a_backend_prints_no_kernel_line(monkeypatch: pytest.Monk
     assert "agent actions: running via Tetragon" in result.output
 
 
-def test_kernel_sensor_summary_never_claims_unknown_loss_is_zero() -> None:
-    assert cmd_agent.kernel_sensor_summary({"kind": "tetragon", "version": "1.7.1", "mode": "consume"}) == (
-        "Tetragon 1.7.1, consume, events lost unknown"
+def test_status_formatters_come_from_the_shared_module() -> None:
+    # One formatter for doctor, runtime status and the TUI (the copies in
+    # cmd_agent were removed).
+    from defenseclaw.kernel_sensor import kernel_sensor_summary
+
+    assert not hasattr(cmd_agent, "kernel_sensor_summary") and not hasattr(cmd_agent, "_kernel_floor_line")
+    assert kernel_sensor_summary({"kind": "tetragon", "version": "1.7.1", "mode": "consume"}) == (
+        "Tetragon v1.7.1, consume, events lost unknown"
     )
-    assert cmd_agent.kernel_sensor_summary(
+    assert kernel_sensor_summary(
         {"kind": "tetragon", "mode": "observe", "events_lost": 12, "loss_known": True}
     ) == "Tetragon, observe, 12 events lost"
 

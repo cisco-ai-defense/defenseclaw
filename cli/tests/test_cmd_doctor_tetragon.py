@@ -106,11 +106,25 @@ def test_managed_tetragon_backend_passes_with_version_mode_and_loss(tmp_path: Pa
     backend = {"kind": "tetragon", "version": "1.7.1", "mode": "observe", "events_lost": 0, "loss_known": True}
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(backend), mode="observe"))
     assert row["status"] == "pass"
-    assert row["detail"] == "Tetragon 1.7.1, observe, 0 events lost"
+    assert row["detail"] == "Tetragon v1.7.1, observe, 0 events lost"
 
     unknown_loss = dict(backend, loss_known=False)
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(unknown_loss)))
-    assert row["detail"] == "Tetragon 1.7.1, observe, events lost unknown"
+    assert row["detail"] == "Tetragon v1.7.1, observe, events lost unknown"
+
+    # The pass names your own Tetragon policies when the helper reports them.
+    yours = dict(
+        backend,
+        customer_policies=[
+            {"name": "10-file-sensitive", "mode": "enforce"},
+            {"name": "20-net-connect", "mode": "monitor"},
+        ],
+        customer_events={"seen": 40, "forwarded": 12, "dropped": 0},
+    )
+    row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(yours)))
+    assert row["detail"] == (
+        "Tetragon v1.7.1, observe, 0 events lost; your Tetragon policies: 2 loaded (1 enforcing); 12 agent events forwarded"
+    )
 
 
 def test_managed_fallback_names_the_reason(tmp_path: Path) -> None:
@@ -118,7 +132,10 @@ def test_managed_fallback_names_the_reason(tmp_path: Path) -> None:
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(backend)))
     assert row["status"] == "warn"
     assert row["reason_code"] == "tetragon-fallback"
-    assert row["detail"] == "present, but the helper uses cn_proc: tetragon_unsupported_version: 1.5.0"
+    assert row["detail"] == (
+        "present, but the helper uses cn_proc: this Tetragon version is not supported (tetragon_unsupported_version)"
+    )
+    assert "tetragon verify" in row["remediation"]
     # A gateway that reports no backend at all (an older helper) also falls back.
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health()))
     assert row["reason_code"] == "tetragon-fallback"
