@@ -294,15 +294,17 @@ class ModelsDbTests(unittest.TestCase):
     def test_status_alert_count_skips_the_classifier_for_rows_that_say_they_were_not_enforced(self):
         # GAP-0199: the hook classifier is a Python function SQLite calls per
         # row, so 25,000 allowed hook rows used up the whole budget of the
-        # status alert count. The gateway states "not enforced" in the enforced
-        # column (NULL for false) and in the structured envelope, so only the
-        # enforced rows reach the classifier.
+        # status alert count. A row that says it was not enforced, or whose
+        # envelope states a non-block action (the shape the gateway writes:
+        # enforced NULL, no "enforced" key), never reaches the classifier.
         now = datetime.now(timezone.utc).isoformat()
         details = "connector=codex action=block mode=observe"
         rows = [(f"column-{index}", now, details, '{"action":"allow"}', 0) for index in range(10)]
         rows += [(f"envelope-{index}", now, details, '{"action":"allow","enforced":false}', None) for index in range(10)]
+        rows += [(f"gateway-{index}", now, details, '{"action":"allow","would_block":false}', None) for index in range(10)]
         rows.append(("blocked-column", now, details, '{"action":"block"}', 1))
         rows.append(("blocked-envelope", now, details, '{"action":"block","enforced":true}', None))
+        rows.append(("blocked-legacy", now, "connector=codex action=block mode=action", '{"action":"block"}', None))
         self.store.db.executemany(
             "INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json,"
             " severity, connector, enforced) VALUES (?, ?, 'connector-hook', 'PreToolUse', 'a', ?, ?, 'INFO',"
@@ -318,8 +320,8 @@ class ModelsDbTests(unittest.TestCase):
 
         self.store.db.create_function("dc_hook_decision", 3, classify)
 
-        self.assertEqual(self.store.get_counts().alerts, 2)
-        self.assertEqual(sorted(classified, key=str), [1, None])
+        self.assertEqual(self.store.get_counts().alerts, 3)
+        self.assertEqual(sorted(classified, key=str), [1, None, None])
 
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()

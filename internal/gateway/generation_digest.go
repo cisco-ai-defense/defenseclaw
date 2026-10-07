@@ -328,7 +328,7 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 	if err != nil {
 		return EffectivePolicy{}, err
 	}
-	profiles, err := newGuardrailProfileSet(cfg, false)
+	profiles, err := newGuardrailProfileSet(cfg, rulePacks.cache, false)
 	if err != nil {
 		profiles = nil
 	}
@@ -352,9 +352,9 @@ func generationRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) 
 	if candidate, err := preflightSidecarRulePacks(cfg); err == nil {
 		return candidate, nil
 	}
-	global, active, err := loadInitialSidecarRulePack(cfg)
+	global, active, cache, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &sidecarRulePackCandidate{global: global, active: active}, nil
+	return &sidecarRulePackCandidate{cache: cache, global: global, active: active}, nil
 }
