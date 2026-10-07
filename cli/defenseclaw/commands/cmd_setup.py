@@ -17709,7 +17709,14 @@ def _apply_enterprise_config(
             secret_value=token or None,
         )
     except ValueError as exc:
-        click.echo(f"  error: {exc}", err=True)
+        message = str(exc)
+        if "set allow_private_networks" in message:
+            message = (
+                "Private HEC collector: use defenseclaw setup observability add "
+                "splunk-enterprise --endpoint <url> --allow-private-networks "
+                "(plus your index and token options)."
+            )
+        click.echo(f"  error: {message}", err=True)
         raise SystemExit(2) from exc
     _reload_cfg_from_data_dir(app)
     return name

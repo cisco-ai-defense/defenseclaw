@@ -156,6 +156,11 @@ defenseclaw setup splunk --enterprise --non-interactive \
   --sourcetype _json
 ```
 
+For a collector on localhost or a private network, use
+`defenseclaw setup observability add splunk-enterprise --endpoint <url> --allow-private-networks`
+with the same token and index options. The dedicated `setup splunk --enterprise`
+alias does not have this opt-in flag.
+
 The token comes from the environment, because a `--hec-token` value on the
 command line is visible to other local users in `ps`.
 
