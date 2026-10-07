@@ -108,7 +108,7 @@ def test_overview_keyboard_actions_reach_gateway_and_ai_discovery(tmp_path, monk
         lambda: SimpleNamespace(status="disabled"),
     )
     assert app._handle_active_panel_key(SimpleNamespace(key="G", character="G"))
-    assert app._handle_active_panel_key(SimpleNamespace(key="v", character="v"))
+    assert app._handle_active_panel_key(SimpleNamespace(key="z", character="z"))
     assert commands == [
         "defenseclaw-gateway start",
         "defenseclaw agent discovery enable --yes",

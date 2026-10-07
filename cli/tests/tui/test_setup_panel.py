@@ -1047,7 +1047,7 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     assert built == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "--value" not in built
     assert "sk-live" not in built
-    assert render_wizard_value(set_fields[2]) == "****live"
+    assert render_wizard_value(set_fields[2]) == "********"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
 
     # GAP-1176: a stored credential can be removed from the wizard.

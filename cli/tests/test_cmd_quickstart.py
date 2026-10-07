@@ -592,6 +592,10 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 return_value=StepResult("Connector", "pass", "Codex config found"),
             ),
             patch("defenseclaw.bootstrap.shutil.which", return_value="available"),
+            patch(
+                "defenseclaw.bootstrap._agent_installation_readiness",
+                return_value=StepResult("Agent installation", "pass", "Codex is installed"),
+            ),
         ):
             result = self._invoke([
                 "--connector",

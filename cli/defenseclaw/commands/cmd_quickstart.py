@@ -256,9 +256,12 @@ def quickstart_cmd(
     # selected the connector, including explicit --connector on macOS/Windows.
     from defenseclaw.inventory import agent_discovery
 
-    agent_discovery.discover_agents(
-        use_cache=False, refresh=True, data_dir=str(cfg_mod.default_data_path())
-    )
+    if not (platform_support.host_os() == "windows" and connector == "opencode"):
+        # Native Windows OpenCode uses a protected exact executable selection;
+        # a generic discovery pass before that selection would override it.
+        agent_discovery.discover_agents(
+            use_cache=False, refresh=True, data_dir=str(cfg_mod.default_data_path())
+        )
 
     report = run_first_run(
         FirstRunOptions(

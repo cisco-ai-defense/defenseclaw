@@ -4944,7 +4944,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
                 ("G", "Start or restart the gateway"),
-                ("v", "Enable or run AI Discovery"),
+                ("z", "Enable or run AI Discovery"),
                 ("g", "Setup guardrail"),
                 ("m", overview_m),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
@@ -10483,7 +10483,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # rendered overview, so the operator sees ``Scan all`` with
         # no key to press.
         quick = (
-            "\\[s] Scan  \\[d] Doctor  \\[G] Gateway  \\[v] AI Discovery  "
+            "\\[s] Scan  \\[d] Doctor  \\[G] Gateway  \\[z] AI Discovery  "
             "\\[i] Inventory  \\[g] Setup"
         )
         return (
@@ -11879,7 +11879,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 command = "start" if self.overview_model.gateway_down() else "restart"
                 self._submit_command_text(f"defenseclaw-gateway {command}")
                 return True
-            if key == "v":
+            if key == "z":
                 ai_status = (self.overview_model.ai_discovery_box().status or "").lower()
                 command = "enable --yes" if ai_status in {"disabled", "offline"} else "scan"
                 self._submit_command_text(f"defenseclaw agent discovery {command}")
