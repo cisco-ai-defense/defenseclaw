@@ -191,7 +191,7 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	// and with ensure, as its line says, not by repair.
 	noConnector := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
 	noConnector.Installed = true
-	const message = "the enumerator found 2 eligible users, but config.yaml enables no guardrail.connectors entry"
+	const message = "the enumerator found 2 eligible users, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors"
 	noConnector.AddWarning("no_connectors_enabled", message)
 	noConnector.AddError("verify_failed", message)
 	noConnector.Finish("linux", 0)

@@ -278,21 +278,26 @@ func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 				if r.SecurityComplete {
 					t.Fatalf("%s reports security_complete with no connector enabled", action)
 				}
-				if action == ActionVerify && !strings.Contains(messagesOf(r.Errors, codeVerify), "enables no guardrail.connectors entry") {
+				if action == ActionVerify && !strings.Contains(messagesOf(r.Errors, codeVerify), "enables no connector the managed deployment protects") {
 					t.Fatalf("verify passes with no connector enabled: %+v", r.Errors)
 				}
 			}
 			// ensure warns too, as on Windows (GAP-0266), and an explicit
 			// disable beats the singular guardrail.connector (GAP-0263).
 			disabled := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(disabled, append(DefaultConfig(h.env.Layout), "  connector: claudecode\n  connectors:\n    claudecode:\n      enabled: false\n"...), 0o600); err != nil {
+			if err := os.WriteFile(disabled, append(DefaultConfig(h.env.Layout), "  connector: claudecode\n  connectors:\n    claudecode:\n      enabled: false\n    openclaw: {}\n"...), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			r := h.run(Options{Action: ActionEnsure, ConfigFile: disabled})
 			if !hasWarning(r, "no_connectors_enabled") || r.SecurityComplete {
 				t.Fatalf("ensure does not warn that no connector is enabled: %+v", r.Warnings)
 			}
-			// ...and publishes no machine policy for the disabled connector
+			// The warning names the entries it ignored (GAP-0272)...
+			if got := messagesOf(r.Warnings, "no_connectors_enabled"); !strings.Contains(got, "(ignored: claudecode (enabled: false), openclaw (not supported") {
+				t.Fatalf("the warning does not name the ignored entries: %q", got)
+			}
+			// ...and ensure publishes no machine policy for the disabled connector
+
 			// either (GAP-0267).
 			if _, published := r.MachinePolicy["claudecode"]; published || (goos == "linux" && exists(h.env.P(claudeDropIn))) {
 				t.Fatalf("ensure published machine policy for a disabled connector: %+v", r.MachinePolicy)
