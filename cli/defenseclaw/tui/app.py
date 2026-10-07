@@ -615,6 +615,8 @@ class _OverviewRenderSnapshot:
     audit_version: object | None
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
+    # The terminal size the body was laid out for (_overview_layout_key).
+    layout: tuple[int, bool]
 
 
 @dataclass(frozen=True)
@@ -3370,6 +3372,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         worker_store = self._attach_worker_audit_store(detached, store_source)
         try:
+            # Read before the render: the copy shares the live driver size,
+            # so a resize while this runs changes it mid-render.
+            layout = detached._overview_layout_key()
             with detached._connector_hook_event_render_cache():
                 renderable = detached._overview_renderable()
                 metrics = detached._overview_metric_data()
@@ -3416,6 +3421,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         detached._connector_hook_event_stats_last_good or {}
                     ).items()
                 ),
+                layout=layout,
             )
         finally:
             if worker_store is not None:
@@ -3471,6 +3477,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     self._connector_hook_event_stats_last_good or {}
                 ).items()
             ),
+            layout=self._overview_layout_key(),
         )
 
     @staticmethod
@@ -3560,17 +3567,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._applying_panel_snapshot = True
         try:
             current_scroll_y = float(scroller.scroll_y)
-            self.body_text = snapshot.body_text
-            if (
-                snapshot.body_signature != self._last_body_signature
-                or snapshot.connector_rows_signature != self._overview_connector_rows_signature_cache
-                or snapshot.live_data_signature != self._overview_live_data_signature_cache
-            ):
-                body_widget.update(snapshot.body_renderable)
-                current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y) or 0.0
-            self._last_body_signature = snapshot.body_signature
-            self._overview_connector_rows_signature_cache = snapshot.connector_rows_signature
-            self._overview_live_data_signature_cache = snapshot.live_data_signature
+            # A sample prepared before a resize is laid out for the old size.
+            # Landing after 80x45 -> 80x24 it put the wrapped notice back
+            # under the button bar until the next sample (slow Windows
+            # runners). The resize renders the body for the new size itself.
+            if snapshot.layout == self._overview_layout_key():
+                self.body_text = snapshot.body_text
+                if (
+                    snapshot.body_signature != self._last_body_signature
+                    or snapshot.connector_rows_signature != self._overview_connector_rows_signature_cache
+                    or snapshot.live_data_signature != self._overview_live_data_signature_cache
+                ):
+                    body_widget.update(snapshot.body_renderable)
+                    current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y) or 0.0
+                self._last_body_signature = snapshot.body_signature
+                self._overview_connector_rows_signature_cache = snapshot.connector_rows_signature
+                self._overview_live_data_signature_cache = snapshot.live_data_signature
             self._overview_last_render_scroll_y = current_scroll_y
             self._overview_audit_version_cache = snapshot.audit_version
             self._connector_hook_event_stats_version = snapshot.audit_version
@@ -9731,6 +9743,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
+        return ("overview", self.help_open, *self._overview_layout_key(), stable_text)
+
+    def _overview_layout_key(self) -> tuple[int, bool]:
+        """The part of the terminal size the Overview layout depends on."""
+
         # The CONFIGURATION card is laid out for the width at render time, so
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
@@ -9739,7 +9756,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
         # wrapped notice, its end hidden under the button bar (GAP-2519).
         short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
-        return ("overview", self.help_open, width, short, stable_text)
+        return (width, short)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
