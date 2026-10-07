@@ -421,7 +421,11 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	id := b.identity()
 	rec := b.rec
 	m.mu.Unlock()
-	if previous == phase {
+	// A restarted daemon republishes the phase its record held: telemetry
+	// records it again, but nothing happened, so the feed gets no line
+	// ("sandbox X stopped" for every stopped sandbox at a restart, GAP-0167).
+	unchanged := previous == phase
+	if unchanged {
 		previous = ""
 	}
 	ev := audit.SandboxLifecycleEvent{
@@ -437,10 +441,12 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		// The session is over: keep what it reached.
 		m.flushDestinations(rec.Name)
 	}
-	m.feed.Publish(sandboxapi.ActivityEvent{
-		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
-		Message: lifecycleMessage(rec.Name, phase),
-	})
+	if !unchanged {
+		m.feed.Publish(sandboxapi.ActivityEvent{
+			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
+			Message: lifecycleMessage(rec.Name, phase),
+		})
+	}
 	m.syncGuard(b, phase)
 	m.syncObserve(b, phase)
 }

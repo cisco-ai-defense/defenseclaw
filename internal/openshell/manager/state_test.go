@@ -872,3 +872,22 @@ func TestFeed(t *testing.T) {
 		t.Fatal("slot not released")
 	}
 }
+
+// A restarted daemon republishes every sandbox's phase to telemetry, but the
+// feed says what happened: a sandbox stopped before the restart gets no new
+// "stopped" line (GAP-0167).
+func TestRestartFeedsNoUnchangedPhase(t *testing.T) {
+	e := liveEnv(t, "stillstopped", nil)
+	e.stopBox("stillstopped")
+	e.restartDaemon()
+	for _, ev := range e.events("stillstopped", sandboxapi.ActivityLifecycle, "") {
+		if ev.Phase != "" {
+			t.Fatalf("feed after a restart: %+v", ev)
+		}
+	}
+	if len(where(&e.tel.mu, &e.tel.lifecycle, func(ev audit.SandboxLifecycleEvent) bool {
+		return ev.Sandbox.Name == "stillstopped" && ev.Trigger == audit.SandboxTriggerReconcile && ev.Sandbox.Phase == audit.SandboxPhaseStopped
+	})) == 0 {
+		t.Fatalf("lifecycle not republished: %+v", e.tel.lifecycle)
+	}
+}
