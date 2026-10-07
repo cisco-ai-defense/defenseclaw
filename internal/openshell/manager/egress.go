@@ -803,12 +803,14 @@ func (m *Manager) egressEnded(ctx context.Context, ident audit.SandboxIdentity, 
 }
 
 // authFailures counts the egress proxy's refusals of invalid credentials
-// since the last report (authFailed).
+// (authFailed): count since the last report, the last at lastAt, and
+// whether a streak is reported as degraded health.
 type authFailures struct {
-	mu                sync.Mutex
-	count             int
-	since, reportedAt time.Time
-	last              string
+	mu                        sync.Mutex
+	count                     int
+	since, reportedAt, lastAt time.Time
+	last                      string
+	degraded                  bool
 }
 
 // authFailedEvery paces the reports of refused credentials.
@@ -817,11 +819,10 @@ const authFailedEvery = time.Minute
 // authFailed counts a request the egress proxy refused for an invalid proxy
 // credential (malformed, unknown, revoked or wrong; a request without one
 // is the normal first leg of the handshake and no event). It names no
-// sandbox, so it is degraded health of the integration, reported at once and
-// then at most every authFailedEvery with the count: a sandbox that keeps
-// a stale or revoked credential (an environment from before a restart) or
-// another program on this machine trying the proxy would otherwise flood
-// the records.
+// sandbox, so it is health of the integration (reportAuthFailures): a
+// sandbox that keeps a stale or revoked credential (an environment from
+// before a restart) or another program on this machine trying the proxy
+// must not flood the records.
 func (m *Manager) authFailed(ctx context.Context, e egress.Event) {
 	now := m.now()
 	a := &m.authFails
@@ -830,30 +831,49 @@ func (m *Manager) authFailed(ctx context.Context, e egress.Event) {
 		a.since = now
 	}
 	a.count++
+	a.lastAt = now
 	a.last = truncate(sandboxapi.DisplayText(sandboxapi.HostPort(e.Host, e.Port)), 256)
 	a.mu.Unlock()
 	m.reportAuthFailures(ctx, now)
 }
 
-// reportAuthFailures records the refused credentials counted since the last
-// report once authFailedEvery has passed since it. The sink's flush calls it
-// too, so the end of a burst is reported.
+// reportAuthFailures reports the refused credentials: the first of a streak
+// at once, as one degraded health record; then their count in the log at
+// most every authFailedEvery; and the streak's end, once authFailedEvery
+// passes without a refusal, as one restored record. The sink's flush calls
+// it too, so a burst's count and its end are reported.
 func (m *Manager) reportAuthFailures(ctx context.Context, now time.Time) {
 	a := &m.authFails
 	a.mu.Lock()
-	if a.count == 0 || (!a.reportedAt.IsZero() && now.Sub(a.reportedAt) < authFailedEvery) {
+	var state audit.SandboxHealthState
+	switch {
+	case a.count > 0 && !a.degraded:
+		state, a.degraded = audit.SandboxHealthDegraded, true
+	case a.count > 0 && now.Sub(a.reportedAt) >= authFailedEvery:
+		// Logged only: the streak is reported degraded already.
+	case a.count == 0 && a.degraded && now.Sub(a.lastAt) >= authFailedEvery:
+		state, a.degraded = audit.SandboxHealthRestored, false
+	default:
 		a.mu.Unlock()
 		return
 	}
 	n, since, last := a.count, a.since, a.last
-	a.count, a.reportedAt = 0, now
+	if n > 0 {
+		a.count, a.reportedAt = 0, now
+	}
 	a.mu.Unlock()
+	code := gatewaylog.ErrCodeOpenShellEgressAuthFailed
 	msg := fmt.Sprintf("the sandbox egress proxy refused %d request(s) with an invalid proxy credential since %s (the last to %s): "+
 		"a sandbox may use a stale or revoked credential, or another program on this machine tries the proxy",
 		n, since.UTC().Format(time.RFC3339), firstNonEmpty(last, "-"))
-	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellEgressAuthFailed, msg)
-	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{State: audit.SandboxHealthDegraded,
-		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellEgressAuthFailed), ErrorSummary: truncate(msg, 512), Timestamp: now})
+	if state == audit.SandboxHealthRestored {
+		msg = fmt.Sprintf("the sandbox egress proxy refused no proxy credential for %s", authFailedEvery)
+	}
+	m.logf("%s: %s", code, msg)
+	if state != "" {
+		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{State: state, ErrorCode: errorToken(code),
+			ErrorSummary: truncate(msg, 512), Timestamp: now})
+	}
 }
 
 // largeUploadBlocked records and shows an upload the large-upload block cut

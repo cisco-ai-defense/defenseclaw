@@ -239,9 +239,10 @@ Two `degraded` records are the manager's own:
 - `openshell_egress_auth_failed`: the egress proxy refused requests that
   presented an invalid proxy credential (malformed, unknown, revoked or
   wrong; a request with none is the normal first leg of the handshake). The
-  credential names no sandbox, so the first refusal is reported at once and
-  later ones at most once a minute, with their count and the last
-  destination.
+  credential names no sandbox. The first refusal of a streak is one
+  `degraded` record at once; the gateway log counts the later ones at most
+  once a minute, with the last destination; and a minute without a refusal
+  ends the streak with one `restored` record (same error code).
 - `openshell_telemetry_failed`: the recorder refused a sandbox record. The
   first refusal of a streak is recorded (through the same recorder, so a
   runtime that is down refuses this too) and logged; every refusal is

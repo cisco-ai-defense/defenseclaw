@@ -118,8 +118,10 @@ func TestRecordsCarryTheSandboxsBindingUserAndSession(t *testing.T) {
 }
 
 // The end of an allowed tunnel is recorded with its bytes and duration, an
-// upstream failure as failed (timed out on a 504), and the proxy's refusals
-// of invalid credentials as paced degraded health.
+// upstream failure as failed (timed out on a 504), one the proxy cut short
+// as cancelled, and a streak of the proxy's refusals of invalid credentials
+// as one degraded health record, counted in the log, and one restored
+// record once a minute passes without one.
 func TestEgressEndsAndCredentialRefusals(t *testing.T) {
 	e := newEnv(t, nil)
 	ctx, now := context.Background(), time.Now()
@@ -159,17 +161,34 @@ func TestEgressEndsAndCredentialRefusals(t *testing.T) {
 	authFailed()
 	authFailed()
 	authFailed()
-	if got := authFailures(); len(got) != 1 || !strings.Contains(got[0].ErrorSummary, "refused 1 request(s)") || got[0].Sandbox.Name != "" {
+	got := authFailures()
+	if len(got) != 1 || got[0].State != audit.SandboxHealthDegraded || !strings.Contains(got[0].ErrorSummary, "refused 1 request(s)") ||
+		got[0].Sandbox.Name != "" {
 		t.Fatalf("first report = %+v", got)
 	}
-	advance(authFailedEvery)
+	// The streak goes on: its count is logged, and recorded no more.
+	advance(authFailedEvery / 2)
+	authFailed()
+	advance(authFailedEvery / 2)
 	e.m.reportAuthFailures(ctx, now2())
-	if got := authFailures(); len(got) != 2 || !strings.Contains(got[1].ErrorSummary, "refused 2 request(s)") || !strings.Contains(got[1].ErrorSummary, "x.example") {
-		t.Fatalf("paced report = %+v", got)
+	if got := authFailures(); len(got) != 1 {
+		t.Fatalf("a streak recorded again = %+v", got)
 	}
+	// A minute without a refusal (the last was half a minute ago) ends it.
+	advance(authFailedEvery/2 - time.Second)
+	e.m.reportAuthFailures(ctx, now2())
+	if got := authFailures(); len(got) != 1 {
+		t.Fatalf("restored too early = %+v", got)
+	}
+	advance(time.Second)
+	e.m.reportAuthFailures(ctx, now2())
 	e.m.reportAuthFailures(ctx, now2().Add(time.Hour))
-	if got := authFailures(); len(got) != 2 {
-		t.Fatalf("a report with nothing new = %+v", got)
+	if got := authFailures(); len(got) != 2 || got[1].State != audit.SandboxHealthRestored {
+		t.Fatalf("the end of the streak = %+v", got)
+	}
+	authFailed()
+	if got := authFailures(); len(got) != 3 || got[2].State != audit.SandboxHealthDegraded {
+		t.Fatalf("a new streak = %+v", got)
 	}
 }
 

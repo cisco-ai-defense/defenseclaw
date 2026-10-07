@@ -91,7 +91,8 @@ stopped`. Nothing is changed; use the install command above.
 - `defenseclaw.egress.events` gains the `connector` label (the sandbox's
   harness).
 - Refused proxy credentials are reported as degraded sandbox health
-  (`openshell_egress_auth_failed`, at most once a minute), and refused
+  (`openshell_egress_auth_failed`: one record per streak, counted in the
+  gateway log at most once a minute, restored after a quiet minute), and refused
   telemetry records are no longer silently dropped: they are logged, counted
   on `sandbox status` and reported as degraded health
   (`openshell_telemetry_failed`).
