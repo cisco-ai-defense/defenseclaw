@@ -156,11 +156,42 @@ func copyWindowsScannerRuntime(source, target, root string) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	// A scan the gateway is running keeps the installed image mapped, and
+	// Windows refuses to replace a mapped image but lets it be renamed: move
+	// it aside first, and remove it once nothing runs it.
+	previous := ""
+	if _, err := os.Lstat(target); err == nil {
+		previous = filepath.Join(root, ".scanners-"+hex.EncodeToString(suffix)+".old")
+		if err := os.Rename(target, previous); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("move the installed scanner runtime aside: %w", err)
+		}
+	}
 	if err := os.Rename(tmp, target); err != nil {
 		_ = os.Remove(tmp)
+		if previous != "" {
+			_ = os.Rename(previous, target)
+		}
 		return fmt.Errorf("install the scanner runtime: %w", err)
 	}
+	removeStaleWindowsScannerCopies(root)
 	return nil
+}
+
+// removeStaleWindowsScannerCopies removes earlier runtimes moved aside and
+// interrupted copies. One a scan still runs stays until the next install.
+func removeStaleWindowsScannerCopies(root string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.Type().IsRegular() && strings.HasPrefix(name, ".scanners-") &&
+			(strings.HasSuffix(name, ".old") || strings.HasSuffix(name, ".tmp")) {
+			_ = os.Remove(filepath.Join(root, name))
+		}
+	}
 }
 
 // removeWindowsScannerRuntime removes the scanner runtime root. It refuses
