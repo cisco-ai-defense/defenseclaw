@@ -189,6 +189,30 @@ func TestIDEAIIndexFlagsPreRenameDevinPlugins(t *testing.T) {
 	}
 }
 
+func TestMarketplaceAIExtensionsIncludeDescribedAndKnownProducts(t *testing.T) {
+	index := newIDEAIIndex(nil)
+	for _, id := range []string{
+		"augment.vscode-augment", "kilocode.kilo-code", "rjmacarthy.twinny",
+		"genieai.chatgpt-vscode", "gitlab.gitlab-workflow",
+		"google.gemini-cli-vscode-ide-companion", "sst-dev.opencode",
+		"visualstudioexptteam.vscodeintellicode",
+	} {
+		if _, ok := index.matchPlugin(ideplugins.FamilyVSCode, ideplugins.Plugin{ID: id}); !ok {
+			t.Fatalf("%s was not flagged AI", id)
+		}
+	}
+	if _, ok := index.matchPlugin(ideplugins.FamilyVSCode, ideplugins.Plugin{
+		ID: "newvendor.assistant", Description: "AI coding assistant for editors",
+	}); !ok {
+		t.Fatal("description-based AI coding rule missed a new extension")
+	}
+	if _, ok := index.matchPlugin(ideplugins.FamilyVSCode, ideplugins.Plugin{
+		ID: "plain.theme", Description: "A colorful theme",
+	}); ok {
+		t.Fatal("ordinary extension was flagged AI")
+	}
+}
+
 // The built-in catalog flags JetBrains' own AI Assistant plugin as AI.
 func TestIDEAIIndexFlagsJetBrainsAIAssistant(t *testing.T) {
 	catalog, err := LoadAISignatures()
