@@ -1363,6 +1363,46 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 	opts *windowsEnterpriseLifecycleOptions,
 	cause error,
 ) error {
+	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, applyWindowsEnterpriseRecordedDeployment)
+}
+
+// writeWindowsEnterpriseStandaloneConfigRefusal answers an install or ensure
+// whose config the gateway could not load. It changed nothing, so the result
+// is the status of the host as it is, as an ensure refused by its plan
+// reports it: installed, version, services and readiness of the running
+// deployment. Reporting installed false with every readiness flag false made
+// an MDM compliance rule read a healthy host as uninstalled (GAP-0181). A
+// probe that cannot read the host leaves the recorded deployment.
+func writeWindowsEnterpriseStandaloneConfigRefusal(
+	ctx context.Context,
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+	cause error,
+) error {
+	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, func(result *enterprisestatus.Result) {
+		status, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
+			windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
+		if err != nil || status.probeFailed {
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return
+		}
+		applyWindowsEnterpriseInstallerReport(result, opts, status, run)
+		result.Errors = []enterprisestatus.Message{}
+	})
+}
+
+// writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
+// request refused before it changed anything. describeHost fills the host
+// as it is into a refusal for invalid arguments.
+func writeWindowsEnterpriseStandaloneRefusal(
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	cause error,
+	describeHost func(*enterprisestatus.Result),
+) error {
 	if cause == nil {
 		return nil
 	}
@@ -1398,8 +1438,8 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 			// the text the Secure Client profile pins.
 			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
-			applyWindowsEnterpriseRecordedDeployment(result)
 		}
+		describeHost(result)
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
