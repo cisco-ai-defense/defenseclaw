@@ -29,6 +29,31 @@ func currentIdentitySpoolDir() string {
 	return dir
 }
 
+// awaitingSpool marks facts a gateway that takes account groups from the
+// guardian's identity spool (Windows) resolved before the enumerator wrote the
+// account's record: they have no groups, which means "not known yet", not "in
+// no group". The cache refreshes such facts after identityDirectoryIncompleteTTL
+// instead of holding them for the full TTL, so an account's first sign-in
+// does not leave it on the default profile for 15 minutes (GAP-0121).
+func awaitingSpool(facts useridentity.DirectoryFacts) bool {
+	return currentIdentitySpoolDir() != "" && len(facts.Groups) == 0
+}
+
+// spoolRecordNote is the explain note for an account the enumerator has no
+// current identity record for. On Windows a group assignment can match only
+// through that record, so the answer, usually match=default, is not final.
+func spoolRecordNote(id string, now time.Time) string {
+	if id == "" || currentIdentitySpoolDir() == "" {
+		return ""
+	}
+	if _, ok := readIdentitySpoolFacts(id, now); ok {
+		return ""
+	}
+	return "the guardian has no identity record for this account yet: its group membership is unknown until the enumerator " +
+		"writes one (at the account's first sign-in or its next cycle), so a group assignment cannot match it now and the " +
+		"profile above is not final"
+}
+
 // readIdentitySpoolFacts returns the guardian's record for key (a uid or
 // SID), when one exists, is trusted and is current.
 func readIdentitySpoolFacts(key string, now time.Time) (enterprisehooks.IdentitySpoolRecord, bool) {
