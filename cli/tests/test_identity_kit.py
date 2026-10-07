@@ -156,6 +156,28 @@ def test_intune_devices_json_hides_users_by_default(capsys: pytest.CaptureFixtur
     assert "userPrincipalName" not in json.loads(capsys.readouterr().out)[0]
 
 
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="requires no-follow file opens")
+def test_entra_password_file_rejects_links_and_insecure_existing_file(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    target = tmp_path / "existing"
+    target.write_text("original\n", encoding="ascii")
+    target.chmod(0o644)
+    link = tmp_path / "passwords"
+    link.symlink_to(target)
+
+    with pytest.raises(SystemExit, match="password file"):
+        entra._record_password(str(link), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii") == "original\n"
+
+    with pytest.raises(SystemExit, match="password file"):
+        entra._record_password(str(target), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii") == "original\n"
+
+    target.chmod(0o600)
+    entra._record_password(str(target), "user@example.test", "generated-value")
+    assert target.read_text(encoding="ascii").endswith("user@example.test\tgenerated-value\n")
+
+
 def test_entra_sid_is_four_words_of_the_object_id() -> None:
     entra = _load(ENTRA)
     # Data1 = 1; Data2 and Data3 share one little-endian word; Data4 is two more.
