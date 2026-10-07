@@ -140,9 +140,9 @@ If you're not running OpenClaw, the [Claude Code](/docs/connectors/claudecode) c
 
 OpenClaw 2026.6.8 and later can emit provider traffic through undici or
 embedded runtimes that skip a fetch-only patch. The DefenseClaw plugin
-intercepts `globalThis.fetch`, Node `http`/`https.request`, and the undici
-global dispatcher, then runs a sentinel self-test that never leaves the
-host. `defenseclaw doctor` reports **OpenClaw interception** from that
+intercepts `globalThis.fetch`, Node `http`/`https.request`, the undici
+global dispatcher and the undici copy OpenClaw ships, then runs a sentinel
+self-test that never leaves the host. `defenseclaw doctor` reports **OpenClaw interception** from that
 self-test. A healthy `:4000` `/health` probe is not enough; if agent
 turns succeed while doctor says traffic is not intercepted, restart
 OpenClaw so the plugin reloads and rerun doctor. Confirm a real
