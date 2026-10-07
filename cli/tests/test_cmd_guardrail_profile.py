@@ -144,8 +144,8 @@ def test_explain_on_windows_asks_for_the_token_sid(monkeypatch):
 
 
 def test_profile_timeout_displays_account_name_instead_of_windows_sid(monkeypatch):
-    from requests.exceptions import ReadTimeout
     from defenseclaw import gateway
+    from requests.exceptions import ReadTimeout
 
     app = AppContext()
     app.cfg = default_config()
