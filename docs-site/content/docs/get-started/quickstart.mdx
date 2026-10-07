@@ -222,9 +222,8 @@ The same alert is in the **Alerts** panel of `defenseclaw tui` (press `2`):
 ### Undo the demo
 
 ```bash
-defenseclaw guardrail use-pack --clear --connector claudecode   # back to the default pack
+defenseclaw guardrail use-pack --clear --connector claudecode   # back to the default pack; drops the unused pin
 defenseclaw guardrail mode --clear --connector claudecode       # back to observe
-defenseclaw config unset guardrail.custom_packs.first-guardrail # drop the pinned digest
 ```
 
 Then delete the `first-guardrail` folder under `~/.defenseclaw/policies/guardrail/`.

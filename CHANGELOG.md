@@ -61,6 +61,22 @@ stopped`. Nothing is changed; use the install command above.
 - Interactive `defenseclaw init` offers `closed` as the hook fail mode on a
   new install (Enter used to pick `open`), the default `--non-interactive`,
   `quickstart` and the config already used; a re-run offers the saved value.
+- `defenseclaw guardrail use-pack` removes a `guardrail.custom_packs` pin that
+  no connector or profile selects after the switch (it used to stay, pointing
+  at the folder after it was deleted) and names it; `use-pack DIR` pins the
+  pack again.
+- `defenseclaw guardrail use-pack NAME` re-pins a custom pack that was edited
+  after it was pinned: it now runs while that stale pin fails the start-up
+  config check (its write still validates the whole config), and
+  `use-pack default` switches away. On a per-user install the mismatch error
+  from the config check and the gateway names the `config set` command that
+  pins the new digest.
+- After a Codex update on Windows, `defenseclaw doctor`'s **Hook contract**
+  and **Codex hooks** rows name `defenseclaw setup codex --yes`, which
+  selects the new Codex executable. The gateway's hook guard reports a
+  self-heal that keeps failing the same way once (it raised a HIGH
+  guardrail-degraded alert and a log line on every 30 s check) and, on a
+  per-user install, points at `defenseclaw doctor`.
 
 ### Added
 

@@ -323,6 +323,15 @@ your own Codex configuration does not change.
   DefenseClaw writes user hooks. That app-server connects to OpenAI (for
   example chatgpt.com) and can reach your model provider. No Codex window has
   to be open; see the CLI reference for the other commands that reach out.
+- **Codex hooks fail after a Codex update (Windows).** Setup records the
+  exact Codex executable (path and SHA-256) it uses to read Codex's effective
+  requirements. Updating or reinstalling Codex (for example with npm) changes
+  that file, so `defenseclaw doctor` fails the **Hook contract** and **Codex
+  hooks** rows with `policy-blocked: selected Codex executable no longer
+  matches protected Setup evidence`, and a blocked call shows `DefenseClaw
+  hook failed closed` instead of the rule's message. Run
+  `defenseclaw setup codex --yes`: it selects the new executable and keeps
+  the current mode.
 - **Behind an HTTP proxy.** DefenseClaw's hooks reach the gateway on
   127.0.0.1 directly and ignore `HTTP_PROXY` and `HTTPS_PROXY`. Codex's own
   OTel exporter follows those variables and has no proxy option of its own,

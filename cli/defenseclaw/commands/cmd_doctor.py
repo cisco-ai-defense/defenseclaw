@@ -4883,7 +4883,7 @@ def _check_windows_native_hooks(
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
         return
     status = "pass" if check.healthy else "fail"
-    _emit(status, label, f"{check.state}: {check.detail}", r=r)
+    _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
 
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
@@ -13238,7 +13238,7 @@ def _check_hook_contract_lock(
     elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
-        _emit("fail", "Hook contract", detail, r=r)
+        _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":
         _emit(
             "fail",

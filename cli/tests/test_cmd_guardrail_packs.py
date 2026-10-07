@@ -227,3 +227,57 @@ def test_list_packs_json(env):
     text = _run(app, ["list-packs"])
     assert text.exit_code == 0
     assert "team2" in text.output
+
+
+def test_switching_away_drops_the_unused_custom_pin(env):
+    """GAP-0127: use-pack drops the custom_packs pin no scope selects any more
+    and keeps the pins still in use."""
+    from defenseclaw.config import CustomRulePack, GuardrailProfile
+
+    app, _root, custom, writes = env
+    gc = app.cfg.guardrail
+    gc.custom_packs = {
+        "team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64),
+        "ops": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64),
+    }
+    gc.connectors = {"codex": PerConnectorGuardrailConfig(rule_pack="team")}
+    gc.profiles = {"oncall": GuardrailProfile(rule_pack="ops")}
+
+    result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["dropped_pins"] == ["team"]
+    assert config_writer.Change("guardrail.custom_packs.team", unset=True) in writes[-1]
+    assert not any(c.path == "guardrail.custom_packs.ops" for c in writes[-1])
+
+    gc.rule_pack = "team"
+    gc.connectors = {}
+    result = _run(app, ["use-pack", "strict"])
+    assert result.exit_code == 0, result.output
+    assert "guardrail.custom_packs.team" in result.output
+    assert config_writer.Change("guardrail.custom_packs.team", unset=True) in writes[-1]
+
+    result = _run(app, ["use-pack", "permissive", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["dropped_pins"] == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["guardrail", "use-pack", "cert-rb"], True),
+        (["guardrail", "use-pack", "default", "--connector", "codex"], True),
+        (["guardrail", "status"], False),
+        (["guardrail", "--json", "use-pack", "x"], False),
+        (["status"], False),
+    ],
+)
+def test_use_pack_skips_the_startup_config_check(monkeypatch, argv, expected):
+    """GAP-0128: use-pack re-pins an edited pack whose stale pin fails the
+    start-up config check (its own write validates the candidate)."""
+    import click
+    from defenseclaw import main as main_module
+
+    monkeypatch.setattr(main_module.sys, "argv", ["defenseclaw", *argv])
+    ctx = click.Context(main_module.cli)
+    ctx.invoked_subcommand = argv[0]
+    assert main_module._is_rule_pack_switch(ctx) is expected
