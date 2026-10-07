@@ -33,6 +33,7 @@ packaging/mdm/**/*.ps1 text eol=lf
 # as committed, and cli/tests/test_identity_kit.py checks it stays LF; keep
 # it LF on Windows checkouts too.
 packaging/identity/** text eol=lf
+packaging/mdm/intune/tenant/** text eol=lf
 
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the
