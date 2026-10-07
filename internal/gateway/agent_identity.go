@@ -365,6 +365,12 @@ func withSessionAgentInstance(ctx context.Context, sessionID string) context.Con
 // link is a join, not a verification, so it never feeds
 // agentIdentityFromContext.
 func agentIdentityIDForTraffic(ctx context.Context, identity AgentIdentity) string {
+	return agentIdentityIDForSession(ctx, identity, firstNonEmpty(SessionIDFromContext(ctx), audit.EnvelopeFromContext(ctx).SessionID))
+}
+
+// agentIdentityIDForSession is agentIdentityIDForTraffic for traffic that
+// names its session itself, as a native OTLP record does.
+func agentIdentityIDForSession(ctx context.Context, identity AgentIdentity, sessionID string) string {
 	if identity.IdentityID != "" {
 		return identity.IdentityID
 	}
@@ -372,5 +378,5 @@ func agentIdentityIDForTraffic(ctx context.Context, identity AgentIdentity) stri
 	if reg == nil {
 		return ""
 	}
-	return reg.AgentIdentityForSession(ctx, firstNonEmpty(SessionIDFromContext(ctx), audit.EnvelopeFromContext(ctx).SessionID))
+	return reg.AgentIdentityForSession(ctx, sessionID)
 }

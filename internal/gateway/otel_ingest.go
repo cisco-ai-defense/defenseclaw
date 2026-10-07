@@ -876,7 +876,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 	sessionID := codexNotifySessionID(p)
 	ctx := withSessionAgentInstance(ContextWithSessionID(r.Context(), sessionID), sessionID)
-	agentID := a.codexNotifyAgentID(sessionID)
+	agentID := a.codexNotifyAgentID(ctx, sessionID)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -972,12 +972,12 @@ func codexNotifySessionID(p codexNotifyPayload) string {
 // codexNotifyAgentID is the root agent of the notify's thread: the ID the
 // correlation ledger mints for the Codex session and its hook rows carry,
 // so the notify row and its model records join them on agent_id.
-func (a *APIServer) codexNotifyAgentID(sessionID string) string {
+func (a *APIServer) codexNotifyAgentID(ctx context.Context, sessionID string) string {
 	// Secure Client keeps its notify records without an agent (issue #1092).
 	if sessionID == "" || a.managedAIDOnly() {
 		return ""
 	}
-	return stableLLMEventID("agent", "codex", sessionID, "root")
+	return agentNodeID(agentIdentityIDForSession(ctx, AgentIdentityFromContext(ctx), sessionID), "codex", sessionID, "root")
 }
 
 func normalizeCodexNotifyPayloadAliases(p *codexNotifyPayload, body []byte) map[string]any {
@@ -1033,7 +1033,7 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 		SessionID:  sessionID,
 		TurnID:     turnID,
 		PromptID:   promptID,
-		AgentID:    a.codexNotifyAgentID(sessionID),
+		AgentID:    a.codexNotifyAgentID(ctx, sessionID),
 		AgentName:  "codex",
 		AgentType:  "codex",
 		UserID:     user.ID,
