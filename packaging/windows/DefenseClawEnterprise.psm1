@@ -23627,14 +23627,24 @@ function Invoke-DefenseClawNuclearUninstall {
     #    self-uninstall receipt, managed-hook cleanup receipt) and
     #    survived earlier nuclear sweeps - leaving install-rollback-
     #    <scope>.json orphaned there made the next install trip on
-    #    "open managed receipt metadata failed".
+    #    "open managed receipt metadata failed". The sibling path is
+    #    derived inline (not threaded through $Layout) because the sole
+    #    nuclear caller passes a reduced hashtable with only InstallRoot
+    #    and StateRoot keys; under Set-StrictMode -Version Latest
+    #    reading a missing hashtable key throws.
     $safeRootPattern =
         '^[A-Z]:\\(Program Files|ProgramData)\\Cisco\\' +
         'Cisco Secure Client\\DefenseClaw(-Cert|-Lifecycle)?(\\|$)'
+    $nuclearLifecycleDir = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw-Lifecycle'
+    )
     foreach ($pathEntry in @(
         @{ Role = 'InstallRoot';  Path = [string]$Layout.InstallRoot },
         @{ Role = 'StateRoot';    Path = [string]$Layout.StateRoot },
-        @{ Role = 'LifecycleDir'; Path = [string]$Layout.LifecycleLockDirectory }
+        @{ Role = 'LifecycleDir'; Path = $nuclearLifecycleDir }
     )) {
         $path = $pathEntry.Path
         $role = $pathEntry.Role
