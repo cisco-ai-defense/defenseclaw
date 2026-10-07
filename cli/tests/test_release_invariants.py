@@ -61,7 +61,7 @@ class TestReleaseInvariants(unittest.TestCase):
         functions. The recursive bytecode pattern covers those files without
         the legacy trailing wildcard that also removed required package data.
         """
-        manifest = (_REPO_ROOT / "MANIFEST.in").read_text()
+        manifest = (_REPO_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         self.assertNotIn("recursive-exclude cli __pycache__ *", manifest)
         self.assertIn("recursive-exclude cli *.py[cod]", manifest)
 
