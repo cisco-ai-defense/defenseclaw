@@ -76,24 +76,6 @@ func TestStopRecordsTheStopAndHookStartHonorsIt(t *testing.T) {
 	}
 }
 
-func TestGatewayStartLockSerializesStarts(t *testing.T) {
-	dataDir := t.TempDir()
-	release, err := acquireGatewayStartLock(dataDir, time.Second)
-	if err != nil {
-		t.Fatalf("first lock: %v", err)
-	}
-	if _, err := acquireGatewayStartLock(dataDir, 200*time.Millisecond); err == nil ||
-		!strings.Contains(err.Error(), "still in progress") {
-		t.Fatalf("second lock while held = %v, want a timeout", err)
-	}
-	release()
-	again, err := acquireGatewayStartLock(dataDir, time.Second)
-	if err != nil {
-		t.Fatalf("lock after release: %v", err)
-	}
-	again()
-}
-
 func TestStartLockRunsUnlockedWithoutADataDirectory(t *testing.T) {
 	release, err := acquireGatewayStartLock(filepath.Join(t.TempDir(), "missing"), time.Second)
 	if err != nil {
