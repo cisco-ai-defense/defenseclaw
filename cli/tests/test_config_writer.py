@@ -205,6 +205,7 @@ def test_a_refusal_is_audited_when_the_command_has_no_logger(monkeypatch):
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the managed gateway hook socket is a Unix socket")
 def test_a_standard_users_refusal_goes_to_the_managed_gateway_hook_socket(monkeypatch):
     # A standard user holds no gateway token, so its refusal is reported over
     # the managed gateway hook socket, which names the caller from the kernel.
