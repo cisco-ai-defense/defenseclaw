@@ -373,13 +373,21 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		if r.Class == ocsf.ClassHTTP {
 			ev.Scheme = schemeOf(r.URL)
 		}
+		var feed *sandboxapi.ActivityEvent
+		if r.Denied() && !quiet {
+			feed = &sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
+				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
+				Replayed: replayed}
+		}
+		if ev.Blocked && ev.Severity == "" && !replayed && m.sink != nil && m.sink.foldOpenShell(name, ev, feed) {
+			// A repeat of an alerted refusal: counted, then recorded once.
+			return
+		}
 		if !m.connectionRequest(b, r, host, at) {
 			m.tel.RecordSandboxEgress(ctx, ev)
 		}
-		if r.Denied() && !quiet {
-			m.publishEgress(sandboxapi.ActivityEvent{Time: at, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: name, Host: host, Port: r.Port,
-				Source: sandboxapi.SourceOpenShell, Reason: r.Reason, Message: "✗ " + host + " (direct connection denied by OpenShell)",
-				Replayed: replayed})
+		if feed != nil {
+			m.publishEgress(*feed)
 		}
 	case ocsf.ClassProcess:
 		if harnessActivity(harnessName, r.Binary) {

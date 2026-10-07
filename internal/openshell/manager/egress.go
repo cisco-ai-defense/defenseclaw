@@ -482,6 +482,83 @@ type egressSink struct {
 	overflow []egress.Event
 	// heldAt is when flush last reported what the pacing held back.
 	heldAt time.Time
+	// openshell folds OpenShell's own refusals like recent folds the
+	// proxy's (foldOpenShell).
+	openshell map[openshellRefusalKey]*openshellRefusal
+}
+
+// openshellRefusalKey is what makes OpenShell's refusals repeats of one
+// another: the sandbox, the destination and the program.
+type openshellRefusalKey struct {
+	sandbox, host, binary string
+	port                  int
+}
+
+// openshellRefusal is the fold of one openshellRefusalKey's repeats since
+// its first record and feed line: the last repeat stands for them all.
+type openshellRefusal struct {
+	since   time.Time
+	repeats int
+	last    audit.SandboxEgressEvent
+	feed    *sandboxapi.ActivityEvent
+}
+
+// maxOpenShellRefusals bounds the refusals foldOpenShell keeps windows for.
+const maxOpenShellRefusals = 4096
+
+// foldOpenShell reports whether an OpenShell refusal of sandbox (its record
+// ev, its feed line feed when the feed shows it) repeats one recorded within
+// blockCoalesceWindow: then it only counts, and flush records the count in
+// one record and one feed line. A retry loop refused seven times in seven
+// seconds made seven MEDIUM alerts and seven feed lines (GAP-0199).
+func (s *egressSink) foldOpenShell(sandbox string, ev audit.SandboxEgressEvent, feed *sandboxapi.ActivityEvent) bool {
+	now := s.m.now()
+	k := openshellRefusalKey{sandbox: sandbox, host: ev.Host, binary: ev.Executable, port: ev.Port}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.openshell[k]; r != nil && now.Sub(r.since) < blockCoalesceWindow {
+		r.repeats++
+		r.last, r.feed = ev, feed
+		return true
+	}
+	if s.openshell == nil {
+		s.openshell = map[openshellRefusalKey]*openshellRefusal{}
+	}
+	if len(s.openshell) < maxOpenShellRefusals {
+		s.openshell[k] = &openshellRefusal{since: now}
+	}
+	return false
+}
+
+// flushOpenShell records, for each OpenShell refusal whose window ended,
+// the repeats folded into it, and forgets the ended windows.
+func (s *egressSink) flushOpenShell(ctx context.Context, now time.Time) {
+	var folded []*openshellRefusal
+	s.mu.Lock()
+	for k, r := range s.openshell {
+		if now.Sub(r.since) < blockCoalesceWindow {
+			continue
+		}
+		if r.repeats > 0 {
+			folded = append(folded, r)
+		}
+		delete(s.openshell, k)
+	}
+	s.mu.Unlock()
+	sort.Slice(folded, func(i, j int) bool { return folded[i].last.Timestamp.Before(folded[j].last.Timestamp) })
+	for _, r := range folded {
+		ev, more := r.last, ""
+		if r.repeats > 1 {
+			more = fmt.Sprintf(" (and %d more like it)", r.repeats-1)
+		}
+		ev.Reason = truncate(ev.Reason+more, 512)
+		s.m.tel.RecordSandboxEgress(ctx, ev)
+		if r.feed != nil {
+			line := *r.feed
+			line.Message += more
+			s.m.publishEgress(line)
+		}
+	}
 }
 
 // sinkItem is one queued proxy event; repeats counts the refusals like it
@@ -626,6 +703,7 @@ func (s *egressSink) drainOverflow(ctx context.Context) {
 func (s *egressSink) flush(ctx context.Context) {
 	now := s.m.now()
 	s.m.reportAuthFailures(ctx, now)
+	s.flushOpenShell(ctx, now)
 	var folded []sinkItem
 	s.mu.Lock()
 	for k, r := range s.recent {
