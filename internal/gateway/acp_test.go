@@ -360,9 +360,24 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 // home-directory fallback principal names no account, and with identity
 // facts off (Secure Client) nothing is bound.
 func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
+	// Only the account kind of this platform names who holds the bearer.
+	uidWant, sidWant := "7", ""
+	if runtime.GOOS == "windows" {
+		uidWant, sidWant = "", "S-1-5-21-1-2-3-1001"
+	}
+	for principal, want := range map[string]string{
+		"uid:7": uidWant, "sid:S-1-5-21-1-2-3-1001": sidWant, "home:abc": "", "uid:x": "",
+		"uid:S-1-5-21-1-2-3-1001": "", "sid:7": "",
+	} {
+		if got := acpPrincipalIdentity(principal); got != want {
+			t.Fatalf("acpPrincipalIdentity(%q) = %q, want %q", principal, got, want)
+		}
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
 	}
+	// The in-process guard must not write a session cache in the real home.
+	t.Setenv("HOME", t.TempDir())
 	setIdentityFactsEnabled(true)
 	priorHosted := managedServiceHosted.Load()
 	setManagedServiceHosted(true)
@@ -394,13 +409,14 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 		subject  VerifiedSubject
 		verified bool
 		caller   string
+		agent    string
 		profile  profileDecision
 	}
 	got := make(chan seen, 1)
 	chain := CorrelationMiddleware(NewAgentRegistry("", ""))(api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/acp/evaluate" {
 			subject, ok := verifiedSubjectFromContext(r.Context())
-			got <- seen{subject, ok, auditCallerIdentity(r.Context()).ID, api.resolveProfile(r.Context())}
+			got <- seen{subject, ok, auditCallerIdentity(r.Context()).ID, AgentIdentityFromContext(r.Context()).UserID, api.resolveProfile(r.Context())}
 			api.handleACPEvaluate(w, r)
 			return
 		}
@@ -440,19 +456,13 @@ func TestACPManagedCredentialAttachesTheVerifiedSubject(t *testing.T) {
 		t.Fatalf("enrolled uid: profile = %+v, want acp-user by user", bound.profile)
 	}
 	unbound := evaluate("home:" + strings.Repeat("ab", 32))
-	if unbound.verified || unbound.caller != "" || unbound.profile.Match != profileMatchDefaultUnverified {
-		t.Fatalf("home: credential: verified=%v caller=%q profile=%+v, want unverified", unbound.verified, unbound.caller, unbound.profile)
+	if unbound.verified || unbound.caller != "" || unbound.agent != "" || unbound.profile.Match != profileMatchDefaultUnverified {
+		t.Fatalf("home: credential: verified=%v caller=%q agent user=%q profile=%+v, want unverified and no claimed user",
+			unbound.verified, unbound.caller, unbound.agent, unbound.profile)
 	}
 	setIdentityFactsEnabled(false)
 	if off := evaluate("uid:4301"); off.verified || off.caller != "" {
 		t.Fatalf("identity facts off: verified=%v caller=%q, want nothing bound", off.verified, off.caller)
-	}
-	for principal, want := range map[string]string{
-		"uid:7": "7", "sid:S-1-5-21-1-2-3-1001": "S-1-5-21-1-2-3-1001", "home:abc": "", "uid:x": "", "uid:S-1-5-21-1-2-3-1001": "",
-	} {
-		if got := acpPrincipalIdentity(principal); got != want {
-			t.Fatalf("acpPrincipalIdentity(%q) = %q, want %q", principal, got, want)
-		}
 	}
 }
 

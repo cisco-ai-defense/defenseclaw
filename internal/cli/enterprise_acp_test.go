@@ -57,6 +57,14 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 	enterpriseACPUserDataDir, enterpriseACPUID, enterpriseACPGID = userData, -1, -1
 	enterpriseACPJSON = true
 
+	// A SID names no account a Unix gateway can bind (GAP-0200).
+	cfg.Enterprise.Profile = "standalone"
+	enterpriseACPSID = "S-1-5-21-1-2-3-500"
+	if _, err := resolveEnterpriseACPEnrollment(true); err == nil {
+		t.Fatal("a Windows SID was accepted as a standalone Unix enrollment principal")
+	}
+	enterpriseACPSID = ""
+
 	run := func(fn func(*cobra.Command, []string) error) map[string]any {
 		t.Helper()
 		var output bytes.Buffer

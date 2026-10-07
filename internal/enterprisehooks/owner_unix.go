@@ -186,6 +186,16 @@ func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
 	return fn()
 }
 
+// RunAsAccount runs fn with the effective uid and gid of one service
+// account, from root, and restores root afterwards. A caller that is not root
+// must already be that account.
+func RunAsAccount(uid, gid int, fn func() error) error {
+	if uid <= 0 || gid < 0 {
+		return fmt.Errorf("enterprise hooks: refusing to run as uid=%d gid=%d", uid, gid)
+	}
+	return withOwnerCredentials(uid, gid, fn)
+}
+
 func runAsTarget(target TargetCredentials, fn func() error) error {
 	home, err := validateUserHome(target.UserHome)
 	if err != nil {
