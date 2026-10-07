@@ -17,7 +17,10 @@
 package policy
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -25,6 +28,24 @@ import (
 // That engine needed <policy_dir>/data.json, which no Secure Client layout
 // ships, so every load failed and admission used the built-in fallback
 // below. These functions keep those answers byte for byte.
+
+// SecureClientPolicyLoadError is the error the 1.0 engine reported when it
+// loaded policyDir, or nil when its data.json is readable JSON.
+func SecureClientPolicyLoadError(policyDir string) error {
+	dir := resolveRegoDir(policyDir)
+	raw, err := os.ReadFile(filepath.Join(dir, "rego", "data.json"))
+	if err != nil {
+		raw, err = os.ReadFile(filepath.Join(dir, "data.json"))
+	}
+	if err != nil {
+		return fmt.Errorf("policy: read data.json: %w", err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return fmt.Errorf("policy: parse data.json: %w", err)
+	}
+	return nil
+}
 
 type secureClientFirstPartyEntry struct {
 	reason string

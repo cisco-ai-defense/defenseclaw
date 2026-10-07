@@ -110,7 +110,11 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 			return nil, fmt.Errorf("generation: OPA policy: %w", err)
 		default:
 			g.opaError = err.Error()
-			fmt.Fprintf(os.Stderr, "[sidecar] OPA policy unavailable (guardrail falls back to the resolved thresholds): %v\n", err)
+			// Secure Client logs the start-up line of main instead
+			// (logSecureClientPolicyEngine, issue #1092).
+			if !cfg.SecureClientIntegration() {
+				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy unavailable (guardrail falls back to the resolved thresholds): %v\n", err)
+			}
 		}
 	}
 
