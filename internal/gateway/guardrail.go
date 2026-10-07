@@ -621,35 +621,17 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 	}
 	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
 	if raw != "" {
-		// Clamp each verdict as a separate Inspect call did before merging.
-		if !g.managedMode {
-			clampPromptDirectionVerdict(verdict, direction)
-		}
-		rawVerdict := g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode)
-		if !g.managedMode {
-			clampPromptDirectionVerdict(rawVerdict, direction)
-		}
-		verdict = mergePromptVerdicts(verdict, rawVerdict)
+		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
 	}
 
 	elapsed := time.Since(start)
 	latencyMs := elapsed.Milliseconds()
 
-	// Apply the prompt-surface UX contract before any caller observes the
-	// verdict. Done here (rather than in each call site) so the clamp is
-	// applied uniformly across regex-only / regex+judge / judge-first
-	// strategies and across pre-call, post-call, and mid-stream paths.
-	//
-	// The clamp is a UX contract for LOCAL detection: a prompt-direction
-	// block is demoted to alert so a user's prompt is never hard-blocked
-	// on a local heuristic. It must NOT apply to managed_enterprise: there
-	// the AID cloud verdict is the sole, authoritative decision-maker, so
-	// demoting a non-CRITICAL AID block to alert would leave HIGH/MEDIUM
-	// AID blocks non-enforcing while local enforcement is already off.
-	if !g.managedMode {
-		clampPromptDirectionVerdict(verdict, direction)
-	}
-
+	// A prompt block stands: guardrail.block_at is one threshold on every
+	// surface, so the proxy blocks a prompt at the level the operator set
+	// (GAP-0190). A confirm verdict has no approval surface on a prompt and
+	// is demoted to alert by resolveConfirm; the session-message scan runs
+	// after the prompt was sent and clamps itself.
 	if endSpan != nil {
 		traceFinished = true
 		endSpan(verdict, elapsed)
@@ -920,7 +902,6 @@ func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, co
 		verdict = allowVerdict("ai-defense")
 	} else {
 		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
-		clampPromptDirectionVerdict(verdict, direction)
 	}
 	if endSpan != nil {
 		traceFinished = true

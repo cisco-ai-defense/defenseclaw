@@ -286,10 +286,9 @@ func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, ve
 	// here is unusable (operators couldn't reply in the right
 	// format; the message itself re-triggered scanners), so we
 	// demote prompt confirms to alert before any HILT call. We
-	// deliberately scope this guard to confirm — block verdicts on
-	// the prompt direction are already demoted upstream in the
-	// inspector chokepoint, and tests that construct synthetic
-	// block verdicts directly should not be intercepted here.
+	// deliberately scope this guard to confirm: a block verdict on
+	// the prompt direction stands (guardrail.block_at is one threshold
+	// on every surface).
 	if verdict != nil && isPromptDirection(direction) && verdict.Action == guardrailActionConfirm {
 		original := verdict.Action
 		verdict.Action = guardrailActionAlert
