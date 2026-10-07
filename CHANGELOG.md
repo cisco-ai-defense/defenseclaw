@@ -1077,8 +1077,9 @@ deleted.
   projects or harness install, within what was asked and within
   `ai_discovery.max_file_bytes` a file, `max_files_per_scan` files read,
   8,192 entries listed and a 4 MiB stream),
-  writes what passes as private regular files on this machine and scans them
-  there. It runs once a sandbox is ready, every
+  writes what passes as private regular files on this machine, scans them
+  there and removes them (only the scan record stays). It runs once a
+  sandbox is ready, every
   `ai_discovery.scan_interval_min` while it runs, and on demand with
   `defenseclaw sandbox discover NAME`; a stop keeps what was found (without
   its processes) and a delete drops it. `defenseclaw agent usage --sandbox

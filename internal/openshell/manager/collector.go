@@ -54,7 +54,7 @@ import (
 // collectStreamBytes). What is kept is written as owner-only regular files
 // and directories (never links, FIFOs or devices) into a fresh tree under
 // <data_dir>/sandboxes/<name>/discovery/root, which the inventory scanner
-// reads (see inventory.ScanSandboxRoot).
+// reads (see inventory.ScanSandboxRoot) and the discovery then removes.
 
 // collectSchema heads every collector answer; collectEnd closes a complete
 // one.

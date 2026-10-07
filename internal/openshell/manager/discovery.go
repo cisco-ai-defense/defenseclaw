@@ -42,8 +42,9 @@ import (
 // In-sandbox AI discovery. While a sandbox is ready, what its agent installed
 // and configured in it (MCP servers, skills, plugins, CLIs, packages, shell
 // history mentions, running agents) is inventoried like a user's home: the
-// collector (collector.go) reads it, ScanSandboxRoot scans it, and the scan
-// record under <data_dir>/sandboxes/<name>/discovery joins the gateway's AI
+// collector (collector.go) reads it, ScanSandboxRoot scans the tree it
+// answered (removed once scanned), and the scan record under
+// <data_dir>/sandboxes/<name>/discovery joins the gateway's AI
 // discovery on its next full scan, attributed to the sandbox. A scan runs once
 // the sandbox is ready and checked, every ai_discovery.scan_interval_min while
 // it stays ready, and on demand (Discover: `defenseclaw sandbox discover`).
@@ -328,6 +329,14 @@ func (m *Manager) discover(ctx context.Context, b *box) (*sandboxapi.DiscoveryRe
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "sandbox %s: %v", rec.Name, err)
 	}
 	root := filepath.Join(dir, inventory.SandboxTreeDirName)
+	// The tree holds copies of the sandbox's files (its MCP configurations,
+	// its shell history's tail): it goes once scanned, and only the scan
+	// record stays.
+	defer func() {
+		if err := removeTree(root); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			m.logf("sandbox %s: remove the discovery tree: %v", rec.Name, err)
+		}
+	}()
 	if _, err := writeCollectedTree(root, col); err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "sandbox %s: write the discovery tree: %v", rec.Name, err)
 	}

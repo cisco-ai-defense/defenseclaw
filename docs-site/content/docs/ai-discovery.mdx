@@ -365,7 +365,8 @@ configured there, which its own scan of this machine never sees:
   private regular files (never links or FIFOs) under
   `<data_dir>/sandboxes/NAME/discovery` and scanned on this machine with the
   same detectors, without the machine-wide ones (applications, IDEs,
-  loopback endpoints, model files).
+  loopback endpoints, model files). The copies go once scanned: only the
+  scan record (`scan.json`) stays.
 - Each signal carries the sandbox's name and id (`sandbox_name`,
   `sandbox_id`, and `defenseclaw.sandbox.name` and `.id` on the
   `ai_component.*` records), and its hashes are its sandbox's own, so the

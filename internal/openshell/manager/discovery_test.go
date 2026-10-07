@@ -19,7 +19,6 @@ package manager
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -60,7 +59,9 @@ func discoveringEnv(t *testing.T, name string, edit func(*config.Config)) *harne
 			edit(c)
 		}
 	})
-	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse { return discoveryAnswer(call) })
+	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		return discoveryAnswer(call)
+	})
 	e.live(sandboxapi.CreateRequest{Name: name})
 	return e
 }
@@ -213,28 +214,19 @@ func TestDiscoverIsOffWithAIDiscoveryOff(t *testing.T) {
 	}
 }
 
-// The tree a discovery writes holds only what the collector was asked for,
-// as owner-only regular files.
-func TestDiscoverWritesAPrivateTree(t *testing.T) {
+// The tree a discovery writes (copies of the sandbox's MCP configurations
+// and history) goes once scanned: only the owner-only scan record stays.
+func TestDiscoverKeepsOnlyTheScanRecord(t *testing.T) {
 	e := discoveringEnv(t, "treebox", nil)
-	if _, err := e.m.Discover(context.Background(), "treebox"); err != nil {
-		t.Fatal(err)
+	res, err := e.m.Discover(context.Background(), "treebox")
+	if err != nil || !slices.ContainsFunc(res.Signals, func(s sandboxapi.DiscoverySignal) bool { return s.Detector == "mcp" }) {
+		t.Fatalf("discover = %+v, %v, want the MCP configuration read from the tree", res, err)
 	}
-	root := filepath.Join(e.m.discoveryDir("treebox"), inventory.SandboxTreeDirName)
-	files := 0
-	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			files++
-			if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-				t.Errorf("%s: %v", p, info.Mode())
-			}
-		}
-		return nil
-	})
-	if err != nil || files == 0 {
-		t.Fatalf("tree: %d files, %v", files, err)
+	entries, err := os.ReadDir(e.m.discoveryDir("treebox"))
+	if err != nil || len(entries) != 1 || entries[0].Name() != inventory.SandboxScanRecordName {
+		t.Fatalf("discovery folder = %v, %v, want only the scan record", entries, err)
+	}
+	if info, err := os.Lstat(e.m.scanRecordPath("treebox")); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("scan record: %v, %v", info, err)
 	}
 }

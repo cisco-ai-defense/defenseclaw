@@ -38,11 +38,12 @@ import (
 // runs a read-only collector in every ready sandbox, checks what it sent and
 // writes it, file by file, into a private tree on the host
 // (<data_dir>/sandboxes/<name>/discovery/root: the sandbox's path P at
-// root+P). ScanSandboxRoot scans that tree with the per-user scan's detectors
-// and the sandbox's processes, executables, environment variable names and
-// variables in place of the host's, and without the detectors of
-// machine-wide surfaces (applications, IDEs, loopback endpoints, model
-// files): nothing of the host leaks into a sandbox's report. Every path the
+// root+P; removed once scanned). ScanSandboxRoot scans that tree with the
+// per-user scan's detectors and the sandbox's processes, executables,
+// environment variable names and variables in place of the host's, and
+// without the detectors of machine-wide surfaces (applications, IDEs,
+// loopback endpoints, model files): nothing of the host leaks into a
+// sandbox's report. Every path the
 // report keeps is the sandbox's own. The manager writes the report with the
 // sandbox's identity to <data_dir>/sandboxes/<name>/discovery/scan.json
 // (SandboxScanRecord), and every full scan of the gateway ingests the records
