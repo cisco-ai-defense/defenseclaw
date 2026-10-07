@@ -63,6 +63,9 @@ const (
 	processRecordRate    = 10
 	maxLineageDepth      = 32
 	maxCmdlineBytes      = 1024
+	// commBytes is how much of a program's name the kernel keeps as a
+	// process's comm (TASK_COMM_LEN less its NUL).
+	commBytes = 15
 	// lineageStartWindow is how long before its connection a process of the
 	// program may have started for PIDOf to credit it with the connection,
 	// and lineageClockSlack how long after: the sandbox's clock and its boot
@@ -353,7 +356,7 @@ func (m *Manager) recordProcesses(ctx context.Context, b *box, id audit.SandboxI
 // processGateKey is the one key of a tree's record gate.
 const processGateKey = "processes"
 
-// lineageNamesLocked is the comm of each ancestor from pid up, at most
+// lineageNamesLocked is the name of each ancestor from pid up, at most
 // maxLineageDepth of them. Callers hold t.mu.
 func (t *procTree) lineageNamesLocked(pid int) []string {
 	var out []string
@@ -364,7 +367,7 @@ func (t *procTree) lineageNamesLocked(pid int) []string {
 		if node == nil {
 			break
 		}
-		out = append(out, node.Comm)
+		out = append(out, node.name())
 		pid = node.PPID
 	}
 	return out
@@ -402,7 +405,7 @@ func (m *Manager) Lineage(sandboxName string, pid int) []ProcessRef {
 		if node == nil {
 			break
 		}
-		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.Comm, Exe: node.Exe, Start: node.Start})
+		out = append(out, ProcessRef{PID: node.PID, PPID: node.PPID, Comm: node.name(), Exe: node.Exe, Start: node.Start})
 		pid = node.PPID
 	}
 	return out
@@ -464,7 +467,23 @@ func (n *procNode) runs(exe string) bool {
 	if argv0, _, _ := strings.Cut(n.Cmdline, " "); argv0 != "" && path.Base(argv0) == name {
 		return true
 	}
-	return n.Comm != "" && n.Comm == truncate(name, 15)
+	return n.Comm != "" && n.Comm == truncate(name, commBytes)
+}
+
+// name is the process's name in a lineage: its comm, unless that is the
+// kernel's cut of a longer name its executable or first argument gives in
+// full (openshell-sandb of openshell-sandbox; GAP-0172).
+func (n *procNode) name() string {
+	if len(n.Comm) != commBytes {
+		return n.Comm
+	}
+	argv0, _, _ := strings.Cut(n.Cmdline, " ")
+	for _, p := range []string{n.Exe, strings.Trim(argv0, `'"`)} {
+		if base := path.Base(p); len(base) > commBytes && strings.HasPrefix(base, n.Comm) {
+			return base
+		}
+	}
+	return n.Comm
 }
 
 var _ ProcessLookup = (*Manager)(nil)

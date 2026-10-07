@@ -395,6 +395,28 @@ func TestSampleProcessesRecordsTheTree(t *testing.T) {
 	}
 }
 
+// TestLineageNamesTheProgramInFull (GAP-0172): the kernel keeps 15 bytes of a
+// process's name, so a lineage said openshell-sandb for openshell-sandbox;
+// its first argument gives the name in full. A shorter comm stays as it is.
+func TestLineageNamesTheProgramInFull(t *testing.T) {
+	c, err := parseCollection(answerOf("T 100 1700000000",
+		"P 1 0 1000 10", "Pc 1 openshell-sandb", "Pa 1 /.openshell/runtime/openshell-sandbox",
+		"P 42 1 1000 20", "Pc 42 bash", "Pa 42 -bash", "P 43 42 1000 30", "Pc 43 curl", "Pa 43 curl", collectEnd),
+		false, newCollectScope(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := newProcTree()
+	now := time.Now()
+	tree.merge(c, now, now)
+	tree.mu.Lock()
+	names := tree.lineageNamesLocked(43)
+	tree.mu.Unlock()
+	if strings.Join(names, ",") != "curl,bash,openshell-sandbox" {
+		t.Fatalf("lineage = %v", names)
+	}
+}
+
 func TestOCSFProcessRecordsJoinTheTree(t *testing.T) {
 	var sample atomic.Pointer[string]
 	e := treeEnv(t, "ocsfbox", &sample)
