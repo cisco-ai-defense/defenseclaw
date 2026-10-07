@@ -212,13 +212,19 @@ var Hermes = register(&Spec{
 			Unverified: "no Anthropic account on the verification host; only the E2E mock was run",
 		},
 		{
-			ProfileID:  profiles.BedrockMantleOpenAIID,
-			Hosts:      []string{bedrockHostToken},
-			Env:        map[string]string{connector.HermesSandboxProviderBaseURLEnv: "https://" + bedrockHostToken + "/v1"},
-			LaunchArgs: []string{"--provider", connector.HermesSandboxProviderName},
-			Note:       "Bedrock API key sent as a bearer to the Mantle Chat Completions route through the managed defenseclaw provider",
+			ProfileID: profiles.BedrockMantleOpenAIID,
+			Hosts:     []string{bedrockHostToken},
+			Env:       map[string]string{connector.HermesSandboxProviderBaseURLEnv: "https://" + bedrockHostToken + "/v1"},
+			// The managed provider names no model, and Hermes then sends an
+			// empty one, which Mantle refuses: the launch pins
+			// HermesMantleDefaultModel; -m picks another (the last -m wins).
+			DefaultModel: HermesMantleDefaultModel,
+			LaunchArgs:   []string{"--provider", connector.HermesSandboxProviderName, "-m", HermesMantleDefaultModel},
+			Note:         "Bedrock API key sent as a bearer to the Mantle Chat Completions route through the managed defenseclaw provider (default model " + HermesMantleDefaultModel + ")",
 		},
 	},
+	modelArg:  hermesModelArg,
+	modelFlag: "-m",
 	customization: []CustomizationPath{
 		{Host: ".hermes/SOUL.md", Sandbox: "/sandbox/.hermes/SOUL.md", Note: "persona"},
 		{Host: ".hermes/skills", Sandbox: "/sandbox/.hermes/skills", Dir: true, Note: "user skills"},
@@ -237,6 +243,34 @@ var Hermes = register(&Spec{
 
 // HermesLauncherPath is the in-image Hermes launcher.
 const HermesLauncherPath = LauncherDir + "/hermes-launch"
+
+// HermesMantleDefaultModel is the model Hermes runs on Amazon Bedrock
+// Mantle unless the caller picks another with -m: an OpenAI open-weight
+// model Mantle serves on its Chat Completions route.
+const HermesMantleDefaultModel = "openai.gpt-oss-20b"
+
+// hermesModelArg is the model the pass-through arguments pick with
+// Hermes' -m/--model (top level or after chat); the last one wins, as in
+// Hermes' parser.
+func hermesModelArg(args []string) (flag, override string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		switch name, value, inline := strings.Cut(arg, "="); {
+		case name == "-m" || name == "--model":
+			if !inline && i+1 < len(args) {
+				i++
+				value = args[i]
+			}
+			flag = strings.TrimSpace(value)
+		case !strings.HasPrefix(arg, "--") && strings.HasPrefix(arg, "-m") && len(arg) > 2:
+			flag = strings.TrimSpace(arg[2:]) // -mMODEL
+		}
+	}
+	return flag, ""
+}
 
 // hermesEnvFileNames are the Hermes variables a Hermes .env or .op.env may
 // not name (extended regular expressions), matched anywhere in the file

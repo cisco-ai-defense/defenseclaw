@@ -824,6 +824,9 @@ deleted.
   vendor account passes. Each image pins the harness at DefenseClaw's
   reviewed hook contract, installs root-owned hooks (managed or user tier, see
   the capability matrix) and must pass a hook-fire probe before use.
+- Hermes Agent on Bedrock runs `openai.gpt-oss-20b` unless `-- -m MODEL`
+  picks another, and the banner names it. The managed provider named no
+  model, so Hermes sent an empty one, which Mantle refuses.
 - Workspace: the project is mounted live by default, with secret files
   masked, `.git/hooks` and `.git/config` read-only, a pre-session snapshot and
   `sandbox undo`, an end-of-session review of changes that can run code on the

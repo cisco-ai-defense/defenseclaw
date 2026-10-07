@@ -1112,7 +1112,8 @@ so, unless the harness shares no model credential at all (Kiro CLI, Cursor
 Agent, Amp, Devin CLI); a provider whose key is not set refuses the run and names the key. `--llm bedrock` uses a short-term Amazon Bedrock key from
 `AWS_BEARER_TOKEN_BEDROCK` and `--bedrock-region` (default `$AWS_REGION`,
 then `$AWS_DEFAULT_REGION`, then `us-east-1`). Codex on Bedrock runs
-`openai.gpt-5.5` unless `-- -m MODEL` picks another.
+`openai.gpt-5.5` and Hermes Agent `openai.gpt-oss-20b` unless `-- -m MODEL`
+picks another.
 A login you do inside a kept sandbox stays in it; the sandbox's files are
 readable by the agent, so prefer an API key where you can.
 
