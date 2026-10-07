@@ -1,0 +1,80 @@
+# defenseclaw-derived: tetragon-policy family=observe kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-observe-383a3d43
+spec:
+  lsmhooks:
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Equal
+              values:
+                - /etc/shadow
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+    - hook: file_open
+      args:
+        - index: 0
+          type: file
+        - index: 0
+          type: uint32
+          resolve: f_mode
+          label: f_mode
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchArgs:
+            - index: 0
+              operator: Prefix
+              values:
+                - /etc/sudoers.d/
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+---
+# defenseclaw-derived: tetragon-policy family=connect kernel_policy=sha256:08b71155b713
+# Written by defenseclaw-sensor-helper. Do not edit: the helper reconciles this policy.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defenseclaw-connect-21000552
+spec:
+  kprobes:
+    - call: tcp_connect
+      syscall: false
+      args:
+        - index: 0
+          type: sock
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: NotDAddr
+              values:
+                - 127.0.0.0/8
+                - ::1
+          matchActions:
+            - action: Post
+              rateLimit: 1m
+              rateLimitScope: process
+# note: controls: no enrolled user
