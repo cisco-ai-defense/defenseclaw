@@ -547,8 +547,8 @@ func redactWords(s string) string {
 	return b.String()
 }
 
-// unquote splits the shell quotes, their escapes (the \" and '\'' of a
-// script nested in another, GAP-0144) and brackets around a word from it.
+// unquote splits the shell quotes, their backslash escapes (a script nested
+// in another, GAP-0144) and brackets around a word from it.
 func unquote(s string) (pre, core, post string) {
 	core = strings.TrimLeft(s, `\'"($`+"`")
 	pre = s[:len(s)-len(core)]
