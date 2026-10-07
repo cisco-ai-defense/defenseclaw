@@ -30,13 +30,9 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 	if err != nil {
 		return nil
 	}
-	restore := setTemporaryEnvironment(map[string]string{
-		managed.ConfigPathEnv:            configPath,
-		"DEFENSECLAW_HOME":               layout.DataDir,
-		managed.DeploymentModeEnv:        managed.DeploymentModeManagedEnterprise,
-		managed.EnterpriseProfileEnv:     managed.ProfileStandalone,
-		managed.WindowsServiceAccountEnv: layout.ServiceUser,
-	})
+	pins := windowsEnterpriseServicePins(layout)
+	pins[managed.ConfigPathEnv] = configPath
+	restore := setTemporaryEnvironment(pins)
 	defer restore()
 	// The administrator's config may sit anywhere, so credential references
 	// resolve from the deployment's secrets directory, as in the service.
