@@ -137,10 +137,11 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 		t.Fatalf("restart-required change: installer runs %q, writes %q", stub.calls, host.writes)
 	}
 
-	// A gateway that does not adopt the change gets the old config back, with
-	// the generation record as it was, and the upgrade.
+	// A gateway that does not adopt the change gets the old config back and
+	// the upgrade; the generation record is left to the writer, which never
+	// reuses a number.
 	host, opts = newHotConfigHost(t, previous, next)
-	recorded := `{"generation":3,"config_sha256":"` + strings.Repeat("0", 64) + `"}`
+	recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
 	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
 		t.Fatal(err)
 	}

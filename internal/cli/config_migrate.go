@@ -209,6 +209,34 @@ func migrateManagedStandaloneConfig(ctx context.Context, path string) error {
 	return restoreACL(written...)
 }
 
+// recordRestoredManagedStandaloneConfig records the config.yaml a lifecycle
+// rollback put back as a new config generation, as the Unix lifecycle does.
+// The rolled-back run may have recorded, and the gateway reported, a
+// generation for the config it installed, and the counter never goes back.
+// Nothing happens without a generation record (the transaction removes one
+// it created) or when the record already names the restored bytes. The file
+// is not migrated: a rollback leaves the config as it was.
+func recordRestoredManagedStandaloneConfig(ctx context.Context, path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.ConfigSHA256 == configwrite.SHA256Hex(raw) {
+		return nil
+	}
+	restoreACL, err := keepConfigDACL(path)
+	if err != nil {
+		return fmt.Errorf("read the access control list of %s: %w", path, err)
+	}
+	if _, err := configwrite.Locked(ctx, path, configwrite.Options{
+		Actor: configwrite.ActorLifecycle, Reason: "enterprise windows rollback",
+	}, func() (bool, error) { return true, nil }); err != nil {
+		return err
+	}
+	return restoreACL(configwrite.GenerationPath(path))
+}
+
 func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result) error {
 	out := cmd.OutOrStdout()
 	already := result.Record.FromVersion == config.ConfigVersionV9
