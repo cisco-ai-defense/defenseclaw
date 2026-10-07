@@ -22,6 +22,7 @@
 package catalog
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -167,6 +168,33 @@ func TestFirstWriterWinsForADomain(t *testing.T) {
 	provider, _ := catalog.Lookup("shared.example")
 	if provider.ID != "first" || provider.Category != CategoryFrontier {
 		t.Fatalf("Lookup = %+v, want the first writer's frontier classification", provider)
+	}
+}
+
+// TestMultiVendorHostsAreTheirVendors pins that every host of a signature
+// that lists several vendors' APIs (AI SDKs) is named, priced and keyed by
+// its own vendor (GAP-0119).
+func TestMultiVendorHostsAreTheirVendors(t *testing.T) {
+	t.Parallel()
+	signatures, err := inventory.LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := FromSignatures(signatures)
+	for _, signature := range signatures {
+		if !strings.EqualFold(signature.Vendor, multiVendor) {
+			continue
+		}
+		for _, pattern := range signature.DomainPatterns {
+			domain := normalizeDomain(pattern)
+			if apiVendors[domain] == "" {
+				t.Errorf("%s lists %s, which apiVendors names no vendor for", signature.ID, domain)
+			}
+		}
+	}
+	if p, ok := shared.Lookup("api.mistral.ai"); !ok || p.DisplayName != "Mistral AI" || p.Category != CategoryFrontier ||
+		p.ID != "ai-sdks/api.mistral.ai" {
+		t.Errorf("Lookup(api.mistral.ai) = %+v, %v", p, ok)
 	}
 }
 
