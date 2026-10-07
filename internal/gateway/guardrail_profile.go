@@ -491,6 +491,12 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 // profileRequestSubject returns the verified subject of ctx and where it
 // came from, or ("", "") when the request has none.
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
+	// A sandbox bearer names a host user for attribution, but it does not
+	// authenticate the process calling the loopback ingress. Never inherit
+	// the gateway owner's verified subject for these requests.
+	if isSandboxHookRequest(ctx) {
+		return nil, ""
+	}
 	if subject, ok := profileSubjectSource(ctx); ok {
 		if subject.viaProcessOwner {
 			return &subject, profileSubjectProcessOwner

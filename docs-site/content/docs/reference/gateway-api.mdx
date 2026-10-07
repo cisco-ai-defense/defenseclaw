@@ -1097,7 +1097,9 @@ are capped at 4 MiB, far below the main receiver's 64 MiB.
 **Other differences from the main API.**
 
 - Identity comes from the binding: records are attributed to the host user
-  who launched the sandbox. Identity headers such as `X-User-Id` are dropped.
+  who launched the sandbox. The bearer does not verify the calling process,
+  so the attributed user and directory groups cannot select an identity-based
+  guardrail profile. Identity headers such as `X-User-Id` are dropped.
 - Client-supplied request IDs are ignored. The gateway always mints the
   `X-DefenseClaw-Request-Id` it returns.
 - A hook or notify post may send `X-DefenseClaw-Hook-Idempotency-Key`. A retry
