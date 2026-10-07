@@ -229,6 +229,16 @@ function Assert-DataKept {
 
 function Get-Sha256([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash }
 
+# Move-File FROM TO: a rename that waits out a sharing violation, as
+# install.ps1's Move-Path does. Right after gateway stop, Windows (or a
+# virus scanner reading the image) can hold a DefenseClaw .exe for a moment.
+function Move-File([string]$From, [string]$To, [int]$Seconds = 10) {
+    for ($waited = 0; ; $waited++) {
+        try { [IO.File]::Move($From, $To); return } catch { if ($waited -ge $Seconds) { throw } }
+        Start-Sleep -Seconds 1
+    }
+}
+
 function Stop-Lane {
     if (Test-Path -LiteralPath (Join-Path $Bin "defenseclaw-gateway.exe")) {
         [void](Invoke-Exe (Join-Path $Bin "defenseclaw-gateway.exe") @("stop") -Quiet)
@@ -694,7 +704,7 @@ function Test-SetupImport {
         $hookRuntime = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime"
         foreach ($dir in "bin", "installer", "runtime\python") { New-Item -ItemType Directory -Path (Join-Path $setupRoot $dir) -Force | Out-Null }
         New-Item -ItemType Directory -Path $cache, $hookRuntime -Force | Out-Null
-        foreach ($name in "defenseclaw-gateway.exe", "defenseclaw-hook.exe") { Move-Item -LiteralPath (Join-Path $Bin $name) -Destination (Join-Path $setupRoot "bin") }
+        foreach ($name in "defenseclaw-gateway.exe", "defenseclaw-hook.exe") { Move-File (Join-Path $Bin $name) (Join-Path $setupRoot "bin\$name") }
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-gateway.exe") -Destination (Join-Path $setupRoot "bin\defenseclaw-startup.exe")
         Copy-Item -LiteralPath (Join-Path $setupRoot "bin\defenseclaw-hook.exe") -Destination (Join-Path $hookRuntime "defenseclaw-hook.exe")
         Get-ChildItem -LiteralPath $Bin -Force | Remove-Item -Force
