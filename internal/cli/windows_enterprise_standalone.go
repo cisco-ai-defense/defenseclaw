@@ -289,16 +289,32 @@ func runWindowsEnterpriseStandaloneAction(
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 
-// windowsEnterprisePolicyDigest runs the installed CLI's `policy digest`
-// with the managed standalone environment, so the digest comes from the
-// binary the gateway service runs, computed from the config and assets it
-// loads. Its stdout is the report even when the exit status is not 0 (a
-// policy that cannot be built still reports what the gateway says). A seam
-// for tests.
+// windowsEnterprisePolicyDigest runs the installed CLI with `policy digest`
+// under the service pins (windowsEnterpriseServicePins) for every caller:
+// ensure, status and verify run in the administrator or SYSTEM console, which
+// carries none of them, and the digest call was refused there so the result
+// silently omitted policy (GAP-0180). The digest comes from the binary the
+// gateway service runs, computed from the config and assets it loads. Its
+// stdout is the report even when the exit status is not 0 (a policy that
+// cannot be built still reports what the gateway says). A seam for tests.
 var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, managedWindowsAdminCLI(), "policy", "digest", "--json", "--check-gateway").Output()
+	command, err := windowsEnterprisePolicyDigestCommand(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return command.Output()
+}
+
+func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, managedWindowsAdminCLI(), "policy", "digest", "--json", "--check-gateway")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
+	return command, nil
 }
 
 // applyWindowsEnterprisePolicy fills Result.Policy as the Unix lifecycle
@@ -1347,6 +1363,46 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 	opts *windowsEnterpriseLifecycleOptions,
 	cause error,
 ) error {
+	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, applyWindowsEnterpriseRecordedDeployment)
+}
+
+// writeWindowsEnterpriseStandaloneConfigRefusal answers an install or ensure
+// whose config the gateway could not load. It changed nothing, so the result
+// is the status of the host as it is, as an ensure refused by its plan
+// reports it: installed, version, services and readiness of the running
+// deployment. Reporting installed false with every readiness flag false made
+// an MDM compliance rule read a healthy host as uninstalled (GAP-0181). A
+// probe that cannot read the host leaves the recorded deployment.
+func writeWindowsEnterpriseStandaloneConfigRefusal(
+	ctx context.Context,
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+	cause error,
+) error {
+	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, func(result *enterprisestatus.Result) {
+		status, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
+			windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
+		if err != nil || status.probeFailed {
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return
+		}
+		applyWindowsEnterpriseInstallerReport(result, opts, status, run)
+		result.Errors = []enterprisestatus.Message{}
+	})
+}
+
+// writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
+// request refused before it changed anything. describeHost fills the host
+// as it is into a refusal for invalid arguments.
+func writeWindowsEnterpriseStandaloneRefusal(
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	cause error,
+	describeHost func(*enterprisestatus.Result),
+) error {
 	if cause == nil {
 		return nil
 	}
@@ -1382,8 +1438,8 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 			// the text the Secure Client profile pins.
 			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
-			applyWindowsEnterpriseRecordedDeployment(result)
 		}
+		describeHost(result)
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
