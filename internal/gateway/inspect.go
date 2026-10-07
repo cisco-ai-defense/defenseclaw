@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -1294,6 +1295,27 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 	return a.runHookJudge(ctx, direction, direction, req.Connector, content, req.Tool, current)
 }
 
+// connectorRulePack is the composed rule pack the request scans connector
+// with: its guardrail profile scope when one applies, else the connector
+// scope of the live generation (guardrail.rules with every connector
+// layer), else the global pack.
+func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
+	connector = canonicalConnectorRulePackKey(connector)
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
+		if pack := resolved.set.packs[effectiveRulePackKey(resolved.derived, connector)]; pack != nil {
+			return pack
+		}
+	}
+	g := a.generation()
+	if g == nil {
+		return nil
+	}
+	if pack := g.RulePacks["conn:"+connector]; pack != nil {
+		return pack
+	}
+	return g.RulePacks["global"]
+}
+
 // runHookJudge is the shared hook-lane judge core for all three hook
 // surfaces — message content, tool-call args (J3-3b), and tool output
 // (J3-3d). It is the opt-in gate: the judge runs only when the operator
@@ -1383,6 +1405,7 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	}
 	jctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	jctx = withJudgeSuppressionPack(jctx, a.connectorRulePack(ctx, connector))
 
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
