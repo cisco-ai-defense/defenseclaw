@@ -728,8 +728,12 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
             print("WARNING: PyNaCl not installed. Using dev stub signature.",
                   file=sys.stderr)
 
-    # Dev stub: signature starts with 0xED marker
-    sig = b'\xED' + hashlib.sha256(blob).digest()[:63]
+    # Dev stub: 64 bytes = 0xED marker + SHA-256(blob) (32 bytes) + zero padding (31 bytes).
+    # The Go policy service (policy.go) detects this stub by checking:
+    #   blob[-64] == 0xED and blob[-63:-31] == SHA-256(unsigned)[:32]
+    # and strips it before appending the real HMAC signature.
+    digest = hashlib.sha256(blob).digest()  # 32 bytes
+    sig = b'\xED' + digest + b'\x00' * (63 - len(digest))
     return sig
 
 

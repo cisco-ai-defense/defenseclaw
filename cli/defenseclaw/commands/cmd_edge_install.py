@@ -218,6 +218,11 @@ def _install_systemd_unit(target: str, user: str) -> bool:
 
 def _install_local_systemd_unit() -> bool:
     """Install the systemd unit file and enable/start the service locally."""
+    import platform
+    if platform.system() != "Linux":
+        ux.warn(f"Systemd is not available on {platform.system()}; skipping service installation.")
+        return False
+
     service_file = _find_service_file()
     if service_file is None:
         ux.warn("Systemd unit file not found; skipping service installation.")

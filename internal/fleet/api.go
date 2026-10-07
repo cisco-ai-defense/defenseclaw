@@ -241,10 +241,15 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := a.keyStore.SaveDeviceKey(dev.DeviceID, deviceKey); err != nil {
-			log.Printf("[fleet-api] WARNING: failed to save device key for %d: %v", dev.DeviceID, err)
-		} else {
-			deviceKeyHex = hex.EncodeToString(deviceKey)
+			// Key save failed — roll back the device registration so we
+			// don't leave a device without a persisted key.
+			a.manager.DecommissionDevice(req.TenantID, req.FleetID, req.DeviceID)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error": "failed to save device key: " + err.Error(),
+			})
+			return
 		}
+		deviceKeyHex = hex.EncodeToString(deviceKey)
 	}
 
 	a.emitAudit("fleet.device.registered",

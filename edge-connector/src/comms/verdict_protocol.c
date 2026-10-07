@@ -135,17 +135,30 @@ static bool    s_device_key_loaded = false;
 static bool    s_device_key_provisioned = false;
 
 /*
- * Parse a hex-encoded string into a byte buffer.
+ * Strict hex character to nibble conversion.
+ * Returns 0-15 on success, -1 for any non-hex character (including
+ * whitespace, signs, and control characters).
+ */
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/*
+ * Parse a hex-encoded string into a byte buffer with strict validation.
+ * Rejects keys containing whitespace, signs, or any non-[0-9a-fA-F] chars.
  * Returns 0 on success, -1 on invalid input.
  */
 static int hex_decode(const char *hex, uint8_t *out, size_t out_len) {
     size_t hex_len = strlen(hex);
     if (hex_len != out_len * 2) return -1;
     for (size_t i = 0; i < out_len; i++) {
-        unsigned int byte_val;
-        char buf[3] = { hex[i*2], hex[i*2+1], '\0' };
-        if (sscanf(buf, "%02x", &byte_val) != 1) return -1;
-        out[i] = (uint8_t)byte_val;
+        int hi = hex_nibble(hex[i * 2]);
+        int lo = hex_nibble(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return -1;
+        out[i] = (uint8_t)((hi << 4) | lo);
     }
     return 0;
 }

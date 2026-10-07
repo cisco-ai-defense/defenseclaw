@@ -21,7 +21,7 @@ import (
 // the DCLAW_DEVICE_KEY environment variable (hex-encoded, 32 bytes).
 // In production, replace with a per-device key lookup.
 type DeviceKeyProvider interface {
-	KeyForDevice(deviceID uint32) []byte
+	KeyForDevice(deviceID uint64) []byte
 }
 
 // DeviceKeyLookup is the interface that DeviceKeyStore providers must implement
@@ -52,13 +52,9 @@ func newStoreBackedKeyProvider(store DeviceKeyLookup) *storeBackedKeyProvider {
 	return &storeBackedKeyProvider{store: store, fallbackKey: fallback}
 }
 
-func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint32) []byte {
+func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint64) []byte {
 	if p.store != nil {
-		// deviceID in the store is the full composite 64-bit ID, but in the bridge
-		// context we receive the raw 32-bit device_id. The caller (bridge) should
-		// compose the full ID before calling. However, for backward compatibility
-		// we also try the raw 32-bit ID.
-		key, err := p.store.LoadDeviceKey(uint64(deviceID))
+		key, err := p.store.LoadDeviceKey(deviceID)
 		if err != nil {
 			log.Printf("[mqtt-bridge] error loading key for device %d: %v", deviceID, err)
 		}
@@ -88,7 +84,7 @@ func newEnvDeviceKeyProvider() *envDeviceKeyProvider {
 	return &envDeviceKeyProvider{key: make([]byte, 32)}
 }
 
-func (p *envDeviceKeyProvider) KeyForDevice(_ uint32) []byte {
+func (p *envDeviceKeyProvider) KeyForDevice(_ uint64) []byte {
 	return p.key
 }
 
@@ -391,7 +387,7 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// Look up the per-device key using the full composite ID so that the
 	// store-backed provider can find keys stored during registration.
 	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
-	deviceKey := b.keyProvider.KeyForDevice(uint32(fullDeviceID))
+	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
 	resp.HMACTag = computeVerdictHMAC(deviceKey, sessionID, vr.RequestID, resp.Action, vr.ToolHash)
 
 	// Publish the response to the device's verdict/resp topic

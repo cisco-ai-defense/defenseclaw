@@ -260,10 +260,13 @@ def decommission_batch(app: AppContext, ids: str, tenant_id: int, fleet_id: int,
     devices = []
     for raw in raw_ids:
         parts = raw.split(":")
-        if len(parts) == 3:
-            devices.append({"tenant_id": int(parts[0]), "fleet_id": int(parts[1]), "device_id": int(parts[2])})
-        else:
-            devices.append({"tenant_id": tenant_id, "fleet_id": fleet_id, "device_id": int(raw)})
+        try:
+            if len(parts) == 3:
+                devices.append({"tenant_id": int(parts[0]), "fleet_id": int(parts[1]), "device_id": int(parts[2])})
+            else:
+                devices.append({"tenant_id": tenant_id, "fleet_id": fleet_id, "device_id": int(raw)})
+        except ValueError:
+            raise click.UsageError(f"Invalid device ID '{raw}' -- expected an integer or tenant:fleet:device format.")
     if not assume_yes and not click.confirm(f"Decommission {len(devices)} device(s)? This cannot be undone"):
         ux.echo("Cancelled.")
         return
@@ -275,9 +278,15 @@ def decommission_batch(app: AppContext, ids: str, tenant_id: int, fleet_id: int,
         raise SystemExit(1)
     _check(resp, "Failed to decommission devices")
     data = _body(resp) or {}
-    ux.ok(f"{data.get('decommissioned', len(devices))} device(s) decommissioned.")
-    for f in data.get("not_found", []):
-        ux.warn(f"  Not found: {f}")
+    decommissioned = data.get("decommissioned", 0)
+    not_found_ids = data.get("not_found", [])
+    if decommissioned > 0:
+        ux.ok(f"{decommissioned} device(s) decommissioned.")
+    for nf in not_found_ids:
+        ux.warn(f"  Not found: {nf}")
+    if decommissioned == 0 and not_found_ids:
+        ux.err("No devices were decommissioned -- all IDs were not found.")
+        raise SystemExit(1)
 
 
 @edge_connector_group.command("health")

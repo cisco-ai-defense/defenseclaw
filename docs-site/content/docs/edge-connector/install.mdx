@@ -385,20 +385,20 @@ docker run -d --name mosquitto -p 1883:1883 \
 **Authenticated setup (recommended for production):**
 
 ```bash
-# Create a password file with a broker user
-mosquitto_passwd -c /mosquitto/config/passwd dclaw
-# (enter password when prompted)
+# Create a password file with a broker user (runs mosquitto_passwd inside a container)
+docker run --rm -v ./mqtt:/mosquitto/config eclipse-mosquitto \
+  mosquitto_passwd -b -c /mosquitto/config/passwd dclaw yourpassword
 
 # Create a config that requires authentication
-cat > mosquitto.conf <<'EOF'
+mkdir -p mqtt
+cat > mqtt/mosquitto.conf <<'EOF'
 listener 1883 0.0.0.0
 allow_anonymous false
 password_file /mosquitto/config/passwd
 EOF
 
 docker run -d --name mosquitto -p 1883:1883 \
-  -v ./mosquitto.conf:/mosquitto/config/mosquitto.conf \
-  -v ./passwd:/mosquitto/config/passwd \
+  -v ./mqtt:/mosquitto/config \
   eclipse-mosquitto:2
 ```
 

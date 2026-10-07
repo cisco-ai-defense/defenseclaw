@@ -6866,9 +6866,11 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if err := os.MkdirAll(fleetDataDir, 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] fleet data dir: %v\n", err)
 	}
-	if deviceStore, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db")); err != nil {
+	var deviceStore *fleet.SQLiteStore // nil when DB cannot be opened
+	if ds, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db")); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] fleet SQLite store: %v (using in-memory)\n", err)
 	} else {
+		deviceStore = ds
 		fleetMgr.SetStore(deviceStore)
 		if n, err := fleetMgr.LoadFromStore(); err != nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] fleet load from store: %v\n", err)
@@ -6923,6 +6925,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		} else {
 			fleetMQTTClient = tcpClient
 			bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+			// Wire per-device key resolution from the SQLite store so the
+			// bridge verifies/computes verdict HMACs with the correct key
+			// instead of falling back to the fleet-wide shared key.
+			if deviceStore != nil {
+				bridge.SetDeviceKeyStore(deviceStore)
+			}
 			// P0-6 fix: Only allow auto-registration of unknown devices when
 			// DCLAW_FLEET_AUTO_REGISTER=true (dev mode). In production (default),
 			// operators must register devices via CLI/API.
@@ -6949,6 +6957,9 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	if s.logger != nil {
 		fleetOpts = append(fleetOpts, fleet.WithAuditEmitter(s.logger))
+	}
+	if deviceStore != nil {
+		fleetOpts = append(fleetOpts, fleet.WithDeviceKeyStore(deviceStore))
 	}
 	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleetOpts...))
 	// Load scoped tokens that connector setup or the enterprise hook guardian

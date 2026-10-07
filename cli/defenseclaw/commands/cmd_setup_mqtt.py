@@ -180,7 +180,11 @@ def _setup_docker(port: int) -> dict | bool:
         return False
     ux.ok(f"MQTT user '{mqtt_user}' password file generated")
 
-    # Step 4: Start the broker container mounting the entire config directory
+    # Step 4: Start the broker container mounting config and data directories.
+    # The data directory holds persistent MQTT session and retained message state.
+    data_dir = conf_dir / "data"
+    os.makedirs(data_dir, exist_ok=True)
+
     ux.echo("  Starting container...")
     run_result = subprocess.run(
         [
@@ -188,6 +192,7 @@ def _setup_docker(port: int) -> dict | bool:
             "--name", _CONTAINER_NAME,
             "-p", f"{port}:1883",
             "-v", f"{conf_dir}:/mosquitto/config",
+            "-v", f"{data_dir}:/mosquitto/data",
             "--restart", "unless-stopped",
             _MOSQUITTO_IMAGE,
         ],
@@ -198,6 +203,43 @@ def _setup_docker(port: int) -> dict | bool:
         return False
 
     ux.ok(f"Container '{_CONTAINER_NAME}' started on port {port}")
+
+    # Step 5: Verify MQTT CONNACK with the generated credentials.
+    # Try a TCP connect + minimal MQTT CONNECT packet to confirm the broker
+    # is actually accepting authenticated connections, not just listening.
+    ux.echo("  Verifying MQTT CONNACK...")
+    connack_ok = False
+    for attempt in range(6):
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                # Build a minimal MQTT 3.1.1 CONNECT packet
+                client_id = b"dclaw-verify"
+                user_bytes = mqtt_user.encode("utf-8")
+                pass_bytes = mqtt_pass.encode("utf-8")
+                # Variable header: protocol name(6) + level(1) + flags(1) + keepalive(2)
+                var_header = b"\x00\x04MQTT\x04\xC2\x00\x1e"  # 0xC2 = user+pass flags
+                # Payload: client_id + username + password (each length-prefixed)
+                payload = (
+                    len(client_id).to_bytes(2, "big") + client_id
+                    + len(user_bytes).to_bytes(2, "big") + user_bytes
+                    + len(pass_bytes).to_bytes(2, "big") + pass_bytes
+                )
+                remaining = var_header + payload
+                connect_pkt = bytes([0x10, len(remaining)]) + remaining
+                sock.sendall(connect_pkt)
+                sock.settimeout(5)
+                connack = sock.recv(4)
+                if len(connack) >= 4 and connack[0] == 0x20 and connack[3] == 0x00:
+                    connack_ok = True
+                    break
+        except (OSError, TimeoutError):
+            pass
+        time.sleep(0.5 * (2 ** attempt))
+
+    if connack_ok:
+        ux.ok("MQTT CONNACK verified -- broker accepts credentials")
+    else:
+        ux.warn("Could not verify MQTT CONNACK. The broker may still be starting.")
 
     return {"mqtt_user": mqtt_user, "mqtt_pass": mqtt_pass}
 
