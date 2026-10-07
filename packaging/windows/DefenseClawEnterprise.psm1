@@ -25751,13 +25751,30 @@ function Invoke-DefenseClawNuclearUninstall {
     $brokerName = Get-DefenseClawCMIDBrokerServiceName `
         -GatewayServiceName $GatewayServiceName
 
-    # 1. Stop + delete every managed service we might have created in this
-    #    scope. All native-exe invocations in the nuclear path route through
+    # 1. Disarm SCM auto-restart for every managed service, THEN kill the
+    #    worker, THEN stop + delete the service row. Ordering is
+    #    load-bearing: Install registers each service with FailureActions
+    #    (5s/15s/60s restart schedule) + FailureActionsOnNonCrashFailures=1
+    #    via Set-DefenseClawExactFailureActions. A naive sc stop followed
+    #    by taskkill /F terminates the worker while SCM is still in
+    #    STOP_PENDING, SCM reads that as a crash, consults the still-
+    #    populated FailureActions registry blob, and auto-respawns the
+    #    worker ~5s later - exactly inside the Remove-Item retry window.
+    #    The next install then trips on "untrusted principal S-1-3-0 has
+    #    write-like access" because the half-torched InstallRoot survives
+    #    with a stale Creator Owner ACE.
+    #
+    #    sc.exe failure's documented clear sentinel (actions= //) and the
+    #    sc.exe failureflag empty value are both parser-fragile. Use
+    #    direct registry removal instead - deterministic across Windows
+    #    SKUs, and `sc config start= disabled` makes any surviving row
+    #    inert against a scm-cold-start restart.
+    #
+    #    All native-exe invocations in the nuclear path route through
     #    Invoke-DefenseClawNuclearSilentExec so no console window flashes
     #    when the Setup EXE's PowerShell host runs without an inherited
     #    console. Errors are swallowed - a service that is already gone or
-    #    whose stop fails is fine; sc.exe delete marks the row for deletion
-    #    regardless and the SCM pending-delete flag completes at reboot.
+    #    whose stop fails is fine.
     foreach ($name in @(
         $GatewayServiceName,
         $GuardianServiceName,
@@ -25765,15 +25782,27 @@ function Invoke-DefenseClawNuclearUninstall {
         $brokerName
     )) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('stop', $name)
-        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('delete', $name)
+        $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $serviceKey) {
+            Microsoft.PowerShell.Management\Remove-ItemProperty `
+                -LiteralPath $serviceKey `
+                -Name FailureActions `
+                -ErrorAction SilentlyContinue
+            Microsoft.PowerShell.Management\Remove-ItemProperty `
+                -LiteralPath $serviceKey `
+                -Name FailureActionsOnNonCrashFailures `
+                -ErrorAction SilentlyContinue
+        }
+        Invoke-DefenseClawNuclearSilentExec `
+            -File $script:ScExe `
+            -Arguments @('config', $name, 'start=', 'disabled')
     }
 
     # 1b. Force-kill the two SERVICE-WORKER binaries that hold persistent
-    #     file handles on the install tree. sc.exe stop is cooperative;
-    #     if the service's stop handler hangs or the worker is wedged
-    #     holding its log file open, Remove-Item -Recurse fails with
-    #     "being used by another process".
+    #     file handles on the install tree. Runs BEFORE sc stop/delete:
+    #     with FailureActions now empty, SCM sees the worker exit and
+    #     has no action to take. If sc stop went first the worker would
+    #     linger in STOP_PENDING while taskkill races SCM.
     #
     #     DO NOT include defenseclaw.exe or defenseclaw-hook.exe in this
     #     list. defenseclaw.exe is the Setup EXE trailer-extracted
@@ -25793,21 +25822,54 @@ function Invoke-DefenseClawNuclearUninstall {
             -Arguments @('/F', '/IM', $image, '/T')
     }
 
+    # 1c. Short settle delay so SCM registers the worker exits as
+    #     final-state (no respawn pending). Then sc stop + sc delete:
+    #     stop is a no-op now (process is gone), delete succeeds
+    #     because the service is no longer running.
+    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
+    foreach ($name in @(
+        $GatewayServiceName,
+        $GuardianServiceName,
+        $enumeratorName,
+        $brokerName
+    )) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('stop',   $name)
+        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('delete', $name)
+    }
+
     # 1c. Short settle delay so NT closes the released handles before the
     #     Remove-Item -Recurse starts walking the trees. 500 ms is enough
     #     in practice; Remove-Item still retries up to 3 times below.
     Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
 
-    # 2. Nuke InstallRoot + StateRoot. Each path must pass the safe-root
-    #    scope guard before any takeown/icacls/delete runs. The two bases
-    #    are HARDCODED here so a caller cannot subvert the hammer by
-    #    passing an attacker-chosen Layout.
+    # 2. Nuke InstallRoot + StateRoot + the protected lifecycle receipt
+    #    directory. Each path must pass the safe-root scope guard before
+    #    any takeown/icacls/delete runs. The three bases are HARDCODED
+    #    here so a caller cannot subvert the hammer by passing an
+    #    attacker-chosen Layout. The -Lifecycle sibling is a separate
+    #    tree outside StateRoot (install-rollback journal, purge intent,
+    #    self-uninstall receipt, managed-hook cleanup receipt) and
+    #    survived earlier nuclear sweeps - leaving install-rollback-
+    #    <scope>.json orphaned there made the next install trip on
+    #    "open managed receipt metadata failed". The sibling path is
+    #    derived inline (not threaded through $Layout) because the sole
+    #    nuclear caller passes a reduced hashtable with only InstallRoot
+    #    and StateRoot keys; under Set-StrictMode -Version Latest
+    #    reading a missing hashtable key throws.
     $safeRootPattern =
         '^[A-Z]:\\(Program Files|ProgramData)\\Cisco\\' +
-        'Cisco Secure Client\\DefenseClaw(-Cert)?(\\|$)'
+        'Cisco Secure Client\\DefenseClaw(-Cert|-Lifecycle)?(\\|$)'
+    $nuclearLifecycleDir = [IO.Path]::Combine(
+        $script:ProgramData,
+        'Cisco',
+        'Cisco Secure Client',
+        'DefenseClaw-Lifecycle'
+    )
     foreach ($pathEntry in @(
-        @{ Role = 'InstallRoot'; Path = [string]$Layout.InstallRoot },
-        @{ Role = 'StateRoot';   Path = [string]$Layout.StateRoot }
+        @{ Role = 'InstallRoot';  Path = [string]$Layout.InstallRoot },
+        @{ Role = 'StateRoot';    Path = [string]$Layout.StateRoot },
+        @{ Role = 'LifecycleDir'; Path = $nuclearLifecycleDir }
     )) {
         $path = $pathEntry.Path
         $role = $pathEntry.Role
