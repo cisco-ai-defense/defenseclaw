@@ -208,6 +208,36 @@ def test_setup_v8_splunk_hec_verifies_tls_and_refuses_private_networks_unless_as
         assert (destination.get("tls"), destination.get("network_safety")) == (tls, network)
 
 
+def test_setup_v8_failed_add_takes_the_new_key_back_out_of_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0210: a failed add left the token it was given in .env although config.yaml was unchanged.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setattr(
+        "defenseclaw.observability.v8_writer.inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(valid=False),
+    )
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN")
+    app = _setup_app(tmp_path)
+    (tmp_path / ".env").write_text("OTHER_KEY=kept\n")
+    (tmp_path / ".env").chmod(0o600)
+    before = (tmp_path / "config.yaml").read_bytes()
+
+    result = CliRunner().invoke(
+        observability,
+        ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec",
+         "--endpoint", "https://hec.example.com:8088/services/collector"],
+        obj=app,
+    )
+
+    assert result.exit_code != 0
+    assert (tmp_path / "config.yaml").read_bytes() == before
+    assert dotenv_values(tmp_path / ".env") == {"OTHER_KEY": "kept"}
+    assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" not in os.environ
+
+
 def test_setup_v8_interactive_loopback_otlp_asks_instead_of_failing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

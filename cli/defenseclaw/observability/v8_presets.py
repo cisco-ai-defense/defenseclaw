@@ -158,6 +158,24 @@ def apply_secret(
     return [f"{preset.token_env}: written to {path}"]
 
 
+def restore_secret(data_dir: str, key: str, previous: str | None, previous_environ: str | None) -> None:
+    """Put ``key`` back as it was before :func:`apply_secret` (GAP-0210)."""
+
+    def merge(payload: bytes) -> bytes:
+        existing = _load_dotenv(payload)
+        if previous is None:
+            existing.pop(key, None)
+        else:
+            existing[key] = previous
+        return _write_dotenv(existing)
+
+    update_private_file(os.path.join(data_dir, DOTENV_FILE_NAME), owner_directory=data_dir, transform=merge)
+    if previous_environ is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = previous_environ
+
+
 def secret_note_is_info(preset: Preset, message: str) -> bool:
     """Whether an :func:`apply_secret` message reports a write, not a problem."""
 
@@ -212,5 +230,6 @@ __all__ = [
     "render_header_template",
     "render_template",
     "resolve_inputs",
+    "restore_secret",
     "secret_note_is_info",
 ]
