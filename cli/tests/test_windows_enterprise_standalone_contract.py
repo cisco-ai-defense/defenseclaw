@@ -247,7 +247,7 @@ def test_standalone_setup_uninstall_docs_say_it_removes_the_machine_state() -> N
         "windows": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "windows.mdx",
         "cli": ROOT / "docs-site" / "content" / "docs" / "reference" / "cli.mdx",
         "setup-design": ROOT / "docs" / "WINDOWS-ENTERPRISE-SETUP.md",
-        "intune": ROOT / "packaging" / "mdm" / "intune" / "windows.md",
+        "intune": ROOT / "docs-site" / "content" / "docs" / "enterprise" / "mdm" / "intune-windows.mdx",
     }
     for name, page in standalone.items():
         text = " ".join(_text(page).split())
