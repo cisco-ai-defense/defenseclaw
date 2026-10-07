@@ -335,6 +335,15 @@ func runWindowsEnterpriseLifecycle(
 	if opts == nil {
 		return failPreflight(errors.New("Windows enterprise lifecycle options are unavailable"))
 	}
+	// A standard account cannot change the managed deployment whatever file
+	// it passes, so the elevation refusal comes before --config is read,
+	// parsed or compiled: it used to be told to fix a file that no fix would
+	// let it apply (GAP-0120).
+	if windowsEnterpriseMutationAction(action) && !windowsEnterpriseIsElevated() &&
+		(action == "ensure" || managed.IsStandaloneProfile(opts.profile)) {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts,
+			errors.New("elevation_required: "+windowsEnterpriseStandardUserMutationAnswer(action, windowsEnterpriseRequestedAttestations(opts)...)))
+	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		if windowsEnterpriseStandaloneRequested(opts) || windowsEnterpriseUnknownProfileRequested(opts) {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)

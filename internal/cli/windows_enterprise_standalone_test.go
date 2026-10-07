@@ -1780,18 +1780,20 @@ func TestWindowsEnterpriseLifecycleCallerErrorsExitCodes(t *testing.T) {
 	windowsEnterpriseInstalledConfigPath = func() (string, error) { return installed, nil }
 
 	for _, tc := range []struct {
-		action, profile, code, text string
-		exit                        int
+		action, profile, code, text, config string
+		exit                                int
 	}{
-		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", 5},
-		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, 1639},
+		{"repair", "standalone", "elevation_required", "a standard account cannot repair the managed deployment", "", 5},
+		// GAP-0120: the refusal does not wait for --config to be read.
+		{"ensure", "standalone", "elevation_required", "a standard account cannot ensure the managed deployment", `C:\Users\alice\does-not-compile.yaml`, 5},
+		{"verify", "nope", "invalid_arguments", `invalid --profile "nope": use standalone or secure_client`, "", 1639},
 	} {
 		for _, jsonOutput := range []bool{false, true} {
 			var stdout, stderr bytes.Buffer
 			var err error
 			command := &cobra.Command{Use: tc.action, SilenceUsage: true, RunE: func(c *cobra.Command, _ []string) error {
 				err = runWindowsEnterpriseLifecycle(context.Background(), c, tc.action,
-					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput})
+					&windowsEnterpriseLifecycleOptions{profile: tc.profile, jsonOutput: jsonOutput, configPath: tc.config})
 				return err
 			}}
 			command.SetArgs([]string{})

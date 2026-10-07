@@ -230,6 +230,49 @@ func TestInventoryDACLIDEGrantsStayNarrowAndRefuseLinks(t *testing.T) {
 	}
 }
 
+// GAP-0197: an agent folder a standard user replaced with a junction gets no
+// grant from the standalone profile, and no ACE reaches the junction's target.
+func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T) {
+	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(home, ".claude"), outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	hasACE := func(path string) bool {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	for _, g := range inventoryDACLAgentGrants(home, nil, true) {
+		result, err := g.ensure(filepath.Join(home, g.dir), sid)
+		switch g.dir {
+		case ".claude":
+			if !errors.Is(err, errInventoryDACLLink) {
+				t.Fatalf("grant on the junction = %v, %v; want refused", result, err)
+			}
+		case ".codex":
+			if err != nil || result != inventoryDACLGranted {
+				t.Fatalf(".codex = %v, %v; want granted", result, err)
+			}
+		}
+	}
+	if hasACE(outside) {
+		t.Fatal("the junction's target gained the service ACE")
+	}
+	if !hasACE(filepath.Join(home, ".codex")) {
+		t.Fatal("a plain agent folder lost its grant")
+	}
+}
+
 // Copilot CLI and Devin CLI keep their hook files on the guardian's protected
 // path, so, like Kiro CLI, they are discovered through list-only grants on
 // their install folders (GAP-1739). Those folders are never on a hook path.

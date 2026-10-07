@@ -635,3 +635,41 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     panel.apply_agent_identities("Error: No such command 'identities'.")
     assert len(panel.filtered_agents()) == 1
     assert "User" not in panel.data_table_columns()
+
+
+def test_inventory_long_agent_list_jumps_and_does_not_rescan_users_per_row() -> None:
+    """GAP-0184: page/end jumps work, and building the rows reads the items once."""
+
+    panel = InventoryPanelModel(connector="codex")
+    panel.apply_loaded(_inventory())
+    rows = [
+        {"agent_id": f"agt-{index:016x}", "user_id": str(1000 + index % 2), "user_name": f"user{index % 2}",
+         "connector": "codex", "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-05T00:00:00Z",
+         "sessions_seen": 1}
+        for index in range(1300)
+    ]
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": rows}))
+    panel.set_active_subtab("agents")
+    panel.set_size(80, 24)
+
+    calls = 0
+    original = InventoryPanelModel._multi_user
+
+    def counted(items):  # noqa: ANN001 - wraps the staticmethod for the test
+        nonlocal calls
+        calls += 1
+        return original(items)
+
+    InventoryPanelModel._multi_user = staticmethod(counted)  # type: ignore[method-assign]
+    try:
+        assert len(panel.data_table_rows()) == len(panel.filtered_agents())
+    finally:
+        InventoryPanelModel._multi_user = staticmethod(original)  # type: ignore[method-assign]
+    assert calls <= 2, f"the user column was recomputed {calls} times for one table"
+
+    total = panel.current_list_len()
+    assert panel.handle_key("end").handled and panel.cursor == total - 1
+    assert panel.handle_key("home").handled and panel.cursor == 0
+    assert panel.handle_key("pagedown").handled and panel.cursor == 16
+    assert panel.handle_key("pageup").handled and panel.cursor == 0
+    assert panel.handle_key("G").handled and panel.cursor == total - 1

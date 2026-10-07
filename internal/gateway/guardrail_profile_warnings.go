@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -27,7 +29,62 @@ func profileExplainWarnings(set *guardrailProfileSet, decision profileDecision, 
 	if note := shortNameUserNote(set, decision, subject); note != "" {
 		warnings = append(warnings, note)
 	}
+	if note := unnamedGroupsNote(subject); note != "" {
+		warnings = append(warnings, note)
+	}
+	if runtime.GOOS == "windows" && subject != nil {
+		if note := spoolRecordNote(subject.UserID, time.Now()); note != "" {
+			warnings = append(warnings, note)
+		}
+	}
 	return warnings
+}
+
+// unnamedGroupsNote says when some of the explained account's groups are
+// only numbers. The Unix resolver keeps a group id as its number when no
+// group answers for it, which is what a directory that does not answer
+// leaves behind: the account then has too few groups for its assignments to
+// match, and nothing else in the answer shows it (GAP-0212).
+func unnamedGroupsNote(subject *profileSubject) string {
+	if subject == nil || subject.LookupFailed {
+		return ""
+	}
+	groups := subject.Groups
+	isSID := func(group string) bool { return strings.HasPrefix(strings.ToUpper(group), "S-1-") }
+	sidForm := slices.ContainsFunc(groups, isSID)
+	unnamed, total := 0, len(groups)
+	if sidForm {
+		// Windows lists each group's SID followed by its DOMAIN\name; a SID
+		// followed by another SID (or the end) was not named. The guardian
+		// names at most 128 groups per account, within 2 s, so a large token
+		// or a slow domain controller leaves the rest as bare SIDs (GAP-0136).
+		total = 0
+		for i, group := range groups {
+			if !isSID(group) {
+				continue
+			}
+			total++
+			if i+1 >= len(groups) || isSID(groups[i+1]) {
+				unnamed++
+			}
+		}
+	} else {
+		for _, group := range groups {
+			if group != "" && strings.Trim(group, "0123456789") == "" {
+				unnamed++
+			}
+		}
+	}
+	if unnamed == 0 {
+		return ""
+	}
+	if sidForm {
+		return fmt.Sprintf("%d of this account's %d group(s) have no name, only a SID (the guardian names at most 128 groups per account within 2 s, "+
+			"or the SID does not resolve); an assignment that names such a group as DOMAIN\\name cannot match, so name it by its SID", unnamed, total)
+	}
+	return fmt.Sprintf("%d of this account's %d group(s) are shown by number because no group answered for them; "+
+		"the directory may be unreachable or the group missing, and an assignment that names such a group cannot match",
+		unnamed, total)
 }
 
 // Groups an assignment names that the host does not know.
@@ -194,6 +251,12 @@ var cachedDirectoryFacts = func(id string) (useridentity.DirectoryFacts, time.Ti
 	return peerDirectoryCache().peek(id)
 }
 
+// cachedDirectoryFailure reports an account the gateway's own lookups fail
+// for and holds no facts of. Tests replace it.
+var cachedDirectoryFailure = func(id string) (time.Time, string, bool) {
+	return peerDirectoryCache().failing(id)
+}
+
 // explainCacheView describes the cached facts of the explained account: how
 // old they are, and the profile requests currently get from them. warning is
 // non-empty when that profile differs from the explained one.
@@ -203,7 +266,29 @@ func explainCacheView(set *guardrailProfileSet, explained *profileSubject, decis
 	}
 	facts, fetchedAt, ok := cachedDirectoryFacts(explained.UserID)
 	if !ok {
-		return nil, ""
+		// No facts are cached. When the gateway's own lookups for the account
+		// fail, its requests get default_lookup_failed whatever this fresh
+		// lookup found (GAP-0212).
+		since, reason, failing := cachedDirectoryFailure(explained.UserID)
+		if !failing {
+			return nil, ""
+		}
+		failed := profileSubject{UserID: explained.UserID, IDKind: explained.IDKind, UserName: explained.UserName, LookupFailed: true}
+		live := set.match(&failed, profileSubjectLookup, connectorName, agent)
+		differs := live.Name != decision.Name || live.Match != decision.Match
+		view = map[string]any{
+			"failing_since": since.UTC().Format(time.RFC3339),
+			"last_error":    reason,
+			"profile":       live.Name,
+			"match":         live.Match,
+			"differs":       differs,
+		}
+		if differs {
+			warning = fmt.Sprintf("requests of this account currently get profile %s (match %s): the gateway's directory lookup for it has failed since %s (%s) "+
+				"and is retried every %s; the profile above applies once a lookup succeeds",
+				firstNonEmpty(live.Name, "none"), live.Match, since.UTC().Format("15:04:05Z"), reason, identityDirectoryRetry)
+		}
+		return view, warning
 	}
 	age := now.Sub(fetchedAt).Round(time.Second)
 	if age < 0 {
