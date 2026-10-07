@@ -352,7 +352,9 @@ func withSessionAgentInstance(ctx context.Context, sessionID string) context.Con
 	if identityID == "" {
 		return ctx
 	}
-	instance := SharedAgentRegistry().peekAgentInstance(identityID, sessionID)
+	// The hook path keys a sandbox's sessions apart from the host's, so the
+	// join must use the same key or it never finds a sandboxed session.
+	instance := SharedAgentRegistry().peekAgentInstance(identityID, sandboxSessionStateKey(ctx, sessionID))
 	if instance == "" {
 		return ctx
 	}
