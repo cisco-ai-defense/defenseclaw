@@ -102,8 +102,10 @@ NO_ASKS_TEXT = (
     "with --host-port PORT."
 )
 
-# sandboxcli.reasonTexts, plus the triage reasons of rejected proposals: the
-# tokens a blocked destination's category or reason holds, in plain words.
+# sandboxapi.reasonTexts (internal/openshell/sandboxapi/reasons.go), word for
+# word, so the panel reads like `sandbox activity` and the alerts; a test
+# holds the two tables together (GAP-0155). host_local is triage's reason of
+# a host-port ask, which the Go feed shows as the daemon's sentence.
 REASON_LABELS: dict[str, str] = {
     "transparent_tcp_policy_denied": "no OpenShell rule allows it",
     "transparent_tcp_mapping_denied": "no OpenShell rule allows this port",
@@ -114,23 +116,44 @@ REASON_LABELS: dict[str, str] = {
     "tunnel": "tunnel service",
     "anonymizer": "anonymizer",
     "host_internal": "this machine",
-    "host_local": "this machine",
     "private_network": "private network",
     "port_not_allowed": "port not allowed",
     "invalid_destination": "invalid destination",
     "admin_block": "blocked by your organization",
     "admin_allow_only": "not on your organization's allowed list",
-    "admin_violation": "blocked by your organization",
     "operator_block": "on your block list",
+    "pack_block": "on the pack's block list",
+    "repo_policy_block": "on the repository policy's block list, .defenseclaw/sandbox.yaml",
+    "firewall_block": "a deny rule of the host egress firewall",
     "not_allowlisted": "not on the allowlist",
     "rate_limited": "rate limited",
     "ip_literal": "IP address instead of a name",
-    "blocklisted": "on the egress blocklist",
+    "unsupported_rule": "no OpenShell rule allows it, and DefenseClaw does not approve the rule drafted for it",
+    "no_endpoints": "the rule drafted for it names no destination",
+    "wildcard_destination": "wildcard destination",
+    "policy_refused": "the sandbox policy refuses it",
+    "admin_violation": "blocked by your organization",
+    "blocklisted": "on the block list",
+    "agent_proposals_disabled": "no OpenShell rule allows it, and this sandbox takes no new rules",
     "resolves_to_host": "the name leads to this machine",
     "unresolved": "the name does not resolve",
-    "policy_refused": "the sandbox policy refuses it",
-    "wildcard_destination": "wildcard destination",
+    "multiple_hosts": "the rule drafted for it names several hosts",
+    "harness_background_fetch": "a background fetch of the harness, which it does without",
+    "rule_limit": "the sandbox added its limit of rules this session",
+    "too_many_pending": "too many approvals are waiting",
+    "host_local": "this machine",
 }
+
+# sandboxapi.metadataText: a cloud metadata or link-local destination, whatever
+# refused it (the proxy's host_internal or OpenShell's missing rule).
+METADATA_TEXT = "cloud metadata or link-local address, never reachable from a sandbox"
+
+# egress.neverReach: metadata and host-service addresses outside the
+# link-local range that the sandbox guard refuses as host-internal.
+_NEVER_REACH = tuple(
+    ipaddress.ip_network(prefix)
+    for prefix in ("168.63.129.16/32", "fd20:ce::254/128", "fd00:c1::a9fe:a9fe/128", "fec0::/10")
+)
 
 
 def _is_token(text: str) -> bool:
@@ -139,11 +162,34 @@ def _is_token(text: str) -> bool:
 
 
 def reason_label(text: str) -> str:
-    """A reason or category token in plain words (sandboxcli.reasonText); other text as is."""
+    """A reason or category token in plain words (sandboxapi.ReasonText); other text as is."""
     text = text.strip()
     if not _is_token(text):
         return text
     return REASON_LABELS.get(text, text.replace("_", " "))
+
+
+def metadata_or_link_local(host: str) -> bool:
+    """sandboxapi.metadataOrLinkLocal: a link-local or cloud metadata address, or metadata.google.internal."""
+    text = host.strip().lower().strip("[]").removesuffix(".")
+    if text == "metadata.google.internal":
+        return True
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return addr.is_link_local or any(addr.version == net.version and addr in net for net in _NEVER_REACH)
+
+
+# A refused port 22 is git over SSH or ssh, which OpenShell never opens.
+SSH_PORT = 22
+
+
+def ssh_blocked_text(host: str) -> str:
+    """sandboxapi.SSHBlockedText: OpenShell opens no SSH out of a sandbox, which no unblock changes."""
+    return f"SSH does not leave a sandbox: use an HTTPS remote (https://{host}/…)"
 
 
 # sandboxapi.CategoryLargeUpload: the category of the egress.blocked events of
@@ -497,13 +543,17 @@ class SandboxRow:
 
     @property
     def alert_badge(self) -> str:
+        return self.badge()
+
+    def badge(self, *, short: bool = False) -> str:
+        """The Alerts cell; ``short`` (a narrow table) says unreachable as `sandbox list` does (GAP-0163)."""
         parts = []
         if self.tampered:
             parts.append("tamper")
         if self.nested_repos:
             parts.append("nested repo")
         if self.hooks_unreachable:
-            parts.append("hooks unreachable")
+            parts.append("unreachable" if short else "hooks unreachable")
         if self.hook_failed:
             parts.append("hook errors")
         if self.hooks_silent:
@@ -511,6 +561,24 @@ class SandboxRow:
         if self.orphaned:
             parts.append("orphaned")
         return ", ".join(parts) or "-"
+
+
+def _fit_last_cell(
+    columns: tuple[str, ...], rows: tuple[tuple[str, ...], ...], width: int
+) -> tuple[tuple[str, ...], ...]:
+    """Rows whose last cell (Alerts) ends in "…" where the other columns leave
+    it too little of ``width``: the screen edge cut "hooks unreachable" to
+    "hooks unre" at 80x24 (GAP-0163). DataTable pads every cell by one
+    column a side; the last column's right pad may be cut."""
+    if width <= 0 or not rows:
+        return rows
+    widths = [max(map(len, column)) for column in zip(columns, *rows, strict=True)]
+    room = max(len(columns[-1]), width - sum(cells + 2 for cells in widths[:-1]) - 1)
+    if widths[-1] <= room:
+        return rows
+    return tuple(
+        (*row[:-1], row[-1] if len(row[-1]) <= room else row[-1][: room - 1].rstrip(" ,") + "…") for row in rows
+    )
 
 
 def _tool_calls_text(row: SandboxRow) -> str:
@@ -686,10 +754,17 @@ class ActivityRow:
 
     @property
     def why(self) -> str:
-        """The block's category or reason in plain words ("webhook catcher")."""
+        """The block's category or reason in plain words ("webhook catcher"), as
+        sandboxcli.activityLine words it: SSH first, then a large upload, then
+        a metadata or link-local host by name whatever refused it."""
+        if self.kind == "egress.blocked" and self.port == SSH_PORT and self.host:
+            return ssh_blocked_text(self.host)
         if self.category == LARGE_UPLOAD_CATEGORY:
             return large_upload_blocked_text(self.reason)
-        return reason_label(self.category or self.reason)
+        token = self.category or self.reason
+        if token.strip() and metadata_or_link_local(self.host):
+            return METADATA_TEXT
+        return reason_label(token)
 
     @property
     def explanation(self) -> str:
@@ -756,6 +831,7 @@ def decode_activity(raw: Any) -> ActivityRow | None:
     if kind == "sandbox.lifecycle" and not message:
         phase = _text(item.get("phase")).lower()
         message = f"now {phase}" if phase else ""
+    port = _int(item.get("port"))
     return ActivityRow(
         seq=_int(item.get("seq")),
         time=_time(item.get("time")),
@@ -763,11 +839,12 @@ def decode_activity(raw: Any) -> ActivityRow | None:
         sandbox=_text(item.get("sandbox")),
         epoch=_text(item.get("epoch")),
         host=_text(item.get("host")),
-        port=_int(item.get("port")),
+        port=port,
         category=_text(item.get("category")),
         reason=_text(item.get("reason")),
         message=message,
-        unblockable=bool(item.get("unblockable")),
+        # No unblock opens SSH out of a sandbox (sandboxcli.sshPort).
+        unblockable=bool(item.get("unblockable")) and not (kind == "egress.blocked" and port == SSH_PORT),
         approval_id=_text(item.get("approval_id")),
         tool=_text(item.get("tool")),
         severity=_text(item.get("severity")),
@@ -1221,7 +1298,7 @@ class SandboxesPanelModel:
             if last is not None and clock - last < TOAST_DEDUPE_SECONDS:
                 return None
             self._toasted[key] = clock
-            why = f" ({row.category or row.reason})" if (row.category or row.reason) else ""
+            why = f" ({row.why})" if row.why else ""
             where = f" in {row.sandbox}" if row.sandbox else ""
             # An unblockable block holds the host on every port: the port of
             # the first request would say it stops there.
@@ -1642,7 +1719,8 @@ class SandboxesPanelModel:
             return f"  ({ADMIN_UNBLOCK_IGNORED})"
         return "  (u unblocks)" if row.unblockable else ""
 
-    def data_table_rows(self, compact: bool = False) -> tuple[tuple[str, ...], ...]:
+    def data_table_rows(self, compact: bool = False, width: int = 0) -> tuple[tuple[str, ...], ...]:
+        """``width`` (cells the table may use, 0 = unknown) cuts the Sandboxes view's Alerts cells to fit."""
         if self.view == "activity":
             return tuple(
                 (row.time_text, row.sandbox or "-", row.glyph, row.summary + self._feed_suffix(row))
@@ -1673,7 +1751,7 @@ class SandboxesPanelModel:
                 for ask in self.asks
             )
         if compact:
-            return tuple(
+            rows = tuple(
                 (
                     row.name,
                     row.phase or "-",
@@ -1681,25 +1759,27 @@ class SandboxesPanelModel:
                     str(row.destinations),
                     str(row.blocked),
                     _tool_calls_text(row),
+                    row.badge(short=True),
+                )
+                for row in self.rows
+            )
+        else:
+            rows = tuple(
+                (
+                    row.name,
+                    row.phase or "-",
+                    row.harness_label,
+                    row.policy_label,
+                    row.workdir_mode or "-",
+                    row.uptime_text,
+                    str(row.destinations),
+                    str(row.blocked),
+                    _tool_calls_text(row),
                     row.alert_badge,
                 )
                 for row in self.rows
             )
-        return tuple(
-            (
-                row.name,
-                row.phase or "-",
-                row.harness_label,
-                row.policy_label,
-                row.workdir_mode or "-",
-                row.uptime_text,
-                str(row.destinations),
-                str(row.blocked),
-                _tool_calls_text(row),
-                row.alert_badge,
-            )
-            for row in self.rows
-        )
+        return _fit_last_cell(self.data_table_columns(compact), rows, width)
 
     def empty_state(self) -> str:
         if self.view == "activity":
@@ -1802,6 +1882,8 @@ class SandboxesPanelModel:
                     unblock = f"{ADMIN_MESSAGE}; {ADMIN_UNBLOCK_NEXT}"
                 elif event.unblockable:
                     unblock = "press u"
+                elif event.port == SSH_PORT:
+                    unblock = "no unblock opens SSH: use an HTTPS remote"
                 else:
                     unblock = "not unblockable here (private networks, metadata and your organization's blocks)"
                 pairs.append(("Unblock", unblock))

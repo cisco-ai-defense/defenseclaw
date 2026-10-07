@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,7 +40,14 @@ from defenseclaw.tui.screens.sandbox_launch import (
     SandboxLaunchValues,
     harness_choices,
 )
-from defenseclaw.tui.services.sandbox_state import TOAST_DEDUPE_SECONDS, host_port, verdict_reason
+from defenseclaw.tui.services.sandbox_state import (
+    _NEVER_REACH,
+    METADATA_TEXT,
+    REASON_LABELS,
+    TOAST_DEDUPE_SECONDS,
+    host_port,
+    verdict_reason,
+)
 
 STATUS = {
     "enabled": True,
@@ -152,7 +160,7 @@ PRIVATE = {
     "kind": "egress.blocked",
     "sandbox": "fix-tests",
     "host": "10.0.0.5",
-    "port": 22,
+    "port": 5432,
     "reason": "private network",
     "unblockable": False,
 }
@@ -570,7 +578,7 @@ def test_activity_rows_render_plain_lines() -> None:
     rows = model.data_table_rows()
     # A tool block has its own glyph: u lifts only blocked destinations (✗).
     assert rows[0][2:] == ("⊘", "Bash blocked: DC-TOOL-1: deletes your home folder")
-    assert rows[1][2:] == ("✗", "10.0.0.5:22 (private network)")
+    assert rows[1][2:] == ("✗", "10.0.0.5:5432 (private network)")
     assert rows[2][2:] == ("✗", "webhook.site (exfil destination)  (u unblocks)")
     assert rows[3][2:] == ("✓", "registry.npmjs.org")
     assert model.data_table_columns() == ("Time", "Sandbox", "", "Event")
@@ -605,6 +613,50 @@ TOOL_BLOCK = {
     "Do not retry it in another form.",
     "message": "✗ Bash blocked by DefenseClaw: E2E-SANDBOX-MARKER (E2E sandbox marker command)",
 }
+
+
+def _blocked(seq: int, host: str, port: int, **fields: Any) -> dict[str, Any]:
+    return {"seq": seq, "kind": "egress.blocked", "sandbox": "s", "host": host, "port": port, **fields}
+
+
+def test_blocked_lines_read_like_the_cli_feed() -> None:
+    # GAP-0155: the panel read "169.254.169.254:80 (this machine)" and
+    # "github.com:22 (no OpenShell rule allows it)" where `sandbox activity`
+    # names a metadata address and says to use HTTPS for SSH. The words are
+    # sandboxapi's (reasons.go, egress/guard.go), so the tables stay one.
+    repo = Path(__file__).resolve().parents[3]
+    reasons, guard = repo / "internal/openshell/sandboxapi/reasons.go", repo / "internal/openshell/egress/guard.go"
+    if not reasons.is_file() or not guard.is_file():
+        pytest.skip("Go sources not in this checkout")
+    go = reasons.read_text(encoding="utf-8")
+    table = go.split("var reasonTexts = map[string]string{", 1)[1].split("\n}", 1)[0]
+    go_texts = dict(re.findall(r'^\s*"(\w+)":\s*"([^"]*)",', table, re.MULTILINE))
+    assert go_texts and {key: REASON_LABELS.get(key) for key in go_texts} == go_texts
+    assert re.search(r'const metadataText = "([^"]*)"', go).group(1) == METADATA_TEXT
+    never = guard.read_text(encoding="utf-8").split("var neverReach = []netip.Prefix{", 1)[1].split("\n}", 1)[0]
+    assert {str(net) for net in _NEVER_REACH} == set(re.findall(r'MustParsePrefix\("([^"]+)"\)', never))
+
+    model = _model()
+    model.add_events(
+        [
+            _blocked(70, "169.254.169.254", 80, category="host_internal"),
+            _blocked(71, "169.254.169.254", 80, reason="transparent_tcp_policy_denied"),
+            _blocked(72, "168.63.129.16", 80, category="host_internal"),
+            _blocked(73, "127.0.0.1", 8080, category="host_internal"),
+            _blocked(74, "github.com", 22, reason="transparent_tcp_policy_denied", unblockable=True),
+        ]
+    )
+    model.view = "activity"
+    metadata = "(cloud metadata or link-local address, never reachable from a sandbox)"
+    assert [row[3] for row in model.data_table_rows()] == [
+        "github.com:22 (SSH does not leave a sandbox: use an HTTPS remote (https://github.com/…))",
+        "127.0.0.1:8080 (this machine)",
+        f"168.63.129.16:80 {metadata}",
+        f"169.254.169.254:80 {metadata}",
+        f"169.254.169.254:80 {metadata}",
+    ]
+    model.cursor = 0
+    assert dict(model.detail_pairs()[1])["Unblock"] == "no unblock opens SSH: use an HTTPS remote"
 
 
 def test_a_blocked_large_upload_names_its_threshold() -> None:
@@ -727,6 +779,8 @@ async def test_the_unblock_dialog_says_why_it_was_blocked(fetch, monkeypatch) ->
         "DefenseClaw blocked this destination: Webhook catchers record every request sent to them "
         "for whoever holds the URL, a common exfiltration sink."
     )
+    # GAP-0164: Enter alone cancels; lifting the block takes a deliberate choice.
+    assert screens[0].actions[screens[0].selected_index].action_id == "cancel"
 
 
 def test_tool_blocks_do_not_offer_unblock() -> None:
@@ -1874,6 +1928,22 @@ def test_unreachable_hooks_are_an_alert_and_a_toast() -> None:
     )
     refused = decode_sandbox({**RUNNING, "hooks": {"ingress_refused": 2}})
     assert refused is not None and any("refused 2 hook request(s)" in alert for alert in refused.alerts)
+
+
+def test_the_alerts_cell_fits_a_narrow_table() -> None:
+    # GAP-0163: at 80x24 the screen edge cut "hooks unreachable" to "hooks
+    # unre". The narrow table says unreachable as `sandbox list` does, and a
+    # cell that still does not fit ends in "…".
+    model = _model()
+    sandbox = {**RUNNING, "name": "myapp-opencode", "nested_repos": [], "hooks": {"unreachable": True}}
+    model.set_snapshot(STATUS, [sandbox], [])
+    columns = model.data_table_columns(compact=True)
+    assert model.data_table_rows(compact=True)[0][-1] == "unreachable"
+    for width, cell in ((70, "unreacha…"), (74, "unreachable")):
+        rows = model.data_table_rows(compact=True, width=width)
+        assert rows[0][-1] == cell
+        assert sum(max(map(len, column)) + 2 for column in zip(columns, *rows, strict=True)) - 1 <= width
+    assert model.data_table_rows(width=200)[0][-1] == "hooks unreachable"
 
     model = _model()
     unreachable = (

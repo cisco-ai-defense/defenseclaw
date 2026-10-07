@@ -61,7 +61,7 @@ on a copy instead, as every run on a Mac does. See
 | DefenseClaw | Installed and initialized (see the [quickstart](/docs/get-started/quickstart)), with the daemon running (`defenseclaw-gateway start`). Run everything as your own user, not root. |
 | Linux | amd64 or arm64. WSL2 is not supported. |
 | Kernel | Landlock ABI 3 or newer (kernel 6.2 or newer), enabled in the kernel's `lsm=` list. OpenShell refuses to start a sandbox without it. |
-| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. |
+| Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. Every member of the `docker` group can list and enter every container on the machine, sandboxes of other accounts included (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
 | systemd | A user session with a systemd user manager. The OpenShell gateway runs as the `openshell-gateway` user service, one per machine (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
 
@@ -291,6 +291,16 @@ systemctl --user disable --now openshell-gateway
 Then run `defenseclaw sandbox setup` in the other account. Several users
 on one host are tracked upstream in
 [NVIDIA/OpenShell#4273](https://github.com/NVIDIA/OpenShell/issues/4273).
+
+Membership in the `docker` group is root-equivalent on the machine.
+DefenseClaw keeps each account's state, tokens and project files to that
+account, and the OpenShell gateway refuses another account's client
+certificate, but every account in the `docker` group can list every
+sandbox container on the machine, whichever account started it
+(`docker ps`), and run commands in it (`docker exec`). That isolation does
+not hold against another member of the group, so give the `docker` group
+only to accounts that trust each other: one trusted group of users per
+machine.
 
 ## Common problems
 

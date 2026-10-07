@@ -13083,9 +13083,27 @@ def _check_hook_contract_lock(
     raw_version = stable_agent_version(connector, str(entry.get("raw_agent_version") or ""))
     normalized = str(entry.get("normalized_agent_version") or "")
     script_version = str(entry.get("hook_script_version") or "")
+    # Native setup records the exact executable, version, and digest used
+    # to select the hook contract.  Automatic discovery can legitimately find a
+    # different installation (for example an npm .CMD wrapper ahead of the
+    # desktop app on PATH); it must not override that protected setup evidence.
+    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
+        connector == "opencode" and (platform_name or os.name) == "nt"
+    )
+    protected_setup_agent = protected_setup_connector and all(
+        (
+            str(entry.get("agent_executable") or "").strip(),
+            str(entry.get("agent_executable_sha256") or "").strip(),
+            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
+        )
+    )
     detail = f"contract={contract or '?'} status={status or '?'}"
     if raw_version:
         detail += f" {'agent_cli' if connector == 'cursor' else 'agent'}={raw_version}"
+        if protected_setup_agent:
+            # Doctor does not rediscover a protected agent: after an update this
+            # is the old version, next to the executable mismatch (GAP-0158).
+            detail += " (recorded at setup)"
     if normalized:
         detail += f" normalized={normalized}"
     if script_version:
@@ -13131,20 +13149,6 @@ def _check_hook_contract_lock(
     if native_runtime is not None:
         detail += f" {native_runtime.runtime_description}"
 
-    # Native setup records the exact executable, version, and digest used
-    # to select the hook contract.  Automatic discovery can legitimately find a
-    # different installation (for example an npm .CMD wrapper ahead of the
-    # desktop app on PATH); it must not override that protected setup evidence.
-    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
-        connector == "opencode" and (platform_name or os.name) == "nt"
-    )
-    protected_setup_agent = protected_setup_connector and all(
-        (
-            str(entry.get("agent_executable") or "").strip(),
-            str(entry.get("agent_executable_sha256") or "").strip(),
-            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
-        )
-    )
     # OpenCode and Amp are auto-loaded plugin connectors whose ordinary
     # gateway restart has no independent native-client handshake. Their
     # reviewed hook contract therefore depends on the durable executable seal

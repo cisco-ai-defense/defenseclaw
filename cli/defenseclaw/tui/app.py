@@ -5221,7 +5221,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # Under 100 columns the table leaves out what Enter's detail shows.
                 compact = 0 < self.size.width < 100
                 self._table_columns = self.sandbox_model.data_table_columns(compact)
-                self._table_rows = self.sandbox_model.data_table_rows(compact)
+                # The table spans the body (6 columns of borders and padding).
+                self._table_rows = self.sandbox_model.data_table_rows(compact, max(0, self.size.width - 6))
             self.body_text = self._sandbox_body_text()
             return self.body_text
         if self.active_panel == "policies":
