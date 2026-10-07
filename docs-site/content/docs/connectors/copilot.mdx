@@ -136,7 +136,7 @@ Global setup is the default because DefenseClaw is intended to govern the operat
 defenseclaw setup copilot
 ```
 
-Confirms once, writes `~/.copilot/hooks/defenseclaw.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. It writes `~/.copilot/hooks/defenseclaw.json` and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. For scripted setup, pass `--yes --mode observe` (or `--mode action`).
 
 </Tab>
 
