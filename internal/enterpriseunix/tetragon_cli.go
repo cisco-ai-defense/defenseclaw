@@ -82,9 +82,12 @@ type tetragonIntent struct {
 	Configured string
 	Mode       string
 	// Reason is the status code of a cap that overrides Configured.
-	Reason     string
-	BurnIn     string
-	EnforceAck string
+	Reason string
+	BurnIn string
+	// EnforceAck are the approved digests, canonical (nil for none).
+	EnforceAck []string
+	// CustomerEvents is agent or off.
+	CustomerEvents string
 	// EnforceConnectors are the enrolled connectors whose effective
 	// guardrail mode is action; GuardrailObserve the other enrolled ones.
 	// Both are set only in enforce mode.
@@ -96,15 +99,16 @@ type tetragonIntent struct {
 // the enrolled (enabled) connectors.
 func tetragonIntentOf(cfg *config.Config, goos string, connectors []string) tetragonIntent {
 	if cfg == nil {
+		defaults := config.EnterpriseTetragonConfig{}.Effective()
 		return tetragonIntent{Configured: config.TetragonModeConsume, Mode: config.TetragonModeConsume,
-			BurnIn: config.EnterpriseTetragonConfig{}.Effective().BurnIn}
+			BurnIn: defaults.BurnIn, CustomerEvents: defaults.CustomerEvents}
 	}
 	block := cfg.Enterprise.Tetragon
 	effective := block.Effective()
 	mode, reason := cfg.TetragonMode(goos)
 	intent := tetragonIntent{
 		Written: !block.IsDefault(), Configured: effective.Mode, Mode: mode, Reason: reason,
-		BurnIn: effective.BurnIn, EnforceAck: effective.EnforceAck,
+		BurnIn: effective.BurnIn, EnforceAck: effective.EnforceAck, CustomerEvents: effective.CustomerEvents,
 	}
 	if mode != config.TetragonModeEnforce {
 		return intent
@@ -130,10 +134,25 @@ func (t tetragonIntent) helperMode() string {
 	return t.Mode
 }
 
+// envTetragonCustomerEvents carries enterprise.tetragon.customer_events to the
+// sensor helper, only when it is not the default (agent). The helper's
+// kernelpolicy.IntentFromLookup reads it with the other four.
+const envTetragonCustomerEvents = "DEFENSECLAW_SENSOR_TETRAGON_CUSTOMER_EVENTS"
+
+// approves reports whether the intent's enforce_ack approves digest.
+func (t tetragonIntent) approves(digest string) bool {
+	return config.TetragonEnforceAcks(t.EnforceAck).Approves(digest)
+}
+
+// ack is enforce_ack as the drop-in carries it: the canonical comma list.
+func (t tetragonIntent) ack() string { return strings.Join(t.EnforceAck, ",") }
+
 // dropin renders 30-defenseclaw-tetragon.conf, or nil when the helper's own
 // defaults say the same (an absent block, or one that spells out the
 // defaults). The header names the control-set digest this build ships, the
-// value enforce_ack approves.
+// value enforce_ack approves. ENFORCE_ACK is a comma list (one digest, or
+// several while a ring upgrade runs two builds); CUSTOMER_EVENTS appears only
+// when it is not the default.
 func (t tetragonIntent) dropin() []byte {
 	if !t.Written {
 		return nil
@@ -142,12 +161,16 @@ func (t tetragonIntent) dropin() []byte {
 	b.WriteString("# Written by the DefenseClaw enterprise lifecycle. Do not edit.\n")
 	fmt.Fprintf(&b, "# defenseclaw-derived: enterprise.tetragon kernel_policy=%s\n", kernelpolicy.Digest())
 	b.WriteString("[Service]\n")
-	for _, line := range [][2]string{
+	lines := [][2]string{
 		{kernelpolicy.EnvMode, t.Mode},
 		{kernelpolicy.EnvBurnIn, t.BurnIn},
-		{kernelpolicy.EnvEnforceAck, t.EnforceAck},
+		{kernelpolicy.EnvEnforceAck, t.ack()},
 		{kernelpolicy.EnvEnforceConnectors, strings.Join(t.EnforceConnectors, ",")},
-	} {
+	}
+	if t.CustomerEvents != "" && t.CustomerEvents != config.TetragonCustomerEventsAgent {
+		lines = append(lines, [2]string{envTetragonCustomerEvents, t.CustomerEvents})
+	}
+	for _, line := range lines {
 		fmt.Fprintf(&b, "Environment=%s\n", systemdQuote(line[0]+"="+line[1]))
 	}
 	return []byte(b.String())
@@ -358,10 +381,10 @@ func tetragonFindings(goos string, intent tetragonIntent, haveIntent bool, state
 		}
 		if intent.Mode == config.TetragonModeEnforce {
 			switch {
-			case intent.EnforceAck == "":
+			case len(intent.EnforceAck) == 0:
 				add(false, kernelpolicy.WarnEnforceAckMissing, "enterprise.tetragon.mode is enforce, but enforce_ack is empty, so the kernel controls stay in monitor mode; review `enterprise linux tetragon status` and approve with `enforce_ack: %s`", digest)
-			case intent.EnforceAck != digest:
-				add(false, kernelpolicy.WarnEnforceAckStale, "enforce_ack %s approves another control set than the %s this build ships, so the kernel controls stay in monitor mode; review `enterprise linux tetragon status` and approve the new digest", intent.EnforceAck, digest)
+			case !intent.approves(digest):
+				add(false, kernelpolicy.WarnEnforceAckStale, "enforce_ack %s approves another control set than the %s this build ships, so the kernel controls stay in monitor mode; review `enterprise linux tetragon status` and approve the new digest", intent.ack(), digest)
 			}
 			if intent.BurnIn == "0" {
 				add(false, kernelpolicy.WarnBurnInSkipped, "enterprise.tetragon.burn_in is 0: users are enforced without a measured burn-in")
@@ -602,12 +625,15 @@ type TetragonReport struct {
 type TetragonIntentView struct {
 	// Valid is false when the installed config could not be read or does
 	// not validate; the other fields are then the defaults.
-	Valid             bool     `json:"valid"`
-	Configured        string   `json:"configured_mode"`
-	Mode              string   `json:"mode"`
-	CapReason         string   `json:"cap_reason,omitempty"`
-	BurnIn            string   `json:"burn_in"`
+	Valid      bool   `json:"valid"`
+	Configured string `json:"configured_mode"`
+	Mode       string `json:"mode"`
+	CapReason  string `json:"cap_reason,omitempty"`
+	BurnIn     string `json:"burn_in"`
+	// EnforceAck is the approved digests as the drop-in carries them: one,
+	// or a comma list while a ring upgrade runs two builds.
 	EnforceAck        string   `json:"enforce_ack"`
+	CustomerEvents    string   `json:"customer_events"`
 	Approval          string   `json:"approval"`
 	EnforceConnectors []string `json:"enforce_connectors"`
 	GuardrailObserve  []string `json:"guardrail_observe"`
@@ -832,7 +858,8 @@ func (rep *TetragonReport) fill(env *Env, intent tetragonIntent, haveIntent bool
 	}
 	rep.Intent = TetragonIntentView{
 		Valid: haveIntent, Configured: intent.Configured, Mode: intent.helperMode(), CapReason: intent.Reason,
-		BurnIn: intent.BurnIn, EnforceAck: intent.EnforceAck, Approval: approvalOf(intent),
+		BurnIn: intent.BurnIn, EnforceAck: intent.ack(), CustomerEvents: defaultStr(intent.CustomerEvents, config.TetragonCustomerEventsAgent),
+		Approval:          approvalOf(intent),
 		EnforceConnectors: nonNil(intent.EnforceConnectors), GuardrailObserve: nonNil(intent.GuardrailObserve),
 		Dropin: intent.Written,
 	}
@@ -901,9 +928,9 @@ func approvalOf(intent tetragonIntent) string {
 	switch {
 	case intent.Mode != config.TetragonModeEnforce:
 		return "not_needed"
-	case intent.EnforceAck == "":
+	case len(intent.EnforceAck) == 0:
 		return "missing"
-	case intent.EnforceAck != kernelpolicy.Digest():
+	case !intent.approves(kernelpolicy.Digest()):
 		return "stale"
 	}
 	return "approved"

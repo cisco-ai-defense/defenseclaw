@@ -59,14 +59,18 @@ func tetragonTestConfig(t *testing.T, h *testHost, block string, planeC bool) st
 	return path
 }
 
-func expectedTetragonDropin(mode, burnIn, ack, connectors string) string {
-	return "# Written by the DefenseClaw enterprise lifecycle. Do not edit.\n" +
+func expectedTetragonDropin(mode, burnIn, ack, connectors string, extra ...string) string {
+	out := "# Written by the DefenseClaw enterprise lifecycle. Do not edit.\n" +
 		"# defenseclaw-derived: enterprise.tetragon kernel_policy=" + kernelpolicy.Digest() + "\n" +
 		"[Service]\n" +
 		"Environment=DEFENSECLAW_SENSOR_TETRAGON_MODE=" + mode + "\n" +
 		"Environment=DEFENSECLAW_SENSOR_TETRAGON_BURN_IN=" + burnIn + "\n" +
 		"Environment=DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_ACK=" + ack + "\n" +
 		"Environment=DEFENSECLAW_SENSOR_TETRAGON_ENFORCE_CONNECTORS=" + connectors + "\n"
+	for _, line := range extra {
+		out += "Environment=" + line + "\n"
+	}
+	return out
 }
 
 func (h *testHost) recordTetragonPolicies(names ...string) {
@@ -150,7 +154,7 @@ func TestTetragonDropinFollowsTheBlock(t *testing.T) {
 	if exists(h.env.P(tetragonDropinPath)) {
 		t.Fatal("an absent enterprise.tetragon rendered a drop-in")
 	}
-	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: tetragonTestConfig(t, h, "    mode: consume\n    burn_in: 168h\n", true)}))
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: tetragonTestConfig(t, h, "    mode: consume\n    burn_in: 168h\n    customer_events: agent\n    enforce_ack: []\n", true)}))
 	if exists(h.env.P(tetragonDropinPath)) {
 		t.Fatal("a block that spells out the defaults rendered a drop-in")
 	}
@@ -230,6 +234,24 @@ func TestTetragonDropinAppliesTheCaps(t *testing.T) {
 			name: "observe keeps an approval inert", block: "    mode: observe\n    enforce_ack: sha256:000000000000\n", planeC: true,
 			dropin: expectedTetragonDropin("observe", "168h", "sha256:000000000000", ""),
 			absent: []string{kernelpolicy.WarnEnforceAckStale, kernelpolicy.WarnGuardrailObserve + ":codex"},
+		},
+		{
+			// A ring upgrade approves the old and the new build at once: the
+			// list reaches the helper as a comma list and approves this build.
+			name: "approval list", block: "    mode: enforce\n    enforce_ack: [sha256:000000000000, " + digest + "]\n", planeC: true,
+			dropin: expectedTetragonDropin("enforce", "168h", "sha256:000000000000,"+digest, "claudecode"),
+			absent: []string{kernelpolicy.WarnEnforceAckMissing, kernelpolicy.WarnEnforceAckStale},
+		},
+		{
+			name: "approval list without this build", block: "    mode: enforce\n    enforce_ack:\n      - sha256:000000000000\n      - sha256:111111111111\n", planeC: true,
+			dropin:   expectedTetragonDropin("enforce", "168h", "sha256:000000000000,sha256:111111111111", "claudecode"),
+			warnings: []string{kernelpolicy.WarnEnforceAckStale},
+		},
+		{
+			// customer_events alone is a written block; its variable appears
+			// only when it is not the default.
+			name: "customer events off", block: "    customer_events: off\n", planeC: true,
+			dropin: expectedTetragonDropin("consume", "168h", "", "", envTetragonCustomerEvents+"=off"),
 		},
 	}
 	for _, tc := range cases {
