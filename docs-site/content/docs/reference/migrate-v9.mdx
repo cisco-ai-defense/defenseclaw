@@ -208,6 +208,17 @@ admission:
   bypassed the scan only for an explicit `true`).
 - `first_party_allow_list` is written for a type only when it differs from the
   built-in list.
+- A `first_party_allow_list` entry without `source_path_contains` matched any
+  path in v8, and skipped the scan only where `allow_list_bypass_scan` was on.
+  A v9 first-party entry needs a path, so where the bypass applies to its type
+  the entry becomes a name-only `asset_policy.<type>.allowed` entry. Where it
+  does not, v8 scanned the asset anyway: the entry is dropped and a note is
+  recorded.
+- A value `config.yaml` already sets under `admission:` wins. Before the
+  migration has run, `defenseclaw config set`, `policy activate` and the TUI
+  write such values into the version 8 file, and the gateway applies them when
+  it reads that file in memory. Where `data.json` held a different value, a
+  conflict is recorded that keeps the config value.
 - `cisco_trust_level` is written when it is not `full`.
 - Keys with no reader in 1.0.x (`config.policy_name`,
   `config.max_enforcement_delay_seconds`, `severity_ranking`, `audit`,
@@ -578,7 +589,7 @@ Every run that writes also writes `migration-v9.json` next to `config.yaml`
 | `migrated_at`, `actor` | When it ran, and who: `migration` for the commands above, `lifecycle` for a managed host's `ensure`. |
 | `source_sha256`, `result_sha256` | The hash of `config.yaml` before and after. The lifecycle uses them to see that an installed file is the migration of your v8 file, not drift. |
 | `moved[]` | Every value written. `source` is `config`, `data.json` or `audit.db`; `from` is the v8 location; `to` is the v9 key; `value` is the value written, with secrets shown as `<redacted>`. |
-| `conflicts[]` | A v9 key with disagreeing v8 sources: the `kept` and the `lost` value, and why. `data.json` (or, with none, the built-in defaults) wins over the `*_actions` keys and `watch.allow_list_bypass_scan`, because enforcement read it. |
+| `conflicts[]` | A v9 key with disagreeing v8 sources: the `kept` and the `lost` value, and why. `data.json` (or, with none, the built-in defaults) wins over the `*_actions` keys and `watch.allow_list_bypass_scan`, because enforcement read it. A value `config.yaml` already sets under `admission:`, or in `block_at` or `alert_at`, wins over `data.json`. |
 | `removed[]` | v8 keys dropped without a v9 value because nothing read them. |
 | `actions_rows_moved`, `actions_rows_ignored` | The `audit.db` rows moved, and (managed host) left in place. |
 | `notes[]` | Behaviour changes to read, such as the threshold note above. |
