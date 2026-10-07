@@ -648,6 +648,12 @@ from defenseclaw.commands.cmd_setup_edge_connector import edge_connector  # noqa
 
 setup.add_command(edge_connector)
 
+# Register `defenseclaw setup mqtt-broker` (bundled MQTT broker setup).
+# Stands up an MQTT broker via Docker or systemd for fleet communication.
+from defenseclaw.commands.cmd_setup_mqtt import mqtt_broker  # noqa: E402
+
+setup.add_command(mqtt_broker)
+
 # `defenseclaw setup acp` is the discovery-first entry point: it finds
 # unguarded ACP agents and routes them through the guard, where
 # `defenseclaw acp setup` requires the operator to already know the pair.

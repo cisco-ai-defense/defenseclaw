@@ -19,6 +19,9 @@
 Guides the operator through building the edge-connector from source,
 setting the fleet API bearer token, registering the fleet API endpoint,
 and emitting a sample policy YAML.
+
+Subcommands:
+    install   Build and deploy the edge-connector engine locally or via SSH.
 """
 
 from __future__ import annotations
@@ -63,7 +66,7 @@ spec:
 """
 
 
-@click.command("edge-connector")
+@click.group("edge-connector", invoke_without_command=True)
 @click.option(
     "--token",
     default=None,
@@ -84,9 +87,9 @@ spec:
     is_flag=True,
     help="Skip prompts; use flag values or defaults.",
 )
-@pass_ctx
+@click.pass_context
 def edge_connector(
-    app: AppContext,
+    ctx: click.Context,
     token: str | None,
     endpoint: str | None,
     emit_policy: bool,
@@ -97,7 +100,17 @@ def edge_connector(
     Walks through building the edge-connector binary, setting the fleet
     API bearer token in ~/.defenseclaw/.env, and registering the endpoint.
     Use ``--emit-policy`` to print a sample fleet policy YAML.
+
+    Subcommands:
+
+        install   Build and deploy the edge-connector engine (local or SSH).
     """
+    # If a subcommand was invoked, skip the default setup wizard.
+    if ctx.invoked_subcommand is not None:
+        return
+
+    app = ctx.ensure_object(AppContext)
+
     if emit_policy:
         ux.echo(_SAMPLE_POLICY)
         return
@@ -106,7 +119,7 @@ def edge_connector(
 
     # --- 1. Build instructions -------------------------------------------
     ux.echo()
-    ux.info(
+    ux.echo(
         "Edge Connector Engine (C):\n"
         "\n"
         "  cd edge-connector\n"
@@ -209,3 +222,9 @@ def _persist_env_var(env_path: Path, key: str, value: str) -> None:
         env_path.chmod(0o600)
     except OSError:
         pass
+
+
+# Register subcommands
+from defenseclaw.commands.cmd_edge_install import edge_install  # noqa: E402
+
+edge_connector.add_command(edge_install, "install")
