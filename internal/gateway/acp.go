@@ -300,25 +300,32 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 	}
 	// The agent an ACP client drives is the connector's install, so its
 	// records carry the agent identity the hook path derives for it.
+	var facts agentIdentityFacts
 	if identity.IdentityID == "" {
-		if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
+		if facts = resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connector}); facts.ID != "" {
 			identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
 			updated = true
 		}
 	}
+	newSession := false
 	// And the instance (ais-) of the ACP session the frame belongs to,
 	// derived from that identity as the hook path derives one per session; a
 	// frame that names no session has none (GAP-0252). Secure Client ACP
 	// records carry no instance, as on main (issue #1092).
 	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && session != "" && !ManagedEnterpriseActive() {
 		if registry := SharedAgentRegistry(); registry != nil {
-			resolved, _ := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
+			resolved, minted := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
+			newSession = minted
 			if resolved.AgentInstanceID != "" {
 				identity.AgentInstanceID = resolved.AgentInstanceID
 				updated = true
 			}
 		}
 	}
+	// Recorded for `defenseclaw agent identities` as the hook path and the
+	// LLM proxy record theirs, so an agent used only through ACP is listed
+	// and its ACP sessions are counted (GAP-0315).
+	sharedAgentIdentities.observe(facts, SessionIDFromContext(ctx), newSession)
 	if updated {
 		ctx = ContextWithAgentIdentity(ctx, identity)
 	}
