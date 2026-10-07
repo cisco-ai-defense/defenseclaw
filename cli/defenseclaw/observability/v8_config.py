@@ -1256,7 +1256,8 @@ def _one_of_action(branches: Any) -> str:
             if all(name in (other.get("required") or []) for other in objects)
         ]
         if common:
-            return "use a mapping with " + (", ".join(common[:-1]) + " and " + common[-1] if len(common) > 1 else common[0])
+            names = ", ".join(common[:-1]) + " and " + common[-1] if len(common) > 1 else common[0]
+            return "use a mapping with " + names
     parts: list[str] = []
     for branch in resolved:
         values = branch.get("enum")

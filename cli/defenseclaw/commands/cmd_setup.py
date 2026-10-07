@@ -457,11 +457,15 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
         ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
         return
     if known and not running:
-        ux.echo(f"  ℹ Saved. It takes effect once the gateway starts and confirms the {noun} (defenseclaw-gateway start).")
+        ux.echo(
+            f"  ℹ Saved. It takes effect once the gateway starts and confirms the {noun} (defenseclaw-gateway start)."
+        )
         ctx.meta[_SETUP_START_HINT_KEY] = True
         ctx.meta[_SETUP_OFFLINE_NOTED_KEY] = True
         return
-    ux.echo(f"  ℹ Saved. It takes effect once the gateway restarts and confirms the {noun} (defenseclaw-gateway restart).")
+    ux.echo(
+        f"  ℹ Saved. It takes effect once the gateway restarts and confirms the {noun} (defenseclaw-gateway restart)."
+    )
 
 
 @click.group(cls=_SetupGroup, invoke_without_command=True)
