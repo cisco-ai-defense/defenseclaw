@@ -23571,27 +23571,30 @@ function Invoke-DefenseClawNuclearUninstall {
     $brokerName = Get-DefenseClawCMIDBrokerServiceName `
         -GatewayServiceName $GatewayServiceName
 
-    # 1. Stop + delete every managed service we might have created in this
-    #    scope. All native-exe invocations in the nuclear path route through
+    # 1. Disarm SCM auto-restart for every managed service, THEN kill the
+    #    worker, THEN stop + delete the service row. Ordering is
+    #    load-bearing: Install registers each service with FailureActions
+    #    (5s/15s/60s restart schedule) + FailureActionsOnNonCrashFailures=1
+    #    via Set-DefenseClawExactFailureActions. A naive sc stop followed
+    #    by taskkill /F terminates the worker while SCM is still in
+    #    STOP_PENDING, SCM reads that as a crash, consults the still-
+    #    populated FailureActions registry blob, and auto-respawns the
+    #    worker ~5s later - exactly inside the Remove-Item retry window.
+    #    The next install then trips on "untrusted principal S-1-3-0 has
+    #    write-like access" because the half-torched InstallRoot survives
+    #    with a stale Creator Owner ACE.
+    #
+    #    sc.exe failure's documented clear sentinel (actions= //) and the
+    #    sc.exe failureflag empty value are both parser-fragile. Use
+    #    direct registry removal instead - deterministic across Windows
+    #    SKUs, and `sc config start= disabled` makes any surviving row
+    #    inert against a scm-cold-start restart.
+    #
+    #    All native-exe invocations in the nuclear path route through
     #    Invoke-DefenseClawNuclearSilentExec so no console window flashes
     #    when the Setup EXE's PowerShell host runs without an inherited
     #    console. Errors are swallowed - a service that is already gone or
-    #    whose stop fails is fine; sc.exe delete marks the row for deletion
-    #    regardless and the SCM pending-delete flag completes at reboot.
-    #
-    #    BEFORE sc stop: clear SCM failure actions and demote start= to
-    #    disabled. The managed services ship with FailureActionsOnNonCrash-
-    #    Failures=1 + a 5s/15s/60s restart schedule (see
-    #    Get-DefenseClawFailureActionsBytes). A nuclear sc stop that
-    #    hits SCM's stop-timeout, or a taskkill /F while SCM still has
-    #    the row, counts as a non-crash failure - SCM then respawns the
-    #    worker ~5s later while this function is still deleting files,
-    #    which lands us at Remove-Item "being used by another process"
-    #    and a surviving broker row at state=running on the probe below.
-    #    Clearing failure actions first makes sc stop + taskkill /F
-    #    terminal; demoting start= disabled makes the service row
-    #    inert even if `sc delete` has to wait on an open-handle
-    #    pending-delete flag.
+    #    whose stop fails is fine.
     foreach ($name in @(
         $GatewayServiceName,
         $GuardianServiceName,
@@ -23599,21 +23602,27 @@ function Invoke-DefenseClawNuclearUninstall {
         $brokerName
     )) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        Invoke-DefenseClawNuclearSilentExec `
-            -File $script:ScExe `
-            -Arguments @('failure', $name, 'reset=', '0', 'actions=', '')
+        $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $serviceKey) {
+            Microsoft.PowerShell.Management\Remove-ItemProperty `
+                -LiteralPath $serviceKey `
+                -Name FailureActions `
+                -ErrorAction SilentlyContinue
+            Microsoft.PowerShell.Management\Remove-ItemProperty `
+                -LiteralPath $serviceKey `
+                -Name FailureActionsOnNonCrashFailures `
+                -ErrorAction SilentlyContinue
+        }
         Invoke-DefenseClawNuclearSilentExec `
             -File $script:ScExe `
             -Arguments @('config', $name, 'start=', 'disabled')
-        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('stop', $name)
-        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('delete', $name)
     }
 
     # 1b. Force-kill the two SERVICE-WORKER binaries that hold persistent
-    #     file handles on the install tree. sc.exe stop is cooperative;
-    #     if the service's stop handler hangs or the worker is wedged
-    #     holding its log file open, Remove-Item -Recurse fails with
-    #     "being used by another process".
+    #     file handles on the install tree. Runs BEFORE sc stop/delete:
+    #     with FailureActions now empty, SCM sees the worker exit and
+    #     has no action to take. If sc stop went first the worker would
+    #     linger in STOP_PENDING while taskkill races SCM.
     #
     #     DO NOT include defenseclaw.exe or defenseclaw-hook.exe in this
     #     list. defenseclaw.exe is the Setup EXE trailer-extracted
@@ -23631,6 +23640,22 @@ function Invoke-DefenseClawNuclearUninstall {
         Invoke-DefenseClawNuclearSilentExec `
             -File $taskkillExe `
             -Arguments @('/F', '/IM', $image, '/T')
+    }
+
+    # 1c. Short settle delay so SCM registers the worker exits as
+    #     final-state (no respawn pending). Then sc stop + sc delete:
+    #     stop is a no-op now (process is gone), delete succeeds
+    #     because the service is no longer running.
+    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
+    foreach ($name in @(
+        $GatewayServiceName,
+        $GuardianServiceName,
+        $enumeratorName,
+        $brokerName
+    )) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('stop',   $name)
+        Invoke-DefenseClawNuclearSilentExec -File $script:ScExe -Arguments @('delete', $name)
     }
 
     # 1c. Short settle delay so NT closes the released handles before the
