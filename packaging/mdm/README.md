@@ -27,7 +27,7 @@ in the config, including which agents to protect, is in
 | `windows/Invoke-DefenseClawEnterprise.ps1` | Generic Windows wrapper (PowerShell 7.4 or later). Verifies and runs `DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure`. |
 | `windows/detect.ps1`, `windows/uninstall.ps1` | Windows detection and removal. These run in Windows PowerShell 5.1 (32- or 64-bit) and PowerShell 7. |
 | `linux/*.sh`, `macos/*.sh` | Generic wrapper (`defenseclaw-enterprise.sh`), `detect.sh` and `uninstall.sh`. The Linux and macOS copies differ only in the line `DC_SCRIPT_OS`. |
-| `intune/` | Microsoft Intune guide for Windows (Win32 app and Remediations), macOS (shell script, or PKG app) and Linux (platform script). |
+| `intune/` | Microsoft Intune: the Windows Win32 app packager, launcher and Remediations scripts (`intune/windows`), and `intune/tenant`, a Graph helper that checks the tenant, creates device groups and assigns the package and Remediations. The step-by-step guides are in the docs. |
 | `signing/` | Signing channels, and `authenticode-sign.sh` for release signing or re-signing with your own certificate. |
 
 ## Quick start
