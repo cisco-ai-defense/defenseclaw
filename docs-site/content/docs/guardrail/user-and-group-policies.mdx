@@ -231,7 +231,9 @@ What follows when the identity is missing:
   added to a group gets the group's profile after all three. `guardrail profile
   explain` asks the operating system directly, so it already shows the new
   profile; its `cache:` line and a warning give the age of the facts requests
-  still use. Restart the gateway to drop its cache at once. On Windows the
+  still use. On a bound Mac, flush Open Directory membership with
+  `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
+  gateway or wait for its 15-minute refresh. On Windows the
   groups are those of the sign-in token, so the user must also sign out and
   back in. While the directory does not answer, the gateway keeps using a
   user's last facts, for at most an hour (four times the cache lifetime). After
