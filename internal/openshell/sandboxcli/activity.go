@@ -435,7 +435,9 @@ func (a *App) Decide(ctx context.Context, o DecideOptions) error {
 	}
 	switch m := strings.TrimSpace(res.Message); {
 	case res.Approval.Status == sandboxapi.ApprovalQueued:
-		msg += "; it applies at the next quiet moment of the sandbox"
+		// The connection that asked was refused at once: nothing waits for
+		// the answer, so the program has to try again.
+		msg += "; it applies at the next quiet moment of the sandbox (usually within a minute), then retry the connection that asked"
 	case m != "" && m != verb && !strings.HasPrefix(m, verb+";") && !strings.HasPrefix(m, verb+" "):
 		msg += "; " + m
 	}

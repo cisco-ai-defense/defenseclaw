@@ -305,8 +305,9 @@ func TestApprovalsAndDecisions(t *testing.T) {
 	if len(calls) != 1 || !strings.Contains(string(calls[0].Body), `"decision":"approve"`) || !strings.Contains(string(calls[0].Body), `"always":true`) {
 		t.Fatalf("decide calls = %+v", calls)
 	}
-	// One line per decision (manual test L10).
-	has(t, ta.output(), "approved ap-1", "next quiet moment", "kept for future sandboxes")
+	// One line per decision (manual test L10), which says to retry the
+	// connection that asked (GAP-0120: it was refused at once).
+	has(t, ta.output(), "approved ap-1", "next quiet moment", "then retry the connection that asked", "kept for future sandboxes")
 	if n := strings.Count(ta.output(), "\n"); n != 1 {
 		t.Fatalf("decide printed %d lines:\n%s", n, ta.output())
 	}
