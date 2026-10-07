@@ -656,6 +656,38 @@ func TestSessionSummary(t *testing.T) {
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
+		// GAP-0077: the OpenShell gateway restarted under the session (an
+		// upgrade), which closed the harness's exec relay: the sandbox read
+		// as unknown for a moment, then ready, and the session said it was
+		// stopped from outside and kept stopped.
+		{name: "the connection was lost", opts: claude, exit: 1, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 1
+			ta.term.during = func() { ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "unknown" }) }
+			ta.Sleep = func(_ context.Context, d time.Duration) error {
+				if d == settlePhaseInterval {
+					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+				}
+				return nil
+			}
+		}, check: noStop,
+			want: []string{"the connection to " + sbName + " was lost (the OpenShell gateway restarted, for one), which ended Claude Code; " + sbName +
+				" is still running → reattach: defenseclaw sandbox connect " + sbName, "Sandbox " + sbName + " keeps running → reattach"},
+			not: []string{"stopped from outside", "Sandbox kept (stopped)"}},
+		// GAP-0096: DefenseClaw's own stop for silent hooks is no stop from
+		// outside.
+		{name: "stopped by DefenseClaw for silent hooks", opts: claude, exit: 255, setup: func(ta *testApp) {
+			noChanges(ta)
+			ta.term.code = 255
+			ta.term.during = func() {
+				ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+					sb.Phase = "stopped"
+					sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
+				})
+			}
+		}, check: noStop,
+			want: []string{"DefenseClaw stopped " + sbName + ": Claude Code worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)"},
+			not:  []string{"stopped from outside"}},
 		{name: "undone from elsewhere", opts: claude, exit: 255, setup: elsewhere(true), check: noStop,
 			want: []string{sbName + " was undone from outside this session (`defenseclaw sandbox undo` or the TUI): the folder is back at its undo point, " +
 				"and that stopped Claude Code", "Sandbox kept (stopped)"}, not: []string{"the harness itself failed"}},
