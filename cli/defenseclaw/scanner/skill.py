@@ -265,7 +265,8 @@ class SkillScannerWrapper:
             # instance-metadata credentials once with a 1 s timeout; retry a
             # slow answer like the gateway's Go SDK does (GAP-2628).
             region = _bedrock_region(llm)
-            if region and not os.environ.get("AWS_REGION"):
+            # Config wins over the shell, as in the gateway scanner env.
+            if region:
                 os.environ["AWS_REGION"] = region
             if llm.keyless_auth_mode() == "instance_role":
                 os.environ.setdefault("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "3")

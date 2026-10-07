@@ -86,6 +86,8 @@ class TestSkillScannerBedrockInstanceRole(unittest.TestCase):
         return build_analyzers.call_args.kwargs, stderr.getvalue()
 
     def test_uses_credential_chain_and_configured_region(self):
+        # The configured region wins over the shell, as in the gateway scanner env.
+        os.environ["AWS_REGION"] = "ap-south-1"
         kwargs, err = self._scan(creds_found=True)
         self.assertTrue(kwargs.get("use_llm"))
         self.assertNotIn("llm_api_key", kwargs)
