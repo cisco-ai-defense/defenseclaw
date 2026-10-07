@@ -39,13 +39,16 @@ if TYPE_CHECKING:
 
 
 def _tool_policy_entries(tools: Any) -> list[ActionEntry]:
+    """asset_policy.tool rules as ActionEntry rows. config.yaml stores no
+    time for a rule, so ``updated_at`` is None (shown as "-"), never the
+    time of the read."""
     out: list[ActionEntry] = []
     for decision, rules in (("block", getattr(tools, "denied", [])), ("allow", getattr(tools, "allowed", []))):
         for rule in rules or []:
             target = f"@{rule.connector}/{rule.name}" if rule.connector else rule.name
             out.append(ActionEntry(
                 id=f"asset_policy:tool:{target}", target_type="tool", target_name=target,
-                actions=ActionState(install=decision), reason=rule.reason,
+                actions=ActionState(install=decision), reason=rule.reason, updated_at=None,
             ))
     return out
 

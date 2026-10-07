@@ -189,6 +189,8 @@ class TestToolList(ToolCommandTestBase):
             for row in group.get("tools", [])
         ]
         self.assertIn("shell_exec", names)
+        # config.yaml stores no time for a rule: none is invented (GAP-0309).
+        self.assertEqual({row["updated_at"] for group in data for row in group.get("tools", [])}, {None})
 
 # ---------------------------------------------------------------------------
 # status
