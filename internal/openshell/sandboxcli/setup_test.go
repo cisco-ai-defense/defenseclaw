@@ -1872,6 +1872,11 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	writeFile(t, edited, "dc\n")
 	ta.ok(t, ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: kept, Backup: kept + ".bak"}, {Path: edited}}}))
 	writeFile(t, edited, "user edit\n")
+	// GAP-0123: every edit left a backup, and teardown kept them all.
+	backups := []string{kept + ".defenseclaw-20261007T100000Z.bak", kept + ".defenseclaw-20261007T110000Z.bak"}
+	for _, b := range append(backups, edited+".defenseclaw-20261007T100000Z.bak") {
+		writeFile(t, b, "dc\n")
+	}
 	rc := filepath.Join(ta.home, ".bashrc")
 	if _, err := wrapper.Enable(wrapper.Bash, rc, "/usr/local/bin/defenseclaw-gateway", wrapper.Wrap{Command: "claude", Harness: "claude"}); err != nil {
 		t.Fatal(err)
@@ -1884,6 +1889,7 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	has(t, ta.output(), "leftover data     dc-claude-stale", "dc-claude-live, dc-claude-orphan",
 		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n  images ")
 	lacks(t, ta.output(), "dc-claude-theirs")
+	has(t, ta.output(), "then remove the 2 backups DefenseClaw made of it")
 	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
 	}
@@ -1915,7 +1921,15 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if len(ta.gateway.rollbacks) != 1 || len(ta.gateway.rollbacks[0].Files) != 1 || ta.gateway.rollbacks[0].Files[0].Path != kept {
 		t.Fatalf("rollbacks = %+v", ta.gateway.rollbacks)
 	}
-	has(t, ta.output(), edited+" changed after DefenseClaw edited it")
+	has(t, ta.output(), edited+" changed after DefenseClaw edited it", "removed the 2 backups DefenseClaw made of the gateway configuration")
+	for _, b := range backups {
+		if _, err := os.Stat(b); !os.IsNotExist(err) {
+			t.Errorf("backup %s is still there: %v", b, err)
+		}
+	}
+	if _, err := os.Stat(edited + ".defenseclaw-20261007T100000Z.bak"); err != nil {
+		t.Errorf("the backup of a file left alone is gone: %v", err)
+	}
 	if b, _ := wrapper.Read(rc); len(b.Wraps) != 0 {
 		t.Fatalf("wrappers left: %+v", b)
 	}
