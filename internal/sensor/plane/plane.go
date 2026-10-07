@@ -26,7 +26,9 @@
 // -- tactics, agent lineage, chain scoring -- never branches on the operating
 // system. What varies is only how the events are obtained: Endpoint Security
 // on macOS, the netlink process connector plus fanotify on Linux, and the
-// Security event log on Windows.
+// Security event log on Windows. The managed Linux sensor helper can also use
+// a customer-run Tetragon for the process half (NewTetragonSource), with the
+// native halves live inside the same stream as its fallback.
 //
 // # Degradation is a value, not a silence
 //
@@ -62,6 +64,51 @@ const (
 	KindIdentity Kind = "identity"
 	// KindPrivilege is a process acquiring rights it did not start with.
 	KindPrivilege Kind = "privilege"
+	// KindConnect is a process opening a TCP connection to a peer outside
+	// the host (Remote). Only the Tetragon backend's connect policy produces
+	// it; the classifier has no tactic for it, so it never scores alone.
+	KindConnect Kind = "connect"
+)
+
+// EventSource names the backend that produced an event.
+type EventSource string
+
+const (
+	// SourceTetragon is a customer-run Tetragon agent, read by the managed
+	// Linux sensor helper.
+	SourceTetragon EventSource = "tetragon"
+	// SourceCNProc is the netlink process connector.
+	SourceCNProc EventSource = "cn_proc"
+	// SourceFanotify is a fanotify notification group.
+	SourceFanotify EventSource = "fanotify"
+)
+
+// KernelOutcome is what a kernel policy did to the access an event reports.
+type KernelOutcome string
+
+const (
+	// OutcomeObserved is a post-only policy recording the access.
+	OutcomeObserved KernelOutcome = "observed"
+	// OutcomeWouldBlock is a deny selector that matched while its policy ran
+	// in monitor mode: counted, not applied.
+	OutcomeWouldBlock KernelOutcome = "would_block"
+	// OutcomeBlocked is a deny selector that matched while its policy was
+	// enforcing: the kernel returned EPERM.
+	OutcomeBlocked KernelOutcome = "blocked"
+)
+
+// HookMark is the self-filter's verdict on a process at or under a
+// DefenseClaw hook (section 8.1 of the Tetragon spec).
+type HookMark string
+
+const (
+	// HookVerified is the exec or exit of a verified hook: the exact rendered
+	// hook command, launched by the agent root (or its one sh -c launcher)
+	// as the root's own uid. Its argv is reduced to the fixed hook tokens.
+	HookVerified HookMark = "verified"
+	// HookUnexpected is a process under a verified hook that is not one of
+	// the hook's own tools. It is forwarded like any other event, marked.
+	HookUnexpected HookMark = "hook_subtree_unexpected"
 )
 
 // Event is one normalised kernel observation.
@@ -91,6 +138,47 @@ type Event struct {
 	// User is the owning username, when cheaply available.
 	User string
 	At   time.Time
+
+	// Exe is the executable path the backend resolved: Tetragon's binary,
+	// or /proc/<pid>/exe for a native Linux event read in the helper.
+	// Identity prefers it to Name, whose basename can be a version number
+	// (a native Claude install runs as .../versions/2.1.292).
+	Exe string
+	// UID and AUID are the process's kernel uid and audit login uid. nil is
+	// "not observed": uid 0 is root, which is a value, not an absence.
+	UID  *int
+	AUID *int
+	// ExecID and ParentExecID are the backend's process identities (Tetragon
+	// exec_id). Unlike a pid they are never reused, so lineage keyed on them
+	// does not have to guess at pid reuse.
+	ExecID       string
+	ParentExecID string
+	// StartNS is the process start time in Unix nanoseconds.
+	StartNS int64
+	// ContainerID is set for a process inside a container. Such an event is
+	// counted in the container bucket and never joins a host agent session.
+	ContainerID string
+	// Source names the backend that produced the event.
+	Source EventSource
+
+	// Policy, Outcome and Control are set only on events of DefenseClaw's
+	// own Tetragon policies: the policy name, what the policy did, and for
+	// the controls policy the control id (kernel.ssh_private_key_read or
+	// kernel.persistence_write).
+	Policy  string
+	Outcome KernelOutcome
+	Control string
+	// Remote is the peer of a KindConnect event, as host:port.
+	Remote string
+
+	// Self marks DefenseClaw's own gateway, helper and ACP processes. They
+	// are excluded from scoring, never hidden.
+	Self bool
+	// Hook is the self-filter's verdict (empty for everything else).
+	Hook HookMark
+	// HookTools, on a verified hook's exit, counts the hook's own tool
+	// processes (jq, curl, ...) that were summarized instead of forwarded.
+	HookTools int
 }
 
 // Coverage describes what a running source can and cannot see.
@@ -108,6 +196,107 @@ type Coverage struct {
 	MissingKinds []Kind
 	// Limitations are operator-facing reasons, one per missing capability.
 	Limitations []string
+	// Backend describes the process backend of the managed Linux sensor
+	// helper: Tetragon, or the native one with the reason Tetragon is not in
+	// use. nil everywhere else.
+	Backend *Backend
+}
+
+// Backend kinds.
+const (
+	BackendTetragon = "tetragon"
+	BackendNative   = "native"
+)
+
+// Backend is what the managed Linux helper's Plane C process half runs on.
+type Backend struct {
+	// Kind is BackendTetragon or BackendNative.
+	Kind string
+	// Version is Tetragon's version (v1.7.1) when it answered GetVersion.
+	Version string
+	// Mode is the effective enterprise.tetragon mode the helper runs:
+	// off, consume, observe or enforce.
+	Mode string
+	// Socket is the unix socket the helper dialled.
+	Socket string
+	// EventsLost is how many events the backend reported losing since the
+	// stream opened: rate-limit drops in the stream, plus Tetragon's own
+	// loss counters when LossKnown.
+	EventsLost int64
+	// LossKnown is true when Tetragon's loss counters could be read
+	// (metrics on loopback, served by the Tetragon pid). Display only.
+	LossKnown bool
+	// FallbackReason says why the native backend runs although Tetragon is
+	// wanted: a reason code, a colon and the detail
+	// ("tetragon_unavailable: no /var/run/tetragon/tetragon-info.json").
+	FallbackReason string
+	// Policies are the DefenseClaw policies Tetragon has loaded.
+	Policies []BackendPolicy
+}
+
+// BackendPolicy is one loaded Tetragon policy as ListTracingPolicies
+// reported it.
+type BackendPolicy struct {
+	Name string
+	// Mode is enforce, monitor or unknown. TP_MODE_MONITOR_ONLY and an
+	// unknown mode both count as not enforcing.
+	Mode string
+	// State is enabled, disabled, load_error, error, loading, unloading or
+	// unknown.
+	State string
+	Error string
+}
+
+// CoverageWatcher is implemented by a source whose coverage can change while
+// it runs: the Tetragon backend falling back to the native one and back, or
+// handing the file half from fanotify to its observe policy. A receive on
+// the channel means "read Coverage again"; it is closed when the source
+// stops.
+type CoverageWatcher interface {
+	CoverageChanges() <-chan struct{}
+}
+
+// KernelFeed is one connected session to a kernel event backend that runs
+// outside DefenseClaw (a customer's Tetragon). The backend's own client
+// package implements it; this package only consumes it, so the plane
+// carries no gRPC dependency.
+type KernelFeed interface {
+	// Recv blocks for the next batch. An error ends the session.
+	Recv() (KernelBatch, error)
+	// Backend describes the connected backend now: version, socket, the
+	// DefenseClaw policies it has loaded and what it lost.
+	Backend() Backend
+	// Close ends the session and unblocks Recv.
+	Close() error
+}
+
+// KernelBatch is what one backend message became.
+type KernelBatch struct {
+	// Events are the plane events, already mapped, filtered and redacted.
+	Events []Event
+	// ThrottleStart and ThrottleStop report the backend starting or
+	// stopping to throttle a cgroup's events.
+	ThrottleStart, ThrottleStop bool
+	// Dropped counts events the backend says it dropped (rate limiting).
+	Dropped int64
+}
+
+// KernelDialer opens a KernelFeed. Its error starts with the reason code the
+// coverage reports (tetragon_unavailable, tetragon_tcp_api,
+// tetragon_untrusted_endpoint, tetragon_unsupported_version).
+type KernelDialer func(ctx context.Context) (KernelFeed, error)
+
+// TetragonOptions configure NewTetragonSource.
+type TetragonOptions struct {
+	// Mode is the effective enterprise.tetragon mode: consume, observe or
+	// enforce. Off never builds this source.
+	Mode string
+	// Dial opens the Tetragon session. Required.
+	Dial KernelDialer
+	// OwnObservePolicy reports whether a loaded policy is DefenseClaw's
+	// observe policy, as the helper recorded it. nil keeps fanotify running
+	// for as long as the source runs: the hand-off never happens.
+	OwnObservePolicy func(name string) bool
 }
 
 // Complete reports whether the source is delivering every kind it knows about.
