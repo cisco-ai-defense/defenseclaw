@@ -153,6 +153,16 @@ def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
     return ""
 
 
+def current_gateway_reload_notice() -> str:
+    """gateway_reload_notice for the config.yaml in use, or "" when it does not load."""
+    try:
+        from defenseclaw import config as config_module
+
+        return gateway_reload_notice(config_module.load())
+    except Exception:  # noqa: BLE001 - a file that does not load has no gateway to ask about.
+        return ""
+
+
 def _gateway_off_configured_port_notice(host: str, port: int) -> str:
     """This account's gateway is running but not on the configured port, or ""."""
     from defenseclaw.config import default_data_path
