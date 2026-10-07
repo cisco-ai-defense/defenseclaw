@@ -46,10 +46,7 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 			{Host: "artifacts.example.com", Kind: sandboxapi.DestinationOther, Tunnels: 2, Binaries: []string{"/usr/bin/curl\n# not a comment"}},
 		}},
 	}
-	out := filepath.Join(ta.home, "recorded", packs.PackFileName)
-	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	out := filepath.Join(ta.home, "packs", "recorded", packs.PackFileName)
 	ta.ok(t, ta.PolicySuggest(bg, SuggestOptions{PackOut: out}))
 	has(t, ta.output(), "wrote "+out+": pack recorded, extends balanced, 1 host to allow")
 	pack, err := packs.Validate(out, "")
@@ -66,7 +63,7 @@ func TestPolicySuggestWritesAValidPack(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
-	has(t, text, "- artifacts.example.com # 14 requests; by /usr/bin/curl?# not a comment, /usr/bin/node; in api, web",
+	has(t, text, `- "artifacts.example.com" # 14 requests; by /usr/bin/curl?# not a comment, /usr/bin/node; in api, web`,
 		"# Covered by the balanced pack's curated allowlist: registry.npmjs.org",
 		"#   refused.example.net: only ever refused",
 		"#   api.openai.com: shadow AI (OpenAI)",

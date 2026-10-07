@@ -364,7 +364,8 @@ func (s *suggestion) render(day, sandbox string) string {
 	} else {
 		b.WriteString("  allow:\n")
 		for _, h := range s.Allow {
-			fmt.Fprintf(&b, "    - %s # %s\n", h.Host, hostComment(h))
+			// Quoted: a host such as "null" or "yes" is not a YAML value.
+			fmt.Fprintf(&b, "    - %s # %s\n", strconv.Quote(h.Host), hostComment(h))
 		}
 	}
 	if len(s.Curated) > 0 {
@@ -404,8 +405,12 @@ func joinHosts(list []suggestedHost) string {
 	return listFit(strings.Join(names, ", "), 200)
 }
 
-// writeNewFile creates path with data, never over an existing file.
+// writeNewFile creates path with data, never over an existing file, and
+// the folder it goes in (<pack_dir>/<name>/ for a pack named by name).
 func writeNewFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
