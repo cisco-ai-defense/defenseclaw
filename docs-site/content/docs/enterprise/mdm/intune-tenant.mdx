@@ -185,6 +185,30 @@ The rows for the Intune test devices are what the OS setup implies: DefenseClaw
 was not installed on them, so none of it was observed there. The Entra-joined
 Windows facts come from a separate test tenant, where they were run live.
 
+Put the profiles in the `config.yaml` you give the package builder (Windows), or in the
+config block of the macOS and Linux wrapper. For an Entra-joined Windows fleet,
+assign by user, or by group SID after the local group step below:
+
+```yaml
+guardrail:
+  profiles:
+    strict: {mode: action, block_at: MEDIUM}
+    ml-team: {mode: observe}
+  profile_assignments:
+    - profile: ml-team
+      match:
+        groups: ["S-1-12-1-1864145422-1280850733-3047453086-4192786374"]   # Entra group SID
+  default_profile: strict
+ai_discovery:
+  include_user_principal: true
+```
+
+`ensure` validates the file before it applies it, and a config with an unknown
+profile fails with `config_invalid` and leaves the installed config in force
+([Deliver it to managed hosts](/docs/guardrail/user-and-group-policies#deliver-it-to-managed-hosts)).
+A complete starting point is `admin-config.windows.example.yaml` in
+`packaging/identity/entra`.
+
 Entra groups on Windows need one more thing from Intune: a policy that puts the
 group into a built-in local group, with the group's SID. The recipe (an Account
 protection policy, Local user group membership, the group **Users**, action
