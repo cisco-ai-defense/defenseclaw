@@ -178,3 +178,28 @@ def test_okta_explicit_gid_is_not_its_own_collision(monkeypatch: pytest.MonkeyPa
     report = okta.Report(dry_run=False)
     assert okta.ensure_group(Client(), report, "team", 1720500, set(), 1720000) == (group, 1720500)
     assert report.problems == 0
+
+
+def test_okta_bind_role_refuses_extra_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    okta = _load(OKTA)
+    monkeypatch.setattr(okta, "find_user", lambda *_args: {"id": "bind1"})
+
+    class Client:
+        org_url = "https://example.okta.com"
+        def get_all(self, path, key=None):
+            return ([{"id": "role1", "label": "reader"}] if key == "roles"
+                    else [{"id": "set1", "label": "all"}])
+        def must(self, method, path, body=None):
+            if path.endswith("/permissions"):
+                return {"permissions": [{"label": label} for label in
+                        [*okta.BIND_PERMISSIONS, "okta.users.manage"]]}
+            if path.endswith("/resources"):
+                return {"resources": [{"_links": {"self": {"href": self.org_url + "/api/v1/" + kind}}}
+                                      for kind in ("users", "groups")]}
+            if method == "GET":
+                return []
+            raise AssertionError("an overbroad role must not be assigned")
+
+    args = type("Args", (), {"apply": True, "bind_login": "bind@example.com",
+                             "role_label": "reader", "resource_set_label": "all"})()
+    assert okta.cmd_bind_role(Client(), args) == 1

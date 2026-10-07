@@ -535,11 +535,12 @@ def cmd_bind_role(client: Okta, args: argparse.Namespace) -> int:
     else:
         granted = client.must("GET", f"/api/v1/iam/roles/{role['id']}/permissions") or {}
         labels = {p.get("label") for p in granted.get("permissions", [])}
-        if set(BIND_PERMISSIONS) <= labels:
-            report.ok(f"role '{args.role_label}' exists with the read permissions")
+        if labels == set(BIND_PERMISSIONS):
+            report.ok(f"role '{args.role_label}' has only the read permissions")
         else:
-            lacking = ", ".join(sorted(set(BIND_PERMISSIONS) - labels))
-            report.problem(f"role '{args.role_label}' exists but lacks {lacking}")
+            report.problem(f"role '{args.role_label}' has permissions {', '.join(sorted(labels))}; "
+                           f"it must have only {', '.join(BIND_PERMISSIONS)}")
+            role = None  # Never assign a role with unexpected permissions.
 
     sets = client.get_all("/api/v1/iam/resource-sets", key="resource-sets")
     rset = next((s for s in sets if s.get("label") == args.resource_set_label), None)
