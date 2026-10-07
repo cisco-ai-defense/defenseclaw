@@ -88,7 +88,7 @@ the standalone enterprise profile with its root guardian or SYSTEM enumerator.
 | Local account | uid, name and groups from NSS `files` (verified) | SID and name from `LookupAccountSid` (verified) | uid, name and groups from Open Directory, reported as `local` (verified), also per-user |
 | LDAP or SSSD | The NSS backend that owns the uid (`sss` or `ldap`), the domain from the fully qualified name, the groups from `initgroups` and, for an SSSD account, the directory type of the realmd realm that serves its domain (verified), also per-user. Enterprise adds the UPN from SSSD InfoPipe (verified) | Not applicable | An LDAP-bound account's directory from `dscl /Search` (verified, enterprise) |
 | Active Directory over Kerberos | SSSD or winbind: principal, domain and groups (verified). Without InfoPipe the principal is `account@REALM`. The Kerberos principal in the session's credential cache (claimed) | Account and domain from `LookupAccountSid`, the AD UPN from `TranslateNameW` (verified). Groups from the SYSTEM enumerator's token-group cache (verified, enterprise only). The logon session's UPN and Kerberos principal (claimed) | AD-bound Mac: the Kerberos principal from `dscl` and the domain from `dsconfigad -show` (verified, enterprise). The session's Kerberos principal (claimed) |
-| Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` (verified) | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified). Entra group SIDs (`S-1-12-1-...`) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified, enterprise). The user's Platform SSO login is not read |
+| Entra ID | With the himmelblau or `aad` NSS module, reported as `entra_id` with the UPN as principal (verified), also per-user. The `aad` module gives no Entra groups | Entra-joined or hybrid-joined: the UPN and provider from the identity store cache, the tenant from the join state (verified), also per-user. Entra group SIDs (`S-1-12-1-...`) only for the groups a built-in local group lists (verified, enterprise only; see [Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)) | Platform SSO with Company Portal: the device's SSO provider from `app-sso platform -s` (verified, enterprise). The user's Platform SSO login is not read |
 | Okta | Through the Okta LDAP Interface and SSSD: the uid, name and Okta groups (verified), also per-user; standalone enterprise adds directory `ldap`, and the UPN when SSSD maps the Okta login to it. Tested live on RHEL 9. Or the AD account Okta syncs to. No Okta NSS module is recognized | As the AD account Okta syncs to | Platform SSO or Okta Device Access with Okta Verify: the device's SSO provider (verified, enterprise; not tested live). As AD or LDAP when synced |
 
 What differs between platforms and installs, as exercised on real hosts:
@@ -124,8 +124,14 @@ What differs between platforms and installs, as exercised on real hosts:
 - **Okta through the Okta LDAP Interface and SSSD was tested live** on RHEL 9
   with an Okta org; see
   [Use Okta users on Linux through the Okta LDAP Interface](#use-okta-users-on-linux-through-the-okta-ldap-interface).
-  The Entra, Okta Device Access and Platform SSO readers were tested against
-  recorded OS output, not a live tenant. See the limits in
+- **Entra ID was tested on a live tenant.** Per-user installs on an
+  Entra-joined Windows 11 computer and on Ubuntu with Entra ID SSH sign-in
+  report directory `entra_id`, the UPN as principal and, on Windows, the
+  tenant ID; a `users` assignment by UPN selected the profile on both. See
+  [Entra ID fields, as seen live](/docs/enterprise/identity-sources#entra-id-fields-as-seen-live).
+  Windows puts an Entra group into the sign-in token only when a built-in
+  local group lists it. The Okta Device Access and Platform SSO readers
+  were tested against recorded OS output, not a live tenant. See the limits in
   [How DefenseClaw knows who a user is](/docs/enterprise/identity-sources#limits-stated-plainly).
 
 ## Agent identity
@@ -227,6 +233,10 @@ with four differences.
   [Network and egress](/docs/sandboxes/network).
 
 ## Guides
+
+The guides below use Active Directory and Okta. For Microsoft Entra ID users on
+Entra-joined Windows and on Azure Linux VMs, see
+[Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id).
 
 ### Join a Linux host to AD and see what DefenseClaw learns
 
@@ -621,4 +631,5 @@ and the CLI, API, AIBOM, TUI and Grafana views.
   <Card title="User- and group-based policies" href="/docs/guardrail/user-and-group-policies" description="Write assignments, read the audit record, ship to managed hosts." />
   <Card title="End-user identity" href="/docs/observability/end-user-identity" description="Every identity attribute and how to join records." />
   <Card title="Grafana dashboards" href="/docs/observability/grafana-dashboards" description="The Identity & Users board and the $user filter." />
+  <Card title="Deploy with Microsoft Entra ID" href="/docs/enterprise/identity-entra-id" description="Entra-joined Windows and Azure Linux VMs: setup, scripts and profiles." />
 </Cards>
