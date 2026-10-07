@@ -138,8 +138,8 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	}
 
 	// A gateway that does not adopt the change gets the old config back and
-	// the upgrade; the generation record is left to the writer, which never
-	// reuses a number.
+	// the upgrade. The apply and the restore each record a generation, so the
+	// counter moves past the recorded 3 and never reuses a number.
 	host, opts = newHotConfigHost(t, previous, next)
 	recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
 	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
@@ -149,7 +149,7 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	runHotConfigEnsure(t, host, opts, stub)
 	got, _ := os.ReadFile(host.configPath)
 	generation, _ := os.ReadFile(configwrite.GenerationPath(host.configPath))
-	if string(got) != previous || string(generation) != recorded || len(host.writes) != 2 ||
+	if string(got) != previous || string(generation) == recorded || len(host.writes) != 2 ||
 		len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" {
 		t.Fatalf("gateway never adopted: config %q, generation %q, writes %q, installer runs %q", got, generation, host.writes, stub.calls)
 	}
