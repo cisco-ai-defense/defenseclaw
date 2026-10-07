@@ -133,6 +133,10 @@ type box struct {
 	// destinations they were to, as the feed names them (noteBlocked).
 	blockedRequests int
 	blockedHosts    map[string]struct{}
+	// proxyOpens are OpenShell's records of the sandbox's connections to
+	// the egress proxy, which name the program that opened them, newest
+	// last (proxyActor).
+	proxyOpens []proxyOpen
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// triageBusy is set while a triageNow poll runs; triageAgain asks it

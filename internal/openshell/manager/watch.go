@@ -544,6 +544,14 @@ func (m *Manager) hostAliasEvent(ctx context.Context, b *box, r ocsf.Record, at 
 		// its own binary made it (the proxy cannot tell); it is no model
 		// call, which goes around the proxy.
 		m.markWork(b, at, harnessActivity(harnessName, r.Binary), noModelCall)
+		if r.Allowed() && r.Binary != "" {
+			m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: r.Binary, pid: ocsfPID(r), at: m.now()})
+			if n := len(b.proxyOpens); n > maxProxyOpens {
+				b.proxyOpens = slices.Delete(b.proxyOpens, 0, n-maxProxyOpens)
+			}
+			m.mu.Unlock()
+		}
 	case 0:
 	default:
 		ofHarness := harnessActivity(harnessName, r.Binary)
