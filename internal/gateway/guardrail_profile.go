@@ -833,9 +833,15 @@ func (a *APIServer) decisionConfigFrom(ctx context.Context, base *config.Config)
 
 // snapshotRulePackGenerationFor is snapshotRulePackGeneration for a request:
 // when the request's profile resolves connector to another rule pack than
-// the base configuration does, it returns that pack's compiled rules.
+// the base configuration does, it returns that pack's compiled rules. A
+// request with no stored resolution resolves it as decisionConfig does, so
+// its thresholds and its rule pack come from the same profile (GAP-0311).
 func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.derived != nil {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if set := liveGuardrailProfiles.Load(); set != nil && (resolved == nil || resolved.set != set) {
+		resolved = resolveGuardrailProfileFor(ctx, set)
+	}
+	if resolved != nil && resolved.derived != nil {
 		if generation := resolved.ruleGeneration(connectorName); generation != nil {
 			return generation
 		}

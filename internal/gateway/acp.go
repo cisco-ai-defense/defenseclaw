@@ -153,6 +153,11 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID)
+	// Resolve the identity-based guardrail profile once, with the ACP
+	// agent's connector, as the hook, proxy and inspect paths do: resolved
+	// lazily, the request had no connector, so a connectors assignment never
+	// selected ACP traffic (GAP-0311).
+	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
 	if slices.Contains(profile.DeniedMethods, req.Method) {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile"}
 		if mode != string(acp.ModeAction) {
