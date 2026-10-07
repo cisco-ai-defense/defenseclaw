@@ -623,6 +623,8 @@ type ContinuousDiscoveryService struct {
 	lastIDE       *IDEInventory
 	ideBaseline   map[string]IDEPlugin
 	ideRecordedAt time.Time
+	// scanMu guards the per-scan privacy skip observation.
+	tccSkipped bool
 }
 
 type scanResponse struct {
@@ -1111,6 +1113,7 @@ func (s *ContinuousDiscoveryService) runScanSingleFlight(
 
 func (s *ContinuousDiscoveryService) runScanOnce(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
 	start := time.Now()
+	s.tccSkipped = false
 	scanID := newScanID()
 	ctx, scanObservation := s.startScanObservation(ctx, AIDiscoveryV8ScanStart{
 		ScanID: scanID, Source: source, PrivacyMode: s.opts.Mode, StartedAt: start,
@@ -1353,6 +1356,7 @@ type scanStats struct {
 	ModelFileConclusive map[string]bool
 	ModelFileAttempted  map[string]bool
 	ModelFileDeferred   map[string]bool
+	TCCSkipped          bool
 }
 
 func (s *ContinuousDiscoveryService) scanSignals(
@@ -1476,6 +1480,11 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	}
 
 	signals = s.dropUnbackedSharedSurfaceSignals(signals)
+	if s.tccSkipped {
+		stats.TCCSkipped = true
+		stats.Errors++
+		stats.DetectorErrors["macos_privacy"] = "protected folders were not scanned"
+	}
 	sortAISignals(signals)
 	return signals, stats
 }
@@ -1712,6 +1721,18 @@ func (s *ContinuousDiscoveryService) classifyAndPersist(scanID, source string, s
 				continue
 			}
 			if carry.handleModelAPICarryForward(fp, old, stats, &apiCarryRemaining) {
+			if stats.TCCSkipped && (old.Detector == "package_manifest" || old.Detector == "model_file") {
+				// A protected subtree was skipped. Its absence is not proof of removal.
+				if old.Detector == "model_file" {
+					if fileCarryRemaining > 0 {
+						carry.persist(fp, old, &fileCarryRemaining)
+					}
+				} else {
+					budget := 1
+					carry.persist(fp, old, &budget)
+				}
+				continue
+			}
 				continue
 			}
 			if carry.handleModelFileCarryForward(fp, old, stats, &fileCarryRemaining) {
