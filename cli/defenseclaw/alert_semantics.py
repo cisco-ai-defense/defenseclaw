@@ -33,6 +33,11 @@ ALERT_NON_ALLOW_OUTCOMES = (
     "timed_out",
 )
 
+# Decision codes of refusals that are audited only and never alerts: a
+# sandbox harness's own request that it does without (GAP-0130). Mirrors
+# SandboxEgressCodeHarnessFetch in internal/audit/store.go.
+ALERT_AUDIT_ONLY_DECISION_CODES = ("SANDBOX_EGRESS_HARNESS_FETCH",)
+
 ALERT_LEGACY_FINDING_ACTIONS = (
     "alert",
     "connector-hook-tampered",

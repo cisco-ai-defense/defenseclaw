@@ -167,7 +167,8 @@ func TestProxyRefusedHarnessFetchIsQuiet(t *testing.T) {
 	refuse("ocbox")
 	audited := where(&e.tel.mu, &e.tel.egress, func(r audit.SandboxEgressEvent) bool { return r.Host == "models.opencode.ai" && r.Blocked })
 	d, err := e.m.Destinations(t.Context(), "ocbox")
-	if len(audited) != 1 || err != nil || len(e.events("ocbox", sandboxapi.ActivityEgressBlocked, "")) != 0 || len(d.Destinations) != 0 ||
+	if len(audited) != 1 || audited[0].DecisionCode != audit.SandboxEgressCodeHarnessFetch || audited[0].Severity != "INFO" ||
+		err != nil || len(e.events("ocbox", sandboxapi.ActivityEgressBlocked, "")) != 0 || len(d.Destinations) != 0 ||
 		e.get("ocbox").Egress.Blocked != 0 || len(e.tel.findingsOf(audit.SandboxFindingShadowAI)) != 0 {
 		t.Fatalf("audited %d, feed %+v, destinations %+v (%v), blocked %d", len(audited), e.events("ocbox", sandboxapi.ActivityEgressBlocked, ""), d, err, e.get("ocbox").Egress.Blocked)
 	}

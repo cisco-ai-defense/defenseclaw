@@ -321,6 +321,9 @@ func (m *Manager) ocsfEvent(ctx context.Context, b *box, r ocsf.Record, at time.
 		}
 		if r.Denied() {
 			ev.DecisionCode = "SANDBOX_EGRESS_OPENSHELL_DENIED"
+			if fetch {
+				ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+			}
 			// OpenShell drafts a proposal for the denied destination a few
 			// seconds later; OpenShell 0.1.1 does not always announce it
 			// on the stream. A lookup draws none.

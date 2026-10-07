@@ -279,10 +279,11 @@ func (m *Manager) triagePolicy(b *box, eff *packs.Effective) triage.Policy {
 // harnessFetchHost reports host (and port, 0 when unknown) as one of the
 // harness's own background requests it does without
 // (harness.Spec.DirectFetches). The egress proxy's refusal of one is
-// audited but, like OpenShell's (harnessFetchDenial), neither shown on the
-// feed nor counted as a blocked site, a destination or shadow AI: the
-// proxy cannot tell the harness's request from a tool's, so the host
-// decides.
+// audited (at INFO, decision code audit.SandboxEgressCodeHarnessFetch, which
+// keeps it off the alerts) but, like OpenShell's (harnessFetchDenial),
+// neither shown on the feed nor counted as a blocked site, a destination or
+// shadow AI: the proxy cannot tell the harness's request from a tool's, so
+// the host decides.
 func harnessFetchHost(harnessName, host string, port int) bool {
 	host = triage.NormalizeHost(host)
 	for _, f := range harnessFetches(harnessName) {

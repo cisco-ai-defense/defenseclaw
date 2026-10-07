@@ -142,6 +142,10 @@ OpenShell's denials are recorded as they come (decision code
 policy reload ("policy generation is stale") and the denials of this
 install's own ingress and egress ports; those two are not counted in the
 sandbox's blocked requests and are not shown as blocks on the activity feed.
+A refusal of a request the harness makes on its own and does without
+(OpenCode's model catalog, the Codex tip download), by OpenShell or the
+proxy, is recorded at INFO with decision code `SANDBOX_EGRESS_HARNESS_FETCH`
+and is no alert: `defenseclaw alerts` and the TUI leave it out.
 A denied connection to a host port is recorded with `server.address`
 `host.openshell.internal`, not OpenShell's synthetic address. A sandbox
 whose policy turned its web egress off while it ran is refused by the proxy

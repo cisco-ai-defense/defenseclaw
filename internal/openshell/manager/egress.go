@@ -710,9 +710,14 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			DecisionCode: decisionCode(e), Reason: truncate(reason, 512),
 			PolicyOutcome: policyOutcome(e), Timestamp: e.Time,
 		}
+		fetch := blocked && harnessFetchHost(harnessName, e.Host, e.Port)
+		if fetch {
+			// The harness's own background request, which it does without:
+			// audited, but no alert.
+			ev.DecisionCode, ev.Severity = audit.SandboxEgressCodeHarnessFetch, "INFO"
+		}
 		m.tel.RecordSandboxEgress(ctx, ev)
-		if blocked && harnessFetchHost(harnessName, e.Host, e.Port) {
-			// The harness's own background request, which it does without.
+		if fetch {
 			return
 		}
 		category, text := string(e.Category), categoryText(e)
