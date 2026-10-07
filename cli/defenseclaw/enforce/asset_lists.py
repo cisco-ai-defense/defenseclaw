@@ -423,6 +423,7 @@ def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) 
         _load_existing_config_yaml,
         _merge_asset_rules,
         _merge_asset_tool_policy,
+        default_asset_policy_baseline,
     )
 
     if not os.path.isfile(path):
@@ -439,7 +440,11 @@ def _reload_lists_from_disk(cfg: Any, holder: Any, target_type: str, path: str) 
     snapshot = getattr(cfg, "_loaded_v8_modeled_snapshot", None)
     if isinstance(snapshot, dict):
         current = _config_to_dict(cfg).get("asset_policy", {}).get(target_type, {})
-        base = snapshot.setdefault("asset_policy", {}).setdefault(target_type, {})
+        # A load that saw no asset_policy left the key out of the snapshot; seed the
+        # defaults so the save writes this rule alone, not every default (GAP-0060).
+        if not isinstance(snapshot.get("asset_policy"), dict):
+            snapshot["asset_policy"] = default_asset_policy_baseline()
+        base = snapshot["asset_policy"].setdefault(target_type, {})
         for key in ("denied", "allowed"):
             base[key] = copy.deepcopy(current.get(key, []))
 

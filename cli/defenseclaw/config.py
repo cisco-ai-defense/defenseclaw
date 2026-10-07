@@ -3653,7 +3653,7 @@ class Config:
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
-            _baseline_keeping_migrated_llm_slots(dataclass_data, baseline),
+            _baseline_with_default_asset_policy(_baseline_keeping_migrated_llm_slots(dataclass_data, baseline)),
         )
         merged["config_version"] = version
         merged.setdefault("observability", {})
@@ -3970,6 +3970,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     else:
         _serialize_asset_policy_connectors(cfg, d.get("asset_policy"))
         _prune_v9_block(d["asset_policy"], "tool")
+        _prune_asset_policy_rules(d["asset_policy"])
     for key in ("admission", "llm_providers", "update"):
         _prune_v9_block(d, key)
     # Per-connector observability (D5b): drop the empty block (omitempty),
@@ -4487,6 +4488,54 @@ def _default_asset_policy_dict() -> dict[str, Any]:
     from dataclasses import asdict
 
     return asdict(AssetPolicyConfig())
+
+
+def _prune_asset_policy_rules(asset_policy: Any) -> None:
+    """Drop the unset fields of every ``asset_policy.<type>`` rule (Go ``omitempty``).
+
+    A blocked skill is a name and a reason; the empty connector, url, command,
+    args_prefix, transport and source_path_contains of the dataclass are not
+    written (GAP-0060).
+    """
+    if not isinstance(asset_policy, dict):
+        return
+    for type_key in ("mcp", "plugin", "skill"):
+        block = asset_policy.get(type_key)
+        if not isinstance(block, dict):
+            continue
+        for list_key in ("registry", "allowed", "denied"):
+            rules = block.get(list_key)
+            if isinstance(rules, list):
+                block[list_key] = [
+                    {key: value for key, value in rule.items() if value not in ("", None, [])}
+                    if isinstance(rule, dict)
+                    else rule
+                    for rule in rules
+                ]
+
+
+def _baseline_with_default_asset_policy(baseline: dict[str, Any]) -> dict[str, Any]:
+    """The save baseline, with the default ``asset_policy`` a load leaves out.
+
+    A config with no ``asset_policy`` loads as the all-default block, which the
+    serializer omits, so the load snapshot has no such key. Without it the first
+    rule added (``skill block``) looked like a brand-new tree and the whole
+    default block was written to config.yaml. Taking the defaults as the baseline
+    writes only what changed (GAP-0060).
+    """
+    if "asset_policy" in baseline:
+        return baseline
+    return {**baseline, "asset_policy": default_asset_policy_baseline()}
+
+
+def default_asset_policy_baseline() -> dict[str, Any]:
+    """The all-default ``asset_policy`` in the form the serializer would write it."""
+    default = _default_asset_policy_dict()
+    if not default.get("connectors"):
+        default.pop("connectors", None)
+    _prune_v9_block(default, "tool")
+    _prune_asset_policy_rules(default)
+    return default
 
 
 def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
