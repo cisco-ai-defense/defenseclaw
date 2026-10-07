@@ -896,10 +896,16 @@ func firstJSONLine(out []byte) []byte {
 }
 
 func (r *doctorRun) dockerAccessFix(msg string) *Fix {
-	if !strings.Contains(strings.ToLower(msg), "permission denied") {
-		if r.GOOS == "darwin" {
-			return &Fix{Summary: "start Docker Desktop"}
-		}
+	denied := strings.Contains(strings.ToLower(msg), "permission denied")
+	switch {
+	case r.GOOS == "darwin" && denied:
+		// macOS has no docker group: the socket is another account's
+		// Docker Desktop's, until this account's starts and takes it.
+		return &Fix{Summary: "start Docker Desktop in this account: /var/run/docker.sock leads to another account's Docker Desktop, " +
+			"which this account may not use (Docker Desktop points it at its own when it starts)"}
+	case r.GOOS == "darwin":
+		return &Fix{Summary: "start Docker Desktop"}
+	case !denied:
 		return &Fix{Summary: "start the Docker daemon", Command: "sudo systemctl enable --now docker", Sudo: true}
 	}
 	member, inSession, err := r.DockerGroup()
