@@ -1251,7 +1251,14 @@ dashboards:
 | --- | --- |
 | `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
 | `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
-| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+| `ai.runtime.plane_health` | One running plane per poll cycle |
+
+A running plane emits about one health record per poll cycle (roughly once a
+minute with the default runtime poll), per enabled destination that routes
+ai.discovery logs. Unselected or stopped planes emit no recurring health
+record. Exclude the ai.discovery bucket from a destination route to remove
+this stream there; this also removes runtime findings and discovery events on
+that route. Local sensor status still reports every plane.
 
 A degraded cycle is reported with outcome `partial` rather than `completed`.
 

@@ -102,6 +102,8 @@ Every canonical record belongs to one bucket:
 | `network.egress` | What outbound operation or egress policy decision occurred? |
 | `agent.lifecycle` | How did root agents, subagents, turns, workflows, phases, and executions progress? |
 | `ai.discovery` | What AI components and runtimes were discovered? |
+
+The ai.discovery bucket includes one ai.runtime.plane_health log per running plane per runtime poll (about once a minute by default). Remove this bucket from a destination route to omit those logs there; the route will also omit other discovery records.
 | `telemetry.ingest` | What inbound OTLP leaf was accepted, normalized, rejected, or re-exported? |
 | `platform.health` | Are gateway, storage, exporters, queues, guardrail, and sidecar healthy? |
 | `diagnostic` | What explicit debug/diagnostic fact does not belong to another product bucket? |
