@@ -17,7 +17,7 @@ GATEWAY = "/opt/fake/defenseclaw-gateway"
 
 
 class TestPolicyRegoToolsWithoutOPA(PolicyCommandTestBase):
-    def _run(self, args):
+    def _run(self, args, opa=None):
         calls = []
 
         def fake_run(cmd, **_kwargs):
@@ -25,7 +25,7 @@ class TestPolicyRegoToolsWithoutOPA(PolicyCommandTestBase):
             return subprocess.CompletedProcess(cmd, 0, stdout="PASS: 1/1\n", stderr="")
 
         with (
-            patch("shutil.which", return_value=None),
+            patch("shutil.which", return_value=opa),
             patch("defenseclaw.gateway.resolve_gateway_binary", return_value=GATEWAY),
             patch("defenseclaw.commands.cmd_policy.subprocess.run", side_effect=fake_run),
         ):
@@ -39,6 +39,14 @@ class TestPolicyRegoToolsWithoutOPA(PolicyCommandTestBase):
         self.assertEqual(calls, [[GATEWAY, "policy", "validate", "--rego-dir", rd]])
         self.assertIn("defenseclaw-gateway", result.output)
         self.assertNotIn("brew install opa", result.output)
+
+    def test_validate_prefers_gateway_over_opa(self):
+        # The gateway loader refuses a module reading data.config, which
+        # opa check accepts: its verdict is the one that holds.
+        rd = _rego_dir()
+        result, calls = self._run(["validate", "--rego-dir", rd], opa="/usr/bin/opa")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(calls, [[GATEWAY, "policy", "validate", "--rego-dir", rd]])
 
     def test_test_uses_gateway_when_opa_missing(self):
         rd = tempfile.mkdtemp()

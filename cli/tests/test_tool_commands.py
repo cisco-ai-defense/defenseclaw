@@ -334,6 +334,18 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         self.assertFalse(self.pe().is_blocked_for_connector("tool", "delete_file", ""))
         self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "tool", "delete_file", "hermes", "block"))
 
+    def test_at_connector_name_is_the_connector_scope(self):
+        # tool list shows a connector rule as @C/T; the gateway matches only
+        # a tool name plus a connector, never a split name.
+        result = self.invoke(["block", "@codex/shell"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(asset_lists.tool_decision(self.app.cfg.asset_policy, "shell", "codex")[0], asset_lists.LIST_DENY)
+        self.assertEqual(asset_lists.tool_decision(self.app.cfg.asset_policy, "shell", "hermes")[0], "")
+
+        result = self.invoke(["unblock", "@codex/shell"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(asset_lists.tool_decision(self.app.cfg.asset_policy, "shell", "codex")[0], "")
+
     def test_connector_normalized(self):
         """A connector value is canonicalized (e.g. 'Hermes' → 'hermes') so the
         CLI write surface matches the runtime's lowercase connector keys."""
