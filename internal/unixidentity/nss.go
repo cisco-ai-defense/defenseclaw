@@ -55,6 +55,9 @@ func (r *NSSResolver) query(database string, keys ...string) (commandResult, err
 		}
 	}
 	args := append([]string{database}, keys...)
+	if database == "group" {
+		return r.runner(r.context(), r.path, args, withoutGroupMembers)
+	}
 	return r.runner(r.context(), r.path, args)
 }
 

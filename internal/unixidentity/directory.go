@@ -13,8 +13,10 @@
 package unixidentity
 
 import (
+	"errors"
 	"fmt"
 	"maps"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,10 +29,11 @@ import (
 // The backend that owns an account is found by asking each directory
 // service named on the passwd line of nsswitch.conf for the uid with
 // `getent -s <service>`; the first that answers owns it, and an account no
-// directory service knows is local. The domain comes from the
-// fully-qualified name SSSD (alice@corp.example.com) or winbind
-// (CORP\alice) reports, and groups from initgroups plus group lookups for
-// all of their ids. The realm and directory type of an SSSD or winbind
+// directory service knows, or one /etc/passwd holds, is local. The domain
+// comes from the fully-qualified name SSSD (alice@corp.example.com) or
+// winbind (CORP\alice) reports, a NetBIOS domain by the DNS name of its
+// realm, and groups from initgroups plus group lookups for all of their
+// ids. The realm and directory type of an SSSD or winbind
 // account come from realmd, which any account may ask (realm_linux.go).
 // UPN and mail need SSSD InfoPipe, which only root may call, so the root
 // guardian adds them (enterprisehooks identity spool).
@@ -96,6 +99,18 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				// own the account.
 				return useridentity.DirectoryFacts{}, lookupErr
 			}
+			// SSSD's files provider (the implicit files domain of RHEL 8, an
+			// id_provider=files or proxy domain) answers for the accounts of
+			// /etc/passwd as well, and the only realm would then name a local
+			// account as an AD one. An account the files database holds
+			// under its name and uid is local, whichever service answers.
+			local, localErr := LocalAccounts(r.context())
+			if localErr != nil && !errors.Is(localErr, os.ErrNotExist) {
+				return useridentity.DirectoryFacts{}, localErr
+			}
+			if id, ok := local[account.Name]; ok && id == uid {
+				break
+			}
 			facts.Directory, facts.Source = known.directory, known.source
 			bare, domain := useridentity.SplitQualifiedName(account.Name)
 			if domain != "" && known.directory == useridentity.DirectoryEntraID {
@@ -106,7 +121,10 @@ func (r *NSSResolver) DirectoryFactsForUID(uid int, now time.Time) (useridentity
 				facts.UPN = useridentity.NormalizeUPN(account.Name)
 				facts.Principal = facts.UPN
 			} else if domain != "" {
-				facts.Domain = domain
+				// Lower case, as Windows reports a NetBIOS domain it knows
+				// no DNS name for; applyRealm gives the DNS name of the
+				// realm a NetBIOS domain names.
+				facts.Domain = strings.ToLower(domain)
 				if strings.Contains(domain, ".") {
 					facts.Realm = strings.ToUpper(domain)
 					// sAMAccountName@REALM, the Kerberos principal SSSD
@@ -158,7 +176,9 @@ func (r *NSSResolver) groupNames(account Account) ([]string, error) {
 	return out, nil
 }
 
-// groupBatchNames asks one getent group call for the names of ids.
+// groupBatchNames asks one getent group call for the names of ids. The
+// member lists getent prints are dropped as they arrive (query), so a batch
+// of large directory groups stays within the output limit.
 func (r *NSSResolver) groupBatchNames(ids []int) (map[int]string, error) {
 	keys := make([]string, 0, len(ids))
 	for _, id := range ids {
