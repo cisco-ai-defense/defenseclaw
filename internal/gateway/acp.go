@@ -273,6 +273,8 @@ func acpWithheldOutputReason(reason string) string {
 // user's ACP token), to that user. The guard sends no identity headers, so
 // ACP finding, scan and span rows named no user or session and could not be
 // joined to the hook rows of the same session (GAP-1946).
+type acpUnboundAgentContextKey struct{}
+
 func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector string) context.Context {
 	env := audit.EnvelopeFromContext(ctx)
 	changed := false
@@ -307,12 +309,17 @@ func acpEvaluationContext(ctx context.Context, req acp.Evaluation, connector str
 			updated = true
 		}
 	}
+	// An unbound managed credential must not adopt a hook agent merely
+	// because its caller supplied the same session ID.
+	if identity.IdentityID == "" && !ManagedEnterpriseActive() {
+		ctx = context.WithValue(ctx, acpUnboundAgentContextKey{}, true)
+	}
 	newSession := false
 	// And the instance (ais-) of the ACP session the frame belongs to,
 	// derived from that identity as the hook path derives one per session; a
 	// frame that names no session has none (GAP-0252). Secure Client ACP
 	// records carry no instance, as on main (issue #1092).
-	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && session != "" && !ManagedEnterpriseActive() {
+	if session := SessionIDFromContext(ctx); identity.AgentInstanceID == "" && identity.IdentityID != "" && session != "" && !ManagedEnterpriseActive() {
 		if registry := SharedAgentRegistry(); registry != nil {
 			resolved, minted := registry.ResolveForAgentIdentity(ctx, identity.IdentityID, session, "")
 			newSession = minted

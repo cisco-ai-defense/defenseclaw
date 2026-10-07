@@ -551,6 +551,24 @@ func TestACPEvaluationContextNamesTheSessionInstance(t *testing.T) {
 	}
 }
 
+func TestACPUnboundFrameDoesNotJoinAnotherAgentSession(t *testing.T) {
+	InstallSharedAgentRegistry("", "")
+	priorHosted := managedServiceHosted.Load()
+	setManagedServiceHosted(true)
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setManagedServiceHosted(priorHosted); setIdentityFactsEnabled(false) })
+	const session = "shared-acp-session"
+	const agent = "agt-0123456789abcdef"
+	hook, _ := SharedAgentRegistry().ResolveForAgentIdentity(t.Context(), agent, session, "")
+	req := deniedACPTestEvaluation()
+	req.Payload = json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{"sessionId":"shared-acp-session"}}`)
+	ctx := acpEvaluationContext(t.Context(), req, "kiro")
+	identity := AgentIdentityFromContext(ctx)
+	if identity.AgentInstanceID != "" || agentIdentityIDForTraffic(ctx, identity) != "" {
+		t.Fatalf("unbound ACP frame joined hook agent %q: %+v", hook.AgentInstanceID, identity)
+	}
+}
+
 func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
 	return api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
