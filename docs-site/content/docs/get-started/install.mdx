@@ -29,9 +29,11 @@ Windows (PowerShell):
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-On a first install the installer asks which agent to guard (the default is
-`codex`). When it finishes, run `defenseclaw init` to configure DefenseClaw (see the
-[quickstart](/docs/get-started/quickstart)). To pick an agent during the install, pass options: on
+On a first install the installer asks which agent to guard (a number or a name;
+the default is `codex`). When it finishes, run the command it prints,
+`defenseclaw init --connector <agent>`, to set up that agent (see the
+[quickstart](/docs/get-started/quickstart)); plain `defenseclaw init` sets up
+every agent it finds. To set the agent up during the install, pass options: on
 macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
 instead of `bash`; on Windows, run
 
