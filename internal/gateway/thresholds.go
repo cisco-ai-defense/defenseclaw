@@ -115,12 +115,29 @@ func packLabel(ref config.RulePackRef, posture string) string {
 // resolveThresholds returns the block and alert levels for connector ("" for
 // the global scope) of cfg, a base or profile-derived configuration.
 func resolveThresholds(cfg *config.Config, connector string) ResolvedThresholds {
+	return resolveThresholdsWith(cfg, connector, packPosture)
+}
+
+func resolveThresholdsWith(cfg *config.Config, connector string, posture func(config.RulePackRef, string) string) ResolvedThresholds {
 	if cfg == nil {
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := cfg.EffectiveRulePackRefForConnector(connector)
-	posture := packPosture(ref, cfg.ResolveRulePackDir(ref))
-	return thresholdsFromLevels(&cfg.Guardrail, connector, posture, ref)
+	return thresholdsFromLevels(&cfg.Guardrail, connector, posture(ref, cfg.ResolveRulePackDir(ref)), ref)
+}
+
+// buildingPackPosture is packPosture for the generation being built: the
+// postures its build just read are not published yet, but the table built
+// with it is what the proxy path serves once it is, so it must resolve with
+// them, as the request-time resolution does after publishing.
+func buildingPackPosture(ref config.RulePackRef, dir string) string {
+	if dir = strings.TrimSpace(dir); dir == "" {
+		dir = strings.TrimSpace(ref.Dir)
+	}
+	if v, ok := pendingPackPostures.Load(dir); ok && v.(string) != "" {
+		return v.(string)
+	}
+	return packPosture(ref, dir)
 }
 
 // ConfigThresholds is resolveThresholds for a caller outside the gateway
@@ -232,9 +249,9 @@ func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thre
 	}
 	connectors := thresholdConnectorNames(cfg)
 	fill := func(profile string, derived *config.Config) {
-		table[thresholdKey{Profile: profile}] = resolveThresholds(derived, "")
+		table[thresholdKey{Profile: profile}] = resolveThresholdsWith(derived, "", buildingPackPosture)
 		for _, name := range connectors {
-			table[thresholdKey{Profile: profile, Connector: name}] = resolveThresholds(derived, name)
+			table[thresholdKey{Profile: profile, Connector: name}] = resolveThresholdsWith(derived, name, buildingPackPosture)
 		}
 	}
 	fill("", cfg)

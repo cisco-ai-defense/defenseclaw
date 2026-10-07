@@ -246,11 +246,6 @@ var policyEvaluateCmd = &cobra.Command{
 			return fmt.Errorf("--target-name is required")
 		}
 
-		engine, err := policy.NewExact(paths.regoDir)
-		if err != nil {
-			return err
-		}
-
 		block, allow := policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
 			TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
 		})
@@ -273,9 +268,19 @@ var policyEvaluateCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		out, err := engine.Evaluate(ctx, input)
-		if err != nil {
-			return fmt.Errorf("evaluation failed: %w", err)
+		// The managed packages ship no Rego: the config-driven twin the
+		// gateway falls back to decides, as it does there.
+		var out *policy.AdmissionOutput
+		engine, err := policy.NewExact(paths.regoDir)
+		switch {
+		case errors.Is(err, policy.ErrNoModules) || errors.Is(err, fs.ErrNotExist):
+			out = policy.EvaluateAdmissionFallback(input)
+		case err != nil:
+			return err
+		default:
+			if out, err = engine.Evaluate(ctx, input); err != nil {
+				return fmt.Errorf("evaluation failed: %w", err)
+			}
 		}
 
 		result, _ := json.MarshalIndent(out, "", "  ")
