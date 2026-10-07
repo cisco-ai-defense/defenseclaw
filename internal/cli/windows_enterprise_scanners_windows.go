@@ -126,11 +126,21 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 	}
 	switch result.Action {
 	case "install", "upgrade", "repair", "ensure":
-		if len(result.Errors) != 0 || opts == nil || strings.TrimSpace(opts.resolvedInstaller) == "" {
+		if len(result.Errors) != 0 || opts == nil {
 			return
 		}
-		source := filepath.Join(filepath.Dir(opts.resolvedInstaller), managed.StandaloneWindowsScannerRuntimeName)
-		if info, err := os.Lstat(source); err != nil || !info.Mode().IsRegular() {
+		source := ""
+		if installer := strings.TrimSpace(opts.resolvedInstaller); installer != "" {
+			candidate := filepath.Join(filepath.Dir(installer), managed.StandaloneWindowsScannerRuntimeName)
+			if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() {
+				source = candidate
+			}
+		}
+		if source == "" {
+			// No staged copy to install from (a repair run from the installed CLI, an older
+			// Setup): a runtime that is installed but not unpacked is prepared again, so a
+			// prepare that failed half way is not left for a hand clean-up (GAP-0263).
+			reprepareInstalledWindowsScannerRuntime(result)
 			return
 		}
 		if err := installWindowsScannerRuntime(source); err != nil {
@@ -192,6 +202,32 @@ func installWindowsScannerRuntime(source string) error {
 		}
 	}
 	return nil
+}
+
+// reprepareInstalledWindowsScannerRuntime unpacks the runtime of an installed
+// scanners executable whose state is not_prepared. A ready or missing runtime is
+// left alone.
+func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
+	current := readWindowsScannerRuntime()
+	if current == nil || current.State != "not_prepared" {
+		return
+	}
+	root, err := windowsScannerRuntimeDir()
+	if err == nil {
+		target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
+		if err = managed.ValidateTrustedFilePath(target, "scanner runtime"); err == nil {
+			for _, step := range []string{"prepare", "prune"} {
+				if err = runWindowsScannerRuntime(target, step); err != nil {
+					break
+				}
+			}
+		}
+	}
+	if err != nil {
+		result.AddWarning("scanner_runtime_unavailable",
+			"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
+	}
+	result.Scanners = readWindowsScannerRuntime()
 }
 
 func runWindowsScannerRuntime(executable, step string) error {

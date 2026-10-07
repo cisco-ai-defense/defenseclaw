@@ -36,6 +36,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 )
 
 //go:embed all:payload
@@ -281,7 +282,7 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 		return dir, nil
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
-		return "", fmt.Errorf("create scanner runtime root: %w", err)
+		return "", notPreparedError(fmt.Errorf("create scanner runtime root: %w", err))
 	}
 	if info, err := os.Lstat(root); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("scanner runtime root %s is not a plain folder", root)
@@ -290,6 +291,14 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 	if err != nil {
 		return "", errors.New("this build carries no scanner runtime archive")
 	}
+	// A folder here is not complete (checked above): an unpack that stopped half
+	// way, or a removal that left files behind. Windows cannot rename a folder
+	// onto a non-empty one, so it must go before the new one is published.
+	if _, err := os.Lstat(dir); err == nil && !runtimeComplete(dir, manifest.SHA256) {
+		if err := clearRuntimeDir(dir); err != nil {
+			return "", fmt.Errorf("clear the incomplete scanner runtime: %w", err)
+		}
+	}
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
 		return "", err
@@ -297,7 +306,7 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 	staging := filepath.Join(root, ".unpack-"+hex.EncodeToString(suffix))
 	if err := unpack(archive, staging); err != nil {
 		_ = os.RemoveAll(staging)
-		return "", err
+		return "", notPreparedError(err)
 	}
 	if err := os.WriteFile(filepath.Join(staging, completeMarker), []byte(manifest.SHA256), 0o644); err != nil {
 		_ = os.RemoveAll(staging)
@@ -327,10 +336,12 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 	if err != nil {
 		return "", errors.New("this build carries no scanner runtime archive")
 	}
-	if verifyRuntime(dir, archive) == nil {
+	verifyErr := verifyRuntime(dir, archive)
+	if verifyErr == nil {
 		return dir, nil
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	fmt.Fprintf(os.Stderr, "defenseclaw-scanners: the scanner runtime at %s does not match this build (%v); unpacking it again\n", dir, verifyErr)
+	if err := clearRuntimeDir(dir); err != nil {
 		return "", fmt.Errorf("remove the scanner runtime that does not match this build: %w", err)
 	}
 	if dir, err = ensureRuntime(manifest); err != nil {
@@ -340,6 +351,52 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
 	}
 	return dir, nil
+}
+
+// removeAll and the retry pacing of clearRuntimeDir are variables so a test can
+// fail a removal without a locked file.
+var (
+	removeAll            = os.RemoveAll
+	clearRuntimeAttempts = 8
+	clearRuntimeDelay    = 250 * time.Millisecond
+)
+
+// clearRuntimeDir removes an incomplete or mismatching unpack at dir, so a
+// fresh one can be published there. A file a scan or the antivirus still holds
+// open cannot be deleted for a moment, so the removal is retried with a growing
+// pause; what still stays is moved aside, for the next prune to remove, and the
+// error names the file that blocked it. A half-removed folder left in place
+// failed every later prepare (GAP-0262).
+func clearRuntimeDir(dir string) error {
+	var err error
+	delay := clearRuntimeDelay
+	for attempt := 0; attempt < clearRuntimeAttempts; attempt++ {
+		if err = removeAll(dir); err == nil {
+			return nil
+		}
+		time.Sleep(delay)
+		if delay < 4*time.Second {
+			delay *= 2
+		}
+	}
+	suffix := make([]byte, 8)
+	if _, randErr := rand.Read(suffix); randErr != nil {
+		return err
+	}
+	aside := filepath.Join(filepath.Dir(dir), ".stale-"+hex.EncodeToString(suffix))
+	if renameErr := os.Rename(dir, aside); renameErr != nil {
+		return fmt.Errorf("%w (the folder cannot be moved aside either: %v)", err, renameErr)
+	}
+	return nil
+}
+
+// notPreparedError tells a standard account that cannot create the runtime
+// that an administrator prepares it, instead of a bare "Access is denied".
+func notPreparedError(err error) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("the scanner runtime is not prepared and this account cannot prepare it; an administrator prepares it with `defenseclaw enterprise windows repair`: %w", err)
+	}
+	return err
 }
 
 // verifyRuntime checks that every file of archive exists under dir as a
