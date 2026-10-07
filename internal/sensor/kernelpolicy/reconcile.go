@@ -1,0 +1,585 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package kernelpolicy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// Intervals are the reconciler's clocks. The zero value of a field means its
+// default.
+type Intervals struct {
+	// Reconcile is the full pass cadence (60 s).
+	Reconcile time.Duration
+	// Scan is how often live processes are read for new or exited agent
+	// roots (5 s). A changed root set triggers a pass after Debounce.
+	Scan time.Duration
+	// Accrue is the burn-in accrual tick: covered time counts in units of it (60 s).
+	Accrue time.Duration
+	// Flush writes burnin.json (30 s).
+	Flush time.Duration
+	// PauseCheck is how often the pause files are read (2 s), so a pause
+	// takes effect well inside 5 s.
+	PauseCheck time.Duration
+	// Debounce batches re-renders (1 s).
+	Debounce time.Duration
+	// Call bounds all Tetragon calls of one pass (30 s).
+	Call time.Duration
+	// RetryBackoff spaces repeated attempts to repair one broken policy (5 min).
+	RetryBackoff time.Duration
+}
+
+func (i Intervals) withDefaults() Intervals {
+	def := func(v *time.Duration, d time.Duration) {
+		if *v <= 0 {
+			*v = d
+		}
+	}
+	def(&i.Reconcile, 60*time.Second)
+	def(&i.Scan, 5*time.Second)
+	def(&i.Accrue, 60*time.Second)
+	def(&i.Flush, 30*time.Second)
+	def(&i.PauseCheck, 2*time.Second)
+	def(&i.Debounce, time.Second)
+	def(&i.Call, 30*time.Second)
+	def(&i.RetryBackoff, 5*time.Minute)
+	return i
+}
+
+// DialFunc opens a connection to Tetragon that already passed the endpoint
+// trust checks, and returns its closer. It is called once per pass and once
+// per cleanup.
+type DialFunc func(ctx context.Context) (Client, func(), error)
+
+// Config wires a Controller to its environment.
+type Config struct {
+	Intent Intent
+	Dirs   Dirs
+	Logger *slog.Logger
+	Dial   DialFunc
+	// Enrollment returns the guardian manifest's enabled rows.
+	Enrollment func() (Enrollment, error)
+	// FS defaults to the operating system's.
+	FS FS
+	// Procs lists live processes; the argument says which uids are enrolled.
+	// It defaults to a /proc scan.
+	Procs         func(enrolled func(uid int) bool) ([]Proc, error)
+	ExtraPrefixes []string
+	Now           func() time.Time
+	Intervals     Intervals
+}
+
+// Hit is a kernel event from a DefenseClaw controls policy: an open that the
+// control denied (enforce) or would have denied (monitor).
+type Hit struct {
+	// Policy is the event's policy name, matched exactly against the names
+	// this helper loaded.
+	Policy string
+	UID    int
+	Path   string
+	Binary string
+	At     time.Time
+}
+
+type known struct {
+	family Family
+	index  PathIndex
+	mode   LoadedMode
+	// live is true while the helper's record holds the name; a retired name
+	// stays a few seconds so its last events are still attributed.
+	live    bool
+	expires time.Time
+}
+
+// Controller is the reconciler. One goroutine (Run) owns all state; the
+// event source reaches it through RecordHit, RecordLoss and SetStream, and
+// readers through Status.
+type Controller struct {
+	cfg Config
+
+	// Loop-owned.
+	st         FileState
+	tracker    *Tracker
+	enrollment Enrollment
+	installs   []Install
+	roots      RootSet
+	rootSig    string
+	recorded   map[string]bool
+	retryAt    map[string]time.Time
+	lastPaused bool
+	lastStale  bool
+	pauseKey   string
+	lastPIDs   map[int]bool
+	enabled    map[int]bool
+	alive      map[int]int
+
+	snapshot atomic.Pointer[State]
+	nudge    chan struct{}
+
+	// tallyMu guards what RecordHit and friends touch.
+	tallyMu sync.Mutex
+	burn    *Burnin
+	stream  bool
+	loss    bool
+	names   map[string]known
+}
+
+// New creates a Controller and restores what a previous helper published
+// (applied records, operator overrides, burn-in evidence).
+func New(cfg Config) *Controller {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+	if cfg.FS == nil {
+		cfg.FS = OSFS()
+	}
+	if cfg.Procs == nil {
+		cfg.Procs = func(enrolled func(int) bool) ([]Proc, error) { return ScanProcs("/proc", enrolled) }
+	}
+	cfg.Intervals = cfg.Intervals.withDefaults()
+	c := &Controller{
+		cfg:      cfg,
+		tracker:  NewTracker(),
+		recorded: map[string]bool{},
+		retryAt:  map[string]time.Time{},
+		lastPIDs: map[int]bool{},
+		enabled:  map[int]bool{},
+		alive:    map[int]int{},
+		nudge:    make(chan struct{}, 1),
+		burn:     LoadBurnin(cfg.Dirs),
+		names:    map[string]known{},
+	}
+	if err := readJSON(cfg.Dirs.StateFile(), &c.st); err != nil && !errors.Is(err, os.ErrNotExist) {
+		cfg.Logger.Warn("kernel policy state unreadable; starting from the live state", "error", err)
+		c.st = FileState{}
+	}
+	if names, err := readLoaded(cfg.Dirs); err == nil {
+		for _, name := range names {
+			c.recorded[name] = true
+		}
+	}
+	c.st.Version = stateVersion
+	c.st.HelperPID = os.Getpid()
+	c.st.KernelPolicy = Digest()
+	c.st.Intent = IntentStatus{
+		Mode: cfg.Intent.Mode, BurnIn: burnInText(cfg.Intent.BurnIn), EnforceAck: cfg.Intent.EnforceAck,
+		EnforceConnectors: cfg.Intent.EnforceConnectors, Problems: cfg.Intent.Problems,
+	}
+	if c.st.Applied == nil {
+		c.st.Applied = map[string]Applied{}
+	}
+	// Overrides last until the intent changes.
+	if key := cfg.Intent.Key(); c.st.IntentKey != key {
+		if len(c.st.Overrides) > 0 {
+			c.change(Change{Event: EventResumed, Reason: "intent changed; operator overrides cleared"})
+		}
+		c.st.Overrides = nil
+		c.st.IntentKey = key
+	}
+	c.syncTally()
+	c.publish()
+	return c
+}
+
+func burnInText(d time.Duration) string {
+	if d == 0 {
+		return "0"
+	}
+	return strconv.Itoa(int(d/time.Hour)) + "h"
+}
+
+// Nudge asks for a pass soon (a root started or exited, Tetragon reconnected).
+func (c *Controller) Nudge() {
+	select {
+	case c.nudge <- struct{}{}:
+	default:
+	}
+}
+
+// SetStream tells the controller whether the Tetragon event stream is
+// connected. Covered time accrues only while it is.
+func (c *Controller) SetStream(connected bool) {
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	if c.stream != connected {
+		c.loss = true // the minute it changed is not a covered minute
+	}
+	c.stream = connected
+}
+
+// RecordLoss tells the controller the stream dropped events: a process
+// throttle or a rate-limit notice. The current minute does not count as
+// covered.
+func (c *Controller) RecordLoss() {
+	c.tallyMu.Lock()
+	c.loss = true
+	c.tallyMu.Unlock()
+}
+
+// RecordHit counts an event from a controls policy. It only counts events
+// whose policy name is exactly one this helper loaded.
+func (c *Controller) RecordHit(h Hit) {
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	entry, ok := c.names[h.Policy]
+	if !ok || (entry.family != FamilyControls && entry.family != FamilyBurnin) {
+		return
+	}
+	control := entry.index.ControlOf(h.Path)
+	if control == "" {
+		control = "unknown"
+	}
+	at := h.At
+	if at.IsZero() {
+		at = c.cfg.Now()
+	}
+	// An enforcing controls policy denied this open; anything else would have.
+	blocked := entry.family == FamilyControls && entry.mode.Enforcing()
+	c.burn.Hit(h.UID, control, blocked, h.Path, h.Binary, at)
+}
+
+// OwnsPolicy reports whether name is a policy of family that this helper
+// recorded as loaded. The event source uses it to decide that DefenseClaw's own
+// observe policy is in place before it stops the fanotify watch.
+func (c *Controller) OwnsPolicy(name string, family Family) bool {
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	entry, ok := c.names[name]
+	return ok && entry.live && entry.family == family
+}
+
+// Status is the published state. It never blocks on a pass.
+func (c *Controller) Status() State {
+	var out State
+	if snap := c.snapshot.Load(); snap != nil {
+		out = *snap
+	}
+	c.tallyMu.Lock()
+	out.BurnIn = c.burn.Snapshot()
+	c.tallyMu.Unlock()
+	if pause := ReadPause(c.cfg.Dirs, c.cfg.Now()); pause.Active() {
+		out.Pause = &pause
+	} else {
+		out.Pause = nil
+	}
+	return out
+}
+
+// publish stores an immutable copy of the loop's state for Status.
+func (c *Controller) publish() {
+	snap := State{FileState: c.st}
+	snap.Policies = append([]PolicyStatus(nil), c.st.Policies...)
+	snap.UIDs = append([]UIDStatus(nil), c.st.UIDs...)
+	snap.Warnings = append([]string(nil), c.st.Warnings...)
+	snap.Changes = append([]Change(nil), c.st.Changes...)
+	snap.Applied = map[string]Applied{}
+	for name, a := range c.st.Applied {
+		snap.Applied[name] = a
+	}
+	snap.Overrides = map[Family]Override{}
+	for family, o := range c.st.Overrides {
+		snap.Overrides[family] = o
+	}
+	snap.Loaded = sortedKeys(c.recorded)
+	c.snapshot.Store(&snap)
+}
+
+func (c *Controller) persist() {
+	c.st.UpdatedAt = c.cfg.Now().UTC()
+	if err := writeJSON(c.cfg.Dirs.StateFile(), c.st); err != nil {
+		c.cfg.Logger.Warn("kernel policy state not written", "error", err)
+	}
+	c.publish()
+}
+
+// change appends to the change ring.
+func (c *Controller) change(ch Change) {
+	c.st.Seq++
+	ch.Seq = c.st.Seq
+	ch.At = c.cfg.Now().UTC()
+	c.st.Changes = append(c.st.Changes, ch)
+	if len(c.st.Changes) > maxChanges {
+		c.st.Changes = c.st.Changes[len(c.st.Changes)-maxChanges:]
+	}
+}
+
+// syncTally refreshes the lookup RecordHit uses.
+func (c *Controller) syncTally() {
+	now := c.cfg.Now()
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	for name, entry := range c.names {
+		if _, live := c.st.Applied[name]; !live {
+			entry.live = false
+			c.names[name] = entry
+			if now.After(entry.expires) {
+				delete(c.names, name)
+			}
+		}
+	}
+	for name, applied := range c.st.Applied {
+		entry := c.names[name]
+		entry.family = applied.Family
+		entry.live = true
+		entry.expires = now.Add(30 * time.Second)
+		if applied.Mode == PolicyEnforce {
+			entry.mode = LoadedEnforce
+		} else {
+			entry.mode = LoadedMonitor
+		}
+		c.names[name] = entry
+	}
+}
+
+// setIndex records the path index of a loaded controls policy.
+func (c *Controller) setIndex(name string, index PathIndex) {
+	c.tallyMu.Lock()
+	entry := c.names[name]
+	entry.index = index
+	c.names[name] = entry
+	c.tallyMu.Unlock()
+}
+
+// observeMode records the mode Tetragon reports for a name, so a hit is
+// counted as blocked or would-block by what is actually loaded.
+func (c *Controller) observeMode(name string, mode LoadedMode) {
+	c.tallyMu.Lock()
+	if entry, ok := c.names[name]; ok {
+		entry.mode = mode
+		c.names[name] = entry
+	}
+	c.tallyMu.Unlock()
+}
+
+// mayTouch is the only authority to delete or configure a name: the helper's
+// own record.
+func (c *Controller) mayTouch(name string) bool { return c.recorded[name] }
+
+func (c *Controller) recordLoaded(name string) error {
+	if c.recorded[name] {
+		return nil
+	}
+	c.recorded[name] = true
+	return writeLoaded(c.cfg.Dirs, sortedKeys(c.recorded))
+}
+
+func (c *Controller) forgetLoaded(name string) {
+	if !c.recorded[name] {
+		return
+	}
+	delete(c.recorded, name)
+	if err := writeLoaded(c.cfg.Dirs, sortedKeys(c.recorded)); err != nil {
+		c.cfg.Logger.Warn("tetragon-loaded not written", "error", err)
+	}
+	removePolicyCopy(c.cfg.Dirs, name)
+}
+
+// Run drives the controller until ctx ends. In off and consume it only
+// retires names its record holds. The policies it loaded keep running when it
+// stops, with frozen anchors, until it returns; status says so.
+func (c *Controller) Run(ctx context.Context) error {
+	if !c.cfg.Intent.Mode.LoadsPolicies() {
+		return c.runRetire(ctx)
+	}
+	iv := c.cfg.Intervals
+	c.pass(ctx, "start")
+	reconcile := time.NewTicker(iv.Reconcile)
+	scan := time.NewTicker(iv.Scan)
+	accrue := time.NewTicker(iv.Accrue)
+	flush := time.NewTicker(iv.Flush)
+	pauseCheck := time.NewTicker(iv.PauseCheck)
+	defer func() {
+		for _, t := range []*time.Ticker{reconcile, scan, accrue, flush, pauseCheck} {
+			t.Stop()
+		}
+	}()
+	var debounce <-chan time.Time
+	arm := func() {
+		if debounce == nil {
+			debounce = time.After(iv.Debounce)
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			c.flush()
+			c.persist()
+			return nil
+		case <-reconcile.C:
+			c.pass(ctx, "interval")
+		case <-scan.C:
+			if c.rescan() {
+				arm()
+			}
+		case <-c.nudge:
+			arm()
+		case <-debounce:
+			debounce = nil
+			c.pass(ctx, "nudge")
+		case <-pauseCheck.C:
+			if c.pauseChanged() {
+				c.pass(ctx, "pause")
+			}
+		case <-accrue.C:
+			c.accrue()
+		case <-flush.C:
+			c.flush()
+		}
+	}
+}
+
+func (c *Controller) flush() {
+	c.tallyMu.Lock()
+	err := c.burn.Save(c.cfg.Dirs)
+	c.tallyMu.Unlock()
+	if err != nil {
+		c.cfg.Logger.Warn("burn-in not written", "error", err)
+	}
+}
+
+// pauseChanged reports whether the pause files changed since the last look.
+func (c *Controller) pauseChanged() bool {
+	state := ReadPause(c.cfg.Dirs, c.cfg.Now())
+	key := "none"
+	switch {
+	case state.Invalid != "":
+		key = "invalid:" + state.Invalid
+	case state.Pause != nil:
+		key = fmt.Sprintf("%d:%v:%d", state.Pause.Until.Unix(), state.Pause.UntilReboot, state.Pause.SetAt.Unix())
+	}
+	if key == c.pauseKey {
+		return false
+	}
+	c.pauseKey = key
+	return true
+}
+
+// runRetire is the whole of off and consume: retire the names this helper
+// recorded, if any, and then never connect again. Tetragon may be down at
+// start, so it retries until the record is empty.
+func (c *Controller) runRetire(ctx context.Context) error {
+	c.st.Effective = string(c.cfg.Intent.Mode)
+	c.persist()
+	orphaned := false
+	for {
+		if len(c.recorded) == 0 {
+			return nil
+		}
+		if err := c.retireOnce(ctx); err == nil && len(c.recorded) == 0 {
+			return nil
+		} else if err != nil {
+			c.cfg.Logger.Warn("retiring recorded tetragon policies failed; will retry", "error", err)
+			if !orphaned {
+				// Policies this helper loaded are still in Tetragon while the
+				// mode says none should be.
+				orphaned = true
+				c.change(Change{Event: EventOrphaned, Reason: fmt.Sprintf("%d recorded policies not retired: %v", len(c.recorded), err)})
+				c.st.Warnings = addUnique(c.st.Warnings, WarnTetragonUnavailable)
+				c.persist()
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(c.cfg.Intervals.Reconcile):
+		}
+	}
+}
+
+func (c *Controller) retireOnce(ctx context.Context) error {
+	callCtx, cancel := context.WithTimeout(ctx, c.cfg.Intervals.Call)
+	defer cancel()
+	client, closeFn, err := c.cfg.Dial(callCtx)
+	if err != nil {
+		return err
+	}
+	if closeFn != nil {
+		defer closeFn()
+	}
+	result, err := Cleanup(callCtx, client, c.cfg.Dirs)
+	for _, name := range append(append([]string(nil), result.Removed...), result.Missing...) {
+		delete(c.recorded, name)
+		delete(c.st.Applied, name)
+		c.change(Change{Event: EventRemoved, Policy: name, Reason: "mode " + string(c.cfg.Intent.Mode)})
+	}
+	for _, name := range result.Foreign {
+		c.st.Warnings = addUnique(c.st.Warnings, WarnForeignName+":"+name)
+	}
+	c.st.Policies = nil
+	c.persist()
+	return err
+}
+
+func addUnique(list []string, value string) []string {
+	for _, item := range list {
+		if item == value {
+			return list
+		}
+	}
+	return append(list, value)
+}
+
+// rescan reads live processes and reports whether the set of agent roots
+// changed, which warrants a re-render.
+func (c *Controller) rescan() bool {
+	c.installs = ResolveInstalls(c.cfg.FS, c.enrollment, ResolveOptions{ExtraPrefixes: c.cfg.ExtraPrefixes})
+	procs, err := c.cfg.Procs(c.enrollment.Has)
+	if err != nil {
+		return false
+	}
+	c.roots = c.tracker.Update(c.cfg.FS, procs, c.installs, c.enrollment)
+	keys := make([]string, 0, len(c.roots.Roots))
+	alive := map[int]int{}
+	for _, root := range c.roots.Roots {
+		keys = append(keys, fmt.Sprintf("%d:%d", root.PID, root.StartTicks))
+		if c.lastPIDs[root.PID] {
+			alive[root.UID]++
+		}
+	}
+	sort.Strings(keys)
+	sig := strings.Join(keys, ",")
+	changed := sig != c.rootSig
+	c.rootSig = sig
+	c.alive = alive
+	return changed
+}
+
+// accrue adds one tick of covered time to every user whose controls are
+// enabled with an anchored root alive, if the stream was connected and
+// lossless and nothing is paused.
+func (c *Controller) accrue() {
+	paused := ReadPause(c.cfg.Dirs, c.cfg.Now()).Active()
+	c.tallyMu.Lock()
+	defer c.tallyMu.Unlock()
+	lossy := c.loss || !c.stream
+	c.loss = false
+	if lossy || paused || !c.cfg.Intent.Mode.LoadsPolicies() {
+		return
+	}
+	for uid, on := range c.enabled {
+		if on && c.alive[uid] > 0 {
+			c.burn.Accrue(uid, c.cfg.Intervals.Accrue)
+		}
+	}
+}
