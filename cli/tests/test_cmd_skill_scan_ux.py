@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unittest
 import uuid
@@ -155,7 +156,11 @@ class TestSingleTargetUX(_SkillScanUXBase):
         self.assertIn("Summary: 1 skill scanned", result.output)
         self.assertIn("clean=1", result.output)
         self.assertIn("blocked=0", result.output)
-        self.assertIn("in 80ms", result.output)
+        # The summary reports the scan's 80ms plus the real time of the default
+        # rule-pack overlay (GAP-0164, GAP-2070), so only the floor is exact.
+        took = re.search(r"in (\d+)ms", result.output)
+        self.assertIsNotNone(took, result.output)
+        self.assertGreaterEqual(int(took.group(1)), 80)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
