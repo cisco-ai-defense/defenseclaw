@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -354,10 +355,86 @@ const (
 	TetragonReasonNotApplicable = "tetragon_not_applicable"
 )
 
+// enterprise.tetragon.customer_events: what the sensor helper does with the
+// kprobe and LSM events of the customer's own Tetragon policies. It never
+// manages, changes or deletes those policies in either case.
+const (
+	// TetragonCustomerEventsAgent (default) forwards the events that fall
+	// under an AI agent's process lineage, attributed to the agent, the user
+	// and the hook decision; every other event is only counted.
+	TetragonCustomerEventsAgent = "agent"
+	// TetragonCustomerEventsOff forwards none; the per-policy counts and the
+	// policy summary stay.
+	TetragonCustomerEventsOff = "off"
+)
+
+// MaxTetragonEnforceAcks bounds the list form of enterprise.tetragon.
+// enforce_ack: the old and the new build's digest during a ring upgrade, with
+// room for a skipped release.
+const MaxTetragonEnforceAcks = 4
+
 var (
 	tetragonBurnInPattern     = regexp.MustCompile(`^[0-9]{1,4}h$`)
 	tetragonEnforceAckPattern = regexp.MustCompile(`^sha256:[0-9a-f]{12}$`)
 )
+
+// TetragonEnforceAcks is enterprise.tetragon.enforce_ack: the kernel_policy
+// digests the administrator approved. YAML takes one digest as a string ("" for
+// none) or a list of at most MaxTetragonEnforceAcks, so a ring upgrade can
+// approve the old and the new build at once. A one-item list and the string
+// mean the same and marshal the same, as the string.
+type TetragonEnforceAcks []string
+
+// UnmarshalYAML accepts a string or a list of strings.
+func (a *TetragonEnforceAcks) UnmarshalYAML(node *yaml.Node) error {
+	switch {
+	case node.Kind == yaml.ScalarNode && node.ShortTag() == "!!null":
+		*a = nil
+	case node.Kind == yaml.ScalarNode:
+		*a = TetragonEnforceAcks{node.Value}
+	case node.Kind == yaml.SequenceNode:
+		items := make([]string, 0, len(node.Content))
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode {
+				return fmt.Errorf("config: enterprise.tetragon.enforce_ack must be a digest or a list of digests")
+			}
+			items = append(items, item.Value)
+		}
+		*a = items
+	default:
+		return fmt.Errorf("config: enterprise.tetragon.enforce_ack must be a digest or a list of digests")
+	}
+	return nil
+}
+
+// MarshalYAML writes one digest as a string and several as a list.
+func (a TetragonEnforceAcks) MarshalYAML() (any, error) {
+	if len(a) == 1 {
+		return a[0], nil
+	}
+	return []string(a), nil
+}
+
+// Canonical is the list trimmed, without empty items or repeats, in the order
+// written; nil when it approves nothing.
+func (a TetragonEnforceAcks) Canonical() TetragonEnforceAcks {
+	var out TetragonEnforceAcks
+	for _, item := range a {
+		item = strings.TrimSpace(item)
+		if item != "" && !slices.Contains(out, item) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// Approves reports whether the list approves digest.
+func (a TetragonEnforceAcks) Approves(digest string) bool {
+	return digest != "" && slices.Contains(a.Canonical(), digest)
+}
+
+// String is the canonical list joined by commas: the drop-in's value.
+func (a TetragonEnforceAcks) String() string { return strings.Join(a.Canonical(), ",") }
 
 // EnterpriseTetragonConfig is enterprise.tetragon: how the managed Linux
 // sensor helper uses the Tetragon the host already runs. It applies to the
@@ -377,19 +454,25 @@ type EnterpriseTetragonConfig struct {
 	// BurnIn is the covered agent time each enrolled user needs before its
 	// uid is enforced: "0" or whole hours from 24h to 2160h (default 168h).
 	BurnIn string `mapstructure:"burn_in" yaml:"burn_in,omitempty"`
-	// EnforceAck is the kernel_policy digest the administrator approved:
-	// "sha256:" and 12 lowercase hex digits, the prefix `enterprise linux
-	// tetragon status` prints. Only mode enforce reads it; with any other
-	// mode it is kept but inert.
-	EnforceAck string `mapstructure:"enforce_ack" yaml:"enforce_ack,omitempty"`
+	// EnforceAck are the kernel_policy digests the administrator approved,
+	// each "sha256:" and 12 lowercase hex digits as `enterprise linux
+	// tetragon verify --ready-for enforce` prints them: one, or at most
+	// MaxTetragonEnforceAcks during a ring upgrade. Only mode enforce reads
+	// it; with any other mode it is kept but inert.
+	EnforceAck TetragonEnforceAcks `mapstructure:"enforce_ack" yaml:"enforce_ack,omitempty"`
+	// CustomerEvents is agent (the default: forward the kprobe and LSM
+	// events of the customer's own Tetragon policies that fall under an AI
+	// agent) or off (count them only).
+	CustomerEvents string `mapstructure:"customer_events" yaml:"customer_events,omitempty"`
 }
 
 // Effective returns the block with the defaults filled in and every value in
 // canonical form: mode lowercased (consume when unset, or for a value that is
 // not a mode), burn_in as whole hours ("168h" when unset or malformed, "0"
-// for no burn-in) and enforce_ack trimmed. Two blocks with the same
-// Effective value configure the helper identically, so an absent block and
-// one that spells out the defaults are the same intent.
+// for no burn-in), enforce_ack trimmed without empty items or repeats (nil
+// for none) and customer_events lowercased (agent when unset or malformed).
+// Two blocks with the same Effective value configure the helper identically,
+// so an absent block and one that spells out the defaults are the same intent.
 func (t EnterpriseTetragonConfig) Effective() EnterpriseTetragonConfig {
 	mode := strings.ToLower(strings.TrimSpace(t.Mode))
 	switch mode {
@@ -397,10 +480,15 @@ func (t EnterpriseTetragonConfig) Effective() EnterpriseTetragonConfig {
 	default:
 		mode = TetragonModeConsume
 	}
+	events := strings.ToLower(strings.TrimSpace(t.CustomerEvents))
+	if events != TetragonCustomerEventsOff {
+		events = TetragonCustomerEventsAgent
+	}
 	return EnterpriseTetragonConfig{
-		Mode:       mode,
-		BurnIn:     formatTetragonBurnIn(t.BurnInDuration()),
-		EnforceAck: strings.TrimSpace(t.EnforceAck),
+		Mode:           mode,
+		BurnIn:         formatTetragonBurnIn(t.BurnInDuration()),
+		EnforceAck:     t.EnforceAck.Canonical(),
+		CustomerEvents: events,
 	}
 }
 
@@ -417,7 +505,9 @@ func (t EnterpriseTetragonConfig) BurnInDuration() time.Duration {
 // IsDefault reports whether the block configures the helper exactly as an
 // absent block does.
 func (t EnterpriseTetragonConfig) IsDefault() bool {
-	return t.Effective() == EnterpriseTetragonConfig{}.Effective()
+	effective, defaults := t.Effective(), EnterpriseTetragonConfig{}.Effective()
+	return effective.Mode == defaults.Mode && effective.BurnIn == defaults.BurnIn &&
+		len(effective.EnforceAck) == 0 && effective.CustomerEvents == defaults.CustomerEvents
 }
 
 func parseTetragonBurnIn(value string) (time.Duration, error) {
@@ -450,7 +540,7 @@ func formatTetragonBurnIn(burnIn time.Duration) string {
 
 func tetragonEmpty(t EnterpriseTetragonConfig) bool {
 	return strings.TrimSpace(t.Mode) == "" && strings.TrimSpace(t.BurnIn) == "" &&
-		strings.TrimSpace(t.EnforceAck) == ""
+		len(t.EnforceAck.Canonical()) == 0 && strings.TrimSpace(t.CustomerEvents) == ""
 }
 
 // TetragonMode is the Tetragon mode the managed sensor helper runs with on
@@ -480,13 +570,20 @@ func (c *Config) TetragonMode(goos string) (mode, reason string) {
 	if !c.StandaloneEnterprise() {
 		return TetragonModeOff, ""
 	}
-	if !c.AIDiscovery.Runtime.Enabled || !planeCSelected(c.AIDiscovery.Runtime) {
+	if !c.PlaneCSelected() {
 		if written && configured != TetragonModeOff {
 			return TetragonModeOff, TetragonReasonPlaneCOff
 		}
 		return TetragonModeOff, ""
 	}
 	return configured, ""
+}
+
+// PlaneCSelected reports whether AI Discovery Plane C runs: the runtime
+// planes are enabled and EffectivePlanes contains c. Without it the managed
+// sensor helper runs with Tetragon off.
+func (c *Config) PlaneCSelected() bool {
+	return c != nil && c.AIDiscovery.Runtime.Enabled && planeCSelected(c.AIDiscovery.Runtime)
 }
 
 func planeCSelected(runtime AIRuntimeConfig) bool {
@@ -510,8 +607,18 @@ func validateEnterpriseTetragon(t EnterpriseTetragonConfig) error {
 			return fmt.Errorf("config: enterprise.tetragon.burn_in %q must be 0 or whole hours from 24h to 2160h", t.BurnIn)
 		}
 	}
-	if ack := strings.TrimSpace(t.EnforceAck); ack != "" && !tetragonEnforceAckPattern.MatchString(ack) {
-		return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `defenseclaw-gateway enterprise linux tetragon status` prints", t.EnforceAck)
+	acks := t.EnforceAck.Canonical()
+	if len(acks) > MaxTetragonEnforceAcks {
+		return fmt.Errorf("config: enterprise.tetragon.enforce_ack lists %d digests; list at most %d (the builds a ring upgrade runs at once)", len(acks), MaxTetragonEnforceAcks)
+	}
+	for _, ack := range acks {
+		if !tetragonEnforceAckPattern.MatchString(ack) {
+			return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` prints", ack)
+		}
+	}
+	if err := oneOf("enterprise.tetragon.customer_events", t.CustomerEvents,
+		TetragonCustomerEventsAgent, TetragonCustomerEventsOff); err != nil {
+		return err
 	}
 	return nil
 }

@@ -3069,10 +3069,20 @@ def _check_kernel_sensor(
     Reads only Tetragon's world-readable info file and the /health doctor
     already fetched. It never opens Tetragon's socket (root-only, and it grants
     kernel policy control) and runs no binary. No row on a Linux host without
-    Tetragon whose config does not ask for it.
+    Tetragon whose config does not ask for it. Every remediation runs as
+    printed (``sudo /opt/defenseclaw/bin/...``; the words and commands come
+    from :mod:`defenseclaw.kernel_sensor`).
     """
-    from defenseclaw.commands.cmd_agent import kernel_sensor_summary
     from defenseclaw.config import runtime_plane_c_selected, tetragon_configured_mode
+    from defenseclaw.kernel_sensor import (
+        TETRAGON_RESTART,
+        admin_command,
+        fallback_text,
+        helper_command,
+        kernel_sensor_summary,
+        tetragon_setting,
+        your_policies_summary,
+    )
     from defenseclaw.platform_support import host_os
 
     if (os_name or host_os()) != "linux":
@@ -3100,7 +3110,8 @@ def _check_kernel_sensor(
             f"Tetragon serves its API on {address}: any local account can load kernel policies; "
             "set server-address to a unix socket",
             "tetragon-tcp-api",
-            "Set Tetragon's server-address to unix:///var/run/tetragon/tetragon.sock and restart Tetragon",
+            f"Run `{tetragon_setting('server-address', 'unix:///var/run/tetragon/tetragon.sock')}`, "
+            f"then {TETRAGON_RESTART}",
         )
         return
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
@@ -3123,16 +3134,16 @@ def _check_kernel_sensor(
             "fail",
             f"DefenseClaw kernel policies are loaded with nothing to reconcile them: {', '.join(sorted(orphaned))}",
             "kernel-policy-orphaned",
-            "Run `sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup`, "
-            "then `sudo defenseclaw-gateway enterprise linux verify`",
+            f"Start the sensor helper (`sudo systemctl start defenseclaw-sensor-helper`), or remove them with "
+            f"`{helper_command('--tetragon-cleanup')}`, then run `{admin_command('enterprise', 'linux', 'verify')}`",
         )
         return
     runtime = getattr(getattr(cfg, "ai_discovery", None), "runtime", None)
     if not runtime_plane_c_selected(runtime):
         emit(
             "skip",
-            "Plane C is off, so the sensor helper does not read Tetragon; set "
-            "ai_discovery.runtime.enable_host_plane in the managed config to use it",
+            "Plane C is off, so the sensor helper does not read Tetragon; set ai_discovery.runtime.enabled: true "
+            "and ai_discovery.runtime.enable_host_plane: true in the admin config and apply it",
             "tetragon-plane-c-off",
         )
         return
@@ -3149,7 +3160,8 @@ def _check_kernel_sensor(
             f"enterprise.tetragon.mode is {configured}, but Tetragon is not running on this host "
             f"({info_path} is missing); the sensor helper uses cn_proc",
             "tetragon-unavailable",
-            "Start Tetragon (`sudo systemctl start tetragon`), or set enterprise.tetragon.mode to consume",
+            "Check it with `systemctl status tetragon` and start it with `sudo systemctl start tetragon`, "
+            "or set enterprise.tetragon.mode: consume in the admin config and apply it",
         )
         return
     if not health:
@@ -3161,12 +3173,15 @@ def _check_kernel_sensor(
     plane_c = planes.get("c") if isinstance(planes.get("c"), dict) else {}
     backend = plane_c.get("backend") if isinstance(plane_c.get("backend"), dict) else {}
     if str(backend.get("kind") or "").strip().lower() != "tetragon":
-        reason = str(backend.get("fallback_reason") or "").strip() or "the gateway reports no Tetragon backend"
+        reason = str(backend.get("fallback_reason") or "").strip()
+        why = "the gateway reports no Tetragon backend"
+        if reason:
+            why = f"{fallback_text(reason)} ({reason.split(':', 1)[0]})"
         emit(
             "warn",
-            f"present, but the helper uses cn_proc: {reason}",
+            f"present, but the helper uses cn_proc: {why}",
             "tetragon-fallback",
-            "Run `sudo defenseclaw-gateway enterprise linux tetragon status` for the details",
+            f"Run `{admin_command('enterprise', 'linux', 'tetragon', 'verify')}` for the failing check and its fix",
         )
         return
     summary = kernel_sensor_summary(backend)
@@ -3179,19 +3194,20 @@ def _check_kernel_sensor(
             f"{summary}; the sensor helper applies kernel policy {_short_policy_digest(applied)}, "
             f"but the gateway's policy generation has {_short_policy_digest(wanted)}",
             "kernel-policy-not-applied",
-            "Run `sudo defenseclaw-gateway enterprise linux ensure` so the helper restarts with this build's controls",
+            f"Run `{admin_command('enterprise', 'linux', 'ensure')}` so the helper restarts with this build's controls",
         )
         return
     paused = str(kernel.get("paused_until") or "").strip()
     if paused:
         emit(
             "warn",
-            f"{summary}; kernel enforcement is paused until {paused}",
+            f"{summary}; kernel enforcement is paused for every user on this host until {paused}",
             "kernel-enforce-paused",
-            "Run `sudo defenseclaw-gateway enterprise linux tetragon resume` when the pause is no longer needed",
+            f"Run `{admin_command('enterprise', 'linux', 'tetragon', 'resume')}` when the pause is no longer needed",
         )
         return
-    emit("pass", summary)
+    policies = your_policies_summary(backend)
+    emit("pass", f"{summary}; your Tetragon policies: {policies}" if policies else summary)
 
 
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:

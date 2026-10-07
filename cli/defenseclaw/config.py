@@ -2988,7 +2988,12 @@ def runtime_plane_c_selected(runtime: Any) -> bool:
 # `config get --effective` and doctor. They mirror Go's
 # EnterpriseTetragonConfig.Effective and Config.TetragonMode.
 TETRAGON_MODES: tuple[str, ...] = ("off", "consume", "observe", "enforce")
-TETRAGON_DEFAULTS: dict[str, str] = {"mode": "consume", "burn_in": "168h", "enforce_ack": ""}
+TETRAGON_DEFAULTS: dict[str, str] = {
+    "mode": "consume",
+    "burn_in": "168h",
+    "enforce_ack": "",
+    "customer_events": "agent",
+}
 
 
 def tetragon_block(document: Any) -> dict[str, Any]:
@@ -3004,6 +3009,22 @@ def _tetragon_text(value: Any) -> str:
     if isinstance(value, bool):
         return "on" if value else "off"
     return str(value).strip()
+
+
+def _tetragon_acks(value: Any) -> str | list[str]:
+    """``enforce_ack`` as Go's TetragonEnforceAcks marshals it: trimmed, without
+    empty items or repeats, in the order written; one digest is the string
+    (``""`` for none) and several are a list (a ring upgrade approves two
+    builds at once)."""
+    items = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    for item in items:
+        text = _tetragon_text(item) if item is not None else ""
+        if text and text not in out:
+            out.append(text)
+    if not out:
+        return ""
+    return out[0] if len(out) == 1 else out
 
 
 def tetragon_configured_mode(document: Any) -> str:
@@ -3024,17 +3045,23 @@ def effective_tetragon(
 
     The mode is capped at ``off`` where the helper does not use Tetragon:
     macOS and Windows ignore the block, only a managed Linux deployment has
-    the helper, and Plane C must be selected. ``enforce_ack`` is marked inert
-    unless the mode is ``enforce``. The caps that need the helper's own state
-    (a stale ack, the Tetragon version) are reported by
-    ``defenseclaw-gateway enterprise linux tetragon status``.
+    the helper, and Plane C must be selected. ``enforce_ack`` (one digest, or a
+    list during a ring upgrade) is marked inert unless the mode is
+    ``enforce``, and ``customer_events`` when the mode is ``off`` (no event
+    stream). The caps that need the helper's own state (a stale ack, the
+    Tetragon version) are reported by
+    ``sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify``.
     """
     written = tetragon_block(document)
-    view: dict[str, tuple[str, str]] = {}
+    view: dict[str, tuple[Any, str]] = {}
     for key, default in TETRAGON_DEFAULTS.items():
         value = written.get(key)
         if value is None:
             view[key] = (default, "builtin")
+        elif key == "enforce_ack":
+            view[key] = (_tetragon_acks(value), f"config:enterprise.tetragon.{key}")
+        elif key == "customer_events":
+            view[key] = (_tetragon_text(value).lower(), f"config:enterprise.tetragon.{key}")
         else:
             view[key] = (_tetragon_text(value), f"config:enterprise.tetragon.{key}")
     mode, source = view["mode"]
@@ -3053,6 +3080,9 @@ def effective_tetragon(
     ack, ack_source = view["enforce_ack"]
     if ack and view["mode"][0] != "enforce":
         view["enforce_ack"] = (ack, f"{ack_source} (inert: the mode is not enforce)")
+    events, events_source = view["customer_events"]
+    if view["mode"][0] == "off":
+        view["customer_events"] = (events, f"{events_source} (inert: the mode is off)")
     return view
 
 

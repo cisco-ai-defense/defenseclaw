@@ -106,11 +106,25 @@ def test_managed_tetragon_backend_passes_with_version_mode_and_loss(tmp_path: Pa
     backend = {"kind": "tetragon", "version": "1.7.1", "mode": "observe", "events_lost": 0, "loss_known": True}
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(backend), mode="observe"))
     assert row["status"] == "pass"
-    assert row["detail"] == "Tetragon 1.7.1, observe, 0 events lost"
+    assert row["detail"] == "Tetragon v1.7.1, observe, 0 events lost"
 
     unknown_loss = dict(backend, loss_known=False)
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(unknown_loss)))
-    assert row["detail"] == "Tetragon 1.7.1, observe, events lost unknown"
+    assert row["detail"] == "Tetragon v1.7.1, observe, events lost unknown"
+
+    # The pass names your own Tetragon policies when the helper reports them.
+    yours = dict(
+        backend,
+        customer_policies=[
+            {"name": "10-file-sensitive", "mode": "enforce"},
+            {"name": "20-net-connect", "mode": "monitor"},
+        ],
+        customer_events={"seen": 40, "forwarded": 12, "dropped": 0},
+    )
+    row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(yours)))
+    assert row["detail"] == (
+        "Tetragon v1.7.1, observe, 0 events lost; your Tetragon policies: 2 loaded (1 enforcing); 12 agent events forwarded"
+    )
 
 
 def test_managed_fallback_names_the_reason(tmp_path: Path) -> None:
@@ -118,7 +132,10 @@ def test_managed_fallback_names_the_reason(tmp_path: Path) -> None:
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health(backend)))
     assert row["status"] == "warn"
     assert row["reason_code"] == "tetragon-fallback"
-    assert row["detail"] == "present, but the helper uses cn_proc: tetragon_unsupported_version: 1.5.0"
+    assert row["detail"] == (
+        "present, but the helper uses cn_proc: this Tetragon version is not supported (tetragon_unsupported_version)"
+    )
+    assert "tetragon verify" in row["remediation"]
     # A gateway that reports no backend at all (an older helper) also falls back.
     row = _only(_row(tmp_path, info=_UNIX_INFO, cfg=_cfg(managed=True), health=_health()))
     assert row["reason_code"] == "tetragon-fallback"
@@ -194,6 +211,7 @@ def test_effective_tetragon_defaults_sources_and_caps(monkeypatch: pytest.Monkey
         "mode": ("consume", "builtin"),
         "burn_in": ("168h", "builtin"),
         "enforce_ack": ("", "builtin"),
+        "customer_events": ("agent", "builtin"),
     }
 
     view = effective_tetragon(_document(mode="enforce", burn_in=0, enforce_ack="sha256:3f9c2a7d41b0"), **managed)
@@ -204,6 +222,25 @@ def test_effective_tetragon_defaults_sources_and_caps(monkeypatch: pytest.Monkey
     # An ack with a mode that never reads it is kept but says so.
     view = effective_tetragon(_document(mode="observe", enforce_ack="sha256:3f9c2a7d41b0"), **managed)
     assert view["enforce_ack"][1].endswith("(inert: the mode is not enforce)")
+
+    # The list form of a ring upgrade, as Go marshals it: canonical, one item
+    # is the string.
+    ring = ["sha256:3f9c2a7d41b0", " sha256:08b71155b713", "", "sha256:3f9c2a7d41b0"]
+    view = effective_tetragon(_document(mode="enforce", enforce_ack=ring), **managed)
+    assert view["enforce_ack"] == (
+        ["sha256:3f9c2a7d41b0", "sha256:08b71155b713"],
+        "config:enterprise.tetragon.enforce_ack",
+    )
+    view = effective_tetragon(_document(mode="enforce", enforce_ack=["sha256:3f9c2a7d41b0"]), **managed)
+    assert view["enforce_ack"][0] == "sha256:3f9c2a7d41b0"
+    assert effective_tetragon(_document(enforce_ack=[]), **managed)["enforce_ack"][0] == ""
+
+    # customer_events: PyYAML reads an unquoted off as False; the off mode
+    # has no event stream, so the key is inert there.
+    view = effective_tetragon(_document(customer_events=False), **managed)
+    assert view["customer_events"] == ("off", "config:enterprise.tetragon.customer_events")
+    view = effective_tetragon(_document(mode="off", customer_events="Agent"), **managed)
+    assert view["customer_events"] == ("agent", "config:enterprise.tetragon.customer_events (inert: the mode is off)")
 
     # The caps the lifecycle renders: Plane C off, not managed, not Linux.
     capped = effective_tetragon(_document(mode="observe"), **dict(managed, runtime=_NO_PLANE_C))
@@ -265,7 +302,7 @@ def test_config_get_effective_prints_the_tetragon_intent(tmp_path: Path, monkeyp
     assert mode.stdout == "off\n"
     assert "builtin, capped:" in mode.stderr
     assert block.exit_code == 0, block.output
-    assert json.loads(block.stdout) == {"mode": "off", "burn_in": "168h", "enforce_ack": ""}
+    assert json.loads(block.stdout) == {"mode": "off", "burn_in": "168h", "enforce_ack": "", "customer_events": "agent"}
     assert "burn_in=builtin" in block.stderr
 
 

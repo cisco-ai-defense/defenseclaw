@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"testing"
 
@@ -91,7 +92,7 @@ func TestConfigDigestNormalizesTetragonDefaults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if cfg.Enterprise.Tetragon != block {
+		if !reflect.DeepEqual(cfg.Enterprise.Tetragon, block) {
 			t.Fatalf("configDigest changed the config: %+v, want %+v", cfg.Enterprise.Tetragon, block)
 		}
 		return got
@@ -102,7 +103,9 @@ func TestConfigDigestNormalizesTetragonDefaults(t *testing.T) {
 			{Mode: "consume", BurnIn: "168h"},
 			{Mode: "consume"},
 			{BurnIn: "168h"},
-			{Mode: "consume", BurnIn: "0168h", EnforceAck: " "},
+			{Mode: "consume", BurnIn: "0168h", EnforceAck: config.TetragonEnforceAcks{" "}},
+			{CustomerEvents: "agent"},
+			{EnforceAck: config.TetragonEnforceAcks{}},
 		} {
 			if got := digest(same, profile); got != absent {
 				t.Errorf("profile %q: %+v digests %s, the absent block %s", profile, same, got, absent)
@@ -113,9 +116,11 @@ func TestConfigDigestNormalizesTetragonDefaults(t *testing.T) {
 			{Mode: "off"},
 			{Mode: "observe"},
 			{Mode: "enforce"},
-			{Mode: "enforce", EnforceAck: "sha256:3f9c2a7d41b0"},
+			{Mode: "enforce", EnforceAck: config.TetragonEnforceAcks{"sha256:3f9c2a7d41b0"}},
+			{Mode: "enforce", EnforceAck: config.TetragonEnforceAcks{"sha256:3f9c2a7d41b0", "sha256:08b71155b713"}},
 			{BurnIn: "24h"},
 			{BurnIn: "0"},
+			{CustomerEvents: "off"},
 		} {
 			got := digest(different, profile)
 			if previous, dup := seen[got]; dup {

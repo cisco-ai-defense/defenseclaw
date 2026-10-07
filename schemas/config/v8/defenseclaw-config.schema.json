@@ -5007,8 +5007,29 @@
               ]
             },
             "enforce_ack": {
+              "description": "The kernel_policy digests you approved for mode enforce: one digest, or a list of at most 4 while a ring upgrade runs two builds. Each is sha256: and 12 lowercase hex digits, as `enterprise linux tetragon verify --ready-for enforce` prints it.",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^(|sha256:[0-9a-f]{12})$"
+                },
+                {
+                  "type": "array",
+                  "maxItems": 4,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^sha256:[0-9a-f]{12}$"
+                  }
+                }
+              ]
+            },
+            "customer_events": {
+              "description": "The kprobe and LSM events of your own Tetragon policies: agent (default) forwards those under an AI agent, attributed to the agent, the user and the hook decision; off only counts them. DefenseClaw never changes your policies.",
               "type": "string",
-              "pattern": "^(|sha256:[0-9a-f]{12})$"
+              "enum": [
+                "agent",
+                "off"
+              ]
             }
           }
         }

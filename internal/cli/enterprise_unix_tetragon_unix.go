@@ -30,8 +30,21 @@ func runUnixTetragon(cmd *cobra.Command, action string, opts *unixTetragonOption
 	if err != nil {
 		return withExitCode(err, enterprisestatus.UnixExitFailure)
 	}
+	if action == enterpriseunix.TetragonActionVerify {
+		readiness := enterpriseunix.RunTetragonVerify(cmd.Context(), env, opts.readyFor)
+		if err := enterpriseunix.WriteTetragonReadiness(cmd.OutOrStdout(), readiness, opts.json); err != nil {
+			return err
+		}
+		if readiness.OK {
+			return nil
+		}
+		if len(readiness.Errors) > 0 {
+			return withExitCode(errors.New("tetragon verify failed; see the "+countNoun(len(readiness.Errors), "problem")+" listed above"), readiness.ExitCode)
+		}
+		return withExitCode(errors.New("not ready for "+readiness.ReadyFor+"; see the failing checks above"), readiness.ExitCode)
+	}
 	report := enterpriseunix.RunTetragon(cmd.Context(), env, enterpriseunix.TetragonOptions{
-		Action: action, For: opts.pauseFor, UntilReboot: opts.untilReboot, Reason: opts.reason,
+		Action: action, For: opts.pauseFor, UntilReboot: opts.untilReboot, Reason: opts.reason, User: opts.user,
 	})
 	if err := enterpriseunix.WriteTetragonReport(cmd.OutOrStdout(), report, opts.json); err != nil {
 		return err

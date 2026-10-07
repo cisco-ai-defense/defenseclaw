@@ -172,9 +172,8 @@ func (l *lifecycle) describeKernelPolicy(applied, generation string) {
 	if applied == "" || generation == "" || shortDigest(applied) == shortDigest(generation) {
 		return
 	}
-	l.result.AddWarning(codeKernelPolicyNotApplied, fmt.Sprintf(
-		"the sensor helper applies kernel policy %s, but the gateway's policy generation has %s; run `%s` so the helper restarts with this build's controls",
-		shortDigest(applied), shortDigest(generation), l.env.lifecycleCommand(ActionEnsure)))
+	l.result.AddWarning(codeKernelPolicyNotApplied, tetragonMessage(codeKernelPolicyNotApplied,
+		tetragonFacts{Variant: variantGeneration, Applied: shortDigest(applied), Digest: shortDigest(generation)}))
 }
 
 // shortDigest is "sha256:" and the first 12 hex digits, or "none".

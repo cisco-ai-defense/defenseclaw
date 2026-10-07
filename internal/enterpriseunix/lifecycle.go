@@ -1132,6 +1132,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
+		l.noteTetragonRestart(ctx, p, changed)
 	} else {
 		for _, unit := range units {
 			if unit.Activate {

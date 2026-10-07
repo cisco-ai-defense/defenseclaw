@@ -286,6 +286,76 @@ echo "version=$(dc_json_field "$doc" installed_version)"
         assert result.stdout.splitlines() == ["installed", "version=1.2.3"], (shell, result.stdout)
 
 
+_NOT_READY = json.dumps(
+    {
+        "schema_version": 1, "action": "verify", "ok": False, "exit_code": 1, "mode": "consume", "ready_for": "enforce",
+        "ready": False, "kernel_policy": "sha256:08b71155b713",
+        "checks": [
+            {"id": "tetragon.installed", "status": "pass", "message": "Tetragon is installed", "fix": []},
+            {"id": "tetragon.keep_sensors_on_exit", "status": "fail", "message": "keeps sensors", "fix": ["echo false"]},
+            {"id": "kernel.bpf_lsm", "status": "fail", "message": "no \"bpf\"", "fix": []},
+        ],
+        "users": [{"uid": 1001, "state": "fail", "covered_hours": 1, "needed_hours": 168, "percent": 0,
+                   "ready": False, "reset": False, "measuring": True, "hits": []}],
+        "approve": {"state": "missing", "digest": "sha256:08b71155b713", "enforce_ack": "", "ready_users": 0, "users": 1},
+        "next": [], "errors": [],
+    },
+    indent=2,
+)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_requires_tetragon_readiness_in_each_format(tmp_path: Path) -> None:
+    # --require-tetragon MODE maps `tetragon verify --ready-for MODE --json`
+    # to the exit, value and jamf formats; value names the first failing
+    # check. A gateway that prints no report counts as not ready.
+    text = _text(MDM / "linux" / "detect.sh")
+    names = ("dc_json_top", "dc_json_field", "dc_json_true", "dc_report", "dc_first_failing_check", "dc_require_tetragon")
+    functions = "\n".join(_shell_function(text, name) for name in names)
+    script = functions + '\nDC_FORMAT=$1\ndc_require_tetragon "$2" enforce\necho ready\n'
+    reports = {"not-ready": _NOT_READY, "ready": json.dumps({"ok": True, "ready": True, "checks": []}, indent=2), "none": ""}
+    gateways = {}
+    for name, report in reports.items():
+        (tmp_path / f"{name}.json").write_text(report, encoding="utf-8")
+        gateway = tmp_path / f"gateway-{name}"
+        gateway.write_text(
+            '#!/bin/sh\n[ "$*" = "enterprise linux tetragon verify --ready-for enforce --json" ] || exit 9\n'
+            f'cat "{tmp_path / f"{name}.json"}"\n[ "{name}" = ready ] || exit 1\n',
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+        gateways[name] = str(gateway)
+    for shell in ("sh", "dash", "bash"):
+        if not shutil.which(shell):
+            continue
+
+        def run(fmt: str, name: str, shell: str = shell) -> subprocess.CompletedProcess[str]:
+            return subprocess.run([shell, "-c", script, "detect", fmt, gateways[name]], capture_output=True, text=True)
+
+        value = run("value", "not-ready")
+        assert (value.returncode, value.stdout) == (0, "tetragon-not-ready:tetragon.keep_sensors_on_exit\n"), shell
+        jamf = run("jamf", "not-ready")
+        assert jamf.stdout == "<result>tetragon-not-ready:tetragon.keep_sensors_on_exit</result>\n", shell
+        failed = run("exit", "not-ready")
+        assert failed.returncode == 1 and failed.stdout == "", shell
+        assert "not ready for Tetragon mode enforce (tetragon.keep_sensors_on_exit)" in failed.stderr, shell
+        assert "tetragon verify --ready-for enforce" in failed.stderr, shell
+        assert run("value", "none").stdout == "tetragon-not-ready:unknown\n", shell
+        ready = run("value", "ready")
+        assert (ready.returncode, ready.stdout) == (0, "ready\n"), shell
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_detect_require_tetragon_arguments() -> None:
+    linux, macos = str(MDM / "linux" / "detect.sh"), str(MDM / "macos" / "detect.sh")
+    bad = _run([linux, "--require-tetragon", "audit"])
+    assert bad.returncode == 2 and "consume, observe or enforce" in bad.stderr
+    # Tetragon runs on Linux only; the macOS copy refuses the flag.
+    refused = _run([macos, "--require-tetragon", "enforce", "--format", "value"])
+    assert refused.returncode == 2 and "Linux only" in refused.stderr and refused.stdout == ""
+    assert "--require-tetragon consume|observe|enforce" in _run([linux, "--help"]).stdout
+
+
 def test_windows_shared_helpers_never_trust_environment_paths() -> None:
     region = _shared_region(_text(WINDOWS_SHARED[0]))
     code = "\n".join(line for line in region.splitlines() if not line.lstrip().startswith("#"))

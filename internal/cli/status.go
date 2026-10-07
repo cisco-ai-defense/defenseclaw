@@ -1057,6 +1057,47 @@ func printSubsystems(snap *gateway.HealthSnapshot) {
 	if snap.Sandbox != nil {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
+	if line := kernelSensorStatusLine(snap); line != "" {
+		fmt.Printf("  %s%s\n\n", Style("Kernel sensor: ", "fg=bright_black", "bold"), asciiText(line))
+	}
+}
+
+// kernelSensorStatusLine is the managed Linux sensor helper's kernel sensor
+// and kernel controls in one line, from /health
+// ai_runtime.details.planes.c.backend; "" when the gateway reports no
+// backend (every host but a managed Linux one).
+func kernelSensorStatusLine(snap *gateway.HealthSnapshot) string {
+	planes, _ := snap.AIRuntime.Details["planes"].(map[string]interface{})
+	planeC, _ := planes["c"].(map[string]interface{})
+	raw, ok := planeC["backend"]
+	if !ok {
+		return ""
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return ""
+	}
+	var backend enterpriseRuntimeBackend
+	if json.Unmarshal(data, &backend) != nil {
+		return ""
+	}
+	sensor := "cn_proc and fanotify (Tetragon not used: " + tetragonFallback(backend.FallbackReason) + ")"
+	if strings.EqualFold(backend.Kind, "tetragon") {
+		version := strings.TrimSpace(backend.Version)
+		if version != "" && version[0] >= '0' && version[0] <= '9' {
+			version = "v" + version
+		}
+		sensor = strings.TrimSpace("Tetragon " + version)
+		if backend.Mode != "" {
+			sensor += " (" + backend.Mode + ")"
+		}
+	}
+	for _, line := range backend.lines() {
+		if controls, ok := strings.CutPrefix(line, "kernel controls: "); ok {
+			sensor += "; kernel controls: " + controls
+		}
+	}
+	return sensor
 }
 
 func fleetUplinkUnused(snap *gateway.HealthSnapshot) bool {

@@ -80,10 +80,12 @@ func configDigest(cfg *config.Config) (string, error) {
 }
 
 // dropTetragonDefaults removes the enterprise.tetragon values equal to their
-// built-in defaults (mode consume, burn_in 168h, an empty enforce_ack) from
-// the marshalled config, and the block (and an enterprise block it leaves
-// empty) once nothing is left: an absent block and one that spells out the
-// defaults are the same intent and digest the same.
+// built-in defaults (mode consume, burn_in 168h, an empty enforce_ack,
+// customer_events agent) from the marshalled config, and the block (and an
+// enterprise block it leaves empty) once nothing is left: an absent block and
+// one that spells out the defaults are the same intent and digest the same.
+// An enforce_ack list of two or more digests is never a default; a one-item
+// list marshals as its string.
 func dropTetragonDefaults(doc any) {
 	root, _ := doc.(map[string]any)
 	enterprise, _ := root["enterprise"].(map[string]any)
@@ -95,12 +97,14 @@ func dropTetragonDefaults(doc any) {
 		value, _ := tetragon[key].(string)
 		return value
 	}
-	written := config.EnterpriseTetragonConfig{Mode: text("mode"), BurnIn: text("burn_in"), EnforceAck: text("enforce_ack")}
+	written := config.EnterpriseTetragonConfig{Mode: text("mode"), BurnIn: text("burn_in"),
+		EnforceAck: config.TetragonEnforceAcks{text("enforce_ack")}, CustomerEvents: text("customer_events")}
 	effective, defaults := written.Effective(), config.EnterpriseTetragonConfig{}.Effective()
 	for key, isDefault := range map[string]bool{
-		"mode":        effective.Mode == defaults.Mode,
-		"burn_in":     effective.BurnIn == defaults.BurnIn,
-		"enforce_ack": effective.EnforceAck == defaults.EnforceAck,
+		"mode":            effective.Mode == defaults.Mode,
+		"burn_in":         effective.BurnIn == defaults.BurnIn,
+		"enforce_ack":     len(effective.EnforceAck) == 0,
+		"customer_events": effective.CustomerEvents == defaults.CustomerEvents,
 	} {
 		if _, isText := tetragon[key].(string); isDefault && isText {
 			delete(tetragon, key)
