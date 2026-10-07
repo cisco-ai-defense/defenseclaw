@@ -67,7 +67,13 @@ func (p *storeBackedKeyProvider) KeyForDevice(deviceID uint64) []byte {
 	if p.store != nil {
 		key, err := p.store.LoadDeviceKey(deviceID)
 		if err != nil {
-			log.Printf("[mqtt-bridge] error loading key for device %d: %v", deviceID, err)
+			// P1-HMAC fix: Do NOT fall back to fleet key on store errors.
+			// The fleet key is a known zero/deterministic dev key; falling
+			// back to it when the store is broken lets an attacker sign with
+			// the well-known key. Only fall back when the store explicitly
+			// returns (nil, nil) meaning "no per-device key provisioned."
+			log.Printf("[mqtt-bridge] ERROR: key store lookup failed for device %d: %v — refusing fallback to fleet key", deviceID, err)
+			return nil
 		}
 		if key != nil {
 			return key
@@ -138,6 +144,11 @@ type Bridge struct {
 	// P0-6 fix: default is false to prevent unauthenticated auto-registration.
 	AllowAutoRegistration bool
 
+	// NEW-5 fix: decommissioned tracks device IDs that have been decommissioned.
+	// MQTT messages from these devices are explicitly rejected with a log message.
+	decommissioned   map[uint64]struct{}
+	decommissionedMu sync.RWMutex
+
 	// Metrics hooks (set externally to avoid circular imports)
 	onBlock func()
 
@@ -173,13 +184,30 @@ type BridgeConfig struct {
 // NewBridge creates a new MQTT bridge.
 func NewBridge(client Client, fleet *manager.FleetManager, cache *verdict.Cache) *Bridge {
 	return &Bridge{
-		client:      client,
-		fleet:       fleet,
-		cache:       cache,
-		keyProvider: newEnvDeviceKeyProvider(),
-		logger:      log.Default(),
-		stopped:     make(chan struct{}),
+		client:         client,
+		fleet:          fleet,
+		cache:          cache,
+		keyProvider:    newEnvDeviceKeyProvider(),
+		logger:         log.Default(),
+		stopped:        make(chan struct{}),
+		decommissioned: make(map[uint64]struct{}),
 	}
+}
+
+// MarkDecommissioned adds a device ID to the decommissioned set.
+// NEW-5 fix: MQTT messages from decommissioned devices are rejected.
+func (b *Bridge) MarkDecommissioned(fullDeviceID uint64) {
+	b.decommissionedMu.Lock()
+	b.decommissioned[fullDeviceID] = struct{}{}
+	b.decommissionedMu.Unlock()
+}
+
+// isDecommissioned checks if a device has been decommissioned.
+func (b *Bridge) isDecommissioned(fullDeviceID uint64) bool {
+	b.decommissionedMu.RLock()
+	_, ok := b.decommissioned[fullDeviceID]
+	b.decommissionedMu.RUnlock()
+	return ok
 }
 
 // SetDeviceKeyStore configures per-device key resolution via a persistent store.
@@ -270,6 +298,14 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		return
 	}
 
+	// NEW-5 fix: Reject messages from decommissioned devices.
+	fullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+	if b.isDecommissioned(fullID) {
+		b.logger.Printf("[mqtt-bridge] rejected heartbeat from decommissioned device %d", parts.DeviceID)
+		b.incErrors()
+		return
+	}
+
 	if parts.Suffix != "heartbeat" {
 		b.logger.Printf("[mqtt-bridge] unexpected suffix %q for heartbeat handler", parts.Suffix)
 		b.incErrors()
@@ -302,9 +338,19 @@ func (b *Bridge) handleHeartbeat(msg Message) {
 		fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 		deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
 
+		if deviceKey == nil {
+			b.logger.Printf("[mqtt-bridge] WARNING: heartbeat rejected — key lookup returned nil for device %d (key store error, fail closed)",
+				parts.DeviceID)
+			b.incErrors()
+			return
+		}
+
 		if hw.Signed {
-			// Signed heartbeat: verify HMAC-SHA256 over the first 32 bytes
+			// Signed heartbeat: verify HMAC-SHA256 over topic + payload.
+			// Including the topic binds the HMAC to the message type, so a
+			// valid signed heartbeat cannot be replayed on the /register topic.
 			mac := hmac.New(sha256.New, deviceKey)
+			mac.Write([]byte(msg.Topic))
 			mac.Write(msg.Payload[:32])
 			expected := mac.Sum(nil)
 
@@ -412,9 +458,19 @@ func (b *Bridge) handleRegistration(msg Message) {
 		fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 		deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
 
+		if deviceKey == nil {
+			b.logger.Printf("[mqtt-bridge] WARNING: registration rejected — key lookup returned nil for device %d (key store error, fail closed)",
+				parts.DeviceID)
+			b.incErrors()
+			return
+		}
+
 		if hw.Signed {
-			// Signed registration: verify HMAC-SHA256 over the first 32 bytes
+			// Signed registration: verify HMAC-SHA256 over topic + payload.
+			// Including the topic binds the HMAC to the message type, so a
+			// valid signed heartbeat cannot be replayed on the /register topic.
 			mac := hmac.New(sha256.New, deviceKey)
+			mac.Write([]byte(msg.Topic))
 			mac.Write(msg.Payload[:32])
 			expected := mac.Sum(nil)
 
@@ -503,6 +559,14 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		return
 	}
 
+	// NEW-5 fix: Reject messages from decommissioned devices.
+	fullID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
+	if b.isDecommissioned(fullID) {
+		b.logger.Printf("[mqtt-bridge] rejected verdict request from decommissioned device %d", parts.DeviceID)
+		b.incErrors()
+		return
+	}
+
 	vr, err := DecodeVerdictRequest(msg.Payload)
 	if err != nil {
 		b.logger.Printf("[mqtt-bridge] decode verdict request from device %d: %v", parts.DeviceID, err)
@@ -538,7 +602,10 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	// store-backed provider can find keys stored during registration.
 	fullDeviceID := manager.ComposeID(parts.TenantID, parts.FleetID, parts.DeviceID)
 	deviceKey := b.keyProvider.KeyForDevice(fullDeviceID)
-	resp.HMACTag = computeVerdictHMAC(deviceKey, sessionID, vr.RequestID, resp.Action, vr.ToolHash)
+	// NEW-6 fix: HMAC covers all response fields, not just action+request_id+hash prefix.
+	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
+		vr.RequestID, resp.Action, resp.Severity, resp.TTL,
+		resp.Reason, resp.Flags, resp.ServerTS, vr.ToolHash)
 
 	// Publish the response to the device's verdict/resp topic
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
@@ -570,15 +637,29 @@ func (b *Bridge) incErrors() {
 // computeVerdictHMAC computes the 4-byte HMAC tag for a verdict response,
 // matching the C-side compute_verdict_hmac() in verdict_protocol.c.
 //
-// Input: HMAC-SHA256(deviceKey, sessionID || requestID(2 LE) || action(1) || toolHash[0:8])
-// Output: first 4 bytes of the HMAC-SHA256 digest.
+// NEW-6 fix: HMAC now covers ALL verdict response fields, not just
+// action + request_id + tool_hash prefix. This prevents an attacker from
+// tampering with severity, TTL, reason, flags, or timestamp fields without
+// invalidating the tag.
 //
-// The deviceKey is loaded from the device's HAL secure element on the C side.
-// On the Go/cloud side we use a per-session or per-device key. For now, the
-// session ID is derived from the MQTT topic (device ID as string), and the
-// device key defaults to a 32-byte zero key for development parity with the
-// C-side fallback.
+// Input: HMAC-SHA256(deviceKey, sessionID || requestID(2 LE) || action(1) ||
+//
+//	severity(1) || ttl(2 LE) || reason(1) || flags(1) ||
+//	serverTS(4 LE) || toolHash[0:8])
+//
+// Output: first 4 bytes of the HMAC-SHA256 digest.
 func computeVerdictHMAC(deviceKey []byte, sessionID string, requestID uint16, action uint8, toolHash [32]byte) [4]byte {
+	// This is the legacy 3-field HMAC — kept for reference but no longer used.
+	// Use computeVerdictHMACFull instead.
+	return computeVerdictHMACFull(deviceKey, sessionID, requestID, action, 0, 0, 0, 0, 0, toolHash)
+}
+
+// computeVerdictHMACFull computes the 4-byte HMAC tag covering all verdict
+// response fields plus the tool hash. This is the NEW-6 full-coverage HMAC.
+func computeVerdictHMACFull(deviceKey []byte, sessionID string,
+	requestID uint16, action, severity uint8, ttl uint16,
+	reason, flags uint8, serverTS uint32, toolHash [32]byte) [4]byte {
+
 	mac := hmac.New(sha256.New, deviceKey)
 
 	// session_id (string bytes, no NUL terminator — matches C strlen)
@@ -591,6 +672,25 @@ func computeVerdictHMAC(deviceKey []byte, sessionID string, requestID uint16, ac
 
 	// action: 1 byte
 	mac.Write([]byte{action})
+
+	// NEW-6: severity (1 byte)
+	mac.Write([]byte{severity})
+
+	// NEW-6: ttl (2 bytes little-endian)
+	var ttlBuf [2]byte
+	binary.LittleEndian.PutUint16(ttlBuf[:], ttl)
+	mac.Write(ttlBuf[:])
+
+	// NEW-6: reason (1 byte)
+	mac.Write([]byte{reason})
+
+	// NEW-6: flags (1 byte)
+	mac.Write([]byte{flags})
+
+	// NEW-6: server_ts (4 bytes little-endian)
+	var tsBuf [4]byte
+	binary.LittleEndian.PutUint32(tsBuf[:], serverTS)
+	mac.Write(tsBuf[:])
 
 	// tool_hash[0:8]
 	mac.Write(toolHash[:8])

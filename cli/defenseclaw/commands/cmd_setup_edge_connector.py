@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import os
 import secrets
+import shlex
+import subprocess
 from pathlib import Path
 
 import click
@@ -128,6 +130,18 @@ def edge_connector(
         "  make -j$(nproc)\n"
         "  sudo make install\n"
         "\n"
+        "  NOTE: -DDCLAW_DEV_MODE=OFF disables unsigned audit log acceptance.\n"
+        "  The edge-connector requires DCLAW_AUDIT_KEY in its environment to\n"
+        "  start.  This wizard provisions the key automatically to both\n"
+        "  ~/.defenseclaw/.env (CLI) and /etc/defenseclaw/edge-connector.env\n"
+        "  (systemd service).  For manual installs, generate a key with:\n"
+        "\n"
+        "    python3 -c \"import secrets; print(secrets.token_hex(32))\"\n"
+        "\n"
+        "  and write it to /etc/defenseclaw/edge-connector.env as:\n"
+        "\n"
+        "    DCLAW_AUDIT_KEY=<hex-key>\n"
+        "\n"
         "Gateway (includes fleet manager):\n"
         "\n"
         "  go build -o defenseclaw ./cmd/defenseclaw\n"
@@ -170,12 +184,20 @@ def edge_connector(
                     existing_audit = _line.strip().split("=", 1)[1].strip("'\"")
                     break
 
+    svc_env_path = Path("/etc/defenseclaw/edge-connector.env")
+
     if existing_audit:
         ux.ok("DCLAW_AUDIT_KEY already set.")
+        # P1-18 fix: Even if the CLI env already has the key, ensure the
+        # service env file also has it.
+        _persist_svc_env_var(svc_env_path, "DCLAW_AUDIT_KEY", existing_audit)
     else:
         audit_key = secrets.token_hex(32)
+        # P1-18 fix: Write the audit key to BOTH locations so the systemd
+        # service can read it from its EnvironmentFile.
         _persist_env_var(env_path, "DCLAW_AUDIT_KEY", audit_key)
-        ux.ok(f"Generated DCLAW_AUDIT_KEY ({len(audit_key)} hex chars) and wrote to {env_path}")
+        _persist_svc_env_var(svc_env_path, "DCLAW_AUDIT_KEY", audit_key)
+        ux.ok(f"Generated DCLAW_AUDIT_KEY ({len(audit_key)} hex chars) and wrote to {env_path} and {svc_env_path}")
 
     # --- 3. Fleet API endpoint -------------------------------------------
     if endpoint is None:
@@ -238,6 +260,56 @@ def _persist_env_var(env_path: Path, key: str, value: str) -> None:
         env_path.chmod(0o600)
     except OSError:
         pass
+
+
+def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
+    """Write a KEY=VALUE to the systemd service env file using sudo.
+
+    P1-18 fix: The service reads /etc/defenseclaw/edge-connector.env via its
+    EnvironmentFile directive.  The CLI user typically cannot write to /etc/
+    directly, so we use sudo tee.
+    """
+    # Read existing content (if any) via sudo
+    existing_lines: list[str] = []
+    if svc_env_path.exists():
+        try:
+            result = subprocess.run(
+                ["sudo", "cat", str(svc_env_path)],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                existing_lines = result.stdout.splitlines()
+        except OSError:
+            pass
+
+    # Update or append the key
+    found = False
+    new_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+            new_lines.append(f"{key}={value}")
+            found = True
+        else:
+            new_lines.append(line)
+    if not found:
+        new_lines.append(f"{key}={value}")
+
+    content = "\n".join(new_lines) + "\n"
+    write_cmd = (
+        "sudo mkdir -p /etc/defenseclaw && "
+        f"printf %s {shlex.quote(content)} | sudo tee {svc_env_path} > /dev/null && "
+        f"sudo chmod 600 {svc_env_path}"
+    )
+    result = subprocess.run(["sh", "-c", write_cmd], capture_output=True, text=True)
+    if result.returncode == 0:
+        ux.ok(f"Wrote {key} to {svc_env_path}")
+    else:
+        ux.warn(
+            f"Could not write {key} to {svc_env_path} (sudo may have been denied).\n"
+            f"  The systemd service needs this key in its EnvironmentFile to start.\n"
+            f"  Write it manually: echo '{key}={value}' | sudo tee -a {svc_env_path}"
+        )
 
 
 # Register subcommands

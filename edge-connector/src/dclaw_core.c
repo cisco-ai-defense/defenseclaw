@@ -38,6 +38,7 @@ extern void dclaw_emergency_load_from_flash(void);
 static inline void dclaw_canary_record_block(void) { /* no-op: canary is part of OTA/MQTT */ }
 #endif
 extern void dclaw_policy_tables_init(void);
+extern int dclaw_audit_ring_init(void);
 
 dclaw_state_t *dclaw_get_state(void) {
     return &g_state;
@@ -108,6 +109,12 @@ int dclaw_init(const dclaw_device_info_t *info) {
         return -2;
     }
 #endif
+
+    /* NEW-1 fix: Restore the audit ring head position and prev_hmac from
+     * flash BEFORE the first audit write can happen.  Must run after the
+     * audit key is loaded (dclaw_audit_key_provisioned triggers key init)
+     * so that HMAC validation during old-format migration works. */
+    dclaw_audit_ring_init();
 
     return 0;
 }

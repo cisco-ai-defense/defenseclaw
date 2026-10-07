@@ -161,7 +161,9 @@ func TestHeartbeatReplayRejected(t *testing.T) {
 		t.Fatalf("denied_total = %d, want 5 (replay should be rejected)", dev.DeniedTotal)
 	}
 
-	// Replay with lower uptime — should also be dropped
+	// Lower uptime — treated as legitimate reboot (NEW-3 fix: not rejected).
+	// After reboot, PrevDenied resets to 0, so the full DeniedCount (999)
+	// is added as delta. Total becomes 5 + 999 = 1004.
 	hb3 := &Heartbeat{
 		DeviceID:     42,
 		UptimeSec:    50,
@@ -171,8 +173,11 @@ func TestHeartbeatReplayRejected(t *testing.T) {
 	fm.ProcessHeartbeat(1, 1, 42, hb3)
 
 	dev, _ = fm.GetDevice(ComposeID(1, 1, 42))
-	if dev.DeniedTotal != 5 {
-		t.Fatalf("denied_total = %d, want 5 (stale hb should be rejected)", dev.DeniedTotal)
+	if dev.DeniedTotal != 5+999 {
+		t.Fatalf("denied_total = %d, want %d (reboot should accept heartbeat with reset counters)", dev.DeniedTotal, 5+999)
+	}
+	if dev.LastUptime != 50 {
+		t.Fatalf("last_uptime = %d, want 50 (should track post-reboot uptime)", dev.LastUptime)
 	}
 }
 

@@ -699,10 +699,18 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 	var notFound []uint64
 
 	for _, d := range req.Devices {
+		fullID := manager.ComposeID(d.TenantID, d.FleetID, d.DeviceID)
 		if a.manager.DecommissionDevice(d.TenantID, d.FleetID, d.DeviceID) {
+			// NEW-5 fix: Revoke the device's HMAC signing key on decommission
+			// so it can no longer authenticate heartbeats or verdicts.
+			if a.keyStore != nil {
+				if err := a.keyStore.DeleteDeviceKey(fullID); err != nil {
+					log.Printf("[fleet-api] failed to delete device key for %d: %v", fullID, err)
+				}
+			}
 			decommissioned++
 		} else {
-			notFound = append(notFound, uint64(manager.ComposeID(d.TenantID, d.FleetID, d.DeviceID)))
+			notFound = append(notFound, uint64(fullID))
 		}
 	}
 

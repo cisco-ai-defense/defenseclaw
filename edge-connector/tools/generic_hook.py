@@ -417,6 +417,109 @@ class EdgeConnector:
             f"or socket ({self._socket_path}). Set DCLAW_FAIL_OPEN=1 to allow fail-open."
         )
 
+    # -- backend liveness check -------------------------------------------
+
+    def _check_backend(self) -> None:
+        """Re-evaluate the active backend before every evaluate() call.
+
+        * If currently using FFI, check whether the daemon IPC socket has
+          appeared since construction — if so, switch to IPC (the daemon is
+          the policy authority and receives OTA updates).
+        * If currently using IPC, verify the socket is still alive with a
+          quick connect test — if the daemon has gone away, fall back to FFI.
+        * For FFI specifically: check whether the flash policy version has
+          changed since the last evaluate (indicating an OTA was applied
+          externally).  If so, call ``dclaw_policy_reload_from_flash()`` so
+          the in-process policy tables pick up the new version.
+        """
+        if self._backend is None:
+            return
+
+        if isinstance(self._backend, _FFIBackend):
+            # Daemon may have started since we connected — prefer IPC.
+            if Path(self._socket_path).exists():
+                try:
+                    test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    test_sock.settimeout(0.5)
+                    test_sock.connect(self._socket_path)
+                    test_sock.close()
+                    # Socket is alive — switch to IPC.
+                    logger.info(
+                        "EdgeConnector: daemon socket appeared at %s — "
+                        "switching from FFI to IPC",
+                        self._socket_path,
+                    )
+                    old = self._backend
+                    self._backend = _SocketBackend(self._socket_path)
+                    old.shutdown()
+                    return
+                except (OSError, socket.error):
+                    pass  # Socket file exists but daemon not responding; stay on FFI.
+
+            # Still on FFI — check if the flash policy version changed (OTA
+            # applied by an external process).  Reload if necessary.
+            try:
+                lib = self._backend._lib
+                if not hasattr(self, "_last_policy_version"):
+                    # Bind the helper on first use.
+                    try:
+                        lib.dclaw_policy_reload_from_flash.argtypes = []
+                        lib.dclaw_policy_reload_from_flash.restype = ctypes.c_int
+                        lib.dclaw_get_state.argtypes = []
+                        lib.dclaw_get_state.restype = ctypes.c_void_p
+                    except AttributeError:
+                        pass
+                    self._last_policy_version = -1
+
+                # Read current policy_version from the device info struct.
+                # dclaw_get_state() returns a pointer whose first field
+                # contains the dclaw_device_info_t (starts at offset 0).
+                # policy_version is at offset 4 (after tenant_id u16 + fleet_id u16).
+                state_ptr = lib.dclaw_get_state()
+                if state_ptr:
+                    pv = ctypes.cast(
+                        state_ptr + 4,
+                        ctypes.POINTER(ctypes.c_uint16),
+                    ).contents.value
+                    if self._last_policy_version >= 0 and pv != self._last_policy_version:
+                        logger.info(
+                            "EdgeConnector: flash policy version changed (%d -> %d) — reloading",
+                            self._last_policy_version, pv,
+                        )
+                        lib.dclaw_policy_reload_from_flash()
+                    self._last_policy_version = pv
+            except Exception as exc:
+                logger.debug("EdgeConnector: FFI policy version check failed: %s", exc)
+
+        elif isinstance(self._backend, _SocketBackend):
+            # Verify the daemon socket is still alive.
+            alive = False
+            try:
+                test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                test_sock.settimeout(0.5)
+                test_sock.connect(self._socket_path)
+                test_sock.close()
+                alive = True
+            except (OSError, socket.error):
+                pass
+            if not alive:
+                logger.warning(
+                    "EdgeConnector: daemon socket at %s is dead — "
+                    "falling back to FFI",
+                    self._socket_path,
+                )
+                self._backend = None
+                try:
+                    self._backend = _FFIBackend(self._lib_path)
+                    logger.info("EdgeConnector: reconnected via FFI (%s)", self._lib_path)
+                except (OSError, RuntimeError) as exc:
+                    logger.debug("EdgeConnector: FFI unavailable (%s)", exc)
+                    if not self._fail_open:
+                        raise ConnectionError(
+                            f"EdgeConnector: daemon gone and FFI unavailable ({exc}). "
+                            f"Set DCLAW_FAIL_OPEN=1 to allow fail-open."
+                        )
+
     # -- public API --------------------------------------------------------
 
     def evaluate(
@@ -441,6 +544,8 @@ class EdgeConnector:
         Returns:
             A :class:`Verdict` with ``blocked``, ``reason``, etc.
         """
+        self._check_backend()
+
         if self._backend is None:
             return Verdict.allow()
 

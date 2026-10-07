@@ -29,35 +29,130 @@ extern dclaw_state_t *dclaw_get_state(void);
  *   [11] reserved (0x00)
  *   [12] policy_version high byte
  *   [13] policy_version low byte
+ *
+ * Issue #07 fix: Double-write + CRC16 scheme for partial-write resilience.
+ * Each record is 8 bytes: 6 data + 2 CRC16 appended.  Two copies (A & B)
+ * are written so that a partial write to copy A still leaves copy B intact.
+ * On load: check CRC of A, if valid use it.  Else check CRC of B.  If both
+ * invalid, fall back to defaults.
+ *
+ * Flash layout (each copy):
+ *   [0]  PARTITION_MAGIC_0  (0xDC)
+ *   [1]  PARTITION_MAGIC_1  (0xAB)
+ *   [2]  active_partition   (0x00 or 0x01)
+ *   [3]  reserved           (0x00)
+ *   [4]  policy_version high byte
+ *   [5]  policy_version low byte
+ *   [6]  CRC16 high byte
+ *   [7]  CRC16 low byte
  */
-#define PARTITION_FLASH_OFFSET   (HAL_FLASH_CONFIG_OFFSET + 8)
-#define PARTITION_FLASH_SIZE     6
+#define PARTITION_FLASH_OFFSET_A (HAL_FLASH_CONFIG_OFFSET + 8)
+#define PARTITION_FLASH_OFFSET_B (HAL_FLASH_CONFIG_OFFSET + 8 + PARTITION_RECORD_SIZE)
+#define PARTITION_DATA_SIZE      6
+#define PARTITION_RECORD_SIZE    8   /* 6 data + 2 CRC16 */
 #define PARTITION_MAGIC_0        0xDC
 #define PARTITION_MAGIC_1        0xAB
 
-static void persist_active_partition(void) {
-    uint8_t buf[PARTITION_FLASH_SIZE];
-    buf[0] = PARTITION_MAGIC_0;
-    buf[1] = PARTITION_MAGIC_1;
-    buf[2] = active_policy_partition;
-    buf[3] = 0x00;
-    buf[4] = (uint8_t)(persisted_policy_version >> 8);
-    buf[5] = (uint8_t)(persisted_policy_version);
-    if (hal_flash_write(PARTITION_FLASH_OFFSET, buf, PARTITION_FLASH_SIZE) != 0) {
-        fprintf(stderr, "[DCLAW] WARNING: Failed to persist active partition to flash.\n");
+/* CRC-16/CCITT-FALSE: poly 0x1021, init 0xFFFF, no final XOR */
+static uint16_t crc16_ccitt(const uint8_t *data, size_t len) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++) {
+            if (crc & 0x8000)
+                crc = (crc << 1) ^ 0x1021;
+            else
+                crc = crc << 1;
+        }
     }
+    return crc;
+}
+
+/*
+ * Write a single record (data + CRC16) to the given flash offset.
+ * Returns 0 on success, -1 on failure (retries once on short write).
+ */
+static int write_record_with_crc(uint32_t offset, const uint8_t *data) {
+    uint8_t record[PARTITION_RECORD_SIZE];
+    memcpy(record, data, PARTITION_DATA_SIZE);
+    uint16_t crc = crc16_ccitt(data, PARTITION_DATA_SIZE);
+    record[6] = (uint8_t)(crc >> 8);
+    record[7] = (uint8_t)(crc);
+
+    int rc = hal_flash_write(offset, record, PARTITION_RECORD_SIZE);
+    if (rc != 0) {
+        fprintf(stderr, "[DCLAW] WARNING: flash write returned %d at offset 0x%X, retrying.\n",
+                rc, (unsigned)offset);
+        rc = hal_flash_write(offset, record, PARTITION_RECORD_SIZE);
+        if (rc != 0) {
+            fprintf(stderr, "[DCLAW] ERROR: flash write retry failed at offset 0x%X.\n",
+                    (unsigned)offset);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Validate a record: check that magic bytes and CRC16 match.
+ * Returns true if valid, and fills out_buf with the 6 data bytes.
+ */
+static bool read_and_validate_record(uint32_t offset, uint8_t *out_buf) {
+    uint8_t record[PARTITION_RECORD_SIZE];
+    if (hal_flash_read(offset, record, PARTITION_RECORD_SIZE) != 0) {
+        return false;
+    }
+    if (record[0] != PARTITION_MAGIC_0 || record[1] != PARTITION_MAGIC_1) {
+        return false;
+    }
+    uint16_t stored_crc = ((uint16_t)record[6] << 8) | record[7];
+    uint16_t computed_crc = crc16_ccitt(record, PARTITION_DATA_SIZE);
+    if (stored_crc != computed_crc) {
+        return false;
+    }
+    memcpy(out_buf, record, PARTITION_DATA_SIZE);
+    return true;
+}
+
+static void persist_active_partition(void) {
+    uint8_t data[PARTITION_DATA_SIZE];
+    data[0] = PARTITION_MAGIC_0;
+    data[1] = PARTITION_MAGIC_1;
+    data[2] = active_policy_partition;
+    data[3] = 0x00;
+    data[4] = (uint8_t)(persisted_policy_version >> 8);
+    data[5] = (uint8_t)(persisted_policy_version);
+
+    /* Issue #07 fix: Double-write with CRC16 for partial-write resilience.
+     * Write copy A first, then copy B.  On load, A is preferred; B is the
+     * backup in case A was only partially written. */
+    if (write_record_with_crc(PARTITION_FLASH_OFFSET_A, data) != 0) {
+        fprintf(stderr, "[DCLAW] WARNING: Failed to persist partition record A.\n");
+    }
+    if (write_record_with_crc(PARTITION_FLASH_OFFSET_B, data) != 0) {
+        fprintf(stderr, "[DCLAW] WARNING: Failed to persist partition record B.\n");
+    }
+
     /* P1-07 fix: Flush to durable storage so a power cut after this call
      * cannot lose the write that is sitting in the OS page cache. */
-    hal_flash_sync();
+    if (hal_flash_sync() != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: hal_flash_sync failed after partition persist.\n");
+    }
 }
 
 static void load_active_partition_from_flash(void) {
-    uint8_t buf[PARTITION_FLASH_SIZE];
-    if (hal_flash_read(PARTITION_FLASH_OFFSET, buf, PARTITION_FLASH_SIZE) != 0) {
-        return; /* flash read failed — use default (partition A) */
-    }
-    if (buf[0] != PARTITION_MAGIC_0 || buf[1] != PARTITION_MAGIC_1) {
-        return; /* no valid persisted state — use default */
+    /* Issue #07 fix: Try record A (CRC-validated), fall back to record B.
+     * If both are corrupt, use defaults (partition A, version 0). */
+    uint8_t buf[PARTITION_DATA_SIZE];
+    bool valid = read_and_validate_record(PARTITION_FLASH_OFFSET_A, buf);
+    if (!valid) {
+        fprintf(stderr, "[DCLAW] WARNING: Partition record A CRC invalid, trying backup B.\n");
+        valid = read_and_validate_record(PARTITION_FLASH_OFFSET_B, buf);
+        if (!valid) {
+            fprintf(stderr, "[DCLAW] WARNING: Both partition records corrupt — using defaults.\n");
+            return; /* fall back to defaults (partition A, version 0) */
+        }
+        fprintf(stderr, "[DCLAW] Recovered partition state from backup record B.\n");
     }
     if (buf[2] <= 1) {
         active_policy_partition = buf[2];
@@ -166,14 +261,6 @@ void dclaw_config_switch_policy_partition(uint16_t policy_version) {
     persist_active_partition();
 }
 
-/*
- * Persist a new policy version WITHOUT switching the active partition.
- * Primarily a convenience for callers that need to update the version
- * in-place (e.g. migration paths). The normal OTA path should use
- * dclaw_config_switch_policy_partition(version) which writes both the
- * partition indicator and version atomically in a single flash write.
- */
-void dclaw_config_persist_policy_version(uint16_t version) {
-    persisted_policy_version = version;
-    persist_active_partition();
-}
+/* P2-17: dclaw_config_persist_policy_version() removed — had no callers.
+ * The normal OTA path uses dclaw_config_switch_policy_partition(version)
+ * which writes both the partition indicator and version atomically. */

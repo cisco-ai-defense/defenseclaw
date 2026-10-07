@@ -312,6 +312,108 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
 }
 
 /*
+ * Verify a single audit entry's HMAC given a known previous HMAC tag.
+ * Returns true if the entry's HMAC matches.
+ */
+static bool verify_entry_hmac(const dclaw_audit_entry_t *entry,
+                              const uint8_t *prev_hmac) {
+    uint8_t expected[4];
+    compute_hmac(entry, prev_hmac, expected);
+    return memcmp(expected, entry->hmac, 4) == 0;
+}
+
+/*
+ * NEW-1 fix: Migrate an old-format audit region that has no header.
+ *
+ * Old layout: entries started at HAL_FLASH_AUDIT_OFFSET (no 8-byte header).
+ * The first entry occupied what is now the header area.  We must NOT corrupt
+ * any existing entries.
+ *
+ * Strategy:
+ *   1.  Scan entries from slot 0 forward, validating HMACs with the chain
+ *       starting from prev_hmac = {0,0,0,0} (the original boot default).
+ *   2.  The first slot whose HMAC does NOT validate is the next write
+ *       position (entries after it are either empty/erased or corrupt).
+ *   3.  Set ring_head to that slot, and prev_hmac to the last valid
+ *       entry's HMAC (or zeros if none were valid).
+ *   4.  Write the persistent header.  The header occupies the first 8
+ *       bytes of the audit region — overlapping the very first old-format
+ *       entry (24 bytes).  That first entry is sacrificed, but all
+ *       remaining entries are preserved.
+ *
+ * The old-format region is detected by audit_ring_restore_header returning
+ * -1 (magic mismatch), which is also the case on a truly blank flash.
+ * A blank flash will simply have no valid HMACs and we start at slot 0.
+ */
+static void audit_ring_migrate_old_format(dclaw_audit_writer_t *w) {
+    /* Old entries started at the very beginning of the audit region
+     * (no header reserved), so old slot N is at:
+     *   HAL_FLASH_AUDIT_OFFSET + N * sizeof(dclaw_audit_entry_t)
+     */
+    const uint32_t old_entry_base = HAL_FLASH_AUDIT_OFFSET;
+    const uint16_t max_old_entries = (uint16_t)(HAL_FLASH_AUDIT_SIZE /
+                                                sizeof(dclaw_audit_entry_t));
+
+    uint8_t chain_hmac[4] = {0, 0, 0, 0}; /* old format chain started from zeros */
+    uint16_t last_valid_slot = 0;
+    bool found_any = false;
+    uint8_t last_valid_hmac[4] = {0, 0, 0, 0};
+
+    for (uint16_t i = 0; i < max_old_entries && i < DCLAW_AUDIT_RING_SIZE; i++) {
+        dclaw_audit_entry_t entry;
+        uint32_t offset = old_entry_base + (uint32_t)i * sizeof(dclaw_audit_entry_t);
+        if (hal_flash_read(offset, &entry, sizeof(entry)) != 0) {
+            break;
+        }
+
+        /* An erased/blank entry has all-0xFF or all-0x00 timestamp.
+         * Treat either as the end of valid data. */
+        if (entry.timestamp == 0 || entry.timestamp == UINT64_MAX) {
+            break;
+        }
+
+        if (verify_entry_hmac(&entry, chain_hmac)) {
+            memcpy(chain_hmac, entry.hmac, 4);
+            last_valid_slot = i;
+            memcpy(last_valid_hmac, entry.hmac, 4);
+            found_any = true;
+        } else {
+            /* HMAC chain broke — stop here; this is the first invalid slot. */
+            break;
+        }
+    }
+
+    if (found_any) {
+        /* The new header occupies the first 8 bytes, which overlaps old slot 0.
+         * Entries are now indexed relative to entry_base (after the header).
+         * The old slot 0 is sacrificed.  Remaining old entries at offsets
+         * [1..last_valid_slot] are still physically in flash at their original
+         * positions, but future writes use the new layout.
+         *
+         * Set head to slot after the last valid one (in new indexing).  Since
+         * old slot 0 is now under the header, the effective valid range is
+         * reduced by one — but it is simpler and safer to just start writing
+         * after the last known-good position.  If last_valid_slot+1 overflows
+         * past the new partition entries, wrap around. */
+        ring_head = (last_valid_slot + 1) % DCLAW_AUDIT_PARTITION_ENTRIES;
+        memcpy(w->prev_hmac, last_valid_hmac, 4);
+        fprintf(stderr,
+                "[DCLAW-AUDIT] Migrated old-format ring: %u valid entries found, "
+                "head set to %u\n", (unsigned)(last_valid_slot + 1),
+                (unsigned)ring_head);
+    } else {
+        /* No valid old entries — truly fresh flash. */
+        ring_head = 0;
+        memset(w->prev_hmac, 0, 4);
+        fprintf(stderr, "[DCLAW-AUDIT] No old-format entries found — starting fresh\n");
+    }
+
+    /* Write the new-format header so subsequent boots use the fast path. */
+    audit_ring_persist_header(w->prev_hmac);
+    hal_flash_sync();
+}
+
+/*
  * NEW-1 fix: Initialise the audit ring from persistent flash state.
  *
  * Must be called once at boot (before any dclaw_audit_write).  Reads
@@ -319,8 +421,9 @@ static int flush_buffer_to_flash(dclaw_audit_writer_t *w) {
  * new entries append after the last valid one and the HMAC chain
  * continues unbroken across restarts.
  *
- * If no valid header is found (first boot / erased flash), the ring
- * starts fresh from slot 0 with a zero prev_hmac.
+ * If no valid header is found, check whether the flash contains
+ * old-format audit entries (no header) and migrate gracefully.
+ * If the flash is truly blank, start fresh from slot 0.
  */
 int dclaw_audit_ring_init(void) {
     dclaw_state_t *s = dclaw_get_state();
@@ -335,9 +438,11 @@ int dclaw_audit_ring_init(void) {
         fprintf(stderr, "[DCLAW-AUDIT] Restored ring head=%u from flash\n",
                 (unsigned)ring_head);
     } else {
-        ring_head = 0;
-        memset(w->prev_hmac, 0, 4);
-        fprintf(stderr, "[DCLAW-AUDIT] No valid header — starting fresh at slot 0\n");
+        /* No valid header — could be old-format layout or blank flash.
+         * Scan for old-format entries by checking HMACs, set head to the
+         * next slot, and write the new header without corrupting existing
+         * valid entries. */
+        audit_ring_migrate_old_format(w);
     }
     return 0;
 }

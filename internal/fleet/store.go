@@ -31,4 +31,8 @@ type DeviceKeyStore interface {
 	// LoadDeviceKey retrieves the signing key for a device.
 	// Returns nil, nil if no key exists.
 	LoadDeviceKey(deviceID uint64) ([]byte, error)
+
+	// DeleteDeviceKey removes the signing key for a device.
+	// NEW-5 fix: Called during decommission to revoke the device's key.
+	DeleteDeviceKey(deviceID uint64) error
 }

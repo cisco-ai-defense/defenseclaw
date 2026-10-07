@@ -19,7 +19,7 @@
 extern dclaw_state_t *dclaw_get_state(void);
 extern uint8_t dclaw_config_active_policy_partition(void);
 extern void dclaw_config_switch_policy_partition(uint16_t policy_version);
-extern void dclaw_config_persist_policy_version(uint16_t version);
+/* P2-17: dclaw_config_persist_policy_version() extern removed — function deleted. */
 extern void dclaw_cache_flush_all(void);
 extern int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                              uint16_t target_hash, uint16_t session_id);

@@ -11,6 +11,9 @@ extern int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *to
 extern int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                                          const uint8_t *pending_tool_hash);
 extern void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
+                                                uint8_t severity, uint16_t ttl,
+                                                uint8_t reason, uint8_t flags,
+                                                uint32_t server_ts,
                                                 const uint8_t *tool_hash,
                                                 uint8_t *out_hmac_4bytes);
 extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
@@ -18,17 +21,27 @@ extern void dclaw_verdict_set_device_key(const uint8_t *key, size_t key_len);
 static void build_valid_response(uint16_t request_id, uint8_t action,
                                  const uint8_t *tool_hash, uint8_t *buf) {
     /* Build 16-byte wire format response */
+    uint8_t severity = 0;
+    uint16_t ttl = 60;
+    uint8_t reason = DCLAW_REASON_CLOUD_BLOCK;
+    uint8_t flags = 0;
+    uint32_t server_ts = 0x000F4240; /* 1000000 */
+
     buf[0] = (uint8_t)(request_id >> 8);
     buf[1] = (uint8_t)(request_id);
     buf[2] = action;
-    buf[3] = 0; /* severity */
-    buf[4] = 0; buf[5] = 60; /* ttl = 60 minutes */
-    buf[6] = DCLAW_REASON_CLOUD_BLOCK; /* reason */
-    buf[7] = 0; /* flags */
-    /* server_ts = 1000000 */
-    buf[8] = 0x00; buf[9] = 0x0F; buf[10] = 0x42; buf[11] = 0x40;
-    /* hmac_tag */
-    dclaw_verdict_compute_expected_hmac(request_id, action, tool_hash, buf + 12);
+    buf[3] = severity;
+    buf[4] = (uint8_t)(ttl >> 8); buf[5] = (uint8_t)(ttl & 0xFF);
+    buf[6] = reason;
+    buf[7] = flags;
+    buf[8] = (uint8_t)((server_ts >> 24) & 0xFF);
+    buf[9] = (uint8_t)((server_ts >> 16) & 0xFF);
+    buf[10] = (uint8_t)((server_ts >> 8) & 0xFF);
+    buf[11] = (uint8_t)(server_ts & 0xFF);
+    /* NEW-6: HMAC now covers all verdict fields */
+    dclaw_verdict_compute_expected_hmac(request_id, action, severity, ttl,
+                                        reason, flags, server_ts,
+                                        tool_hash, buf + 12);
 }
 
 static void test_valid_verdict_accepted(void) {

@@ -10,10 +10,10 @@
  * Phase 2 will replace these stubs with an mbedTLS-backed
  * implementation for mTLS handshake + session management.
  *
- * STATUS: This file is intentionally compiled into STANDARD/EDGE profiles
- * (via DCLAW_MQTT_ENABLED) to satisfy linker references from mqtt_client.c.
- * The stubs are NOT dead code — they are required placeholders. When TLS
- * support is implemented, these will be replaced with real implementations.
+ * STATUS (P2-17): Phase 2 stub — no call sites exist yet.  This file is
+ * compiled into STANDARD/EDGE profiles (via DCLAW_MQTT_ENABLED) as a
+ * placeholder for the future mTLS implementation.  The functions below
+ * will be called from mqtt_client.c once TLS transport is wired in.
  */
 
 int dclaw_tls_init(void) { return -1; }

@@ -43,11 +43,15 @@ extern int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
 static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
                                  const char *session_id,
                                  uint16_t request_id, uint8_t action,
+                                 uint8_t severity, uint16_t ttl,
+                                 uint8_t reason, uint8_t flags,
+                                 uint32_t server_ts,
                                  const uint8_t *tool_hash,
                                  uint8_t *out_4bytes) {
     /*
-     * Real HMAC-SHA256 truncated to 4 bytes.
-     * Input: HMAC-SHA256(device_key, session_id || request_id || action || tool_hash[0:8])
+     * NEW-6 fix: HMAC-SHA256 truncated to 4 bytes, covering ALL verdict fields.
+     * Input: HMAC-SHA256(device_key, session_id || request_id || action ||
+     *        severity || ttl || reason || flags || server_ts || tool_hash[0:8])
      */
     uint8_t hmac_full[32];
     mbedtls_md_context_t ctx;
@@ -67,6 +71,28 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     /* Feed: action (1 byte) */
     mbedtls_md_hmac_update(&ctx, &action, 1);
 
+    /* NEW-6: Feed severity (1 byte) */
+    mbedtls_md_hmac_update(&ctx, &severity, 1);
+
+    /* NEW-6: Feed ttl (2 bytes, little-endian) */
+    uint8_t ttl_le[2] = { (uint8_t)(ttl & 0xFF), (uint8_t)(ttl >> 8) };
+    mbedtls_md_hmac_update(&ctx, ttl_le, 2);
+
+    /* NEW-6: Feed reason (1 byte) */
+    mbedtls_md_hmac_update(&ctx, &reason, 1);
+
+    /* NEW-6: Feed flags (1 byte) */
+    mbedtls_md_hmac_update(&ctx, &flags, 1);
+
+    /* NEW-6: Feed server_ts (4 bytes, little-endian) */
+    uint8_t ts_le[4] = {
+        (uint8_t)(server_ts & 0xFF),
+        (uint8_t)((server_ts >> 8) & 0xFF),
+        (uint8_t)((server_ts >> 16) & 0xFF),
+        (uint8_t)((server_ts >> 24) & 0xFF)
+    };
+    mbedtls_md_hmac_update(&ctx, ts_le, 4);
+
     /* Feed: tool_hash[0:8] */
     mbedtls_md_hmac_update(&ctx, tool_hash, 8);
 
@@ -84,15 +110,19 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
 static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
                                  const char *session_id,
                                  uint16_t request_id, uint8_t action,
+                                 uint8_t severity, uint16_t ttl,
+                                 uint8_t reason, uint8_t flags,
+                                 uint32_t server_ts,
                                  const uint8_t *tool_hash,
                                  uint8_t *out_4bytes) {
     /*
-     * Real HMAC-SHA256 truncated to 4 bytes.
-     * Input: HMAC-SHA256(device_key, session_id || request_id || action || tool_hash[0:8])
+     * NEW-6 fix: HMAC-SHA256 truncated to 4 bytes, covering ALL verdict fields.
+     * Input: HMAC-SHA256(device_key, session_id || request_id || action ||
+     *        severity || ttl || reason || flags || server_ts || tool_hash[0:8])
      * Matches the mbedTLS path semantics exactly.
      */
     uint8_t hmac_full[32];
-    uint8_t msg[256]; /* Plenty for session_id + 2 + 1 + 8 */
+    uint8_t msg[256]; /* Plenty for session_id + 2 + 1 + 1 + 2 + 1 + 1 + 4 + 8 */
     size_t msg_len = 0;
 
     /* Feed: session_id (NUL-terminated string, excluding NUL) */
@@ -106,6 +136,25 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
 
     /* Feed: action (1 byte) */
     msg[msg_len++] = action;
+
+    /* NEW-6: Feed severity (1 byte) */
+    msg[msg_len++] = severity;
+
+    /* NEW-6: Feed ttl (2 bytes, little-endian) */
+    msg[msg_len++] = (uint8_t)(ttl & 0xFF);
+    msg[msg_len++] = (uint8_t)(ttl >> 8);
+
+    /* NEW-6: Feed reason (1 byte) */
+    msg[msg_len++] = reason;
+
+    /* NEW-6: Feed flags (1 byte) */
+    msg[msg_len++] = flags;
+
+    /* NEW-6: Feed server_ts (4 bytes, little-endian) */
+    msg[msg_len++] = (uint8_t)(server_ts & 0xFF);
+    msg[msg_len++] = (uint8_t)((server_ts >> 8) & 0xFF);
+    msg[msg_len++] = (uint8_t)((server_ts >> 16) & 0xFF);
+    msg[msg_len++] = (uint8_t)((server_ts >> 24) & 0xFF);
 
     /* Feed: tool_hash[0:8] */
     memcpy(msg + msg_len, tool_hash, 8);
@@ -324,8 +373,11 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
         return -1; /* device key not provisioned */
     }
 
+    /* NEW-6 fix: HMAC covers all verdict response fields */
     compute_verdict_hmac(device_key, key_len, session_id,
-                         request_id, action, pending_tool_hash, expected_hmac);
+                         request_id, action, severity, ttl,
+                         reason, flags, server_ts,
+                         pending_tool_hash, expected_hmac);
 
     if (!ct_compare(received_hmac, expected_hmac, 4)) {
         /* REQ-29: HMAC verification failed — leave slot pending for valid retry */
@@ -390,13 +442,20 @@ bool dclaw_verdict_is_key_provisioned(void) {
     return s_device_key_provisioned;
 }
 
-/* Compute HMAC for outbound use (e.g., for testing/verification) */
+/* Compute HMAC for outbound use (e.g., for testing/verification).
+ * NEW-6 fix: Now accepts all verdict response fields to match the
+ * full-coverage HMAC computation. */
 void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
+                                         uint8_t severity, uint16_t ttl,
+                                         uint8_t reason, uint8_t flags,
+                                         uint32_t server_ts,
                                          const uint8_t *tool_hash,
                                          uint8_t *out_hmac_4bytes) {
     size_t key_len;
     const uint8_t *device_key = get_device_key(&key_len);
     const char *session_id = dclaw_mqtt_get_session_id();
     compute_verdict_hmac(device_key, key_len, session_id,
-                         request_id, action, tool_hash, out_hmac_4bytes);
+                         request_id, action, severity, ttl,
+                         reason, flags, server_ts,
+                         tool_hash, out_hmac_4bytes);
 }

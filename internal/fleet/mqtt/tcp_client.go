@@ -39,10 +39,11 @@ type TCPClient struct {
 	addr     string
 	clientID string
 
-	mu       sync.Mutex
-	conn     net.Conn
-	closed   bool
-	packetID uint16
+	mu           sync.Mutex
+	conn         net.Conn
+	closed       bool
+	packetID     uint16
+	reconnecting bool // NEW-4: true while a reconnect attempt is in progress
 
 	// subscriptions maps topic filters to message handlers.
 	subs   map[string]func(Message)
@@ -188,7 +189,11 @@ func (c *TCPClient) Subscribe(ctx context.Context, topicFilter string, qos byte,
 func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload []byte) error {
 	c.mu.Lock()
 	if c.conn == nil {
+		reconnecting := c.reconnecting
 		c.mu.Unlock()
+		if reconnecting {
+			return fmt.Errorf("publish to %s: client is reconnecting to broker", topic)
+		}
 		return fmt.Errorf("not connected")
 	}
 	c.packetID++
@@ -274,11 +279,17 @@ func (c *TCPClient) readLoop(ctx context.Context) {
 			}
 			log.Printf("mqtt: readLoop error: %v — closing connection", err)
 			c.mu.Lock()
+			wasClosed := c.closed
 			if c.conn != nil && !c.closed {
 				c.conn.Close()
 				c.conn = nil
 			}
 			c.mu.Unlock()
+			// NEW-4: If the connection was not intentionally closed,
+			// start a reconnect goroutine with exponential backoff.
+			if !wasClosed {
+				go c.reconnectLoop(ctx)
+			}
 			return
 		}
 
@@ -391,6 +402,151 @@ func (c *TCPClient) pingLoop(ctx context.Context, interval time.Duration) {
 			_ = writeAll(conn, []byte{mqttPktPingReq, 0x00})
 		}
 	}
+}
+
+// reconnectLoop attempts to reconnect to the broker with exponential backoff.
+// NEW-4 fix: When readLoop gets EOF/error (broker restart), don't just log and
+// close -- attempt to reconnect. Backoff: 1s, 2s, 4s, 8s, max 30s.
+// After reconnect, re-subscribes to all topics.
+func (c *TCPClient) reconnectLoop(ctx context.Context) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.reconnecting = true
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.reconnecting = false
+		c.mu.Unlock()
+	}()
+
+	backoff := 1 * time.Second
+	const maxBackoff = 30 * time.Second
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("mqtt: reconnect cancelled")
+			return
+		default:
+		}
+
+		log.Printf("mqtt: attempting reconnect to %s in %v", c.addr, backoff)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Unlock()
+
+		// Attempt to dial and send CONNECT
+		dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+		err := c.doConnect(dialCtx)
+		dialCancel()
+
+		if err != nil {
+			log.Printf("mqtt: reconnect failed: %v", err)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		log.Printf("mqtt: reconnected to %s", c.addr)
+
+		// Re-subscribe to all previously registered topics
+		c.subsMu.RLock()
+		subs := make(map[string]func(Message), len(c.subs))
+		for topic, handler := range c.subs {
+			subs[topic] = handler
+		}
+		c.subsMu.RUnlock()
+
+		subCtx, subCancel := context.WithTimeout(ctx, 10*time.Second)
+		for topic, handler := range subs {
+			if err := c.Subscribe(subCtx, topic, 1, handler); err != nil {
+				log.Printf("mqtt: re-subscribe to %s failed: %v", topic, err)
+			}
+		}
+		subCancel()
+
+		return
+	}
+}
+
+// doConnect is the internal connection logic shared between Connect() and
+// reconnectLoop(). It establishes a TCP connection, sends CONNECT, reads
+// CONNACK, and starts the reader/ping goroutines.
+func (c *TCPClient) doConnect(ctx context.Context) error {
+	c.mu.Lock()
+	if c.conn != nil {
+		c.mu.Unlock()
+		return nil // already connected
+	}
+
+	if isTLSScheme(c.addr) {
+		c.mu.Unlock()
+		return fmt.Errorf("%w: broker address %q uses TLS scheme", errTLSNotSupported, c.addr)
+	}
+
+	addr := stripMQTTScheme(c.addr)
+	c.mu.Unlock()
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("tcp dial %s: %w", c.addr, err)
+	}
+
+	mqttUser := os.Getenv("DCLAW_MQTT_USER")
+	mqttPass := os.Getenv("DCLAW_MQTT_PASS")
+
+	pkt := buildConnectPacket(c.clientID, mqttUser, mqttPass)
+	if err := writeAll(conn, pkt); err != nil {
+		conn.Close()
+		return fmt.Errorf("send CONNECT: %w", err)
+	}
+
+	connAck := make([]byte, 4)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(conn, connAck); err != nil {
+		conn.Close()
+		return fmt.Errorf("read CONNACK: %w", err)
+	}
+	conn.SetReadDeadline(time.Time{})
+
+	if connAck[0]&0xF0 != mqttPktConnAck {
+		conn.Close()
+		return fmt.Errorf("expected CONNACK (0x20), got 0x%02X", connAck[0])
+	}
+	if connAck[3] != 0x00 {
+		conn.Close()
+		return fmt.Errorf("CONNACK return code: 0x%02X", connAck[3])
+	}
+
+	c.mu.Lock()
+	c.conn = conn
+	c.closed = false
+
+	readerCtx, cancel := context.WithCancel(context.Background())
+	c.cancelReader = cancel
+	c.readerDone = make(chan struct{})
+	go c.readLoop(readerCtx)
+	go c.pingLoop(readerCtx, 25*time.Second)
+	c.mu.Unlock()
+
+	return nil
 }
 
 // --- MQTT 3.1.1 packet builders ---

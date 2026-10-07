@@ -98,3 +98,12 @@ func (s *MemoryStore) LoadDeviceKey(deviceID uint64) ([]byte, error) {
 	copy(keyCopy, key)
 	return keyCopy, nil
 }
+
+// DeleteDeviceKey removes a per-device signing key from memory.
+// NEW-5 fix: Called during decommission to revoke the device's key.
+func (s *MemoryStore) DeleteDeviceKey(deviceID uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.deviceKeys, deviceID)
+	return nil
+}

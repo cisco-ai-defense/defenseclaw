@@ -294,10 +294,21 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	// NEW-3 fix: Replay detection — reject heartbeats where the monotonic
 	// uptime has not advanced.  A legitimate device's uptime_sec increases
 	// on every heartbeat.  A replayed (or stale) heartbeat will have
-	// uptime <= the last seen value.  Allow uptime == 0 only on the very
-	// first heartbeat (LastUptime is zero-initialized).
-	if hb.UptimeSec > 0 && hb.UptimeSec <= dev.LastUptime {
-		log.Printf("[fleet] replay detected for device %d: uptime %d <= last %d, dropping",
+	// uptime <= the last seen value.
+	//
+	// Reboot handling: when uptime < last_uptime (or uptime == 0 while
+	// last_uptime > 0), the device has rebooted. Accept the heartbeat but
+	// reset the delta counters to 0 so the first post-reboot absolute
+	// values are treated as the full delta. Don't reject legitimate reboots.
+	if hb.UptimeSec < dev.LastUptime || (hb.UptimeSec == 0 && dev.LastUptime > 0) {
+		// Device rebooted — reset replay counters, accept heartbeat.
+		log.Printf("[fleet] device %d rebooted: uptime %d < last %d, resetting counters",
+			deviceID, hb.UptimeSec, dev.LastUptime)
+		dev.PrevDenied = 0
+		dev.PrevAllowed = 0
+	} else if hb.UptimeSec > 0 && hb.UptimeSec == dev.LastUptime {
+		// Exact same uptime with no reboot — replay. Drop it.
+		log.Printf("[fleet] replay detected for device %d: uptime %d == last %d, dropping",
 			deviceID, hb.UptimeSec, dev.LastUptime)
 		return
 	}

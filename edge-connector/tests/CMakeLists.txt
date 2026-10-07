@@ -3,8 +3,9 @@
 
 # P2-22 fix: Collect all test targets so we can apply common definitions.
 # In Release builds, CMake adds -DNDEBUG which compiles out assert().
-# We undefine NDEBUG for test targets and set DCLAW_TESTING=1 so that
-# asserts remain active regardless of build type.
+# We undefine NDEBUG for test targets so that asserts remain active
+# regardless of build type.
+# P2-17: Removed DCLAW_TESTING=1 — no source file references it.
 set(DCLAW_TEST_TARGETS "")
 
 add_executable(test_input_validation test_input_validation.c)
@@ -80,10 +81,8 @@ if(DCLAW_CONTENT_SCAN)
 endif()
 
 # P2-22 fix: Ensure asserts are active in all test targets even in Release
-# builds. -UNDEBUG removes the NDEBUG that CMake adds for Release/RelWithDebInfo,
-# and DCLAW_TESTING=1 lets test code detect the test environment if needed.
+# builds. -UNDEBUG removes the NDEBUG that CMake adds for Release/RelWithDebInfo.
 foreach(_tgt IN LISTS DCLAW_TEST_TARGETS)
-    target_compile_definitions(${_tgt} PRIVATE DCLAW_TESTING=1)
     target_compile_options(${_tgt} PRIVATE -UNDEBUG)
 endforeach()
 

@@ -533,6 +533,8 @@ def _status_line(label: str, passed: bool, detail: str) -> None:
 
 @edge_connector_group.command("test")
 @click.option("--device-id", default=None, help="Specific device ID to verify.")
+@click.option("--tenant-id", default=1, type=int, help="Tenant ID for composing the full device ID (default 1).")
+@click.option("--fleet-id", default=1, type=int, help="Fleet ID for composing the full device ID (default 1).")
 @click.option(
     "--broker-url", default=None,
     help="MQTT broker URL (reads DCLAW_MQTT_BROKER_URL from env if omitted).",
@@ -543,6 +545,8 @@ def _status_line(label: str, passed: bool, detail: str) -> None:
 def test_fleet(
     app: AppContext,
     device_id: str | None,
+    tenant_id: int,
+    fleet_id: int,
     broker_url: str | None,
     timeout: int,
     as_json: bool,
@@ -640,18 +644,21 @@ def test_fleet(
         if stale:
             results["devices"]["stale_heartbeats"] = stale
 
-    # Specific device check
+    # Specific device check — compose the full 64-bit ID from device_id +
+    # tenant_id + fleet_id, consistent with other commands.
     if device_id:
+        full_device_id = _compose_device_id(device_id, tenant_id, fleet_id)
         try:
-            dr = c.get(f"/devices/{device_id}")
+            dr = c.get(f"/devices/{full_device_id}")
             if dr.status_code == 404:
-                results["device_check"] = {"status": "not_found", "device_id": device_id}
+                results["device_check"] = {"status": "not_found", "device_id": device_id, "looked_up_as": full_device_id}
                 all_ok = False
             elif 200 <= dr.status_code < 300:
                 ds = str((_body(dr) or {}).get("status") or "unknown").lower()
                 results["device_check"] = {
                     "status": "online" if ds in ("online", "active", "healthy") else ds,
                     "device_id": device_id,
+                    "looked_up_as": full_device_id,
                 }
                 if ds not in ("online", "active", "healthy"):
                     all_ok = False
@@ -659,27 +666,33 @@ def test_fleet(
             results["device_check"] = {"status": "error", "detail": str(exc)}
             all_ok = False
 
-    # 5. Policy distribution status ---------------------------------------
+    # 5. Policy distribution status — use /policy/versions (the actual
+    #    endpoint) instead of the nonexistent /policy/status.
     if health_data is not None:
         try:
-            pr = c.get("/policy/status")
+            pr = c.get(f"/policy/versions?tenant_id={tenant_id}&fleet_id={fleet_id}")
             if 200 <= pr.status_code < 300:
                 pd = _body(pr) or {}
-                ver = pd.get("version")
-                if ver:
-                    dist = int(pd.get("distributed_count", 0))
-                    tot = len(devices) or int(pd.get("total_devices", 0))
+                versions_list = pd if isinstance(pd, list) else (pd.get("versions", []) if isinstance(pd, dict) else [])
+                if versions_list:
+                    latest = versions_list[0]
+                    ver = latest.get("version") or latest.get("id")
+                    status_str = str(latest.get("status") or "unknown")
                     results["policy"] = {
                         "status": "ok", "version": ver,
-                        "distributed": dist, "total_devices": tot,
+                        "policy_status": status_str,
+                        "total_versions": len(versions_list),
+                        "total_devices": len(devices),
                     }
                 else:
                     results["policy"] = {"status": "no_policy"}
                     all_ok = False
             elif pr.status_code == 404:
                 results["policy"] = {"status": "no_policy"}
+                all_ok = False
         except Exception:  # noqa: BLE001
             results["policy"] = {"status": "error"}
+            all_ok = False
 
     # --- Output ----------------------------------------------------------
     if as_json:
@@ -737,13 +750,13 @@ def test_fleet(
     pol = results.get("policy", {})
     if pol.get("status") == "ok":
         v = pol.get("version", "?")
-        d = pol.get("distributed", 0)
         t = pol.get("total_devices", 0)
-        _status_line("Policy", True, f"v{v} distributed to {d}/{t} devices")
+        tv = pol.get("total_versions", 1)
+        _status_line("Policy", True, f"v{v} ({tv} version(s), {t} device(s) in fleet)")
     elif pol.get("status") == "no_policy":
-        _status_line("Policy", False, "no policy loaded (run: defenseclaw policy load <file>)")
+        _status_line("Policy", False, "no policy loaded (run: defenseclaw edge-connector policy push <file>)")
     elif health_data is not None:
-        _status_line("Policy", False, pol.get("detail", "could not query policy status"))
+        _status_line("Policy", False, pol.get("detail", "could not query policy versions"))
 
     # Summary
     ux.echo()

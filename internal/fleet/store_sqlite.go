@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
@@ -58,11 +59,30 @@ func createTable(db *sql.DB) error {
 			flags           INTEGER NOT NULL DEFAULT 0,
 			denied_total    INTEGER NOT NULL DEFAULT 0,
 			allowed_total   INTEGER NOT NULL DEFAULT 0,
-			flash_writes    INTEGER NOT NULL DEFAULT 0
+			flash_writes    INTEGER NOT NULL DEFAULT 0,
+			last_uptime     INTEGER NOT NULL DEFAULT 0,
+			prev_denied     INTEGER NOT NULL DEFAULT 0,
+			prev_allowed    INTEGER NOT NULL DEFAULT 0
 		)
 	`)
 	if err != nil {
 		return fmt.Errorf("create devices table: %w", err)
+	}
+
+	// NEW-3 migration: add replay detection columns to existing databases.
+	// ALTER TABLE ADD COLUMN is idempotent with IF NOT EXISTS in modern SQLite,
+	// but modernc.org/sqlite may not support that syntax, so we catch errors.
+	for _, col := range []string{
+		"ALTER TABLE devices ADD COLUMN last_uptime INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN prev_denied INTEGER NOT NULL DEFAULT 0",
+		"ALTER TABLE devices ADD COLUMN prev_allowed INTEGER NOT NULL DEFAULT 0",
+	} {
+		if _, err := db.Exec(col); err != nil {
+			// Ignore "duplicate column name" — column already exists.
+			if !isDuplicateColumnErr(err) {
+				return fmt.Errorf("migrate devices table: %w", err)
+			}
+		}
 	}
 
 	// Index for efficient tenant+fleet queries
@@ -98,8 +118,9 @@ func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
 			device_id, tenant_id, fleet_id, hw_profile, fw_version,
 			policy_version, capabilities, status, last_heartbeat,
 			last_audit_hmac, site_id, registered_at, flags,
-			denied_total, allowed_total, flash_writes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			denied_total, allowed_total, flash_writes,
+			last_uptime, prev_denied, prev_allowed
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(device_id) DO UPDATE SET
 			hw_profile     = excluded.hw_profile,
 			fw_version     = excluded.fw_version,
@@ -112,7 +133,10 @@ func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
 			flags          = excluded.flags,
 			denied_total   = excluded.denied_total,
 			allowed_total  = excluded.allowed_total,
-			flash_writes   = excluded.flash_writes
+			flash_writes   = excluded.flash_writes,
+			last_uptime    = excluded.last_uptime,
+			prev_denied    = excluded.prev_denied,
+			prev_allowed   = excluded.prev_allowed
 	`,
 		dev.DeviceID, dev.TenantID, dev.FleetID,
 		dev.HWProfile, dev.FWVersion,
@@ -120,6 +144,7 @@ func (s *SQLiteStore) SaveDevice(dev *manager.Device) error {
 		string(dev.Status), dev.LastHeartbeat.Format(time.RFC3339),
 		hmacHex, dev.SiteID, dev.RegisteredAt.Format(time.RFC3339),
 		dev.Flags, dev.DeniedTotal, dev.AllowedTotal, dev.FlashWrites,
+		dev.LastUptime, dev.PrevDenied, dev.PrevAllowed,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert device %d: %w", dev.DeviceID, err)
@@ -134,7 +159,8 @@ func (s *SQLiteStore) LoadDevice(tenantID, fleetID uint16, deviceID uint32) (*ma
 		SELECT device_id, tenant_id, fleet_id, hw_profile, fw_version,
 		       policy_version, capabilities, status, last_heartbeat,
 		       last_audit_hmac, site_id, registered_at, flags,
-		       denied_total, allowed_total, flash_writes
+		       denied_total, allowed_total, flash_writes,
+		       last_uptime, prev_denied, prev_allowed
 		FROM devices WHERE device_id = ?
 	`, fullID)
 
@@ -146,7 +172,8 @@ func (s *SQLiteStore) ListDevices() ([]*manager.Device, error) {
 		SELECT device_id, tenant_id, fleet_id, hw_profile, fw_version,
 		       policy_version, capabilities, status, last_heartbeat,
 		       last_audit_hmac, site_id, registered_at, flags,
-		       denied_total, allowed_total, flash_writes
+		       denied_total, allowed_total, flash_writes,
+		       last_uptime, prev_denied, prev_allowed
 		FROM devices ORDER BY device_id
 	`)
 	if err != nil {
@@ -212,9 +239,25 @@ func (s *SQLiteStore) LoadDeviceKey(deviceID uint64) ([]byte, error) {
 	return key, nil
 }
 
+// DeleteDeviceKey removes the per-device HMAC signing key.
+// NEW-5 fix: Called during device decommission to revoke the key.
+func (s *SQLiteStore) DeleteDeviceKey(deviceID uint64) error {
+	_, err := s.db.Exec("DELETE FROM device_keys WHERE device_id = ?", deviceID)
+	if err != nil {
+		return fmt.Errorf("delete device key %d: %w", deviceID, err)
+	}
+	return nil
+}
+
 // Close closes the underlying database connection.
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// isDuplicateColumnErr returns true if the error indicates that the column
+// already exists (e.g., from ALTER TABLE ADD COLUMN on an already-migrated DB).
+func isDuplicateColumnErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column")
 }
 
 // scanner is an interface satisfied by both *sql.Row and *sql.Rows.
@@ -238,6 +281,7 @@ func scanDeviceFromScanner(s scanner) (*manager.Device, error) {
 		&status, &lastHB, &hmacHex, &dev.SiteID,
 		&registeredAt, &dev.Flags,
 		&dev.DeniedTotal, &dev.AllowedTotal, &dev.FlashWrites,
+		&dev.LastUptime, &dev.PrevDenied, &dev.PrevAllowed,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {

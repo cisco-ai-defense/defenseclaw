@@ -453,6 +453,122 @@ def _start_remote_daemon(target: str, user: str) -> bool:
     return False
 
 
+def _persist_env_var(env_path: Path, key: str, value: str) -> None:
+    """Append or update a KEY=VALUE line in a dotenv file."""
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = []
+    found = False
+    if env_path.exists():
+        lines = env_path.read_text().splitlines(keepends=True)
+        new_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+                new_lines.append(f"{key}={value}\n")
+                found = True
+            else:
+                new_lines.append(line)
+        lines = new_lines
+
+    if not found:
+        lines.append(f"{key}={value}\n")
+
+    env_path.write_text("".join(lines))
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _provision_local_service_env(broker_url: str) -> None:
+    """P1-15/P1-18 fix: Write DCLAW_AUDIT_KEY (and other vars) to both
+    ~/.defenseclaw/.env (for CLI use) and /etc/defenseclaw/edge-connector.env
+    (for the systemd service).
+
+    On local install the service env file was never written, so the
+    edge-connector built with -DDCLAW_DEV_MODE=OFF would refuse to start
+    because DCLAW_AUDIT_KEY was missing from its EnvironmentFile.
+    """
+    cli_env = Path(os.environ.get("DEFENSECLAW_HOME", Path.home() / ".defenseclaw")) / ".env"
+    svc_env = Path("/etc/defenseclaw/edge-connector.env")
+
+    ux.echo()
+    ux.section("Provisioning service environment")
+
+    # Generate or reuse audit key
+    audit_key = _load_local_env_value("DCLAW_AUDIT_KEY")
+    if not audit_key:
+        audit_key = secrets.token_hex(32)
+        ux.echo(f"  Generated random audit key ({len(audit_key)} hex chars)")
+    else:
+        ux.echo(f"  Reusing existing audit key ({len(audit_key)} hex chars)")
+
+    # Write to CLI env (~/.defenseclaw/.env)
+    _persist_env_var(cli_env, "DCLAW_AUDIT_KEY", audit_key)
+    ux.ok(f"Wrote DCLAW_AUDIT_KEY to {cli_env}")
+
+    # Write to service env (/etc/defenseclaw/edge-connector.env) -- needs sudo
+    env_lines: list[str] = []
+
+    # Preserve existing lines from the service env if present
+    if svc_env.exists():
+        try:
+            existing = subprocess.run(
+                ["sudo", "cat", str(svc_env)],
+                capture_output=True, text=True,
+            )
+            if existing.returncode == 0:
+                for line in existing.stdout.splitlines():
+                    s = line.strip()
+                    # Skip keys we are about to write fresh
+                    if any(s.startswith(f"{k}=") for k in (
+                        "DCLAW_AUDIT_KEY", "DCLAW_BROKER_URL",
+                        "DCLAW_MQTT_USER", "DCLAW_MQTT_PASS",
+                    )):
+                        continue
+                    env_lines.append(line)
+        except OSError:
+            pass
+
+    env_lines.append(f"DCLAW_AUDIT_KEY={audit_key}")
+    env_lines.append(f"DCLAW_BROKER_URL={broker_url}")
+
+    # Also propagate MQTT creds if available
+    mqtt_user = _load_local_env_value("DCLAW_MQTT_USER")
+    mqtt_pass = _load_local_env_value("DCLAW_MQTT_PASS")
+    if mqtt_user:
+        env_lines.append(f"DCLAW_MQTT_USER={mqtt_user}")
+    if mqtt_pass:
+        env_lines.append(f"DCLAW_MQTT_PASS={mqtt_pass}")
+
+    env_content = "\n".join(env_lines) + "\n"
+    write_cmd = (
+        "sudo mkdir -p /etc/defenseclaw && "
+        f"printf %s {shlex.quote(env_content)} | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
+        "sudo chmod 600 /etc/defenseclaw/edge-connector.env"
+    )
+    result = subprocess.run(["sh", "-c", write_cmd], text=True)
+    if result.returncode == 0:
+        ux.ok(f"Wrote DCLAW_AUDIT_KEY to {svc_env}")
+    else:
+        ux.err(f"Failed to write {svc_env}. The service may fail to start without DCLAW_AUDIT_KEY.")
+
+
+def _verify_local_service() -> bool:
+    """P1-15 fix: After starting the local systemd service, verify it is running."""
+    import time as _time
+    _time.sleep(1)  # give systemd a moment to start the process
+    result = subprocess.run(
+        ["systemctl", "is-active", "edge-connector"],
+        capture_output=True, text=True,
+    )
+    if result.stdout.strip() == "active":
+        ux.ok("edge-connector.service is running")
+        return True
+    return False
+
+
 def _build_local(source: Path, profile: str) -> bool:
     """Build the edge connector locally with cmake."""
     ux.echo()
@@ -602,8 +718,22 @@ def edge_install(
         if not _build_local(source, profile):
             raise SystemExit(1)
 
+        # P1-15 / P1-18 fix: Write audit key to the service env file so the
+        # systemd unit can read it.  The edge-connector built with
+        # -DDCLAW_DEV_MODE=OFF refuses to start without DCLAW_AUDIT_KEY.
+        _provision_local_service_env(broker_url)
+
         # Try to install the systemd service locally
-        _install_local_systemd_unit()
+        svc_ok = _install_local_systemd_unit()
+
+        if svc_ok:
+            # P1-15 fix: Verify the service is actually running.
+            if not _verify_local_service():
+                ux.err(
+                    "edge-connector.service was installed but failed to start.\n"
+                    "  Check logs: journalctl -u edge-connector -n 40"
+                )
+                raise SystemExit(1)
 
         ux.echo()
         ux.section("Done")

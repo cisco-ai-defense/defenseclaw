@@ -153,9 +153,11 @@ func makeHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16,
 }
 
 // makeSignedHeartbeatPayload creates a 64-byte signed heartbeat: 32-byte payload + 32-byte HMAC-SHA256.
-func makeSignedHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16, flags uint8, key []byte) []byte {
+// The HMAC is computed over topic + payload to bind the signature to the message type.
+func makeSignedHeartbeatPayload(deviceID uint32, policyVer uint16, deniedCount uint16, flags uint8, key []byte, topic string) []byte {
 	payload := makeHeartbeatPayload(deviceID, policyVer, deniedCount, flags)
 	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(topic))
 	mac.Write(payload)
 	tag := mac.Sum(nil)
 	return append(payload, tag...)
@@ -656,9 +658,10 @@ func TestBridgeSignedHeartbeatAccepted(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Send a signed heartbeat with a valid HMAC
-	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, deviceKey)
-	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+	// Send a signed heartbeat with a valid HMAC (topic-bound)
+	topic := "defenseclaw/1/2/42/heartbeat"
+	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, deviceKey, topic)
+	mc.simulateMessage(topic, payload, 0)
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -698,8 +701,9 @@ func TestBridgeSignedHeartbeatBadHMAC(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Send a signed heartbeat with the WRONG key — should be rejected
-	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, wrongKey)
-	mc.simulateMessage("defenseclaw/1/2/42/heartbeat", payload, 0)
+	topic := "defenseclaw/1/2/42/heartbeat"
+	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, wrongKey, topic)
+	mc.simulateMessage(topic, payload, 0)
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -873,8 +877,9 @@ func TestBridgeSignedRegistrationAccepted(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, deviceKey)
-	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+	regTopic := "defenseclaw/1/2/42/register"
+	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, deviceKey, regTopic)
+	mc.simulateMessage(regTopic, payload, 1)
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -916,8 +921,9 @@ func TestBridgeSignedRegistrationBadHMAC(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, wrongKey)
-	mc.simulateMessage("defenseclaw/1/2/42/register", payload, 1)
+	regTopic := "defenseclaw/1/2/42/register"
+	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, wrongKey, regTopic)
+	mc.simulateMessage(regTopic, payload, 1)
 
 	time.Sleep(50 * time.Millisecond)
 
@@ -1121,4 +1127,156 @@ func TestBridgeRegistrationRejectedOnKeyStoreError(t *testing.T) {
 
 	cancel()
 	<-errCh
+}
+
+// --- Topic-bound HMAC tests (cross-topic replay prevention) ---
+
+func TestBridgeHeartbeatHMACReplayedOnRegisterTopicRejected(t *testing.T) {
+	// A valid signed heartbeat (HMAC computed with heartbeat topic) MUST be
+	// rejected when replayed on the /register topic. This validates that the
+	// HMAC is bound to the topic string.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	deviceKey := []byte("test-device-key-32-bytes-long!!!")
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.AllowAutoRegistration = true
+	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Sign the payload with the heartbeat topic
+	heartbeatTopic := "defenseclaw/1/2/42/heartbeat"
+	payload := makeSignedHeartbeatPayload(42, 7, 0, 0, deviceKey, heartbeatTopic)
+
+	// Replay on the register topic — MUST be rejected
+	registerTopic := "defenseclaw/1/2/42/register"
+	mc.simulateMessage(registerTopic, payload, 1)
+
+	time.Sleep(50 * time.Millisecond)
+
+	_, _, errs := bridge.Stats()
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1 (heartbeat HMAC replayed on register topic must be rejected)", errs)
+	}
+
+	// Verify the device was NOT registered via the replayed message
+	_, ok := fm.GetDevice(manager.ComposeID(1, 2, 42))
+	if ok {
+		t.Error("device should NOT be registered from a replayed heartbeat HMAC")
+	}
+
+	cancel()
+	<-errCh
+}
+
+func TestBridgeRegisterHMACReplayedOnHeartbeatTopicRejected(t *testing.T) {
+	// A valid signed registration (HMAC computed with register topic) MUST be
+	// rejected when replayed on the /heartbeat topic.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	deviceKey := []byte("test-device-key-32-bytes-long!!!")
+
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&fixedKeyProvider{key: deviceKey})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Sign the payload with the register topic
+	registerTopic := "defenseclaw/1/2/42/register"
+	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, deviceKey, registerTopic)
+
+	// Replay on the heartbeat topic — MUST be rejected
+	heartbeatTopic := "defenseclaw/1/2/42/heartbeat"
+	mc.simulateMessage(heartbeatTopic, payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 0 {
+		t.Errorf("heartbeats processed = %d, want 0 (register HMAC replayed on heartbeat topic must be rejected)", hb)
+	}
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+// --- Key-store error falls back to nil key test ---
+
+func TestBridgeSignedHeartbeatRejectedWhenKeyStoreErrorsOnLookup(t *testing.T) {
+	// P1-HMAC fix: When KeyForDevice returns nil (key store error), even a
+	// "signed" heartbeat must be rejected. The bridge must not attempt HMAC
+	// verification with a nil key.
+	mc := newMockClient()
+	fm := manager.New(nil)
+	fm.RegisterDevice(1, 2, 42, "sbc", "1.0.0", 1, 0xFF)
+
+	cache := verdict.NewCache(100, func(h [32]byte) (verdict.Action, uint8) {
+		return verdict.ActionAllow, 0
+	})
+
+	// errorKeyProvider returns nil from KeyForDevice, simulating the new
+	// behavior where store errors do not fall back to the fleet key.
+	bridge := NewBridge(mc, fm, cache)
+	bridge.SetKeyProvider(&errorKeyProvider{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- bridge.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Build a signed payload (key doesn't matter, it'll be rejected at nil-key check)
+	anyKey := []byte("any-key-32-bytes-long-for-sign!!")
+	topic := "defenseclaw/1/2/42/heartbeat"
+	payload := makeSignedHeartbeatPayload(42, 7, 15, 0, anyKey, topic)
+	mc.simulateMessage(topic, payload, 0)
+
+	time.Sleep(50 * time.Millisecond)
+
+	hb, _, errs := bridge.Stats()
+	if hb != 0 {
+		t.Errorf("heartbeats processed = %d, want 0 (nil key from store error must reject)", hb)
+	}
+	if errs != 1 {
+		t.Errorf("errors = %d, want 1", errs)
+	}
+
+	cancel()
+	<-errCh
+}
+
+// errorKeyProvider simulates a key store that always fails lookups.
+// KeyForDevice returns nil (as storeBackedKeyProvider now does on error).
+type errorKeyProvider struct{}
+
+func (e *errorKeyProvider) KeyForDevice(_ uint64) []byte {
+	return nil
 }

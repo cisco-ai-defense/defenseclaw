@@ -20,6 +20,10 @@
 #include <mbedtls/md.h>
 #endif
 
+/* Forward declarations for verdict_protocol.c accessor functions */
+extern const uint8_t *dclaw_verdict_get_device_key(size_t *out_key_len);
+extern bool dclaw_verdict_is_key_provisioned(void);
+
 /*
  * Minimal MQTT 3.1.1 client for Edge Connector.
  *
@@ -71,6 +75,16 @@ typedef struct {
 } mqtt_context_t;
 
 static mqtt_context_t mqtt_ctx;
+
+/*
+ * P2-19 fix: QoS 0 publish success only means the bytes hit the kernel
+ * buffer — NOT that the broker received them.  For the rollback flag
+ * (which signals a safety-critical canary rollback), keep the flag set
+ * for ROLLBACK_CLEAR_AFTER consecutive successful heartbeat sends before
+ * clearing, so the information is transmitted at least that many times.
+ */
+#define ROLLBACK_CLEAR_AFTER 3
+static uint8_t rollback_send_count = 0;
 
 /*
  * Pending request tracking table — ring-buffer of {request_id, tool_hash} pairs.
@@ -785,13 +799,47 @@ int dclaw_mqtt_connect(void) {
      * this device immediately, without waiting for the first heartbeat.
      * Uses the same 32-byte heartbeat wire format (device_id, fw_version,
      * policy_version, capabilities, etc.) as the registration payload.
-     * QoS 1 ensures at-least-once delivery. */
+     * QoS 1 ensures at-least-once delivery.
+     *
+     * P1-HMAC fix: If a device key is provisioned, compute HMAC over
+     * topic + payload and append it (64-byte signed format), same as
+     * heartbeats. This prevents unsigned registration spoofing. */
     {
-        uint8_t reg_buf[32];
+        uint8_t reg_buf[64]; /* 32 payload + 32 HMAC (if signed) */
         size_t reg_len;
         if (dclaw_cbor_encode_heartbeat(reg_buf, &reg_len, sizeof(reg_buf)) == 0) {
             char reg_topic[128];
             if (build_topic(reg_topic, sizeof(reg_topic), "register") == 0) {
+                /* Append HMAC if device key is provisioned */
+                size_t rk_len = 0;
+                if (dclaw_verdict_is_key_provisioned()) {
+                    const uint8_t *rk = dclaw_verdict_get_device_key(&rk_len);
+                    if (rk && rk_len > 0) {
+                        uint8_t reg_hmac[32];
+#if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS == 1
+                        mbedtls_md_context_t rctx;
+                        const mbedtls_md_info_t *rmd = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+                        mbedtls_md_init(&rctx);
+                        mbedtls_md_setup(&rctx, rmd, 1);
+                        mbedtls_md_hmac_starts(&rctx, rk, rk_len);
+                        mbedtls_md_hmac_update(&rctx, (const uint8_t *)reg_topic, strlen(reg_topic));
+                        mbedtls_md_hmac_update(&rctx, reg_buf, 32);
+                        mbedtls_md_hmac_finish(&rctx, reg_hmac);
+                        mbedtls_md_free(&rctx);
+#else
+                        {
+                            size_t rt_len = strlen(reg_topic);
+                            uint8_t rtmp[128 + 32];
+                            memcpy(rtmp, reg_topic, rt_len);
+                            memcpy(rtmp + rt_len, reg_buf, 32);
+                            dclaw_hmac_sha256(rk, rk_len, rtmp, rt_len + 32, reg_hmac);
+                        }
+#endif
+                        memcpy(reg_buf + 32, reg_hmac, 32);
+                        reg_len = 64;
+                    }
+                }
+
                 if (dclaw_mqtt_publish(reg_topic, reg_buf, reg_len, 1 /* QoS 1 */) != 0) {
                     fprintf(stderr, "[DCLAW-MQTT] Failed to publish registration message\n");
                 } else {
@@ -995,9 +1043,7 @@ const char *dclaw_mqtt_get_session_id(void) {
     return mqtt_ctx.session_id;
 }
 
-/* Forward declarations for device key access (defined in verdict_protocol.c) */
-extern const uint8_t *dclaw_verdict_get_device_key(size_t *out_key_len);
-extern bool dclaw_verdict_is_key_provisioned(void);
+
 
 /* Heartbeat publish (called from event loop).
  *
@@ -1022,7 +1068,13 @@ int dclaw_mqtt_send_heartbeat(void) {
     size_t hb_len;
     if (dclaw_cbor_encode_heartbeat(hb_buf, &hb_len, sizeof(hb_buf)) != 0) return -1;
 
-    /* Append HMAC-SHA256 tag if a real device key is provisioned */
+    char topic[128];
+    if (build_topic(topic, sizeof(topic), "heartbeat") != 0) return -1;
+
+    /* Append HMAC-SHA256 tag if a real device key is provisioned.
+     * P1-HMAC fix: HMAC is computed over topic_bytes + payload_bytes so that
+     * the signature is bound to the message type. A heartbeat HMAC cannot be
+     * replayed on the /register topic (and vice versa). */
     size_t key_len = 0;
     if (dclaw_verdict_is_key_provisioned()) {
         const uint8_t *device_key = dclaw_verdict_get_device_key(&key_len);
@@ -1034,31 +1086,46 @@ int dclaw_mqtt_send_heartbeat(void) {
             mbedtls_md_init(&ctx);
             mbedtls_md_setup(&ctx, md_info, 1);
             mbedtls_md_hmac_starts(&ctx, device_key, key_len);
+            mbedtls_md_hmac_update(&ctx, (const uint8_t *)topic, strlen(topic));
             mbedtls_md_hmac_update(&ctx, hb_buf, 32);
             mbedtls_md_hmac_finish(&ctx, hmac_tag);
             mbedtls_md_free(&ctx);
 #else
-            dclaw_hmac_sha256(device_key, key_len, hb_buf, 32, hmac_tag);
+            /* Two-part HMAC: topic + payload. Use incremental API if available,
+             * otherwise concatenate into a temporary buffer. */
+            {
+                size_t topic_len = strlen(topic);
+                uint8_t tmp[128 + 32]; /* topic (max 128) + payload (32) */
+                memcpy(tmp, topic, topic_len);
+                memcpy(tmp + topic_len, hb_buf, 32);
+                dclaw_hmac_sha256(device_key, key_len, tmp, topic_len + 32, hmac_tag);
+            }
 #endif
             memcpy(hb_buf + 32, hmac_tag, 32);
             hb_len = 64;
         }
     }
 
-    char topic[128];
-    if (build_topic(topic, sizeof(topic), "heartbeat") != 0) return -1;
-
     int rc = dclaw_mqtt_publish(topic, hb_buf, hb_len, 0 /* QoS 0 */);
 
-    /* P2-19 fix: Clear the rollback_pending flag only after a successful
-     * publish.  The encoder sets the CANARY_ROLLBACK bit in the heartbeat
-     * flags but no longer clears the state — we do it here so the flag is
-     * retried on the next heartbeat if this publish fails. */
+    /* P2-19 fix: QoS 0 gives no broker-level ack — a successful publish()
+     * only means the bytes were written to the kernel socket buffer.  For
+     * the rollback flag (safety-critical canary rollback signal), we keep
+     * the flag set and count consecutive successful sends.  Only after
+     * ROLLBACK_CLEAR_AFTER (3) successful heartbeats do we clear the flag,
+     * ensuring the broker has had multiple chances to receive the signal. */
     if (rc == 0) {
         dclaw_state_t *st = dclaw_get_state();
         if (st->rollback_pending) {
-            st->rollback_pending = false;
+            rollback_send_count++;
+            if (rollback_send_count >= ROLLBACK_CLEAR_AFTER) {
+                st->rollback_pending = false;
+                rollback_send_count = 0;
+            }
         }
+    } else {
+        /* Publish failed — reset the counter so we start over. */
+        rollback_send_count = 0;
     }
 
     return rc;
