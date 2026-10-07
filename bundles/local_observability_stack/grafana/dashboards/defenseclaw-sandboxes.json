@@ -715,7 +715,8 @@
                 "value": 10
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -769,7 +770,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -835,7 +837,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -889,7 +892,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.dest}"
         },
         "overrides": []
       },
@@ -1232,7 +1236,8 @@
                 "value": 10
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.kind}"
         },
         "overrides": []
       },
@@ -1544,7 +1549,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "displayName": "${__field.labels.program}"
         },
         "overrides": []
       },

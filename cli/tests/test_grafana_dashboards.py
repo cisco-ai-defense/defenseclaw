@@ -1014,6 +1014,17 @@ def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
     assert 'defenseclaw_sandbox_name=~"$sandbox"' in expr and 'defenseclaw_sandbox_name!=""' in expr
 
 
+def test_sandboxes_bar_gauges_name_a_lone_bar() -> None:
+    # GAP-0141: with one row in range (one finding kind) Grafana drops the
+    # series name of a Loki instant bar gauge; each bar takes its label.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    gauges = [panel for panel in board["panels"] if panel.get("type") == "bargauge"]
+    assert gauges
+    for panel in gauges:
+        label = panel["targets"][0]["legendFormat"].strip("{}")
+        assert panel["fieldConfig"]["defaults"]["displayName"] == "${__field.labels." + label + "}", panel["title"]
+
+
 def test_live_inventory_does_not_report_non_finite_samples_as_zero() -> None:
     audit = _load_audit_module()
 
