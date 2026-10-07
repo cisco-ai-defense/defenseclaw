@@ -260,7 +260,8 @@ func TestVerifyNamesTheConnectorAndFileOfMachinePolicyDrift(t *testing.T) {
 
 // With the documented standalone config (no guardrail.connectors block) the
 // enumerator found eligible users but published no target, and status and
-// verify still reported coverage and security complete with 0 targets.
+// verify still reported coverage and security complete with 0 targets. verify
+// now fails on it (GAP-0221).
 func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -276,6 +277,9 @@ func TestStatusWarnsWhenNoConnectorIsEnabledForEligibleUsers(t *testing.T) {
 				}
 				if r.SecurityComplete {
 					t.Fatalf("%s reports security_complete with no connector enabled", action)
+				}
+				if action == ActionVerify && !strings.Contains(messagesOf(r.Errors, codeVerify), "enables no guardrail.connectors entry") {
+					t.Fatalf("verify passes with no connector enabled: %+v", r.Errors)
 				}
 			}
 			requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: machinePolicyConfig(t, h, "claudecode")}))

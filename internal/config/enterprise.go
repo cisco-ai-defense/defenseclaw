@@ -407,6 +407,20 @@ func (c *Config) SecureClientIntegration() bool {
 	return managed.IsSecureClientProfile(c.EnterpriseProfile())
 }
 
+// resolvesToSecureClient reports whether a config the loader has just
+// decoded resolves to the Secure Client profile, from the inputs
+// resolveEnterpriseConfig reads later in the same load: the deployment mode
+// and its pin, the profile pin, enterprise.profile and the OS default. A
+// config whose profile does not resolve fails there.
+func resolvesToSecureClient(cfg *Config, pinnedDeploymentMode string) bool {
+	mode := normalizeDeploymentMode(cfg.DeploymentMode)
+	if pinnedDeploymentMode != "" {
+		mode = pinnedDeploymentMode
+	}
+	profile, err := managed.ResolveEnterpriseProfile(runtime.GOOS, mode, os.Getenv(managed.EnterpriseProfileEnv), cfg.Enterprise.Profile)
+	return err == nil && managed.IsSecureClientProfile(profile)
+}
+
 // StandaloneEnterprise reports a managed deployment on the standalone
 // profile, where the local policy engine decides.
 func (c *Config) StandaloneEnterprise() bool {
